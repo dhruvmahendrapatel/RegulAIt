@@ -442,7 +442,7 @@ afterAll(async () => {
   globalThis.fetch = realFetch;
   if (savedMode === undefined) delete process.env[DEPLOY_MODE_ENV];
   else process.env[DEPLOY_MODE_ENV] = savedMode;
-  await setOrgPolicy("inherit");
+  await setOrgPolicy("strict"); // ADR-0181: hand on the shipped default
   await db.delete(egressAllowHosts);
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "google"));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "openai"));

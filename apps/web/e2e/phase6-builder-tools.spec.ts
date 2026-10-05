@@ -123,6 +123,18 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   };
   const repo = await post("/v1/servers", { name: REPO, url: `http://127.0.0.1:${port}/repo-mcp` });
   const wh = await post("/v1/servers", { name: WAREHOUSE, url: `http://127.0.0.1:${port}/warehouse-mcp` });
+  // ADR-0181: a server registered now waits out the 7-day release-age cooldown.
+  // These two are the spec's own fixtures, so an admin overrides the cooldown
+  // for them through the real, audited route, with a reason (per server, at the
+  // registration release; nothing global changes).
+  for (const id of [repo.id, wh.id]) {
+    await post("/v1/release-quarantine/override", {
+      kind: "mcp_server",
+      id,
+      digest: "registration",
+      reason: "e2e: the spec's own local MCP fixture; the cooldown is not what this journey tests",
+    });
+  }
   const branches = await post(`/v1/servers/${repo.id}/tools`, { name: "list_branches", kind: "read", description: "list branches and their heads" });
   const schemas = await post(`/v1/servers/${wh.id}/tools`, { name: "list_schemas", kind: "read", description: "list schemas" });
   for (const [serverId, toolName] of [

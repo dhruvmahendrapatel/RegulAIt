@@ -15,6 +15,13 @@ reports waits for a report unless the gateway declares offline mode — the seed
 then auto-pass their checks, labelled "auto-passed · no report". A database seeded before
 2026-10-03 predates that opt-in and must be recreated.
 
+**Database TLS (ADR-0181).** The gateway and every demo script require TLS to Postgres by default.
+The demo's Postgres is local and has none, so **every terminal** also exports
+`REGULAIT_DATABASE_SSL=disable` — an explicit, visible relaxation: the gateway prints a loud
+boot warning and Settings → Enforcement posture shows "database TLS: relaxed". Without it every
+step fails at its first query with "The server does not support SSL connections". Docker compose
+sets it for the bundled `db` service itself.
+
 **Whole stack in Docker, no pnpm?** §1.3 does steps 1–5 below (and `demo:intake`, `demo:traffic`,
 `demo:check`, the export key) inside the containers with one `.env` switch.
 
@@ -90,8 +97,9 @@ Then paste **that same literal** into **every** terminal, and run §1 steps 2–
 export DATABASE_URL="postgres://regulait:regulait@127.0.0.1:5432/regulait"
 export REGULAIT_BOOTSTRAP_TOKEN="dev-bootstrap"
 export REGULAIT_DATA_KEY="<the value you just minted>"
-export REGULAIT_SCHEDULER=on
+export REGULAIT_DATABASE_SSL=disable   # local Postgres without TLS (ADR-0181: the default is require)
 export REGULAIT_OFFLINE_CHECKS=1
+# the scheduler is ON by default since ADR-0181; REGULAIT_SCHEDULER=off switches it off
 ```
 
 Do **not** put `$(openssl rand -hex 32)` in each terminal's export — that mints a different key
@@ -207,17 +215,20 @@ booted and prepared the same way. The PowerShell commands are written for Docker
 
 ---
 
-## 2. The two controls that are not settable from any API
+## 2. The controls that are not settable from any API
 
-`demo:setup` will report **5 of 7** enforcement controls and an overall verdict of **not hardened**.
-That is correct, not a failure: the audit anchor and the scheduler are resolved from the process
-environment at start-up, and an API call cannot set an environment variable. The product reports them
-with their *observed* state and refuses to count them on its own say-so.
+`demo:setup` reports an overall verdict of **not hardened**. That is correct, not a failure: the
+audit anchor, the scheduler and database TLS are resolved from the process environment at start-up,
+and an API call cannot set an environment variable. The product reports them with their *observed*
+state and refuses to count them on its own say-so.
 
-To reach **7 of 7 / `hardened: true`**:
+- **The scheduler** is ON by default since ADR-0181; its row satisfies unless `REGULAIT_SCHEDULER=off`.
+- **Database TLS** reads **relaxed** on every local demo: the demo sets `REGULAIT_DATABASE_SSL=disable`
+  for its TLS-less local Postgres (§1). That row never satisfies in the demo, by design, and the page
+  says "database TLS: relaxed" so nobody mistakes the demo for a hardened install.
+- **The audit anchor** satisfies only against a real Object Lock bucket:
 
 ```bash
-export REGULAIT_SCHEDULER=on            # docker compose does NOT pass this through by default
 docker compose up -d minio minio-init   # a REAL S3 Object Lock COMPLIANCE bucket
 ```
 
@@ -230,8 +241,8 @@ fake it, which is the point and is worth saying out loud.
 deliberately — an honest "here is what this install has not got" lands better than a number nobody
 can interrogate.
 
-**On the §1.1 native path the ceiling is 6 of 7, and the missing row is the good one.** With
-`REGULAIT_SCHEDULER=on` exported, the scheduler row satisfies; the anchor row cannot, because
+**On the §1.1 native path the anchor row is also unmet, and it is the good one.** The scheduler row
+satisfies (it is on by default); the anchor row cannot, because
 without MinIO there is no Object Lock bucket to ask. It will read a **local buffer** with
 `tamperResistant: false`, and the control's own text says why: *"A local directory is a buffer,
 never WORM."*

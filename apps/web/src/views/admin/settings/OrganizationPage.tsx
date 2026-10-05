@@ -452,15 +452,15 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "MCP egress posture saved (audited)",
             )
           }
-          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Open (default) = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony — the guard fires on the risky public-internet case, not the ordinary internal one. Strict = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
+          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Strict (default) = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Open = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony; choosing it relaxes the strict default and is audited. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
         >
           <Field label="Private-range default for MCP servers">
             <Select
               value={mcpEgress.f.mcpPrivateRangesDefault}
               onChange={(e) => mcpEgress.set("mcpPrivateRangesDefault", e.target.value)}
             >
-              <option value="true">open (default — private-LAN MCP servers just work)</option>
-              <option value="false">strict (each server needs an explicit opt-in)</option>
+              <option value="false">strict (default — each server needs an explicit opt-in)</option>
+              <option value="true">open (private-LAN MCP servers just work — relaxed)</option>
             </Select>
           </Field>
         </SectionShell>
@@ -482,15 +482,15 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Deployment egress posture saved (audited)",
             )
           }
-          help="The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — api.anthropic.com, slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'. This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = today's behaviour on a hosted or BYOC box."
+          help="The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — api.anthropic.com, slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'. This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict (default) = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = the deploy mode decides, which on a hosted or BYOC box means compiled endpoints are not adjudicated; choosing it relaxes the strict default and is audited."
         >
           <Field label="Compiled vendor endpoints">
             <Select
               value={compiledEgress.f.egressCompiledDefaultPolicy}
               onChange={(e) => compiledEgress.set("egressCompiledDefaultPolicy", e.target.value)}
             >
-              <option value="inherit">inherit (default — the server's deploy mode decides)</option>
-              <option value="strict">strict (adjudicate them even on a hosted/BYOC box)</option>
+              <option value="strict">strict (default — adjudicate them on every deployment)</option>
+              <option value="inherit">inherit (the server's deploy mode decides — relaxed)</option>
             </Select>
           </Field>
         </SectionShell>

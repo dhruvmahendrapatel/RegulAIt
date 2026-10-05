@@ -46,10 +46,18 @@
  *
  *   effective posture = STRICTEST( env-derived mode posture, org tightening )
  *
- * `org_settings.egressCompiledDefaultPolicy` is `inherit` (default, today's
- * behaviour) or `strict`. So an admin **can** make a hosted or BYOC box strict.
- * An admin **cannot** make an air-gapped box permissive — there is no value
- * that loosens, by construction rather than by validation.
+ * `org_settings.egressCompiledDefaultPolicy` is `strict` (DEFAULT since
+ * ADR-0181, migration 0159) or `inherit`. So a fresh hosted or BYOC box is
+ * strict, and an admin may relax it to `inherit` (audited old -> new on
+ * PUT /v1/org/settings). An admin **cannot** make an air-gapped box permissive
+ * — there is no value that loosens, by construction rather than by validation.
+ *
+ * ADR-0181 and the deploy mode: the mode is the env FLOOR and stays
+ * `hosted` when unset. Making the floor strict for hosted/BYOC would put the
+ * strict posture beyond an admin's reach (the floor cannot be loosened from
+ * the portal), and ADR-0181 requires every strict default to stay relaxable.
+ * So the security half of the mode default lives in the org default above: a
+ * fresh install of any mode adjudicates compiled vendor endpoints.
  *
  * ## The posture per mode, and why `byoc` is permissive by default
  *
@@ -148,8 +156,18 @@ export function resolveEgressPosture(args: {
   return strictestPosture(modeEgressPosture(args.mode), fromOrg);
 }
 
-/** One line an operator can read in the boot log to know what this box refuses. */
-export function describeEgressPosture(mode: DeployMode): string {
+/** One line an operator can read in the boot log to know what this box refuses.
+ * With `orgPolicy` it describes the EFFECTIVE posture (mode floor + org
+ * tightening), which is what the boot line prints since ADR-0181. */
+export function describeEgressPosture(mode: DeployMode, orgPolicy?: EgressCompiledDefaultPolicy | null): string {
+  if (orgPolicy !== undefined && modeEgressPosture(mode) === "permissive") {
+    return resolveEgressPosture({ mode, orgPolicy }) === "strict"
+      ? `deploy mode '${mode}', org egressCompiledDefaultPolicy='strict' (the default) — STRICT egress: a ` +
+          `built-in provider/connector/git/PM adapter running on its COMPILED vendor endpoint is refused unless ` +
+          `that host is in the egress allow-list`
+      : `deploy mode '${mode}', org egressCompiledDefaultPolicy='inherit' — RELAXED: compiled vendor endpoints ` +
+          `are NOT adjudicated (an admin relaxed the strict default; set it back to 'strict' to refuse them)`;
+  }
   const posture = modeEgressPosture(mode);
   return posture === "strict"
     ? `deploy mode '${mode}' — STRICT egress: a built-in provider/connector/git/PM adapter running on its ` +

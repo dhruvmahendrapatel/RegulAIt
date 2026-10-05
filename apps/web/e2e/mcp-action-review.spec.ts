@@ -24,6 +24,20 @@ let callerId: string;
 let approverId: string;
 let sequence = 0;
 const prefix = `review_${Date.now()}`;
+// ADR-0181: the release-age cooldown is 7 days by default, and this spec grows
+// its upstream manifest per test (each a new release). The cooldown is not what
+// these journeys test, so it is relaxed through the real audited admin route
+// for the spec's lifetime and restored afterwards (M-068).
+let savedMinReleaseAgeDays: number | null = null;
+
+async function putSettings(payload: Record<string, unknown>) {
+  const response = await fetch(`${base}/v1/org/settings`, {
+    method: "PUT",
+    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  expect(response.ok, `PUT /v1/org/settings: ${response.status}`).toBe(true);
+}
 
 async function api(route: string, payload?: unknown) {
   const response = await fetch(`${base}${route}`, {
@@ -58,6 +72,8 @@ async function signIn(page: Page) {
 }
 
 test.beforeAll(async () => {
+  savedMinReleaseAgeDays = (await api("/v1/org/settings")).settings.minReleaseAgeDays as number;
+  await putSettings({ minReleaseAgeDays: 0 });
   approverId = (await api("/v1/users")).users.find((user: { email: string }) => user.email === "admin@regulait.local").id;
   callerId = (await api("/v1/users", { email: `${prefix}@example.test`, displayName: "Review test caller" })).id;
   upstream = http.createServer((req, res) => {
@@ -84,6 +100,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  if (savedMinReleaseAgeDays !== null) await putSettings({ minReleaseAgeDays: savedMinReleaseAgeDays });
   upstream?.closeAllConnections();
   if (upstream) await new Promise<void>((resolve) => upstream.close(() => resolve()));
   await db.$client.end();

@@ -82,7 +82,7 @@ const anchorOf = (body: { controls: Array<{ key: string; current: Record<string,
 
 async function restoreShippedDefaults(app: ReturnType<typeof buildApp>) {
   const r = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: {
-    defaultPiiMode: "none", mcpAdmissionMode: "off", useCaseGateMode: "off",
+    defaultPiiMode: "none", mcpAdmissionMode: "enforce", useCaseGateMode: "off",
     dispatchAttributionRequired: false, semanticCachePolicy: "opt_in",
   } });
   expect(r.statusCode).toBe(200);

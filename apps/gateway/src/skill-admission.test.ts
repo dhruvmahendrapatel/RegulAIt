@@ -14,6 +14,11 @@ import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -52,6 +57,7 @@ const skillRow = async (id: string) => (await k.db.select().from(builderSkills).
 beforeAll(async () => {
   k = await builderKit("bld-adm");
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   admin = await k.person("admin", { admin: true });
@@ -61,6 +67,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreSb2Gates();
+  await restoreStrictAdmission?.();
   await k.close();
 });
 

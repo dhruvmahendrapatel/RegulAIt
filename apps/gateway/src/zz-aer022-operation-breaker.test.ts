@@ -10,6 +10,11 @@ import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js"
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL must name a disposable test database");
@@ -23,6 +28,7 @@ let auth: { authorization: string };
 beforeAll(async () => {
   db = createDb(databaseUrl);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, {
     bootstrapToken: "aer022-operation-bootstrap",
     breaker: { failureThreshold: 2, cooldownMs: 30_000 },
@@ -40,7 +46,12 @@ beforeAll(async () => {
   auth = { authorization: `Bearer ${key.json().token}` };
 }, 120_000);
 
-afterAll(async () => { app.server.closeAllConnections(); await restoreSb2Gates(); await app.close(); });
+afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await restoreSb2Gates();
+  app.server.closeAllConnections();
+  await app.close();
+});
 
 async function fixture() {
   let fail: "tools/list" | "tools/call" | null = null;

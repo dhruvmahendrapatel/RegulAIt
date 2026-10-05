@@ -60,6 +60,11 @@ import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { spEntityId } from "./saml.js";
 import { normalizeAssertedGroups } from "./group-roles.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -452,6 +457,7 @@ beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // ADR-0052 §4: this suite both creates SAML providers and mints SCIM tokens,
   // and both flags are now ENFORCED at their creation routes — so it runs
@@ -494,6 +500,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // The whole gateway suite shares ONE database (vitest.config.ts turns file
   // parallelism off for exactly that reason), so this file cleans up the global
   // state it created: enabled SSO providers would change what a LATER file's

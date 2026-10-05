@@ -642,7 +642,7 @@ describe("AER-015 — strict egress admits an outlook connector created without 
   afterAll(async () => {
     // RESTORE the shared posture and allow-list: the org singleton and the
     // table outlive this file
-    await setPolicy("inherit");
+    await setPolicy("strict"); // ADR-0181: hand on the shipped default
     for (const id of [loginAllowId, graphAllowId].filter(Boolean)) {
       await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${id}`, headers: AUTH });
     }

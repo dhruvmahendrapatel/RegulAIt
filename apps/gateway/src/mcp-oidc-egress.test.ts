@@ -54,6 +54,11 @@ import { encryptSecret } from "./secrets.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -192,6 +197,7 @@ async function mcpClientFor(serverId: string): Promise<Client> {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   upstream = await startUpstream();
@@ -220,8 +226,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // leave the shared database in the shipped posture for whatever runs next
-  await setOrgDefault(true);
+  // leave the shared database in the posture it FOUND (ADR-0181 ships private ranges closed)
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await restoreSb2Gates();
   await app.close();
@@ -631,7 +637,7 @@ describe("ADR-0043 — OIDC issuers behind the egress guard", () => {
     await dropAllowHost(hostId);
   });
 
-  it("(hygiene) the org toggle survives this suite at its shipped default", async () => {
+  it("(hygiene) the org toggle is back at this file's open baseline (afterAll then restores what it found)", async () => {
     const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     expect(org!.mcpPrivateRangesDefault).toBe(true);
   });

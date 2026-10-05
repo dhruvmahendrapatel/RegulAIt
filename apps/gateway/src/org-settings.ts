@@ -799,6 +799,11 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
           ([k, v]) => JSON.stringify((locked as Record<string, unknown>)[k]) !== JSON.stringify(v),
         ),
       );
+      // ADR-0181: every relaxation of a strict default is audited old -> new.
+      // `changed` carries the new values; `previous` carries what each changed
+      // key held before, redacted exactly as `after` is.
+      const lockedRedacted = redactSettings(locked) as Record<string, unknown>;
+      const previous = Object.fromEntries(Object.keys(changed).map((k) => [k, lockedRedacted[k] ?? null]));
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.
@@ -811,9 +816,8 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         detail: {
           via: req.authCtx.via,
           changed,
-          transitions: settingTransitions(redactSettings(locked), changed, ["tracingOtlpHeaders"]),
-          previous: ((prev: Record<string, unknown>) =>
-            Object.fromEntries(Object.keys(changed).map((k) => [k, prev[k] ?? null])))(redactSettings(locked)),
+          transitions: settingTransitions(lockedRedacted, changed, ["tracingOtlpHeaders"]),
+          previous,
           after: redactSettings(after),
           approvalTtlPosture: approvalTtlPosture(after),
         },

@@ -23,16 +23,17 @@
  *      reason, audited. Nothing auto-clears.
  *
  * THE POSTURE, in one place. `org_settings.mcp_admission_mode`:
- *   - `off`   (SHIPPED DEFAULT) — no scan runs at all. Byte-identical to
- *              pre-ADR-0097. Asserted by a test, not asserted in prose.
+ *   - `off`   — no scan runs at all. Byte-identical to pre-ADR-0097. An
+ *              admin's audited relaxation since ADR-0181.
  *   - `log`   — every sync is scanned and the verdict/findings land on the row.
  *              NOTHING is ever refused. A server can sit in state `held` and
  *              keep serving: `held` is the SCAN VERDICT, and whether it holds
  *              anything is this knob's business. That is what "observe before
  *              you enforce" has to mean if flipping the switch is to be an
  *              informed act.
- *   - `enforce` — a `held` server is refused before any connect and contributes
- *              nothing to tool discovery, until an admin clears it.
+ *   - `enforce` (SHIPPED DEFAULT since ADR-0181, migration 0159) — a `held`
+ *              server is refused before any connect and contributes nothing
+ *              to tool discovery, until an admin clears it.
  *
  * DRIFT RE-OPENS THE GATE. A `cleared` server's clearance is pinned to the
  * manifest digest it was granted for. Every sync re-scans and re-adjudicates;

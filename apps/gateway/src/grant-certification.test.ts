@@ -52,6 +52,11 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { certificationPostureSection } from "./grant-certification.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -186,6 +191,7 @@ const inOneHour = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
 
   const opener = await makeUser("gc-opener@example.com", { admin: true });
@@ -284,6 +290,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await app.close();
   await db.$client.end();
 });

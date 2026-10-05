@@ -34,6 +34,11 @@ import { buildApp } from "./app.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour that is not the strict compiled-egress default (a
+// vendor endpoint answered by a local double) — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -104,6 +109,7 @@ async function latestAudit(ruleId: string) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, ["egressCompiledDefaultPolicy"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   loginServer = http.createServer((req, res) => {
@@ -128,6 +134,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   if (allowEntryId) {
     await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${allowEntryId}`, headers: AUTH });
   }

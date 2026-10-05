@@ -12,6 +12,11 @@ import { McpEgressBlockedError } from "./mcp-egress.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * AER-024 — AN OPEN BREAKER MUST NOT HIDE AN ADMISSION HOLD OR AN EGRESS REFUSAL.
@@ -47,6 +52,7 @@ const setAdmissionMode = async (mcpAdmissionMode: "off" | "enforce") => {
 beforeAll(async () => {
   db = createDb(databaseUrl);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, {
     bootstrapToken: "aer024-preflight-bootstrap",
     breaker: { failureThreshold: 2, cooldownMs: 30_000 },
@@ -65,6 +71,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await setAdmissionMode("off");
   app.server.closeAllConnections();
   await restoreSb2Gates();

@@ -558,7 +558,7 @@ describe("ADR-0049 — the detector fires on a real spike AND stays silent on no
     expect(overview.json().note).toMatch(/A deployment running neither raises NO anomalies/i);
   });
 
-  it("a disabled policy computes nothing at all — OFF by default is real", async () => {
+  it("a disabled policy computes nothing at all — an admin's OFF is real (ON by default since ADR-0181)", async () => {
     const res = await app.inject({
       method: "PUT",
       url: "/v1/spend/monitor-policies",
@@ -569,7 +569,7 @@ describe("ADR-0049 — the detector fires on a real spike AND stays silent on no
     const out = await evaluate(calmId);
     const result = out.results.find((r: { projectId: string }) => r.projectId === calmId);
     expect(result.evaluated).toBe(false);
-    expect(result.reason).toMatch(/not enabled/);
+    expect(result.reason).toMatch(/switched off/);
   });
 });
 

@@ -10,6 +10,11 @@ import { approvalArgumentsDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { beginTrace, type TraceContext } from "./tracing.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -41,6 +46,7 @@ async function post(url: string, payload: unknown) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: "mcp-redaction-bootstrap", dataKey: "a".repeat(64) });
   httpServer = http.createServer((req, res) => {
     let body = "";
@@ -75,6 +81,7 @@ beforeAll(async () => {
 
 beforeEach(() => { wireCalls = []; response = undefined; upstreamError = undefined; onInitialize = undefined; onCall = undefined; });
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await app?.close();
   httpServer?.closeAllConnections();
   if (httpServer) await new Promise<void>((resolve) => httpServer.close(() => resolve()));

@@ -41,11 +41,11 @@ import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
-import { backfillOtlpHeaderCiphertext } from "./org-settings.js";
+import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
 import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigestRepinResult } from "./manifest-digest-repin.js";
 import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
-import { describeDbPool, resolveDbPoolConfig } from "@regulait/db";
+import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 
 /** ADR-0035: how often the chain head is captured when anchoring is on. */
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
@@ -172,8 +172,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // Audit anchoring is DEFAULT-ON and deliberately does NOT ride the ADR-0064
   // scheduler. Two reasons, both load-bearing:
   //
-  //  1. The scheduler is off by default because its six sweeps MUTATE governed
-  //     state and one of them (ADR-0057 red-team) costs real money per run.
+  //  1. The scheduler can be switched off (REGULAIT_SCHEDULER=off; ON by
+  //     default since ADR-0181) because its sweeps MUTATE governed state and
+  //     one of them (ADR-0057 red-team) costs real money per run.
   //     Anchoring only ever READS the chain head and appends an anchor row, so
   //     it does not need that ceremony — and folding it in would have meant
   //     "turn on anchoring" silently also meant "start running red-team sweeps".
@@ -247,10 +248,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     rateLimitPruneTimer.unref();
   }
 
-  // ADR-0064 — the tick loop. OFF unless REGULAIT_SCHEDULER says on, in every
-  // environment including production: enabling a background loop that mutates
-  // governed state is an operator's decision. Started AFTER listen so a slow
-  // first sweep can never delay the deployment coming into service.
+  // ADR-0064 — the tick loop. ON unless REGULAIT_SCHEDULER says off (ADR-0181:
+  // the sweeps are the controls' clock, so a deployment where none runs only
+  // looks governed). Started AFTER listen so a slow first sweep can never delay
+  // the deployment coming into service.
   //
   // The job DEFINITIONS are synced either way, so an operator with the
   // scheduler off can still see on the admin screen exactly what would run.
@@ -294,7 +295,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // ADR-0062: say out loud what this box will REFUSE to reach. An operator who
   // believes their install is air-gapped and has not set the variable must be
   // able to see that from the boot log rather than from a packet capture.
-  log(`  egress:    ${describeEgressPosture(resolveDeployMode())}`);
+  // ADR-0181: the EFFECTIVE posture — the org default is now strict, so the
+  // mode alone no longer says what this box refuses.
+  const egressOrgPolicy = await loadOrgSettings(db)
+    .then((o) => o.egressCompiledDefaultPolicy)
+    .catch(() => undefined);
+  log(`  egress:    ${describeEgressPosture(resolveDeployMode(), egressOrgPolicy)}`);
   // ADR-0063: say out loud WHICH KEY this box is running, and whether anybody
   // has ever claimed to hold a copy of it. The fingerprint is a PRF output, so
   // printing it costs nothing; not printing it costs an operator the one string
@@ -330,7 +336,13 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     log(`             (booting anyway: REGULAIT_ALLOW_DEV_SECRETS=1 overrides the refusal on ${secrets.networkFacingSignal})`);
   }
   // ADR-0167 (CFG-08): the pool's bounds and whether the database hop is TLS.
-  log(`  database:  ${describeDbPool(resolveDbPoolConfig(env))}`);
+  const dbPool = resolveDbPoolConfig(env);
+  log(`  database:  ${describeDbPool(dbPool)}`);
+  // ADR-0181: TLS to Postgres is the default. Running without it is an
+  // explicit relaxation (REGULAIT_DATABASE_SSL=disable — the local demo and
+  // docker-compose set it), and it is said LOUDLY rather than in one line of
+  // a posture block. GET /v1/org/posture reports it as `relaxed` too.
+  for (const line of databaseTlsBootWarning(dbPool)) log(line);
   // ADR-0167 (CFG-02): whether refusals and failures leave a trace at all.
   log(`  logging:   ${describeGatewayLogger(logger)}`);
   // ADR-0064: say out loud whether the six sweeps will actually run on this

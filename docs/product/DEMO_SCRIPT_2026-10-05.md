@@ -27,6 +27,7 @@ export REGULAIT_BOOTSTRAP_TOKEN=<any long random string>
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)        # 64 hex chars — keep it for the whole demo
 export REGULAIT_EPHEMERAL_LICENSE=1 REGULAIT_LICENSE_KEYRING=$HOME/.regulait-demo-keys
 export REGULAIT_OFFLINE_CHECKS=1   # no CI in the demo: the seeded check stages auto-pass, labelled (AER-047)
+export REGULAIT_DATABASE_SSL=disable   # the local Postgres has no TLS; the default is require (ADR-0181)
 ```
 
 Windows PowerShell equivalent:
@@ -37,6 +38,7 @@ $env:REGULAIT_BOOTSTRAP_TOKEN = "<any long random string>"
 $env:REGULAIT_DATA_KEY = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
 $env:REGULAIT_EPHEMERAL_LICENSE = "1"; $env:REGULAIT_LICENSE_KEYRING = "$HOME\.regulait-demo-keys"
 $env:REGULAIT_OFFLINE_CHECKS = "1"
+$env:REGULAIT_DATABASE_SSL = "disable"
 ```
 
 `REGULAIT_OFFLINE_CHECKS=1` must be set in the **gateway's** terminal (step 2 below). A workflow

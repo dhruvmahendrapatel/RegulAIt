@@ -162,6 +162,12 @@ jobs:
       KONG_IMAGE: kong:3.6@sha256:a42d2b4503e7b6674ca7914883bdb0d2274b806b0e397a6af28d1dd57aafce4e
       POSTGRES_IMAGE: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
       E2E_PG: postgres://regulait:regulait@localhost:5432
+      # ADR-0181: the gateway's defaults are strict. CI's Postgres service has
+      # no TLS, so the database hop is relaxed EXPLICITLY here (the default is
+      # `require`), and the scheduler (ON by default) is switched off so no
+      # tick loop runs underneath a test.
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_SCHEDULER: 'off'
 
     steps:
       - uses: actions/checkout@v4

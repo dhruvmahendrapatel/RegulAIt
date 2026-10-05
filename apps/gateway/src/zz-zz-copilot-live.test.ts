@@ -70,6 +70,11 @@ import {
 } from "@regulait/shared";
 import { COPILOT_RULE_IDS } from "./copilot.js";
 import { buildApp } from "./app.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -237,6 +242,7 @@ const latestAuditFor = async (ruleId: string) => {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
 
   const [before] = await db.select().from(orgSettings);
@@ -320,6 +326,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // M-012: this file flips an org singleton; restore the EXACT prior values
   await db
     .update(orgSettings)

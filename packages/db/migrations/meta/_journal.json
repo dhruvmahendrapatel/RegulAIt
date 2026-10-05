@@ -1085,6 +1085,13 @@
       "version": "7",
       "when": 1785093000000,
       "tag": "0158_strict_governance_gates",
+        "breakpoints": true
+      },
+      {
+      "idx": 159,
+      "version": "7",
+      "when": 1785094000000,
+      "tag": "0159_strict_admission_infra",
       "breakpoints": true
     }
   ]

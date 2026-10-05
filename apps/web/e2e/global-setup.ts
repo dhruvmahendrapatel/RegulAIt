@@ -88,6 +88,12 @@ export default async function globalSetup() {
     // suite tests the app THROUGH HTTP, so give the bucket suite-sized
     // headroom rather than testing the limiter by accident.
     REGULAIT_RATE_LIMIT_MAX: "20000",
+    // ADR-0181: the scheduler is ON by default; the journeys assert what a
+    // human's action did, so no background sweep may run underneath them.
+    // Set off EXPLICITLY here. (REGULAIT_DATABASE_SSL is not set here: it
+    // comes from the caller's environment, and CI sets `disable` for its
+    // TLS-less Postgres service.)
+    REGULAIT_SCHEDULER: "off",
   };
 
   // 2. seed via the real API (prints one-time passwords exactly once)

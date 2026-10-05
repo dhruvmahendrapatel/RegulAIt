@@ -16,6 +16,11 @@ import {
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour that is not the strict compiled-egress default (a
+// vendor endpoint answered by a local double) — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * B1.5 F1 — MOCK-AGENT ROUTING HONESTY (owner-experienced defect,
@@ -178,6 +183,7 @@ beforeAll(async () => {
   for (const name of PROVIDER_ENV_VARS) delete process.env[name];
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, ["egressCompiledDefaultPolicy"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
@@ -226,6 +232,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   const agentIds = [reqLiveId, cheapLiveId, mockLivId, liveKeylessId, mockKeyId].filter(Boolean);
   if (agentIds.length > 0) await db.delete(usageEvents).where(inArray(usageEvents.agentId, agentIds));
   await db.delete(costEvents).where(inArray(costEvents.userId, [livId, keyId].filter(Boolean)));

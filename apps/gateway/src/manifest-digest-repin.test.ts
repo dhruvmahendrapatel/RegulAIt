@@ -31,6 +31,11 @@ import { legacyManifestDigestFnv1a64, manifestDigest, type ScannableTool } from 
 import { builderKit, type BuilderKit } from "./testing/builder-fixture.js";
 import { McpReleaseQuarantinedError, recordManifestScan } from "./mcp-admission.js";
 import { MANIFEST_DIGEST_REPIN, MANIFEST_DIGEST_REPIN_RULE_ID, repinManifestDigests } from "./manifest-digest-repin.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DAY = 86_400_000;
 let k: BuilderKit;
@@ -94,6 +99,7 @@ const CONCURRENT = "0123456789abcdef";
 
 beforeAll(async () => {
   k = await builderKit("repin");
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db, ["mcpPrivateRangesDefault"]);
   PROVEN = poisoned(`proven ${k.RUN}`);
   STALE_SERVED = poisoned(`stale ${k.RUN}`);
   proven = await legacyClearedServer("proven", PROVEN, PROVEN);
@@ -115,7 +121,9 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  const r = await k.req("PUT", "/v1/org/settings", k.BOOT, { mcpAdmissionMode: "off", minReleaseAgeDays: 0 });
+  await restoreStrictAdmission?.();
+  // ADR-0181: hand on the shipped strict posture
+  const r = await k.req("PUT", "/v1/org/settings", k.BOOT, { mcpAdmissionMode: "enforce", minReleaseAgeDays: 7 });
   expect(r.statusCode, r.body).toBe(200);
   await k.close();
 });
