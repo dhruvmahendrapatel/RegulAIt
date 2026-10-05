@@ -125,6 +125,8 @@ import {
   /** B9b — the ten kinds the one queue holds; the `objectType` filter's enum */
   APPROVAL_OBJECT_TYPES,
   type AuthzDecision,
+  // ADR-0173 batch 2c fix round A: the audit-log CSV row formatter
+  csvRecord,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { refuseMcpServerWrite } from "./mcp-egress.js";
@@ -344,6 +346,12 @@ import {
   registerPromptRegistryRoutes,
 } from "./prompt-registry.js";
 import { registerOutboundWebhookRoutes } from "./outbound-webhooks.js";
+import { annotationLabelsFor, registerAnnotationRoutes } from "./annotations.js";
+import { calibrationLabelsFromAnnotations } from "./eval-judge-calibration.js";
+// ADR-0173 batch 2c (K)
+import { registerKriRoutes } from "./kri.js";
+import { registerDashboardRoutes } from "./dashboards.js";
+import { registerAutomationRuleRoutes } from "./automation-rules.js";
 import { registerPlaygroundRoutes } from "./playground.js";
 // ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
 // protected-resource metadata + WWW-Authenticate challenge (part B).
@@ -4115,7 +4123,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // /v1/evals/runs, which is in NON_ADMIN_ROUTES because its gate is the
   // caller's own agent entitlement, checked inside the runner exactly as an
   // invoke would check it.
-  registerEvalRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0173 batch 2c: judge calibration reads human labels from annotation
+  // queues (eval-result items). One reviewer's submission becomes one label
+  // carrying every criterion they answered, read against the rubric version
+  // they used: a score is normalised onto 0..1 by THAT rubric's bounds
+  // ((v - min) / (max - min), so on a 1-5 rubric a 1 is 0 and fails), and a
+  // label keeps the rubric's allowed labels. Which criterion carries the
+  // verdict is calibration's decision (the one the request names, else the
+  // single qualifying one, else "ambiguous"), never this adapter's.
+  registerEvalRoutes(app, db, {
+    dataKey: opts.dataKey,
+    labelsFor: async (kind, ids) => calibrationLabelsFromAnnotations(await annotationLabelsFor(db, { kind, ids })),
+  });
   // ADR-0045 — the model risk management registry: model cards, the
   // recertification chain, evidence links onto ADR-0044 eval runs, the expiry
   // sweep, and the org toggle that turns "reviewed for a stated purpose" into
@@ -4511,6 +4530,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerPlaygroundRoutes(app, db, { dataKey: opts.dataKey });
   registerOutboundWebhookRoutes(app, db, { dataKey: opts.dataKey });
 
+  // ADR-0173 batch 2c
+  // Q: annotation queues. Queue setup, enqueue, export and the SLA sweep are
+  // admin (default gate); the reviewer inbox, item read and submit are in
+  // NON_ADMIN_ROUTES and gated in-handler (named reviewer or admin; no self-review).
+  registerAnnotationRoutes(app, db, { dataKey: opts.dataKey });
+  // (K) monitoring KRIs, series and dashboards, automation rules and retention
+  // holds — all admin-only (none is in NON_ADMIN_ROUTES).
+  registerKriRoutes(app, db);
+  registerDashboardRoutes(app, db);
+  registerAutomationRuleRoutes(app, db, { dataKey: opts.dataKey });
+
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a
   // compliance product that means no admin could ever see row 101. It now pages
@@ -4608,11 +4638,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       for (const id of missing) if (!nameOf.has(id)) nameOf.set(id, "");
     };
 
-    const csvCell = (v: unknown): string => {
-      if (v === null || v === undefined) return "";
-      const s = typeof v === "object" ? JSON.stringify(v) : String(v);
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
+    // ADR-0173 batch 2c fix round A: rows are formatted by the shared
+    // `csvRecord` (csv-stringify, `escape_formulas`), so a reason or detail
+    // that starts with = + - @ opens as text, never as a spreadsheet formula.
 
     // filename names every filter that shaped the file, so two downloads taken
     // with different filters never collide in a downloads folder
@@ -4645,7 +4673,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       },
       cursorOf: (r) => ({ at: r.atText, id: r.id }),
       renderRow: (r) =>
-        [
+        csvRecord([
           r.at.toISOString(),
           r.userId,
           nameOf.get(r.userId) ?? "",
@@ -4658,9 +4686,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           r.deployMode ?? "unknown",
           r.reason,
           r.detail,
-        ]
-          .map(csvCell)
-          .join(","),
+        ]),
       hasRowsOutsideWindow: async () => {
         if (!win.from) return false;
         // the SAME filters with the window inverted — the disclosure must speak

@@ -362,7 +362,7 @@ export type DispatchOutcome =
         thinking?: ModelThinkingBlock[];
         /** Complete scanned output was released instead of live provider events. */
         streamBuffered?: boolean;
-        usage: { inputTokens: number; outputTokens: number };
+        usage: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
         credentialSource: "user" | "platform" | "none";
@@ -498,6 +498,9 @@ export interface GovernedDispatchArgs {
   /** ADR-0070 — override the span's displayed name. Absent = derived from the
    * served agent. Used by the fallback driver to label a hop. */
   traceSpanName?: string | undefined;
+  /** ADR-0173 batch 2c — extra facts for THIS attempt's span only (e.g. the
+   * pillar-6 compaction state). Never read by any governance decision. */
+  traceAttributes?: Record<string, unknown> | undefined;
   /** ADR-0070 — the span kind this attempt records as. Defaults to `llm`; the
    * fallback driver passes `fallback_hop`. */
   traceSpanKind?: "llm" | "fallback_hop" | undefined;
@@ -929,12 +932,23 @@ async function dispatchOnce(
     ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
       ? { fallbackPosition: detail["fallbackPosition"] ?? null }
       : {}),
+    // ADR-0173 batch 2c (trace standards): the builder agent that ran this
+    // call (exported as gen_ai.agent.*) and the caller's trace-only facts
+    // (pillar 6 compaction). Ids, names and flags only — never content.
+    ...(typeof detail["builderAgentId"] === "string" ? { builderAgentId: detail["builderAgentId"] } : {}),
+    ...(typeof detail["builderAgentName"] === "string" ? { builderAgentName: detail["builderAgentName"] } : {}),
+    ...(args.traceAttributes ?? {}),
   };
 
   let spanId: string | null;
   if (outcome.ok) {
     const r = outcome.result;
     attributes["stopReason"] = r.stopReason;
+    // the provider's own prompt-cache counts (gen_ai.usage.cache_*), when reported
+    if (!args.cachedResponse && r.usage.cacheReadInputTokens) attributes["cacheReadInputTokens"] = r.usage.cacheReadInputTokens;
+    if (!args.cachedResponse && r.usage.cacheCreationInputTokens) {
+      attributes["cacheCreationInputTokens"] = r.usage.cacheCreationInputTokens;
+    }
     if (r.refusal) attributes["providerRefusal"] = true;
     if (r.credentialSource) attributes["credentialSource"] = r.credentialSource;
     if (r.pii) attributes["pii"] = { mode: r.pii.mode, action: r.pii.action, withheld: r.pii.withheld };
@@ -2453,6 +2467,8 @@ async function performDispatch(
     onText?: ((delta: string) => void) | undefined;
     /** ADR-0066: the virtual key this invoke arrived on, when it did */
     virtualKey?: VirtualKeyContext | null | undefined;
+    /** ADR-0173 batch 2c: the pillar-6 compaction state, for the span only */
+    compaction?: { active: boolean; compacted?: boolean | undefined } | null | undefined;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
@@ -2477,6 +2493,9 @@ async function performDispatch(
     // re-applies the matrix to routing's choice and to every fallback hop
     modelFeature: CHAT_FEATURE,
     detail: { mode: body.mode, ...(body.conversationId ? { conversationId: body.conversationId } : {}) },
+    ...(args.compaction
+      ? { traceAttributes: { compaction: { active: args.compaction.active, compacted: args.compaction.compacted === true } } }
+      : {}),
   });
 }
 
@@ -4570,6 +4589,7 @@ export function registerAgentConnectorRoutes(
           cacheSystem: promptCache.cacheSystem,
           onText: (delta) => send("delta", { text: delta }),
           virtualKey: invokeVirtualKey,
+          compaction: convoContext?.publicDetail ?? null,
         });
         // savings are only claimed for work that happened (see the staging
         // comment above) — a refused/failed stream leaves the ledger untouched
@@ -4632,6 +4652,7 @@ export function registerAgentConnectorRoutes(
           system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
           virtualKey: invokeVirtualKey,
+          compaction: convoContext?.publicDetail ?? null,
         });
         // savings are only claimed for work that happened (see the staging
         // comment above) — a refused/failed dispatch leaves the ledger untouched

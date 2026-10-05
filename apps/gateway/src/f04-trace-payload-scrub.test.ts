@@ -364,7 +364,9 @@ describe("3. the EXPORTED bytes, not only the stored row", () => {
     // POSITIVE FIRST: the content really is on the wire, so the negative below
     // is discriminating and not a statement about an empty export.
     expect(wire).toContain(nonce);
-    expect(wire).toContain("gen_ai.input.messages");
+    // ADR-0173 batch 2c: a tool span carries its arguments under the tool
+    // convention's own key (it was gen_ai.input.messages before)
+    expect(wire).toContain("gen_ai.tool.call.arguments");
     expect(wire).toMatch(/\[redacted:aws_key:20:[0-9a-f]{12}\]/);
     expect(wire).not.toContain(AWS_KEY);
   });

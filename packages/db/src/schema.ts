@@ -1208,6 +1208,12 @@ export const auditLog = pgTable(
         // text column — no DDL needed.
         "governance_alert",
         "governance_monitor",
+        // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
+        // changed / deleted, and an automation rule created / changed /
+        // paused / backfilled / matched (objectId = the row). Plain text — no DDL.
+        "kri",
+        "monitoring_dashboard",
+        "automation_rule",
         // ADR-0159: a remediation proposed / applied / denied / failed
         "remediation",
         // ADR-0161: one CI/CD deploy-gate evaluation (objectId = use case)
@@ -1235,6 +1241,12 @@ export const auditLog = pgTable(
         // ADR-0173 batch 2b: a decision on a held connector write (the
         // approvals queue's object type rides the audit row). Plain text — no DDL.
         "connector_call",
+        // ADR-0173 batch 2c (Q): an annotation queue created / changed /
+        // removed or exported (objectId = the queue), and an annotation item
+        // queued, read, reviewed, removed or past its deadline (objectId = the
+        // item). Plain text column — no DDL.
+        "annotation_queue",
+        "annotation_item",
       ],
     })
       .notNull()
@@ -4419,7 +4431,9 @@ const EVAL_SCORER_KINDS_SQL = sql.raw(
  */
 export const SCORING_SEMANTICS_VERSION = 2;
 
-export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
+/** ADR-0173 batch 2c (migration 0149): `config_change` = the drift sweep re-ran
+ * a pinned baseline because the agent's configuration hash changed */
+export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled", "config_change"] as const;
 export const EVAL_RUN_STATUSES = ["running", "completed", "error", "denied"] as const;
 
 /** ONE ROW PER (name, version). A version is frozen the moment a run references
@@ -4480,6 +4494,11 @@ export const evalCases = pgTable(
      * asked. */
     contextInPrompt: boolean("context_in_prompt").notNull().default(true),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    /** ADR-0173 batch 2c (migration 0149): the trace span this case was built
+     * from, when it was. FK-free on purpose: a dataset row is authored content
+     * and outlives the §8.3 trace prune. Unique per dataset version. */
+    sourceTraceId: uuid("source_trace_id"),
+    sourceSpanId: uuid("source_span_id"),
     /** NULL = inherit the dataset's default scorer */
     scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }),
     scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>(),
@@ -4496,6 +4515,9 @@ export const evalCases = pgTable(
       foreignColumns: [evalDatasets.id, evalDatasets.version],
     }).onDelete("cascade"),
     index("eval_cases_dataset_idx").on(t.datasetId, t.datasetVersion),
+    uniqueIndex("eval_cases_source_span_uq")
+      .on(t.datasetId, t.datasetVersion, t.sourceSpanId)
+      .where(sql`${t.sourceSpanId} IS NOT NULL`),
   ],
 );
 
@@ -4569,11 +4591,41 @@ export const evalRuns = pgTable(
       .default(SCORING_SEMANTICS_VERSION),
     error: text("error"),
     note: text("note"),
+    // --- ADR-0173 batch 2c (migration 0149) ---------------------------------
+    /** sha256 over the measured configuration (model, tier, system-prompt
+     * hash, custom provider): what `config_change` compares */
+    configHash: text("config_hash"),
+    /** the pinned baseline a `config_change` run re-ran */
+    configChangeOfRunId: uuid("config_change_of_run_id"),
+    /** who pinned this run as THE baseline; a config_change re-run runs as
+     * this person and is skipped when they are gone */
+    baselinePinnedByUserId: uuid("baseline_pinned_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** [{agentId, agentName, weight}] for a weighted judge-panel run */
+    judgePanel: jsonb("judge_panel").$type<Array<{ agentId: string | null; agentName: string; weight: number }>>(),
+    /** judge repetitions per case (1..5) */
+    repetitions: integer("repetitions").notNull().default(1),
+    /** the seeded bootstrap interval on the mean score */
+    scoreCi: jsonb("score_ci").$type<Record<string, unknown>>(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
   (t) => [
-    check("eval_runs_trigger_check", sql`${t.trigger} IN ('manual','workflow','scheduled')`),
+    check(
+      "eval_runs_trigger_check",
+      sql`${t.trigger} IN ('manual','workflow','scheduled','config_change')`,
+    ),
+    check("eval_runs_repetitions_check", sql`${t.repetitions} >= 1 AND ${t.repetitions} <= 5`),
+    foreignKey({
+      name: "eval_runs_config_change_of_run_id_fk",
+      columns: [t.configChangeOfRunId],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    /** each (pinned baseline, configuration) pair re-runs at most once */
+    uniqueIndex("eval_runs_config_change_uq")
+      .on(t.configChangeOfRunId, t.configHash)
+      .where(sql`${t.trigger} = 'config_change'`),
     check("eval_runs_scoring_semantics_check", sql`${t.scoringSemantics} >= 1`),
     check("eval_runs_status_check", sql`${t.status} IN ('running','completed','error','denied')`),
     check("eval_runs_tolerance_check", sql`${t.tolerance} >= 0 AND ${t.tolerance} <= 1`),
@@ -8023,6 +8075,11 @@ export const traces = pgTable(
     index("traces_project_idx").on(t.projectId, t.startedAt),
     index("traces_root_idx").on(t.kind, t.rootRefId),
     index("traces_started_idx").on(t.startedAt),
+    // migration 0151: the automation sweep's keyset (automation-rules.ts
+    // `endedMsUtc`, written identically there)
+    index("traces_ended_ms_id_idx")
+      .on(sql`date_trunc('milliseconds', ${t.endedAt} AT TIME ZONE 'UTC')`, t.id)
+      .where(sql`${t.endedAt} IS NOT NULL`),
   ],
 );
 
@@ -8083,6 +8140,10 @@ export const traceSpans = pgTable(
     index("trace_spans_parent_idx").on(t.parentSpanId),
     index("trace_spans_usage_idx").on(t.usageEventId),
     index("trace_spans_run_idx").on(t.runId),
+    /** ADR-0173 batch 2c (migration 0146): the `agentId` and `model` trace
+     * filters are EXISTS over a trace's spans (traceFilterConditions). */
+    index("trace_spans_agent_started_idx").on(t.agentId, t.startedAt),
+    index("trace_spans_model_idx").on(t.model),
     /** ADR-0109 (migration 0108) — and note this table appears in BOTH of
      * ADR-0107's tables without contradiction, because the two sites have
      * different predicates. `closeRunSpan` reads `(trace_id, kind='run')` with
@@ -8681,6 +8742,8 @@ export const traceEvaluations = pgTable(
   (t) => [
     uniqueIndex("trace_evaluations_span_uq").on(t.spanId),
     index("trace_evaluations_agent_started_idx").on(t.agentId, t.spanStartedAt),
+    /** ADR-0173 batch 2c (migration 0146): the `flagged` trace filter */
+    index("trace_evaluations_trace_flagged_idx").on(t.traceId).where(sql`${t.flagged}`),
   ],
 );
 
@@ -9622,3 +9685,472 @@ export const energyFactors = pgTable(
 );
 
 export type EnergyFactorRow = typeof energyFactors.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — F (migration 0146): trace tags and trace scores.
+// ---------------------------------------------------------------------------
+
+/**
+ * Key=value labels on a trace, one value per (trace, key). Written only by the
+ * trace's owner or an admin (the tag routes enforce that); the key shape and
+ * the value length are also CHECKed here so no write path can bypass them.
+ * `regulait.*` keys are reserved for the system (an API rule, not a DB rule).
+ * Cascades from `traces`, so the §8.3 prune removes a trace's tags with it.
+ */
+export const traceTags = pgTable(
+  "trace_tags",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: text("value").notNull().default(""),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("trace_tags_trace_key_uq").on(t.traceId, t.key),
+    index("trace_tags_key_value_idx").on(t.key, t.value),
+    check("trace_tags_key_ck", sql`${t.key} ~ '^[a-z0-9_.-]{1,64}$'`),
+    check("trace_tags_value_ck", sql`char_length(${t.value}) <= 256`),
+  ],
+);
+export type TraceTagRow = typeof traceTags.$inferSelect;
+
+/** where a trace score came from; `source_ref_id` is the id of the row in that
+ * source (an annotation submission, an eval result, a judge verdict, a trace
+ * evaluation) */
+export const TRACE_SCORE_SOURCES = ["annotation", "evaluator", "judge", "trace_eval"] as const;
+export type TraceScoreSource = (typeof TRACE_SCORE_SOURCES)[number];
+
+/**
+ * One score per (source, source_ref_id, name), written ONLY through
+ * `recordTraceScore` (apps/gateway/src/trace-scores.ts), which is idempotent on
+ * that key: a replayed submission or a retried sweep never adds a second row
+ * and never changes the first. A numeric `value`, a categorical `label`, or
+ * both; never a comment or any other content (the OTel export reads this
+ * table for `gen_ai.evaluation.*`). Cascades from the trace and the span.
+ */
+export const traceScores = pgTable(
+  "trace_scores",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    /** null = a score on the whole trace */
+    spanId: uuid("span_id").references(() => traceSpans.id, { onDelete: "cascade" }),
+    source: text("source", { enum: TRACE_SCORE_SOURCES }).notNull(),
+    name: text("name").notNull(),
+    value: doublePrecision("value"),
+    label: text("label"),
+    sourceRefId: text("source_ref_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("trace_scores_source_ref_name_uq").on(t.source, t.sourceRefId, t.name),
+    index("trace_scores_trace_idx").on(t.traceId),
+    index("trace_scores_name_value_idx").on(t.name, t.value),
+    check("trace_scores_source_ck", sql`${t.source} IN ('annotation', 'evaluator', 'judge', 'trace_eval')`),
+    check("trace_scores_value_or_label_ck", sql`${t.value} IS NOT NULL OR ${t.label} IS NOT NULL`),
+  ],
+);
+export type TraceScoreRow = typeof traceScores.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — Q (migration 0148): annotation queues.
+// ---------------------------------------------------------------------------
+
+/**
+ * A named review queue: a rubric (versioned in `annotation_rubric_versions`),
+ * named reviewers, an N-person requirement and an optional SLA. Admin-only to
+ * create or change (apps/gateway/src/annotations.ts).
+ */
+export const annotationQueues = pgTable(
+  "annotation_queues",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    /** the CURRENT rubric version; the rubric itself is that version's row */
+    rubricVersion: integer("rubric_version").notNull().default(1),
+    /** distinct reviewers an item needs before it completes */
+    requiredReviews: integer("required_reviews").notNull().default(1),
+    /** null = no deadline */
+    slaHours: integer("sla_hours"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_queues_name_uq").on(sql`lower(${t.name})`),
+    check("annotation_queues_required_ck", sql`${t.requiredReviews} BETWEEN 1 AND 5`),
+    check("annotation_queues_sla_ck", sql`${t.slaHours} IS NULL OR ${t.slaHours} BETWEEN 1 AND 720`),
+  ],
+);
+export type AnnotationQueueRow = typeof annotationQueues.$inferSelect;
+
+/**
+ * Every rubric a queue has had. Editing a rubric that already has submissions
+ * under its current version writes a NEW version (old reviews keep the rubric
+ * they were made against); editing one with none replaces it in place.
+ */
+export const annotationRubricVersions = pgTable(
+  "annotation_rubric_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    rubric: jsonb("rubric").$type<Record<string, unknown>>().notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("annotation_rubric_versions_queue_version_uq").on(t.queueId, t.version)],
+);
+export type AnnotationRubricVersionRow = typeof annotationRubricVersions.$inferSelect;
+
+/** the named reviewers of a queue: the only non-admins who may read its items */
+export const annotationQueueReviewers = pgTable(
+  "annotation_queue_reviewers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_queue_reviewers_uq").on(t.queueId, t.userId),
+    index("annotation_queue_reviewers_user_idx").on(t.userId),
+  ],
+);
+
+/** mirrors ANNOTATION_SUBJECT_KINDS / ANNOTATION_ITEM_STATUSES in @regulait/shared */
+export const ANNOTATION_SUBJECT_KINDS_DB = ["trace", "span", "eval_result"] as const;
+export const ANNOTATION_ITEM_STATUSES_DB = ["open", "completed"] as const;
+
+/**
+ * One subject in one queue, at most once (unique on queue + subject). The
+ * subject and its trace are referenced FK-FREE on purpose: the §8.3 prune and
+ * an erasure request delete traces, and the item (with its reviews) must then
+ * say "no longer retained" rather than vanish. `subject_user_ids` is who the
+ * subject belongs to (the trace's person, the run's initiator), captured at
+ * enqueue for the no-self-review rule.
+ */
+export const annotationItems = pgTable(
+  "annotation_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    subjectKind: text("subject_kind", { enum: ANNOTATION_SUBJECT_KINDS_DB }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    traceId: uuid("trace_id"),
+    spanId: uuid("span_id"),
+    subjectUserIds: jsonb("subject_user_ids").$type<string[]>().notNull().default([]),
+    /** the queue's N when this item was queued */
+    requiredReviews: integer("required_reviews").notNull().default(1),
+    status: text("status", { enum: ANNOTATION_ITEM_STATUSES_DB }).notNull().default("open"),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    /** set once, by the SLA sweep; the breach event fires only on that write */
+    slaBreachedAt: timestamp("sla_breached_at", { withTimezone: true }),
+    disagreement: boolean("disagreement"),
+    disagreementDetail: jsonb("disagreement_detail").$type<Array<Record<string, unknown>>>(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    enqueuedByUserId: uuid("enqueued_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** an automation rule that queued it (FK-free; the rule may be deleted) */
+    ruleId: uuid("rule_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_items_queue_subject_uq").on(t.queueId, t.subjectKind, t.subjectId),
+    index("annotation_items_queue_status_idx").on(t.queueId, t.status, t.createdAt),
+    index("annotation_items_due_idx").on(t.dueAt).where(sql`${t.status} = 'open' AND ${t.slaBreachedAt} IS NULL`),
+    index("annotation_items_subject_idx").on(t.subjectKind, t.subjectId),
+    check("annotation_items_kind_ck", sql`${t.subjectKind} IN ('trace', 'span', 'eval_result')`),
+    check("annotation_items_status_ck", sql`${t.status} IN ('open', 'completed')`),
+  ],
+);
+export type AnnotationItemRow = typeof annotationItems.$inferSelect;
+
+/**
+ * One reviewer's review of one item, at most once (unique on item + reviewer).
+ * `values` maps each rubric criterion to a number or a label; `comment` is the
+ * reviewer's free text (never copied to trace_scores or a webhook).
+ */
+export const annotationSubmissions = pgTable(
+  "annotation_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => annotationItems.id, { onDelete: "cascade" }),
+    queueId: uuid("queue_id")
+      .notNull()
+      .references(() => annotationQueues.id, { onDelete: "cascade" }),
+    reviewerUserId: uuid("reviewer_user_id")
+      .notNull()
+      .references(() => users.id),
+    rubricVersion: integer("rubric_version").notNull(),
+    values: jsonb("values").$type<Record<string, number | string>>().notNull(),
+    comment: text("comment"),
+    /** sha256 of (rubric version, values, comment): an identical replay is a no-op */
+    payloadHash: text("payload_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("annotation_submissions_item_reviewer_uq").on(t.itemId, t.reviewerUserId),
+    index("annotation_submissions_queue_created_idx").on(t.queueId, t.createdAt, t.id),
+    check("annotation_submissions_comment_ck", sql`${t.comment} IS NULL OR char_length(${t.comment}) <= 2000`),
+  ],
+);
+export type AnnotationSubmissionRow = typeof annotationSubmissions.$inferSelect;
+// ADR-0173 batch 2c — E (migration 0149): every judge verdict of a panel run.
+// ---------------------------------------------------------------------------
+
+/**
+ * One judge's verdict on one case in one repetition. A panel run combines the
+ * verdicts into the case's `eval_results` score by weight, and KEEPS every
+ * verdict here, so a combined number can always be taken apart. A failed judge
+ * call is a row with `error` and no score, never a fabricated zero.
+ */
+export const evalJudgeVerdicts = pgTable(
+  "eval_judge_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "cascade" }),
+    caseId: uuid("case_id").references(() => evalCases.id, { onDelete: "set null" }),
+    judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** the judge's stable name on this run (its instrument id) */
+    judgeName: text("judge_name").notNull(),
+    weight: doublePrecision("weight").notNull(),
+    repetition: integer("repetition").notNull(),
+    score: doublePrecision("score"),
+    passed: boolean("passed"),
+    rationale: text("rationale"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("eval_judge_verdicts_uq").on(t.runId, t.caseId, t.judgeName, t.repetition),
+    index("eval_judge_verdicts_run_idx").on(t.runId),
+    check("eval_judge_verdicts_weight_check", sql`${t.weight} > 0`),
+    check("eval_judge_verdicts_repetition_check", sql`${t.repetition} >= 1 AND ${t.repetition} <= 5`),
+    check(
+      "eval_judge_verdicts_score_check",
+      sql`${t.score} IS NULL OR (${t.score} >= 0 AND ${t.score} <= 1)`,
+    ),
+    check("eval_judge_verdicts_outcome_check", sql`${t.score} IS NOT NULL OR ${t.error} IS NOT NULL`),
+  ],
+);
+export type EvalJudgeVerdictRow = typeof evalJudgeVerdicts.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0173 batch 2c — K (migration 0150): monitoring KRIs, dashboards,
+// automation rules, their match log, and retention holds on traces.
+// ---------------------------------------------------------------------------
+
+/** mirrors `KRI_METRICS` in packages/shared/src/kri.ts */
+export const KRI_METRIC_VALUES = [
+  "trace_volume",
+  "error_rate",
+  "latency_p50",
+  "latency_p99",
+  "cost_usd",
+  "feedback_score",
+] as const;
+/** mirrors `KRI_SCOPES` in packages/shared/src/kri.ts */
+export const KRI_SCOPE_VALUES = ["fleet", "agent", "project"] as const;
+export const KRI_COMPARATOR_VALUES = ["above", "below"] as const;
+
+/**
+ * A key risk indicator: one metric over traces, a scope, a rolling window
+ * (at most 90 days) and a threshold. The governance monitor evaluates every
+ * enabled KRI on its pass (rule `kri_threshold_breached`, subject
+ * `kri:<id>`). Below `min_samples` a KRI neither breaches nor resolves. This
+ * table is the metric registry ADR-0175 A2 reuses. Admin-only.
+ */
+export const kris = pgTable(
+  "kris",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    metric: text("metric", { enum: KRI_METRIC_VALUES }).notNull(),
+    scope: text("scope", { enum: KRI_SCOPE_VALUES }).notNull().default("fleet"),
+    /** the agent or project id; null exactly when scope = 'fleet' */
+    scopeId: uuid("scope_id"),
+    windowDays: integer("window_days").notNull().default(7),
+    comparator: text("comparator", { enum: KRI_COMPARATOR_VALUES }).notNull().default("above"),
+    threshold: doublePrecision("threshold").notNull(),
+    minSamples: integer("min_samples").notNull().default(20),
+    severity: text("severity", { enum: GOVERNANCE_ALERT_SEVERITIES }).notNull().default("medium"),
+    /** feedback_score only: the annotation score name to average (null = every annotation score) */
+    scoreName: text("score_name"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "kris_metric_ck",
+      sql`${t.metric} IN ('trace_volume', 'error_rate', 'latency_p50', 'latency_p99', 'cost_usd', 'feedback_score')`,
+    ),
+    check("kris_scope_ck", sql`${t.scope} IN ('fleet', 'agent', 'project')`),
+    check("kris_scope_id_ck", sql`(${t.scope} = 'fleet') = (${t.scopeId} IS NULL)`),
+    check("kris_window_ck", sql`${t.windowDays} BETWEEN 1 AND 90`),
+    check("kris_comparator_ck", sql`${t.comparator} IN ('above', 'below')`),
+    check("kris_min_samples_ck", sql`${t.minSamples} BETWEEN 1 AND 100000`),
+    check("kris_severity_ck", sql`${t.severity} IN ('low', 'medium', 'high')`),
+  ],
+);
+export type KriRow = typeof kris.$inferSelect;
+
+/** a saved monitoring dashboard: at most 24 panels, each validated by the
+ * shared `dashboardPanelSchema` on write (and the count CHECKed here) */
+export const monitoringDashboards = pgTable(
+  "monitoring_dashboards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    panels: jsonb("panels").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("monitoring_dashboards_panels_ck", sql`jsonb_array_length(${t.panels}) <= 24`)],
+);
+export type MonitoringDashboardRow = typeof monitoringDashboards.$inferSelect;
+
+export const AUTOMATION_RULE_STATUSES = ["active", "paused"] as const;
+export const AUTOMATION_MATCH_STATUSES = ["done", "retry", "failed"] as const;
+export interface AutomationActionResult {
+  type: string;
+  /** pending = not yet run (a pass stopped, or the process died, after the match was claimed) */
+  status: "ok" | "failed" | "pending";
+  /** a fixed code, never error text */
+  reason: string | null;
+  attempts: number;
+  /** a failed action the next pass may retry (until AUTOMATION_LIMITS.maxAttempts) */
+  retryable: boolean;
+}
+
+/**
+ * An automation rule: a stored trace filter (the shared `traceFilterSchema`),
+ * a deterministic sampling rate, and one to four actions (send to an
+ * annotation queue, add to a dataset, a webhook to one subscription, extend
+ * retention). Actions run AS `author_user_id`; when the author is no longer an
+ * active admin the sweep pauses the rule (audited). The sweep reads traces
+ * that ENDED after the keyset cursor (`cursor_ended_at`, `cursor_trace_id`); a
+ * new rule's cursor is its creation time, so nothing older is matched unless
+ * an admin asks for a backfill (at most 7 days), which moves the cursor back
+ * and marks the matches it produces (`backfill_until`).
+ */
+export const automationRules = pgTable(
+  "automation_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    filter: jsonb("filter").$type<Record<string, unknown>>().notNull().default({}),
+    samplingRate: doublePrecision("sampling_rate").notNull().default(1),
+    actions: jsonb("actions").$type<Array<Record<string, unknown>>>().notNull(),
+    status: text("status", { enum: AUTOMATION_RULE_STATUSES }).notNull().default("active"),
+    pausedReason: text("paused_reason"),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    authorUserId: uuid("author_user_id")
+      .notNull()
+      .references(() => users.id),
+    dailyActionCap: integer("daily_action_cap").notNull().default(500),
+    cursorEndedAt: timestamp("cursor_ended_at", { withTimezone: true }).notNull().defaultNow(),
+    cursorTraceId: uuid("cursor_trace_id"),
+    /** set by an explicit backfill: traces that ended at or before this are matched as backfill */
+    backfillUntil: timestamp("backfill_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("automation_rules_sampling_ck", sql`${t.samplingRate} >= 0 AND ${t.samplingRate} <= 1`),
+    check("automation_rules_status_ck", sql`${t.status} IN ('active', 'paused')`),
+    check("automation_rules_cap_ck", sql`${t.dailyActionCap} BETWEEN 1 AND 10000`),
+    check("automation_rules_actions_ck", sql`jsonb_array_length(${t.actions}) BETWEEN 1 AND 4`),
+    index("automation_rules_status_idx").on(t.status),
+  ],
+);
+export type AutomationRuleRow = typeof automationRules.$inferSelect;
+
+/**
+ * One row per (rule, trace): THE dedupe. A re-run pass, a backfill over the
+ * same window or a concurrent sweep never matches a trace twice, so no action
+ * runs twice for it. `action_results` holds each action's outcome (a fixed
+ * reason code, never error text); `status = 'retry'` marks a match whose
+ * failed actions the next pass retries (only those, up to 3 attempts).
+ */
+export const automationMatches = pgTable(
+  "automation_matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: uuid("rule_id")
+      .notNull()
+      .references(() => automationRules.id, { onDelete: "cascade" }),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    matchedAt: timestamp("matched_at", { withTimezone: true }).notNull().defaultNow(),
+    backfill: boolean("backfill").notNull().default(false),
+    status: text("status", { enum: AUTOMATION_MATCH_STATUSES }).notNull().default("done"),
+    attempts: integer("attempts").notNull().default(1),
+    actionResults: jsonb("action_results").$type<AutomationActionResult[]>().notNull().default([]),
+  },
+  (t) => [
+    uniqueIndex("automation_matches_rule_trace_uq").on(t.ruleId, t.traceId),
+    index("automation_matches_rule_at_idx").on(t.ruleId, t.matchedAt),
+    index("automation_matches_retry_idx").on(t.ruleId).where(sql`${t.status} = 'retry'`),
+    check("automation_matches_status_ck", sql`${t.status} IN ('done', 'retry', 'failed')`),
+  ],
+);
+export type AutomationMatchRow = typeof automationMatches.$inferSelect;
+
+/**
+ * A retention hold keeps one trace past the §8.3 floor until `hold_until`
+ * (at most 2x the floor and at most 3 years from the trace's start; the
+ * owner's decision of 2026-10-05). The prune skips a held trace and deletes it
+ * once the hold has expired. An erasure request ALWAYS releases the hold
+ * (`released_at`, `release_reason = 'erasure'`, audited), and a hold released
+ * for erasure is never re-applied. One row per trace; cascades with it.
+ */
+export const traceRetentionHolds = pgTable(
+  "trace_retention_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    holdUntil: timestamp("hold_until", { withTimezone: true }).notNull(),
+    ruleId: uuid("rule_id").references(() => automationRules.id, { onDelete: "set null" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    releasedByUserId: uuid("released_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releaseReason: text("release_reason"),
+  },
+  (t) => [
+    uniqueIndex("trace_retention_holds_trace_uq").on(t.traceId),
+    index("trace_retention_holds_active_idx").on(t.holdUntil).where(sql`${t.releasedAt} IS NULL`),
+    check(
+      "trace_retention_holds_reason_ck",
+      sql`${t.releaseReason} IS NULL OR ${t.releaseReason} IN ('erasure', 'admin')`,
+    ),
+  ],
+);
+export type TraceRetentionHoldRow = typeof traceRetentionHolds.$inferSelect;

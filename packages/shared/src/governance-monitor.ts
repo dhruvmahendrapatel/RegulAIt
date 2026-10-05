@@ -17,6 +17,7 @@
  */
 import type { PropagatedRating, RiskBand } from "./dependency-graph.js";
 import type { TrustDimension } from "./risks.js";
+import { KRI_METRICS, evaluateKri, formatKriValue, type KriComparator, type KriMetric, type KriState } from "./kri.js";
 
 /** guardrail detector ids as words for alert titles (`semantic_dlp` → `semantic DLP`) */
 const DETECTOR_LABELS: Record<string, string> = {
@@ -119,6 +120,15 @@ export const MONITOR_RULES = {
       "threshold, owner deactivated, or over-scoped by its type's rule. One episode per credential type and flag, " +
       "with the count and the first credential ids. Off by default: the flags show on the credential inventory, and " +
       "an admin turns alert episodes on there.",
+  },
+  kri_threshold_breached: {
+    label: "Key risk indicator past its threshold",
+    severity: "medium",
+    description:
+      "A key risk indicator (ADR-0173 batch 2c) measured over its window is past the threshold an admin set: trace " +
+      "volume, error rate, p50/p99 latency, cost or annotation feedback, for the fleet, an agent or a project. The " +
+      "episode carries the KRI's own severity. Below the KRI's minimum sample count it neither raises nor resolves, " +
+      "and deleting or disabling the KRI resolves its episode.",
   },
   dimension_coverage_below_floor: {
     label: "Trust dimension evidence coverage below floor",
@@ -328,6 +338,39 @@ export interface MonitorInput {
   traffic?: MonitorTrafficInput;
   /** ADR-0175 A7 — absent = rule not evaluated */
   credentials?: MonitorCredentialInput;
+  /** ADR-0173 batch 2c — every KRI with its measurement; absent = rule not evaluated */
+  kris?: MonitorKriInput[];
+}
+
+/** ADR-0173 batch 2c — one KRI and what the monitor measured for it */
+export interface MonitorKriInput {
+  id: string;
+  name: string;
+  metric: KriMetric;
+  scope: string;
+  scopeId: string | null;
+  scopeLabel: string | null;
+  windowDays: number;
+  comparator: KriComparator;
+  threshold: number;
+  minSamples: number;
+  severity: MonitorSeverity;
+  /** false = the KRI is switched off: no finding, and its open episode resolves */
+  enabled: boolean;
+  value: number | null;
+  samples: number;
+}
+
+/** the subject key of a KRI's episode */
+export function kriSubjectKey(kriId: string): string {
+  return `kri:${kriId}`;
+}
+
+/** ADR-0173 batch 2c — each KRI's state, for the findings and for the
+ * subjects whose open episode must be HELD (neither refreshed nor resolved)
+ * because the KRI had too few samples to say anything */
+export function kriStates(kris: readonly MonitorKriInput[]): Array<{ kri: MonitorKriInput; state: KriState | "disabled" }> {
+  return kris.map((k) => ({ kri: k, state: k.enabled ? evaluateKri(k, { value: k.value, samples: k.samples }) : "disabled" }));
 }
 
 /** ADR-0175 A7 — the flagged credentials from the inventory */
@@ -582,6 +625,32 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
     }
   }
 
+  for (const { kri: k, state } of kriStates(input.kris ?? [])) {
+    if (state !== "breached") continue;
+    const scopeWords = k.scope === "fleet" ? "fleet-wide" : `for ${k.scope} ${k.scopeLabel ?? k.scopeId}`;
+    out.push({
+      ruleId: "kri_threshold_breached",
+      subjectKey: kriSubjectKey(k.id),
+      severity: k.severity,
+      title:
+        `${k.name}: ${KRI_METRICS[k.metric].label.toLowerCase()} ${scopeWords} is ${formatKriValue(k.metric, k.value)} ` +
+        `over ${k.windowDays} ${k.windowDays === 1 ? "day" : "days"}, ${k.comparator} the threshold of ` +
+        `${formatKriValue(k.metric, k.threshold)}`,
+      detail: {
+        kriId: k.id,
+        metric: k.metric,
+        scope: k.scope,
+        scopeId: k.scopeId,
+        windowDays: k.windowDays,
+        comparator: k.comparator,
+        threshold: k.threshold,
+        value: k.value,
+        samples: k.samples,
+        minSamples: k.minSamples,
+      },
+    });
+  }
+
   for (const r of input.risks) {
     if (r.status !== "open" && r.status !== "mitigating") continue;
     if (r.band !== "high" || r.controls > 0) continue;
@@ -731,11 +800,14 @@ export interface ActiveAlertRef {
  * new condition → raise; persisting → refresh (status untouched, so an
  * acknowledgement survives); cleared → resolve. Only rules in `evaluatedRules`
  * can resolve — an alert from a rule this pass did not run is left alone.
+ * ADR-0173 batch 2c: an active alert whose `ruleId|subjectKey` is in `held`
+ * is also left alone (a KRI below its minimum samples says nothing either way).
  */
 export function reconcileAlerts(
   active: readonly ActiveAlertRef[],
   findings: readonly MonitorFinding[],
   evaluatedRules: ReadonlySet<string> = new Set(MONITOR_RULE_IDS),
+  held: ReadonlySet<string> = new Set(),
 ): { raise: MonitorFinding[]; refresh: Array<{ id: string; finding: MonitorFinding }>; resolve: string[] } {
   const byKey = new Map(active.map((a) => [`${a.ruleId}|${a.subjectKey}`, a]));
   const raise: MonitorFinding[] = [];
@@ -751,6 +823,8 @@ export function reconcileAlerts(
       raise.push(f);
     }
   }
-  const resolve = active.filter((a) => !still.has(a.id) && evaluatedRules.has(a.ruleId)).map((a) => a.id);
+  const resolve = active
+    .filter((a) => !still.has(a.id) && evaluatedRules.has(a.ruleId) && !held.has(`${a.ruleId}|${a.subjectKey}`))
+    .map((a) => a.id);
   return { raise, refresh, resolve };
 }

@@ -24,6 +24,16 @@
  *    card says plainly that no exporter is configured and that this is the
  *    shipped, air-gapped-correct state rather than a fault.
  *
+ * ADR-0173 batch 2c — TRACES AS THE EVIDENCE SPINE. The list takes the shared
+ * trace filter (agent, model, cost, latency, score, flagged, tag); a trace
+ * carries key/value tag chips (click one to filter by it; the owner or an
+ * admin edits them in the tree); several traces can be selected and added to
+ * an evaluation dataset, sent to an annotation queue, or tagged in one go, each
+ * answering what was added and what was skipped and why. The export card picks
+ * the attribute vocabulary (OpenTelemetry GenAI, or OpenInference). The
+ * "Automations" tab is a slot: `TracesAutomationsTab` is replaced by the
+ * automation-rules UI.
+ *
  * House pattern: react-router + TanStack Query + the owned kit, following
  * `RegulAItLlmPage.tsx`.
  */
@@ -43,11 +53,27 @@ import {
   Input,
   Select,
   Table,
+  Tabs,
   type Tone,
 } from "../../../ui/kit";
-import { KV, QueryGate, Stat, optionEls, useAction } from "../adminKit";
+import { KV, QueryGate, Stat, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import t from "./traces.module.css";
+// ADR-0173 batch 2c: THE AUTOMATIONS SLOT. This import is the mount point the
+// automation-rules UI replaces (the file, not this line).
+import TracesAutomationsTab from "./TracesAutomationsTab";
+import {
+  EMPTY_TRACE_FILTERS,
+  activeFilterCount,
+  bulkSentence,
+  reasonWords,
+  tagProblem,
+  traceFilterProblem,
+  traceListQuery,
+  type BulkOutcome,
+  type TraceListFilters,
+} from "./tracesQuery";
 
 // ---------------------------------------------------------------------------
 // mirrors of the gateway's read projections
@@ -70,6 +96,21 @@ interface TraceRow {
   inputTokens: number;
   outputTokens: number;
   costUsd: number | null;
+  /** ADR-0173 batch 2c */
+  tags?: TraceTag[];
+}
+
+interface TraceTag {
+  key: string;
+  value: string;
+}
+
+interface TraceScore {
+  spanId: string | null;
+  source: string;
+  name: string;
+  value: number | null;
+  label: string | null;
 }
 
 interface SpanNode {
@@ -119,6 +160,8 @@ interface TraceDetail {
   truncated: boolean;
   spanLimit?: number;
   note: string;
+  tags?: TraceTag[];
+  scores?: TraceScore[];
 }
 
 interface SessionRow {
@@ -143,7 +186,26 @@ interface TracingConfig {
   limits: string;
   retention: string;
   note: string;
+  profiles?: string[];
+  standards?: Record<string, string>;
 }
+
+interface DatasetOption {
+  id: string;
+  name: string;
+  version: number;
+  frozen?: boolean;
+}
+
+interface QueueOption {
+  id: string;
+  name: string;
+}
+
+const PROFILE_LABEL: Record<string, string> = {
+  otel_genai: "OpenTelemetry GenAI (default)",
+  openinference: "OpenInference",
+};
 
 // ---------------------------------------------------------------------------
 
@@ -186,25 +248,77 @@ function flatten(nodes: SpanNode[]): SpanNode[] {
 // ---------------------------------------------------------------------------
 
 export default function TracesPage() {
+  const [tab, setTab] = useState("traces");
+  return (
+    <>
+      <PageHeader
+        title="Traces"
+        sub={
+          "One causal tree per governed call: an orchestration run, its nodes, every model turn, every " +
+          "tool call — and, the reason this exists, every governance decision that refused one. A " +
+          "refusal is a SPAN carrying its reason, not an absence. Nothing here is a second copy of the " +
+          "ledger: a span references the usage_events row its cost came from and the audit row its " +
+          "decision came from."
+        }
+      />
+      <div className={v.stack}>
+        <Tabs
+          tabs={[
+            { id: "traces", label: "Traces" },
+            { id: "automations", label: "Automations" },
+          ]}
+          active={tab}
+          onChange={setTab}
+        />
+        {tab === "automations" ? <TracesAutomationsTab /> : <TracesView />}
+      </div>
+    </>
+  );
+}
+
+function TracesView() {
   const act = useAction();
-  const [deniedOnly, setDeniedOnly] = useState(false);
-  const [kind, setKind] = useState("");
-  const [sessionId, setSessionId] = useState("");
+  const [filters, setFilters] = useState<TraceListFilters>(EMPTY_TRACE_FILTERS);
+  const setFilter = <K extends keyof TraceListFilters>(k: K, value: TraceListFilters[K]) =>
+    setFilters((f) => ({ ...f, [k]: value }));
   // ADR-0173 batch 2b: the run graph links a step to its trace (?trace=<id>)
   const [params] = useSearchParams();
   const [selected, setSelected] = useState<string | null>(() => params.get("trace"));
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // ADR-0173 batch 2c: multi-select, the bulk actions and their outcome
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const [datasetId, setDatasetId] = useState("");
+  const [queueId, setQueueId] = useState("");
+  const [bulkKey, setBulkKey] = useState("");
+  const [bulkValue, setBulkValue] = useState("");
+  const [bulk, setBulk] = useState<{ sentence: string; skipped: BulkOutcome["skipped"] } | null>(null);
+  const [profile, setProfile] = useState("otel_genai");
+  const [tagKey, setTagKey] = useState("");
+  const [tagValue, setTagValue] = useState("");
 
-  const qs = new URLSearchParams();
-  if (deniedOnly) qs.set("deniedOnly", "true");
-  if (kind) qs.set("kind", kind);
-  if (sessionId) qs.set("sessionId", sessionId);
-  qs.set("limit", "100");
+  const filterProblem = traceFilterProblem(filters);
+  // a half-typed filter keeps the last good query rather than sending a 400
+  const [lastGoodQs, setLastGoodQs] = useState(() => traceListQuery(EMPTY_TRACE_FILTERS));
+  const qs = filterProblem ? lastGoodQs : traceListQuery(filters);
+  if (!filterProblem && qs !== lastGoodQs) setLastGoodQs(qs);
 
   const list = useQuery({
-    queryKey: ["admin", "traces", qs.toString()],
+    queryKey: ["admin", "traces", qs],
     queryFn: () =>
-      api.get<{ traces: TraceRow[]; scope: string; note: string }>(`/v1/traces?${qs.toString()}`),
+      api.get<{ traces: TraceRow[]; total?: number; scope: string; note: string }>(`/v1/traces?${qs}`),
+  });
+  const agents = useAgents();
+  const anyPicked = picked.size > 0;
+  const datasets = useQuery({
+    queryKey: ["admin", "trace-action-datasets"],
+    enabled: anyPicked,
+    queryFn: () => api.get<{ datasets: DatasetOption[] }>("/v1/evals/datasets"),
+  });
+  const queues = useQuery({
+    queryKey: ["admin", "trace-action-queues"],
+    enabled: anyPicked,
+    retry: false,
+    queryFn: () => api.get<{ queues: QueueOption[] }>("/v1/annotation-queues"),
   });
   const sessions = useQuery({
     queryKey: ["admin", "trace-sessions"],
@@ -221,19 +335,32 @@ export default function TracesPage() {
   });
 
   const rows = useMemo(() => flatten(detail.data?.tree ?? []), [detail.data]);
+  const visible = list.data?.traces ?? [];
+  const allPicked = visible.length > 0 && visible.every((r) => picked.has(r.id));
+  const togglePick = (id: string) =>
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  /** one bulk action: post, then say what was added and what was skipped */
+  const runBulk = (action: string, target: string, call: () => Promise<BulkOutcome>) =>
+    act.run(async () => {
+      const out = await call();
+      const sentence = bulkSentence(action, target, out);
+      setBulk({ sentence, skipped: out.skipped ?? [] });
+      return sentence;
+    }, null);
+  const pickedIds = [...picked];
+  const datasetName = datasets.data?.datasets.find((d) => d.id === datasetId)?.name ?? "the dataset";
+  const queueName = queues.data?.queues.find((q) => q.id === queueId)?.name ?? "the queue";
+  const bulkTagProblem = bulkKey ? tagProblem(bulkKey, bulkValue) : null;
+  const treeTagProblem = tagKey ? tagProblem(tagKey, tagValue) : null;
 
   return (
     <>
-      <PageHeader
-        title="Traces"
-        sub={
-          "One causal tree per governed call: an orchestration run, its nodes, every model turn, every " +
-          "tool call — and, the reason this exists, every governance decision that refused one. A " +
-          "refusal is a SPAN carrying its reason, not an absence. Nothing here is a second copy of the " +
-          "ledger: a span references the usage_events row its cost came from and the audit row its " +
-          "decision came from."
-        }
-      />
       <div className={v.stack}>
         {/* --- posture ------------------------------------------------- */}
         <QueryGate
@@ -284,12 +411,29 @@ export default function TracesPage() {
                         ],
                       ]}
                     />
-                    <div className={v.row}>
+                    <div className={a.formRow}>
+                      <Field
+                        label="Export profile"
+                        help={
+                          "OpenTelemetry GenAI is the standard vocabulary. OpenInference adds its " +
+                          "span kinds, flattened messages and a cost key (llm.cost.total) for backends " +
+                          "that read it. Neither profile carries prompts or outputs when content " +
+                          "capture is off."
+                        }
+                      >
+                        <Select value={profile} onChange={(e) => setProfile(e.target.value)}>
+                          {(config.data.profiles ?? ["otel_genai"]).map((p) => (
+                            <option key={p} value={p}>
+                              {PROFILE_LABEL[p] ?? p}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
                       <Button
                         size="sm"
                         onClick={() =>
                           act.run(
-                            () => api.post("/v1/tracing/export", { dryRun: true, limit: 25 }),
+                            () => api.post("/v1/tracing/export", { dryRun: true, limit: 25, profile }),
                             "Built the OTLP payload and adjudicated egress — nothing was sent.",
                           )
                         }
@@ -300,7 +444,7 @@ export default function TracesPage() {
                         size="sm"
                         onClick={() =>
                           act.run(
-                            () => api.post("/v1/tracing/export", { limit: 100 }),
+                            () => api.post("/v1/tracing/export", { limit: 100, profile }),
                             "Exported to the configured OTLP endpoint.",
                           )
                         }
@@ -341,6 +485,13 @@ export default function TracesPage() {
                   ]}
                 />
                 <p className={v.faint}>{config.data.limits}</p>
+                {config.data.standards && (
+                  <p className={v.faint}>
+                    Pinned conventions: OpenTelemetry semantic conventions{" "}
+                    {config.data.standards["otelSemanticConventions"]}, OpenInference{" "}
+                    {config.data.standards["openInferenceSemanticConventions"]}.
+                  </p>
+                )}
                 <p className={v.faint}>{config.data.retention}</p>
               </div>
             </Card>
@@ -367,8 +518,8 @@ export default function TracesPage() {
                 columns={[
                   { key: "session", header: "Session", render: (s) => (
                       <button
-                        className={v.listRow}
-                        onClick={() => setSessionId(s.sessionId ?? "")}
+                        className={`${v.listRow} ${t.rowButton}`}
+                        onClick={() => setFilter("sessionId", s.sessionId ?? "")}
                         title="filter the trace list to this session"
                       >
                         <span className={v.mono}>{shortId(s.sessionId ?? "")}</span>
@@ -394,12 +545,21 @@ export default function TracesPage() {
         </Card>
 
         {/* --- trace list ------------------------------------------------ */}
-        <Card title="Traces">
+        <Card
+          title="Traces"
+          actions={
+            activeFilterCount(filters) > 0 ? (
+              <Button size="sm" variant="ghost" onClick={() => setFilters(EMPTY_TRACE_FILTERS)}>
+                Clear filters ({activeFilterCount(filters)})
+              </Button>
+            ) : undefined
+          }
+        >
           <div className={v.stack}>
             {list.data?.note && <p className={v.faint}>{list.data.note}</p>}
-            <div className={v.row}>
+            <div className={a.formRow}>
               <Field label="Kind">
-                <Select value={kind} onChange={(e) => setKind(e.target.value)}>
+                <Select value={filters.kind} onChange={(e) => setFilter("kind", e.target.value)}>
                   {optionEls(
                     ["dispatch", "run", "conversation", "tool", "workflow", "eval"].map((k) => ({
                       v: k,
@@ -411,64 +571,266 @@ export default function TracesPage() {
               </Field>
               <Field label="Session id">
                 <Input
-                  value={sessionId}
-                  onChange={(e) => setSessionId(e.target.value)}
+                  value={filters.sessionId}
+                  onChange={(e) => setFilter("sessionId", e.target.value)}
                   placeholder="any"
                 />
               </Field>
               <Field label="Governance">
                 <Select
-                  value={deniedOnly ? "denied" : ""}
-                  onChange={(e) => setDeniedOnly(e.target.value === "denied")}
+                  value={filters.deniedOnly ? "denied" : ""}
+                  onChange={(e) => setFilter("deniedOnly", e.target.value === "denied")}
                 >
                   <option value="">everything</option>
                   <option value="denied">only traces where something was REFUSED</option>
                 </Select>
               </Field>
+              <Field label="Agent">
+                <Select value={filters.agentId} onChange={(e) => setFilter("agentId", e.target.value)}>
+                  {optionEls(agentOpts(agents.data?.agents), "any")}
+                </Select>
+              </Field>
+              <Field label="Model">
+                <Input value={filters.model} onChange={(e) => setFilter("model", e.target.value)} placeholder="any" />
+              </Field>
+              <Field label="Cost at least (USD)">
+                <Input
+                  inputMode="decimal"
+                  value={filters.minCostUsd}
+                  onChange={(e) => setFilter("minCostUsd", e.target.value)}
+                  placeholder="0"
+                />
+              </Field>
+              <Field label="Latency at least (ms)">
+                <Input
+                  inputMode="numeric"
+                  value={filters.minLatencyMs}
+                  onChange={(e) => setFilter("minLatencyMs", e.target.value)}
+                  placeholder="0"
+                />
+              </Field>
             </div>
+            <div className={a.formRow}>
+              <Field label="Score name">
+                <Input
+                  value={filters.scoreName}
+                  onChange={(e) => setFilter("scoreName", e.target.value)}
+                  placeholder="any"
+                />
+              </Field>
+              <Field label="Score from">
+                <Input inputMode="decimal" value={filters.scoreMin} onChange={(e) => setFilter("scoreMin", e.target.value)} />
+              </Field>
+              <Field label="Score to">
+                <Input inputMode="decimal" value={filters.scoreMax} onChange={(e) => setFilter("scoreMax", e.target.value)} />
+              </Field>
+              <Field label="Evaluation">
+                <Select
+                  value={filters.flagged}
+                  onChange={(e) => setFilter("flagged", e.target.value as TraceListFilters["flagged"])}
+                >
+                  <option value="">any</option>
+                  <option value="true">flagged by a trace evaluation</option>
+                  <option value="false">not flagged</option>
+                </Select>
+              </Field>
+              <Field label="Tag key">
+                <Input value={filters.tagKey} onChange={(e) => setFilter("tagKey", e.target.value)} placeholder="any" />
+              </Field>
+              <Field label="Tag value">
+                <Input value={filters.tagValue} onChange={(e) => setFilter("tagValue", e.target.value)} placeholder="any" />
+              </Field>
+            </div>
+            {filterProblem && (
+              <div className={v.errLine} role="alert">
+                {filterProblem} — the list still shows the last valid filter.
+              </div>
+            )}
+
+            {/* --- the selection bar: the bulk actions ------------------- */}
+            {anyPicked && (
+              <div className={t.selectionBar} role="region" aria-label="Selected traces">
+                <strong>
+                  {picked.size} selected
+                </strong>
+                <Field label="Dataset">
+                  <Select value={datasetId} onChange={(e) => setDatasetId(e.target.value)}>
+                    <option value="">choose a dataset</option>
+                    {(datasets.data?.datasets ?? []).map((d) => (
+                      <option key={d.id} value={d.id} disabled={d.frozen}>
+                        {d.name} v{d.version}
+                        {d.frozen ? " (frozen)" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Button
+                  size="sm"
+                  disabled={!datasetId || act.busy}
+                  onClick={() =>
+                    void runBulk("Added", `to ${datasetName}`, () =>
+                      api.post<BulkOutcome>(`/v1/evals/datasets/${datasetId}/from-traces`, { traceIds: pickedIds }),
+                    )
+                  }
+                >
+                  Add to dataset
+                </Button>
+                <Field label="Annotation queue">
+                  <Select value={queueId} onChange={(e) => setQueueId(e.target.value)}>
+                    <option value="">{queues.isError ? "no queues available" : "choose a queue"}</option>
+                    {(queues.data?.queues ?? []).map((q) => (
+                      <option key={q.id} value={q.id}>
+                        {q.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Button
+                  size="sm"
+                  disabled={!queueId || act.busy}
+                  onClick={() =>
+                    void runBulk("Sent", `to ${queueName}`, () =>
+                      api.post<BulkOutcome>(`/v1/annotation-queues/${queueId}/items`, {
+                        subjects: pickedIds.map((id) => ({ kind: "trace", id })),
+                      }),
+                    )
+                  }
+                >
+                  Send to annotation queue
+                </Button>
+                <Field label="Tag key" error={bulkTagProblem}>
+                  <Input value={bulkKey} onChange={(e) => setBulkKey(e.target.value)} placeholder="release" />
+                </Field>
+                <Field label="Tag value">
+                  <Input value={bulkValue} onChange={(e) => setBulkValue(e.target.value)} placeholder="2026.10" />
+                </Field>
+                <Button
+                  size="sm"
+                  disabled={!bulkKey || Boolean(bulkTagProblem) || act.busy}
+                  onClick={() =>
+                    void runBulk("Tagged", `${bulkKey.trim()}=${bulkValue}`, () =>
+                      api.post<BulkOutcome>("/v1/traces/tags", { traceIds: pickedIds, key: bulkKey.trim(), value: bulkValue }),
+                    )
+                  }
+                >
+                  Tag selected
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>
+                  Clear selection
+                </Button>
+              </div>
+            )}
+            {bulk && (
+              <div role="status" className={v.stackTight}>
+                <span>{bulk.sentence}</span>
+                {bulk.skipped.length > 0 && (
+                  <ul className={t.skipped} aria-label="Skipped traces">
+                    {bulk.skipped.map((sk) => (
+                      <li key={sk.id}>
+                        <span className={v.mono}>{shortId(sk.id)}</span> — {reasonWords(sk.reason)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
             <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
-              {(list.data?.traces ?? []).length === 0 ? (
+              {visible.length === 0 ? (
                 <EmptyState
                   title="No traces match"
                   body="Make a governed call — or clear the filters."
                 />
               ) : (
-                <Table
-                  rows={list.data!.traces}
-                  rowKey={(t) => t.id}
-                  columns={[
-                    { key: "trace", header: "Trace", render: (t) => (
-                        <Button size="sm" variant="ghost" onClick={() => setSelected(t.id)}>
-                          {t.name}
-                        </Button>
-                      ),
-                    },
-                    { key: "kind", header: "Kind", render: (t) => KIND_LABEL[t.kind] ?? t.kind },
-                    { key: "status", header: "Status", render: (t) => (
-                        <Badge tone={STATUS_TONE[t.status] ?? "info"}>{statusWord(t.status)}</Badge>
-                      ),
-                    },
-                    { key: "refused", header: "Refused", render: (t) =>
-                        t.deniedSpanCount > 0 ? (
-                          <Badge tone="danger" title="a governance decision refused something in this trace">
-                            {t.deniedSpanCount}
-                          </Badge>
-                        ) : (
-                          <span className={v.faint}>—</span>
+                <>
+                  {typeof list.data?.total === "number" && (
+                    <p className={v.faint}>
+                      Showing {visible.length} of {list.data.total} matching trace
+                      {list.data.total === 1 ? "" : "s"}.
+                    </p>
+                  )}
+                  <Table
+                    rows={visible}
+                    rowKey={(r) => r.id}
+                    columns={[
+                      {
+                        key: "pick",
+                        width: "36px",
+                        header: (
+                          <input
+                            type="checkbox"
+                            className={t.check}
+                            aria-label="Select every trace on this page"
+                            checked={allPicked}
+                            onChange={() =>
+                              setPicked(allPicked ? new Set() : new Set(visible.map((r) => r.id)))
+                            }
+                          />
                         ),
-                    },
-                    { key: "spans", header: "Spans", render: (t) => t.spanCount },
-                    { key: "tokens", header: "Tokens", render: (t) => (
-                        <span className={v.num}>
-                          {t.inputTokens}/{t.outputTokens}
-                        </span>
-                      ),
-                    },
-                    { key: "cost", header: "Cost", render: (t) => fmtUsd(t.costUsd) },
-                    { key: "took", header: "Took", render: (t) => fmtDur(t.durationMs) },
-                    { key: "when", header: "When", render: (t) => ago(t.startedAt) },
-                  ]}
-                />
+                        render: (r) => (
+                          <input
+                            type="checkbox"
+                            className={t.check}
+                            aria-label={`Select trace ${r.name}`}
+                            checked={picked.has(r.id)}
+                            onChange={() => togglePick(r.id)}
+                          />
+                        ),
+                      },
+                      { key: "trace", header: "Trace", render: (r) => (
+                          <Button size="sm" variant="ghost" onClick={() => setSelected(r.id)}>
+                            {r.name}
+                          </Button>
+                        ),
+                      },
+                      { key: "kind", header: "Kind", render: (r) => KIND_LABEL[r.kind] ?? r.kind },
+                      { key: "status", header: "Status", render: (r) => (
+                          <Badge tone={STATUS_TONE[r.status] ?? "info"}>{statusWord(r.status)}</Badge>
+                        ),
+                      },
+                      { key: "refused", header: "Refused", render: (r) =>
+                          r.deniedSpanCount > 0 ? (
+                            <Badge tone="danger" title="a governance decision refused something in this trace">
+                              {r.deniedSpanCount}
+                            </Badge>
+                          ) : (
+                            <span className={v.faint}>—</span>
+                          ),
+                      },
+                      { key: "tags", header: "Tags", render: (r) =>
+                          (r.tags ?? []).length === 0 ? (
+                            <span className={v.faint}>—</span>
+                          ) : (
+                            <ul className={t.tagList}>
+                              {(r.tags ?? []).map((tg) => (
+                                <li key={tg.key} className={t.tag}>
+                                  <button
+                                    type="button"
+                                    className={t.tagButton}
+                                    title="show only traces with this tag"
+                                    aria-label={`Filter by tag ${tg.key}=${tg.value}`}
+                                    onClick={() => setFilters((f) => ({ ...f, tagKey: tg.key, tagValue: tg.value }))}
+                                  >
+                                    {tg.value ? `${tg.key}=${tg.value}` : tg.key}
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          ),
+                      },
+                      { key: "spans", header: "Spans", render: (r) => r.spanCount },
+                      { key: "tokens", header: "Tokens", render: (r) => (
+                          <span className={v.num}>
+                            {r.inputTokens}/{r.outputTokens}
+                          </span>
+                        ),
+                      },
+                      { key: "cost", header: "Cost", render: (r) => fmtUsd(r.costUsd) },
+                      { key: "took", header: "Took", render: (r) => fmtDur(r.durationMs) },
+                      { key: "when", header: "When", render: (r) => ago(r.startedAt) },
+                    ]}
+                  />
+                </>
               )}
             </QueryGate>
           </div>
@@ -517,13 +879,91 @@ export default function TracesPage() {
                     </div>
                   )}
 
+                  {/* ADR-0173 batch 2c: tags (the owner or an admin edits them) */}
+                  <div className={v.sectionTitle}>Tags</div>
+                  {(detail.data.tags ?? []).length === 0 ? (
+                    <p className={v.faint}>No tags yet.</p>
+                  ) : (
+                    <ul className={t.tagList} aria-label="Trace tags">
+                      {(detail.data.tags ?? []).map((tg) => (
+                        <li key={tg.key} className={t.tag}>
+                          <span>{tg.value ? `${tg.key}=${tg.value}` : tg.key}</span>
+                          {!tg.key.startsWith("regulait.") && (
+                            <button
+                              type="button"
+                              className={t.tagRemove}
+                              aria-label={`Remove tag ${tg.key}`}
+                              onClick={() =>
+                                void act.run(
+                                  () =>
+                                    api.del(`/v1/traces/${detail.data!.trace.id}/tags/${encodeURIComponent(tg.key)}`),
+                                  `Removed tag ${tg.key}.`,
+                                )
+                              }
+                            >
+                              ×
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className={a.formRow}>
+                    <Field label="New tag key" error={treeTagProblem}>
+                      <Input value={tagKey} onChange={(e) => setTagKey(e.target.value)} placeholder="release" />
+                    </Field>
+                    <Field label="New tag value">
+                      <Input value={tagValue} onChange={(e) => setTagValue(e.target.value)} placeholder="2026.10" />
+                    </Field>
+                    <Button
+                      size="sm"
+                      disabled={!tagKey || Boolean(treeTagProblem) || act.busy}
+                      onClick={() =>
+                        void act
+                          .run(
+                            () =>
+                              api.put(
+                                `/v1/traces/${detail.data!.trace.id}/tags/${encodeURIComponent(tagKey.trim())}`,
+                                { value: tagValue },
+                              ),
+                            `Tagged ${tagKey.trim()}${tagValue ? `=${tagValue}` : ""}.`,
+                          )
+                          .then((ok) => {
+                            if (ok) {
+                              setTagKey("");
+                              setTagValue("");
+                            }
+                          })
+                      }
+                    >
+                      Add tag
+                    </Button>
+                  </div>
+
+                  {(detail.data.scores ?? []).length > 0 && (
+                    <>
+                      <div className={v.sectionTitle}>Scores</div>
+                      <Table<TraceScore>
+                        rows={detail.data.scores}
+                        rowKey={(sc) => `${sc.source}:${sc.name}:${sc.spanId ?? "trace"}:${sc.value ?? ""}:${sc.label ?? ""}`}
+                        columns={[
+                          { key: "name", header: "Score", render: (sc) => sc.name },
+                          { key: "value", header: "Value", render: (sc) => (sc.value == null ? "—" : <span className={v.num}>{sc.value}</span>) },
+                          { key: "label", header: "Label", render: (sc) => sc.label ?? "—" },
+                          { key: "source", header: "From", render: (sc) => sc.source.replace(/_/g, " ") },
+                          { key: "on", header: "On", render: (sc) => (sc.spanId ? <span className={v.mono}>span {shortId(sc.spanId)}</span> : "the whole trace") },
+                        ]}
+                      />
+                    </>
+                  )}
+
                   <div className={v.stackTight}>
                     {rows.map((s) => {
                       const open = expanded[s.id] ?? false;
                       return (
                         <div key={s.id} className={v.stackTight}>
                           <button
-                            className={v.listRow}
+                            className={`${v.listRow} ${t.rowButton}`}
                             style={{ paddingLeft: `${8 + s.depth * 20}px`, width: "100%", textAlign: "left" }}
                             onClick={() => setExpanded((e) => ({ ...e, [s.id]: !open }))}
                             aria-expanded={open}

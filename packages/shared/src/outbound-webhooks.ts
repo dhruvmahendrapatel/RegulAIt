@@ -20,7 +20,7 @@
  */
 import { z } from "zod";
 
-export const WEBHOOK_EVENT_FAMILIES = ["prompt"] as const;
+export const WEBHOOK_EVENT_FAMILIES = ["prompt", "trace", "annotation", "automation"] as const;
 export type WebhookEventFamily = (typeof WEBHOOK_EVENT_FAMILIES)[number];
 
 interface WebhookEventSpec {
@@ -51,6 +51,89 @@ export const WEBHOOK_EVENTS = {
     description: "A prompt promotion was approved, denied or found stale when decided.",
     fields: ["promptId", "promptName", "tag", "commitHash", "approvalId", "decision", "outcome", "decidedByUserId"],
   },
+
+  // -------------------------------------------------------------------------
+  // ADR-0173 batch 2c (F owns these entries; T, Q, E and K only emit them).
+  //
+  // Field conventions, shared by every 2c event:
+  //   *Id / *UserId     uuids (or a source row id) — never a display name of a person
+  //   *Name             the admin-given name of a queue, dataset or rule
+  //   ruleId            set when an automation rule caused the event, else absent
+  //   reason            a FIXED machine code (e.g. "author_not_admin",
+  //                     "egress_refused", "daily_cap"), never an error message
+  //   scores            [{ name, value?, label? }] — rubric names, numbers and
+  //                     rubric labels only; never a reviewer's comment
+  //   *At / holdUntil   ISO timestamps
+  // No field carries trace content (inputs, outputs, previews, messages,
+  // comments). `occurredAt` is added to every payload by the enqueuer.
+  // -------------------------------------------------------------------------
+  "trace.added_to_dataset": {
+    family: "trace",
+    description: "A trace's span was added to an evaluation dataset.",
+    fields: ["traceId", "spanId", "datasetId", "datasetName", "datasetVersion", "rowId", "addedByUserId", "ruleId"],
+  },
+  "trace.queued": {
+    family: "trace",
+    description: "A trace or span was sent to an annotation queue.",
+    fields: ["traceId", "spanId", "queueId", "queueName", "itemId", "queuedByUserId", "ruleId"],
+  },
+  "trace.retention_extended": {
+    family: "trace",
+    description: "A retention hold now keeps a trace past the normal retention floor.",
+    fields: ["traceId", "holdUntil", "previousHoldUntil", "extendedByUserId", "ruleId"],
+  },
+  "annotation.submitted": {
+    family: "annotation",
+    description: "A reviewer submitted an annotation on a queue item.",
+    fields: [
+      "queueId",
+      "queueName",
+      "itemId",
+      "subjectKind",
+      "subjectId",
+      "traceId",
+      "rubricVersion",
+      "reviewerUserId",
+      "scores",
+    ],
+  },
+  "annotation.item.completed": {
+    family: "annotation",
+    description: "A queue item reached its required number of reviews.",
+    fields: [
+      "queueId",
+      "queueName",
+      "itemId",
+      "subjectKind",
+      "subjectId",
+      "traceId",
+      "rubricVersion",
+      "reviewerCount",
+      "disagreement",
+      "scores",
+      "completedAt",
+    ],
+  },
+  "annotation.sla.breached": {
+    family: "annotation",
+    description: "A queue item passed its review deadline without completing (sent once per item).",
+    fields: ["queueId", "queueName", "itemId", "subjectKind", "subjectId", "traceId", "dueAt", "reviewerUserIds"],
+  },
+  "automation.matched": {
+    family: "automation",
+    description: "An automation rule matched a trace.",
+    fields: ["ruleId", "ruleName", "matchId", "traceId", "actions", "matchedAt"],
+  },
+  "automation.action.failed": {
+    family: "automation",
+    description: "An automation rule's action failed for a matched trace.",
+    fields: ["ruleId", "ruleName", "matchId", "traceId", "action", "reason", "attempts"],
+  },
+  "automation.rule.paused": {
+    family: "automation",
+    description: "An automation rule was paused (by an admin, or automatically).",
+    fields: ["ruleId", "ruleName", "reason", "authorUserId", "pausedByUserId", "pausedAt"],
+  },
 } as const satisfies Record<string, WebhookEventSpec>;
 
 export type WebhookEventName = keyof typeof WEBHOOK_EVENTS;
@@ -76,13 +159,27 @@ export function webhookSelectorMatches(selectors: readonly string[], event: stri
   return selectors.some((s) => s === event || s === `${family}.*`);
 }
 
-/** keep only what the event declares; drop undefined */
+/** keep only what the event declares; drop undefined. A `scores` field is
+ * narrowed per entry to `{ name, value, label }`, so an emitter that passes a
+ * whole annotation row cannot ship its comment. */
 export function webhookPayloadFor(event: WebhookEventName, data: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const f of WEBHOOK_EVENTS[event].fields) {
-    if (data[f] !== undefined) out[f] = data[f];
+  for (const f of WEBHOOK_EVENTS[event].fields as readonly string[]) {
+    if (data[f] === undefined) continue;
+    out[f] = f === "scores" ? narrowScores(data[f]) : data[f];
   }
   return out;
+}
+
+function narrowScores(v: unknown): Array<{ name: unknown; value?: unknown; label?: unknown }> {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+    .map((s) => ({
+      name: s.name,
+      ...(s.value !== undefined ? { value: s.value } : {}),
+      ...(s.label !== undefined ? { label: s.label } : {}),
+    }));
 }
 
 export const WEBHOOK_LIMITS = {

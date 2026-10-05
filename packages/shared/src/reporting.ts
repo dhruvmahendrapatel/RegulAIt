@@ -33,6 +33,7 @@
  *   the deviation is recorded in the ADR amendment rather than papered over
  *   with a `format: 'pdf'` that silently emits HTML.
  */
+import { stringify } from "csv-stringify/sync";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -615,8 +616,40 @@ export interface ReportCsvRow {
 
 const CSV_HEADER = "section,key,metric,value";
 
-function csvCell(v: string): string {
-  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+/**
+ * ONE CSV record (no line terminator), formatted by `csv-stringify` (MIT,
+ * pinned; ADR-0176 open source first) rather than a hand-written escaper:
+ * RFC 4180 quoting, plus `escape_formulas`, which prefixes a single quote to a
+ * cell a spreadsheet would read as a formula (a leading = + - @ tab or CR, and
+ * their full-width forms; OWASP "CSV injection"). A JS number is written as a
+ * number, so a negative number is not prefixed; a boolean as `true`/`false`; a
+ * Date as ISO 8601; an object as JSON; null and undefined as an empty cell.
+ *
+ * Every CSV export that formats its own rows uses this (the report CSV below,
+ * the audit-log export and the annotation-queue export), so there is one
+ * answer to "is this cell neutralised".
+ */
+export function csvRecord(cells: readonly unknown[]): string {
+  return stringify([cells as unknown[]], {
+    eof: false,
+    escape_formulas: true,
+    cast: {
+      boolean: (v) => String(v),
+      date: (v) => v.toISOString(),
+      number: (v) => String(v),
+      object: (v) => JSON.stringify(v),
+    },
+  });
+}
+
+/** a report value that is a canonical number ("-12.5") goes to the formatter
+ * as a number, so the formula guard does not prefix a negative amount */
+function reportCell(v: string): string | number {
+  if (v !== "" && /^-?[0-9.eE+-]+$/.test(v)) {
+    const n = Number(v);
+    if (Number.isFinite(n) && String(n) === v) return n;
+  }
+  return v;
 }
 
 /** The documented CSV shape: a long-format `section,key,metric,value` table.
@@ -681,7 +714,7 @@ export function reportCsvRows(payload: ReportPayload): ReportCsvRow[] {
 export function renderReportCsv(payload: ReportPayload): string {
   const rows = reportCsvRows(payload);
   return (
-    [CSV_HEADER, ...rows.map((r) => [r.section, r.key, r.metric, r.value].map(csvCell).join(","))].join(
+    [CSV_HEADER, ...rows.map((r) => csvRecord([r.section, r.key, r.metric, reportCell(r.value)]))].join(
       "\r\n",
     ) + "\r\n"
   );

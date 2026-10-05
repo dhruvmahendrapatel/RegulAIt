@@ -33,7 +33,61 @@
  *     auto-instrumentation) is entirely in the part we do not need — while its
  *     cost (a transitive dependency tree, a background exporter that wants to
  *     open a socket) lands squarely on an air-gapped-primary product.
+ *
+ * ADR-0173 batch 2c / ADR-0177 step 1 — TRACE STANDARDS. The attribute KEYS now
+ * come from the pinned `@opentelemetry/semantic-conventions` incubating exports
+ * (Apache-2.0, 1.43.0) rather than string literals, and `otel-conformance.test.ts`
+ * checks every `gen_ai.*` / `mcp.*` key we emit against that same pinned
+ * module. The six emitter gaps ADR-0177 lists are closed here:
+ * `gen_ai.provider.name` (with `gen_ai.system` kept for the transition), an
+ * array `gen_ai.response.finish_reasons`, the SERVED model as
+ * `gen_ai.response.model`, structured message parts, `gen_ai.agent.*`, cache
+ * token counts, evaluation results as `gen_ai.evaluation.result` span events,
+ * and `mcp.*` on MCP tool spans. "Conversation compacted" has NO key in the
+ * pinned convention, so it rides `regulait.conversation.compacted` until one
+ * is published (inventing it inside `gen_ai.*` would fail the conformance test).
+ * The OPENINFERENCE export profile is not a hand-written mapper: it is
+ * `@arizeai/openinference-genai`'s converter (Apache-2.0, 0.4.0) applied to the
+ * OTel attributes, plus the one thing OTel lacks, a cost key (`llm.cost.total`).
  */
+import { convertGenAISpanAttributesToOpenInferenceSpanAttributes } from "@arizeai/openinference-genai";
+import {
+  OpenInferenceSpanKind,
+  SEMRESATTRS_PROJECT_NAME,
+  SemanticConventions as OI,
+} from "@arizeai/openinference-semantic-conventions";
+import {
+  ATTR_GEN_AI_AGENT_ID,
+  ATTR_GEN_AI_AGENT_NAME,
+  ATTR_GEN_AI_CONVERSATION_ID,
+  ATTR_GEN_AI_EVALUATION_NAME,
+  ATTR_GEN_AI_EVALUATION_SCORE_LABEL,
+  ATTR_GEN_AI_EVALUATION_SCORE_VALUE,
+  ATTR_GEN_AI_INPUT_MESSAGES,
+  ATTR_GEN_AI_OPERATION_NAME,
+  ATTR_GEN_AI_OUTPUT_MESSAGES,
+  ATTR_GEN_AI_PROVIDER_NAME,
+  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_RESPONSE_FINISH_REASONS,
+  ATTR_GEN_AI_RESPONSE_MODEL,
+  ATTR_GEN_AI_SYSTEM,
+  ATTR_GEN_AI_TOOL_CALL_ARGUMENTS,
+  ATTR_GEN_AI_TOOL_CALL_ID,
+  ATTR_GEN_AI_TOOL_CALL_RESULT,
+  ATTR_GEN_AI_TOOL_NAME,
+  ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_MCP_METHOD_NAME,
+  EVENT_GEN_AI_EVALUATION_RESULT,
+  GEN_AI_OPERATION_NAME_VALUE_CHAT,
+  GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL,
+  GEN_AI_PROVIDER_NAME_VALUE_ANTHROPIC,
+  GEN_AI_PROVIDER_NAME_VALUE_GCP_GEMINI,
+  GEN_AI_PROVIDER_NAME_VALUE_OPENAI,
+  GEN_AI_PROVIDER_NAME_VALUE_X_AI,
+} from "@opentelemetry/semantic-conventions/incubating";
 
 // ---------------------------------------------------------------------------
 // Shapes. Deliberately structural, not imports from @regulait/db: this package
@@ -68,6 +122,12 @@ export interface SpanRecord {
   outputPreview?: string | null;
   contentWithheld?: boolean;
   attributes?: Record<string, unknown> | null;
+  /** EXPORT ENRICHMENT ONLY (never stored on the span): the model id the
+   * provider reported serving, read from the `usage_events` row the span
+   * names (ADR-0175 A4). Null/absent = not reported; never guessed. */
+  servedModel?: string | null;
+  /** EXPORT ENRICHMENT ONLY: the registry name of `agentId` */
+  agentName?: string | null;
 }
 
 export interface TraceRecord {
@@ -265,11 +325,65 @@ export function toolPayloadPreview(value: unknown, maxChars: number): string | n
  * standardised field.
  */
 const GEN_AI_OPERATION: Record<string, string> = {
-  llm: "chat",
-  fallback_hop: "chat",
-  tool: "execute_tool",
-  eval_case: "chat",
+  llm: GEN_AI_OPERATION_NAME_VALUE_CHAT,
+  fallback_hop: GEN_AI_OPERATION_NAME_VALUE_CHAT,
+  tool: GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL,
+  eval_case: GEN_AI_OPERATION_NAME_VALUE_CHAT,
 };
+
+/** the span kinds whose operation is a model call (and so carry an LLM cost
+ * in the OpenInference profile) */
+const MODEL_CALL_KINDS = new Set(["llm", "fallback_hop", "eval_case"]);
+
+/**
+ * Our provider KIND -> the convention's well-known `gen_ai.provider.name`
+ * value. A kind with no well-known value (`custom`, `regulait_llm`, `mock`)
+ * passes through unchanged, which the convention allows ("custom values MAY be
+ * used"). `gen_ai.system` keeps the raw kind for the transition window so an
+ * existing dashboard grouping on it does not change under anyone.
+ */
+const PROVIDER_NAME: Record<string, string> = {
+  anthropic: GEN_AI_PROVIDER_NAME_VALUE_ANTHROPIC,
+  openai: GEN_AI_PROVIDER_NAME_VALUE_OPENAI,
+  // our `google` adapter is the Gemini API (generativelanguage), not Vertex
+  google: GEN_AI_PROVIDER_NAME_VALUE_GCP_GEMINI,
+  xai: GEN_AI_PROVIDER_NAME_VALUE_X_AI,
+};
+
+export function otelProviderName(provider: string): string {
+  return PROVIDER_NAME[provider] ?? provider;
+}
+
+/** An OTLP attribute value we emit: scalars, or a string array (finish reasons). */
+export type OtelAttrValue = string | number | boolean | string[];
+
+/** The export profiles. `otel_genai` is the default; `openinference` adds the
+ * OpenInference keys (span kind, flattened messages, `llm.cost.total`). */
+export const TRACE_EXPORT_PROFILES = ["otel_genai", "openinference"] as const;
+export type TraceExportProfile = (typeof TRACE_EXPORT_PROFILES)[number];
+
+/** the pinned convention versions, stated on the export config surface */
+export const TRACE_STANDARDS_PINS = {
+  otelSemanticConventions: "1.43.0",
+  openInferenceGenai: "0.4.0",
+  openInferenceSemanticConventions: "2.14.0",
+} as const;
+
+/** The structured input message the convention defines (role + parts). */
+function genAiInputMessages(text: string): string {
+  return JSON.stringify([{ role: "user", parts: [{ type: "text", content: text }] }]);
+}
+
+/** The structured output message; `finish_reason` is required by the schema. */
+function genAiOutputMessages(text: string, finishReason: string): string {
+  return JSON.stringify([
+    { role: "assistant", parts: [{ type: "text", content: text }], finish_reason: finishReason },
+  ]);
+}
+
+const num = (v: unknown): number | undefined =>
+  typeof v === "number" && Number.isFinite(v) ? v : undefined;
+const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
 
 /** OTel status codes (opentelemetry.proto.trace.v1.Status.StatusCode) */
 export const OTEL_STATUS_UNSET = 0;
@@ -358,28 +472,54 @@ export interface OtelAttrContext {
 export function otelAttributesForSpan(
   span: SpanRecord,
   ctx: OtelAttrContext,
-): Record<string, string | number | boolean> {
-  const a: Record<string, string | number | boolean> = {};
+): Record<string, OtelAttrValue> {
+  const a: Record<string, OtelAttrValue> = {};
+  const attrs = span.attributes ?? {};
   const op = GEN_AI_OPERATION[span.kind];
-  if (op) a["gen_ai.operation.name"] = op;
-  // `gen_ai.system` is the provider family. Ours is the provider column, which
-  // is already provider-agnostic vocabulary ("anthropic" | "openai" | ...).
-  if (span.provider) a["gen_ai.system"] = span.provider;
-  if (span.model) {
-    a["gen_ai.request.model"] = span.model;
-    a["gen_ai.response.model"] = span.model;
+  if (op) a[ATTR_GEN_AI_OPERATION_NAME] = op;
+  if (span.provider) {
+    // gap 1: the current key, with the deprecated one kept for the transition
+    a[ATTR_GEN_AI_PROVIDER_NAME] = otelProviderName(span.provider);
+    a[ATTR_GEN_AI_SYSTEM] = span.provider;
   }
-  if (span.inputTokens != null) a["gen_ai.usage.input_tokens"] = span.inputTokens;
-  if (span.outputTokens != null) a["gen_ai.usage.output_tokens"] = span.outputTokens;
-  const finish = span.attributes?.["stopReason"];
-  if (typeof finish === "string") a["gen_ai.response.finish_reasons"] = finish;
+  if (span.model) a[ATTR_GEN_AI_REQUEST_MODEL] = span.model;
+  // gap 3: the response model is what the PROVIDER said it served (ADR-0175
+  // A4's usage_events.served_model). Absent when it did not say — a semantic
+  // cache hit, a refusal, a pre-A4 row. Never copied from the request.
+  if (span.servedModel) a[ATTR_GEN_AI_RESPONSE_MODEL] = span.servedModel;
+  if (span.inputTokens != null) a[ATTR_GEN_AI_USAGE_INPUT_TOKENS] = span.inputTokens;
+  if (span.outputTokens != null) a[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS] = span.outputTokens;
+  // gap 5: provider prompt-cache token counts, when the provider reported them
+  const cacheRead = num(attrs["cacheReadInputTokens"]);
+  if (cacheRead !== undefined) a[ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = cacheRead;
+  const cacheWrite = num(attrs["cacheCreationInputTokens"]);
+  if (cacheWrite !== undefined) a[ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS] = cacheWrite;
+  // gap 2: an ARRAY, as the convention defines it
+  const finish = str(attrs["stopReason"]);
+  if (finish) a[ATTR_GEN_AI_RESPONSE_FINISH_REASONS] = [finish];
+  // gap 5: gen_ai.agent.* — only on a span that IS a GenAI operation. A
+  // builder agent (ADR-0173) is the agent when one ran the call; otherwise the
+  // registry agent that served it.
+  if (op) {
+    const builderId = str(attrs["builderAgentId"]);
+    const agentId = builderId ?? span.agentId ?? undefined;
+    const agentName = builderId ? str(attrs["builderAgentName"]) : (span.agentName ?? undefined);
+    if (agentId) a[ATTR_GEN_AI_AGENT_ID] = agentId;
+    if (agentName) a[ATTR_GEN_AI_AGENT_NAME] = agentName;
+  }
   if (span.kind === "tool") {
-    a["gen_ai.tool.name"] = span.name;
-    const callId = span.attributes?.["toolCallId"];
-    if (typeof callId === "string") a["gen_ai.tool.call.id"] = callId;
+    a[ATTR_GEN_AI_TOOL_NAME] = span.name;
+    const callId = str(attrs["toolCallId"]);
+    if (callId) a[ATTR_GEN_AI_TOOL_CALL_ID] = callId;
+    // gap 5: mcp.* on an MCP tool span. A governed MCP call is always a
+    // `tools/call` request; the server is ours to name.
+    if (span.mcpServerId) {
+      a[ATTR_MCP_METHOD_NAME] = "tools/call";
+      a["regulait.mcp_server.id"] = span.mcpServerId;
+    }
   }
   if (ctx.sessionId) {
-    a["gen_ai.conversation.id"] = ctx.sessionId;
+    a[ATTR_GEN_AI_CONVERSATION_ID] = ctx.sessionId;
     // `session.id` is the general-purpose convention; emitted alongside so a
     // backend that groups on either one works without configuration.
     a["session.id"] = ctx.sessionId;
@@ -426,25 +566,140 @@ export function otelAttributesForSpan(
     const code = span.attributes?.["error"];
     a["error.type"] = typeof code === "string" ? code : "execution_error";
   }
-  // NO STANDARD GENAI COST KEY EXISTS. Emitting one under gen_ai.* would be
-  // inventing a convention; this is ours and is labelled as ours.
+  // gap 6, corrected: the OTel GenAI convention has NO cost key, so inventing
+  // one under gen_ai.* would be squatting; this one is ours and labelled as
+  // ours. OpenInference DOES define one (`llm.cost.total`), and the
+  // `openinference` export profile emits it — see `openInferenceAttributes`.
   if (span.costUsd != null) a["regulait.cost.usd"] = span.costUsd;
   if (ctx.projectId) a["regulait.project.id"] = ctx.projectId;
   if (span.runId) a["regulait.run.id"] = span.runId;
   if (span.nodeId) a["regulait.run.node_id"] = span.nodeId;
   if (span.agentId) a["regulait.agent.id"] = span.agentId;
+  if (span.connectorId) a["regulait.connector.id"] = span.connectorId;
   if (span.usageEventId) a["regulait.usage_event.id"] = span.usageEventId;
   if (span.auditLogId) a["regulait.audit_log.id"] = span.auditLogId;
   if (span.contentWithheld) a["regulait.content.withheld"] = true;
   if (span.kind === "fallback_hop") {
-    const pos = span.attributes?.["fallbackPosition"];
+    const pos = attrs["fallbackPosition"];
     if (typeof pos === "number") a["regulait.fallback.position"] = pos;
   }
-
-  if (ctx.includeContent) {
-    if (span.inputPreview) a["gen_ai.input.messages"] = span.inputPreview;
-    if (span.outputPreview) a["gen_ai.output.messages"] = span.outputPreview;
+  // pillar 6: did this call ride a compacted history? The pinned convention
+  // has no key for it (see the file header), so it is ours.
+  const compaction = attrs["compaction"];
+  if (compaction && typeof compaction === "object" && "active" in compaction) {
+    a["regulait.conversation.compacted"] = (compaction as { active: unknown }).active === true;
   }
+
+  // CONTENT, and only when the org allows it to leave. Gap 4: structured
+  // message parts on a model call; the tool convention's own argument/result
+  // keys on a tool call; anything else keeps its preview under our namespace.
+  if (ctx.includeContent) {
+    if (op === GEN_AI_OPERATION_NAME_VALUE_CHAT) {
+      if (span.inputPreview) a[ATTR_GEN_AI_INPUT_MESSAGES] = genAiInputMessages(span.inputPreview);
+      if (span.outputPreview) {
+        const finishReason = finish ?? (span.status === "error" ? "error" : "unknown");
+        a[ATTR_GEN_AI_OUTPUT_MESSAGES] = genAiOutputMessages(span.outputPreview, finishReason);
+      }
+    } else if (op === GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL) {
+      if (span.inputPreview) a[ATTR_GEN_AI_TOOL_CALL_ARGUMENTS] = span.inputPreview;
+      if (span.outputPreview) a[ATTR_GEN_AI_TOOL_CALL_RESULT] = span.outputPreview;
+    } else {
+      if (span.inputPreview) a["regulait.input.preview"] = span.inputPreview;
+      if (span.outputPreview) a["regulait.output.preview"] = span.outputPreview;
+    }
+  }
+  return a;
+}
+
+/**
+ * Every attribute key that can carry prompt, output or tool content, in either
+ * profile. With content capture off, `stripContentAttributes` removes them all
+ * as a SECOND line of defence: the first is that `otelAttributesForSpan` never
+ * adds them, and the OpenInference converter only derives its message and
+ * input/output keys from those.
+ */
+const CONTENT_KEY_PREFIXES = [
+  ATTR_GEN_AI_INPUT_MESSAGES,
+  ATTR_GEN_AI_OUTPUT_MESSAGES,
+  ATTR_GEN_AI_TOOL_CALL_ARGUMENTS,
+  ATTR_GEN_AI_TOOL_CALL_RESULT,
+  "gen_ai.prompt",
+  "gen_ai.completion",
+  "gen_ai.system_instructions",
+  "regulait.input.preview",
+  "regulait.output.preview",
+  OI.INPUT_VALUE,
+  OI.INPUT_MIME_TYPE,
+  OI.OUTPUT_VALUE,
+  OI.OUTPUT_MIME_TYPE,
+  OI.LLM_INPUT_MESSAGES,
+  OI.LLM_OUTPUT_MESSAGES,
+  OI.TOOL_PARAMETERS,
+] as const;
+
+export function isContentAttributeKey(key: string): boolean {
+  return CONTENT_KEY_PREFIXES.some((p) => key === p || key.startsWith(`${p}.`));
+}
+
+export function stripContentAttributes(a: Record<string, OtelAttrValue>): Record<string, OtelAttrValue> {
+  const out: Record<string, OtelAttrValue> = {};
+  for (const [k, v] of Object.entries(a)) if (!isContentAttributeKey(k)) out[k] = v;
+  return out;
+}
+
+/** OpenInference's span kind for the spans that are not a GenAI operation (the
+ * converter would otherwise default every one of them to LLM). */
+const OI_KIND_FOR_NON_GENAI: Record<string, OpenInferenceSpanKind> = {
+  run: OpenInferenceSpanKind.CHAIN,
+  run_node: OpenInferenceSpanKind.AGENT,
+  workflow_stage: OpenInferenceSpanKind.CHAIN,
+  connector: OpenInferenceSpanKind.TOOL,
+  policy: OpenInferenceSpanKind.GUARDRAIL,
+};
+
+/**
+ * THE OPENINFERENCE PROFILE: the OTel attributes plus the OpenInference keys
+ * the pinned `@arizeai/openinference-genai` converter derives from them, plus
+ * `llm.cost.total` (the cost key OTel lacks) and `user.id`. The `gen_ai.*` and
+ * `regulait.*` keys stay, so one export reads in either kind of backend.
+ */
+export function openInferenceAttributes(
+  span: SpanRecord,
+  ctx: OtelAttrContext,
+  otel: Record<string, OtelAttrValue>,
+): Record<string, OtelAttrValue> {
+  const out: Record<string, OtelAttrValue> = { ...otel };
+  const converted = convertGenAISpanAttributesToOpenInferenceSpanAttributes(otel) ?? {};
+  for (const [k, v] of Object.entries(converted)) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
+    else if (Array.isArray(v) && v.every((x) => typeof x === "string")) out[k] = v as string[];
+  }
+  if (!GEN_AI_OPERATION[span.kind]) {
+    out[OI.OPENINFERENCE_SPAN_KIND] = OI_KIND_FOR_NON_GENAI[span.kind] ?? OpenInferenceSpanKind.CHAIN;
+  }
+  if (span.costUsd != null && MODEL_CALL_KINDS.has(span.kind)) out[OI.LLM_COST_TOTAL] = span.costUsd;
+  if (ctx.userId) out[OI.USER_ID] = ctx.userId;
+  return ctx.includeContent ? out : stripContentAttributes(out);
+}
+
+/** One recorded score, as the export reads it from `trace_scores`. Score and
+ * label only: a reviewer's comment is never a field here, so it cannot leave. */
+export interface TraceScoreRecord {
+  traceId: string;
+  spanId: string | null;
+  source: string;
+  name: string;
+  value: number | null;
+  label: string | null;
+  createdAt?: string | Date | null;
+}
+
+/** A score as a `gen_ai.evaluation.result` event's attributes. */
+export function otelEvaluationAttributes(score: TraceScoreRecord): Record<string, OtelAttrValue> {
+  const a: Record<string, OtelAttrValue> = { [ATTR_GEN_AI_EVALUATION_NAME]: score.name };
+  if (score.value != null && Number.isFinite(score.value)) a[ATTR_GEN_AI_EVALUATION_SCORE_VALUE] = score.value;
+  if (score.label) a[ATTR_GEN_AI_EVALUATION_SCORE_LABEL] = score.label;
+  a["regulait.evaluation.source"] = score.source;
   return a;
 }
 
@@ -488,15 +743,19 @@ function unixNano(t: string | Date | null | undefined): string {
   return (BigInt(Math.trunc(ms)) * 1_000_000n).toString();
 }
 
-function otlpAttrs(a: Record<string, string | number | boolean>): unknown[] {
+/** keys whose convention type is `double`, encoded as such even when whole */
+const DOUBLE_KEYS = new Set<string>([ATTR_GEN_AI_EVALUATION_SCORE_VALUE]);
+
+function otlpAttrs(a: Record<string, OtelAttrValue>): unknown[] {
   return Object.entries(a).map(([key, v]) => ({
     key,
-    value:
-      typeof v === "string"
+    value: Array.isArray(v)
+      ? { arrayValue: { values: v.map((s) => ({ stringValue: s })) } }
+      : typeof v === "string"
         ? { stringValue: v }
         : typeof v === "boolean"
           ? { boolValue: v }
-          : Number.isInteger(v)
+          : Number.isInteger(v) && !DOUBLE_KEYS.has(key)
             ? { intValue: String(v) }
             : { doubleValue: v },
   }));
@@ -516,6 +775,12 @@ export interface OtlpBuildInput {
   /** stamped on the resource so a receiving backend can tell which deployment
    * mode produced the data (hosted / byoc / air_gapped) */
   deploymentMode?: string | undefined;
+  /** default `otel_genai` */
+  profile?: TraceExportProfile | undefined;
+  /** the traces' recorded scores, emitted as `gen_ai.evaluation.result` span
+   * events on the scored span (or the trace's first root span when the score
+   * is on the whole trace). Score and label only. */
+  scores?: readonly TraceScoreRecord[] | undefined;
 }
 
 /**
@@ -527,28 +792,61 @@ export function buildOtlpPayload(input: OtlpBuildInput): {
   body: Record<string, unknown>;
   traceCount: number;
   spanCount: number;
+  profile: TraceExportProfile;
 } {
-  const resourceAttrs: Record<string, string | number | boolean> = {
+  const profile: TraceExportProfile = input.profile ?? "otel_genai";
+  const resourceAttrs: Record<string, OtelAttrValue> = {
     "service.name": input.serviceName,
     "telemetry.sdk.name": "regulait",
     "telemetry.sdk.language": "nodejs",
   };
   if (input.deploymentMode) resourceAttrs["deployment.environment.name"] = input.deploymentMode;
+  if (profile === "openinference") resourceAttrs[SEMRESATTRS_PROJECT_NAME] = input.serviceName;
+
+  // scores grouped by trace, so each lands on its span in one pass
+  const scoresByTrace = new Map<string, TraceScoreRecord[]>();
+  for (const sc of input.scores ?? []) {
+    const list = scoresByTrace.get(sc.traceId) ?? [];
+    list.push(sc);
+    scoresByTrace.set(sc.traceId, list);
+  }
 
   const spans: unknown[] = [];
   let spanCount = 0;
   for (const { trace, spans: rows } of input.traces) {
     const traceIdHex = otlpTraceId(trace.id);
+    // where each score goes: its own span when it is in this export, else the
+    // trace's first root span (lowest seq)
+    const events = new Map<string, unknown[]>();
+    const spanIds = new Set(rows.map((r) => r.id));
+    const firstRoot = [...rows]
+      .filter((r) => !r.parentSpanId || !spanIds.has(r.parentSpanId))
+      .sort((x, y) => x.seq - y.seq)[0];
+    for (const sc of scoresByTrace.get(trace.id) ?? []) {
+      const target = sc.spanId && spanIds.has(sc.spanId) ? sc.spanId : firstRoot?.id;
+      if (!target) continue;
+      const list = events.get(target) ?? [];
+      const at = rows.find((r) => r.id === target);
+      list.push({
+        timeUnixNano: unixNano(sc.createdAt ?? at?.endedAt ?? at?.startedAt ?? null),
+        name: EVENT_GEN_AI_EVALUATION_RESULT,
+        attributes: otlpAttrs(otelEvaluationAttributes(sc)),
+      });
+      events.set(target, list);
+    }
     for (const s of rows) {
-      const attrs = otelAttributesForSpan(s, {
+      const ctx: OtelAttrContext = {
         sessionId: trace.sessionId,
         projectId: trace.projectId,
         userId: trace.userId,
         includeContent: input.includeContent,
-      });
+      };
+      const otel = otelAttributesForSpan(s, ctx);
+      const attrs = profile === "openinference" ? openInferenceAttributes(s, ctx, otel) : otel;
       attrs["regulait.span.id"] = s.id;
       attrs["regulait.trace.kind"] = trace.kind;
       const st = otelStatus(s.status, s.statusReason);
+      const spanEvents = events.get(s.id);
       spans.push({
         traceId: traceIdHex,
         spanId: otlpSpanId(s.id),
@@ -558,6 +856,7 @@ export function buildOtlpPayload(input: OtlpBuildInput): {
         startTimeUnixNano: unixNano(s.startedAt),
         endTimeUnixNano: unixNano(s.endedAt ?? s.startedAt),
         attributes: otlpAttrs(attrs),
+        ...(spanEvents ? { events: spanEvents } : {}),
         status: st,
       });
       spanCount++;
@@ -580,6 +879,7 @@ export function buildOtlpPayload(input: OtlpBuildInput): {
     },
     traceCount: input.traces.length,
     spanCount,
+    profile,
   };
 }
 
@@ -600,4 +900,7 @@ export const OTLP_EXPORT_LIMITS =
   "also carries `regulait.decision`, `regulait.reason` and `regulait.rule.id`. The reason is NOT " +
   "in the OTel status message because the spec requires receivers to ignore a description on a " +
   "non-Error status. No exporter is configured by default and none is ever contacted " +
-  "unless an admin types an endpoint, which is then adjudicated by the egress guard on every export.";
+  "unless an admin types an endpoint, which is then adjudicated by the egress guard on every export. " +
+  "Keys follow the pinned OpenTelemetry semantic conventions (1.43.0, GenAI keys incubating); the " +
+  "`openinference` profile adds the OpenInference keys and `llm.cost.total`. With content capture " +
+  "off, neither profile carries a prompt, an output, a tool argument or a tool result.";

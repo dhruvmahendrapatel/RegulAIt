@@ -1,0 +1,88 @@
+/* ADR-0173 batch 2c — trace tag chips and the selection bar. Tokens only, so
+   light and dark both come from the theme. */
+.tagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s0);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--rg-signal-ring);
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-signal-tint);
+  color: var(--text);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+}
+.tagButton {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.tagButton:hover {
+  text-decoration: underline;
+}
+.tagRemove {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+  border-radius: var(--rg-r-sm);
+}
+.tagRemove:hover {
+  color: var(--danger);
+}
+.tagButton:focus-visible,
+.tagRemove:focus-visible {
+  outline: 2px solid var(--rg-signal);
+  outline-offset: 1px;
+}
+.selectionBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: flex-end;
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--rg-r-md, 8px);
+  background: var(--surface-2, transparent);
+}
+.check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--rg-signal);
+}
+.skipped {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+/* A <button> laid out as a list row. Without this the user agent's button face
+   shows through — in dark mode that is a mid-grey the row's text fails
+   contrast against. */
+.rowButton {
+  background: transparent;
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.rowButton:focus-visible {
+  outline: 2px solid var(--rg-signal);
+  outline-offset: -2px;
+}

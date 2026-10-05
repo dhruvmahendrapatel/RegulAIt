@@ -33,6 +33,7 @@ import {
   governanceAlerts,
   inArray,
   isNull,
+  kris,
   modelCardApprovals,
   modelCards,
   ne,
@@ -52,9 +53,12 @@ import {
   MONITOR_RULE_IDS,
   effectiveRiskRating,
   evaluateMonitorRules,
+  kriStates,
+  kriSubjectKey,
   reconcileAlerts,
   type MonitorAgentInput,
   type MonitorCredentialInput,
+  type MonitorKriInput,
   type MonitorRuleId,
   type MonitorServedModelInput,
   type MonitorTrafficInput,
@@ -68,6 +72,7 @@ import { TRACE_EVAL_WINDOW_DAYS, traceSummaryForAgents } from "./trace-evaluatio
 import { notifyGovernanceAlerts } from "./chatops.js";
 import { computeCredentialInventory } from "./credential-inventory.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { kriMonitorInput } from "./kri.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -99,11 +104,14 @@ export interface MonitorOptionalInputs {
   servedModels: (db: Db, now: Date) => Promise<MonitorServedModelInput[]>;
   traffic: (db: Db, now: Date) => Promise<MonitorTrafficInput>;
   credentials: (db: Db, now: Date) => Promise<MonitorCredentialInput>;
+  /** ADR-0173 batch 2c — every KRI, measured */
+  kris: (db: Db, now: Date) => Promise<MonitorKriInput[]>;
 }
 const OPTIONAL_INPUT_RULE: Record<keyof MonitorOptionalInputs, MonitorRuleId> = {
   servedModels: "served_model_drift",
   traffic: "unregistered_ai_traffic",
   credentials: "stale_credentials",
+  kris: "kri_threshold_breached",
 };
 
 export async function runGovernanceMonitor(
@@ -130,6 +138,7 @@ export async function runGovernanceMonitor(
     servedModels: servedModelsByAgent,
     traffic: unregisteredTrafficInput,
     credentials: (d, n) => staleCredentialsInput(d, n),
+    kris: kriMonitorInput,
     ...opts.optionalInputs,
   };
   const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
@@ -251,6 +260,13 @@ export async function runGovernanceMonitor(
   }));
 
   const trust = await computeTrustDashboard(db, { now });
+  // ADR-0173 batch 2c — KRIs; one below its minimum samples HOLDS its episode
+  const kriInput = await optional("kris");
+  const heldSubjects = new Set(
+    kriStates(kriInput ?? [])
+      .filter((s) => s.state === "insufficient")
+      .map((s) => `kri_threshold_breached|${kriSubjectKey(s.kri.id)}`),
+  );
 
   const findings = evaluateMonitorRules({
     useCases,
@@ -265,6 +281,7 @@ export async function runGovernanceMonitor(
     // ADR-0175 A7 — always evaluated (an explicit "not alerting" input when
     // the org has it off), so turning alerting off resolves the open episodes
     credentials: await optional("credentials"),
+    kris: kriInput,
   });
   const notEvaluated = new Set<string>(failedInputs.map((f) => f.ruleId));
   for (const f of failedInputs) {
@@ -285,7 +302,7 @@ export async function runGovernanceMonitor(
     .select({ id: governanceAlerts.id, ruleId: governanceAlerts.ruleId, subjectKey: governanceAlerts.subjectKey, title: governanceAlerts.title })
     .from(governanceAlerts)
     .where(ne(governanceAlerts.status, "resolved"));
-  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS.filter((r) => !notEvaluated.has(r))));
+  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS.filter((r) => !notEvaluated.has(r))), heldSubjects);
   if (opts.afterPlan) await opts.afterPlan(plan);
 
   const raisedIds: string[] = [];
@@ -753,6 +770,13 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
       if (keyIds.length) {
         for (const k of await db.select({ id: virtualKeys.id, name: virtualKeys.name }).from(virtualKeys).where(inArray(virtualKeys.id, keyIds))) {
           labels.set(`virtual_key:${k.id}`, k.name);
+        }
+      }
+      // ADR-0173 batch 2c — KRI subjects
+      const kriIds = idsOf("kri:");
+      if (kriIds.length) {
+        for (const k of await db.select({ id: kris.id, name: kris.name }).from(kris).where(inArray(kris.id, kriIds))) {
+          labels.set(`kri:${k.id}`, k.name);
         }
       }
       const callerIds = idsOf("caller:").filter((id) => id !== NO_IDENTITY);

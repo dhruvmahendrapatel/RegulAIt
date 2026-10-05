@@ -50,9 +50,11 @@ import {
   eq,
   evalCases,
   evalDatasets,
+  evalJudgeVerdicts,
   evalResults,
   evalRuns,
   externalScorers,
+  inArray,
   isNull,
   ne,
   sql,
@@ -91,6 +93,16 @@ import {
   setEvalBaselineSchema,
   startEvalRunSchema,
   validateScorerConfig,
+  promptFromBody,
+  combinePanelVerdicts,
+  judgeCalibrationSchema,
+  judgementBudgetProblem,
+  meanScoreInterval,
+  measuredConfigHash,
+  runComparisonRefusal,
+  type BootstrapInterval,
+  type JudgePanel,
+  type PanelVerdictInput,
   type EvalAggregate,
   type EvalGateDecision,
   type EvalJudge,
@@ -117,6 +129,10 @@ import {
   resolveExternalScorersByName,
   type ResolvedExternalScorer,
 } from "./external-scorers.js";
+import { registerEvalCatalogRoutes } from "./eval-catalog.js";
+import { loadVersions } from "./config-versions.js";
+import { registerEvalDatasetSourceRoutes } from "./eval-dataset-sources.js";
+import { calibrateRunJudges, type AnnotationLabelsFor } from "./eval-judge-calibration.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -221,7 +237,7 @@ export interface EvalRunOptions {
   agentId: string;
   /** whose entitlements, whose budget, whose audit trail */
   userId: string;
-  trigger: "manual" | "workflow" | "scheduled";
+  trigger: "manual" | "workflow" | "scheduled" | "config_change";
   mode?: string;
   judgeAgentId?: string | null | undefined;
   projectId?: string | null | undefined;
@@ -253,7 +269,84 @@ export interface EvalRunOptions {
    * wiring without a provider.
    */
   judge?: EvalJudge | null | undefined;
+  /**
+   * ADR-0173 batch 2c — a weighted panel of 2–5 judges instead of one judge.
+   * Every verdict is stored in `eval_judge_verdicts`; the case score is their
+   * weighted mean. Mutually exclusive with `judgeAgentId`.
+   */
+  judgePanel?: JudgePanel | null | undefined;
+  /** ADR-0173 batch 2c — judge each judge-backed case this many times (1–5) */
+  repetitions?: number | undefined;
+  /** TEST SEAM for panels: the judge implementation per panel agent id */
+  panelJudges?: Record<string, EvalJudge> | undefined;
+  /** ADR-0173 batch 2c — the pinned baseline a `config_change` run re-runs */
+  configChangeOfRunId?: string | null | undefined;
 }
+
+/** a panel member resolved for this run */
+interface PanelMember {
+  agentId: string | null;
+  name: string;
+  weight: number;
+  judge: EvalJudge;
+}
+
+/** a verdict row waiting for its run's results to land */
+interface PendingVerdict {
+  caseId: string;
+  judgeAgentId: string | null;
+  judgeName: string;
+  weight: number;
+  repetition: number;
+  score: number | null;
+  passed: boolean | null;
+  rationale: string | null;
+  error: string | null;
+}
+
+/**
+ * The configuration hash of what a run of this agent would measure NOW: its
+ * model, tier and custom provider, and the base system prompt a dispatch
+ * actually uses — the ACTIVE ADR-0048 config version's prompt when the agent
+ * is versioned (plus any canary version, which some traffic sees), else the
+ * `agents.system_prompt` column.
+ */
+export async function agentConfigHash(
+  db: Db,
+  agent: { id: string; model: string | null; tier: number | null; systemPrompt: string | null; customProviderId: string | null },
+): Promise<string> {
+  const versions = await loadVersions(db, "agent_system_prompt", agent.id);
+  const active = versions.find((v) => v.status === "active");
+  const canary = versions.find((v) => v.status === "canary");
+  const prompt = active ? promptFromBody(active.body) : agent.systemPrompt;
+  const promptHash = hashPrompt(prompt ?? null);
+  return measuredConfigHash({
+    model: agent.model ?? null,
+    tier: agent.tier ?? null,
+    systemPromptHash: canary ? `${promptHash ?? ""}|canary:${canary.id}` : promptHash,
+    customProviderId: agent.customProviderId ?? null,
+  });
+}
+
+/** the configuration hash a stored run measured (legacy rows: from its snapshot) */
+export function runConfigHash(run: EvalRunRow): string {
+  return (
+    run.configHash ??
+    measuredConfigHash({
+      model: run.model ?? null,
+      tier: run.tier ?? null,
+      systemPromptHash: run.systemPromptHash ?? null,
+      customProviderId: run.customProviderId ?? null,
+    })
+  );
+}
+
+const isUniqueViolation = (e: unknown, constraint: string) => {
+  const err = e as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  const code = err?.code ?? err?.cause?.code;
+  const name = err?.constraint ?? err?.cause?.constraint;
+  return code === "23505" && (name === undefined || name === constraint);
+};
 
 export type EvalRunOutcome =
   | {
@@ -576,6 +669,66 @@ export async function runEvalSuite(
     judgeAgent = ja as AgentRow;
   }
 
+  // ------------------------------------------------------------------
+  // ADR-0173 batch 2c — A JUDGE PANEL, resolved and checked BEFORE ANY ROW.
+  // Every member is an ordinary governed judge: it must exist (a missing one
+  // is a 422 here, never a silently smaller panel), and it takes the same
+  // entitlement and model-policy check the single judge above takes.
+  // ------------------------------------------------------------------
+  const repetitions = opts.repetitions ?? 1;
+  const panelSpec = opts.judgePanel && opts.judgePanel.length > 0 ? opts.judgePanel : null;
+  if (panelSpec && (opts.judgeAgentId || opts.judge)) {
+    return {
+      ok: false,
+      status: 422,
+      error: "judge_and_panel_exclusive",
+      detail: "name either one judge (`judgeAgentId`) or a `judgePanel`, not both",
+    };
+  }
+  const panelAgents: Array<{ agent: AgentRow; weight: number }> = [];
+  if (panelSpec) {
+    const ids = panelSpec.map((m) => m.agentId);
+    const found = await db.select().from(agents).where(inArray(agents.id, ids));
+    const byId = new Map(found.map((a) => [a.id, a as AgentRow]));
+    const missing = ids.filter((id) => !byId.has(id));
+    if (missing.length > 0) {
+      await db.insert(auditLog).values({
+        userId: opts.userId,
+        objectType: "eval_run",
+        objectId: dataset.id,
+        detail: { phase: "judge-panel", purpose, ...originDetail, missingJudgeAgentIds: missing },
+        effect: "deny",
+        ruleId: "panel_judge_missing",
+        ruleChain: [],
+        reason: `judge panel names agent(s) that do not exist: ${missing.join(", ")}`,
+      });
+      return {
+        ok: false,
+        status: 422,
+        error: "panel_judge_missing",
+        detail: `the judge panel names agent(s) that do not exist: ${missing.join(", ")}. A panel is never silently run with fewer judges than it names.`,
+      };
+    }
+    for (const m of panelSpec) {
+      const ja = byId.get(m.agentId)!;
+      const jd = decide(ja, mode);
+      if (jd.effect !== "allow") {
+        await db.insert(auditLog).values({
+          userId: opts.userId,
+          objectType: "eval_run",
+          objectId: dataset.id,
+          detail: { phase: "judge-entitlement", purpose, ...originDetail, judgeAgentId: ja.id, mode, panel: true },
+          effect: "deny",
+          ruleId: jd.ruleId,
+          ruleChain: jd.ruleChain,
+          reason: jd.reason,
+        });
+        return { ok: false, status: 403, error: "judge_not_entitled", decision: jd };
+      }
+      panelAgents.push({ agent: ja, weight: m.weight });
+    }
+  }
+
   const cases = await db
     .select()
     .from(evalCases)
@@ -616,7 +769,25 @@ export async function runEvalSuite(
     .map((r) => r.kind);
   let judgeDispatchable = false;
   let judgeUndispatchableDetail: string | null = null;
-  if (opts.judge) {
+  if (panelAgents.length > 0) {
+    // ADR-0173 batch 2c: a panel is dispatchable only when EVERY member is —
+    // an injected implementation, or a model credential for its provider
+    const undispatchable: string[] = [];
+    let configured: Set<string> | null = null;
+    for (const m of panelAgents) {
+      if (opts.panelJudges?.[m.agent.id]) continue;
+      if (!m.agent.model || !isModelProviderKind(m.agent.provider)) {
+        undispatchable.push(`'${m.agent.name}' has no dispatchable model`);
+        continue;
+      }
+      configured ??= await configuredProviders(db, dataKey, opts.userId);
+      if (!configured.has(agentProviderToken(m.agent))) {
+        undispatchable.push(`no model credential is configured for '${m.agent.name}' (${m.agent.provider})`);
+      }
+    }
+    judgeDispatchable = undispatchable.length === 0;
+    judgeUndispatchableDetail = undispatchable.length ? `judge panel: ${undispatchable.join("; ")}` : null;
+  } else if (opts.judge) {
     // an injected judge implementation IS the judge — it needs no credential
     judgeDispatchable = true;
   } else if (judgeAgent) {
@@ -633,7 +804,7 @@ export async function runEvalSuite(
     }
   }
   const availability = judgeAvailabilityFor(scorerKinds, {
-    named: Boolean(opts.judge) || Boolean(judgeAgent),
+    named: Boolean(opts.judge) || Boolean(judgeAgent) || panelAgents.length > 0,
     dispatchable: judgeDispatchable,
     detail: judgeUndispatchableDetail,
   });
@@ -664,6 +835,27 @@ export async function runEvalSuite(
       detail: availability.reason,
       metrics: availability.metrics,
     };
+  }
+
+  // ADR-0173 batch 2c — THE JUDGEMENT BUDGET, before any row: judges × judged
+  // cases × repetitions is capped, so a panel cannot turn one click into an
+  // unbounded number of model calls.
+  const judgedCases = scorerKinds.filter((k) => isJudgeBackedScorer(k)).length;
+  const judgeCount = panelAgents.length > 0 ? panelAgents.length : opts.judge || judgeAgent ? 1 : 0;
+  const budgetProblem =
+    judgeCount > 0 ? judgementBudgetProblem(judgeCount, judgedCases, repetitions) : null;
+  if (budgetProblem) {
+    await db.insert(auditLog).values({
+      userId: opts.userId,
+      objectType: "eval_run",
+      objectId: dataset.id,
+      detail: { phase: "judgement-budget", purpose, ...originDetail, judges: judgeCount, judgedCases, repetitions },
+      effect: "deny",
+      ruleId: "judgement_budget_exceeded",
+      ruleChain: [],
+      reason: budgetProblem,
+    });
+    return { ok: false, status: 422, error: "judgement_budget_exceeded", detail: budgetProblem };
   }
 
   // ------------------------------------------------------------------
@@ -759,9 +951,20 @@ export async function runEvalSuite(
   }
 
   const tolerance = opts.tolerance ?? 0.05;
-  const [run] = await db
+  const configHash = await agentConfigHash(db, agent as AgentRow);
+  const usesPanelPath = panelAgents.length > 0 || repetitions > 1;
+  let run: EvalRunRow | undefined;
+  try {
+    [run] = await db
     .insert(evalRuns)
     .values({
+      configHash,
+      configChangeOfRunId: opts.configChangeOfRunId ?? null,
+      judgePanel:
+        panelAgents.length > 0
+          ? panelAgents.map((m) => ({ agentId: m.agent.id, agentName: m.agent.name, weight: m.weight }))
+          : null,
+      repetitions,
       scoringSemantics: SCORING_SEMANTICS_VERSION,
       datasetId: dataset.id,
       datasetVersion: dataset.version,
@@ -786,6 +989,34 @@ export async function runEvalSuite(
       note: opts.note ?? null,
     })
     .returning();
+  } catch (e) {
+    // ADR-0173 batch 2c: a (baseline, configuration) pair re-runs at most ONCE;
+    // a concurrent sweep that lost the race is a no-op, never a second run
+    if (opts.trigger === "config_change" && isUniqueViolation(e, "eval_runs_config_change_uq")) {
+      return { ok: false, status: 409, error: "config_change_already_run" };
+    }
+    throw e;
+  }
+
+  // ADR-0173 batch 2c — the panel members, each a governed judge on this run
+  const panelMembers: PanelMember[] = panelAgents.map((m) => {
+    const impl =
+      opts.panelJudges?.[m.agent.id] ??
+      new ModelBackedJudge(db, dataKey, {
+        judgeAgent: m.agent,
+        userId: opts.userId,
+        projectId: opts.projectId ?? null,
+        threshold: 1,
+        evalRunId: run!.id,
+      });
+    return { agentId: m.agent.id, name: impl.id, weight: m.weight, judge: impl };
+  });
+  // a verdict row is keyed by the judge's name; two members whose instruments
+  // share an id are told apart by their agent
+  for (const m of panelMembers) {
+    if (panelMembers.filter((o) => o.name === m.name).length > 1) m.name = `${m.name}@${m.agentId}`;
+  }
+  const pendingVerdicts: PendingVerdict[] = [];
 
   // The judge implementation is chosen ONCE per run and recorded on it, so a
   // score can never be mistaken for a model's opinion when no model produced
@@ -984,6 +1215,79 @@ export async function runEvalSuite(
         scored = { score: 0, passed: false, detail: { externalScorer: config.externalScorer, failed: true } };
         caseError = `external_scorer_failed: ${(e as Error).message}`;
       }
+    } else if (usesPanelPath && (panelMembers.length > 0 || judge)) {
+      // ADR-0173 batch 2c — A PANEL (or one judge, repeated). Every judge
+      // judges every repetition; every verdict is kept; the case score is the
+      // weighted mean of the verdicts that produced a score. A failed judge
+      // call is a recorded verdict ERROR whose weight leaves the mean — never
+      // a zero averaged in (ADR-0072). Observe-only: the case score feeds the
+      // gate exactly as one judge's verdict did.
+      const members: PanelMember[] =
+        panelMembers.length > 0
+          ? panelMembers
+          : [{ agentId: judgeAgent?.id ?? null, name: judge!.id, weight: 1, judge: judge! }];
+      const req: EvalJudgeRequest = {
+        caseInput: c.input,
+        expected: c.expected ?? null,
+        rubric: c.rubric ?? null,
+        output,
+        instructions: config.instructions ?? null,
+        ...(isJudgeBackedScorer(kind) ? { metric: kind } : {}),
+        context,
+      };
+      const inputs: PanelVerdictInput[] = [];
+      for (const m of members) {
+        for (let rep = 1; rep <= repetitions; rep++) {
+          try {
+            const v = await m.judge.judge(req);
+            inputs.push({ judge: m.name, weight: m.weight, score: v.score });
+            pendingVerdicts.push({
+              caseId: c.id,
+              judgeAgentId: m.agentId,
+              judgeName: m.name,
+              weight: m.weight,
+              repetition: rep,
+              score: v.score,
+              passed: v.passed,
+              rationale: v.rationale ? v.rationale.slice(0, OUTPUT_SNIPPET_MAX) : null,
+              error: null,
+            });
+          } catch (e) {
+            inputs.push({ judge: m.name, weight: m.weight, score: null });
+            pendingVerdicts.push({
+              caseId: c.id,
+              judgeAgentId: m.agentId,
+              judgeName: m.name,
+              weight: m.weight,
+              repetition: rep,
+              score: null,
+              passed: null,
+              rationale: null,
+              error: `judge_failed: ${(e as Error).message}`.slice(0, 2000),
+            });
+          }
+        }
+      }
+      const combined = combinePanelVerdicts(inputs);
+      const panelDetail = {
+        judges: members.map((m) => ({ judge: m.name, agentId: m.agentId, weight: m.weight })),
+        repetitions,
+        verdicts: inputs.length,
+        counted: combined.counted,
+        failed: combined.failed,
+        spread: combined.spread,
+      };
+      if (combined.score === null) {
+        scored = { score: 0, passed: false, detail: { method: "model-judged", metric: kind, panel: panelDetail, failed: true } };
+        caseError = "judge_failed: no judge on the panel produced a verdict";
+      } else {
+        const threshold = config.threshold ?? 1;
+        scored = {
+          score: combined.score,
+          passed: combined.score >= threshold,
+          detail: { method: "model-judged", metric: kind, panel: panelDetail },
+        };
+      }
     } else if (!judge) {
       // ADR-0072 — UNREACHABLE BY CONSTRUCTION, AND A THROW RATHER THAN A ZERO.
       //
@@ -1078,6 +1382,20 @@ export async function runEvalSuite(
       })),
     );
   }
+  // ADR-0173 batch 2c — EVERY verdict, kept beside the combined case score
+  for (let i = 0; i < pendingVerdicts.length; i += 200) {
+    await db.insert(evalJudgeVerdicts).values(
+      pendingVerdicts.slice(i, i + 200).map((v) => ({ ...v, runId: run!.id })),
+    );
+  }
+  // and the seeded bootstrap interval on the mean score, for a panel or a
+  // repeated run (seed = the run id, so the interval reproduces exactly)
+  const scoreCi: BootstrapInterval | null = usesPanelPath
+    ? meanScoreInterval(
+        scores.map((s) => s.score),
+        run!.id,
+      )
+    : null;
 
   const aggregate = aggregateEvalResults(scores);
   const resolution = await resolveBaselineRun(db, {
@@ -1120,7 +1438,9 @@ export async function runEvalSuite(
       gatePassed: gate.passed,
       regression: gate.regression,
       gateReason: gate.reason,
-      judgeImpl: judge?.id ?? null,
+      judgeImpl:
+        panelMembers.length > 0 ? `panel:${panelMembers.map((m) => m.name).join(",")}`.slice(0, 500) : (judge?.id ?? null),
+      scoreCi: scoreCi as unknown as Record<string, unknown> | null,
       finishedAt: new Date(),
     })
     .where(eq(evalRuns.id, run!.id))
@@ -1144,7 +1464,14 @@ export async function runEvalSuite(
       systemPromptHash: finished!.systemPromptHash,
       trigger: opts.trigger,
       judgeAgentId: judgeAgent?.id ?? null,
-      judgeImpl: judge?.id ?? null,
+      judgeImpl: finished!.judgeImpl,
+      ...(panelMembers.length > 0
+        ? { judgePanel: panelMembers.map((m) => ({ judge: m.name, agentId: m.agentId, weight: m.weight })) }
+        : {}),
+      ...(repetitions > 1 ? { repetitions } : {}),
+      ...(scoreCi ? { scoreCi: { low: scoreCi.low, high: scoreCi.high, level: scoreCi.level } } : {}),
+      configHash,
+      ...(opts.configChangeOfRunId ? { configChangeOfRunId: opts.configChangeOfRunId } : {}),
       cases: aggregate.cases,
       meanScore: aggregate.meanScore,
       passRate: aggregate.passRate,
@@ -1311,7 +1638,11 @@ export const EVAL_DRIFT_SWEEP_NOTE =
   "the comparison happens. Driven by ADR-0064's scheduler when it is on, and by this endpoint otherwise. " +
   "ADR-0072: a pair whose pinned baseline predates the scoring-semantics correction is SKIPPED with that " +
   "reason stated rather than re-run — the comparison would be refused anyway, and spending a model call to " +
-  "arrive at a refusal we can predict is not honest reporting, it is just an invoice. Re-pin to resume.";
+  "arrive at a refusal we can predict is not honest reporting, it is just an invoice. Re-pin to resume. " +
+  "ADR-0173 batch 2c: when the agent's configuration (model, tier, system prompt, custom provider) no longer " +
+  "matches what the pinned baseline measured, the pass re-runs the pair ONCE for that configuration " +
+  "(trigger 'config_change') as the person who pinned the baseline, and skips it, saying so, when that person " +
+  "is gone.";
 
 export interface EvalDriftSweepResult {
   /** pairs the sweep actually re-ran */
@@ -1321,6 +1652,8 @@ export interface EvalDriftSweepResult {
     runId: string;
     regression: boolean;
     scoreDelta: number | null;
+    /** ADR-0173 batch 2c: `config_change` when the configuration changed */
+    trigger: "scheduled" | "config_change";
   }>;
   skipped: Array<{ datasetId: string; agentId: string | null; reason: string }>;
 }
@@ -1366,17 +1699,6 @@ export async function runEvalDriftSweep(
     if (seen.has(key)) continue;
     seen.add(key);
 
-    if (!base.initiatedByUserId) {
-      skipped.push({
-        datasetId: base.datasetId,
-        agentId: base.agentId,
-        reason:
-          "the baseline's initiating user is gone — the sweep will not run an eval as somebody else, " +
-          "so re-pin a baseline under a current user to resume drift detection for this pair",
-      });
-      continue;
-    }
-
     // ADR-0072 — a stranded pin is REPORTED, not re-run. See the sweep note.
     if (base.scoringSemantics !== SCORING_SEMANTICS_VERSION) {
       skipped.push({
@@ -1387,6 +1709,34 @@ export async function runEvalDriftSweep(
           `this deployment scores under v${SCORING_SEMANTICS_VERSION} (ADR-0072). Drift detection for this ` +
           "pair is PAUSED, not silently passing: re-run this dataset version against this agent and pin the " +
           "new run. Nothing was deleted — the old baseline row is intact and marked.",
+      });
+      continue;
+    }
+
+    // ADR-0173 batch 2c — AUTOMATIC RE-RUN ON A CONFIGURATION CHANGE. When the
+    // agent's model, tier, system prompt or custom provider no longer matches
+    // what the pinned baseline measured, this pass re-runs the pair ONCE for
+    // that configuration (unique on (baseline, configuration hash)), as the
+    // person who PINNED the baseline, under the ordinary runner — so the same
+    // entitlements, the `evals` model policy and the same gate apply. A pinner
+    // who is gone (deleted or deactivated) is never substituted.
+    const change = await configChangeRerun(db, dataKey, base);
+    if (change.kind === "ran") {
+      ran.push(change.entry);
+      continue;
+    }
+    if (change.kind === "skipped") {
+      skipped.push(change.entry);
+      continue;
+    }
+
+    if (!base.initiatedByUserId) {
+      skipped.push({
+        datasetId: base.datasetId,
+        agentId: base.agentId,
+        reason:
+          "the baseline's initiating user is gone — the sweep will not run an eval as somebody else, " +
+          "so re-pin a baseline under a current user to resume drift detection for this pair",
       });
       continue;
     }
@@ -1415,9 +1765,128 @@ export async function runEvalDriftSweep(
       runId: outcome.run.id,
       regression: outcome.run.regression === true,
       scoreDelta: outcome.run.scoreDelta,
+      trigger: "scheduled",
     });
   }
   return { ran, skipped };
+}
+
+type ConfigChangeStep =
+  | { kind: "none" }
+  | { kind: "ran"; entry: EvalDriftSweepResult["ran"][number] }
+  | { kind: "skipped"; entry: EvalDriftSweepResult["skipped"][number] };
+
+/**
+ * ADR-0173 batch 2c — one pinned baseline's configuration-change check. `none`
+ * = the configuration is unchanged (or this configuration already ran), and the
+ * ordinary scheduled re-run proceeds.
+ */
+export async function configChangeRerun(
+  db: Db,
+  dataKey: string | undefined,
+  base: EvalRunRow,
+): Promise<ConfigChangeStep> {
+  if (!base.agentId) return { kind: "none" };
+  const [agent] = await db.select().from(agents).where(eq(agents.id, base.agentId));
+  if (!agent) return { kind: "none" };
+  const current = await agentConfigHash(db, agent as AgentRow);
+  // A LEGACY PIN (made before migration 0149 stored `config_hash`) has an
+  // UNKNOWN configuration hash, not a different one. Its snapshot columns do
+  // not say which ADR-0048 prompt version (or canary) it measured, so a hash
+  // re-derived from them would differ from today's for every such pin and
+  // re-run them all on the first sweep after deploy: a one-time burst of
+  // model calls reporting changes nobody made. Instead the first sweep ADOPTS
+  // the current hash as the pin's baseline hash, without a run, and audits
+  // that it did; a real change after that re-runs as usual. Why not a
+  // migration backfill: the hash needs the active/canary prompt version
+  // resolved in TypeScript and the same canonical JSON as `measuredConfigHash`,
+  // which SQL would have to re-implement, and it would record the same "now"
+  // anyway. The residual is disclosed in the audit row: a change made to a
+  // legacy-pinned agent BEFORE this sweep is not detected.
+  if (base.configHash === null) {
+    const adopted = await db
+      .update(evalRuns)
+      .set({ configHash: current })
+      .where(and(eq(evalRuns.id, base.id), isNull(evalRuns.configHash)))
+      .returning({ id: evalRuns.id });
+    if (adopted.length) {
+      await db.insert(auditLog).values({
+        userId: base.baselinePinnedByUserId ?? base.initiatedByUserId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "eval_run",
+        objectId: base.id,
+        detail: { phase: "config-hash-adopted", agentId: base.agentId, datasetId: base.datasetId, configHash: current },
+        effect: "allow",
+        ruleId: "eval-config-hash-adopted",
+        ruleChain: [],
+        reason:
+          `the pinned baseline ${base.id} predates stored configuration hashes, so its configuration was unknown; ` +
+          "the current configuration was adopted as its baseline without a re-run. A change made before this sweep is not detected.",
+      });
+    }
+    return { kind: "none" };
+  }
+  if (current === base.configHash) return { kind: "none" };
+  const [already] = await db
+    .select({ id: evalRuns.id })
+    .from(evalRuns)
+    .where(
+      and(
+        eq(evalRuns.trigger, "config_change"),
+        eq(evalRuns.configChangeOfRunId, base.id),
+        eq(evalRuns.configHash, current),
+      ),
+    )
+    .limit(1);
+  if (already) return { kind: "none" };
+
+  const skip = (reason: string): ConfigChangeStep => ({
+    kind: "skipped",
+    entry: { datasetId: base.datasetId, agentId: base.agentId, reason: `config_change: ${reason}` },
+  });
+  const pinner = base.baselinePinnedByUserId;
+  const [person] = pinner
+    ? await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, pinner))
+    : [];
+  if (!person || person.disabledAt) {
+    return skip(
+      "the configuration of this agent changed, but the person who pinned the baseline is gone. The re-run is " +
+        "skipped rather than run as somebody else; re-pin a baseline under a current user to resume.",
+    );
+  }
+  const panel = (base.judgePanel ?? [])
+    .filter((m): m is { agentId: string; agentName: string; weight: number } => typeof m.agentId === "string")
+    .map((m) => ({ agentId: m.agentId, weight: m.weight }));
+  const outcome = await runEvalSuite(db, dataKey, {
+    datasetId: base.datasetId,
+    agentId: base.agentId,
+    userId: person.id,
+    trigger: "config_change",
+    mode: base.mode,
+    tolerance: base.tolerance,
+    minScore: base.minScore,
+    minPassRate: base.minPassRate,
+    projectId: base.projectId,
+    baselineRunId: base.id,
+    configChangeOfRunId: base.id,
+    ...(panel.length >= 2 ? { judgePanel: panel } : base.judgeAgentId ? { judgeAgentId: base.judgeAgentId } : {}),
+    repetitions: base.repetitions ?? 1,
+    note: "ADR-0173 batch 2c: automatic re-run on a configuration change",
+  });
+  if (!outcome.ok) {
+    if (outcome.error === "config_change_already_run") return { kind: "none" };
+    return skip(`${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`);
+  }
+  return {
+    kind: "ran",
+    entry: {
+      datasetId: base.datasetId,
+      agentId: base.agentId,
+      runId: outcome.run.id,
+      regression: outcome.run.regression === true,
+      scoreDelta: outcome.run.scoreDelta,
+      trigger: "config_change",
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1429,9 +1898,20 @@ const caseParam = z.object({ id: z.string().uuid(), caseId: z.string().uuid() })
 
 export interface EvalRouteOptions {
   dataKey?: string;
+  /**
+   * ADR-0173 batch 2c — human annotation labels for judge calibration. The
+   * integrator wires this to the annotation queues' `annotationLabelsFor`;
+   * absent, the calibration route answers 503 rather than inventing agreement.
+   */
+  labelsFor?: AnnotationLabelsFor;
 }
 
 export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRouteOptions = {}) {
+  // ADR-0173 batch 2c — the evaluator catalog / "tested by", and datasets from
+  // traces + evaluators on traces. All admin-only (the default gate).
+  registerEvalCatalogRoutes(app, db);
+  registerEvalDatasetSourceRoutes(app, db, { ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
+
   /** the scorer registry, verbatim from the code — each entry's honest `limits`
    * string rendered next to it in the admin screen */
   app.get("/v1/evals/scorers", async () => ({
@@ -1633,6 +2113,9 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
           tags: c.tags,
           scorerKind: c.scorerKind,
           scorerConfig: c.scorerConfig,
+          // ADR-0173 batch 2c: a case built from a trace keeps its provenance
+          sourceTraceId: c.sourceTraceId,
+          sourceSpanId: c.sourceSpanId,
         })),
       );
     }
@@ -1666,6 +2149,9 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       minPassRate: body.minPassRate ?? null,
       baselineRunId: body.baselineRunId ?? null,
       note: body.note ?? null,
+      // ADR-0173 batch 2c
+      judgePanel: body.judgePanel ?? null,
+      repetitions: body.repetitions,
     });
     if (!outcome.ok) {
       return reply.status(outcome.status).send({
@@ -1822,10 +2308,125 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
                 ),
               }),
         },
+        // ADR-0173 batch 2c — every judge verdict of a panel or repeated run
+        verdicts: await db
+          .select()
+          .from(evalJudgeVerdicts)
+          .where(eq(evalJudgeVerdicts.runId, run.id))
+          .orderBy(asc(evalJudgeVerdicts.caseId), asc(evalJudgeVerdicts.judgeName), asc(evalJudgeVerdicts.repetition)),
+      };
+    });
+
+    /**
+     * ADR-0173 batch 2c — COMPARE ANY TWO RUNS side by side: what differed in
+     * the measured configuration, the aggregate deltas, and the per-case
+     * scores. Refused (422) across dataset versions or scoring semantics,
+     * because then the two sets of numbers do not describe the same questions
+     * or do not mean the same thing. Admin-only (the default gate), audited.
+     */
+    scope.get("/v1/evals/compare", async (req, reply) => {
+      const q = z.object({ a: z.string().uuid(), b: z.string().uuid() }).strict().parse(req.query);
+      const [runA] = await db.select().from(evalRuns).where(eq(evalRuns.id, q.a));
+      const [runB] = await db.select().from(evalRuns).where(eq(evalRuns.id, q.b));
+      if (!runA || !runB) return reply.status(404).send({ error: "unknown_run" });
+      const refusal = runComparisonRefusal(runA, runB);
+      if (refusal) return reply.status(422).send(refusal);
+      const resA = await db.select().from(evalResults).where(eq(evalResults.runId, runA.id));
+      const resB = await db.select().from(evalResults).where(eq(evalResults.runId, runB.id));
+      const cases = await db
+        .select({ id: evalCases.id, input: evalCases.input })
+        .from(evalCases)
+        .where(and(eq(evalCases.datasetId, runA.datasetId), eq(evalCases.datasetVersion, runA.datasetVersion)))
+        .orderBy(asc(evalCases.createdAt), asc(evalCases.id));
+      const mapA = new Map(resA.map((r) => [r.caseId, r]));
+      const mapB = new Map(resB.map((r) => [r.caseId, r]));
+      const round = (n: number) => Number(n.toFixed(4));
+      const rows = cases.map((c) => {
+        const ra = mapA.get(c.id);
+        const rb = mapB.get(c.id);
+        return {
+          caseId: c.id,
+          input: c.input.slice(0, 500),
+          a: ra ? { score: ra.score, passed: ra.passed, error: ra.error } : null,
+          b: rb ? { score: rb.score, passed: rb.passed, error: rb.error } : null,
+          delta: ra && rb ? round(rb.score - ra.score) : null,
+          changed: Boolean(ra && rb && ra.passed !== rb.passed),
+        };
+      });
+      const config = (r: EvalRunRow) => ({
+        id: r.id,
+        agentName: r.agentName,
+        model: r.model,
+        tier: r.tier,
+        systemPromptHash: r.systemPromptHash,
+        configHash: runConfigHash(r),
+        judgeImpl: r.judgeImpl,
+        judgePanel: r.judgePanel,
+        repetitions: r.repetitions,
+        trigger: r.trigger,
+        meanScore: r.meanScore,
+        passRate: r.passRate,
+        cases: r.cases,
+        gatePassed: r.gatePassed,
+        scoreCi: r.scoreCi,
+        startedAt: r.startedAt,
+      });
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_UUID,
+        objectType: "eval_run",
+        objectId: runB.id,
+        detail: { phase: "compare", a: runA.id, b: runB.id, datasetId: runA.datasetId, datasetVersion: runA.datasetVersion },
+        effect: "allow",
+        ruleId: "eval-runs-compared",
+        ruleChain: [],
+        reason: `runs ${runA.id} and ${runB.id} compared on dataset version ${runA.datasetVersion}`,
+      });
+      return {
+        datasetId: runA.datasetId,
+        datasetVersion: runA.datasetVersion,
+        scoringSemantics: runA.scoringSemantics,
+        a: config(runA),
+        b: config(runB),
+        differs: {
+          model: runA.model !== runB.model,
+          tier: runA.tier !== runB.tier,
+          systemPrompt: runA.systemPromptHash !== runB.systemPromptHash,
+          configuration: runConfigHash(runA) !== runConfigHash(runB),
+          judge: runA.judgeImpl !== runB.judgeImpl,
+        },
+        delta: {
+          meanScore: runA.meanScore != null && runB.meanScore != null ? round(runB.meanScore - runA.meanScore) : null,
+          passRate: runA.passRate != null && runB.passRate != null ? round(runB.passRate - runA.passRate) : null,
+        },
+        cases: rows,
+        changedCases: rows.filter((r) => r.changed).length,
       };
     });
   });
 
+  /**
+   * ADR-0173 batch 2c — JUDGE CALIBRATION for one run, against the human
+   * labels annotation queues hold. Observe-only: nothing about the run or its
+   * gate changes. Admin-only (the default gate), audited.
+   */
+  app.post("/v1/evals/runs/:id/calibration", async (req, reply) => {
+    const { id } = idParam.parse(req.params);
+    const input = judgeCalibrationSchema.parse(req.body ?? {});
+    if (!opts.labelsFor) {
+      return reply.status(503).send({
+        error: "annotation_labels_unavailable",
+        detail: "no annotation-label source is wired into this deployment, so there are no human labels to calibrate against",
+      });
+    }
+    const out = await calibrateRunJudges(db, {
+      runId: id,
+      labelsFor: opts.labelsFor,
+      input,
+      actorUserId: req.authCtx.userId ?? null,
+    });
+    if (!out.ok) return reply.status(out.status).send({ error: out.error, ...(out.detail ? { detail: out.detail } : {}) });
+    return out;
+  });
 
   /** pin (or unpin) a run as THE baseline for its (dataset version, agent).
    * The DB permits at most one pinned baseline per triple, so this replaces
@@ -1863,7 +2464,8 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     }
     const [updated] = await db
       .update(evalRuns)
-      .set({ isBaseline: body.isBaseline })
+      // ADR-0173 batch 2c: who pinned it — a config_change re-run runs as them
+      .set({ isBaseline: body.isBaseline, baselinePinnedByUserId: body.isBaseline ? (req.authCtx.userId ?? null) : null })
       .where(eq(evalRuns.id, run.id))
       .returning();
     await db.insert(auditLog).values({

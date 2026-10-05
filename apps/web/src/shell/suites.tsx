@@ -60,6 +60,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Posture", to: "/admin/posture" },
       { label: "Trust & evidence", to: "/admin/governance/trust" },
       { label: "Governance alerts", to: "/admin/governance/alerts" },
+      // ADR-0173 batch 2c — KRI tiles, thresholds that raise governance alerts, custom dashboards
+      { label: "Monitoring", to: "/admin/monitoring" },
       // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
       // dashboard and the Audit log render operationally. Nothing new is
       // stored: a report is a read-only projection, scoped to the caller's own
@@ -203,6 +205,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // → enable), scoring evals. Beside the evals it scores (ADR-0093);
       // registration rides the same rails as Custom LLM providers.
       { label: "External scorers", to: "/admin/external-scorers" },
+      { label: "Annotation queues", to: "/admin/annotation-queues" }, // ADR-0173 batch 2c: rubric review by named people, worked from the Inbox
     ],
   },
   {

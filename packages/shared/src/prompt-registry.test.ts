@@ -80,7 +80,8 @@ describe("webhook event registry", () => {
   it("accepts exact events and registered families only", () => {
     expect(isWebhookEventSelector("prompt.commit")).toBe(true);
     expect(isWebhookEventSelector("prompt.*")).toBe(true);
-    expect(isWebhookEventSelector("trace.*")).toBe(false);
+    // batch 2c registered trace.*, annotation.* and automation.*; an unknown family is still refused
+    expect(isWebhookEventSelector("billing.*")).toBe(false);
     expect(isWebhookEventSelector("prompt.nope")).toBe(false);
     expect(webhookSelectorMatches(["prompt.*"], "prompt.tag.moved")).toBe(true);
     expect(webhookSelectorMatches(["prompt.commit"], "prompt.tag.moved")).toBe(false);

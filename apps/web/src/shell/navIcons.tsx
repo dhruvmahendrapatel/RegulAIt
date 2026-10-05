@@ -109,6 +109,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/posture": "gauge",
   "/admin/governance/trust": "shield",
   "/admin/governance/alerts": "bell",
+  "/admin/monitoring": "gauge",
   "/admin/reports": "report",
   "/admin/copilot": "spark",
   "/admin/approvals": "checklist",
@@ -140,6 +141,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/evals": "bars",
   "/admin/redteam": "crosshair",
   "/admin/external-scorers": "star",
+  "/admin/annotation-queues": "checklist", // ADR-0173 batch 2c (Q)
   "/admin/users": "person",
   "/admin/roles": "idCard",
   "/admin/teams": "people",

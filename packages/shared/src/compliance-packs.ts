@@ -126,6 +126,11 @@ export const EVIDENCE_COLLECTORS = [
    * Evidence that environmental impact is estimated (NIST AI RMF MEASURE
    * 2.12), never a measurement of it. */
   "energy_estimate_available",
+  /** ADR-0173 batch 2c: evaluators in the evaluator catalog that cite THIS
+   * control and PASSED a completed run in the period (an eval run whose gate
+   * passed, or a red-team run in which the class was not defeated). Test
+   * evidence: a run that did not happen, or did not pass, is never counted. */
+  "evaluator_tested",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;

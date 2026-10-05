@@ -260,6 +260,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "PUT /v1/prompts/:promptId/tags/:tag",
   "POST /v1/playground/run",
   "POST /v1/playground/evaluate",
+  // ADR-0173 batch 2c (K) — deliberately NONE of the KRI, series, dashboard,
+  // automation-rule or retention-hold routes is here: a KRI or a rule is
+  // policy, a series reads every user's traces, and a rule acts on them.
+  // They stay behind the admin gate (zz-k-monitoring.test.ts asserts 403).
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0171 / AER-050: the intake wizard's own drafts. Any signed-in user
   // keeps their OWN draft (the handler refuses a token with no user identity,
@@ -348,6 +352,13 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/traces",
   "GET /v1/traces/:traceId",
   "GET /v1/sessions",
+  // ADR-0173 batch 2c (T) — trace TAGS. A person labels their OWN traces; the
+  // handler refuses (403 + deny audit) anyone but the trace's owner or an
+  // admin, and the bulk route skips such traces with a reason. Non-admin on
+  // purpose: tagging your own work is not a policy act.
+  "PUT /v1/traces/:traceId/tags/:key",
+  "DELETE /v1/traces/:traceId/tags/:key",
+  "POST /v1/traces/tags",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every
@@ -543,6 +554,22 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/chatops/:connectionName/messages",
   // ADR-0173 batch 2b — the bot's token + identity link, not admin-ness, is the gate
   "POST /v1/chatops/:connectionName/bot",
+  // ADR-0173 batch 2c (Q) — a named reviewer works an annotation queue from
+  // their inbox without being an admin (owner decision, 2026-10-05). Each
+  // handler checks in-handler: the inbox is the caller's own assignments; the
+  // item read admits a named reviewer of the item's queue or an admin (anyone
+  // else: 403 + a deny audit row; every read audited; previews only for a
+  // non-admin); submit admits a named reviewer only and refuses self-review.
+  // Queue setup, enqueue, export and the SLA sweep stay admin (not here).
+  "GET /v1/annotations/inbox",
+  "GET /v1/annotations/items/:itemId",
+  "POST /v1/annotations/items/:itemId/submissions",
+  // ADR-0173 batch 2c (E) — DELIBERATELY ABSENT, so each stays ADMIN-ONLY (the
+  // default): GET /v1/evals/catalog, GET /v1/evals/catalog/tested-by (an
+  // org-wide read of run evidence), POST /v1/evals/datasets/:id/from-traces and
+  // POST /v1/evals/traces/evaluate (an admin reading other people's trace
+  // previews, audited), GET /v1/evals/compare and POST /v1/evals/runs/:id/
+  // calibration (fleet-wide result reads). Nothing is added to this set.
 ]);
 
 /**

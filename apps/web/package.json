@@ -17,7 +17,9 @@
     "@xyflow/react": "12.12.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.18.4"
+    "react-is": "18.3.1",
+    "react-router-dom": "^7.18.4",
+    "recharts": "3.10.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
