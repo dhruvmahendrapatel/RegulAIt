@@ -33,6 +33,7 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
+import { GUARDRAIL_DEFAULT_MODES, GUARDRAIL_FALLBACK_MODE } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { decryptSecret } from "./secrets.js";
 import { openAssuranceGuardrailWindow, seedStrictData } from "./seed-strict-data.js";
@@ -123,6 +124,16 @@ describe("ADR-0181 SB1 — a fresh org reads the strict value", () => {
     for (const p of eff.provenance as Array<{ orgDefault: string }>) expect(p.orgDefault).not.toBe("off");
     const cfg = await get("/v1/guardrails/config");
     expect(cfg.orgModes).toMatchObject({ prompt_injection: "block", jailbreak: "block", toxicity: "warn", semantic_dlp: "warn" });
+  });
+
+  it("the last-resort guardrail fallback (a detector nothing names) is warn, never off", () => {
+    // unreachable through today's resolver (every row and the shipped map name
+    // all four layers), so it is pinned directly: a future layer added without
+    // a column must not arrive switched off
+    expect(GUARDRAIL_FALLBACK_MODE).toBe("warn");
+    for (const id of ["prompt_injection", "jailbreak", "toxicity", "semantic_dlp"] as const) {
+      expect(GUARDRAIL_DEFAULT_MODES[id]).not.toBe("off");
+    }
   });
 
   it("a guardrail_configs row inserted with no modes takes the strict column defaults", async () => {
