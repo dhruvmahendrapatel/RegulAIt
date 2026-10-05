@@ -28,6 +28,7 @@ import { WEBHOOK_LIMITS } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { drainBackgroundWork } from "./background-work.js";
 import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
+import { decryptSecret } from "./secrets.js";
 
 let k: BuilderKit;
 let admin: Person;
@@ -154,6 +155,11 @@ describe("egress and signing", () => {
     const list = await k.req("GET", "/v1/webhooks", admin.auth);
     expect(list.body).not.toContain(sub.secret);
     expect(list.body).not.toContain("ciphertext");
+    // at rest it is a data-key envelope, never the secret itself
+    const [stored] = await k.db.select().from(webhookSubscriptions).where(eq(webhookSubscriptions.id, sub.id));
+    expect(stored!.secretCiphertext).not.toContain(sub.secret);
+    expect(stored!.secretCiphertext).not.toContain(sub.secret.slice("whsec_".length));
+    expect(decryptSecret("a".repeat(64), stored!.secretCiphertext)).toBe(sub.secret);
 
     const t = await k.req("POST", `/v1/webhooks/${sub.id}/test`, admin.auth);
     expect(t.statusCode, t.body).toBe(200);
