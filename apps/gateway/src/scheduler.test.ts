@@ -732,6 +732,10 @@ describe("every sweep is registered", () => {
         // sweep endpoint calls, in zz-k-automation.test.ts; this list pins
         // registration.
         SCHEDULER_JOB_NAMES.automationRules,
+        // ADR-0179 security review item 3: deletes Idempotency-Key claims past
+        // their 30-day window. Driven end-to-end in
+        // aer050-replay-retention.test.ts; this list pins registration.
+        SCHEDULER_JOB_NAMES.idempotencyKeySweep,
       ].sort(),
     );
     for (const def of registry.values()) {

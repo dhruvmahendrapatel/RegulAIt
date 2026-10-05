@@ -92,6 +92,11 @@ interface Gateway {
   /** drop the next risk / questionnaire response AFTER it is stored (a lost response) */
   dropNextRiskResponse: boolean;
   dropNextArtifactResponse: boolean;
+  // ---- ADR-0179 security review, item 6 -----------------------------------
+  /** hold a draft save whose state matches until released (a slow save still in flight) */
+  holdDraftPut: { when: (state: Json) => boolean; until: Promise<void> } | null;
+  /** draft writes refused because they named someone other than the signed-in person */
+  draftOwnerRefusals: number;
 }
 
 const json = (route: Route, body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -101,6 +106,7 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
   const gw: Gateway = {
     drafts: new Map(), draftUnavailable: false, draftPutStatus: null, draftPuts: 0, assistCalls: [], creates: [], useCases: [], artifacts: [], risks: [], dropNextCreateResponse: false, holdCreate: null,
     user: "ada", signInAs: "ada", bobDrafts: new Map(), draftPutFails: null, draftKeyAtCreate: [], riskPosts: [], artifactPosts: [], dropNextRiskResponse: false, dropNextArtifactResponse: false,
+    holdDraftPut: null, draftOwnerRefusals: 0,
     ...patch,
   };
   // the stored risks and questionnaire versions by Idempotency-Key: the gateway's replay contract
@@ -135,6 +141,14 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
       // drafts are per signed-in person
       const drafts = gw.user === "bob" ? gw.bobDrafts : gw.drafts;
       const scope = url.searchParams.get("scope") ?? "";
+      // the gateway's rule: a write naming someone other than the caller stores nothing
+      const named = request.headers()["x-regulait-draft-owner"];
+      if ((method === "PUT" || method === "DELETE") && named !== undefined && named !== person.id) {
+        gw.draftOwnerRefusals += 1;
+        return json(route, { error: "draft_owner_changed" }, 409);
+      }
+      // a slow save: the caller (and its cookie) was resolved when it arrived
+      if (method === "PUT" && gw.holdDraftPut?.when(body.state as Json)) await gw.holdDraftPut.until;
       if (method === "PUT") gw.draftPuts += 1;
       if (method === "PUT" && gw.draftPutStatus) return json(route, { error: gw.draftPutStatus === 413 ? "draft_too_large" : "internal" }, gw.draftPutStatus);
       if (method === "PUT" && gw.draftPutFails?.(body.state as Json)) return json(route, { error: "internal" }, 500);
@@ -771,5 +785,40 @@ test.describe("ADR-0179: session loss and another user", () => {
     // B's page neither read nor removed A's draft
     expect(gw.bobDrafts.size).toBe(0);
     expect(((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Ada's confidential idea");
+  });
+
+  test("A's exit save, queued behind a slow save, lands after B signs in: it names A, so it never becomes B's draft", async ({ page }) => {
+    let release!: () => void;
+    let held = false;
+    const gw = await mockGateway(page, {
+      holdDraftPut: {
+        when: (state) => {
+          const hit = (state.form as Json | undefined)?.title === "Ada's confidential idea";
+          if (hit) held = true;
+          return hit;
+        },
+        until: new Promise<void>((resolve) => { release = resolve; }),
+      },
+    });
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Ada's confidential idea");
+    // the debounced save is in flight and slow
+    await expect.poll(() => held, { message: "the slow save has arrived" }).toBe(true);
+    // a last edit the slow save does not hold; leaving queues it behind that save
+    await page.getByLabel("Use-case name").fill("Ada's confidential idea, second thoughts");
+
+    await page.locator("button[aria-haspopup=menu]").click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await expect(page).toHaveURL(/\/ui\/login/);
+    gw.signInAs = "bob";
+    await signIn(page, "bob@example.test");
+    await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+
+    // the slow save finishes; the exit save queued behind it goes now, under Bob's session
+    release();
+    await expect.poll(() => gw.draftOwnerRefusals, { message: "the late exit save is refused" }).toBe(1);
+    expect(gw.bobDrafts.size, "nothing of Ada's lands in Bob's drafts").toBe(0);
+    await expect(page.getByText(/You have a saved draft/)).toHaveCount(0);
+    expect(await page.content()).not.toContain("second thoughts");
   });
 });

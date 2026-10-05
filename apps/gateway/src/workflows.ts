@@ -2683,11 +2683,21 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
           requestDigest: requestDigestOf({ stageId: body.stageId, content: body.content }),
         }
       : null;
+    // A replay re-runs the dependent-object mirror before it answers. The
+    // original request commits the artifact and the transition first and only
+    // THEN runs `onInstanceTransition`; a crash, a timeout or a failed mirror
+    // in between left the use case (or vendor) behind its instance, and the
+    // retry meant to recover replayed without ever running it. The mirror is
+    // idempotent (it moves an object only when the instance's status says so,
+    // and a compare-and-swap keeps a racing pair to one move), so running it
+    // on every replay is safe.
+    const replayed = async (body: Record<string, unknown>) => {
+      await opts.onInstanceTransition?.(db, instance.id, actorUserId);
+      return reply.status(200).header("Idempotent-Replay", "true").send({ ...body, status: await currentStatus() });
+    };
     if (claim) {
       const prior = await idempotentReplay(db, claim);
-      if (prior?.kind === "replay") {
-        return reply.status(200).header("Idempotent-Replay", "true").send({ ...prior.body, status: await currentStatus() });
-      }
+      if (prior?.kind === "replay") return replayed(prior.body);
       if (prior?.kind === "conflict") return reply.status(prior.status).send(prior.body);
     }
     const refusal = opts.validateArtifact?.(stage.output!, body.content);
@@ -2724,9 +2734,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         done = await submit(tx);
         return { version: done.version };
       });
-      if (outcome.kind === "replay") {
-        return reply.status(200).header("Idempotent-Replay", "true").send({ ...outcome.body, status: await currentStatus() });
-      }
+      if (outcome.kind === "replay") return replayed(outcome.body);
       if (outcome.kind === "conflict") return reply.status(outcome.status).send(outcome.body);
       written = done!;
     } else {

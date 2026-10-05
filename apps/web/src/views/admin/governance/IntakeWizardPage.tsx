@@ -208,7 +208,12 @@ function RegisterUseCase() {
     checkpoint: checkpoint.current,
     attempt: attempt.current,
   });
-  const draft = useIntakeDraft<RegistrationDraft>({ scope: "new", enabled: auth?.via === "session", snapshot: dirty ? snapshot() : null });
+  const draft = useIntakeDraft<RegistrationDraft>({
+    scope: "new",
+    enabled: auth?.via === "session",
+    userId: auth?.userId ?? null,
+    snapshot: dirty ? snapshot() : null,
+  });
 
   useEffect(() => {
     if (shownStep.current === step) return;

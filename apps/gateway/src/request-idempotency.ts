@@ -12,9 +12,11 @@
  *     the claim and the record commit together or not at all, and a
  *     concurrent duplicate waits on the unique (user, scope, key) index and
  *     then replays instead of writing a second record;
- *   - a retry with the same key gets the ORIGINAL response back (the route
+ *   - a retry with the same key gets the original response back (the route
  *     answers 200 with `Idempotent-Replay: true`) for 30 days, the lifetime of
- *     the intake draft that carries the key;
+ *     the intake draft that carries the key — rebuilt from the record the
+ *     request wrote, since the claim keeps only a reference to it (below);
+ *     the `idempotency-key-sweep` scheduler job deletes claims after that;
  *   - keys are per caller and per scope (the route and its target).
  *
  * One rule more than the use-case create: the key is bound to the request it
@@ -31,10 +33,28 @@
  */
 import { createHash } from "node:crypto";
 import type { FastifyRequest } from "fastify";
-import { and, eq, lt, requestIdempotencyKeys, type Db } from "@regulait/db";
+import { and, eq, inArray, lt, requestIdempotencyKeys, useCaseIdempotencyKeys, type Db } from "@regulait/db";
 
 /** how long a claimed key replays its original response: the intake draft's lifetime (30 days) */
 export const IDEMPOTENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * ADR-0179 security review, item 3 — WHAT A CLAIM KEEPS. A claim used to keep
+ * the whole response, which for a risk or a use case is the record itself
+ * (its description, its risk text), copied into a second table for 30 days.
+ * A route that wrote one record now keeps only a REFERENCE to it,
+ * `{ replayOf: <id> }`, and rebuilds the replay from the record when a retry
+ * comes (under the same read rule as the record's own GET). A body that is
+ * not a reference is a claim stored before this change, holding the full
+ * response, and is replayed verbatim as before.
+ */
+export const replayReference = (id: string): Record<string, unknown> => ({ replayOf: id });
+
+/** the id a stored body refers to, or null when it is a full (older) response */
+export function referencedId(stored: Record<string, unknown>): string | null {
+  const keys = Object.keys(stored);
+  return keys.length === 1 && keys[0] === "replayOf" && typeof stored.replayOf === "string" ? stored.replayOf : null;
+}
 
 export type IdempotencyKeyRead =
   | { ok: true; key: string | null }
@@ -123,12 +143,15 @@ export async function idempotentReplay(db: Db, claim: IdempotencyClaim): Promise
  * Run `work` in one transaction with the key's claim. `work` writes the
  * record (and its audit row) through `tx` and returns the response body; it
  * throws to refuse, which rolls the claim back with everything else. The body
- * is stored as the JSON the caller receives, so a replay has the same shape.
+ * is stored as the JSON the caller receives, so a replay has the same shape —
+ * or, with `toStored`, only what the route needs to rebuild it (a
+ * `replayReference`); the route then resolves a replayed body itself.
  */
 export async function withIdempotencyKey<T extends Record<string, unknown>>(
   db: Db,
   claim: IdempotencyClaim,
   work: (tx: Db) => Promise<T>,
+  toStored: (body: T) => Record<string, unknown> = (body) => body,
 ): Promise<IdempotentOutcome<T>> {
   return db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
@@ -153,8 +176,68 @@ export async function withIdempotencyKey<T extends Record<string, unknown>>(
     const body = await work(tx);
     await tx
       .update(requestIdempotencyKeys)
-      .set({ response: JSON.parse(JSON.stringify(body)) as Record<string, unknown> })
+      .set({ response: JSON.parse(JSON.stringify(toStored(body))) as Record<string, unknown> })
       .where(keyWhere(claim));
     return { kind: "fresh" as const, body };
   });
+}
+
+/** at most this many claims per table go in one pass; the rest wait for the next */
+export const IDEMPOTENCY_SWEEP_BATCH = 5000;
+
+export interface IdempotencyKeySweepResult {
+  cutoff: string;
+  /** `request_idempotency_keys` rows deleted (risk and questionnaire-artifact keys) */
+  requestKeys: number;
+  /** `use_case_idempotency_keys` rows deleted (use-case create keys) */
+  useCaseKeys: number;
+  /** true when a table had more expired claims than one pass deletes */
+  capped: boolean;
+}
+
+/**
+ * ADR-0179 security review, item 3 — THE 30-DAY SWEEP. A claim past its
+ * window never replays again (both readers ignore it, and a new claim under
+ * the same key replaces it), but nothing removed it, so both claim tables grew
+ * for ever. This deletes every claim older than the window, a bounded batch
+ * per table per pass, oldest first (the created_at index serves it). The
+ * scheduler job `idempotency-key-sweep` runs it; the scheduler's own run audit
+ * records the counts.
+ */
+export async function runIdempotencyKeySweep(
+  db: Db,
+  opts: { now?: Date; batch?: number } = {},
+): Promise<IdempotencyKeySweepResult> {
+  const now = opts.now ?? new Date();
+  const batch = Math.max(1, opts.batch ?? IDEMPOTENCY_SWEEP_BATCH);
+  const cutoff = new Date(now.getTime() - IDEMPOTENCY_WINDOW_MS);
+
+  const expiredRequest = db
+    .select({ id: requestIdempotencyKeys.id })
+    .from(requestIdempotencyKeys)
+    .where(lt(requestIdempotencyKeys.createdAt, cutoff))
+    .orderBy(requestIdempotencyKeys.createdAt)
+    .limit(batch);
+  const requestKeys = await db
+    .delete(requestIdempotencyKeys)
+    .where(and(inArray(requestIdempotencyKeys.id, expiredRequest), lt(requestIdempotencyKeys.createdAt, cutoff)))
+    .returning({ id: requestIdempotencyKeys.id });
+
+  const expiredUseCase = db
+    .select({ id: useCaseIdempotencyKeys.id })
+    .from(useCaseIdempotencyKeys)
+    .where(lt(useCaseIdempotencyKeys.createdAt, cutoff))
+    .orderBy(useCaseIdempotencyKeys.createdAt)
+    .limit(batch);
+  const useCaseKeys = await db
+    .delete(useCaseIdempotencyKeys)
+    .where(and(inArray(useCaseIdempotencyKeys.id, expiredUseCase), lt(useCaseIdempotencyKeys.createdAt, cutoff)))
+    .returning({ id: useCaseIdempotencyKeys.id });
+
+  return {
+    cutoff: cutoff.toISOString(),
+    requestKeys: requestKeys.length,
+    useCaseKeys: useCaseKeys.length,
+    capped: requestKeys.length === batch || useCaseKeys.length === batch,
+  };
 }

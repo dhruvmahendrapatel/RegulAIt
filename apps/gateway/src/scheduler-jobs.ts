@@ -52,6 +52,7 @@ import { runBuilderScheduleSweep } from "./builder-runtime.js";
 import { runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { runAnnotationSlaSweep } from "./annotations.js";
 import { productionAutomationActionDeps, runAutomationRuleSweep } from "./automation-rules.js";
+import { runIdempotencyKeySweep } from "./request-idempotency.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -87,6 +88,8 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0173 batch 2c (Q)
   annotationSla: "annotation-sla-sweep",
   automationRules: "automation-rule-sweep",
+  // ADR-0179 security review, item 3
+  idempotencyKeySweep: "idempotency-key-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -615,6 +618,23 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
           dataKey: opts.dataKey,
         });
         return { itemsProcessed: out.examined, detail: { ...out } };
+      },
+    },
+    {
+      // ADR-0179 security review, item 3. Deletes Idempotency-Key claims past
+      // their 30-day window from both claim tables. Not a control: an expired
+      // claim never replays whether or not this has run; this only stops the
+      // tables (and what they kept) from growing for ever.
+      name: SCHEDULER_JOB_NAMES.idempotencyKeySweep,
+      description:
+        "Delete Idempotency-Key claims older than their 30-day replay window from request_idempotency_keys and " +
+        "use_case_idempotency_keys (at most 5000 per table per pass, oldest first). Replay does not depend on it: " +
+        "an expired claim is never replayed.",
+      adr: "ADR-0179",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runIdempotencyKeySweep(ctx.db, { now: ctx.now });
+        return { itemsProcessed: out.requestKeys + out.useCaseKeys, detail: { ...out } };
       },
     },
   ];
