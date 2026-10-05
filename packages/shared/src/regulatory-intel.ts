@@ -15,10 +15,26 @@
 import type { ControlEvaluationStatus } from "./compliance-packs.js";
 import type { EuAiActTier } from "./eu-ai-act.js";
 
-export const REGULATORY_UPDATE_STATUSES = ["in_force", "upcoming", "proposed"] as const;
+/**
+ * Lifecycle of an entry (ADR-0179, G14-FEED):
+ *  - `in_force`: a law applies, or a guidance document is current;
+ *  - `upcoming` / `proposed`: not yet applicable;
+ *  - `published`: a voluntary standard is available. It is never "in force",
+ *    because nothing makes it binding by itself;
+ *  - `withdrawn`: the issuer withdrew it on `withdrawnOn`. It stays in the feed
+ *    so a reader who relied on it can see that it no longer applies.
+ */
+export const REGULATORY_UPDATE_STATUSES = ["in_force", "upcoming", "proposed", "published", "withdrawn"] as const;
 export type RegulatoryUpdateStatus = (typeof REGULATORY_UPDATE_STATUSES)[number];
 
-/** The shape G4 authors. Everything except `scope` is required. */
+/**
+ * What kind of instrument an entry is. A `voluntary_standard` (a framework or
+ * standard an organisation chooses to adopt) is never counted as law in force.
+ */
+export const REGULATORY_INSTRUMENT_KINDS = ["law", "guidance", "voluntary_standard"] as const;
+export type RegulatoryInstrumentKind = (typeof REGULATORY_INSTRUMENT_KINDS)[number];
+
+/** The shape G4 authors. Everything except `scope`, `enforcementDate` and `withdrawnOn` is required. */
 export interface RegulatoryUpdate {
   key: string;
   /** e.g. "EU", "US-CO", "US-NYC", "International" */
@@ -27,8 +43,20 @@ export interface RegulatoryUpdate {
   instrument: string;
   title: string;
   summary: string;
-  /** YYYY-MM-DD */
+  /** law, guidance, or a voluntary standard */
+  instrumentKind: RegulatoryInstrumentKind;
+  /**
+   * YYYY-MM-DD: when a law takes effect or applies, when guidance was issued,
+   * or when a voluntary standard was published.
+   */
   effectiveDate: string;
+  /**
+   * YYYY-MM-DD, only when the source names a later date from which the
+   * regulator enforces (e.g. a law effective on one date, enforced from another).
+   */
+  enforcementDate?: string;
+  /** YYYY-MM-DD the issuer withdrew it; present exactly when status is `withdrawn` */
+  withdrawnOn?: string;
   status: RegulatoryUpdateStatus;
   /** pack framework ids, e.g. "eu-ai-act", "nist-ai-rmf", "iso-42001" */
   frameworks: string[];
@@ -66,10 +94,15 @@ export interface RegulatoryImpact {
   instrument: string;
   title: string;
   summary: string;
+  instrumentKind: RegulatoryInstrumentKind;
   effectiveDate: string;
+  enforcementDate: string | null;
+  withdrawnOn: string | null;
   status: RegulatoryUpdateStatus;
   /** negative = already in force for that many days */
   daysUntilEffective: number;
+  /** null when the source names no separate enforcement date */
+  daysUntilEnforcement: number | null;
   sourceUrl: string;
   verifiedOn: string;
   frameworks: Array<{ framework: string; packActive: boolean; activeVersion: number | null }>;
@@ -87,6 +120,53 @@ export interface RegulatoryImpact {
   };
 }
 
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const isDay = (d: unknown): d is string =>
+  typeof d === "string" && ISO_DAY.test(d) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
+
+/**
+ * The consistency rules every feed entry must satisfy (ADR-0179, G14-FEED).
+ * Returns the problems found; an empty list means the entry is consistent.
+ * These are rules about the data's shape, not legal conclusions.
+ */
+export function regulatoryUpdateProblems(u: RegulatoryUpdate): string[] {
+  const problems: string[] = [];
+  const at = `'${u.key}'`;
+  if (!(REGULATORY_INSTRUMENT_KINDS as readonly string[]).includes(u.instrumentKind)) {
+    problems.push(`${at}: unknown instrument kind '${String(u.instrumentKind)}'`);
+  }
+  if (!(REGULATORY_UPDATE_STATUSES as readonly string[]).includes(u.status)) {
+    problems.push(`${at}: unknown status '${String(u.status)}'`);
+  }
+  if (!isDay(u.effectiveDate)) problems.push(`${at}: effectiveDate is not a YYYY-MM-DD date`);
+  // a voluntary standard is published, never in force; only a voluntary standard is "published"
+  if (u.instrumentKind === "voluntary_standard" && u.status === "in_force") {
+    problems.push(`${at}: a voluntary standard is never in force; use 'published'`);
+  }
+  if (u.status === "published" && u.instrumentKind !== "voluntary_standard") {
+    problems.push(`${at}: only a voluntary standard is 'published'`);
+  }
+  // withdrawn exactly when a withdrawal date is recorded, and not before it was issued
+  if (u.status === "withdrawn" && !isDay(u.withdrawnOn)) {
+    problems.push(`${at}: a withdrawn entry needs a withdrawnOn date`);
+  }
+  if (u.status !== "withdrawn" && u.withdrawnOn !== undefined) {
+    problems.push(`${at}: withdrawnOn is set but the status is '${u.status}'`);
+  }
+  if (isDay(u.withdrawnOn) && isDay(u.effectiveDate) && u.withdrawnOn < u.effectiveDate) {
+    problems.push(`${at}: withdrawnOn is before effectiveDate`);
+  }
+  // enforcement is a separate, later date; it never replaces the effective date
+  if (u.enforcementDate !== undefined) {
+    if (!isDay(u.enforcementDate)) problems.push(`${at}: enforcementDate is not a YYYY-MM-DD date`);
+    else if (isDay(u.effectiveDate) && u.enforcementDate <= u.effectiveDate) {
+      problems.push(`${at}: enforcementDate must be after effectiveDate (omit it when they are the same)`);
+    }
+    if (u.instrumentKind !== "law") problems.push(`${at}: only a law has an enforcement date`);
+  }
+  return problems;
+}
+
 /** live = could be affected: everything except rejected and retired */
 const LIVE_USE_CASE = new Set(["proposed", "under_review", "needs_info", "approved"]);
 const EVIDENCED = new Set<string>(["satisfied", "attested"]);
@@ -102,6 +182,10 @@ export function computeRegulatoryImpact(
   },
 ): RegulatoryImpact[] {
   const day = (d: string) => Date.parse(`${d}T00:00:00Z`) / 86_400_000;
+  // fail closed: an inconsistent entry (a "withdrawn" with no date, a voluntary
+  // standard "in force") is never shown to a reader as if it were sound
+  const problems = updates.flatMap(regulatoryUpdateProblems);
+  if (problems.length) throw new Error(`regulatory feed is inconsistent: ${problems.join("; ")}`);
   return updates
     .map((u) => {
       const controls: RegulatoryControlState[] = u.controlRefs.map((ref) => {
@@ -128,9 +212,13 @@ export function computeRegulatoryImpact(
         instrument: u.instrument,
         title: u.title,
         summary: u.summary,
+        instrumentKind: u.instrumentKind,
         effectiveDate: u.effectiveDate,
+        enforcementDate: u.enforcementDate ?? null,
+        withdrawnOn: u.withdrawnOn ?? null,
         status: u.status,
         daysUntilEffective: Math.round(day(u.effectiveDate) - day(ctx.today)),
+        daysUntilEnforcement: u.enforcementDate ? Math.round(day(u.enforcementDate) - day(ctx.today)) : null,
         sourceUrl: u.sourceUrl,
         verifiedOn: u.verifiedOn,
         frameworks,
@@ -158,4 +246,10 @@ export const REGULATORY_INTEL_NOTES = {
   scope:
     "Use cases in scope are live ones (proposed, under review, approved); an entry may narrow by computed EU AI " +
     "Act tier. Scope is a prompt for review, not a legal determination.",
+  status:
+    "Laws and guidance are in force, upcoming or proposed. Voluntary standards are published, never in force. " +
+    "A withdrawn entry stays listed with its withdrawal date and is not counted as in force or as having gaps.",
+  applicability:
+    "Whether an entry applies to this organisation has not had legal review. Applicability is pending legal " +
+    "review, not a conclusion.",
 } as const;

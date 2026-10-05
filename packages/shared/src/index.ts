@@ -4302,3 +4302,10 @@ export {
 // ADR-0173 batch 2c fix round B: a KRI over a window total ignores minSamples
 export { kriMetricIsWindowTotal } from "./kri.js";
 export { automationFilterIsPostHoc } from "./automation-rules.js";
+
+// ADR-0179 G14-FEED — instrument kinds and the feed consistency rules
+export {
+  REGULATORY_INSTRUMENT_KINDS,
+  regulatoryUpdateProblems,
+  type RegulatoryInstrumentKind,
+} from "./regulatory-intel.js";
