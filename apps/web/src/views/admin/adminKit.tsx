@@ -209,8 +209,9 @@ export function RemoveButton(props: {
   onRemove: () => Promise<unknown>;
   /** what becomes true once it is gone; shown in the confirmation */
   consequence?: ReactNode;
-  /** present but refused, with the reason on the row */
-  disabledReason?: string;
+  /** present but refused, with the reason on the row. A node, so the reason can
+   * carry the link to where the lever actually is (UX-AG-5: the Roles page). */
+  disabledReason?: ReactNode;
   label?: string;
   /** runs after a successful removal — refetch the list it came from */
   onDone?: () => void;
