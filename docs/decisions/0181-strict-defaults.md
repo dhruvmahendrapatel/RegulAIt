@@ -131,7 +131,7 @@ reads the audit row.
   default, compiled egress `strict`, backup verification and stale-credential alerts on, and spend monitors on.
   `REGULAIT_SCHEDULER` defaults to on, and `REGULAIT_DATABASE_SSL` to `require`.
 
-The next migration is 0160.
+The security review added 0160 and 0161 (below). The next migration is 0162.
 
 ### What each agent shipped, condensed
 
@@ -193,3 +193,82 @@ rule-row writes (compliance profiles), the builder toolbox (keyed `kind:refId`, 
 SAML/OIDC PATCH. The agents' interim fields (`previous`, `before`, `previousModes`, `previousTools`,
 `beforeRow`/`afterRow` and `requirePreviewBeforeActivateFrom`/`To`) were removed. No UI, export or evidence reader
 consumed them.
+
+## Security review fixes (2026-10-06)
+
+A security review of `strict-int` found twelve issues. Three agents fixed them (`strict-fx1`, `strict-fx3`,
+`strict-fx2`), and each fix has a test that fails without it. Two migrations were added: **0160** and **0161**. The
+next migration is **0162**, and the next ADR is **0182**.
+
+### MRM staleness counts drift, not activity (FX1)
+
+Staleness recertification stays on with a threshold of one drift event. Before this fix, every eval run, red-team run,
+grant or revocation counted, so any entitled non-admin could stale a model for everyone with one passing eval run.
+Since certification:
+
+- **Counts as drift:**
+  - an eval run worse than the certification-era run (judged by `evaluateEvalGate` with that run's tolerance), or a
+    server-started run that failed its gate;
+  - a red-team run with a worse attack success rate than the certification-era run of the same library;
+  - a risk-register change, once triaged: an admin, the bootstrap identity or a named risk acceptor has written or
+    touched the risk. A risk that only non-admins have written shows on the card as awaiting triage and is not drift;
+  - an agent guardrail relaxation (the assurance window's relaxation included, so the demo recertifies afterwards);
+  - a change to the model, prompt or endpoint configuration;
+  - an edit to the card.
+- **Does not count:** routine passing (or merely completed) eval and red-team runs, grants, and revocations. They show
+  as activity.
+- **Judges are not exempt.** Only eval cases and red-team probes against the agent under test are exempt from staleness
+  (`evaluationSubject`, set by the server-side runner, never by a caller). A judge goes through the full MRM gate, and
+  a stale-carded judge is refused.
+- `POST /v1/mrm/enforcement` records `detail.transitions`.
+
+### Database TLS, the guardrail window and the demo seed (FX3)
+
+- **Database TLS from the URL.** pg merges a `DATABASE_URL`'s `sslmode` / `ssl` over the pool config, so the URL could
+  silently turn TLS off. The URL is now parsed: `sslmode=disable|allow|prefer` or `ssl=0|false` counts as relaxed (boot
+  warning, posture `relaxed`), and `sslmode=no-verify` or the libpq-compatible `require` / `verify-ca` counts as
+  unverified. The gateway refuses to start when the URL is weaker than `REGULAIT_DATABASE_SSL`.
+- **The guardrail window has a server-side limit (migration 0161).** `guardrail_configs` gains `created_by` (`admin` or
+  `assurance-window`) and `expires_at`. CHECK constraints require that a window row has an expiry, that an admin row
+  has none, and that the org row is never a window. A window lives at most 60 minutes (the window asks for 30).
+  - The resolver ignores an expired override.
+  - The `guardrail-window-expiry-sweep` scheduler job deletes expired rows, with an audit row (old → new).
+  - The model card's evidence and the compliance packs' `guardrail_configs` collector ignore an expired window row too.
+  - A window never replaces an admin's override (409). An admin's write over a window inherits none of its modes.
+  - The window copies the org row's other modes, so it relaxes only injection and jailbreak. A re-run reclaims its own
+    leftover rows.
+  - 0161 changes no existing record (every existing row is an admin row), so it writes no audit rows.
+- The guardrail override DELETE records `detail.transitions`.
+- **The demo seed needs an explicit demo signal.** The seed refuses without `--seed-demo` or `REGULAIT_DEMO_LICENSE=1`,
+  and refuses a database that has an admin outside its own personas. Both checks run before migrations, so a refusal
+  writes nothing. `SEED_DEMO` defaults to 0 in `docker-compose.yml` and `install.sh`, so a bare `docker compose up`
+  starts an empty gateway. `demo:prepare`, the `seed` script, the e2e harness and `docker-start.sh` pass `--seed-demo`.
+- **What 0157 leaves alone, and why.**
+  - Versioned compliance profiles: their enforced values resolve through `config_versions` (ADR-0074). A raw row
+    UPDATE would change nothing that is enforced, and would bypass the version history. They change only through a new,
+    audited version. (A fresh install has no profiles.)
+  - Agent- and connector-scope guardrail overrides: each one is a deliberate, audited admin choice about one object.
+    Raising it silently would override that decision, so 0157 raises only the org row.
+
+### Identity and keys (FX2)
+
+- **Admin API keys answer to MFA.** A key whose owner the MFA requirement covers (admins by default) is refused (403
+  `mfa_enrollment_required`, audited) until the owner enrols TOTP. It cannot be exchanged for a session, and no key is
+  issued to such an owner (409, audited). The bootstrap token is not a user key.
+- **Key issue and revoke are audited** (`api-key-issued`, `api-key-revoked`): actor, target user, key id, name, expiry
+  and its source. The token is never recorded.
+- **SAML JIT needs allowed email domains**, as OIDC JIT does: 422 `jit_requires_allowed_domains` at create and PATCH,
+  audited, and a CHECK constraint.
+- **Migration 0160.**
+  - It adds `migration_audit_outbox`. A migration that changes existing records writes its audit rows there, and
+    `runMigrations` moves them into the chained `audit_log` in one transaction (each row exactly once).
+  - It turns JIT off on SAML providers that have no allowed domains, with one audit row each.
+  - It writes one audit row per SAML provider that requires a signed Response, since 0156 turned that on. A sign-in
+    with an unsigned Response now names `wantAuthnResponseSigned`, so an admin knows what to relax.
+  - No grandfathering: a live API key with no expiry, or one beyond the org ceiling, gets the ceiling (365 days unless
+    an admin set another), recorded as one summary audit row. If an admin relaxed the ceiling to none, keys are left
+    as they are.
+- A live session follows a tightened idle timeout on its next request.
+- The dev box keeps `REGULAIT_HSTS=max-age=86400` for its sslip.io host.
+- **Demo.** The seed enrols Ada's TOTP through the real routes before it mints her key, and prints the authenticator
+  URI once. `demo:set-passwords` re-provisions her authenticator (audited), so she enrols at her first sign-in.

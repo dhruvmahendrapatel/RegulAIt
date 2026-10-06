@@ -1,5 +1,5 @@
 ---
-phase: adr0181-strict-defaults-integrated-on-strict-int-security-review-next
+phase: adr0181-strict-defaults-security-review-fixes-integrated-on-strict-int-pr-next
 last_updated: 2026-10-06
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -21,9 +21,21 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-06 - ADR-0181 security review fixed and integrated on `strict-int` (PR #127).**
+- Three fix agents (`strict-fx1`, `strict-fx3`, `strict-fx2`) merged in that order. Migrations **0160** (SAML JIT
+  domains, signed-Response audit, API-key expiry backfill, `migration_audit_outbox`) and **0161** (guardrail window
+  `created_by` / `expires_at`). The next migration is **0162**, and the next ADR is **0182**.
+- MRM staleness counts drift only (regressions, triaged risk changes, guardrail relaxations, config and card edits);
+  judges go through the full gate. A `DATABASE_URL` cannot weaken DB TLS. The guardrail window expires on the server
+  and is swept; an expired window is not evidence on the model card or in compliance packs. The demo seed needs
+  `--seed-demo` / `REGULAIT_DEMO_LICENSE=1` and refuses a real admin's database; a bare `docker compose up` starts
+  empty. Admin API keys answer to MFA; key issue and revoke are audited. See the ADR-0181 "Security review fixes"
+  section.
+- Next: the PR, then D4.
+
 **2026-10-06 - Strict defaults (ADR-0181) built by four agents and integrated on `strict-int`.**
 - Migrations 0156–0159 (identity; guardrails, data and runtime; governance gates; admission and infrastructure). The
-  next migration is **0160**, and the next ADR is **0182**.
+  next migration was 0160 (see above).
 - Every relaxable setting ships strict, and each relaxation is audited as `detail.transitions` (`{ from, to }` per
   key), one shape on every settings write.
 - The demo stays truthful: `demo:check` passes 18/18 with 15 active alerts. The prep scripts revoke their own keys, so
@@ -4544,9 +4556,12 @@ to personal `dhruvmahendrapatel`.
 ## Known follow-ups (not urgent, not blocking)
 - **ADR-0181 follow-ups (2026-10-06):**
   - Replace the hand-written TOTP with the `otpauth` library (MIT), per open source first (ADR-0176).
-  - SAML JIT provisioning should require allowed email domains, as OIDC JIT now does.
-  - The dev-box `user-data` should set `REGULAIT_HSTS=max-age=86400` for its sslip.io host, since the gateway default
-    is now one year.
+  - ~~SAML JIT provisioning should require allowed email domains, as OIDC JIT now does.~~ **Done** (FX2, migration 0160).
+  - ~~The dev-box `user-data` should set `REGULAIT_HSTS=max-age=86400` for its sslip.io host.~~ **Done** (FX2).
+  - Performance: move the MRM staleness comparison (eval and red-team runs against the certification-era runs) into
+    SQL. It now reads the candidate runs since certification and compares them in the gateway.
+  - The web app should show tailored messages for the MFA key refusals (403 `mfa_enrollment_required` on a key, 409
+    when a key is issued to an un-enrolled covered user); today it shows the generic error.
 - ~~**Concurrent reads on one pg client in MRM autofill (pg@9 hazard).**~~ **CLOSED 2026-10-02 by
   PR #115 (0f5d0b2): card-autofill reads run sequentially on a transaction handle.** `computeCardAutofill` /
   `computeCardStaleness` (`apps/gateway/src/mrm-autofill.ts`) run reads through `Promise.all`;

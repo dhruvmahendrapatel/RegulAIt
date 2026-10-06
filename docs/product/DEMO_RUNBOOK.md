@@ -196,12 +196,14 @@ failure in demo:setup or demo:intake is retried on the next start (`docker compo
 gateway`); from demo:traffic on, use `down -v` and `up`. You can re-run the dry run any time
 without changing anything: `docker compose exec gateway node apps/gateway/dist/demo-check.js`.
 
-Without the switch nothing changes: no licence is minted, the gateway reads its default keyring,
-no MCP server, export key, offline checks or prep step runs, and `demo:set-passwords` refuses as
-before. **The switch is demo-only.** `scripts/install.sh` refuses it from the environment or a
+Without the switch (or `SEED_DEMO=1`) the gateway starts empty: no demo users, keys or relaxations
+are seeded (ADR-0181), no licence is minted, the gateway reads its default keyring, no MCP server,
+export key, offline checks or prep step runs, and `demo:set-passwords` refuses as before. **The switch is demo-only.** `scripts/install.sh` refuses it from the environment or a
 `.env`, and its rendered override pins it to `"0"`. The image's start script
 (`apps/gateway/docker-start.sh`) also ignores it on a `byoc` / `air_gapped`
-`REGULAIT_DEPLOY_MODE` and without `SEED_DEMO=1`.
+`REGULAIT_DEPLOY_MODE`. Since ADR-0181 the switch is itself the explicit demo signal: it seeds
+without `SEED_DEMO=1` (which now defaults to `0`), every seed runs with `--seed-demo`, and the
+seed refuses a database that has a real admin (anyone outside its own personas).
 
 Verified on 2026-10-05 in real containers (Linux, Docker 29, compose 5.1) with a CRLF `.env`: a
 fresh stack prepared itself (18 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
