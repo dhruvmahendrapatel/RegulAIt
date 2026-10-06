@@ -799,6 +799,21 @@ export const DEFAULT_MIN_PREPROCESS_TOKENS = 200;
  * preprocessing stays idempotent. */
 const LONG_TOKEN_ELISION = "[…elided-long-token…]";
 
+/** Trailing spaces and tabs removed by a backward scan, in linear time. The
+ * regex `/[ \t]+$/` it replaces is quadratic on a long run of tabs or spaces
+ * that does not end the line (each start position rescans the run), and a
+ * reference is user-supplied: 40,000 tabs after a fence took 1.25 s (CodeQL
+ * js/polynomial-redos, ADR-0184 triage). */
+export function trimTrailingSpaceTab(s: string): string {
+  let end = s.length;
+  while (end > 0) {
+    const c = s.charCodeAt(end - 1);
+    if (c !== 32 && c !== 9) break;
+    end--;
+  }
+  return end === s.length ? s : s.slice(0, end);
+}
+
 /** Deterministically shrink reference/file content WITHOUT changing meaning:
  * collapse runs of 3+ blank lines to 1, collapse runs of spaces/tabs to a single
  * space (but NOT inside fenced code blocks ```...```), trim trailing whitespace
@@ -823,7 +838,7 @@ export function preprocessReference(text: string): string {
       // fence delimiter: flush pending blanks, toggle, emit (trailing-trim only)
       flushBlanks();
       inFence = !inFence;
-      out.push(raw.replace(/[ \t]+$/, ""));
+      out.push(trimTrailingSpaceTab(raw));
       continue;
     }
     if (inFence) {
@@ -834,10 +849,7 @@ export function preprocessReference(text: string): string {
     }
     // outside a fence: collapse space/tab runs, trim trailing whitespace, elide
     // very long unbroken tokens
-    const line = raw
-      .replace(/[ \t]+/g, " ")
-      .replace(/[ \t]+$/, "")
-      .replace(/\S{513,}/g, LONG_TOKEN_ELISION);
+    const line = trimTrailingSpaceTab(raw.replace(/[ \t]+/g, " ")).replace(/\S{513,}/g, LONG_TOKEN_ELISION);
     if (line === "") {
       blankRun++;
       continue;
