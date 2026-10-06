@@ -247,6 +247,9 @@ const roundTrip = async (
   });
 };
 
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -259,12 +262,18 @@ beforeAll(async () => {
   });
   // another suite may already have allow-listed the loopback IdP host
   expect([201, 409]).toContain(egress.statusCode);
+  if (egress.statusCode === 201) loopbackAllowHostId = egress.json().id;
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   orgSnapshot = settings ?? null;
 }, 120_000);
 
 afterAll(async () => {
   try {
+    // M-068: remove the loopback allow entry this file created
+    if (loopbackAllowHostId) {
+      const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+      expect(gone.statusCode).toBe(200);
+    }
     if (orgSnapshot) await db.update(orgSettings).set(orgSnapshot).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     if (createdProviderIds.size > 0) await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdProviderIds]));
   } finally {

@@ -1459,3 +1459,19 @@ on Windows and Codex had just reported other Windows-only failures.
 Rule: any file a Linux container or CI executes (shell scripts, entrypoints) is pinned to LF in `.gitattributes`, and
 the Dockerfile normalises line endings on anything it executes from the build context. When the owner runs on
 Windows, test the CRLF form of every executed text file, not only of its inputs.
+
+### M-070 (2026-10-06) - A ledger rule was applied to the spec that produced it, not to the pattern it names
+
+M-068's rule (a spec that creates global state removes it before it ends) was written from `phase2.spec.ts` and
+applied there. The gateway suite carried the same pattern in 13 files: each created the shared `127.0.0.1` egress
+allow entry in `beforeAll` (`POST /v1/egress-allow-hosts` upserts by host, so the whole suite shares ONE row) and
+none removed it. Under ADR-0181's `mcpPrivateRangesDefault=false` that leftover row was the only reason 15 suites
+that register an MCP double on loopback passed - in the file orders where a leaver had already run. vitest's order is
+not fixed (largest files first with no results cache, failed-then-slowest first with one), so the dependency showed
+up as order-dependent failures on `strict-int`; the 15 dependents were given their own relaxation (baad6c9) before
+the leak itself was closed (PR #128).
+
+Rule: when a ledger rule names a pattern, grep for every instance of that pattern before the entry is closed, and fix
+or list them - here, the files that POST an allow entry minus the files that DELETE one. A file that creates shared
+state is proven clean by running it LAST on a fresh database (`vitest.run-last.config.ts`,
+`REGULAIT_VITEST_LAST=<file>`) and checking the table afterwards, not by a green run in whatever order vitest chose.

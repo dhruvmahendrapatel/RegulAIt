@@ -63,6 +63,9 @@ let app: ReturnType<typeof buildApp>;
 let memberId: string;
 let memberAuth: { authorization: string };
 let reactivateIds: string[] = [];
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 
 // same env hygiene as env-fallback.test.ts: the model_provider step reads the
 // provider env vars, so an ambient key in the runner's shell would flip it.
@@ -131,7 +134,8 @@ beforeAll(async () => {
   // and plaintext opt-ins, exactly as an air-gapped operator would, and point
   // the fixture at a loopback dead port: the guard RESOLVES every destination,
   // so a real vendor hostname would make this suite depend on DNS. Explicit
-  // rather than inherited — a sibling file's entry is not this file's fixture.
+  // rather than inherited — a sibling file's entry is not this file's fixture,
+  // and this file's entry is not a sibling's: afterAll removes it (M-068).
   const egressAllowed = await app.inject({
     method: "POST",
     headers: AUTH,
@@ -144,6 +148,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
   // deactivate every ACTIVE non-admin user so the non_admin_user step starts
   // honestly pending; restored verbatim in afterAll
   const disabled = await db
@@ -157,6 +162,11 @@ beforeAll(async () => {
 afterAll(async () => {
   await restoreStrictAdmission?.();
   await restoreSb1Posture?.();
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
+  }
   if (reactivateIds.length) {
     await db
       .update(users)
