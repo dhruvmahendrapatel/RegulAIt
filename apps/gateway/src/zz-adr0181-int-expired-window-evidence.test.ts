@@ -92,14 +92,17 @@ describe("ADR-0181 integration: an expired guardrail window is not read as a liv
     await windowRow(expired, new Date(now.getTime() - 60_000));
 
     const card = (agentId: string) => ({ id: randomUUID(), agentId, customProviderId: null });
+    type Overrides = Array<{ agentId: string; modes: { jailbreak: string } }>;
+    const overridesOf = (fill: Awaited<ReturnType<typeof computeCardAutofill>>) =>
+      (fill.sections.guardrails as { agentOverrides: Overrides }).agentOverrides;
     const liveFill = await computeCardAutofill(db, card(live), now);
-    expect(liveFill.sections.guardrails.agentOverrides).toHaveLength(1);
-    expect(liveFill.sections.guardrails.agentOverrides[0]!.modes.jailbreak).toBe("warn");
+    expect(overridesOf(liveFill)).toHaveLength(1);
+    expect(overridesOf(liveFill)[0]!.modes.jailbreak).toBe("warn");
 
     // the expired row still exists (the sweep has not run) but is not in force
     expect(await db.select().from(guardrailConfigs).where(eq(guardrailConfigs.scopeId, expired))).toHaveLength(1);
     const expiredFill = await computeCardAutofill(db, card(expired), now);
-    expect(expiredFill.sections.guardrails.agentOverrides).toEqual([]);
+    expect(overridesOf(expiredFill)).toEqual([]);
   });
 
   it("the compliance packs' guardrail_configs collector does not count an expired window row as evidence", async () => {
