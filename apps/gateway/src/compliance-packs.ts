@@ -101,6 +101,7 @@ import {
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { countTestedEvaluators } from "./eval-catalog.js";
+import { overrideInForce } from "./guardrails.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -275,7 +276,14 @@ export async function runCollector(
       const [row] = await db
         .select({ n: count() })
         .from(guardrailConfigs)
-        .where(inArray(col, atOrAbove as Array<"off" | "log" | "warn" | "block">));
+        .where(
+          and(
+            inArray(col, atOrAbove as Array<"off" | "log" | "warn" | "block">),
+            // ADR-0181 (security review): an expired guardrail-window override
+            // is not in force, so it is not evidence of a configured control
+            overrideInForce(new Date()),
+          ),
+        );
       return row?.n ?? 0;
     }
 

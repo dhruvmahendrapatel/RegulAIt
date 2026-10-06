@@ -73,6 +73,7 @@ import {
   type GuardrailMode,
 } from "@regulait/shared";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
+import { overrideInForce } from "./guardrails.js";
 import { INVENTORY_WINDOW_DAYS } from "./inventory.js";
 
 /** the ADR-0081/0082 evidence window, reused so "recent" means the same thing
@@ -319,7 +320,17 @@ export async function computeCardAutofill(
       ? db
           .select()
           .from(guardrailConfigs)
-          .where(and(eq(guardrailConfigs.scope, "agent"), inArray(guardrailConfigs.scopeId, agentIds)))
+          .where(
+            and(
+              eq(guardrailConfigs.scope, "agent"),
+              inArray(guardrailConfigs.scopeId, agentIds),
+              // ADR-0181 (security review): an EXPIRED guardrail-window override
+              // is not in force (the resolver ignores it), so it is not read as
+              // a live override here either, swept or not. A live window, and a
+              // window's recorded relaxation (its audit row), still count.
+              overrideInForce(now),
+            ),
+          )
       : Promise.resolve([]),
   ], sequential);
   const modes = (row: (typeof orgConfig)[number]) => ({
