@@ -32,6 +32,11 @@ roadmap: ../docs/product/ROADMAP.md
   - the MRM staleness exemption for `evals` dispatches (SB2);
   - the demo's audited guardrail window for red-team probes (SB1);
   - the `x-regulait-accept-buffered` header (SB1).
+- Test hygiene (M-068 sweep, PR #128 against `strict-int`): the 13 gateway suites that allow-list `127.0.0.1` now
+  remove the entry in `afterAll` (the row is upserted per host, so one leftover had let 15 MCP-double suites pass in
+  some file orders). `apps/gateway/vitest.run-last.config.ts` runs named files last to prove nothing inherits a
+  file's state; the full suite is green (303 files) with `setup-status` last and in the default order, and the table
+  is empty after both. M-070 records the process lesson.
 - Next: the batch security review, then the PR, then D4.
 
 **2026-10-05 - D3 continuous assurance (ADR-0180) built, reviewed and fixed on `d3-int`.**
