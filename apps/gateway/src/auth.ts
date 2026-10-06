@@ -755,8 +755,6 @@ export function recoveryReason(user: {
 // The implementation lives in `totp.ts` (ADR-0181: the e2e journeys load it
 // without the rest of this module); every name is re-exported unchanged.
 export {
-  base32Decode,
-  base32Encode,
   generateTotpSecret,
   otpauthUri,
   TOTP_DIGITS,
