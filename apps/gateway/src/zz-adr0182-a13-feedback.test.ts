@@ -697,6 +697,9 @@ describe("A13 open incident: A12's contract, pre-linked, no copy of the body", (
     expect(again.statusCode).toBe(409);
     expect(again.json().error).toBe("incident_already_linked");
     await db.update(useCaseFeedback).set({ incidentId: null }).where(eq(useCaseFeedback.id, id));
+    // migration 0168: an incident that is not closed is never deleted — close the fixture first (test-only)
+    await db.execute(sql`UPDATE ai_incidents SET status = 'closed', closed_at = now(), root_cause = 'fixture cleanup',
+      lessons_learned = 'fixture cleanup' WHERE id = ${incidentId} AND status <> 'closed'`);
     await db.delete(aiIncidents).where(eq(aiIncidents.id, incidentId));
   });
 });

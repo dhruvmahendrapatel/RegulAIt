@@ -10674,9 +10674,9 @@ export const useCaseDecisionRecords = pgTable(
   "use_case_decision_records",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    useCaseId: uuid("use_case_id")
-      .notNull()
-      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    // migration 0168 (D4 review): SET NULL, not CASCADE — the record of a
+    // decision outlives the use case it was taken on
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "set null" }),
     workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
     outcome: text("outcome", { enum: USE_CASE_DECISIONS }).notNull(),

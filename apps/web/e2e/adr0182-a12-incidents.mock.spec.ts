@@ -12,7 +12,10 @@
  *    "confirm with counsel" caveat on EU clocks and the cited text; recording
  *    the initial report posts stage `initial` (Art. 73(5)); the evidence hold
  *    banner cites Art. 73(6);
- *  - axe (WCAG 2.x A/AA) in light and dark on both pages.
+ *  - D4 review: the gate banner says only closing releases it; an owner who is
+ *    not an admin cannot close a high/serious incident (the dialog says why);
+ *    a report recorded more than an hour back asks for a reason and sends it;
+ *  - axe (WCAG 2.x A/AA) in light and dark on both pages and the dialogs.
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
@@ -128,7 +131,7 @@ const detail = {
     quote: "…shall not perform any investigation which involves altering the AI system concerned …",
   },
   gate: { mode: "enforce", holds: "open_serious_incident" },
-  permissions: { canEdit: true, isAdmin: true },
+  permissions: { canEdit: true, canClose: true, closeNeedsAdmin: true, isAdmin: true },
   disclaimer: DISCLAIMER,
 };
 
@@ -138,9 +141,14 @@ interface Captured {
   sent: Array<Record<string, unknown>>;
 }
 
-async function mockApi(page: Page): Promise<Captured> {
+async function mockApi(page: Page, opts: { asOwner?: boolean } = {}): Promise<Captured> {
   const cap: Captured = { creates: [], settings: [], sent: [] };
-  const me = { userId: "u-admin", isAdmin: true, user: { id: "u-admin", email: "avery@example.test", displayName: "Avery Admin" } };
+  const me = opts.asOwner
+    ? { userId: "u-owner", isAdmin: false, user: { id: "u-owner", email: "olive@example.test", displayName: "Olive Owner" } }
+    : { userId: "u-admin", isAdmin: true, user: { id: "u-admin", email: "avery@example.test", displayName: "Avery Admin" } };
+  const shown = opts.asOwner
+    ? { ...detail, permissions: { canEdit: true, canClose: false, closeNeedsAdmin: true, isAdmin: false } }
+    : detail;
   let settings = { incidentGateMode: "enforce", incidentEvidenceHold: true, incidentClockRegimes: ["eu-ai-act", "hipaa"] };
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -167,7 +175,7 @@ async function mockApi(page: Page): Promise<Captured> {
       cap.sent.push(req.postDataJSON() as Record<string, unknown>);
       return json(route, { notification: { ...detail.notifications[1], status: "sent_initial" } });
     }
-    if (p === `/v1/incidents/${INC}`) return json(route, detail);
+    if (p === `/v1/incidents/${INC}`) return json(route, shown);
     return json(route, {});
   });
   return cap;
@@ -249,6 +257,7 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     await expect(page.getByTestId("clock-art26-5-inform-provider")).toContainText("immediately — no numeric limit in the text");
     await expect(page.getByTestId("clock-art26-5-inform-provider").getByRole("button", { name: /initial report/ })).toHaveCount(0);
     await expect(page.getByText("This incident holds the use case's deploy gate")).toBeVisible();
+    await expect(page.getByText(/until it is closed by an admin; marking it resolved does not release it/)).toBeVisible();
     await expectAxeClean(page, "incident detail");
 
     await general.getByRole("button", { name: "Record the initial report for art73-2-general" }).click();
@@ -257,5 +266,40 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     await dialog.getByRole("button", { name: "Record" }).click();
     await expect.poll(() => cap.sent.length).toBe(1);
     expect(cap.sent[0]).toMatchObject({ stage: "initial", recipient: "the market surveillance authorities", reference: "MSA-2026-118" });
+  });
+
+  test("an owner who is not an admin cannot close a high, serious incident: the dialog says an admin closes it", async ({ page }) => {
+    await mockApi(page, { asOwner: true });
+    await page.goto(`/ui/incidents/${INC}`);
+    await expect(page.getByRole("heading", { name: "INC-00042 · Claims assistant denied valid claims" })).toBeVisible();
+    await page.getByRole("button", { name: "Close…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Close INC-00042" });
+    await expect(dialog.getByText(/so an admin closes it/)).toBeVisible();
+    await dialog.getByLabel("Root cause").fill("synthetic root cause");
+    await dialog.getByLabel("Lessons learned").fill("synthetic lesson");
+    await expect(dialog.getByRole("button", { name: "Close incident" })).toBeDisabled();
+    await expectAxeClean(page, "close dialog (owner)");
+  });
+
+  test("a report recorded more than an hour after it was sent asks why, and sends the reason", async ({ page }) => {
+    const cap = await mockApi(page);
+    await page.goto(`/ui/incidents/${INC}`);
+    await page.getByTestId("clock-art73-2-general").getByRole("button", { name: "Record the report for art73-2-general" }).click();
+    const dialog = page.getByRole("dialog", { name: "Record the report as sent" });
+    await expect(dialog.getByText(/Not before the clock started/)).toBeVisible();
+    await expect(dialog.getByLabel(/Why is this recorded late/)).toHaveCount(0);
+    const d = new Date(Date.now() - 3 * 24 * HOUR);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const local = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    await dialog.getByLabel("Sent at (local time; empty = now)").fill(local);
+    const why = dialog.getByLabel(/Why is this recorded late/);
+    await expect(why).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Record" })).toBeDisabled();
+    await expectAxeClean(page, "record a backdated report");
+    await why.fill("sent by registered post; the receipt arrived today");
+    await dialog.getByRole("button", { name: "Record" }).click();
+    await expect.poll(() => cap.sent.length).toBe(1);
+    expect(cap.sent[0]).toMatchObject({ stage: "complete", reason: "sent by registered post; the receipt arrived today" });
+    expect(typeof cap.sent[0]!.sentAt).toBe("string");
   });
 });

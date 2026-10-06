@@ -25,6 +25,7 @@ import {
   inArray,
   projects,
   runMigrations,
+  sql,
   useCaseFeedback,
   users,
   type Db,
@@ -141,7 +142,15 @@ afterAll(async () => {
     if (made.runs.length) await db.delete(decisionRegressionRuns).where(inArray(decisionRegressionRuns.id, made.runs));
     if (made.docs.length) await db.delete(aiPolicyDocuments).where(inArray(aiPolicyDocuments.id, made.docs)); // cascades the acks
     if (made.feedback.length) await db.delete(useCaseFeedback).where(inArray(useCaseFeedback.id, made.feedback));
-    if (made.incidents.length) await db.delete(aiIncidents).where(inArray(aiIncidents.id, made.incidents));
+    if (made.incidents.length) {
+      // migration 0168: an incident that is not closed is never deleted — close the fixtures first (test-only)
+      for (const id of made.incidents) {
+        await db.execute(sql`UPDATE ai_incidents SET status = 'closed', closed_at = now(),
+          root_cause = COALESCE(root_cause, 'fixture cleanup'), lessons_learned = COALESCE(lessons_learned, 'fixture cleanup')
+          WHERE id = ${id} AND status <> 'closed'`);
+      }
+      await db.delete(aiIncidents).where(inArray(aiIncidents.id, made.incidents));
+    }
     if (made.useCases.length) await db.delete(aiUseCases).where(inArray(aiUseCases.id, made.useCases));
     if (made.projects.length) await db.delete(projects).where(inArray(projects.id, made.projects));
     if (made.users.length) await db.delete(users).where(inArray(users.id, made.users));

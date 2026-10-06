@@ -4,7 +4,7 @@
  * sentences (which never invent free text).
  */
 import { describe, expect, it } from "vitest";
-import { EU_CRITERIA, eventSentence, impliesSerious, localInputToIso, settingRelaxed, utc } from "./incidentModel";
+import { EU_CRITERIA, eventSentence, impliesSerious, localInputToIso, sentAtBackdated, settingRelaxed, utc } from "./incidentModel";
 
 describe("incidentModel", () => {
   it("names a setting relaxed exactly when it is off its strict default", () => {
@@ -44,5 +44,17 @@ describe("incidentModel", () => {
     );
     expect(eventSentence({ kind: "containment", detail: { agentId: "a1", changed: false } })).toBe("Contained: agent a1 halted (it was already halted)");
     expect(eventSentence({ kind: "note", detail: { evidenceHoldOverride: true } })).toBe("Evidence hold overridden by an admin");
+  });
+  it("a sentAt more than an hour back is backdated (the form then asks for a reason, D4G-06)", () => {
+    const now = new Date("2026-10-05T12:00:00Z");
+    expect(sentAtBackdated(undefined, now)).toBe(false);
+    expect(sentAtBackdated("2026-10-05T11:30:00Z", now)).toBe(false);
+    expect(sentAtBackdated("2026-10-05T10:59:00Z", now)).toBe(true);
+    expect(
+      eventSentence({
+        kind: "notification",
+        detail: { clockId: "art73-2-general", from: "pending", to: "sent_complete", backdated: true, sentAt: "2026-10-01T00:00:00Z", recordedAt: "2026-10-05T12:00:00Z" },
+      }),
+    ).toMatch(/recorded late: sent .*, recorded /);
   });
 });

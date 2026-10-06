@@ -14,8 +14,9 @@
  *          medium alert
  *
  *   ADR-0182 A12, as `incident_gate_mode` says (enforce = BLOCK, warn = WARN,
- *   off = skipped and labelled so): an open or contained serious incident, or
- *   high or critical incident, on the use case. Resolving it releases the gate.
+ *   off = skipped and labelled so): a serious incident, or a high or critical
+ *   incident, on the use case that is not closed. Only closing it releases the
+ *   gate (`resolved` does not: D4 review D4A-01 / D4G-01).
  *
  *   ADR-0180 continuous assurance, as `assurance_gate_mode` says (enforce =
  *   BLOCK, warn = WARN, off = skipped and labelled so): a measured condition
@@ -143,12 +144,12 @@ export const DEPLOY_GATE_REASON_INFO: Readonly<Record<DeployGateReasonCode, { ti
   open_serious_incident: {
     title: "Open serious incident",
     explanation:
-      "A serious AI incident on this use case is open or contained. It holds the release until it is resolved (the incident deploy gate).",
+      "A serious AI incident on this use case is not closed. It holds the release until it is closed (the incident deploy gate); marking it resolved does not release it.",
   },
   open_high_incident: {
     title: "Open high-severity incident",
     explanation:
-      "A high or critical AI incident on this use case is open or contained. It holds the release until it is resolved (the incident deploy gate).",
+      "A high or critical AI incident on this use case is not closed. It holds the release until it is closed (the incident deploy gate); marking it resolved does not release it.",
   },
 };
 

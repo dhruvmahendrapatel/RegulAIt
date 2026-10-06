@@ -204,7 +204,7 @@ export default function IncidentsPage() {
             </div>
           </div>
           <p className={v.faint}>
-            {list.data?.scope === "all" ? "Showing every incident (admin)." : "Showing the incidents you own and those on use cases you own."} {CLOCK_DISCLAIMER}
+            {list.data?.scope === "all" ? "Showing every incident (admin)." : "Showing the incidents you own or reported, those on use cases you own and those linked to agents you steward."} {CLOCK_DISCLAIMER}
           </p>
           <Table
             rows={rows}

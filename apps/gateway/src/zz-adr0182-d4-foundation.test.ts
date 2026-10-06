@@ -182,8 +182,15 @@ afterAll(async () => {
     alert_sla_hours = '{"high": 24, "medium": 72, "low": 168}'::jsonb, alert_ticket_mode = 'manual'`);
   await restoreAdminKeyMfa?.();
   // incidents cascade to their events and clocks (the referential path the
-  // append-only trigger admits); use cases cascade to their decision records
-  for (const id of created.incidents) await db.delete(aiIncidents).where(eq(aiIncidents.id, id));
+  // append-only trigger admits). Migration 0168: an incident that is not
+  // closed is never deleted, so the fixtures are closed first (test-only);
+  // a use case's decision records outlive it (use_case_id set null)
+  for (const id of created.incidents) {
+    await db.execute(sql`UPDATE ai_incidents SET status = 'closed', closed_at = now(),
+      root_cause = COALESCE(root_cause, 'fixture cleanup'), lessons_learned = COALESCE(lessons_learned, 'fixture cleanup')
+      WHERE id = ${id} AND status <> 'closed'`);
+    await db.delete(aiIncidents).where(eq(aiIncidents.id, id));
+  }
   for (const id of created.useCases) await db.delete(aiUseCases).where(eq(aiUseCases.id, id));
   for (const id of created.kris) await db.delete(kris).where(eq(kris.id, id));
   for (const id of created.agents) await db.delete(agents).where(eq(agents.id, id));
@@ -287,7 +294,7 @@ describe("ADR-0182 secure by default: the D4 org settings", () => {
 });
 
 describe("ADR-0182 migration 0162: the rules the database holds", () => {
-  it("decision records are append-only; deleting the use case removes them (the referential path)", async () => {
+  it("decision records are append-only; deleting the use case KEEPS them, use_case_id set null (migration 0168)", async () => {
     const uc = await mkUseCase("records");
     const [rec] = await db
       .insert(useCaseDecisionRecords)
@@ -304,7 +311,9 @@ describe("ADR-0182 migration 0162: the rules the database holds", () => {
       /use_case_decision_records_outcome_check/,
     );
     await db.delete(aiUseCases).where(eq(aiUseCases.id, uc));
-    expect(await db.select().from(useCaseDecisionRecords).where(eq(useCaseDecisionRecords.id, rec!.id))).toHaveLength(0);
+    const kept = await db.select().from(useCaseDecisionRecords).where(eq(useCaseDecisionRecords.id, rec!.id));
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ useCaseId: null, outcome: "approved", decidedBy: users.admin.id });
   });
 
   it("incident events are append-only; a clock is never deleted and is set aside only with a reason", async () => {
