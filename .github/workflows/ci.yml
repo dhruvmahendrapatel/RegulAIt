@@ -168,11 +168,19 @@ jobs:
       # CI addition is publishing S3 on the runner's loopback (compose
       # publishes no port), so the endpoint below stays localhost:9000.
       - name: Object store — the compose `objectstore` service, plus its bucket init
+        # BOTH commands must see the same compose files. `run` without the port
+        # override sees a different `objectstore` config and RECREATES it with no
+        # published port: the init job still works over the compose network, and
+        # the suite then finds nothing on localhost:9000 (PR #133, 23:12:05).
         run: |
           printf 'services:\n  objectstore:\n    ports: ["127.0.0.1:9000:9000"]\n' > "$RUNNER_TEMP/ci-objectstore.yml"
-          docker compose -f docker-compose.yml -f "$RUNNER_TEMP/ci-objectstore.yml" up -d --wait objectstore \
-            || { docker compose logs objectstore; exit 1; }
+          export COMPOSE_FILE="docker-compose.yml:$RUNNER_TEMP/ci-objectstore.yml"
+          docker compose up -d --wait objectstore || { docker compose logs objectstore; exit 1; }
           docker compose run --rm objectstore-init
+          # what the suite needs: S3 answering on the runner's loopback (an
+          # unsigned request is refused 403, which still proves the listener)
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:9000/) || code=000
+          [ "$code" != 000 ] || { echo "object store not reachable on 127.0.0.1:9000 after init" >&2; docker compose ps -a; exit 1; }
 
       # `pnpm -r build` also typechecks + bundles the React SPA (apps/web),
       # which is the ONLY UI since ADR-0033 deleted the two single-file
