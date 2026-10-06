@@ -3,6 +3,7 @@ import {
   randomBytes,
   scryptSync,
 } from "node:crypto";
+import { deploymentBaseUrl } from "./public-url.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
@@ -1772,11 +1773,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     });
   };
 
-  const baseUrlFor = (req: FastifyRequest): string => {
-    const proto = requestIsSecure(req) ? "https" : "http";
-    const host = req.headers.host ?? "localhost";
-    return `${proto}://${host}`;
-  };
+  // REGULAIT_PUBLIC_URL when set, else the request's scheme and Host
+  const baseUrlFor = (req: FastifyRequest): string => deploymentBaseUrl(req);
 
   // enabled providers for the login screen — names only, no config. Exempt
   // from auth (the login page has no credential yet).

@@ -17,6 +17,8 @@ import {
   OutlookConnectorProvider,
   OUTLOOK_TOKEN_REFRESH_MARGIN_MS,
   clearOutlookTokenCache,
+  graphErrorDetail,
+  OUTLOOK_ERROR_DETAIL_MAX,
   parseOutlookCredential,
   WebhookConnectorProvider,
   buildSnowflakeJwt,
@@ -1710,5 +1712,27 @@ describe("reservedChatControl", () => {
     let deep: unknown = { text: "x" };
     for (let i = 0; i < 40; i++) deep = { nested: deep };
     expect(reservedChatControl("slack", "write", deep)?.code).toBe("reserved_chat_control");
+  });
+});
+
+describe("outlook Graph error detail (ADR-0183 batch 2 review L2)", () => {
+  it("names Graph's code and message, capped, with secrets, bearer tokens and JWTs scrubbed", () => {
+    const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl";
+    const body = JSON.stringify({
+      error: { code: "ErrorAccessDenied", message: `nope s3cr3t-value Bearer abc.def ${jwt} client_secret=zzz\n` + "x".repeat(2000) },
+    });
+    const d = graphErrorDetail(body, 403, ["s3cr3t-value"]);
+    expect(d).toMatch(/^HTTP 403 ErrorAccessDenied: nope/);
+    expect(d).not.toContain("s3cr3t-value");
+    expect(d).not.toContain("abc.def");
+    expect(d).not.toContain(jwt);
+    expect(d).not.toContain("zzz");
+    expect(d).not.toMatch(/\n/);
+    expect(d.length).toBeLessThanOrEqual(OUTLOOK_ERROR_DETAIL_MAX + 1);
+  });
+  it("a non-JSON body is capped and scrubbed too", () => {
+    const d = graphErrorDetail("<html>" + "y".repeat(5000), 500, []);
+    expect(d.startsWith("HTTP 500: <html>")).toBe(true);
+    expect(d.length).toBeLessThanOrEqual(OUTLOOK_ERROR_DETAIL_MAX + 1);
   });
 });

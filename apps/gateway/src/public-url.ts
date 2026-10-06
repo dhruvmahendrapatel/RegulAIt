@@ -57,7 +57,19 @@ export function parsePublicUrl(raw: string | undefined): string | null {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
     throw new PublicUrlBootError(`the scheme must be https (http only for localhost or loopback), got ${url.protocol.replace(/:$/, "")}`);
   }
-  if (url.username || url.password) throw new PublicUrlBootError("it must not carry credentials");
+  // the AUTHORITY as written: `https://:@host` parses to empty credentials the
+  // URL parser silently drops, so the raw text is checked, not the parse
+  const rawAfterScheme = value.replace(/^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*/, "");
+  const rawAuthority = rawAfterScheme.split(/[/\\?#]/, 1)[0] ?? "";
+  const rawPath = rawAfterScheme.slice(rawAuthority.length).split(/[?#]/, 1)[0] ?? "";
+  if (url.username || url.password || rawAuthority.includes("@")) throw new PublicUrlBootError("it must not carry credentials");
+  // a trailing-dot FQDN names the same host under a different origin string
+  // (certificates, cookies and allow-lists compare the dotless form): refused
+  if (url.hostname.endsWith(".")) throw new PublicUrlBootError("the host must not end with a dot");
+  // dot segments are refused as written, never normalised away
+  if (/(^|[/\\])(\.|%2e){1,2}([/\\]|$)/i.test(rawPath)) {
+    throw new PublicUrlBootError(`the base path ${JSON.stringify(rawPath)} must not contain '.' or '..' segments`);
+  }
   if (url.search || value.includes("?")) throw new PublicUrlBootError("it must not carry a query");
   if (url.hash || value.includes("#")) throw new PublicUrlBootError("it must not carry a fragment");
   const basePath = url.pathname.replace(/\/+$/, "");
@@ -89,4 +101,33 @@ export function publicUrlPosture(env: NodeJS.ProcessEnv = process.env): { set: b
     value = null;
   }
   return { set: value !== null, value, env: PUBLIC_URL_ENV };
+}
+
+/**
+ * Join the public URL and an absolute in-app path. A base path that already
+ * ends in `/ui` (an operator who pasted the SPA's address) is not doubled:
+ * `https://h/ui` + `/ui/admin` → `https://h/ui/admin`.
+ */
+export function joinPublicUrl(base: string, path: string): string {
+  const b = base.replace(/\/+$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (/\/ui$/.test(b) && (p === "/ui" || p.startsWith("/ui/") || p.startsWith("/ui?"))) return `${b}${p.slice(3)}`;
+  return `${b}${p}`;
+}
+
+/**
+ * ADR-0183 batch 2 review — the base URL a sign-in flow or a discovery
+ * document names (SAML ACS and default SP entity id, the OIDC redirect_uri,
+ * RFC 9728 resource metadata). When REGULAIT_PUBLIC_URL is set it is the
+ * answer, whatever Host the request carried: a forged Host can then no longer
+ * move a SAML Destination/Audience check or a redirect_uri. Unset → today's
+ * behaviour, the request's scheme (`req.protocol`, which is exactly what
+ * `requestIsSecure` reads: the trusted-proxy-aware value) and Host.
+ * A set-but-invalid value throws (fail closed; boot already refuses it).
+ */
+export function deploymentBaseUrl(req: { protocol: string; headers: { host?: string } }, env: NodeJS.ProcessEnv = process.env): string {
+  const pub = resolvePublicUrl(env);
+  if (pub) return pub;
+  const proto = req.protocol === "https" ? "https" : "http";
+  return `${proto}://${req.headers.host ?? "localhost"}`;
 }

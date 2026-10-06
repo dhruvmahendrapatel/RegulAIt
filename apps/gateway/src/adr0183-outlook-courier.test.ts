@@ -503,6 +503,24 @@ describe("6–8. failures, alerts and the inbound path that does not exist", () 
     }
   });
 
+  it("L1: a per-post recipient other than the registered mailbox is refused (403), audited, and nothing is sent", async () => {
+    const approvalId = await makeApproval();
+    const before = { login: loginHits.length, graph: graphHits.length };
+    for (const channel of ["outsider@evil.example", "ANA@other.example"]) {
+      const res = await inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION, channel });
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json().error).toBe("recipient_not_registered");
+    }
+    const alertRes = await inject("POST", `/v1/governance/alerts/${alertId}/post`, { connectionName: CONNECTION, channel: "outsider@evil.example" });
+    expect(alertRes.statusCode).not.toBe(200);
+    expect({ login: loginHits.length, graph: graphHits.length }).toEqual(before);
+    const refused = (await db.select().from(auditLog).where(eq(auditLog.ruleId, CHATOPS_RULE_IDS.postRefusedRecipient))).filter((r) => r.at >= startedAt);
+    expect(refused.length).toBeGreaterThanOrEqual(3);
+    // the registered recipient, named explicitly (any case), still sends
+    const ok = await inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION, channel: RECIPIENT.toUpperCase() });
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
   it("8: every inbound route still refuses outlook BY NAME", async () => {
     for (const route of ["interactions", "events", "messages"]) {
       const res = await app.inject({

@@ -1200,13 +1200,13 @@ describe("ADR-0060: sink precedence", () => {
 // Lock support, or run SeaweedFS (Apache-2.0; what CI and the compose stack
 // use) with the compose credentials:
 //
-//   AWS_ACCESS_KEY_ID=regulait AWS_SECRET_ACCESS_KEY=regulait-dev-minio \
+//   AWS_ACCESS_KEY_ID=regulait AWS_SECRET_ACCESS_KEY=regulait-dev-objectstore \
 //     weed mini -dir=/tmp/anchors -s3.port=9000
 // -----------------------------------------------------------------------------
 
 const S3_TEST_ENDPOINT = process.env.REGULAIT_TEST_S3_ENDPOINT ?? "http://127.0.0.1:9000";
 const S3_TEST_KEY = process.env.REGULAIT_TEST_S3_ACCESS_KEY_ID ?? "regulait";
-const S3_TEST_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait-dev-minio";
+const S3_TEST_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait-dev-objectstore";
 // Reachability is a SIGNED S3 call with the suite's own credentials, not a
 // vendor health path: `/minio/health/live` exists only on MinIO (SeaweedFS
 // answers it 403, as a request for a bucket called "minio"). ListBuckets is in

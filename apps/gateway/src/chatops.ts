@@ -134,9 +134,8 @@ import {
 import { ConnectionEgressBlockedError, guardConnectionCall } from "./connection-egress.js";
 import { EgressBlockedError } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { PUBLIC_URL_ENV, resolvePublicUrl } from "./public-url.js";
+import { joinPublicUrl, PUBLIC_URL_ENV, resolvePublicUrl } from "./public-url.js";
 import { projectPiiMode } from "./projects.js";
-import { baseUrlFor } from "./mcp-auth-metadata.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
@@ -219,6 +218,8 @@ export const CHATOPS_RULE_IDS = {
   /** ADR-0173 batch 2b review — the Slack workspace pin */
   slackTeamChanged: "chatops-slack-team-changed",
   slackRefusedTeam: "chatops-slack-refused-team",
+  /** ADR-0183 batch 2 review (L1) — mail goes to the registered mailbox only */
+  postRefusedRecipient: "chatops-post-refused-unregistered-recipient",
 } as const;
 
 /** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
@@ -749,6 +750,25 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (kind === "outlook" && !mailboxSchema.safeParse(channel).success) {
       return { ok: false, status: 400, body: { error: "invalid_recipient", detail: "an outlook message is sent to ONE mailbox address" } };
     }
+    // ADR-0183 batch 2 review (L1) — STRICT: mail goes to the workspace's
+    // REGISTERED mailbox only. A per-post `channel` override naming any other
+    // address would let whoever posts make the organisation's own mailbox send
+    // an approval summary anywhere, including off-domain. Refused and audited.
+    // (An admin-set allow-list of further recipients needs its own column and
+    // is a follow-up; until then the registered recipient is the whole list.)
+    if (kind === "outlook" && channel.trim().toLowerCase() !== conn.defaultChannel.trim().toLowerCase()) {
+      await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedRecipient, "deny",
+        `outlook workspace '${conn.name}': mail to an unregistered recipient refused ('${label}')`,
+        { registered: conn.defaultChannel, requested: channel, label });
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          error: "recipient_not_registered",
+          detail: "an outlook workspace sends mail to its registered mailbox only; register a workspace for another recipient",
+        },
+      };
+    }
     if (kind === "outlook") {
       const pub = mailPublicUrl();
       if (!pub.ok) return pub;
@@ -921,7 +941,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       // its origin is REGULAIT_PUBLIC_URL alone — the request's Host is never
       // read for it. The link is the approval's page, never a token: opening it
       // means signing in.
-      portalUrl: pub?.ok ? `${pub.url}/ui${portalUrl(approvalId)}` : portalUrl(approvalId),
+      portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${portalUrl(approvalId)}`) : portalUrl(approvalId),
       fenced,
       decidable,
     });
@@ -975,7 +995,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
                 severity: alert.severity,
                 ruleLabel: (MONITOR_RULES as Record<string, { label: string }>)[alert.ruleId]?.label ?? alert.ruleId,
                 title: alert.title,
-                portalUrl: `${pub?.ok ? pub.url : ""}/ui${alertPortalUrl(alert.id)}`,
+                portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${alertPortalUrl(alert.id)}`) : `/ui${alertPortalUrl(alert.id)}`,
               }),
             );
     } catch (err) {
@@ -1448,7 +1468,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
       const retryRaw = headers[SLACK_RETRY_NUM_HEADER];
       const retryNum = retryRaw && /^\d{1,4}$/.test(retryRaw) ? Number(retryRaw) : null;
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum, baseUrlFor(req)));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum));
       return reply.status(ack.status).send(ack.body);
     });
 
@@ -1467,7 +1487,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       const fresh = teamsActivityFreshness(parsed.timestamp, now());
       if (!fresh.ok) return reply.status(401).send({ error: "unauthenticated", code: fresh.code });
 
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null, baseUrlFor(req)));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null));
       return reply.status(ack.status).send(ack.body);
     });
 
@@ -1519,7 +1539,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         return reply.status(403).send({ error: "tenant_not_allowed", detail: "this bot accepts activities from its pinned tenant only" });
       }
       if (activity.kind === "ignored") return reply.status(200).send({ ok: true, ignored: activity.reason });
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, activity.message, null, baseUrlFor(req), "courier"));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, activity.message, null, null, "courier"));
       return reply.status(ack.status).send(ack.body);
     });
   });

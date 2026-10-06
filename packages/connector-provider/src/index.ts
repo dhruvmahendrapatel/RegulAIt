@@ -1116,6 +1116,32 @@ export function clearOutlookTokenCache(): void {
   outlookTokenCache.clear();
 }
 
+
+export const OUTLOOK_ERROR_DETAIL_MAX = 300;
+/** strip bearer tokens, JWT-shaped strings and the given literal secrets */
+export function scrubSecrets(text: string, secrets: readonly string[] = []): string {
+  let out = text;
+  for (const sec of secrets) if (sec && sec.length >= 4) out = out.split(sec).join("[redacted]");
+  return out
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g, "[redacted-jwt]")
+    .replace(/((?:client_secret|access_token|password)["'=:\s]+)[^"'&\s,}]+/gi, "$1[redacted]");
+}
+/** Graph's `{error:{code,message}}` as one capped, scrubbed line */
+export function graphErrorDetail(text: string, status: number, secrets: readonly string[] = []): string {
+  let line = `HTTP ${status}`;
+  try {
+    const e = (JSON.parse(text) as { error?: { code?: unknown; message?: unknown } }).error;
+    if (e && typeof e === "object") {
+      line = `HTTP ${status} ${typeof e.code === "string" ? e.code : ""}: ${typeof e.message === "string" ? e.message : ""}`;
+    }
+  } catch {
+    line = `HTTP ${status}: ${text}`;
+  }
+  const clean = scrubSecrets(line.replace(/[\r\n\t]+/g, " "), secrets);
+  return clean.length > OUTLOOK_ERROR_DETAIL_MAX ? `${clean.slice(0, OUTLOOK_ERROR_DETAIL_MAX)}…` : clean;
+}
+
 export class OutlookConnectorProvider implements ConnectorProvider {
   readonly kind = "outlook" as const;
   private readonly base: string;
@@ -1267,7 +1293,10 @@ export class OutlookConnectorProvider implements ConnectorProvider {
       throw new ConnectorProviderError("outlook sendMail rate-limited by Microsoft Graph (HTTP 429)", 429);
     }
     if (res.status >= 400) {
-      throw new ConnectorProviderError(`outlook sendMail failed: ${text}`, res.status);
+      // ADR-0183 batch 2 review (L2): the caller sees Graph's error CODE and a
+      // capped, scrubbed message; the whole body goes to the server log only
+      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, [this.cred.appPassword])}`);
+      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, [this.cred.appPassword])}`, res.status);
     }
     // Graph answers 202 with an EMPTY body on success. Reporting that honestly
     // matters: "accepted for delivery" is not "delivered", and the adapter does

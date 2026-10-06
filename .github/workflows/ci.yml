@@ -133,7 +133,7 @@ jobs:
       # service (or a wrong credential) fails the job out loud.
       REGULAIT_TEST_S3_ENDPOINT: http://localhost:9000
       REGULAIT_TEST_S3_ACCESS_KEY_ID: regulait
-      REGULAIT_TEST_S3_SECRET_ACCESS_KEY: regulait-dev-minio
+      REGULAIT_TEST_S3_SECRET_ACCESS_KEY: regulait-dev-objectstore
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

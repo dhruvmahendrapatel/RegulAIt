@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { startGateway } from "./boot.js";
-import { PublicUrlBootError, parsePublicUrl, publicUrlPosture } from "./public-url.js";
+import { PublicUrlBootError, deploymentBaseUrl, joinPublicUrl, parsePublicUrl, publicUrlPosture } from "./public-url.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -38,11 +38,36 @@ describe("parsePublicUrl", () => {
       ["https://regulait.acme.example/#x", /fragment/],
       ["https://regulait.acme.example/a b", /base path/],
       ["https://regulait.acme.example/a%3Fb", /base path/],
+      // ADR-0183 batch 2 review L3–L5: refused as written, never normalised
+      ["https://:@regulait.acme.example", /credentials/],
+      ["https://@regulait.acme.example", /credentials/],
+      ["https://regulait.acme.example.", /dot/],
+      ["https://regulait.acme.example./gov", /dot/],
+      ["https://regulait.acme.example/..", /'\.' or '\.\.'/],
+      ["https://regulait.acme.example/gov/../x", /'\.' or '\.\.'/],
+      ["https://regulait.acme.example/./gov", /'\.' or '\.\.'/],
+      ["https://regulait.acme.example/gov/%2e%2e", /'\.' or '\.\.'/],
     ];
     for (const [value, why] of bad) {
       expect(() => parsePublicUrl(value), value).toThrow(PublicUrlBootError);
       expect(() => parsePublicUrl(value), value).toThrow(why);
     }
+  });
+
+  it("sign-in/discovery base: the public URL when set (a forged Host ignored), else the request's scheme and Host", () => {
+    const req = { protocol: "https", headers: { host: "attacker.example" } };
+    expect(deploymentBaseUrl(req, { REGULAIT_PUBLIC_URL: "https://sp.example/gov" })).toBe("https://sp.example/gov");
+    expect(deploymentBaseUrl(req, {})).toBe("https://attacker.example");
+    expect(deploymentBaseUrl({ protocol: "http", headers: {} }, {})).toBe("http://localhost");
+    expect(() => deploymentBaseUrl(req, { REGULAIT_PUBLIC_URL: "https://:@x.example" })).toThrow(PublicUrlBootError);
+  });
+
+  it("L5: joining the base and an in-app path never doubles /ui", () => {
+    expect(joinPublicUrl("https://h.example", "/ui/admin?x=1")).toBe("https://h.example/ui/admin?x=1");
+    expect(joinPublicUrl("https://h.example/gov", "/ui/admin")).toBe("https://h.example/gov/ui/admin");
+    expect(joinPublicUrl("https://h.example/ui", "/ui/admin")).toBe("https://h.example/ui/admin");
+    expect(joinPublicUrl("https://h.example/gov/ui", "/ui/builder/inbox?tab=all")).toBe("https://h.example/gov/ui/builder/inbox?tab=all");
+    expect(joinPublicUrl("https://h.example/build", "/ui/x")).toBe("https://h.example/build/ui/x");
   });
 
   it("the posture fact: set and its value, or unset (never throws)", () => {
