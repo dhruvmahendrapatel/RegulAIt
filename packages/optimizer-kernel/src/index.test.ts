@@ -13,6 +13,7 @@ import {
   DEFAULT_MIN_EDITABLE_BASELINE_TOKENS,
   EDIT_DIFF_FRACTION,
   preprocessReference,
+  trimTrailingSpaceTab,
   planFilePreprocessing,
   DEFAULT_MIN_PREPROCESS_TOKENS,
   normalizeCacheInput,
@@ -687,5 +688,26 @@ describe("planFilePreprocessing (file preprocessing §8)", () => {
 
   it("exposes the documented default constant", () => {
     expect(DEFAULT_MIN_PREPROCESS_TOKENS).toBe(200);
+  });
+});
+
+describe("preprocessReference: linear time on long whitespace runs (CodeQL js/polynomial-redos, ADR-0184)", () => {
+  it("a fence line with 400,000 tabs before a non-space finishes well inside a second", () => {
+    // the replaced `/[ \t]+$/` took 1.25 s on 40,000 tabs and grows with the square of the run
+    const t0 = performance.now();
+    preprocessReference("```" + "\t".repeat(400_000) + "x");
+    preprocessReference("text" + " \t".repeat(200_000) + "y");
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
+  it("trims exactly what the old regex trimmed, on a deterministic sample", () => {
+    const alphabet = [" ", "\t", "x", "```", "\n", " ", "\r"];
+    let a = 7;
+    const next = () => ((a = (a * 1103515245 + 12345) >>> 0) / 4294967296);
+    for (let i = 0; i < 4000; i++) {
+      let s = "";
+      for (let j = 0, n = Math.floor(next() * 14); j < n; j++) s += alphabet[Math.floor(next() * alphabet.length)];
+      expect(trimTrailingSpaceTab(s), JSON.stringify(s)).toBe(s.replace(/[ \t]+$/, ""));
+    }
   });
 });

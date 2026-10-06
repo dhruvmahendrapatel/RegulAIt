@@ -38,6 +38,7 @@ import {
   type PullRequestRef,
   type PullRequestState,
 } from "./types.js";
+import { trimTrailingSlashes } from "./url.js";
 
 export interface GitLabAdapterOptions {
   /** personal/project/group access token with `api` scope (sent as PRIVATE-TOKEN) */
@@ -91,7 +92,7 @@ export class GitLabProvider implements GitProvider {
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: GitLabAdapterOptions) {
-    let base = (opts.baseUrl ?? "https://gitlab.com/api/v4").replace(/\/+$/, "");
+    let base = trimTrailingSlashes(opts.baseUrl ?? "https://gitlab.com/api/v4");
     if (!/\/api\/v4$/.test(base)) base = `${base}/api/v4`;
     this.base = base;
     this.token = opts.token;

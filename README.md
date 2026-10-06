@@ -211,7 +211,7 @@ build.
 
 ```bash
 # 0. Use the package manager this repo pins. package.json declares
-#    "packageManager": "pnpm@10.33.0"; corepack is what makes your shell honour
+#    "packageManager": "pnpm@10.34.5"; corepack is what makes your shell honour
 #    it. Skipping this is the single most common cause of a "broken clone"
 #    report that the repo cannot reproduce — a mismatched pnpm resolves a
 #    different tree from the same lockfile.

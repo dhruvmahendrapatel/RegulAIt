@@ -43,6 +43,7 @@ import {
   type PullRequestRef,
   type PullRequestState,
 } from "./types.js";
+import { trimTrailingSlashes } from "./url.js";
 
 export interface AzureDevOpsAdapterOptions {
   /** personal access token with Code Read & Write scope */
@@ -104,7 +105,7 @@ export class AzureDevOpsProvider implements GitProvider {
         "azure_devops requires a baseUrl (the organization URL, e.g. https://dev.azure.com/<organization>)",
       );
     }
-    this.base = opts.baseUrl.replace(/\/+$/, "");
+    this.base = trimTrailingSlashes(opts.baseUrl);
     this.auth = `Basic ${Buffer.from(`:${opts.token}`).toString("base64")}`;
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }

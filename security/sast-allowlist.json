@@ -1,0 +1,140 @@
+{
+  "$comment": "SAST (CodeQL) baseline, triaged 2026-10-06 for ADR-0184: false positives only (every real finding was fixed). One entry per result: rule, file and the result's partialFingerprints.primaryLocationLineHash (line is informational). Each needs a reason and expires at most 90 days after review; see docs/ops/SECURITY_CI.md.",
+  "entries": [
+    {
+      "id": "js/bad-tag-filter",
+      "path": "apps/gateway/src/security-headers.ts",
+      "fingerprint": "6347b574ca4cab11:1",
+      "line": 40,
+      "reason": "False positive. inlineScriptBodies() reads only our own built index.html (apps/web/dist) to compute CSP sha256 hashes for its inline scripts; it is not a sanitizer and never sees request input. A missed tag shape would only omit a hash, which makes CSP stricter, not weaker.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-sanitization",
+      "path": "packages/shared/src/shadow-discovery.ts",
+      "fingerprint": "d1bc99df45e23f92:1",
+      "line": 243,
+      "reason": "False positive. literalLength() removes the first '*' only to rank wildcard specificity for tie-breaking between catalog patterns; it is not a sanitizer, and matching itself is done by wildcardMatch() and the dot-boundary check in endpointEntryMatches().",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/clear-text-storage-of-sensitive-data",
+      "path": "apps/gateway/src/auth.ts",
+      "fingerprint": "9988dd1078e54e23:1",
+      "line": 1223,
+      "reason": "False positive (PR #117 triage, d0feaf8). The pending-MFA cookie carries only an opaque server-generated handle (randomBytes(32)); the database row stores sha256(handle), the cookie is HttpOnly and Secure on TLS, single-use and short-lived. token-hash.test.ts fails if the handle loses entropy or the cookie loses HttpOnly.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/clear-text-storage-of-sensitive-data",
+      "path": "apps/gateway/src/saml.ts",
+      "fingerprint": "30c0099eb145a7a0:1",
+      "line": 912,
+      "reason": "False positive (PR #117 triage, d0feaf8). The pending-MFA cookie carries only an opaque server-generated handle (randomBytes(32)); the database row stores sha256(handle), the cookie is HttpOnly and Secure on TLS, single-use and short-lived. token-hash.test.ts fails if the handle loses entropy or the cookie loses HttpOnly.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/insufficient-password-hash",
+      "path": "apps/gateway/src/token-hash.ts",
+      "fingerprint": "67ad4bdd8a2d5ed0:1",
+      "line": 37,
+      "reason": "False positive (PR #117 triage, d0feaf8). hashToken() only ever receives server-generated tokens with 192-256 random bits (caller list in token-hash.ts); SHA-256 is the right lookup hash for those, and passwords go through hashPassword/verifyPassword. token-hash.test.ts pins every generator's entropy. The 'onboard' source is a test helper's password reaching an API-key path, not a stored password hash.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/insufficient-password-hash",
+      "path": "packages/shared/src/constant-time.ts",
+      "fingerprint": "b32686d40e712bfd:1",
+      "line": 20,
+      "reason": "False positive. constantTimeEqual() hashes both inputs with SHA-256 only so timingSafeEqual compares 32 bytes and leaks neither content nor length; nothing is stored. Stored passwords use hashPassword (scrypt) elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/path-injection",
+      "path": "apps/gateway/src/web-serving.ts",
+      "fingerprint": "56c3ce69c44a4955:1",
+      "line": 78,
+      "reason": "False positive. The SPA file path is path.resolve(distDir, rest) and is refused unless it equals distDir or starts with distDir + path.sep (the check in the SPA route handler), so a traversal resolves to index.html, never to a file outside apps/web/dist; the read stream in sendFile only receives that contained path.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/path-injection",
+      "path": "apps/gateway/src/web-serving.ts",
+      "fingerprint": "d5fc72f6b1e95048:1",
+      "line": 103,
+      "reason": "False positive. The SPA file path is path.resolve(distDir, rest) and is refused unless it equals distDir or starts with distDir + path.sep (the check in the SPA route handler), so a traversal resolves to index.html, never to a file outside apps/web/dist; the read stream in sendFile only receives that contained path.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/mode-scoped-egress.test.ts",
+      "fingerprint": "ae88b12a5c6772f3:1",
+      "line": 113,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/mode-scoped-egress.test.ts",
+      "fingerprint": "e727cfb86e650139:1",
+      "line": 119,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/mode-scoped-egress.test.ts",
+      "fingerprint": "6197980798f420e0:1",
+      "line": 120,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/mode-scoped-egress.test.ts",
+      "fingerprint": "87cc07f11d05d2e9:1",
+      "line": 488,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/mode-scoped-egress.test.ts",
+      "fingerprint": "7039af576f5d383a:1",
+      "line": 582,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/zz-c11-demo-check.test.ts",
+      "fingerprint": "568c0f966ae0dab0:1",
+      "line": 60,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/web/e2e/webhooks-admin.mock.spec.ts",
+      "fingerprint": "68f65129ce2816da:1",
+      "line": 80,
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    }
+  ]
+}

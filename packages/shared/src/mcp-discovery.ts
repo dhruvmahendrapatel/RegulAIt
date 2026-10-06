@@ -31,6 +31,7 @@
 import { AUDIT_SCRUB_FINGERPRINT_HEX, AUDIT_SCRUB_MARKER_PREFIX, scrubAuditText } from "./audit-scrub.js";
 import { sha256Hex } from "./audit-chain.js";
 import { redactPII } from "./pii.js";
+import { bareHostBeforePort, trimTrailingSlashes } from "./linear-scan.js";
 
 /** How sure we are that the thing at this host speaks MCP. */
 export type McpEvidenceConfidence = "low" | "medium" | "high";
@@ -175,10 +176,11 @@ function hostFrom(line: string): { host: string; path: string | null } | null {
     return { host: url[1]!.toLowerCase(), path: url[2] ?? null };
   }
   // proxy formats often log `host:port` and the path separately
-  const bare = /\b([a-z0-9][a-z0-9.-]*\.[a-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)\b/i.exec(line);
-  if (bare) {
+  // (linear scan; the equivalent regex is quadratic on a long host-like run, ADR-0184)
+  const bare = bareHostBeforePort(line);
+  if (bare !== undefined) {
     const p = /\s(\/[^\s"']*)/.exec(line);
-    return { host: bare[1]!.toLowerCase(), path: p ? p[1]! : null };
+    return { host: bare.toLowerCase(), path: p ? p[1]! : null };
   }
   return null;
 }
@@ -186,7 +188,7 @@ function hostFrom(line: string): { host: string; path: string | null } | null {
 /** Does this path end in an MCP transport segment? */
 function transportPathOf(path: string | null): string | null {
   if (!path) return null;
-  const clean = path.split("?")[0]!.replace(/\/+$/, "");
+  const clean = trimTrailingSlashes(path.split("?")[0]!);
   for (const t of TRANSPORT_PATHS) {
     if (clean === t || clean.endsWith(t)) return t;
   }
