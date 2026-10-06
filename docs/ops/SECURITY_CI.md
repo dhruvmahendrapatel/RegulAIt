@@ -28,13 +28,14 @@ needs GitHub Advanced Security, or it is replaced with Semgrep OSS on a pinned r
 
 ### 2. Secret scanning: gitleaks (`secrets` job)
 
-**Proves:** no commit in the change (PR base..head, or the pushed range) and no commit anywhere in the fetched history
-(every branch and tag) contains a string matching gitleaks' default rules, except the synthetic values listed in
+**Proves:** no commit in the change (PR base..head, or the pushed range) and no commit in the full history of the
+checked-out commit (for a PR, its merge into `main`) contains a string matching gitleaks' default rules, except the synthetic values listed in
 `.gitleaks.toml`.
 
 **Does not prove:**
 - that a secret in a format gitleaks has no rule for is absent (an internal token with no prefix and low entropy);
 - anything about secrets outside git: CI variables, developer machines, the container's runtime environment;
+- anything about other branches: each is scanned by its own PR (and `main` on every push);
 - that a secret removed from history is safe. A leaked secret is rotated, not just deleted.
 
 Output is redacted (`--redact`), because this repository and its CI logs are public.

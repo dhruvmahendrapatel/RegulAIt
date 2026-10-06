@@ -173,10 +173,14 @@ jobs:
           echo "Scanning ${range}"
           gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="${range}" .
 
-      - name: Scan the full history (every branch and tag fetched)
+      # Everything reachable from the checked-out commit (for a PR, the merge
+      # of the PR into main), not every fetched branch: another branch is
+      # scanned by its own PR, and its synthetic test secrets are allow-listed
+      # by the config on that branch, not this one.
+      - name: Scan the full history of this commit
         run: |
           set -euo pipefail
-          gitleaks git --config .gitleaks.toml --redact --no-banner \
+          gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="HEAD" \
             --report-format sarif --report-path "$RUNNER_TEMP/gitleaks.sarif" .
 
       - name: Keep the (redacted) report
