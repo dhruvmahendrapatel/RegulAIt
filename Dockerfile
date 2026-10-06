@@ -6,11 +6,18 @@
 # is the whole product surface (ADR-0033 deleted the /app and /admin shells).
 # Without that dist the /ui routes answer an explicit 503 "web_bundle_not_built"
 # — never a blank page.
-# ADR-0167 (CFG-07): pinned by DIGEST, not by the floating `22-slim` tag, so a
+# ADR-0167 (CFG-07): pinned by DIGEST, not by the floating tag, so a
 # base-image rebuild cannot change the runtime underneath a reproducible
-# build. Bump deliberately: `docker buildx imagetools inspect node:22-slim`
-# prints the current index digest.
-FROM node:22-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+# build. Bump deliberately: `docker buildx imagetools inspect node:22-trixie-slim`
+# prints the current index digest, and security.yml's Trivy gate must pass on
+# the new one (docs/ops/SECURITY_CI.md).
+#
+# ADR-0184: Debian 13 (trixie) rather than the `22-slim` default (Debian 12).
+# On 2026-10-06 the bookworm image carried seven fixable HIGH/CRITICAL CVEs in
+# perl-base (fixed in 5.36.0-7+deb12u4, not yet in the image); the trixie image
+# of the same Node 22 line carried none. Digest of node:22-trixie-slim as
+# published 2026-10-06T05:38Z (linux/amd64 + arm64 index).
+FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa
 LABEL org.regulait.build-stage="workspace-build+runtime"
 
 RUN corepack enable
@@ -35,6 +42,14 @@ COPY apps ./apps
 # limit to raise.
 RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
+
+# ADR-0184: the runtime runs only `node` and `sh` (docker-start.sh), never a
+# package manager. The base image ships npm with its own bundled dependencies,
+# which carried fixable HIGH advisories (brace-expansion, picomatch, pacote,
+# sigstore, ip-address) on 2026-10-06, and corepack leaves the pnpm it fetched
+# in its cache. Removing both after the build removes that code from the image
+# instead of allow-listing it; corepack itself stays (it has no dependencies).
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.cache/node/corepack
 
 ENV PORT=3000
 EXPOSE 3000
