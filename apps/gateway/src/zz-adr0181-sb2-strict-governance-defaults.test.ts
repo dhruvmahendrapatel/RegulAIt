@@ -201,7 +201,10 @@ describe("ADR-0181 SB2: every gate stays relaxable, audited old -> new", () => {
     expect(r.body.settings.useCaseGateMode).toBe("off");
     const row = await latestAudit("org-settings-updated");
     expect((row!.detail as any).changed).toMatchObject({ useCaseGateMode: "off", dispatchAttributionRequired: false });
-    expect((row!.detail as any).previous).toEqual({ useCaseGateMode: "enforce", dispatchAttributionRequired: true });
+    expect((row!.detail as any).transitions).toEqual({
+      useCaseGateMode: { from: "enforce", to: "off" },
+      dispatchAttributionRequired: { from: true, to: false },
+    });
   });
 
   it("MRM: enforcement and staleness recertification", async () => {
@@ -223,11 +226,11 @@ describe("ADR-0181 SB2: every gate stays relaxable, audited old -> new", () => {
     });
     expect(r.status).toBe(200);
     const row = await latestAudit("interception-settings-updated");
-    expect((row!.detail as any).previous).toEqual({
-      requireProjectAttribution: true,
-      requireMcpAttribution: true,
-      keyCustodyEnforced: true,
-      enforcementPosture: "managed",
+    expect((row!.detail as any).transitions).toEqual({
+      requireProjectAttribution: { from: true, to: false },
+      requireMcpAttribution: { from: true, to: false },
+      keyCustodyEnforced: { from: true, to: false },
+      enforcementPosture: { from: "managed", to: "voluntary" },
     });
     expect((row!.detail as any).changed).toEqual({
       requireProjectAttribution: false,
@@ -241,8 +244,7 @@ describe("ADR-0181 SB2: every gate stays relaxable, audited old -> new", () => {
     const r = await req("PUT", "/v1/policy-simulations/settings", { requirePreviewBeforeActivate: false });
     expect(r.status).toBe(200);
     const row = await latestAudit("policy-simulation-settings-changed");
-    expect((row!.detail as any).requirePreviewBeforeActivateFrom).toBe(true);
-    expect((row!.detail as any).requirePreviewBeforeActivateTo).toBe(false);
+    expect((row!.detail as any).transitions).toEqual({ requirePreviewBeforeActivate: { from: true, to: false } });
   });
 
   it("project: the alert threshold", async () => {
@@ -254,6 +256,6 @@ describe("ADR-0181 SB2: every gate stays relaxable, audited old -> new", () => {
       .from(auditLog)
       .where(and(eq(auditLog.ruleId, "project-updated"), eq(auditLog.objectId, created.body.id)));
     expect((row!.detail as any).changed).toEqual({ alertThresholdPct: 100 });
-    expect((row!.detail as any).previous).toEqual({ alertThresholdPct: 80 });
+    expect((row!.detail as any).transitions).toEqual({ alertThresholdPct: { from: 80, to: 100 } });
   });
 });

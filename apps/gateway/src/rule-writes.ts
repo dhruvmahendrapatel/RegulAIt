@@ -111,6 +111,7 @@ import {
   writeRuleReadModel,
   type DbOrTxDeep,
 } from "./config-versions.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -368,14 +369,9 @@ async function applyRuleEditLocked<T>(
       beforeBody: plan.before,
       afterBody: plan.body,
       // ADR-0181: an UNVERSIONED rule is a plain row write with no before
-      // body, so the row's previous values of the written columns ride here —
-      // every relaxation is audited old -> new
-      ...(plan.kind === "row"
-        ? {
-            beforeRow: Object.fromEntries(Object.keys(plan.rowPatch).map((k) => [k, (row as Record<string, unknown>)[k] ?? null])),
-            afterRow: plan.rowPatch,
-          }
-        : {}),
+      // body, so the written columns' old -> new rides here — every
+      // relaxation is audited old -> new
+      ...(plan.kind === "row" ? { transitions: settingTransitions(row as object, plan.rowPatch) } : {}),
       mintedVersion,
     },
     effect: "allow",

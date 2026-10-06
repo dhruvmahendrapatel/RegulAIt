@@ -298,7 +298,7 @@ describe("ADR-0181 SB1 — the strict posture bites on the dispatch path", () =>
 });
 
 describe("ADR-0181 SB1 — every relaxation is audited old -> new", () => {
-  it("org settings: the audit row carries before and after", async () => {
+  it("org settings: the audit row carries old -> new transitions", async () => {
     const r = await app.inject({
       method: "PUT",
       url: "/v1/org/settings",
@@ -307,13 +307,19 @@ describe("ADR-0181 SB1 — every relaxation is audited old -> new", () => {
     });
     expect(r.statusCode, r.body).toBe(200);
     const row = await latestAudit("org-settings-updated");
-    const d = row!.detail as { before: Record<string, unknown>; changed: Record<string, unknown> };
-    expect(d.before).toEqual({ defaultPiiMode: "block", tracingCaptureContent: false });
+    const d = row!.detail as { transitions: Record<string, unknown>; changed: Record<string, unknown> };
+    expect(d.transitions).toEqual({
+      defaultPiiMode: { from: "block", to: "warn" },
+      tracingCaptureContent: { from: false, to: true },
+    });
     expect(d.changed).toEqual({ defaultPiiMode: "warn", tracingCaptureContent: true });
+    // one shape: the per-agent old-value fields are gone
+    expect(d).not.toHaveProperty("before");
+    expect(d).not.toHaveProperty("previous");
     await app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { defaultPiiMode: "block", tracingCaptureContent: false } });
   });
 
-  it("interception settings: the audit row carries before and after", async () => {
+  it("interception settings: the audit row carries old -> new transitions", async () => {
     const r = await app.inject({
       method: "PUT",
       url: "/v1/interception/settings",
@@ -322,8 +328,11 @@ describe("ADR-0181 SB1 — every relaxation is audited old -> new", () => {
     });
     expect(r.statusCode, r.body).toBe(200);
     const row = await latestAudit("interception-settings-updated");
-    const d = row!.detail as { before: Record<string, unknown>; changed: Record<string, unknown> };
-    expect(d.before).toEqual({ streamingOnBlockMode: "reject", strictFieldRejection: true });
+    const d = row!.detail as { transitions: Record<string, unknown>; changed: Record<string, unknown> };
+    expect(d.transitions).toEqual({
+      streamingOnBlockMode: { from: "reject", to: "suppress" },
+      strictFieldRejection: { from: true, to: false },
+    });
     expect(d.changed).toEqual({ streamingOnBlockMode: "suppress", strictFieldRejection: false });
     await app.inject({
       method: "PUT",
@@ -343,7 +352,10 @@ describe("ADR-0181 SB1 — every relaxation is audited old -> new", () => {
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json().modes).toEqual({ prompt_injection: "log", jailbreak: "block", toxicity: "warn", semantic_dlp: "warn" });
     const row = await latestAudit("guardrail-config-updated");
-    expect((row!.detail as { previousModes: Record<string, string> }).previousModes).toMatchObject({ prompt_injection: "block" });
+    // only the layer that moved is a transition
+    expect((row!.detail as { transitions: Record<string, unknown> }).transitions).toEqual({
+      prompt_injection: { from: "block", to: "log" },
+    });
     expect(row!.reason).toContain("prompt_injection=block->log");
     await db.delete(guardrailConfigs).where(eq(guardrailConfigs.scope, "org"));
   });
@@ -359,10 +371,12 @@ describe("ADR-0181 SB1 — every relaxation is audited old -> new", () => {
     expect(r.statusCode, r.body).toBe(201);
     expect(r.json()).toMatchObject({ piiMode: "log", mcpDefaultMode: "read_write" });
     const row = await latestAudit("compliance-profile-upserted");
-    // an unversioned profile is a plain row write: the previous column values ride as beforeRow
-    const d = row!.detail as { beforeRow: Record<string, unknown>; afterRow: Record<string, unknown> };
-    expect(d.beforeRow).toMatchObject({ piiMode: "block", mcpDefaultMode: "read_only" });
-    expect(d.afterRow).toMatchObject({ piiMode: "log", mcpDefaultMode: "read_write" });
+    // an unversioned profile is a plain row write: the written columns' old -> new ride as transitions
+    const d = row!.detail as { transitions: Record<string, unknown> };
+    expect(d.transitions).toMatchObject({
+      piiMode: { from: "block", to: "log" },
+      mcpDefaultMode: { from: "read_only", to: "read_write" },
+    });
   });
 
   it("storing a platform model credential is audited, with no key material in the row", async () => {
@@ -481,7 +495,9 @@ describe("ADR-0181 SB1 — the demo seed's strict-data block", () => {
     expect(r.traceContentCapture).toBe("enabled");
     expect(r.lines.some((l) => l.startsWith("RELAXED for the demo: trace content capture"))).toBe(true);
     const row = await latestAudit("org-settings-updated");
-    expect((row!.detail as { before: Record<string, unknown> }).before).toEqual({ tracingCaptureContent: false });
+    expect((row!.detail as { transitions: Record<string, unknown> }).transitions).toEqual({
+      tracingCaptureContent: { from: false, to: true },
+    });
     await db.update(orgSettings).set({ tracingCaptureContent: false });
   });
 

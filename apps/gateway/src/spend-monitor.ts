@@ -105,6 +105,7 @@ import {
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -1006,12 +1007,15 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
         enabled: body.enabled,
         sensitivity: body.sensitivity,
         action: body.action,
-        previous: {
-          enabled: previous.enabled,
-          sensitivity: previous.sensitivity,
-          baselineDays: previous.baselineDays,
-          action: previous.action,
-        },
+        transitions: settingTransitions(previous, {
+          enabled: values.enabled,
+          sensitivity: values.sensitivity,
+          baselineDays: values.baselineDays,
+          action: values.action,
+          signals: values.signals,
+          activeHourStart: values.activeHourStart,
+          activeHourEnd: values.activeHourEnd,
+        }),
       },
     );
     return { policy: row, note: "Nothing drives this. POST /v1/spend/anomalies/evaluate is the driver." };

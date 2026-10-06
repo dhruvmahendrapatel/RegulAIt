@@ -800,12 +800,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
           ([k, v]) => JSON.stringify((locked as Record<string, unknown>)[k]) !== JSON.stringify(v),
         ),
       );
-      // ADR-0181: every relaxation of a strict default is audited old -> new.
-      // `changed` carries the new values; `previous` carries what each changed
-      // key held before, redacted exactly as `after` is.
+      // ADR-0181: every relaxation of a strict default is audited old -> new,
+      // from the same redacted view as `after` (no credential material).
       const lockedRedacted = redactSettings(locked) as unknown as Record<string, unknown>;
-      const previous = Object.fromEntries(Object.keys(changed).map((k) => [k, lockedRedacted[k] ?? null]));
-      const before = previous;
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.
@@ -813,14 +810,11 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         objectType: "org_settings",
         objectId: null,
         // ADR-0181: a relaxation is legible as old -> new. `transitions` holds
-        // {from, to} per changed key; `previous` holds the (redacted) value each
-        // changed key had before this write. Both come from the same redacted row.
+        // {from, to} per changed key, taken from the same redacted row as `after`.
         detail: {
           via: req.authCtx.via,
           changed,
           transitions: settingTransitions(lockedRedacted, changed, ["tracingOtlpHeaders"]),
-          previous,
-          before,
           after: redactSettings(after),
           approvalTtlPosture: approvalTtlPosture(after),
         },

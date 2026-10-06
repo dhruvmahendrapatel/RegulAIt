@@ -157,9 +157,13 @@ describe("ADR-0181 SC — every strict value stays relaxable by an admin, audite
         .where(eq(auditLog.ruleId, "org-settings-updated"))
         .orderBy(desc(auditLog.at))
         .limit(1);
-      const detail = row!.detail as { changed: Record<string, unknown>; previous: Record<string, unknown> };
+      const detail = row!.detail as { changed: Record<string, unknown>; transitions: Record<string, unknown> };
       expect(detail.changed).toEqual(SC_LAX_POSTURE);
-      expect(detail.previous).toEqual(SC_STRICT_DEFAULTS);
+      expect(detail.transitions).toEqual(
+        Object.fromEntries(
+          Object.entries(SC_LAX_POSTURE).map(([k, to]) => [k, { from: (SC_STRICT_DEFAULTS as Record<string, unknown>)[k], to }]),
+        ),
+      );
       // and back to strict, audited the other way round
       const back = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: SC_STRICT_DEFAULTS });
       expect(back.statusCode, back.body).toBe(200);
@@ -169,7 +173,7 @@ describe("ADR-0181 SC — every strict value stays relaxable by an admin, audite
     }
   });
 
-  it("PUT /v1/spend/monitor-policies switches the org default off, and the audit row carries previous.enabled", async () => {
+  it("PUT /v1/spend/monitor-policies switches the org default off, and the audit row carries enabled true -> false", async () => {
     const app = buildApp(fresh, { bootstrapToken: BOOT, dataKey: DATA_KEY });
     try {
       await fresh.delete(spendMonitorPolicies);
@@ -187,9 +191,9 @@ describe("ADR-0181 SC — every strict value stays relaxable by an admin, audite
         .where(and(eq(auditLog.ruleId, "spend-monitor-policy-updated")))
         .orderBy(desc(auditLog.at))
         .limit(1);
-      const detail = row!.detail as { enabled: boolean; previous: { enabled: boolean } };
+      const detail = row!.detail as { enabled: boolean; transitions: Record<string, { from: unknown; to: unknown }> };
       expect(detail.enabled).toBe(false);
-      expect(detail.previous.enabled).toBe(true);
+      expect(detail.transitions.enabled).toEqual({ from: true, to: false });
     } finally {
       await fresh.delete(spendMonitorPolicies);
       await app.close();

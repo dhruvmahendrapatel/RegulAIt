@@ -61,6 +61,7 @@ import {
   type GuardrailTerms,
 } from "@regulait/shared";
 import { complianceProfilesForTags, projectClassifications } from "./projects.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -509,7 +510,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       row.id,
       "guardrail-config-updated",
       `org guardrail defaults set — ${modeTransitions(before, rowModes(row))}. A compliance profile can still RAISE any of these for a classified project; nothing here can lower a framework floor.`,
-      { scope: "org", modes: rowModes(row), previousModes: before },
+      { scope: "org", modes: rowModes(row), transitions: settingTransitions(before, rowModes(row)) },
     );
     return reply.status(200).send({ config: row, modes: rowModes(row) });
   });
@@ -540,7 +541,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       row.id,
       "guardrail-config-updated",
       `guardrail override for ${scope} '${target.name}' — ${modeTransitions(before, rowModes(row))}. It replaces the org default for this object and is still MAX-composed with any compliance floor.`,
-      { scope, scopeId, targetName: target.name, modes: rowModes(row), previousModes: before },
+      { scope, scopeId, targetName: target.name, modes: rowModes(row), transitions: settingTransitions(before, rowModes(row)) },
     );
     return reply.status(200).send({ config: row, modes: rowModes(row) });
   });

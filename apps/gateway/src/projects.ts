@@ -73,6 +73,7 @@ import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-vers
 // ADR-0074: a compliance-profile UPDATE rewrites twelve versioned fields, so it
 // goes through the one choke point rather than straight at the read-model.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -1105,9 +1106,7 @@ export async function applyProjectPatch(
     detail: {
       phase: "update",
       changed,
-      previous: Object.fromEntries(
-        Object.keys(changed).map((k) => [k, (project as Record<string, unknown>)[k] ?? null]),
-      ),
+      transitions: settingTransitions(project, changed),
       ...(args.auditDetail ?? {}),
     },
     effect: "allow",

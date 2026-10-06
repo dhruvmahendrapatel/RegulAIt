@@ -274,7 +274,26 @@ describe("toolbox", () => {
     expect(tools[0]).toMatchObject({ kind: "connector", name: `crm-${k.RUN}`, provider: "salesforce", requiresApproval: true, entitledForYou: true });
     expect(tools[1]).toMatchObject({ kind: "mcp_tool", name: "search", provider: `docs-mcp-${k.RUN}`, entitledForYou: true });
     expect(r.json().agent.toolCount).toBe(2);
-    expect(await auditRows(a.id, "builder-agent-tools-changed")).toHaveLength(1);
+    const [toolsAudit] = await auditRows(a.id, "builder-agent-tools-changed");
+    expect(toolsAudit).toBeTruthy();
+    // ADR-0181: the toolbox write is audited old -> new, keyed kind:refId (null = not in the toolbox)
+    expect((toolsAudit!.detail as { transitions: Record<string, unknown> }).transitions).toEqual({
+      [`connector:${grantedConnector}`]: { from: null, to: { requiresApproval: true } },
+      [`mcp_tool:${grantedTool}`]: { from: null, to: { requiresApproval: false } },
+    });
+    // relaxing ask-first on the connector is a transition of its own
+    await k.req("PUT", `/v1/builder/agents/${a.id}/tools`, owner.auth, {
+      tools: [
+        { kind: "connector", refId: grantedConnector, requiresApproval: false },
+        { kind: "mcp_tool", refId: grantedTool, requiresApproval: false },
+      ],
+    });
+    const relaxed = (await auditRows(a.id, "builder-agent-tools-changed")).find(
+      (row) => (row.detail as { transitions: Record<string, unknown> }).transitions[`connector:${grantedConnector}`] !== undefined && row.id !== toolsAudit!.id,
+    );
+    expect((relaxed!.detail as { transitions: Record<string, unknown> }).transitions).toEqual({
+      [`connector:${grantedConnector}`]: { from: { requiresApproval: true }, to: { requiresApproval: false } },
+    });
 
     // the same agent, seen by a workspace viewer who holds none of the grants
     await k.req("PATCH", `/v1/builder/agents/${a.id}`, owner.auth, { sharing: "workspace" });

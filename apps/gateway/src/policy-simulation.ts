@@ -112,6 +112,7 @@ import {
 import { assembleAbacRequest, loadActiveAbacPolicies } from "./abac.js";
 import { loadComplianceProfileCanaryDivergence } from "./config-versions.js";
 import { governedEvaluate, type ReplayCountQuery } from "./governed-evaluate.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const SINGLETON = "singleton";
@@ -1645,8 +1646,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       detail: {
         phase: "blast-radius-settings",
         ...body,
-        requirePreviewBeforeActivateFrom: before.requirePreviewBeforeActivate,
-        requirePreviewBeforeActivateTo: row!.requirePreviewBeforeActivate,
+        transitions: settingTransitions(before, body),
       },
       effect: "allow",
       ruleId: "policy-simulation-settings-changed",

@@ -137,6 +137,7 @@ import {
 } from "./skill-admission.js";
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
+import { settingTransitions } from "./setting-transitions.js";
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
  * control or invisible formatting characters (422 `skill_name_invalid`) */
@@ -929,7 +930,14 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       `toolbox of '${agent.name}' set to ${rows.length} tool(s)`,
       {
         tools: rows.map((t) => ({ kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
-        previousTools,
+        // keyed `kind:refId`; a tool absent on one side reads null (added / removed)
+        transitions: settingTransitions(
+          Object.fromEntries(previousTools.map((t) => [`${t.kind}:${t.refId}`, { requiresApproval: t.requiresApproval }])),
+          Object.fromEntries([
+            ...previousTools.map((t) => [`${t.kind}:${t.refId}`, null] as const),
+            ...rows.map((t) => [`${t.kind}:${t.refId}`, { requiresApproval: t.requiresApproval }] as const),
+          ]),
+        ),
       });
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
