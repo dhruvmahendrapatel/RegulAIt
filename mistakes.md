@@ -1459,3 +1459,16 @@ on Windows and Codex had just reported other Windows-only failures.
 Rule: any file a Linux container or CI executes (shell scripts, entrypoints) is pinned to LF in `.gitattributes`, and
 the Dockerfile normalises line endings on anything it executes from the build context. When the owner runs on
 Windows, test the CRLF form of every executed text file, not only of its inputs.
+
+### M-070 (2026-10-06) - A deterministic failure was called a flake because "it passed alone" on a different tree
+
+In the D4 integration, `external-effects-barrier.test.ts` failed 4 tests in one full gateway run and was reported as
+"not reproduced: passed alone and in the next full run". It was not a flake: the merged fix groups had created a static
+import chain (external-effects → … → agent-evidence-hold → incidents → workflows/pm), so the test's module mock was
+bypassed and every drive used the real `runExternalWrite`. The "passed alone" runs used a working tree that already
+held the uncommitted lazy-import fix (later b85ff5c), so they tested different code from the failing run. The same run
+also showed three load-order failures that pointed straight at the cycle.
+
+Rule: a failure is never called a flake until it has been re-run on the exact commit that failed (`git stash`-free:
+check out that SHA in a scratch worktree) and the other failures in the same run have been explained. When a run
+fails, record the SHA and whether the tree was dirty next to the log, and compare against that, not the current tree.
