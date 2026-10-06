@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X13: reproduce failed checkpoint saves and browser-history draft loss | Recovery/navigation fixes and browser evidence; X14 accessibility | — | 10-06 23:03 | Draft PR creation needs api.github.com egress |
+| Codex | X13: recovery and router guards validated; drafting review handoff | X14 keyboard and screen-reader audit | — | 10-06 23:23 | — |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)

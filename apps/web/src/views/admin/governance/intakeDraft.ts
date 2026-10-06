@@ -57,6 +57,8 @@ export const durableForSubmit = (outcome: DraftSaveOutcome): boolean =>
   outcome.kind === "saved" || (outcome.kind === "not-kept" && (outcome.reason === "off" || outcome.reason === "offer"));
 
 const SAVE_DELAY_MS = 1000;
+/** A stalled save must release the queue and offer a retry, without sending a keyed create. */
+const SAVE_TIMEOUT_MS = 15_000;
 /** a keepalive request body may be at most 64 KiB; a larger exit save goes as an ordinary request */
 const KEEPALIVE_MAX_BYTES = 60_000;
 export const draftPath = (scope: string) => `/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`;
@@ -170,6 +172,7 @@ export function useIntakeDraft<S>(opts: {
           draftPath(scope),
           { state: JSON.parse(body) as unknown },
           draftOwnerHeaders(owner.current),
+          AbortSignal.timeout(SAVE_TIMEOUT_MS),
         );
         saved.current = body;
         if (!stopped.current) {

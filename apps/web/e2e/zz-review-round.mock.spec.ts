@@ -747,6 +747,34 @@ test.describe("update and resubmit", () => {
     await expect.poll(() => state.draft).toBeNull();
   });
 
+  test("X13: a refused resubmission exit save keeps the latest edits until a successful retry", async ({ page }, testInfo) => {
+    const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    let refuse = true;
+    await page.route(`**/v1/use-cases/draft?scope=${UC}`, async (route) => {
+      if (refuse && route.request().method() === "PUT") {
+        await route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"internal"}' });
+      } else {
+        await route.fallback();
+      }
+    });
+    const description = "Keep these resubmission edits until the save succeeds.";
+    await page.getByLabel("What will the system do?").fill(description);
+    await page.getByRole("link", { name: "Cancel", exact: true }).click();
+    const leave = page.getByRole("dialog", { name: "Leave this resubmission?" });
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(leave.getByRole("alert")).toContainText("could not be saved");
+    await expect(page).toHaveURL(/resubmit=/);
+    await expect(page.getByLabel("What will the system do?")).toHaveValue(description);
+    expect(state.draft).toBeNull();
+    await checkScreen(page, "failed resubmission exit save", undefined, '[role="dialog"]');
+    await page.screenshot({ path: testInfo.outputPath("x13-resubmission-exit-save.png") });
+    refuse = false;
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
+    expect((state.draft?.state as { description?: string } | undefined)?.description).toBe(description);
+  });
+
   test("ADR-0171: Cancel and Back wait while a resubmission is in flight; with no edits, Cancel leaves without asking", async ({ page }) => {
     await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
     // nothing edited: Cancel just leaves

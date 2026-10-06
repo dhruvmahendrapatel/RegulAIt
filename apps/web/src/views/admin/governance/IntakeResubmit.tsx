@@ -201,8 +201,8 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   };
   const kept = draftKept(draft.status);
   const leave = useLeaveGuard({
-    when: dirty || busy,
-    unloadWhen: busy || (dirty && draft.unsaved),
+    when: !done && (dirty || busy),
+    unloadWhen: !done && (busy || (dirty && draft.unsaved)),
     title: busy ? "Your resubmission is still being sent" : "Leave this resubmission?",
     body: busy ? (
       <p>If you leave now, open the use case again to check whether it went back for review before resubmitting.</p>
@@ -213,8 +213,15 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     ) : (
       <p>Your changes are not saved anywhere else and will be lost if you leave now.</p>
     ),
-    beforeLeave: () => (kept ? draft.flush() : undefined),
+    beforeLeave: async () =>
+      draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
+      (await draft.flush()).kind === "saved",
   });
+
+  // Navigate after the successful submission has rendered with its guard off.
+  useEffect(() => {
+    if (done) navigate(props.record);
+  }, [done, navigate, props.record]);
 
   const stageHeading = useRef<HTMLHeadingElement>(null);
   const shownStep = useRef(step);
@@ -275,7 +282,6 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       void queryClient.invalidateQueries({ queryKey: ["governance"] });
       void queryClient.invalidateQueries({ queryKey: ["admin", "use-cases"] });
       void queryClient.invalidateQueries({ queryKey: ["admin", "use-case", props.useCaseId] });
-      navigate(props.record);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

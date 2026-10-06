@@ -256,7 +256,9 @@ function RegisterUseCase() {
     ) : (
       <p>Your answers are not saved anywhere else and will be lost if you leave now.</p>
     ),
-    beforeLeave: () => (draftKept(draft.status) ? draft.flush() : undefined),
+    beforeLeave: async () =>
+      draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
+      (await draft.flush()).kind === "saved",
   });
 
   // ---- the stack and the assistant ------------------------------------------

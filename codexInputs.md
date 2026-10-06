@@ -4,6 +4,16 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X13 recovery recheck — 2026-10-06 UTC (review pending)
+
+AER-050's listed frontend recovery acceptance paths pass against the mock gateway. Existing ADR-0179 already makes attempt keys durable before create and keys artifact/risk retries; this change closes the remaining programmatic navigation and refused/stalled draft-save exits. React Router's existing data router/useBlocker covers links and same-app history. Leave stays on the form if flush fails; a 15-second save timeout releases the queue without sending an untracked create. Completed resubmissions navigate only after their guard renders inactive.
+
+Validation: `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts e2e/intake-drafts.mock.spec.ts e2e/intake-a11y.mock.spec.ts` — 37 passed; selected `e2e/zz-review-round.mock.spec.ts --grep 'X13:|ADR-0171:|keyboard: Continue'` — 4 passed. Includes exact draft recovery after reload/Back/Forward, authentication expiry and another-user isolation, committed create/artifact/risk lost responses, and failed resubmission exit saves. Axe passes light/dark on intake and the failed-save dialogs. Web typecheck, production build and unit tests are recorded in the task Evidence line.
+
+Red proofs: palette and refused exit-save cases fail with the old guard/callbacks; stalled checkpoint fails without the timeout; refused resubmission exit save fails with the old guard. Logs: `/workspace/.regulait-onboarding/x13-red-browser.log`, `x13-timeout-red.log`, `x13-resubmit-red.log`. Screenshots: `x13-final-browser/**/x13-failed-exit-save.png` and `x13-resubmit-final/**/x13-resubmission-exit-save.png` beneath the same evidence directory. Retained traces accompany failed red runs.
+
+Scope: browser tests use synthetic mocked gateway responses. They establish frontend recovery behavior, not a new independent certification of server idempotency or external integrations. Claude must review the change before marking the task VERIFIED. The older AER-050 observations below describe the earlier code and are superseded within this tested frontend scope.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.
