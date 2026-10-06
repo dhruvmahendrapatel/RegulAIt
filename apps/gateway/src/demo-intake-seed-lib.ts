@@ -142,12 +142,29 @@ async function seedDemoIntakeRun(
     else {
       // names stay unique after retirement — take a fresh one if this name was used before
       const name = templates.some((t) => t.name === VARIANT) ? `${VARIANT}-${Date.now()}` : VARIANT;
-      const r = await call(
+      // ADR-0182 A11: an intake variant decides every new sign-off, so the
+      // strict decision-regression gate admits it only after a preview of this
+      // exact body; the changed routing is accepted with a reason (audited)
+      const variant = { name, approverUserId: avery.id };
+      const preview = await call(
         "POST",
-        "/v1/workflows/template-gallery/ai-use-case-intake/create",
-        { name, approverUserId: avery.id },
+        "/v1/governance/decision-regression/preview",
+        { subject: "intake_template", candidate: { galleryId: "ai-use-case-intake", ...variant } },
         ada.auth,
       );
+      const r = ok(preview.status)
+        ? await call(
+            "POST",
+            "/v1/workflows/template-gallery/ai-use-case-intake/create",
+            {
+              ...variant,
+              regressionRunId: preview.body.id,
+              acceptChangedOutcomes: true,
+              acceptReason: "demo: every new use-case sign-off goes to the governance approver",
+            },
+            ada.auth,
+          )
+        : preview;
       if (ok(r.status)) report.created.push("use-case sign-off routed to Avery");
       else fail("use-case sign-off routing", r);
     }

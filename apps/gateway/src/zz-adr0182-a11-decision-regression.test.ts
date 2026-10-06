@@ -519,3 +519,21 @@ describe("reviewer overrides become cases", () => {
     expect((await inject("POST", "/v1/governance/decision-regression/cases", users.stranger.auth, { answers: {}, label: "x", expected: { tier: "high" } })).statusCode).toBe(403);
   });
 });
+
+describe("A11 integrator: POST /v1/workflows/templates", () => {
+  it("an ai-use-case-intake template by definition is gated; with a preview of {name, definition} it is created", async () => {
+    const name = `ai-use-case-intake/a11-direct-${RUN}`;
+    const definition = { ...aiUseCaseIntakeDefinition(), workflow: name };
+    const refused = await inject("POST", "/v1/workflows/templates", users.admin.auth, { name, definition });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "decision_regression_not_previewed", subject: "intake_template" });
+    const acc = await regressionAcceptance(app, users.admin.auth, "intake_template", { name, definition });
+    const ok = await inject("POST", "/v1/workflows/templates", users.admin.auth, { name, definition, ...acc });
+    expect(ok.statusCode, ok.body).toBe(201);
+    createdTemplateIds.push(ok.json().id);
+    expect(ok.json().decisionRegression.outcome).toBe("previewed");
+    const plain = await inject("POST", "/v1/workflows/templates", users.admin.auth, { name: `a11-plain-${RUN}`, definition: { ...definition, workflow: "x" } });
+    expect(plain.statusCode, plain.body).toBe(201);
+    createdTemplateIds.push(plain.json().id);
+  });
+});

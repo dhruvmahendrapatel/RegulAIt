@@ -82,7 +82,11 @@ import {
   retireTemplateSchema,
   startInstanceSchema,
   submitArtifactSchema,
+  isIntakeTemplateName,
+  type DecisionRegressionTemplate,
 } from "@regulait/shared";
+// ADR-0182 A11 — intake-named templates pass the decision-regression gate
+import { admitIntakeTemplateWrite } from "./decision-regression.js";
 import { z } from "zod";
 
 const instanceIdParam = z.object({ instanceId: z.string().uuid() });
@@ -2435,9 +2439,24 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
+    // ADR-0182 A11: an `ai-use-case-intake` template or variant decides who
+    // signs off every new use case; it is admitted by the decision-regression
+    // gate exactly as "create from gallery" is (candidate: {name, definition})
+    const definition = body.definition as unknown as Record<string, unknown>;
+    const gate = isIntakeTemplateName(body.name)
+      ? await admitIntakeTemplateWrite(
+          db,
+          req.body,
+          { name: body.name, definition },
+          { name: body.name, definition: definition as unknown as DecisionRegressionTemplate["definition"] },
+          req.authCtx.userId ?? null,
+        )
+      : null;
+    if (gate && !gate.ok) return reply.status(gate.status).send(gate.body);
     const result = await createWorkflowTemplateValidated(db, body);
     if (!result.ok) return reply.status(result.status).send(result.body);
-    return reply.status(201).send(result.row);
+    const decisionRegression = gate ? await gate.record() : null;
+    return reply.status(201).send({ ...result.row, ...(decisionRegression ? { decisionRegression } : {}) });
   });
 
   app.get("/v1/workflows/templates", async () => ({
