@@ -204,7 +204,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   navigation behaviour and its mock Playwright tests (draft restored after reload, back/forward keeps
   state, leaving with unsaved changes asks first). Axe in light and dark. Evidence: spec names, pass
   counts, and the red proof (each test fails with its fix reverted).
-  Status: IN-PROGRESS (Codex, 2026-10-06 23:03 UTC)
+  Status: READY-FOR-REVIEW (c13af8f5; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/136)
+  Evidence: `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build`, `pnpm --filter @regulait/web test` PASS (315 unit tests). System Chromium mock Playwright intake-drafts + intake-a11y 37/37 and selected zz-review-round resubmission 4/4; axe light/dark. New cases fail with old guard/callbacks or timeout reverted. Exact commands, red logs, screenshots and scope in codexInputs.md X13 recheck.
 - **X14 — Keyboard and screen-reader audit of the D4 pages** (ROADMAP §6 #16, deeper a11y): Incidents,
   Incident detail, Feedback queue and public form, AI policies and literacy, Decision regression, and
   the acknowledgement interstitial. Do a full keyboard-only pass (tab order, focus traps in dialogs,
