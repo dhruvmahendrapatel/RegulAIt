@@ -260,6 +260,11 @@ describe("seed script", () => {
       payload: { identifier: "admin", password: issued.json().password },
     });
     expect(signIn.statusCode).toBe(200);
-    expect(signIn.json().userId).toBe(adminUser.id);
+    // ADR-0181 (FX2): the seed enrolled the admin's TOTP (her API key answers
+    // to the MFA requirement), so the name + password pass the FIRST factor
+    // and the sign-in asks for the second
+    expect(adminUser.totpEnabled).toBe(true);
+    expect(signIn.json()).toMatchObject({ mfaRequired: true });
+    expect(typeof signIn.json().pendingToken).toBe("string");
   });
 });

@@ -51,6 +51,7 @@
  * Everything it creates is `tr-` prefixed and removed.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,9 +241,14 @@ async function spansOf(traceId: string): Promise<TraceSpanRow[]> {
     .orderBy(traceSpans.seq);
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
@@ -354,6 +360,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await restoreStrictAdmission?.();
   // Restore the org singleton EXACTLY — every other suite reads it.
   if (priorOrg) {

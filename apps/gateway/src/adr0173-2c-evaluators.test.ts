@@ -14,6 +14,7 @@
  * scoped to this file's own ids or a project only this file uses.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -210,9 +211,14 @@ function stubJudge(id: string, score: (req: EvalJudgeRequest) => number | Error)
   };
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const admin = await makeUser(`e2c-admin-${tag}@example.com`, true);
@@ -234,6 +240,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   if (packId) await app.inject({ method: "DELETE", url: `/v1/compliance/packs/${packId}`, headers: AUTH });
   await restoreSb2Gates();
   await app?.close();

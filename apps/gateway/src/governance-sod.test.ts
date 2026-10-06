@@ -21,6 +21,7 @@
  * transaction, so no other file ever sees it.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -134,9 +135,14 @@ const decide = (approvalId: string, body: Record<string, unknown>, who: Who) =>
 const useCaseStatus = async (id: string) =>
   (await app.inject({ method: "GET", url: `/v1/use-cases/${id}`, headers: users.owner.auth })).json().useCase.status as string;
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "c".repeat(64) });
   [originalPolicy = null] = await db.select().from(governanceReviewPolicy);
   originalDelegation = (await app.inject({ method: "GET", url: "/v1/org/settings", headers: AUTH })).json().settings
@@ -158,6 +164,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // org singletons: put back exactly what was there
   await db.delete(governanceReviewPolicy);
   if (originalPolicy) await db.insert(governanceReviewPolicy).values(originalPolicy);

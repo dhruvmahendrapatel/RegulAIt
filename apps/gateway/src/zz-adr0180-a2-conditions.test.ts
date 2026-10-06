@@ -38,6 +38,7 @@
  * before it ends, so no later monitor pass sees these fixtures.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -207,9 +208,14 @@ const evaluateAt = (useCaseId: string, at: Date) =>
   evaluateConditionsDetailed(db, useCaseId, at, { persist: true, dataKey: DATA_KEY });
 const HOUR = 3600_000;
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   for (const [k, isAdmin] of [["admin", true], ["owner", false], ["member", false]] as const) {
     const name = `a2c ${k} ${RUN}`;
@@ -222,6 +228,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // M-068: no later monitor pass may see these fixtures
   if (useCaseIds.length) {
     await db.delete(useCaseConditions).where(inArray(useCaseConditions.useCaseId, useCaseIds));

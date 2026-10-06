@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, afterAll } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
@@ -102,9 +103,14 @@ const event = (runId: string, body: Record<string, unknown>, auth = ivyAuth) =>
 const dispatch = (runId: string, nodeId: string, auth = ivyAuth) =>
   app.inject({ method: "POST", headers: auth, url: `/v1/runs/${runId}/nodes/${nodeId}/dispatch`, payload: {} });
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "p".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
@@ -257,5 +263,6 @@ describe("pillar 7: delegation may only ever TIGHTEN", () => {
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await restoreSb2Gates();
 });

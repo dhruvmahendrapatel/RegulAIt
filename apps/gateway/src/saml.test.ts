@@ -458,6 +458,25 @@ describe("ADR-0181 — a signed Response by default", () => {
     expect(res.statusCode).toBe(401);
     expect(res.json().error).toBe("saml_validation_failed");
     expect(res.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+    // ADR-0181 FX2 (finding 12): the refusal NAMES the setting, so an admin can
+    // tell a posture choice from a broken certificate — and the audit says why
+    expect(res.json().detail).toContain("response signing required");
+    expect(res.json().detail).toContain("wantAuthnResponseSigned");
+    const audit = await latestAudit("saml-login-failed");
+    expect((audit!.detail as Record<string, unknown>).cause).toBe("response_signing_required");
+    expect(audit!.reason).toContain("wantAuthnResponseSigned is on");
+  });
+
+  it("a response refused for another reason does not blame the Response signature", async () => {
+    const p = await mkProvider();
+    const email = `sam.wrongkey.${randomBytes(3).toString("hex")}@corp.example`;
+    await mkUser(email, "Sam Wrongkey");
+    const s = await start(p.id);
+    const { xml } = buildResponse({ providerId: p.id, email, inResponseTo: s.requestId });
+    const res = await postAcs(p.id, signAssertion(xml, keyB), s.relayState);
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("saml_validation_failed");
+    expect(res.json().detail ?? "").not.toContain("wantAuthnResponseSigned");
   });
 
   it("an admin may relax it for an IdP that signs only the assertion; the change is audited old -> new", async () => {
@@ -703,7 +722,8 @@ describe("ADR-0036 — identity mapping, JIT and the domain backstop", () => {
     });
     expect(roleRes.statusCode).toBe(201);
     const roleId = roleRes.json().id;
-    const p = await mkProvider({ jitProvisioning: true, defaultRoleId: roleId });
+    // ADR-0181 (FX2): JIT needs the email domains it may provision
+    const p = await mkProvider({ jitProvisioning: true, allowedEmailDomains: ["corp.example"], defaultRoleId: roleId });
     const email = `jit.${randomBytes(4).toString("hex")}@corp.example`;
     const { res } = await roundTrip(p.id, { email, displayName: "JIT Person" });
     expect(res.statusCode).toBe(302);

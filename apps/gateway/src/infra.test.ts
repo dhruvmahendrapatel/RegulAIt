@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
@@ -61,9 +62,14 @@ async function makeUser(email: string, displayName: string, isAdmin: boolean) {
   return { id, auth: { authorization: `Bearer ${k.json().token}` } };
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   const admin = await makeUser("inf-admin@example.com", "Inf Admin", true);
@@ -304,4 +310,9 @@ describe("external remediation execution stop", () => {
     expect(resumed.statusCode).toBe(200);
     expect(resumed.json().autoRemediated).toBe(1);
   });
+});
+
+// ADR-0181 (FX2): hand the shared database back strict (M-068)
+afterAll(async () => {
+  await restoreAdminKeyMfa?.();
 });

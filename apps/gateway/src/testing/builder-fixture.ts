@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { LightMyRequestResponse } from "fastify";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "../app.js";
+import { enrolAdminTotpForTest } from "./identity-posture.js";
 
 export interface Person {
   id: string;
@@ -54,6 +55,9 @@ export async function builderKit(prefix: string): Promise<BuilderKit> {
     if (opts.admin) {
       const a = await req("POST", `/v1/users/${id}/admin`, BOOT, { isAdmin: true });
       if (a.statusCode >= 300) throw new Error(`admin promote failed: ${a.body}`);
+      // ADR-0181 (FX2): an admin's key answers to the org MFA requirement, so
+      // an admin person enrols TOTP (real routes) before their key is minted
+      await enrolAdminTotpForTest(app, bootToken, id);
     }
     const k = await req("POST", `/v1/users/${id}/keys`, BOOT, { name: "k" });
     const p = await req("POST", "/v1/projects", BOOT, { name: `${prefix}-${label}-${RUN}` });

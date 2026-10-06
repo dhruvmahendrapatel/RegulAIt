@@ -58,7 +58,12 @@ import {
   users,
   type Db,
 } from "@regulait/db";
-import { createSamlProviderSchema, updateSamlProviderSchema } from "@regulait/shared";
+import {
+  createSamlProviderSchema,
+  OIDC_JIT_DOMAINS_REQUIRED,
+  oidcJitDomainsMissing,
+  updateSamlProviderSchema,
+} from "@regulait/shared";
 import { z } from "zod";
 import {
   SAML_BINDING_COOKIE,
@@ -76,6 +81,15 @@ import {
   ssoBrowserBinding,
 } from "./auth.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
+
+/** ADR-0181 (FX2, review finding 12): the audited cause, and the holder-facing
+ * wording, of a sign-in refused because the IdP did not sign the SAML Response
+ * envelope while the provider requires it (strict since migration 0156) */
+export const SAML_RESPONSE_SIGNING_REQUIRED = "response_signing_required";
+export const SAML_RESPONSE_SIGNING_DETAIL =
+  "response signing required: this identity provider did not sign the SAML Response, and the provider requires it " +
+  "(wantAuthnResponseSigned). Configure the IdP to sign the Response, or an admin can relax `wantAuthnResponseSigned` " +
+  "on this SAML provider (audited) if the IdP signs only the assertion.";
 import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
@@ -184,6 +198,8 @@ function samlFor(
   /** set only on the /start leg, where we mint the request id ourselves so the
    * correlation row can be written with the returnTo/relay_state alongside */
   forcedRequestId?: string,
+  /** ADR-0181 (FX2): a DIAGNOSTIC instance only — never used to sign anyone in */
+  diagnostic?: { ignoreResponseSignature: true },
 ): SAML {
   const privateKey = provider.spPrivateKeyCiphertext && opts.dataKey
     ? decryptSecret(opts.dataKey, provider.spPrivateKeyCiphertext)
@@ -196,17 +212,20 @@ function samlFor(
     callbackUrl: acsUrl,
     entryPoint: provider.idpSsoUrl,
     // --- posture ---------------------------------------------------------
-    wantAssertionsSigned: provider.wantAssertionsSigned,
-    wantAuthnResponseSigned: provider.wantAuthnResponseSigned,
+    wantAssertionsSigned: diagnostic ? true : provider.wantAssertionsSigned,
+    wantAuthnResponseSigned: diagnostic ? false : provider.wantAuthnResponseSigned,
     acceptedClockSkewMs: samlClockSkewMinutes() * 60_000,
     requestIdExpirationPeriodMs: SAML_STATE_MINUTES * 60_000,
     // ADR-0036: IdP-initiated is OPT-IN. `always` refuses an assertion that
     // carries no InResponseTo at all as well as one whose InResponseTo names
     // no outstanding request; `ifPresent` still validates a solicited login
     // fully but permits the unsolicited shape the admin opted into.
-    validateInResponseTo: provider.allowIdpInitiated
-      ? ValidateInResponseTo.ifPresent
-      : ValidateInResponseTo.always,
+    // (a diagnostic instance never touches the single-use correlation row)
+    validateInResponseTo: diagnostic
+      ? ValidateInResponseTo.never
+      : provider.allowIdpInitiated
+        ? ValidateInResponseTo.ifPresent
+        : ValidateInResponseTo.always,
     cacheProvider: loginStateCache(db, provider.id),
     ...(forcedRequestId ? { generateUniqueId: () => forcedRequestId } : {}),
     // optional SP-side signing material (write-only at rest)
@@ -610,11 +629,14 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         reason: string,
         detail: Record<string, unknown>,
         targetUserId: string | null = null,
+        /** ADR-0181 (FX2): a holder-facing explanation, when one helps the
+         * person (or their admin) fix the cause rather than retry */
+        holderDetail?: string,
       ) => {
         await auditAuth(db, null, targetUserId, ruleId, "deny", reason,
           { phase: "saml-acs", provider: provider.name, ...detail },
           targetUserId ? "user" : "saml_provider");
-        return reply.status(status).send({ error });
+        return reply.status(status).send(holderDetail ? { error, detail: holderDetail } : { error });
       };
 
       // Read the correlation row BEFORE validation: the library's
@@ -664,9 +686,32 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         if (!result.profile) throw new Error("no profile in SAML response");
         profile = result.profile;
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // ADR-0181 (FX2, review finding 12): migration 0156 turned
+        // wantAuthnResponseSigned on for every provider. An IdP that signs only
+        // the assertion now fails here, and the refusal NAMES the setting so an
+        // admin can tell a posture choice from a broken certificate. Decided
+        // exactly, not guessed from wording: the library's "no valid top-level
+        // signature" error, AND the same response validating in full (pinned
+        // certs, signed assertion, audience, timestamps) once only the Response
+        // signature is set aside. The probe signs nobody in.
+        let responseUnsigned = false;
+        if (provider.wantAuthnResponseSigned && message === "Invalid document signature") {
+          try {
+            const probe = samlFor(db, provider, acsUrl, entityId, opts, undefined, { ignoreResponseSignature: true });
+            responseUnsigned = Boolean(
+              (await probe.validatePostResponseAsync({ SAMLResponse: body.data.SAMLResponse })).profile,
+            );
+          } catch {
+            responseUnsigned = false;
+          }
+        }
         return refuse(401, "saml_validation_failed", "saml-login-failed",
-          `SAML assertion validation failed for provider '${provider.name}'`,
-          { error: err instanceof Error ? err.message : String(err) });
+          `SAML assertion validation failed for provider '${provider.name}'` +
+            (responseUnsigned ? ": the SAML Response envelope is not signed (wantAuthnResponseSigned is on)" : ""),
+          { error: message, ...(responseUnsigned ? { cause: SAML_RESPONSE_SIGNING_REQUIRED } : {}) },
+          null,
+          responseUnsigned ? SAML_RESPONSE_SIGNING_DETAIL : undefined);
       }
 
       const assertion = verifiedAssertion(profile);
@@ -885,6 +930,23 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
 
   // ---- admin CRUD (default admin gate applies, audited as saml_provider) --
 
+  /** ADR-0181 (FX2): JIT on with no allowed domains is refused by name, audited */
+  const refuseSamlJitWithoutDomains = async (
+    reply: FastifyReply,
+    actorUserId: string | null,
+    name: string,
+    providerId: string | null,
+  ) => {
+    const detail =
+      "JIT provisioning creates an account from whatever email the identity provider asserts, so it needs " +
+      "allowedEmailDomains: name the domains this provider may provision (or turn JIT off). Nothing was saved.";
+    await auditAuth(db, actorUserId, providerId, OIDC_JIT_DOMAINS_REQUIRED, "deny",
+      `SAML provider '${name}' write refused: JIT provisioning without allowed email domains`,
+      { phase: providerId ? "provider-updated" : "provider-created", name, error: OIDC_JIT_DOMAINS_REQUIRED },
+      "saml_provider");
+    return reply.status(422).send({ error: OIDC_JIT_DOMAINS_REQUIRED, detail });
+  };
+
   app.get("/v1/auth/saml-providers", async () => {
     const rows = await db.select().from(samlProviders);
     return { providers: rows.map(publicProvider) };
@@ -901,6 +963,9 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
     });
     if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = createSamlProviderSchema.parse(req.body);
+    // ADR-0181 (FX2, review finding 5): JIT provisioning needs the email
+    // domains it accepts — the same rule, wording and error as OIDC
+    if (oidcJitDomainsMissing(body)) return refuseSamlJitWithoutDomains(reply, req.authCtx.userId, body.name, null);
     if (body.spPrivateKey && !opts.dataKey) {
       return reply.status(409).send({
         error: "data_key_required",
@@ -966,6 +1031,16 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
       .from(samlProviders)
       .where(eq(samlProviders.id, providerId));
     if (!existing) return reply.status(404).send({ error: "unknown_provider" });
+    // ADR-0181 (FX2): over the EFFECTIVE values, so a two-step PATCH cannot
+    // turn JIT on before (or clear the domains after) naming them
+    if (
+      oidcJitDomainsMissing({
+        jitProvisioning: body.jitProvisioning ?? existing.jitProvisioning,
+        allowedEmailDomains: body.allowedEmailDomains !== undefined ? body.allowedEmailDomains : existing.allowedEmailDomains,
+      })
+    ) {
+      return refuseSamlJitWithoutDomains(reply, req.authCtx.userId, existing.name, providerId);
+    }
     if (body.spPrivateKey && !opts.dataKey) {
       return reply.status(409).send({ error: "data_key_required" });
     }

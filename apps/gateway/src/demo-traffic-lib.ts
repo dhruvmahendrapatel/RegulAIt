@@ -100,7 +100,10 @@ async function runDemoTrafficRun(
     return report;
   }
   const keyFor = async (id: string) => {
-    const k = (await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME, expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) })).body;
+    const issued = await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME, expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
+    // ADR-0181 (FX2): an un-enrolled admin gets no key — name it, do not 401 later
+    if (issued.status !== 201) throw new Error(`cannot issue a demo-traffic key for user ${id}: ${issued.status} ${String(issued.body.error ?? "")}`);
+    const k = issued.body;
     if (typeof k.id === "string") minted.push(k.id);
     return { authorization: `Bearer ${k.token}` };
   };

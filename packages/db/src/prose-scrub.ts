@@ -267,10 +267,15 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  *   declared STRING columns only (the ADR-0115 `eval_results.detail`
  *   answer). The one writer, the risk-acceptance route, scrubs each
  *   `description` with `PROSE_SCRUB` before the insert.
+ * - `migration_audit_outbox.reason` — ADR-0181 FX2 (migration 0160): written
+ *   only by migration SQL (no application writer, so nothing an operator
+ *   typed), and held only until `runMigrations` drains it into
+ *   `audit_log.reason` through the chained insert, which ADR-0099 scrubs.
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
   "mcp_registry_entries.conflict_reason",
+  "migration_audit_outbox.reason",
   "risk_acceptances.compensating_controls",
   "trace_retention_holds.release_reason",
   "usage_events.stop_reason",

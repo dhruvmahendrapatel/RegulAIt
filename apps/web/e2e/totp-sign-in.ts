@@ -85,6 +85,33 @@ async function nextCode(email: string): Promise<string> {
 }
 
 /**
+ * ADR-0181 (FX2): the demo seed enrols the admin persona's TOTP OUTSIDE any
+ * browser run (so that her API key works) and shows the secret once on its own
+ * console, and a secret store left by an earlier run may name another
+ * database's enrolment. A journey that re-provisions a person from scratch (a
+ * forced one-time password) therefore re-provisions their MFA too, through the
+ * real, audited lost-authenticator route (`POST /v1/users/:id/mfa/clear`): the
+ * person enrols again at that sign-in, from the secret on screen. An account
+ * with no TOTP is left alone.
+ */
+export async function reprovisionTotp(
+  baseUrl: string,
+  bootHeaders: Record<string, string>,
+  email: string,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/v1/users`, { headers: bootHeaders });
+  const users = ((await res.json()) as { users: Array<{ id: string; email: string; totpEnabled?: boolean }> }).users;
+  const user = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  if (!user?.totpEnabled) return;
+  const cleared = await fetch(`${baseUrl}/v1/users/${user.id}/mfa/clear`, {
+    method: "POST",
+    headers: { ...bootHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ reason: "e2e journey: the authenticator enrolled by the demo seed is not held by this run; the person re-enrols at sign-in" }),
+  });
+  expect(cleared.status, `clearing ${email}'s TOTP for re-enrolment`).toBe(200);
+}
+
+/**
  * After a credential step, answer any TOTP screen the app shows for `email`
  * until `target` is on screen. Safe to call for anybody: a person with no TOTP
  * requirement goes straight to `target`.

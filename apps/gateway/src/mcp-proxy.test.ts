@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { enrolAdminTotpForTest } from "./testing/identity-posture.js";
 import { createHmac } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
@@ -7614,6 +7615,8 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
     ivyId = await mkUser("loop-ivy@example.com", "Loop Ivy");
     oleId = await mkUser("loop-ole@example.com", "Loop Ole");
     const zedId = await mkUser("loop-zed@example.com", "Loop Zed");
+    // ADR-0181 (FX2): an admin's key answers to mfaRequired — enrol TOTP first
+    await enrolAdminTotpForTest(app, BOOT, adminId);
     adminAuth = await authFor(adminId);
     ivyAuth = await authFor(ivyId);
     oleAuth = await authFor(oleId);

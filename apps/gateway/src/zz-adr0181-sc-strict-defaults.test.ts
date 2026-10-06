@@ -125,11 +125,13 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
     tmpMigrations = mkdtempSync(path.join(tmpdir(), "sdsc-mig-"));
     cpSync(migrationsFolder, tmpMigrations, { recursive: true });
     const journalPath = path.join(tmpMigrations, "meta", "_journal.json");
-    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ tag: string }> };
-    // stop BEFORE 0159, dropping every later migration too: the migrator skips
-    // any entry older than the newest one applied, so leaving a later one
-    // (0160, 0161, …) in would make the second run never apply 0159 at all
-    journal.entries = journal.entries.filter((e) => e.tag < "0159_strict_admission_infra");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ idx: number; tag: string }> };
+    // cut every entry FROM 0159 on, so 0159 is the newest migration the second
+    // run applies over 0158: the migrator skips any entry older than the newest
+    // one applied, so leaving a later one (0160, 0161, …) in at this step would
+    // make the second run never apply 0159 at all
+    const cut = journal.entries.find((e) => e.tag === "0159_strict_admission_infra")!.idx;
+    journal.entries = journal.entries.filter((e) => e.idx < cut);
     writeFileSync(journalPath, JSON.stringify(journal));
     upgrade = createDb(urlFor(UPGRADE_DB));
     await runMigrations(upgrade, tmpMigrations);

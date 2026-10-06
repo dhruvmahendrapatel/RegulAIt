@@ -997,29 +997,37 @@ describe("API-key path regression (byte-identical to pre-0042)", () => {
     expect(r.json()).toEqual({ error: "unauthenticated" });
   });
 
-  it("mfa_required=all gates SESSION users into enrollment but never touches API-key requests", async () => {
+  it("mfa_required=all gates SESSION users into enrollment — and, since ADR-0181 FX2, their API keys too", async () => {
     const on = await app.inject({
       method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "all" },
     });
     expect(on.statusCode).toBe(200);
-    // key path: untouched
+    try {
+      // key path: an un-enrolled person's key answers to the same dial
+      // (ADR-0181 FX2 — it used to be untouched, which made a key a way around MFA)
+      const keyed = await app.inject({ method: "GET", url: "/v1/me", headers: { authorization: `Bearer ${key}` } });
+      expect(keyed.statusCode).toBe(403);
+      expect(keyed.json().error).toBe("mfa_enrollment_required");
+      // session path: gated until enrolled
+      const pw = "keyer-Password-55";
+      const cookie = await onboard(uid, "keyer@auth-test.example", pw);
+      const gated = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+      expect(gated.statusCode).toBe(403);
+      expect(gated.json().error).toBe("mfa_enrollment_required");
+      // /auth/me still reachable and says so
+      const meRes = await me(cookie);
+      expect(meRes.statusCode).toBe(200);
+      expect(meRes.json().mfaSetupRequired).toBe(true);
+    } finally {
+      // back to the shipped strict default (ADR-0181), not to off (M-068)
+      const back = await app.inject({
+        method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "admins" },
+      });
+      expect(back.statusCode).toBe(200);
+    }
+    // under the default ('admins') this member's key works again
     const keyed = await app.inject({ method: "GET", url: "/v1/me", headers: { authorization: `Bearer ${key}` } });
     expect(keyed.statusCode).toBe(200);
-    // session path: gated until enrolled
-    const pw = "keyer-Password-55";
-    const cookie = await onboard(uid, "keyer@auth-test.example", pw);
-    const gated = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
-    expect(gated.statusCode).toBe(403);
-    expect(gated.json().error).toBe("mfa_enrollment_required");
-    // /auth/me still reachable and says so
-    const meRes = await me(cookie);
-    expect(meRes.statusCode).toBe(200);
-    expect(meRes.json().mfaSetupRequired).toBe(true);
-    // back to the shipped strict default (ADR-0181), not to off (M-068)
-    const back = await app.inject({
-      method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "admins" },
-    });
-    expect(back.statusCode).toBe(200);
   });
 });
 

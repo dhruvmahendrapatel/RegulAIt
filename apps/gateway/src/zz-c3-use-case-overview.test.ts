@@ -7,6 +7,7 @@
  * the lists; nothing is written. Scoped to ids this file creates (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
@@ -35,9 +36,14 @@ async function makeUser(tag: string, isAdmin = false) {
   return { id, auth: { authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, AUTH, { name: "k" })).json().token}` } };
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   expect((await call("POST", "/v1/compliance/packs/seed", AUTH, {})).statusCode).toBe(201);
   owner = await makeUser("owner");
@@ -47,6 +53,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   app.server.closeAllConnections();
   await app.close();
 });

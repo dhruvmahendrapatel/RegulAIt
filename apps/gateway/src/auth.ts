@@ -20,6 +20,7 @@ import {
   ne,
   oidcLoginStates,
   oidcProviders,
+  ORG_SETTINGS_ID,
   roleAssignments,
   roles,
   samlProviders,
@@ -115,6 +116,10 @@ export interface AuthContext {
    * bucket is the STORED id and never anything derived from the presented
    * string. */
   apiKeyId?: string;
+  /** ADR-0181 (FX2): whether the key's OWNER has TOTP enrolled. Set only when
+   * `via === "api-key"`; the route hook refuses an un-enrolled owner's key
+   * wherever the org MFA requirement covers them (`apiKeyMfaEnrollmentRequired`). */
+  totpEnabled?: boolean;
 }
 
 /**
@@ -231,6 +236,7 @@ export async function authenticate(
       disabledAt: users.disabledAt,
       revokedAt: apiKeys.revokedAt,
       expiresAt: apiKeys.expiresAt,
+      totpEnabled: users.totpEnabled,
     })
     .from(apiKeys)
     .innerJoin(users, eq(apiKeys.userId, users.id))
@@ -255,8 +261,33 @@ export async function authenticate(
   }
 
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.keyId));
-  return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key", apiKeyId: row.keyId };
+  return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key", apiKeyId: row.keyId, totpEnabled: row.totpEnabled };
 }
+
+/**
+ * ADR-0181 (FX2, review finding 3) — an API key is not a way around MFA.
+ *
+ * The org MFA requirement used to bind only the cookie session, so an admin
+ * who never enrolled TOTP kept full administrator power through an API key.
+ * A key now answers to the SAME dial as a session (`orgRequiresMfa`): where
+ * the requirement covers the key's owner and the owner has no TOTP, the key is
+ * refused (route hook), it cannot be exchanged for a browser session (where
+ * the self-service enrolment routes would let its holder enrol THEIR OWN
+ * authenticator), and no new key is issued to that person. The bootstrap token
+ * is no user's key and is not affected; a virtual key is never admin.
+ */
+export function apiKeyMfaEnrollmentRequired(org: OrgSettingsRow, ctx: AuthContext): boolean {
+  if (ctx.via !== "api-key" || !ctx.userId || ctx.totpEnabled === true) return false;
+  return orgRequiresMfa(org, ctx.isAdmin);
+}
+
+/** the holder-facing refusal for an un-enrolled owner's key (one wording) */
+export const API_KEY_MFA_REFUSAL = {
+  error: "mfa_enrollment_required",
+  detail:
+    "this organization requires TOTP MFA for this account, and an API key does not satisfy it: the key's owner must " +
+    "sign in and enroll TOTP (POST /auth/totp/enroll) before the key works. An admin may relax mfaRequired (audited).",
+} as const;
 
 /**
  * ADR-0098 — the audit half of "expired ≠ revoked".
@@ -583,6 +614,10 @@ export async function resolveSession(
       expiresAt: authSessions.expiresAt,
       idleExpiresAt: authSessions.idleExpiresAt,
       idleMinutes: authSessions.idleMinutes,
+      lastSeenAt: authSessions.lastSeenAt,
+      // ADR-0181 (FX2, finding 10a): the org's CURRENT idle window, read with
+      // the session in the same query (the singleton row; null before it exists)
+      orgIdleMinutes: sql<number | null>`(select "session_idle_minutes" from "org_settings" where "id" = ${ORG_SETTINGS_ID})`,
       origin: authSessions.origin,
       revokedAt: authSessions.revokedAt,
       idpMfa: authSessions.idpMfa,
@@ -598,13 +633,23 @@ export async function resolveSession(
   if (row.revokedAt) return null;
   const now = Date.now();
   if (row.expiresAt.getTime() <= now || row.idleExpiresAt.getTime() <= now) return null;
+  // ADR-0181 (FX2, finding 10a) — NO GRANDFATHERING of the idle window. A
+  // session snapshots the org's idle minutes when it is created, so a session
+  // opened under a laxer setting used to keep it until it died. The window
+  // that applies is now the SHORTER of the snapshot and the org's current
+  // value: tightening sessionIdleMinutes binds every live session on its next
+  // request (measured from its last use); relaxing it applies to new sessions.
+  const orgIdle = row.orgIdleMinutes === null ? null : Number(row.orgIdleMinutes);
+  const idleMinutes = orgIdle !== null && orgIdle > 0 ? Math.min(row.idleMinutes, orgIdle) : row.idleMinutes;
+  if (row.lastSeenAt.getTime() + idleMinutes * 60_000 <= now) return null;
   if (row.userId === null) {
     // bootstrap-exchanged session: dies with the deploy-time token
     if (!bootstrapConfigured) return null;
     await db
       .update(authSessions)
       .set({
-        idleExpiresAt: new Date(now + row.idleMinutes * 60_000),
+        idleExpiresAt: new Date(now + idleMinutes * 60_000),
+        idleMinutes,
         lastSeenAt: new Date(now),
         ...(clientIp !== undefined ? { lastSeenIp: clientIp } : {}),
       })
@@ -622,7 +667,8 @@ export async function resolveSession(
   await db
     .update(authSessions)
     .set({
-      idleExpiresAt: new Date(now + row.idleMinutes * 60_000),
+      idleExpiresAt: new Date(now + idleMinutes * 60_000),
+      idleMinutes,
       lastSeenAt: new Date(now),
       ...(clientIp !== undefined ? { lastSeenIp: clientIp } : {}),
     })
@@ -1231,6 +1277,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       });
     }
     const org = await loadOrgSettings(db);
+    // ADR-0181 (FX2): an un-enrolled owner's key buys no session either — an
+    // exchanged session may reach the TOTP self-service routes, which would
+    // let whoever holds the key enrol their own authenticator.
+    if (apiKeyMfaEnrollmentRequired(org, ctx)) {
+      await auditAuth(db, null, ctx.userId, "api-key-mfa-enrollment-required", "deny",
+        "API-key browser sign-in refused: the org requires MFA for this account and its owner has not enrolled TOTP",
+        { phase: "login", method: "api-key-exchange", mfaRequired: org.mfaRequired, apiKeyId: ctx.apiKeyId ?? null });
+      return reply.status(403).send(API_KEY_MFA_REFUSAL);
+    }
     // ADR-0174 (finding 9): in break-glass mode a browser session from an API
     // key is a local sign-in like any other — only a designated break-glass
     // admin may have one. Everybody else gets the same answer as an unknown

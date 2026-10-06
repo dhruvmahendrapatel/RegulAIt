@@ -25,6 +25,7 @@ import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
 import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
+import { enrolAdminTotp, type AdminTotpEnrolment } from "./demo-identity.js"; // ADR-0181 (FX2): seedAdminMfa
 import { ensureDemoModelCards } from "./demo-strict-governance.js";
 import { seedStrictData } from "./seed-strict-data.js";
 import { demoSeedRefusal, demoSeedSignal, realAdminEmails } from "./seed-demo-guard.js"; // ADR-0181 FX3
@@ -150,6 +151,10 @@ for (const [username, id] of [
   await call("PUT", `/v1/users/${id}/username`, { username });
 }
 
+// ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
+// un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
+const adminMfa = await seedAdminMfa(adminId);
+
 const keys: Record<string, string> = {};
 const keyIds: Record<string, string> = {};
 for (const [name, id] of [
@@ -157,6 +162,8 @@ for (const [name, id] of [
   ["dana", danaId],
   ["avery", averyId],
 ] as const) {
+  // ADR-0181 (FX2): an admin who has not enrolled TOTP is issued no key
+  if (name === "admin" && adminMfa.status === "refused") continue;
   const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
   keys[name] = minted.token;
   keyIds[name] = minted.id;
@@ -178,6 +185,11 @@ const passwords: Record<string, string> = {};
     ["avery", averyId],
   ] as const) {
     const row = userRows.find((u: Json) => u.id === id);
+    // ADR-0181 (FX2): Ada's one-time password was issued by her TOTP enrolment
+    if (name === "admin" && adminMfa.status === "enrolled") {
+      passwords[name] = adminMfa.password;
+      continue;
+    }
     if (row?.hasPassword) {
       passwords[name] = "(already set — unchanged)";
       continue;
@@ -249,7 +261,7 @@ for (const userId of [adminId, danaId, averyId]) {
         : {}),
     });
     // a review recorded today (by Ada) schedules the next one by the cadence
-    if (plan.reviewInDays === "record") await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
+    if (plan.reviewInDays === "record" && keys.admin) await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
   }
 }
 
@@ -1414,6 +1426,7 @@ RegulAIt demo data ready.
   simply 'admin' if you prefer.
 
     admin  admin  admin@regulait.local   ${passwords.admin}
+${adminMfaLine(adminMfa)}
     dana   dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
     avery  avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
 
@@ -1626,4 +1639,27 @@ async function seedStrictAdmission(): Promise<void> {
         `cooldown override; a server registered during the demo still waits.`,
     });
   }
+}
+
+// --- ADR-0181 (FX2): seedAdminMfa -------------------------------------------
+// MFA is required for admins, and since FX2 an admin's API key answers to it
+// too, so the admin persona the prep tooling acts as must be enrolled before a
+// key is minted for her. Enrolled through the real routes (enrolAdminTotp:
+// one-time password -> sign-in -> enrol -> activate), never by relaxing
+// mfaRequired. The authenticator secret is printed ONCE, beside her one-time
+// password, for the presenter to add to an authenticator app.
+async function seedAdminMfa(userId: string): Promise<AdminTotpEnrolment> {
+  const result = await enrolAdminTotp(app, BOOT, userId);
+  // a re-seed after the presenter set her password (demo:set-passwords, which
+  // re-provisions her authenticator): she enrols at her own sign-in, and the
+  // seed acts without her key — never by relaxing anything
+  if (result.status === "refused") console.log(`  admin TOTP not enrolled by the seed: ${result.reason}`);
+  return result;
+}
+
+function adminMfaLine(r: AdminTotpEnrolment): string {
+  if (r.status === "enrolled") return `           admin TOTP (shown ONCE; add it to an authenticator app): ${r.otpauthUri}`;
+  return r.status === "already"
+    ? "           admin TOTP: already enrolled (unchanged)"
+    : "           admin TOTP: not enrolled — she enrols an authenticator at her first sign-in";
 }

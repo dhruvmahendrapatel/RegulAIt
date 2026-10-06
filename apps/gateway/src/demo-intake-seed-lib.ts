@@ -29,7 +29,7 @@ import {
   type DemoUseCase,
 } from "@regulait/shared";
 import { VENDOR_QUESTIONNAIRE_TEMPLATE } from "./vendors.js";
-import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, enrolAdminTotp, revokeScriptKeys } from "./demo-identity.js";
 import { openAssuranceGuardrailWindow } from "./seed-strict-data.js";
 
 type Json = Record<string, any>;
@@ -103,7 +103,21 @@ async function seedDemoIntakeRun(
       u = r.body;
       report.created.push(`user ${email}`);
     }
+    // ADR-0181 (FX2): an admin's key answers to the org MFA requirement, so an
+    // admin persona is enrolled (real routes, nothing relaxed) before a key is
+    // minted for her. After `seed` she already is; a standalone run on a
+    // database without the seed enrols her here and shows the secret once.
+    if (isAdmin) {
+      const mfa = await enrolAdminTotp(app, opts.bootstrapToken, u!.id as string);
+      if (mfa.status === "refused") throw new Error(`cannot give ${email} TOTP: ${mfa.reason}`);
+      if (mfa.status === "enrolled") {
+        report.notes.push(
+          `${email} had no TOTP and was enrolled now — one-time password ${mfa.password}, authenticator ${mfa.otpauthUri} (shown ONCE)`,
+        );
+      }
+    }
     const key = await call("POST", `/v1/users/${u!.id}/keys`, { name: "demo-intake-seed", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
+    if (key.status !== 201) throw new Error(`cannot issue a key for persona ${email}: ${key.status} ${String(key.body.error ?? "")}`);
     if (typeof key.body.id === "string") minted.push(key.body.id);
     return { id: u!.id as string, auth: { authorization: `Bearer ${key.body.token}` } };
   }

@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, afterAll } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -88,9 +89,14 @@ async function makeUser(email: string, displayName: string, isAdmin = false) {
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
   // PII handling, so it sets the floor off explicitly, and the injection and jailbreak
   // layers to warn (a block-mode output layer never streams live); restored in afterAll.
@@ -624,6 +630,7 @@ describe("S21 — listing conversations filtered by project", () => {
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await restoreSb2Gates();
   await restoreSb1Posture?.();
 });

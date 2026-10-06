@@ -38,6 +38,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { Webhook } from "standardwebhooks";
 import {
   and,
@@ -194,9 +195,14 @@ async function createRule(payload: Record<string, unknown>, auth: Auth = admin.a
 
 const later = (ms = 60_000) => new Date(Date.now() + ms);
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
   admin = await makeUser("k-auto-admin", true);
@@ -225,6 +231,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await drainBackgroundWork(db);
   if (createdQueueIds.length) await db.delete(annotationQueues).where(inArray(annotationQueues.id, createdQueueIds));
   if (createdDatasetIds.length) await db.delete(evalDatasets).where(inArray(evalDatasets.id, createdDatasetIds));

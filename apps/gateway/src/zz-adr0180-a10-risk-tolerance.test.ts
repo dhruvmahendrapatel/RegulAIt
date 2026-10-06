@@ -27,6 +27,7 @@
  * the alert episodes this file raises are restored/removed before it ends.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -126,9 +127,14 @@ const accept = (riskId: string, body: Record<string, unknown>, who: Who = "admin
     ...body,
   });
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   // idempotent (the ADR-0147 precedent): the pack catalogue a compensating control ref must name
   expect((await inject("POST", "/v1/compliance/packs/seed", AUTH, {})).statusCode).toBe(201);
@@ -155,6 +161,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // M-068: leave the org as it was
   await db.delete(riskTolerances);
   if (policyBefore) {
