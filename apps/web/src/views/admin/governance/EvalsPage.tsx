@@ -29,6 +29,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import {
   Badge,
   Button,
@@ -695,6 +696,7 @@ export default function EvalsPage() {
               />
 
               <div style={{ marginTop: "var(--s3)" }}>
+                <RefusalNotice guidance={act.guidance} />
                 <form
                   className={a.formRow}
                   onSubmit={(e) => {

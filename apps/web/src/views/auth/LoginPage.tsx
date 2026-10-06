@@ -29,6 +29,7 @@ import { useEffect, useId, useState, type FormEvent, type ReactNode } from "reac
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
+import type { RefusalGuidance } from "../../api/refusals";
 import type {
   BrokerIdp,
   LinkPendingResponse,
@@ -39,6 +40,7 @@ import type {
 import { useSession } from "../../session/SessionContext";
 import { Endorsement, Lockup } from "../../ui/Brand";
 import { Button, Field, Input } from "../../ui/kit";
+import { RefusalNotice } from "../../ui/RefusalNotice";
 import { Logo } from "../../ui/logos/Logo";
 import s from "./auth.module.css";
 
@@ -125,6 +127,8 @@ export default function LoginPage() {
   const [code, setCode] = useState("");
   const [pendingToken, setPendingToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ADR-0183 2.3: a refused key whose owner must enrol TOTP says so, with the link
+  const [guidance, setGuidance] = useState<RefusalGuidance | null>(null);
   const [ssoOnly, setSsoOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [ssoOpen, setSsoOpen] = useState(false);
@@ -214,6 +218,7 @@ export default function LoginPage() {
   const submitKey = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    setGuidance(null);
     setBusy(true);
     try {
       await api.post<LoginResponse>("/auth/login-with-key", { apiKey });
@@ -225,6 +230,8 @@ export default function LoginPage() {
             ? "This account has been deactivated — an admin can reactivate it."
             : "That key wasn't accepted.",
         );
+      } else if (err instanceof ApiError && err.guidance) {
+        setGuidance(err.guidance);
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -354,6 +361,7 @@ export default function LoginPage() {
           <p className={s.sub}>Welcome to your governed AI workspace.</p>
         </div>
         {error && <div className={s.error} role="alert">{error}</div>}
+        <RefusalNotice guidance={guidance} />
 
         {hasFederated && (
           <div className={s.providers}>
