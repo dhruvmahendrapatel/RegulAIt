@@ -16,6 +16,12 @@
  * `kriMonitorInput` on its pass and owns the episodes (rule
  * `kri_threshold_breached`, subject `kri:<id>`).
  *
+ * ADR-0182 S5 (PF-03): `on_breach = propose_halt` (agent-scoped KRIs only:
+ * 422 here, a DB CHECK beneath) makes a breach episode CARRY a suggested halt
+ * of the agent (`detail.suggestedAction`). Owner decision 4: a suggestion
+ * only — the monitor files nothing; a person proposes it from the alerts page
+ * and a different person approves it (remediation.ts).
+ *
  * NO CONTENT. Every query here selects aggregates over ids, statuses,
  * durations, costs and score values only — never a preview, an attribute bag,
  * a status reason or a comment. The test reads the generated SQL and fails if
@@ -51,6 +57,7 @@ import {
   foldTopGroups,
   kriCreateSchema,
   kriMetricIsAdditive,
+  kriOnBreachProblem,
   kriSubjectKey,
   kriUpdateSchema,
   seriesQuerySchema,
@@ -264,6 +271,8 @@ export async function kriMonitorInput(db: Db, now: Date): Promise<MonitorKriInpu
       enabled: k.enabled,
       value: m.value,
       samples: m.samples,
+      // ADR-0182 S5 (PF-03): a breach SUGGESTS a halt (never files or trips one)
+      onBreach: k.onBreach,
     });
   }
   return out;
@@ -450,6 +459,9 @@ function kriView(k: KriRow, m: { value: number | null; samples: number } | null,
     severity: k.severity,
     scoreName: k.scoreName,
     enabled: k.enabled,
+    /** ADR-0182 S5 (PF-03): `propose_halt` = a breach episode carries a
+     * suggested halt a person may file; nothing is filed or halted on its own */
+    onBreach: k.onBreach,
     createdAt: k.createdAt.toISOString(),
     updatedAt: k.updatedAt.toISOString(),
     measurement: m
@@ -496,8 +508,17 @@ export function registerKriRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 
+  /** ADR-0182 S5 (PF-03): only an agent-scoped KRI may suggest a halt (422;
+   * the DB CHECK `kris_on_breach_scope_check` holds it whatever this does) */
+  const onBreachRefusal = (scope: KriRow["scope"], onBreach: KriRow["onBreach"]) => {
+    const problem = kriOnBreachProblem(scope, onBreach);
+    return problem ? { error: "propose_halt_requires_agent_scope", detail: problem } : null;
+  };
+
   app.post("/v1/kris", async (req, reply) => {
     const body = kriCreateSchema.parse(req.body);
+    const refusal = onBreachRefusal(body.scope, body.onBreach);
+    if (refusal) return reply.status(422).send(refusal);
     const [row] = await db
       .insert(kris)
       .values({ ...body, createdByUserId: actor(req) })
@@ -511,6 +532,7 @@ export function registerKriRoutes(app: FastifyInstance, db: Db): void {
       threshold: row!.threshold,
       minSamples: row!.minSamples,
       severity: row!.severity,
+      onBreach: row!.onBreach,
     });
     return reply.status(201).send(kriView(row!, null, null));
   });
@@ -534,8 +556,12 @@ export function registerKriRoutes(app: FastifyInstance, db: Db): void {
       severity: merged.severity,
       scoreName: merged.scoreName,
       enabled: merged.enabled,
+      onBreach: merged.onBreach,
     });
     if (!check.success) return reply.status(400).send({ error: "validation", issues: check.error.issues });
+    // a scope change away from `agent` must not leave a halt suggestion behind
+    const refusal = onBreachRefusal(merged.scope, merged.onBreach);
+    if (refusal) return reply.status(422).send(refusal);
     const [row] = await db
       .update(kris)
       .set({ ...body, updatedAt: new Date() })
