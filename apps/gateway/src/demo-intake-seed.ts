@@ -39,7 +39,8 @@ console.log(`demo:intake — ${fixtures.company.name}`);
 console.log(`  created ${report.created.length}, skipped ${report.skipped.length}, failed ${report.failed.length}`);
 for (const n of report.notes) console.log(`  note    ${n}`);
 for (const f of report.failed) console.log(`  FAILED  ${f}`);
-// ADR-0181 SB2: the required-test runs above moved the cards' ledger; Avery recertifies them
+// ADR-0181: the required-test runs' guardrail window relaxed the agents under test (drift;
+// the passing runs themselves are not), so Avery reviews and recertifies those cards
 for (const n of await recertifyDemoModelCards(app, BOOT)) console.log(`  ${n}`);
 await app.close();
 await (db.$client as { end: () => Promise<void> }).end();

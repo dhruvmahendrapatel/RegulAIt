@@ -360,11 +360,14 @@ export default function ModelRiskPage() {
               <div className={v.faint}>
                 Staleness-forces-recertification only bites while the dispatch gate above is on — it
                 deepens that gate, it creates none of its own. When armed, a card with a LIVE
-                sign-off whose ledgers have moved (eval runs, red-team runs, guardrail/grant/risk
-                changes, drift regressions — the same counts the card&apos;s certification-drift
-                banner shows) at least this many times since the last granting decision refuses
-                dispatch on the same 409 the expiry gate uses, naming the drift; a recertification
-                resets the clock. Off keeps drift purely informational.
+                sign-off that has drifted at least this many times since the last granting decision
+                refuses dispatch on the same 409 the expiry gate uses, naming the drift; a
+                recertification resets the clock. Drift is a regression (an eval or red-team run
+                that measured worse than at certification, or a scheduled run that failed its gate),
+                a risk-register change, an agent guardrail relaxation, a model, prompt or endpoint
+                change, or an edit of the card — the same events the card&apos;s certification-drift
+                banner names. Passing runs and grants are routine evidence, not drift. Off keeps
+                drift purely informational.
               </div>
               <div className={v.faint}>{status.data?.note}</div>
               <div className={a.formRow}>

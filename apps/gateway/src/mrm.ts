@@ -80,6 +80,7 @@ import {
   type MrmGateDecision,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { settingTransitions } from "./setting-transitions.js";
 import { summarizeGroundedness } from "./evals.js";
 import { pinnedVersionProblem } from "@regulait/shared";
 
@@ -169,13 +170,15 @@ export interface MrmGateContext {
   customProviderId: string | null;
   projectId?: string | null;
   /**
-   * ADR-0181: the dispatch is an EVALUATION — an eval-suite case, its judge, or
-   * a red-team probe (the server-side `evals` model feature; no HTTP caller
-   * can set it). Staleness-forces-recertification does not refuse these: the
-   * evidence a recertification needs is exactly what they produce, and a run
-   * started after certification is itself ledger drift, so refusing them would
-   * let no certified card ever be re-tested. The base gate (an approved,
-   * unexpired card) still applies to them in full.
+   * ADR-0181: the dispatch EVALUATES this agent — an eval-suite case or a
+   * red-team probe sent to the agent UNDER TEST (set by the server-side eval
+   * runners through `executeGovernedDispatch`'s `evaluationSubject`; no HTTP
+   * caller can set it). Staleness-forces-recertification does not refuse
+   * these: a drifted card can only be recertified on fresh evidence, which is
+   * exactly what they produce. A JUDGE is not the subject of the evaluation
+   * (review finding 8): it is an ordinary dispatch of its own model and goes
+   * through the full gate, staleness included. The base gate (an approved,
+   * unexpired card) applies to every dispatch in full.
    */
   evaluation?: boolean;
 }
@@ -232,13 +235,15 @@ export async function mrmDispatchGate(
       .from(modelCardApprovals)
       .where(eq(modelCardApprovals.cardId, liveCard.id));
     const staleness = await computeCardStaleness(db, liveCard, chain, now);
-    if (!staleness.certified || !staleness.drifted || !staleness.changesSinceCertification) {
+    if (!staleness.certified || !staleness.drifted || !staleness.driftSinceCertification) {
       return null;
     }
-    const totalChanges = Object.values(staleness.changesSinceCertification).reduce(
-      (a, b) => a + b,
-      0,
-    );
+    // ADR-0181 (review finding 1): the threshold counts DRIFT EVENTS only —
+    // regressions, risk changes, guardrail relaxations, configuration changes
+    // and card edits (`StalenessDrift`). Routine evidence (passing runs,
+    // grants) is not drift, so no entitled user can stale a model for everyone
+    // by running a test.
+    const totalChanges = staleness.driftEvents;
     if (totalChanges < org.mrmStalenessRecertThreshold) return null;
     if (ctx.evaluation) {
       // ADR-0181: recorded, not refused — see `MrmGateContext.evaluation`
@@ -260,7 +265,7 @@ export async function mrmDispatchGate(
         ruleId: "mrm-staleness-evaluation-allowed",
         ruleChain: [],
         reason:
-          `model card '${liveCard.intendedUse}' is STALE (${totalChanges} ledger change(s) since certification) — ` +
+          `model card '${liveCard.intendedUse}' is STALE (${totalChanges} drift event(s) since certification) — ` +
           "this evaluation dispatch was allowed so the evidence a recertification needs can be gathered; " +
           "production dispatch stays refused until the card is recertified",
       });
@@ -268,7 +273,7 @@ export async function mrmDispatchGate(
     }
     const detail =
       `the risk sign-off on model card '${liveCard.intendedUse}' is live but STALE: ` +
-      `${staleness.summary} (${totalChanges} ledger change(s) since certification on ` +
+      `${staleness.summary} (${totalChanges} drift event(s) since certification on ` +
       `${staleness.lastCertifiedAt}, threshold ${org.mrmStalenessRecertThreshold}). ` +
       `Staleness-forces-recertification is enabled — recertify (a new sign-off superseding ` +
       `the current one) to restore dispatch`;
@@ -289,6 +294,7 @@ export async function mrmDispatchGate(
         staleness: {
           lastCertifiedAt: staleness.lastCertifiedAt,
           changesSinceCertification: staleness.changesSinceCertification,
+          driftSinceCertification: staleness.driftSinceCertification,
           totalChanges,
           summary: staleness.summary,
         },
@@ -1100,17 +1106,20 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       })
       .parse(req.body);
     const org = await loadOrgSettings(db);
+    const patch = {
+      mrmEnforced: body.enforced,
+      ...(body.warnDays !== undefined ? { mrmExpiryWarnDays: body.warnDays } : {}),
+      ...(body.stalenessRecertEnabled !== undefined
+        ? { mrmStalenessRecertEnabled: body.stalenessRecertEnabled }
+        : {}),
+      ...(body.stalenessRecertThreshold !== undefined
+        ? { mrmStalenessRecertThreshold: body.stalenessRecertThreshold }
+        : {}),
+    };
     const [updated] = await db
       .update(orgSettings)
       .set({
-        mrmEnforced: body.enforced,
-        ...(body.warnDays !== undefined ? { mrmExpiryWarnDays: body.warnDays } : {}),
-        ...(body.stalenessRecertEnabled !== undefined
-          ? { mrmStalenessRecertEnabled: body.stalenessRecertEnabled }
-          : {}),
-        ...(body.stalenessRecertThreshold !== undefined
-          ? { mrmStalenessRecertThreshold: body.stalenessRecertThreshold }
-          : {}),
+        ...patch,
         updatedBy: req.authCtx.userId ?? null,
         updatedAt: new Date(),
       })
@@ -1122,6 +1131,9 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       objectId: null,
       detail: {
         phase: "mrm",
+        // ADR-0181: the unified old -> new shape every strict-default write
+        // carries (org-settings column names, changed keys only)
+        transitions: settingTransitions(org, patch),
         from: org.mrmEnforced,
         to: body.enforced,
         warnDays: updated!.mrmExpiryWarnDays,
@@ -1146,7 +1158,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       reason: body.enforced
         ? "mrmEnforced ON — dispatch of a model with no unexpired approved card is now REFUSED" +
           (updated!.mrmStalenessRecertEnabled
-            ? `; staleness-forces-recertification armed (threshold ${updated!.mrmStalenessRecertThreshold} ledger change(s) since certification)`
+            ? `; staleness-forces-recertification armed (threshold ${updated!.mrmStalenessRecertThreshold} drift event(s) since certification)`
             : "")
         : "mrmEnforced OFF — model cards are recorded but no dispatch is refused",
     });

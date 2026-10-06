@@ -37,6 +37,8 @@ import {
   aiUseCases,
   aiVendors,
   and,
+  auditLog,
+  configActivationEvents,
   count,
   desc,
   eq,
@@ -46,7 +48,9 @@ import {
   gte,
   guardrailConfigs,
   inArray,
+  isNotNull,
   isNull,
+  lte,
   or,
   redteamRuns,
   roleAgentGrants,
@@ -59,6 +63,13 @@ import {
   type ModelCardRow,
   type SQL,
 } from "@regulait/db";
+import {
+  GUARDRAIL_MODES,
+  evaluateEvalGate,
+  modeAtLeast,
+  type EvalAggregate,
+  type GuardrailMode,
+} from "@regulait/shared";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 import { INVENTORY_WINDOW_DAYS } from "./inventory.js";
 
@@ -548,13 +559,65 @@ export function summarizeAutofillForSnapshot(a: CardAutofill): Record<string, un
 }
 
 // ---------------------------------------------------------------------------
-// Staleness — has the world moved since the last certification?
+// Staleness — has the evidence behind the last certification moved?
 // ---------------------------------------------------------------------------
+
+/**
+ * ADR-0181 amendment (review finding 1) — WHAT COUNTS AS DRIFT.
+ *
+ * With staleness-forces-recertification on (the default), drift at the
+ * threshold refuses every non-evaluation dispatch of the model for EVERYONE.
+ * So drift must be something only a measured regression or a deliberate,
+ * governance-level change can produce — never routine evidence that any
+ * entitled user creates by doing their job. Since the last granting sign-off:
+ *
+ *  - `evalRegressions`: an eval run (not one backing a red-team run) that
+ *    completed and either
+ *      (a) scored WORSE than the certification-era run — the latest completed
+ *          run at or before the sign-off with the same agent, dataset version,
+ *          scoring semantics, mode, judge (or panel), repetitions and project —
+ *          by `evaluateEvalGate` with the CERTIFICATION-ERA run's tolerance
+ *          (the caller's own tolerance, floors and pinned baseline are ignored:
+ *          whoever starts a manual run chooses those), or
+ *      (b) was started by the server (`scheduled`, `workflow`,
+ *          `config_change`: thresholds an admin configured) and failed its
+ *          gate or regressed against its baseline.
+ *  - `redteamRegressions`: a finished red-team run whose attack-success rate
+ *    is WORSE (higher) than the certification-era run of the same library
+ *    version against the same agent under the same scoring semantics. A
+ *    red-team run's own gate verdict is not used: `POST /v1/redteam/runs`
+ *    lets the caller choose its trigger and thresholds.
+ *  - `riskChanges`: a risk-register row scoped to the subject created or
+ *    edited.
+ *  - `guardrailRelaxations`: an agent-scope guardrail override written or
+ *    removed so that some detector ends LESS strict (its audited
+ *    `transitions`; a removal recorded without transitions counts, as its
+ *    direction cannot be shown). Tightenings do not count; org-wide guardrail
+ *    defaults are not per-card drift.
+ *  - `configChanges`: the subject's dispatch configuration moved — an
+ *    agent_config or system-prompt version activated, promoted, rolled back
+ *    or canaried, an unversioned agent-config edit, or a custom-provider
+ *    endpoint edit.
+ *  - `cardEdits`: the card itself edited after it was signed.
+ *
+ * NOT drift: passing or merely completed eval and red-team runs, errored or
+ * denied runs, grant additions, and revocations. A revocation row only ever
+ * withdraws access (a tightening); lifting one is the same as granting.
+ */
+export interface StalenessDrift {
+  evalRegressions: number;
+  redteamRegressions: number;
+  riskChanges: number;
+  guardrailRelaxations: number;
+  configChanges: number;
+  cardEdits: number;
+}
 
 export interface CardStaleness {
   certified: boolean;
   lastCertifiedAt: string | null;
-  /** ledger movement since the last certification decision, by section */
+  /** ledger ACTIVITY since the last certification, by section. Informational:
+   * most of it is routine evidence, and none of it alone is drift. */
   changesSinceCertification: {
     evalRuns: number;
     redteamRuns: number;
@@ -563,16 +626,125 @@ export interface CardStaleness {
     riskChanges: number;
     scheduledRegressions: number;
   } | null;
+  /** ADR-0181: the drift events since certification, by kind (see
+   * `StalenessDrift`) — what the staleness gate counts */
+  driftSinceCertification: StalenessDrift | null;
+  /** the sum of `driftSinceCertification`; the gate compares it with the
+   * org's threshold */
+  driftEvents: number;
   drifted: boolean;
-  /** the human sentence the UI leads with — null when nothing moved */
+  /** the human sentence the UI leads with — null when nothing drifted */
   summary: string | null;
   note: string;
 }
 
 export const MRM_STALENESS_NOTE =
-  "computed by comparing ledger timestamps against the last sign-off decision — it INFORMS the " +
-  "recertification conversation and gates nothing; expiry enforcement stays exactly ADR-0045's " +
-  "validUntil recomputation at dispatch.";
+  "drift is counted from the ledgers since the last granting sign-off: an eval run that scored worse " +
+  "than the certification-era run of the same suite (or a server-started run that failed its gate), a " +
+  "red-team run with a worse attack-success rate than the certification-era run of the same library, a " +
+  "risk-register change, an agent guardrail relaxation, a model, prompt or endpoint configuration change, " +
+  "or an edit of this card. Passing runs, grants and revocations are routine evidence, not drift. With " +
+  "staleness-forces-recertification on, drift at the org's threshold refuses dispatch until a new " +
+  "sign-off; expiry stays ADR-0045's validUntil recomputation at dispatch.";
+
+/** the config-version moves that change what a subject agent serves */
+const SERVING_ACTIVATION_ACTIONS = [
+  "activated",
+  "canary_started",
+  "canary_adjusted",
+  "promoted",
+  "rolled_back",
+] as const;
+
+/** the eval-run columns a drift comparison reads */
+const evalDriftColumns = {
+  id: evalRuns.id,
+  agentId: evalRuns.agentId,
+  datasetId: evalRuns.datasetId,
+  datasetVersion: evalRuns.datasetVersion,
+  scoringSemantics: evalRuns.scoringSemantics,
+  mode: evalRuns.mode,
+  judgeAgentId: evalRuns.judgeAgentId,
+  judgePanel: evalRuns.judgePanel,
+  repetitions: evalRuns.repetitions,
+  projectId: evalRuns.projectId,
+  trigger: evalRuns.trigger,
+  gatePassed: evalRuns.gatePassed,
+  regression: evalRuns.regression,
+  cases: evalRuns.cases,
+  passedCases: evalRuns.passedCases,
+  meanScore: evalRuns.meanScore,
+  passRate: evalRuns.passRate,
+  tolerance: evalRuns.tolerance,
+};
+
+type EvalDriftRow = {
+  agentId: string | null;
+  datasetId: string;
+  datasetVersion: number;
+  scoringSemantics: number;
+  mode: string;
+  judgeAgentId: string | null;
+  judgePanel: unknown;
+  repetitions: number;
+  projectId: string | null;
+  trigger: string;
+  gatePassed: boolean | null;
+  regression: boolean | null;
+  cases: number;
+  passedCases: number;
+  meanScore: number | null;
+  passRate: number | null;
+  tolerance: number;
+};
+
+/** two runs are comparable only when they measured the same thing the same
+ * way: same subject, suite version, semantics, mode, measuring instrument
+ * (judge or panel, and its repetitions) and project (whose compliance cascade
+ * shapes the input) */
+function evalComparisonKey(r: EvalDriftRow): string {
+  return JSON.stringify([
+    r.agentId,
+    r.datasetId,
+    r.datasetVersion,
+    r.scoringSemantics,
+    r.mode,
+    r.judgeAgentId,
+    r.judgePanel ?? null,
+    r.repetitions,
+    r.projectId,
+  ]);
+}
+
+function evalAggregateOf(r: EvalDriftRow): EvalAggregate | null {
+  if (r.meanScore == null || r.passRate == null) return null;
+  return {
+    cases: r.cases,
+    passedCases: r.passedCases,
+    failedCases: r.cases - r.passedCases,
+    meanScore: r.meanScore,
+    passRate: r.passRate,
+  };
+}
+
+/** eval runs whose trigger the SERVER sets, with thresholds an admin configured */
+const SERVER_EVAL_TRIGGERS = new Set(["scheduled", "workflow", "config_change"]);
+
+/** true when an audited agent-scope guardrail write left some detector less strict */
+function isGuardrailRelaxation(ruleId: string, detail: unknown): boolean {
+  const transitions = (detail as { transitions?: Record<string, { from?: unknown; to?: unknown }> } | null)
+    ?.transitions;
+  if (!transitions || typeof transitions !== "object") {
+    // a removal recorded without its old -> new: the direction cannot be
+    // shown, so it counts (strict by default)
+    return ruleId === "guardrail-config-deleted";
+  }
+  const isMode = (m: unknown): m is GuardrailMode =>
+    typeof m === "string" && (GUARDRAIL_MODES as readonly string[]).includes(m);
+  return Object.values(transitions).some(
+    (t) => isMode(t?.from) && isMode(t?.to) && !modeAtLeast(t.to, t.from),
+  );
+}
 
 /**
  * What changed since the last sign-off decision. "Certified" here means the
@@ -597,10 +769,12 @@ export async function computeCardStaleness(
       certified: false,
       lastCertifiedAt: null,
       changesSinceCertification: null,
+      driftSinceCertification: null,
+      driftEvents: 0,
       drifted: false,
       summary: null,
       note:
-        "never certified — staleness measures ledger movement since a sign-off, and no " +
+        "never certified — staleness measures drift since a sign-off, and no " +
         "sign-off has been granted on this card",
     };
   }
@@ -608,60 +782,230 @@ export async function computeCardStaleness(
   const subjects = await resolveSubjectAgents(db, card);
   const agentIds = subjects.map((a) => a.id);
   const evalWhere = evalScope(card, agentIds);
+  const providerIds = [
+    ...new Set(
+      [card.customProviderId, ...subjects.map((s) => s.customProviderId)].filter(
+        (p): p is string => typeof p === "string",
+      ),
+    ),
+  ];
+  // a red-team run's eval rows are counted once, as the red-team run
+  const notRedteamBacked = sql`NOT EXISTS (SELECT 1 FROM ${redteamRuns} WHERE ${redteamRuns.evalRunId} = ${evalRuns.id})`;
+  const none = Promise.resolve([{ n: 0 }]);
 
-  const [evalsSince, rtSince, guardrailsSince, grantsSince, revocationsSince, risksSince, regressionsSince] =
-    await readAll([
-      db.select({ n: count() }).from(evalRuns).where(and(evalWhere, gt(evalRuns.startedAt, since))),
-      agentIds.length
-        ? db
-            .select({ n: count() })
-            .from(redteamRuns)
-            .where(and(inArray(redteamRuns.agentId, agentIds), gt(redteamRuns.startedAt, since)))
-        : Promise.resolve([{ n: 0 }]),
-      db
-        .select({ n: count() })
-        .from(guardrailConfigs)
-        .where(
-          and(
-            gt(guardrailConfigs.updatedAt, since),
-            agentIds.length
-              ? or(
-                  eq(guardrailConfigs.scope, "org"),
-                  and(eq(guardrailConfigs.scope, "agent"), inArray(guardrailConfigs.scopeId, agentIds)),
-                )
-              : eq(guardrailConfigs.scope, "org"),
-          ),
+  const [
+    evalsSince,
+    rtSince,
+    guardrailsSince,
+    grantsSince,
+    revocationsSince,
+    risksSince,
+    regressionsSince,
+    evalCandidates,
+    rtCandidates,
+    guardrailWrites,
+    activationsSince,
+    agentConfigEditsSince,
+    providerEditsSince,
+    cardEditsSince,
+  ] = await readAll([
+    // --- activity (informational) ---------------------------------------
+    db.select({ n: count() }).from(evalRuns).where(and(evalWhere, gt(evalRuns.startedAt, since))),
+    agentIds.length
+      ? db
+          .select({ n: count() })
+          .from(redteamRuns)
+          .where(and(inArray(redteamRuns.agentId, agentIds), gt(redteamRuns.startedAt, since)))
+      : none,
+    db
+      .select({ n: count() })
+      .from(guardrailConfigs)
+      .where(
+        and(
+          gt(guardrailConfigs.updatedAt, since),
+          agentIds.length
+            ? or(
+                eq(guardrailConfigs.scope, "org"),
+                and(eq(guardrailConfigs.scope, "agent"), inArray(guardrailConfigs.scopeId, agentIds)),
+              )
+            : eq(guardrailConfigs.scope, "org"),
         ),
-      agentIds.length
-        ? db
-            .select({ n: count() })
-            .from(agentGrants)
-            .where(and(inArray(agentGrants.agentId, agentIds), gt(agentGrants.createdAt, since)))
-        : Promise.resolve([{ n: 0 }]),
-      agentIds.length
-        ? db
-            .select({ n: count() })
-            .from(agentRevocations)
-            .where(and(inArray(agentRevocations.agentId, agentIds), gt(agentRevocations.createdAt, since)))
-        : Promise.resolve([{ n: 0 }]),
-      agentIds.length
-        ? db
-            .select({ n: count() })
-            .from(aiRisks)
-            .where(and(inArray(aiRisks.agentId, agentIds), gt(aiRisks.updatedAt, since)))
-        : Promise.resolve([{ n: 0 }]),
-      db
-        .select({ n: count() })
-        .from(evalRuns)
-        .where(
-          and(
-            evalWhere,
-            eq(evalRuns.trigger, "scheduled"),
-            eq(evalRuns.regression, true),
-            gt(evalRuns.startedAt, since),
-          ),
+      ),
+    agentIds.length
+      ? db
+          .select({ n: count() })
+          .from(agentGrants)
+          .where(and(inArray(agentGrants.agentId, agentIds), gt(agentGrants.createdAt, since)))
+      : none,
+    agentIds.length
+      ? db
+          .select({ n: count() })
+          .from(agentRevocations)
+          .where(and(inArray(agentRevocations.agentId, agentIds), gt(agentRevocations.createdAt, since)))
+      : none,
+    agentIds.length
+      ? db
+          .select({ n: count() })
+          .from(aiRisks)
+          .where(and(inArray(aiRisks.agentId, agentIds), gt(aiRisks.updatedAt, since)))
+      : none,
+    db
+      .select({ n: count() })
+      .from(evalRuns)
+      .where(
+        and(
+          evalWhere,
+          eq(evalRuns.trigger, "scheduled"),
+          eq(evalRuns.regression, true),
+          gt(evalRuns.startedAt, since),
         ),
-    ], sequential);
+      ),
+    // --- drift inputs ----------------------------------------------------
+    db
+      .select(evalDriftColumns)
+      .from(evalRuns)
+      .where(and(evalWhere, eq(evalRuns.status, "completed"), notRedteamBacked, gt(evalRuns.startedAt, since))),
+    agentIds.length
+      ? db
+          .select({ agentId: redteamRuns.agentId, libraryId: redteamRuns.libraryId, scoringSemantics: redteamRuns.scoringSemantics, asr: redteamRuns.asr })
+          .from(redteamRuns)
+          .where(
+            and(
+              inArray(redteamRuns.agentId, agentIds),
+              gt(redteamRuns.startedAt, since),
+              isNotNull(redteamRuns.finishedAt),
+              isNotNull(redteamRuns.asr),
+            ),
+          )
+      : Promise.resolve([] as Array<{ agentId: string | null; libraryId: string; scoringSemantics: number; asr: number | null }>),
+    agentIds.length
+      ? db
+          .select({ ruleId: auditLog.ruleId, detail: auditLog.detail })
+          .from(auditLog)
+          .where(
+            and(
+              inArray(auditLog.ruleId, ["guardrail-config-updated", "guardrail-config-deleted"]),
+              gt(auditLog.at, since),
+              sql`${auditLog.detail}->>'scope' = 'agent'`,
+              inArray(sql`${auditLog.detail}->>'scopeId'`, agentIds),
+            ),
+          )
+      : Promise.resolve([] as Array<{ ruleId: string | null; detail: unknown }>),
+    agentIds.length
+      ? db
+          .select({ n: count() })
+          .from(configActivationEvents)
+          .where(
+            and(
+              inArray(configActivationEvents.artifactType, ["agent_config", "agent_system_prompt"]),
+              inArray(configActivationEvents.artifactId, agentIds),
+              inArray(configActivationEvents.action, [...SERVING_ACTIVATION_ACTIONS]),
+              gt(configActivationEvents.at, since),
+            ),
+          )
+      : none,
+    agentIds.length
+      ? db
+          .select({ n: count() })
+          .from(auditLog)
+          .where(
+            and(
+              eq(auditLog.ruleId, "agent-config-edited"),
+              inArray(auditLog.objectId, agentIds),
+              gt(auditLog.at, since),
+              // a VERSIONED edit is counted once, as its activation event;
+              // an unversioned one is a plain row write with no version row
+              sql`${auditLog.detail}->>'decision' = 'row'`,
+              sql`jsonb_typeof(${auditLog.detail}->'changed') = 'array' AND jsonb_array_length(${auditLog.detail}->'changed') > 0`,
+            ),
+          )
+      : none,
+    providerIds.length
+      ? db
+          .select({ n: count() })
+          .from(auditLog)
+          .where(
+            and(
+              eq(auditLog.ruleId, "custom-provider-updated"),
+              inArray(auditLog.objectId, providerIds),
+              gt(auditLog.at, since),
+            ),
+          )
+      : none,
+    db
+      .select({ n: count() })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "mrm-card-updated"), eq(auditLog.objectId, card.id), gt(auditLog.at, since))),
+  ], sequential);
+
+  // --- the certification-era references the runs are compared with --------
+  const evalDatasetIds = [...new Set(evalCandidates.map((r) => r.datasetId))];
+  const rtLibraryIds = [...new Set(rtCandidates.map((r) => r.libraryId))];
+  const [evalRefs, rtRefs] = await readAll([
+    evalDatasetIds.length
+      ? db
+          .select(evalDriftColumns)
+          .from(evalRuns)
+          .where(
+            and(
+              evalWhere,
+              eq(evalRuns.status, "completed"),
+              notRedteamBacked,
+              inArray(evalRuns.datasetId, evalDatasetIds),
+              lte(evalRuns.startedAt, since),
+            ),
+          )
+          .orderBy(desc(evalRuns.startedAt))
+      : Promise.resolve([] as EvalDriftRow[]),
+    rtLibraryIds.length && agentIds.length
+      ? db
+          .select({ agentId: redteamRuns.agentId, libraryId: redteamRuns.libraryId, scoringSemantics: redteamRuns.scoringSemantics, asr: redteamRuns.asr })
+          .from(redteamRuns)
+          .where(
+            and(
+              inArray(redteamRuns.agentId, agentIds),
+              inArray(redteamRuns.libraryId, rtLibraryIds),
+              lte(redteamRuns.startedAt, since),
+              isNotNull(redteamRuns.finishedAt),
+              isNotNull(redteamRuns.asr),
+            ),
+          )
+          .orderBy(desc(redteamRuns.startedAt))
+      : Promise.resolve([] as Array<{ agentId: string | null; libraryId: string; scoringSemantics: number; asr: number | null }>),
+  ], sequential);
+
+  // newest first, so the first row per key IS the certification-era run
+  const evalRefByKey = new Map<string, EvalDriftRow>();
+  for (const r of evalRefs) if (!evalRefByKey.has(evalComparisonKey(r))) evalRefByKey.set(evalComparisonKey(r), r);
+  let evalRegressions = 0;
+  for (const run of evalCandidates) {
+    const serverGateFailed =
+      SERVER_EVAL_TRIGGERS.has(run.trigger) && (run.gatePassed === false || run.regression === true);
+    const ref = evalRefByKey.get(evalComparisonKey(run));
+    const current = evalAggregateOf(run);
+    const reference = ref ? evalAggregateOf(ref) : null;
+    const worseThanCertified =
+      current !== null &&
+      reference !== null &&
+      evaluateEvalGate({
+        current,
+        baseline: reference,
+        tolerance: ref!.tolerance,
+        currentSemantics: run.scoringSemantics,
+        baselineSemantics: ref!.scoringSemantics,
+      }).regression;
+    if (serverGateFailed || worseThanCertified) evalRegressions += 1;
+  }
+
+  const rtKey = (r: { agentId: string | null; libraryId: string; scoringSemantics: number }) =>
+    JSON.stringify([r.agentId, r.libraryId, r.scoringSemantics]);
+  const rtRefByKey = new Map<string, number>();
+  for (const r of rtRefs) if (r.asr != null && !rtRefByKey.has(rtKey(r))) rtRefByKey.set(rtKey(r), r.asr);
+  let redteamRegressions = 0;
+  for (const run of rtCandidates) {
+    const refAsr = rtRefByKey.get(rtKey(run));
+    if (run.asr != null && refAsr !== undefined && run.asr > refAsr) redteamRegressions += 1;
+  }
 
   const changes = {
     evalRuns: evalsSince[0]?.n ?? 0,
@@ -671,20 +1015,31 @@ export async function computeCardStaleness(
     riskChanges: risksSince[0]?.n ?? 0,
     scheduledRegressions: regressionsSince[0]?.n ?? 0,
   };
+  const drift: StalenessDrift = {
+    evalRegressions,
+    redteamRegressions,
+    riskChanges: risksSince[0]?.n ?? 0,
+    guardrailRelaxations: guardrailWrites.filter((w) => isGuardrailRelaxation(w.ruleId ?? "", w.detail)).length,
+    configChanges:
+      (activationsSince[0]?.n ?? 0) + (agentConfigEditsSince[0]?.n ?? 0) + (providerEditsSince[0]?.n ?? 0),
+    cardEdits: cardEditsSince[0]?.n ?? 0,
+  };
+  const driftEvents = Object.values(drift).reduce((a, b) => a + b, 0);
   const parts: string[] = [];
   const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
-  if (changes.evalRuns > 0) parts.push(plural(changes.evalRuns, "eval run"));
-  if (changes.redteamRuns > 0) parts.push(plural(changes.redteamRuns, "red-team run"));
-  if (changes.guardrailChanges > 0) parts.push(plural(changes.guardrailChanges, "guardrail change"));
-  if (changes.grantChanges > 0) parts.push(plural(changes.grantChanges, "grant change"));
-  if (changes.riskChanges > 0) parts.push(plural(changes.riskChanges, "risk-register change"));
-  if (changes.scheduledRegressions > 0)
-    parts.push(plural(changes.scheduledRegressions, "drift regression"));
-  const drifted = parts.length > 0;
+  if (drift.evalRegressions > 0) parts.push(plural(drift.evalRegressions, "eval regression"));
+  if (drift.redteamRegressions > 0) parts.push(plural(drift.redteamRegressions, "red-team regression"));
+  if (drift.riskChanges > 0) parts.push(plural(drift.riskChanges, "risk-register change"));
+  if (drift.guardrailRelaxations > 0) parts.push(plural(drift.guardrailRelaxations, "agent guardrail relaxation"));
+  if (drift.configChanges > 0) parts.push(plural(drift.configChanges, "model or configuration change"));
+  if (drift.cardEdits > 0) parts.push(plural(drift.cardEdits, "card edit"));
+  const drifted = driftEvents > 0;
   return {
     certified: true,
     lastCertifiedAt: since.toISOString(),
     changesSinceCertification: changes,
+    driftSinceCertification: drift,
+    driftEvents,
     drifted,
     summary: drifted
       ? `${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)!}` : parts[0]!} since certification — the evidence this sign-off rested on has moved`

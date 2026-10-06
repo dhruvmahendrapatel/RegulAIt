@@ -8,11 +8,15 @@
  *                               approved, signed-off model card, decided by
  *                               Avery, the named approver (the bootstrap token
  *                               cannot decide an approval, by design);
- *   mrmStalenessRecertEnabled   after the demo's required-test suite runs (new
- *                               ledger evidence, so the cards are stale),
- *                               Avery recertifies them — a new sign-off that
+ *   mrmStalenessRecertEnabled   the required-test suite opens an audited
+ *                               guardrail window on the agents under test
+ *                               (injection and jailbreak relaxed to warn). An
+ *                               agent guardrail relaxation is drift (passing
+ *                               test runs are not), so those cards are stale;
+ *                               Avery reviews the window and the clean runs
+ *                               and recertifies them — a new sign-off that
  *                               supersedes the old one — exactly as an org
- *                               would after reviewing fresh test evidence;
+ *                               would after a relaxation on a certified model;
  *   dispatchAttributionRequired every demo dispatch already names a project
  *   / requireMcpAttribution     (and the runbook's MCP beat sends the project
  *   / requireProjectAttribution header); nothing here relaxes them;
@@ -68,8 +72,8 @@ function caller(app: FastifyInstance) {
  * Give each demo mock agent an approved model card valid for a year, signed
  * off by Avery. Idempotent: a live card (`approved` / `expiring`) is left
  * alone; a pending sign-off from an interrupted run is decided rather than
- * re-requested. With `recertify`, a live card whose ledger has moved since
- * its sign-off (staleness) gets a NEW sign-off that supersedes the old one.
+ * re-requested. With `recertify`, a live card that has drifted since its
+ * sign-off (staleness) gets a NEW sign-off that supersedes the old one.
  */
 export async function ensureDemoModelCards(
   app: FastifyInstance,
@@ -114,7 +118,7 @@ export async function ensureDemoModelCards(
         approverUserId: opts.averyId,
         validUntil,
         reason: stale
-          ? "demo environment: recertifying the mock provider's card after reviewing the required-test runs"
+          ? "demo environment: recertifying the mock provider's card after the assurance run's guardrail window and its clean required-test runs"
           : "demo environment: approving the mock provider's card so the governed path is exercisable",
       });
       approvalId = signOff.body.approvalId ?? signOff.body.approval?.id;
@@ -123,7 +127,7 @@ export async function ensureDemoModelCards(
     const decided = await call("POST", `/v1/approvals/${approvalId}/decide`, opts.averyAuth, {
       decision: "approved",
       reason: stale
-        ? "recertified by the named approver after the required-test runs (demo)"
+        ? "recertified by the named approver after reviewing the assurance run's guardrail relaxation and its required-test results (demo)"
         : "demo environment setup — approved by the named approver",
     });
     if (decided.status >= 400) {
@@ -136,7 +140,8 @@ export async function ensureDemoModelCards(
 
 /**
  * After the demo's required-test runs: Avery (through a key minted for this
- * step, like demo:setup's) recertifies every demo card whose ledger moved.
+ * step, like demo:setup's) recertifies every demo card that drifted — the
+ * assurance run's guardrail window relaxed its agent's guardrail.
  * Returns the report lines.
  */
 export async function recertifyDemoModelCards(app: FastifyInstance, bootstrapToken: string): Promise<string[]> {

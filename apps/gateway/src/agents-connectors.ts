@@ -480,6 +480,13 @@ export interface GovernedDispatchArgs {
    * for that feature. Absent = no matrix check here (the caller's own decision
    * already applied it, or the call is not a feature use). */
   modelFeature?: ModelPolicyGate | undefined;
+  /** ADR-0181 (review finding 8) — true ONLY for an eval-suite case or a
+   * red-team probe sent to the agent UNDER TEST, set by the server-side eval
+   * runners (never from a request body). With the `evals` feature it exempts
+   * the dispatch from MRM staleness refusal so a drifted card can gather the
+   * evidence its recertification needs. A judge is not the subject and never
+   * sets it: it goes through the full MRM gate, staleness included. */
+  evaluationSubject?: boolean | undefined;
   /** ADR-0066 §4 — the mode a FALLBACK HOP is re-evaluated under. Only the
    * chain driver reads it; a hop must be entitlement-checked in the same mode
    * the primary was, or a `plan`-only grant could serve an `execute` call. */
@@ -1403,9 +1410,10 @@ async function dispatchAttempt(
     model: served.model,
     customProviderId: served.customProviderId ?? null,
     projectId: args.projectId ?? null,
-    // ADR-0181: eval cases, judges and red-team probes name the server-side
-    // `evals` feature; staleness does not refuse them (see MrmGateContext)
-    evaluation: args.modelFeature?.feature === "evals",
+    // ADR-0181: an eval case or red-team probe against the agent under test
+    // (the `evals` feature AND the runner's `evaluationSubject`); staleness does
+    // not refuse it (see MrmGateContext). A judge is gated in full.
+    evaluation: args.modelFeature?.feature === "evals" && args.evaluationSubject === true,
   });
   if (mrmRefusal) {
     return {
