@@ -33,6 +33,7 @@ import {
   type SchedulerJobDefinition,
 } from "./scheduler.js";
 import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
+import { GUARDRAIL_WINDOW_EXPIRY_JOB_NAME } from "./scheduler-jobs.js"; // ADR-0181 FX3
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -752,6 +753,11 @@ describe("every sweep is registered", () => {
         // ADR-0180 A10: expires lapsed residual-risk acceptances and reopens
         // the risk. Driven end-to-end in zz-adr0180-a10-risk-tolerance.test.ts.
         RISK_ACCEPTANCE_EXPIRY_JOB_NAME,
+        // ===== ADR-0181 FX3 =====
+        // Deletes expired guardrail-window overrides, audited. Driven
+        // end-to-end in zz-adr0181-fx3-strict-fixes.test.ts.
+        GUARDRAIL_WINDOW_EXPIRY_JOB_NAME,
+        // ===== end ADR-0181 FX3 =====
       ].sort(),
     );
     for (const def of registry.values()) {

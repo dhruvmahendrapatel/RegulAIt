@@ -24,7 +24,10 @@ const steps: Array<[string, string]> = [
 const started = Date.now();
 for (const [name, file] of steps) {
   console.log(`\n=== ${name} ===`);
-  const r = spawnSync(process.execPath, [path.join(here, file)], { stdio: "inherit", env: process.env });
+  // ADR-0181 FX3: the seed runs only on an explicit demo signal; this command
+  // IS the demo, so it says so
+  const args = file === "seed.js" ? [path.join(here, file), "--seed-demo"] : [path.join(here, file)];
+  const r = spawnSync(process.execPath, args, { stdio: "inherit", env: process.env });
   if (r.status !== 0) {
     console.error(`\ndemo:prepare stopped: ${name} exited ${r.status ?? r.signal}`);
     process.exit(r.status ?? 1);

@@ -61,7 +61,8 @@ beforeAll(async () => {
   await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`));
   await admin.execute(sql.raw(`CREATE DATABASE ${SCRATCH_DB}`));
   for (let i = 0; i < 2; i++) {
-    const r = spawnSync(process.execPath, [seedScript], {
+    // ADR-0181 FX3: the seed runs only on an explicit demo signal
+    const r = spawnSync(process.execPath, [seedScript, "--seed-demo"], {
       encoding: "utf8",
       env: { ...process.env, DATABASE_URL: scratchUrl },
       timeout: 180_000,

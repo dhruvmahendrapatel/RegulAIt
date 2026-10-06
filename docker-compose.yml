@@ -202,7 +202,11 @@ services:
       REGULAIT_DATABASE_SSL: ${REGULAIT_DATABASE_SSL:-disable}
       REGULAIT_DATA_KEY: ${REGULAIT_DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       REGULAIT_BOOTSTRAP_TOKEN: ${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}
-      SEED_DEMO: ${SEED_DEMO:-1}
+      # ADR-0181 FX3: the demo seed (demo users, keys and demo-only
+      # relaxations) is OFF by default. `REGULAIT_DEMO_LICENSE=1` below is the
+      # demo switch and seeds by itself; SEED_DEMO=1 seeds without the licence.
+      # Either way the seed refuses a database that has a real admin.
+      SEED_DEMO: ${SEED_DEMO:-0}
       # ADR-0174 amendment — DEMO ONLY, OFF by default, never for an install.
       # `REGULAIT_DEMO_LICENSE=1` in the .env next to this file lets the demo
       # seed mint its EPHEMERAL demo licence (30 days, says "NOT A PRODUCTION

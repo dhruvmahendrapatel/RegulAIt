@@ -4434,9 +4434,23 @@ export const guardrailConfigs = pgTable(
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // ADR-0181 FX3 (migration 0161): who owns the row. 'assurance-window' is
+    // the time-boxed override the assurance run opens; it MUST carry an expiry,
+    // an admin row never does, and the org row is never a window (DB CHECKs).
+    createdBy: text("created_by", { enum: ["admin", "assurance-window"] }).notNull().default("admin"),
+    /** ADR-0181 FX3: a window override past this instant is ignored by the
+     * resolver and deleted (audited) by the guardrail-window expiry sweep */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (t) => [
     check("guardrail_configs_scope_check", sql`${t.scope} IN ('org','agent','connector')`),
+    check("guardrail_configs_created_by_check", sql`${t.createdBy} IN ('admin', 'assurance-window')`),
+    check(
+      "guardrail_configs_window_expiry_check",
+      sql`(${t.createdBy} = 'assurance-window') = (${t.expiresAt} IS NOT NULL)`,
+    ),
+    check("guardrail_configs_window_scope_check", sql`${t.createdBy} = 'admin' OR ${t.scope} <> 'org'`),
+    index("guardrail_configs_expires_at_idx").on(t.expiresAt).where(sql`${t.expiresAt} IS NOT NULL`),
     check(
       "guardrail_configs_scope_id_check",
       sql`(${t.scope} = 'org') = (${t.scopeId} IS NULL)`,

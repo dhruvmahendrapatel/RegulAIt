@@ -126,7 +126,10 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
     cpSync(migrationsFolder, tmpMigrations, { recursive: true });
     const journalPath = path.join(tmpMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: Array<{ tag: string }> };
-    journal.entries = journal.entries.filter((e) => e.tag !== "0159_strict_admission_infra");
+    // stop BEFORE 0159, dropping every later migration too: the migrator skips
+    // any entry older than the newest one applied, so leaving a later one
+    // (0160, 0161, …) in would make the second run never apply 0159 at all
+    journal.entries = journal.entries.filter((e) => e.tag < "0159_strict_admission_infra");
     writeFileSync(journalPath, JSON.stringify(journal));
     upgrade = createDb(urlFor(UPGRADE_DB));
     await runMigrations(upgrade, tmpMigrations);

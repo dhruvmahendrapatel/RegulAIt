@@ -35,8 +35,11 @@ import {
   desc,
   eq,
   guardrailConfigs,
+  gt,
   inArray,
   isNull,
+  lte,
+  or,
   sql,
   type Db,
   type GuardrailConfigRow,
@@ -148,6 +151,74 @@ export async function loadOrgGuardrailConfig(db: Db): Promise<GuardrailConfigRow
   return row;
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0181 FX3 — THE GUARDRAIL WINDOW'S SERVER-SIDE LIMIT
+// ---------------------------------------------------------------------------
+
+/** who wrote an override row the window may reclaim */
+export const ASSURANCE_WINDOW_CREATED_BY = "assurance-window" as const;
+/** the longest a window override may live. The window asks for its run budget
+ * (about 30 minutes); the server refuses anything past this ceiling. */
+export const ASSURANCE_WINDOW_MAX_MINUTES = 60;
+
+/** SQL predicate: the override row is in force at `now` (no expiry, or an
+ * expiry still in the future). Exported so every reader of override rows
+ * applies the same rule. */
+export function overrideInForce(now: Date) {
+  return or(isNull(guardrailConfigs.expiresAt), gt(guardrailConfigs.expiresAt, now))!;
+}
+
+/**
+ * Delete expired guardrail-window overrides, oldest first, at most `limit` per
+ * pass, with one audit row each (`guardrail-window-expired`, old -> new modes:
+ * the override's modes to the org default now in force). Enforcement does not
+ * depend on it: the resolver ignores an expired row anyway. Audited as the
+ * deployment (nil actor), never as a person.
+ */
+export async function runGuardrailWindowExpirySweep(
+  db: Db,
+  opts: { now?: Date; limit?: number } = {},
+): Promise<{ expired: number; ids: string[] }> {
+  const now = opts.now ?? new Date();
+  const limit = opts.limit ?? 500;
+  const due = await db
+    .select({ id: guardrailConfigs.id })
+    .from(guardrailConfigs)
+    .where(lte(guardrailConfigs.expiresAt, now))
+    .orderBy(guardrailConfigs.expiresAt)
+    .limit(limit);
+  if (due.length === 0) return { expired: 0, ids: [] };
+  const deleted = await db
+    .delete(guardrailConfigs)
+    .where(and(inArray(guardrailConfigs.id, due.map((d) => d.id)), lte(guardrailConfigs.expiresAt, now)))
+    .returning();
+  if (deleted.length === 0) return { expired: 0, ids: [] };
+  const inForce = previousModes(await loadOrgGuardrailConfig(db));
+  for (const row of deleted) {
+    const before = rowModes(row);
+    await db.insert(auditLog).values({
+      userId: NIL_UUID,
+      objectType: "org_settings",
+      objectId: row.id,
+      detail: {
+        phase: "guardrail-config",
+        scope: row.scope,
+        scopeId: row.scopeId,
+        createdBy: row.createdBy,
+        expiresAt: row.expiresAt?.toISOString() ?? null,
+        transitions: settingTransitions(before, inForce),
+      },
+      effect: "allow",
+      ruleId: "guardrail-window-expired",
+      ruleChain: [],
+      reason:
+        `guardrail window override for ${row.scope} ${row.scopeId} expired at ${row.expiresAt?.toISOString()} and was ` +
+        `removed — ${modeTransitions(before, inForce)}. The org default applies again.`,
+    });
+  }
+  return { expired: deleted.length, ids: deleted.map((r) => r.id) };
+}
+
 /**
  * Resolve the modes and term lists in force for ONE call.
  *
@@ -184,7 +255,15 @@ export async function resolveGuardrailPolicy(
       ? db
           .select()
           .from(guardrailConfigs)
-          .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)))
+          .where(
+            and(
+              eq(guardrailConfigs.scope, scope),
+              eq(guardrailConfigs.scopeId, scopeId),
+              // ADR-0181 FX3: an override past its expiry (a guardrail window)
+              // is not in force, whether or not the sweep has deleted it yet
+              overrideInForce(new Date()),
+            ),
+          )
           .then((r) => r[0])
       : Promise.resolve(undefined),
   ]);
@@ -354,6 +433,16 @@ export function runGuardrails(
 // Admin surface
 // ---------------------------------------------------------------------------
 
+/** ADR-0181 FX3: the override write accepts an optional guardrail WINDOW: a
+ * time-boxed override, tagged `assurance-window`, that expires on the server
+ * after at most ASSURANCE_WINDOW_MAX_MINUTES. The org default never takes one. */
+const putOverrideSchema = putGuardrailConfigSchema.extend({
+  assuranceWindow: z
+    .object({ ttlMinutes: z.number().int().min(1).max(ASSURANCE_WINDOW_MAX_MINUTES) })
+    .strict()
+    .optional(),
+});
+
 const scopeParam = z.object({
   scope: z.enum(["agent", "connector"]),
   scopeId: z.string().uuid(),
@@ -434,6 +523,9 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
         ...o,
         modes: rowModes(o),
         targetName: names.get(o.scopeId!) ?? null,
+        // ADR-0181 FX3: an expired window override is listed (until the sweep
+        // deletes it) but is not in force
+        expired: o.expiresAt !== null && o.expiresAt.getTime() <= Date.now(),
       })),
     };
   });
@@ -468,6 +560,9 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     scopeId: string | null,
     body: z.infer<typeof putGuardrailConfigSchema>,
     actor: string | null,
+    // ADR-0181 FX3: a window override expires; every other write is an
+    // admin's durable choice (and converts a window row into one)
+    window: { expiresAt: Date } | null = null,
   ) => {
     const existing = scopeId
       ? (
@@ -477,7 +572,17 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
             .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)))
         )[0]
       : await loadOrgGuardrailConfig(db);
-    const base = existing ? rowModes(existing) : { ...GUARDRAIL_DEFAULT_MODES };
+    // ADR-0181 FX3: a detector the write leaves out keeps the existing row's
+    // mode only when that row is the writer's own kind and still in force. An
+    // admin write never inherits a window's relaxation, and nothing inherits
+    // from an expired row; those start from the shipped defaults instead.
+    const inherit =
+      existing &&
+      existing.createdBy === (window ? ASSURANCE_WINDOW_CREATED_BY : "admin") &&
+      (existing.expiresAt === null || existing.expiresAt > new Date())
+        ? existing
+        : undefined;
+    const base = inherit ? rowModes(inherit) : { ...GUARDRAIL_DEFAULT_MODES };
     const next: Record<string, unknown> = {};
     for (const id of CONFIGURABLE_DETECTORS) {
       next[MODE_COLUMN[id]] = body.modes?.[id] ?? base[id] ?? GUARDRAIL_FALLBACK_MODE;
@@ -486,9 +591,11 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       scope,
       scopeId,
       ...next,
-      customTerms: body.customTerms ?? existing?.customTerms ?? {},
+      customTerms: body.customTerms ?? inherit?.customTerms ?? {},
       updatedByUserId: actor,
       updatedAt: new Date(),
+      createdBy: window ? ASSURANCE_WINDOW_CREATED_BY : "admin",
+      expiresAt: window ? window.expiresAt : null,
     } as typeof guardrailConfigs.$inferInsert;
     const [row] = existing
       ? await db
@@ -517,7 +624,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
 
   app.put("/v1/guardrails/config/:scope/:scopeId", async (req, reply) => {
     const { scope, scopeId } = scopeParam.parse(req.params);
-    const body = putGuardrailConfigSchema.parse(req.body);
+    const body = putOverrideSchema.parse(req.body);
     // the target must exist — an override pointing at nothing is a
     // configuration that silently never applies
     const [target] =
@@ -534,14 +641,40 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       .select()
       .from(guardrailConfigs)
       .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)));
-    const before = previousModes(existingOverride ?? (await loadOrgGuardrailConfig(db)));
-    const row = await upsert(scope, scopeId, body, actor);
+    // ADR-0181 FX3: a window never takes over an admin's override (it would
+    // then expire, and the sweep would delete an admin's choice). An expired
+    // row of any kind is not in force, so the previous modes are the org's.
+    const now = new Date();
+    const existingInForce =
+      existingOverride && (existingOverride.expiresAt === null || existingOverride.expiresAt > now)
+        ? existingOverride
+        : undefined;
+    if (body.assuranceWindow && existingInForce && existingInForce.createdBy !== ASSURANCE_WINDOW_CREATED_BY) {
+      return reply.status(409).send({
+        error: "admin_override_exists",
+        detail: "an admin's guardrail override is in force for this object; a guardrail window never replaces it",
+      });
+    }
+    const window = body.assuranceWindow
+      ? { expiresAt: new Date(now.getTime() + body.assuranceWindow.ttlMinutes * 60_000) }
+      : null;
+    const before = previousModes(existingInForce ?? (await loadOrgGuardrailConfig(db)));
+    const row = await upsert(scope, scopeId, body, actor, window);
     await audit(
       actor,
       row.id,
       "guardrail-config-updated",
-      `guardrail override for ${scope} '${target.name}' — ${modeTransitions(before, rowModes(row))}. It replaces the org default for this object and is still MAX-composed with any compliance floor.`,
-      { scope, scopeId, targetName: target.name, modes: rowModes(row), transitions: settingTransitions(before, rowModes(row)) },
+      `guardrail override for ${scope} '${target.name}' — ${modeTransitions(before, rowModes(row))}. It replaces the org default for this object and is still MAX-composed with any compliance floor.` +
+        (window ? ` Guardrail window: expires at ${window.expiresAt.toISOString()} (removed by the expiry sweep, ignored once past).` : ""),
+      {
+        scope,
+        scopeId,
+        targetName: target.name,
+        modes: rowModes(row),
+        transitions: settingTransitions(before, rowModes(row)),
+        createdBy: row.createdBy,
+        expiresAt: row.expiresAt?.toISOString() ?? null,
+      },
     );
     return reply.status(200).send({ config: row, modes: rowModes(row) });
   });
@@ -553,12 +686,25 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)))
       .returning();
     if (!row) return reply.status(404).send({ error: "unknown_override" });
+    // ADR-0181 FX3 (11b): old -> new, the override's modes to the org default
+    // that applies again. An already-expired row was not in force, so nothing
+    // changed in force by removing it.
+    const removedModes = rowModes(row);
+    const inForce = previousModes(await loadOrgGuardrailConfig(db));
+    const wasInForce = row.expiresAt === null || row.expiresAt > new Date();
     await audit(
       req.authCtx.userId ?? null,
       row.id,
       "guardrail-config-deleted",
-      `guardrail override for ${scope} ${scopeId} removed — the org default applies again`,
-      { scope, scopeId },
+      `guardrail override for ${scope} ${scopeId} removed — the org default applies again` +
+        (wasInForce ? ` (${modeTransitions(removedModes, inForce)})` : " (it had already expired)"),
+      {
+        scope,
+        scopeId,
+        createdBy: row.createdBy,
+        expiresAt: row.expiresAt?.toISOString() ?? null,
+        transitions: wasInForce ? settingTransitions(removedModes, inForce) : {},
+      },
     );
     return reply.status(200).send({ deleted: true });
   });

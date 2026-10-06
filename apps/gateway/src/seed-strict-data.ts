@@ -33,6 +33,7 @@
  * compliance profiles already declare.
  */
 import type { FastifyInstance } from "fastify";
+import { ASSURANCE_WINDOW_CREATED_BY } from "./guardrails.js";
 
 type Json = Record<string, unknown>;
 
@@ -142,6 +143,16 @@ type InjectCall = (
   headers?: Record<string, string>,
 ) => Promise<{ status: number; body: Record<string, any> }>;
 
+/** ADR-0181 FX3: the window asks the server for this long — the assurance
+ * run's budget. The server caps a window at ASSURANCE_WINDOW_MAX_MINUTES,
+ * ignores it once past and deletes it (audited) in the expiry sweep. */
+export const ASSURANCE_WINDOW_TTL_MINUTES = 30;
+
+type Mode = "off" | "log" | "warn" | "block";
+/** the two layers the window relaxes, and only from `block` to `warn` */
+const WINDOW_LAYERS = ["prompt_injection", "jailbreak"] as const;
+const CONFIGURABLE_LAYERS = ["prompt_injection", "jailbreak", "toxicity", "semantic_dlp"] as const;
+
 /**
  * ADR-0181 x ADR-0180 — THE ASSURANCE RUN'S GUARDRAIL WINDOW.
  *
@@ -150,13 +161,24 @@ type InjectCall = (
  * strict default the org guardrail BLOCKS prompt injection and jailbreak at
  * the input, so every probe of those classes is held before it reaches the
  * agent and the run measures nothing about the agent. To measure the agent,
- * the demo opens a WINDOW: for each agent under test that has no guardrail
- * override of its own, it sets an agent-scope override with those two layers
- * at `warn` (through `PUT /v1/guardrails/config/agent/:id`, audited old -> new),
- * runs the suite, and `restore()` removes exactly the overrides it created
- * (`DELETE`, audited), so the strict org default applies again. An override an
- * admin already set is never touched. The guardrail is not part of an agent's
- * configuration hash, so the run stays evidence for the configuration shipped.
+ * the demo opens a WINDOW: for each agent under test that has no admin
+ * guardrail override of its own, it sets an agent-scope override through
+ * `PUT /v1/guardrails/config/agent/:id` (audited old -> new) that
+ *
+ *   - COPIES the org default's modes and relaxes only prompt injection and
+ *     jailbreak, from `block` to `warn` (toxicity and semantic DLP stay exactly
+ *     as the org has them);
+ *   - is a server-side WINDOW (ADR-0181 FX3): tagged `assurance-window`, with
+ *     an expiry `ASSURANCE_WINDOW_TTL_MINUTES` from now. The resolver ignores
+ *     it once expired and the scheduler's expiry sweep deletes it (audited), so
+ *     a crash between open and close cannot leave a permanent relaxation.
+ *
+ * It runs the suite, and `restore()` removes exactly the overrides it opened
+ * (`DELETE`, audited), so the strict org default applies again at once. A
+ * re-run RECLAIMS its own leftover window rows (a crashed earlier run); an
+ * override an admin set is never touched. The guardrail is not part of an
+ * agent's configuration hash, so the run stays evidence for the configuration
+ * shipped.
  */
 export async function openAssuranceGuardrailWindow(
   call: InjectCall,
@@ -164,38 +186,60 @@ export async function openAssuranceGuardrailWindow(
   agentIds: readonly string[],
 ): Promise<{ opened: string[]; notes: string[]; restore: () => Promise<string[]> }> {
   const config = (await call("GET", "/v1/guardrails/config", undefined, auth)).body;
-  const overridden = new Set(
-    ((config.overrides ?? []) as Array<{ scope: string; scopeId: string }>)
+  const orgModes = (config.orgModes ?? {}) as Record<string, Mode>;
+  const overrides = new Map(
+    ((config.overrides ?? []) as Array<{ scope: string; scopeId: string; createdBy?: string }>)
       .filter((o) => o.scope === "agent")
-      .map((o) => o.scopeId),
+      .map((o) => [o.scopeId, o]),
   );
+  // the org's own modes for the four configurable layers (PII is the cascade's,
+  // never written here), with ONLY the two probe layers relaxed block -> warn
+  const modes: Record<string, Mode> = {};
+  for (const layer of CONFIGURABLE_LAYERS) if (orgModes[layer]) modes[layer] = orgModes[layer];
+  for (const layer of WINDOW_LAYERS) if (modes[layer] === "block") modes[layer] = "warn";
+  const relaxes = WINDOW_LAYERS.some((l) => orgModes[l] === "block");
   const opened: string[] = [];
   const notes: string[] = [];
+  let reclaimed = 0;
   for (const id of new Set(agentIds)) {
-    if (overridden.has(id)) {
+    const existing = overrides.get(id);
+    const leftover = existing?.createdBy === ASSURANCE_WINDOW_CREATED_BY;
+    if (existing && !leftover) {
       notes.push(`assurance guardrail window: agent ${id} has an admin guardrail override — left as set`);
       continue;
     }
+    if (!relaxes && !leftover) continue; // the org default already lets the probes reach the agent
     const r = await call(
       "PUT",
       `/v1/guardrails/config/agent/${id}`,
-      { modes: { prompt_injection: "warn", jailbreak: "warn" } },
+      { modes, assuranceWindow: { ttlMinutes: ASSURANCE_WINDOW_TTL_MINUTES } },
       auth,
     );
-    if (r.status === 200) opened.push(id);
-    else notes.push(`assurance guardrail window: could not open for agent ${id} (${r.status} ${String(r.body.error ?? "")})`);
+    if (r.status === 200) {
+      opened.push(id);
+      if (leftover) reclaimed++;
+    } else notes.push(`assurance guardrail window: could not open for agent ${id} (${r.status} ${String(r.body.error ?? "")})`);
   }
-  if (opened.length > 0) {
+  if (reclaimed > 0) {
+    notes.push(`assurance guardrail window: reclaimed ${reclaimed} leftover window override(s) from an earlier run`);
+  }
+  if (opened.length > 0 && relaxes) {
     notes.push(
       `RELAXED for the assurance run only: prompt-injection and jailbreak guardrails at 'warn' (strict default: block) ` +
-        `on ${opened.length} agent(s) under test, so the probes reach the agent; restored when the run ends (both audited)`,
+        `on ${opened.length} agent(s) under test, so the probes reach the agent; the other layers keep the org's modes. ` +
+        `The window expires on the server after ${ASSURANCE_WINDOW_TTL_MINUTES} minutes and is restored when the run ends (both audited)`,
     );
   }
   const restore = async (): Promise<string[]> => {
     const out: string[] = [];
     for (const id of opened) {
       const d = await call("DELETE", `/v1/guardrails/config/agent/${id}`, undefined, auth);
-      if (d.status !== 200) out.push(`assurance guardrail window: could not close for agent ${id} (${d.status}) — remove the override by hand`);
+      if (d.status !== 200) {
+        out.push(
+          `assurance guardrail window: could not close for agent ${id} (${d.status}); it expires on the server within ` +
+            `${ASSURANCE_WINDOW_TTL_MINUTES} minutes and the expiry sweep removes it`,
+        );
+      }
     }
     return out;
   };

@@ -98,6 +98,15 @@ export interface DbPoolConfig {
    * and docker-compose, which set it explicitly). `off` is the resolved name
    * of `disable`. */
   ssl: "off" | "require" | "no-verify";
+  /** ADR-0181 FX3: what the CONNECTION STRING itself says about TLS. pg merges
+   * the URL's `sslmode` / `ssl` parameters OVER the pool config, so a
+   * `DATABASE_URL` ending `?sslmode=disable` turned TLS off whatever
+   * `REGULAIT_DATABASE_SSL` said. `off` = the URL asks for plaintext or
+   * opportunistic TLS (`sslmode=disable|allow|prefer`, `ssl=0|false`);
+   * `no-verify` = TLS without certificate checks (`sslmode=no-verify`, or the
+   * libpq-compatible `require` / `verify-ca`). Absent = the URL says nothing
+   * weaker than the pool config. */
+  urlSsl?: { effect: "off" | "no-verify"; param: string };
 }
 
 export const DB_POOL_DEFAULTS: Readonly<DbPoolConfig> = Object.freeze({
@@ -124,29 +133,100 @@ function envPositiveInt(env: NodeJS.ProcessEnv, name: string, dflt: number): num
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : dflt;
 }
 
-export function resolveDbPoolConfig(env: NodeJS.ProcessEnv = process.env): DbPoolConfig {
+/** ADR-0181 FX3: the URL parameter values that make the hop plaintext, or
+ * plaintext on the server's say-so (`allow` and `prefer` are opportunistic in
+ * libpq: an attacker on the path simply declines TLS). */
+const URL_SSLMODE_PLAINTEXT = ["disable", "allow", "prefer"] as const;
+const URL_SSL_PLAINTEXT = ["0", "false"] as const;
+
+/**
+ * ADR-0181 FX3: read what a connection string says about TLS. Only its query
+ * string matters (pg-connection-string reads `sslmode`, `ssl` and
+ * `uselibpqcompat` from there), so it is read with the standard
+ * `URLSearchParams`: that works for every form pg accepts (URL or socket
+ * path), and it never throws or touches the disk, which pg-connection-string's
+ * own `parse` does (it reads `sslrootcert` files and throws on some modes).
+ */
+export function connectionStringTls(connectionString: string | undefined): DbPoolConfig["urlSsl"] {
+  if (!connectionString) return undefined;
+  const q = connectionString.indexOf("?");
+  if (q < 0) return undefined;
+  const params = new URLSearchParams(connectionString.slice(q + 1));
+  const sslmode = params.get("sslmode")?.trim().toLowerCase();
+  const ssl = params.get("ssl")?.trim().toLowerCase();
+  if (sslmode !== undefined && (URL_SSLMODE_PLAINTEXT as readonly string[]).includes(sslmode)) {
+    return { effect: "off", param: `sslmode=${sslmode}` };
+  }
+  if (sslmode === undefined && ssl !== undefined && (URL_SSL_PLAINTEXT as readonly string[]).includes(ssl)) {
+    return { effect: "off", param: `ssl=${ssl}` };
+  }
+  if (sslmode === "no-verify") return { effect: "no-verify", param: "sslmode=no-verify" };
+  const libpq = params.get("uselibpqcompat")?.trim().toLowerCase() === "true";
+  if (libpq && (sslmode === "require" || sslmode === "verify-ca")) {
+    // libpq semantics: `require` checks no certificate, `verify-ca` no host name
+    return { effect: "no-verify", param: `uselibpqcompat=true&sslmode=${sslmode}` };
+  }
+  return undefined;
+}
+
+export function resolveDbPoolConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  connectionString: string | undefined = env.DATABASE_URL,
+): DbPoolConfig {
   const rawSsl = (env.REGULAIT_DATABASE_SSL ?? "").trim().toLowerCase();
   const ssl: DbPoolConfig["ssl"] = (DB_SSL_DISABLE_VALUES as readonly string[]).includes(rawSsl)
     ? "off"
     : rawSsl === "no-verify"
       ? "no-verify"
       : "require";
+  const urlSsl = connectionStringTls(connectionString);
   return {
     max: envPositiveInt(env, "REGULAIT_DB_POOL_MAX", DB_POOL_DEFAULTS.max),
     connectionTimeoutMillis: envPositiveInt(env, "REGULAIT_DB_CONNECT_TIMEOUT_MS", DB_POOL_DEFAULTS.connectionTimeoutMillis),
     idleTimeoutMillis: envPositiveInt(env, "REGULAIT_DB_IDLE_TIMEOUT_MS", DB_POOL_DEFAULTS.idleTimeoutMillis),
     ssl,
+    ...(urlSsl ? { urlSsl } : {}),
   };
+}
+
+/**
+ * ADR-0181 FX3: the boot refusal. A connection string may not weaken TLS
+ * below what the environment declares: pg would silently obey the URL, and the
+ * boot log and posture read would report `required` over a plaintext hop.
+ * Plaintext in the URL needs `REGULAIT_DATABASE_SSL=disable` too; an
+ * unverified URL needs `no-verify` (or `disable`). `null` = consistent.
+ */
+export function databaseTlsRefusal(cfg: Pick<DbPoolConfig, "ssl" | "urlSsl">): string | null {
+  const url = cfg.urlSsl;
+  if (!url) return null;
+  if (url.effect === "off" && cfg.ssl !== "off") {
+    return (
+      `DATABASE_URL carries '${url.param}', which turns database TLS off (or lets the server decline it), but ` +
+      `REGULAIT_DATABASE_SSL is not 'disable'. Refusing to start rather than run a plaintext database hop that would ` +
+      `be reported as TLS. Remove '${url.param}' from the URL, or, only for a Postgres on this host, also set ` +
+      `REGULAIT_DATABASE_SSL=disable (reported as a relaxed posture, with a boot warning).`
+    );
+  }
+  if (url.effect === "no-verify" && cfg.ssl === "require") {
+    return (
+      `DATABASE_URL carries '${url.param}', which skips server certificate verification, but ` +
+      `REGULAIT_DATABASE_SSL requires a verified certificate. Refusing to start. Remove '${url.param}' from the URL, ` +
+      `or also set REGULAIT_DATABASE_SSL=no-verify (reported as unverified).`
+    );
+  }
+  return null;
 }
 
 /** one line for the gateway's boot posture block */
 export function describeDbPool(cfg: DbPoolConfig): string {
+  const posture = databaseTlsPosture(cfg);
+  const via = cfg.urlSsl ? ` (DATABASE_URL ${cfg.urlSsl.param})` : "";
   const tls =
-    cfg.ssl === "require"
+    posture === "required"
       ? "tls required, server certificate verified"
-      : cfg.ssl === "no-verify"
-        ? "tls on, server certificate NOT verified (REGULAIT_DATABASE_SSL=no-verify)"
-        : "TLS OFF — RELAXED (REGULAIT_DATABASE_SSL=disable): the database hop is plaintext; acceptable only for a local Postgres on this host";
+      : posture === "unverified"
+        ? `tls on, server certificate NOT verified (REGULAIT_DATABASE_SSL=no-verify)${via}`
+        : `TLS OFF — RELAXED (REGULAIT_DATABASE_SSL=disable)${via}: the database hop is plaintext; acceptable only for a local Postgres on this host`;
   return `pool max ${cfg.max}, connect/wait deadline ${cfg.connectionTimeoutMillis}ms, idle reap ${cfg.idleTimeoutMillis}ms, ${tls}`;
 }
 
@@ -155,18 +235,23 @@ export function describeDbPool(cfg: DbPoolConfig): string {
  * `relaxed` is plaintext (an explicit REGULAIT_DATABASE_SSL=disable). */
 export type DatabaseTlsPosture = "required" | "unverified" | "relaxed";
 
-export function databaseTlsPosture(cfg: Pick<DbPoolConfig, "ssl">): DatabaseTlsPosture {
-  return cfg.ssl === "require" ? "required" : cfg.ssl === "no-verify" ? "unverified" : "relaxed";
+export function databaseTlsPosture(cfg: Pick<DbPoolConfig, "ssl" | "urlSsl">): DatabaseTlsPosture {
+  // ADR-0181 FX3: the WEAKER of the environment and the connection string,
+  // because pg obeys the URL's parameters over the pool config
+  if (cfg.ssl === "off" || cfg.urlSsl?.effect === "off") return "relaxed";
+  if (cfg.ssl === "no-verify" || cfg.urlSsl?.effect === "no-verify") return "unverified";
+  return "required";
 }
 
 /** ADR-0181: the LOUD boot warning when TLS to Postgres is off. Empty when it
  * is on. Lines, so the caller's logger prints each one. */
-export function databaseTlsBootWarning(cfg: Pick<DbPoolConfig, "ssl">): string[] {
-  if (cfg.ssl !== "off") return [];
+export function databaseTlsBootWarning(cfg: Pick<DbPoolConfig, "ssl" | "urlSsl">): string[] {
+  if (databaseTlsPosture(cfg) !== "relaxed") return [];
   const bar = "!".repeat(78);
   return [
     bar,
     "!! WARNING: DATABASE TLS IS OFF (REGULAIT_DATABASE_SSL=disable) — RELAXED POSTURE",
+    ...(cfg.urlSsl?.effect === "off" ? [`!! DATABASE_URL also carries '${cfg.urlSsl.param}'.`] : []),
     "!! Every query, credential envelope and audit row crosses the database hop in",
     "!! plaintext. This is acceptable ONLY for a Postgres on this host (the local",
     "!! demo, docker-compose). Unset the variable, or set `require`, for any other.",
@@ -175,8 +260,22 @@ export function databaseTlsBootWarning(cfg: Pick<DbPoolConfig, "ssl">): string[]
   ];
 }
 
+/** ADR-0181 FX3: thrown by `createDb` when the connection string weakens TLS
+ * below what REGULAIT_DATABASE_SSL declares. */
+export class DatabaseTlsRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DatabaseTlsRefusedError";
+  }
+}
+
 export function createDb(connectionString: string, override: Partial<DbPoolConfig> = {}) {
-  const cfg = { ...resolveDbPoolConfig(), ...override };
+  const cfg = { ...resolveDbPoolConfig(process.env, connectionString), ...override };
+  // ADR-0181 FX3: a connection string that weakens TLS below the declared
+  // posture is refused before a pool exists. Every process that talks to the
+  // database (the gateway, the seed, every script) comes through here.
+  const refusal = databaseTlsRefusal(cfg);
+  if (refusal) throw new DatabaseTlsRefusedError(refusal);
   const pool = new pg.Pool({
     connectionString,
     max: cfg.max,
