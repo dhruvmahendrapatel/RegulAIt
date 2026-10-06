@@ -134,7 +134,7 @@ jobs:
         env:
           REGULAIT_DEMO_KEY_DIR: ${{ runner.temp }}/demo-keys
 
-      - name: demo:prepare (empty database → 18/18 demo:check)
+      - name: demo:prepare (empty database → 19/19 demo:check)
         run: pnpm --filter @regulait/gateway demo:prepare
         env:
           REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
