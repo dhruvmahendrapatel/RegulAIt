@@ -54,10 +54,12 @@ import {
   createRoleSchema,
   createUserSchema,
   deactivateUserSchema,
+  decisionRegressionAcceptanceFields,
   evaluateRequestSchema,
   invokeAgentSchema,
   invokeConnectorSchema,
   reportChecksSchema,
+  retireTemplateSchema,
 } from "@regulait/shared";
 import { routeAuthClass, type RouteAuthClass } from "./route-classes.js";
 import { COMPAT_SURFACES, ROUTE_STABILITY, ROUTE_TAGS, type Stability } from "./openapi-registry.js";
@@ -228,6 +230,13 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "GET /v1/workflows/instances": { summary: "Workflow instances." },
   "POST /v1/workflows/instances": { summary: "Start a workflow instance from a template." },
+  "POST /v1/workflows/templates/:templateId/retire": {
+    summary:
+      "Retire a workflow template; the reason is recorded. Retiring the template that decides use-case sign-off " +
+      "(an `ai-use-case-intake` template or variant) passes the decision-regression gate (ADR-0182): `regressionRunId` " +
+      "of a fresh preview, plus `acceptChangedOutcomes` and `acceptReason` when outcomes change.",
+    body: retireTemplateSchema.extend(decisionRegressionAcceptanceFields),
+  },
   "GET /v1/workflows/instances/:instanceId": {
     summary: "One workflow instance with its stage history.",
     responseNote:
