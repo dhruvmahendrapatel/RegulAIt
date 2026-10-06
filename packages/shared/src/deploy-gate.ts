@@ -13,6 +13,10 @@
  *          ACKNOWLEDGED high alert (a person has it in hand) · an open
  *          medium alert
  *
+ *   ADR-0182 A12, as `incident_gate_mode` says (enforce = BLOCK, warn = WARN,
+ *   off = skipped and labelled so): an open or contained serious incident, or
+ *   high or critical incident, on the use case. Resolving it releases the gate.
+ *
  *   ADR-0180 continuous assurance, as `assurance_gate_mode` says (enforce =
  *   BLOCK, warn = WARN, off = skipped and labelled so): a measured condition
  *   failing or without passing evidence · a required AI test class missing,
@@ -26,6 +30,8 @@
  * build time with reasons a developer can act on.
  */
 import type { AssuranceGateMode, ConditionVerdict, DeployGateAssuranceInput, RequiredTestStatus } from "./assurance.js";
+import type { AccountabilityGateMode, IncidentSeverity, IncidentStatus } from "./accountability.js";
+import { incidentHoldsGate } from "./incidents.js";
 
 export const DEPLOY_GATE_REASON_CODES = [
   "use_case_not_approved",
@@ -48,6 +54,9 @@ export const DEPLOY_GATE_REASON_CODES = [
   "autonomy_floor_unmet",
   "residual_above_tolerance",
   "assurance_check_unavailable",
+  // ADR-0182 A12 — the AI incident register (governed by `incident_gate_mode`)
+  "open_serious_incident",
+  "open_high_incident",
 ] as const;
 export type DeployGateReasonCode = (typeof DEPLOY_GATE_REASON_CODES)[number];
 
@@ -131,6 +140,16 @@ export const DEPLOY_GATE_REASON_INFO: Readonly<Record<DeployGateReasonCode, { ti
     title: "Assurance check could not run",
     explanation: "One of the continuous-assurance checks was not evaluated. A check that did not run is never a pass.",
   },
+  open_serious_incident: {
+    title: "Open serious incident",
+    explanation:
+      "A serious AI incident on this use case is open or contained. It holds the release until it is resolved (the incident deploy gate).",
+  },
+  open_high_incident: {
+    title: "Open high-severity incident",
+    explanation:
+      "A high or critical AI incident on this use case is open or contained. It holds the release until it is resolved (the incident deploy gate).",
+  },
 };
 
 export interface DeployGateReason {
@@ -140,7 +159,7 @@ export interface DeployGateReason {
   /** the plain-language meaning of `code` (DEPLOY_GATE_REASON_INFO) */
   explanation?: string;
   /** the record to open to fix it */
-  ref?: { type: "use_case" | "agent" | "alert" | "risk" | "condition"; id: string };
+  ref?: { type: "use_case" | "agent" | "alert" | "risk" | "condition" | "incident"; id: string };
 }
 
 /** How the ADR-0180 checks were applied. `label` is the one-line answer the
@@ -163,6 +182,25 @@ export const ASSURANCE_GATE_REASON_CODES: readonly DeployGateReasonCode[] = [
   "residual_above_tolerance",
   "assurance_check_unavailable",
 ];
+
+/** ADR-0182 A12: the reason codes `incident_gate_mode` governs */
+export const INCIDENT_GATE_REASON_CODES: readonly DeployGateReasonCode[] = ["open_serious_incident", "open_high_incident"];
+
+/** ADR-0182 A12: one AI incident on the use case, as the gate reads it */
+export interface DeployGateIncidentInput {
+  id: string;
+  ref: string;
+  status: IncidentStatus;
+  severity: IncidentSeverity;
+  serious: boolean;
+}
+
+/** How `incident_gate_mode` was applied; `label` is the one-line answer. */
+export interface DeployGateIncidentSummary {
+  mode: AccountabilityGateMode;
+  status: "enforced" | "warn_only" | "skipped";
+  label: string;
+}
 
 export interface DeployGateAgentInput {
   id: string;
@@ -203,6 +241,10 @@ export interface DeployGateInput extends DeployGateAssuranceInput {
   agents: ReadonlyMap<string, DeployGateAgentInput>;
   /** active monitor alerts whose subject is this use case or one of its agents */
   alerts: ReadonlyArray<{ id: string; ruleId: string; severity: string; status: string; title: string }>;
+  /** ADR-0182 A12: `incident_gate_mode`; absent = the incident check is not part of this evaluation */
+  incidentMode?: AccountabilityGateMode;
+  /** ADR-0182 A12: the use case's AI incidents that are not closed */
+  incidents?: ReadonlyArray<DeployGateIncidentInput>;
 }
 
 export interface DeployGateDecision {
@@ -211,6 +253,31 @@ export interface DeployGateDecision {
   agentsChecked: string[];
   /** present when `assuranceMode` was given (the route always gives it) */
   assurance?: DeployGateAssuranceSummary;
+  /** ADR-0182 A12: present when `incidentMode` was given (the route always gives it) */
+  incidentGate?: DeployGateIncidentSummary;
+}
+
+const INCIDENT_LABEL: Record<AccountabilityGateMode, DeployGateIncidentSummary> = {
+  enforce: { mode: "enforce", status: "enforced", label: "enforced (mode enforce)" },
+  warn: { mode: "warn", status: "warn_only", label: "reported as warnings (mode warn)" },
+  off: { mode: "off", status: "skipped", label: "skipped (mode off)" },
+};
+
+/** ADR-0182 A12: an open or contained serious, high or critical incident holds the gate (enforce) or warns (warn) */
+function incidentReasons(input: DeployGateInput, mode: Exclude<AccountabilityGateMode, "off">): DeployGateReason[] {
+  const sev: "block" | "warn" = mode === "enforce" ? "block" : "warn";
+  const out: DeployGateReason[] = [];
+  for (const i of input.incidents ?? []) {
+    const code = incidentHoldsGate(i);
+    if (!code) continue;
+    out.push({
+      code,
+      severity: sev,
+      message: `incident ${i.ref} (${i.serious ? "serious, " : ""}${i.severity}) is ${i.status} on "${input.useCase.name}"`,
+      ref: { type: "incident", id: i.id },
+    });
+  }
+  return out;
 }
 
 /** a measured (non-manual) condition */
@@ -398,6 +465,9 @@ export function evaluateDeployGate(input: DeployGateInput): DeployGateDecision {
   // enforce holds, warn reports, off skips (and the summary says so).
   const mode = input.assuranceMode;
   if (mode && mode !== "off") reasons.push(...assuranceReasons(input, mode));
+  // ADR-0182 A12 — the incident register, as `incident_gate_mode` says
+  const incidentMode = input.incidentMode;
+  if (incidentMode && incidentMode !== "off") reasons.push(...incidentReasons(input, incidentMode));
   for (const r of reasons) r.explanation = DEPLOY_GATE_REASON_INFO[r.code].explanation;
   const order = (r: DeployGateReason) => (r.severity === "block" ? 0 : 1);
   reasons.sort((a, b) => order(a) - order(b) || a.code.localeCompare(b.code));
@@ -406,5 +476,6 @@ export function evaluateDeployGate(input: DeployGateInput): DeployGateDecision {
     reasons,
     agentsChecked: [...checked],
     ...(mode ? { assurance: { ...ASSURANCE_LABEL[mode] } } : {}),
+    ...(incidentMode ? { incidentGate: { ...INCIDENT_LABEL[incidentMode] } } : {}),
   };
 }
