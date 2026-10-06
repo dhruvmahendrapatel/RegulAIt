@@ -50,6 +50,7 @@
  */
 
 import { buildIdf, cosine, isNumericToken, tokenize, weightedVector } from "./text.js";
+import { fencedBlockBody, firstBraceBlock } from "./linear-scan.js";
 
 const round4 = (n: number) => Number(n.toFixed(4));
 const clamp01 = (n: number) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
@@ -592,8 +593,7 @@ export function parseGroundednessVerdict(
   threshold: number,
 ): { ok: true; verdict: GroundednessJudgeVerdict } | { ok: false; error: string } {
   let obj: Record<string, unknown> | null = null;
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  for (const candidate of [fenced?.[1]?.trim(), text.trim(), text.match(/\{[\s\S]*\}/)?.[0]]) {
+  for (const candidate of [fencedBlockBody(text, true)?.trim(), text.trim(), firstBraceBlock(text)]) {
     if (!candidate || obj) continue;
     try {
       const v = JSON.parse(candidate) as unknown;

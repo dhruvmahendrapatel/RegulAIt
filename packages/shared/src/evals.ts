@@ -41,6 +41,7 @@ import {
   type JudgedClaimVerdict,
 } from "./groundedness.js";
 import { JUDGE_PANEL_LIMITS, judgePanelSchema } from "./judge-panels.js";
+import { fencedBlockBody, firstBraceBlock } from "./linear-scan.js";
 
 // ---------------------------------------------------------------------------
 // Kinds
@@ -569,8 +570,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false; error: string } {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = (fenced?.[1] ?? text).trim();
+  const candidate = (fencedBlockBody(text, true) ?? text).trim();
   try {
     return { ok: true, value: JSON.parse(candidate) as unknown };
   } catch (e) {
@@ -978,10 +978,10 @@ export function parseJudgeVerdict(
       : null;
   if (!obj) {
     // fall back to the first {...} block in the text
-    const brace = text.match(/\{[\s\S]*\}/);
-    if (brace) {
+    const brace = firstBraceBlock(text);
+    if (brace !== undefined) {
       try {
-        const v = JSON.parse(brace[0]) as unknown;
+        const v = JSON.parse(brace) as unknown;
         if (v !== null && typeof v === "object" && !Array.isArray(v)) obj = v as Record<string, unknown>;
       } catch {
         obj = null;

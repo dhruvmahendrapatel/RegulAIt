@@ -34,6 +34,7 @@ import {
   type PullRequestRef,
   type PullRequestState,
 } from "./types.js";
+import { trimTrailingSlashes } from "./url.js";
 
 export interface BitbucketAdapterOptions {
   /** "username:app_password" (Basic) or a workspace/repo access token (Bearer) */
@@ -84,7 +85,7 @@ export class BitbucketProvider implements GitProvider {
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: BitbucketAdapterOptions) {
-    this.base = (opts.baseUrl ?? "https://api.bitbucket.org/2.0").replace(/\/+$/, "");
+    this.base = trimTrailingSlashes(opts.baseUrl ?? "https://api.bitbucket.org/2.0");
     this.auth = opts.token.includes(":")
       ? `Basic ${Buffer.from(opts.token).toString("base64")}`
       : `Bearer ${opts.token}`;

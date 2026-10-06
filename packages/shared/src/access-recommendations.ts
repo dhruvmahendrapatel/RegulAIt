@@ -36,6 +36,8 @@
  * opens a campaign or calls a revocation endpoint themselves.
  */
 
+import { fencedBlockBody } from "./linear-scan.js";
+
 export const ACCESS_RECOMMENDATION_RULES_VERSION = 1;
 
 /** how long "unused" has to have lasted before the rule may say it — a
@@ -354,8 +356,7 @@ export function buildRecommendationJudgePrompt(reqs: RecommendationJudgeRequest[
 export function parseRecommendationJudgeReplies(
   raw: string,
 ): { ok: true; replies: RecommendationJudgeReply[] } | { ok: false; error: string } {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = (fenced?.[1] ?? raw).trim();
+  const body = (fencedBlockBody(raw) ?? raw).trim();
   const start = body.indexOf("[");
   const end = body.lastIndexOf("]");
   if (start < 0 || end <= start) return { ok: false, error: "judge reply contains no JSON array" };

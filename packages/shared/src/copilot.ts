@@ -42,6 +42,7 @@
  * `POST /v1/copilot/ask` response, not buried here.
  */
 import { z } from "zod";
+import { fencedBlockBody } from "./linear-scan.js";
 
 // ---------------------------------------------------------------------------
 // The read-only tool surface
@@ -1074,8 +1075,7 @@ export function buildNarrationPrompt(req: CopilotNarrationRequest): string {
 export function parseNarration(
   raw: string,
 ): { ok: true; narration: CopilotNarration } | { ok: false; error: string } {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = (fenced?.[1] ?? raw).trim();
+  const body = (fencedBlockBody(raw) ?? raw).trim();
   const start = body.indexOf("{");
   const end = body.lastIndexOf("}");
   if (start < 0 || end <= start) return { ok: false, error: "narration reply contains no JSON object" };

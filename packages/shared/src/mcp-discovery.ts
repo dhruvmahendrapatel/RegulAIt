@@ -31,6 +31,7 @@
 import { AUDIT_SCRUB_FINGERPRINT_HEX, AUDIT_SCRUB_MARKER_PREFIX, scrubAuditText } from "./audit-scrub.js";
 import { sha256Hex } from "./audit-chain.js";
 import { redactPII } from "./pii.js";
+import { trimTrailingSlashes } from "./linear-scan.js";
 
 /** How sure we are that the thing at this host speaks MCP. */
 export type McpEvidenceConfidence = "low" | "medium" | "high";
@@ -186,7 +187,7 @@ function hostFrom(line: string): { host: string; path: string | null } | null {
 /** Does this path end in an MCP transport segment? */
 function transportPathOf(path: string | null): string | null {
   if (!path) return null;
-  const clean = path.split("?")[0]!.replace(/\/+$/, "");
+  const clean = trimTrailingSlashes(path.split("?")[0]!);
   for (const t of TRANSPORT_PATHS) {
     if (clean === t || clean.endsWith(t)) return t;
   }
