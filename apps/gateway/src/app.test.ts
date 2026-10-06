@@ -3,6 +3,12 @@ import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { enrolAdminTotpForTest } from "./testing/identity-posture.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -24,7 +30,10 @@ let serverId: string;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  app = buildApp(db, { bootstrapToken: BOOT });
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  // ADR-0181 (FX2): a data key, so an admin can enrol TOTP (an admin's API
+  // key answers to the org MFA requirement)
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
 
   const userRes = await app.inject({
     method: "POST",
@@ -60,6 +69,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await app.close();
 });
 
@@ -288,6 +298,12 @@ describe("authn", () => {
       payload: { email: "root@example.com", displayName: "Root", isAdmin: true },
     });
     const adminId = admin.json().id;
+    // ADR-0181 (FX2): mfaRequired covers admins, and an admin's key answers to
+    // it — without TOTP no key is issued at all
+    const refused = await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${adminId}/keys`, payload: { name: "root-key" } });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toBe("mfa_enrollment_required");
+    await enrolAdminTotpForTest(app, BOOT, adminId);
     const key = await app.inject({
       method: "POST",
       headers: AUTH,

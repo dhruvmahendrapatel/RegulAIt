@@ -3,6 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, costEvents, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxDataPostureForTest, setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 
 /**
  * The most recent row by `at`.
@@ -102,6 +106,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const dana = await makeUser("pii-dana@example.com", "PII Dana", false);
   danaId = dana.id;
@@ -234,8 +239,11 @@ describe("§8.4 model dispatch PII enforcement", () => {
     expect(JSON.stringify(detail)).not.toContain(SSN); // counts only
   });
 
-  it("regression: a non-classified project is unaffected — no pii field", async () => {
-    const res = await invoke(`Handle SSN ${SSN} here.`, plainProj);
+  it("regression: a non-classified project under a relaxed org floor ('none') is unaffected — no pii field", async () => {
+    // ADR-0181: the org floor ships at 'block' (pinned in the floor describe
+    // below and in zz-adr0181-sb1); 'none' is the admin relaxation pinned here
+    const restore = await setOrgSettingsForTest(db, { defaultPiiMode: "none" });
+    const res = await invoke(`Handle SSN ${SSN} here.`, plainProj).finally(restore);
     expect(res.statusCode).toBe(200);
     const d = res.json().dispatch;
     expect(d.pii).toBeUndefined();
@@ -341,6 +349,21 @@ describe("§8.4 the semantic cache must not become a PII bypass", () => {
   // lived. So a PII prompt cached under an ungated (no-project) call was served
   // verbatim on a block-classified replay. These two tests pin that shut, and
   // are written to FAIL if the gates are removed (verified by reverting).
+  //
+  // ADR-0181: the cache ships OFF and the org PII floor at 'block'; the leg
+  // pinned here (an UNGATED fill) exists only under the relaxed posture, so
+  // this describe sets it explicitly and restores it.
+  let restorePosture: () => Promise<void>;
+  beforeAll(async () => {
+    restorePosture = await relaxDataPostureForTest(db, {
+      org: { defaultPiiMode: "none", semanticCachePolicy: "opt_in" },
+      interception: false,
+      guardrails: false,
+    });
+  });
+  afterAll(async () => {
+    await restorePosture();
+  });
 
   it("a PII prompt cached with NO project is refused when replayed on a block project", async () => {
     const shared = `please summarise: my SSN is ${SSN}`;
@@ -422,12 +445,24 @@ describe("§8.4 the deployment-wide floor: omitting the project is no longer an 
       payload: { mode: "execute", input, dispatch: true, ...extra },
     });
 
+  // ADR-0181: the floor ships at 'block'; this describe walks every floor
+  // value from 'none', with the cache on opt-in (its cache leg), a block
+  // stream suppressed-and-disclosed, and the injection layer not blocking
+  // output (its live-stream control). All of it is put back in afterAll.
+  let restorePosture: () => Promise<void>;
+  beforeAll(async () => {
+    restorePosture = await relaxDataPostureForTest(db, {
+      org: { defaultPiiMode: "none", semanticCachePolicy: "opt_in" },
+      interception: { streamingOnBlockMode: "suppress" },
+      guardrails: { promptInjectionMode: "warn" },
+    });
+  });
   afterAll(async () => {
     // org_settings is shared by every file after this one — leave it as found
-    await setFloor("none");
+    await restorePosture();
   });
 
-  it("floor unset (the default): an unattributed PII prompt still runs — old behaviour byte-identical", async () => {
+  it("floor 'none' (an audited admin relaxation): an unattributed PII prompt runs", async () => {
     const r = await invokeUnattributed(`my SSN is ${SSN}, summarise this`);
     expect(r.statusCode).toBe(200);
   });
@@ -531,4 +566,8 @@ describe("§8.4 the deployment-wide floor: omitting the project is no longer an 
     expect(r.statusCode).toBe(400);
     expect(r.json().error).toBe("invalid_reference");
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

@@ -12,18 +12,23 @@
  *              reports exactly that (ADR-0164)
  *   leak       a prompt carrying AWS's documented EXAMPLE key (synthetic); a
  *              credential is not PII so the inline PII check passes it, the
- *              mock echoes it into the response, and continuous trace
- *              evaluation flags the response (ADR-0160)
+ *              semantic-DLP guardrail (at `warn` by default, ADR-0181) flags it
+ *              and lets it proceed, the mock echoes it into the response, and
+ *              continuous trace evaluation flags the response (ADR-0160) — over
+ *              the preview the seed's audited content-capture opt-in stores
  *   blocked    an SSN-shaped prompt in `hipaa-project` (PII mode `block`): a
  *              governed refusal — the runtime-block beat
- *   attempt    a prompt-injection string — counted as an ATTEMPT, never held
- *              against the agent
+ *   attempt    a prompt-injection string — REFUSED at the input by the
+ *              guardrail (prompt injection blocks by default, ADR-0181), a 403
+ *              `guardrail_blocked`; counted as an attempt, never held against
+ *              the agent
  *
  * Then it runs trace evaluation and a monitor pass. Every outcome is reported
  * as it happened (status code and refusal), never assumed — a scenario that
  * did not produce its intended effect says so. Synthetic data only.
  */
 import type { FastifyInstance } from "fastify";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 
 type Json = Record<string, any>;
@@ -55,6 +60,25 @@ export async function runDemoTraffic(
   app: FastifyInstance,
   opts: { bootstrapToken: string; fixtures: DemoIntakeFixtures | null; routinePerAgent?: number },
 ): Promise<DemoTrafficReport> {
+  // ADR-0181: the keys this run mints are revoked when it ends, however it
+  // ends (see revokeScriptKeys). The revoked rows stay, so the Docker demo's
+  // "already prepared" marker (DEMO_TRAFFIC_KEY_NAME) still reads them.
+  const minted: string[] = [];
+  let report: DemoTrafficReport | undefined;
+  try {
+    report = await runDemoTrafficRun(app, opts, minted);
+    return report;
+  } finally {
+    const notes = await revokeScriptKeys(app, opts.bootstrapToken, minted);
+    report?.notes.push(...notes);
+  }
+}
+
+async function runDemoTrafficRun(
+  app: FastifyInstance,
+  opts: { bootstrapToken: string; fixtures: DemoIntakeFixtures | null; routinePerAgent?: number },
+  minted: string[],
+): Promise<DemoTrafficReport> {
   const report: DemoTrafficReport = { results: [], traceEvaluation: null, monitor: null, notes: [] };
   const boot = { authorization: `Bearer ${opts.bootstrapToken}` };
   const call = async (method: "GET" | "POST", url: string, headers: Record<string, string>, payload?: unknown) => {
@@ -75,8 +99,14 @@ export async function runDemoTraffic(
     report.notes.push("dana@ / admin@regulait.local missing — run `seed` and `demo:intake` first");
     return report;
   }
-  const keyFor = async (id: string) =>
-    ({ authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME })).body.token}` });
+  const keyFor = async (id: string) => {
+    const issued = await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME, expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
+    // ADR-0181 (FX2): an un-enrolled admin gets no key — name it, do not 401 later
+    if (issued.status !== 201) throw new Error(`cannot issue a demo-traffic key for user ${id}: ${issued.status} ${String(issued.body.error ?? "")}`);
+    const k = issued.body;
+    if (typeof k.id === "string") minted.push(k.id);
+    return { authorization: `Bearer ${k.token}` };
+  };
   const danaAuth = await keyFor(dana.id);
   const adaAuth = await keyFor(ada.id);
 

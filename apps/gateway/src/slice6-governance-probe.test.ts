@@ -3,6 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * SLICE-6 ADVERSARIAL PROBE — governance depth, at the one seam the existing
@@ -73,10 +77,15 @@ async function invoke(input: string, projectId: string) {
   });
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the shipped guardrails now block injection org-wide. This file proves a
+  // compliance FLOOR raises a layer, against an org default at 'log', so it sets that explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: false, interception: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const u = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/users",
@@ -119,7 +128,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

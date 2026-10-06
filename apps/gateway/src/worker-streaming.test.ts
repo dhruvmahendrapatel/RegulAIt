@@ -42,7 +42,11 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -150,6 +154,7 @@ function parseSse(body: string): Array<{ event: string; data: Record<string, unk
   });
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   admin = createDb(DATABASE_URL);
   await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`));
@@ -161,7 +166,11 @@ beforeAll(async () => {
   // actually gone before dropping it (see ./testing/scratch-db.ts), so there is
   // no expected error left to swallow — and a real one is loud again.
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins worker streaming as written against the lax posture: no org
+  // PII floor, suppress-and-disclose on a block project, live deltas otherwise.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: { streamingOnBlockMode: "suppress" }, guardrails: { promptInjectionMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const agent = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/agents",
@@ -182,8 +191,10 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   // Reverse order of construction, every step attempted even if an earlier one
   // throws, and the drop gated on Postgres reporting zero backends rather than
+  await restoreSb2Gates();
   // on `pool.end()` having resolved — which is NOT that guarantee.
   await closeAll([
     () => app.close(),

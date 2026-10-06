@@ -64,6 +64,14 @@ import {
   setRetryConfig,
   withUpstreamRetry,
 } from "./upstream-retry.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /** The policy Part 2 runs under. Tiny backoffs because the SCHEDULE is asserted
  *  in Part 1 and here only the attempt count matters. */
@@ -480,6 +488,7 @@ let gatewayUrl: string;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
 
   // A tiny connect deadline for the same reason g2 uses one: the behaviour is
   // identical at 600ms and the file is not the slowest in the suite. The
@@ -491,6 +500,7 @@ beforeAll(async () => {
     breaker: { failureThreshold: 50 },
     retry: RETRY_ON,
   });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   auth = await userKeyFor(app, "on");
   gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
 
@@ -502,7 +512,9 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   for (const sock of blackHoleSockets) sock.destroy();
   blackHoleSockets.clear();

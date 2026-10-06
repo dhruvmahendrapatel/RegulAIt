@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { enrolAdminTotpForTest } from "./testing/identity-posture.js";
 import { createHmac } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
@@ -14,6 +15,15 @@ import { approvalArgumentsDigest } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 import { currentPeriodKey } from "./projects.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -142,7 +152,9 @@ afterAll(() => {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false });
 
   upstream = await startUpstream();
 
@@ -197,6 +209,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
   // upserts a PLATFORM credential for anthropic, openai, google and xai, each
   // pointing at a loopback fake it closes on the way out and each encrypted
@@ -216,6 +229,7 @@ afterAll(async () => {
   try {
     try {
       app?.server.closeAllConnections();
+  await restoreSb2Gates();
       await app?.close();
     } finally {
       await upstream?.close();
@@ -5914,10 +5928,10 @@ describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enf
       payload: { name: "patch-period", budgetUsd: 4, budgetApproverUserId: finnId },
     });
     const pId = proj.json().id;
-    // default: lifetime, threshold 100
+    // default: lifetime, threshold 80 (ADR-0181)
     const before = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${pId}/costs` });
     expect(before.json().budget.period).toBe("none");
-    expect(before.json().budget.alertThresholdPct).toBe(100);
+    expect(before.json().budget.alertThresholdPct).toBe(80);
 
     const patched = await app.inject({
       method: "PATCH", headers: AUTH, url: `/v1/projects/${pId}`,
@@ -6526,6 +6540,21 @@ describe("streaming dispatch (SSE): same gates, same ledger, delivered as deltas
   let sabaId: string;
   let sabaAuth: { authorization: string };
   let streamAgentId: string;
+
+  // ADR-0181: the strict PII floor and the prompt-injection output layer are
+  // both 'block' by default, which never streams live. This block pins LIVE
+  // delta streaming, so it sets the lax posture explicitly and restores it.
+  let restorePosture: () => Promise<void>;
+  beforeAll(async () => {
+    restorePosture = await relaxDataPostureForTest(db, {
+      org: { defaultPiiMode: "none" },
+      interception: false,
+      guardrails: { promptInjectionMode: "warn" },
+    });
+  });
+  afterAll(async () => {
+    await restorePosture();
+  });
 
   const parseEvents = (body: string) =>
     body.split("\n\n").filter(Boolean).map((chunk) => {
@@ -7586,6 +7615,8 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
     ivyId = await mkUser("loop-ivy@example.com", "Loop Ivy");
     oleId = await mkUser("loop-ole@example.com", "Loop Ole");
     const zedId = await mkUser("loop-zed@example.com", "Loop Zed");
+    // ADR-0181 (FX2): an admin's key answers to mfaRequired — enrol TOTP first
+    await enrolAdminTotpForTest(app, BOOT, adminId);
     adminAuth = await authFor(adminId);
     ivyAuth = await authFor(ivyId);
     oleAuth = await authFor(oleId);

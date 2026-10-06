@@ -97,7 +97,7 @@ interface StatusView {
   enforced: boolean;
   warnDays: number;
   /** ADR-0086 §3's follow-up (batch B3): staleness-forces-recertification —
-   * off by default; deepens the dispatch gate and only bites while enforced */
+   * on by default (ADR-0181); deepens the dispatch gate and only bites while enforced */
   stalenessRecertEnabled: boolean;
   stalenessRecertThreshold: number;
   posture: "enforced" | "declared" | "absent";
@@ -185,6 +185,8 @@ interface StalenessView {
   changesSinceCertification: Record<string, number> | null;
   drifted: boolean;
   summary: string | null;
+  /** ADR-0181: risks only non-admins have written, awaiting triage (not drift) */
+  pendingTriage?: string | null;
   note: string;
 }
 
@@ -286,8 +288,8 @@ export default function ModelRiskPage() {
                       }, "Model-risk enforcement updated")
                     }
                   >
+                    <option value="on">on — 409 at dispatch without a live sign-off (strict default)</option>
                     <option value="off">off — cards are recorded, nothing is refused</option>
-                    <option value="on">on — 409 at dispatch without a live sign-off</option>
                   </Select>
                 </Field>
                 <Field label={`Warn window (days before validUntil)`}>
@@ -309,8 +311,8 @@ export default function ModelRiskPage() {
               </div>
               {/* ADR-0086 §3's follow-up (batch B3) — staleness forces
                   recertification: a per-org opt-in DEEPENING the dispatch
-                  gate above. Off (default) = staleness informs and gates
-                  nothing, exactly as ADR-0086 shipped. */}
+                  gate above. On by default (ADR-0181); off = staleness
+                  informs and gates nothing, as ADR-0086 first shipped. */}
               <div className={a.formRow}>
                 <Field label="Staleness forces recertification">
                   <Select
@@ -318,18 +320,18 @@ export default function ModelRiskPage() {
                     onChange={(e) =>
                       void act.run(async () => {
                         await api.post("/v1/mrm/enforcement", {
-                          enforced: status.data?.enforced ?? false,
+                          enforced: status.data?.enforced ?? true,
                           stalenessRecertEnabled: e.target.value === "on",
                         });
                         await refreshAll();
                       }, "Staleness-recertification setting updated")
                     }
                   >
-                    <option value="off">off — drift informs, nothing more (default)</option>
-                    <option value="on">on — a certified card that drifted past the threshold refuses dispatch</option>
+                    <option value="on">on — a certified card that drifted past the threshold refuses dispatch (strict default)</option>
+                    <option value="off">off — drift informs, nothing more</option>
                   </Select>
                 </Field>
-                <Field label="Drift threshold (ledger changes since certification)">
+                <Field label="Drift threshold (regressions and changes since certification)">
                   <Input
                     type="number"
                     min={1}
@@ -345,7 +347,7 @@ export default function ModelRiskPage() {
                     onClick={() =>
                       void act.run(async () => {
                         await api.post("/v1/mrm/enforcement", {
-                          enforced: status.data?.enforced ?? false,
+                          enforced: status.data?.enforced ?? true,
                           stalenessRecertThreshold: Number(stalenessThreshold),
                         });
                         setStalenessThreshold(null);
@@ -360,11 +362,15 @@ export default function ModelRiskPage() {
               <div className={v.faint}>
                 Staleness-forces-recertification only bites while the dispatch gate above is on — it
                 deepens that gate, it creates none of its own. When armed, a card with a LIVE
-                sign-off whose ledgers have moved (eval runs, red-team runs, guardrail/grant/risk
-                changes, drift regressions — the same counts the card&apos;s certification-drift
-                banner shows) at least this many times since the last granting decision refuses
-                dispatch on the same 409 the expiry gate uses, naming the drift; a recertification
-                resets the clock. Off keeps drift purely informational.
+                sign-off that has drifted at least this many times since the last granting decision
+                refuses dispatch on the same 409 the expiry gate uses, naming the drift; a
+                recertification resets the clock. Drift is a regression (an eval or red-team run
+                that measured worse than at certification, or a scheduled run that failed its gate),
+                a risk-register change, an agent guardrail relaxation, a model, prompt or endpoint
+                change, or an edit of the card — the same events the card&apos;s certification-drift
+                banner names. A risk counts once an admin or a named risk acceptor has written it; one
+                only a non-admin has registered shows as awaiting triage. Passing runs and grants are
+                routine evidence, not drift. Off keeps drift purely informational.
               </div>
               <div className={v.faint}>{status.data?.note}</div>
               <div className={a.formRow}>
@@ -592,6 +598,12 @@ export default function ModelRiskPage() {
                     <Badge tone="warn">certification drift</Badge>{" "}
                     <strong>{staleness.summary}</strong>
                     <div className={v.faint}>{staleness.note}</div>
+                  </div>
+                )}
+                {staleness?.pendingTriage && (
+                  <div>
+                    <Badge tone="info">awaiting triage</Badge>{" "}
+                    <span>{staleness.pendingTriage}</span>
                   </div>
                 )}
 

@@ -2,9 +2,11 @@
  * ADR-0086 §3's named follow-up (batch B3) — STALENESS FORCES
  * RECERTIFICATION, proved through the DISPATCH OUTCOME the mrm.test.ts way:
  *
- *  1. OFF IS BYTE-IDENTICAL, even with mrmEnforced ON and the card DRIFTED:
- *     the exact dispatch that refuses once the knob is armed succeeds, with
- *     the provider spy recording the call.
+ *  0. ADR-0181: the knob SHIPS ARMED (mrmEnforced and staleness recert both
+ *     default on); turned OFF (an audited admin relaxation), it is
+ *     byte-identical even with mrmEnforced ON and the card DRIFTED: the exact
+ *     dispatch that refuses once the knob is armed succeeds, with the provider
+ *     spy recording the call.
  *  2. ARMED + DRIFTED REFUSES, pre-provider, on the SAME 409
  *     `mrm_approval_required` path expiry uses (extended, never forked) —
  *     with the staleness evidence NAMED in the response and audited under
@@ -14,18 +16,28 @@
  *     decide path resets the drift clock and restores dispatch.
  *  5. THE KNOB DEEPENS THE ONE GATE, IT CREATES NONE: staleness-recert armed
  *     with mrmEnforced OFF gates nothing.
+ *  6. ADR-0181: AN EVALUATION IS NOT REFUSED FOR STALENESS. An eval case or
+ *     red-team probe against the agent under test (the server-side `evals`
+ *     feature plus the runner's `evaluationSubject`) on a drifted card
+ *     proceeds and is audited `mrm-staleness-evaluation-allowed`; the same
+ *     dispatch without them still refuses. (A judge is not the subject: see
+ *     zz-adr0181-fx1-mrm-staleness-drift.test.ts.)
  *
- * Drift is manufactured as a GRANT CHANGE on the card's subject agent — one
- * of the exact `computeCardStaleness` ledger counts (never re-derived here).
+ * Drift is manufactured as a RISK-REGISTER CHANGE on the card's subject agent
+ * — one of the exact `computeCardStaleness` drift kinds (never re-derived
+ * here). ADR-0181 FX1: a grant is routine evidence and no longer drift.
  *
  * SHARED-STATE DISCIPLINE (M-012): this file flips four `org_settings`
  * fields; `afterAll` restores the exact pre-existing values and deletes the
- * cards it created. Everything here is prefixed msg-.
+ * cards it created. It relaxes only the attribution mandate (its dispatches
+ * name no project) through `relaxGovernanceGatesForTest`, restored after.
+ * Everything here is prefixed msg-.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  aiRisks,
   auditLog,
   count,
   createDb,
@@ -35,8 +47,10 @@ import {
   modelCards,
   orgSettings,
   runMigrations,
+  agents,
   type Db,
 } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -63,6 +77,7 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 });
 
 const { buildApp } = await import("./app.js");
+const { executeGovernedDispatch } = await import("./agents-connectors.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -89,8 +104,9 @@ let priorOrg: {
   mrmStalenessRecertEnabled: boolean;
   mrmStalenessRecertThreshold: number;
 } | null = null;
-/** users granted the subject agent purely to move the grant ledger */
-let driftGrantSeq = 0;
+/** risks registered on the subject agent purely to drift its card */
+let driftRiskSeq = 0;
+let restoreGates: () => Promise<void> = async () => {};
 
 function providerCalls() {
   return globalThis.__msgProviderCalls;
@@ -133,17 +149,24 @@ async function invoke() {
   });
 }
 
-/** move the staleness ledger: one NEW grant on the subject agent is exactly
- * one `grantChanges` count in computeCardStaleness */
+/** drift the card: one NEW risk-register row on the subject agent is exactly
+ * one `riskChanges` drift event in computeCardStaleness */
 async function createDrift() {
-  const extra = await makeUser(`msg-drift-${++driftGrantSeq}@example.com`);
-  const g = await app.inject({
+  const r = await app.inject({
     method: "POST",
-    url: "/v1/grants/agents",
+    url: "/v1/risks",
     headers: AUTH,
-    payload: { userId: extra.id, agentId },
+    payload: {
+      title: `msg drift risk ${++driftRiskSeq}`,
+      description: "msg: a risk registered after certification",
+      category: "scope_drift",
+      likelihood: "low",
+      impact: "medium",
+      ownerUserId: rikaId,
+      agentId,
+    },
   });
-  expect(g.statusCode).toBe(201);
+  expect(r.statusCode, r.body).toBe(201);
 }
 
 async function certify(validDays: number, reason: string) {
@@ -176,6 +199,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // the dispatches here name no project: relax only the attribution mandate
+  restoreGates = await relaxGovernanceGatesForTest(db, { dispatchAttributionRequired: false });
 
   const [org] = await db.select().from(orgSettings);
   priorOrg = org
@@ -234,12 +259,14 @@ afterAll(async () => {
     await db
       .update(orgSettings)
       .set({
-        mrmEnforced: false,
+        mrmEnforced: true,
         mrmExpiryWarnDays: 30,
-        mrmStalenessRecertEnabled: false,
+        mrmStalenessRecertEnabled: true,
         mrmStalenessRecertThreshold: 1,
       });
   }
+  await restoreGates();
+  await db.delete(aiRisks).where(eq(aiRisks.agentId, agentId));
   const mine = await db.select({ id: modelCards.id }).from(modelCards).where(eq(modelCards.agentId, agentId));
   if (mine.length > 0) {
     await db.delete(modelCardApprovals).where(
@@ -254,17 +281,18 @@ afterAll(async () => {
   await db.$client.end();
 });
 
-describe("off is byte-identical — even enforced, even drifted", () => {
-  it("ships off: /v1/mrm/status reports the knob disabled with threshold 1", async () => {
+describe("ships armed (ADR-0181); relaxed off it is byte-identical — even enforced, even drifted", () => {
+  it("ships armed: /v1/mrm/status reports enforcement and the knob on, threshold 1", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/mrm/status", headers: AUTH });
     expect(res.statusCode).toBe(200);
-    expect(res.json().stalenessRecertEnabled).toBe(false);
+    expect(res.json().enforced).toBe(true);
+    expect(res.json().stalenessRecertEnabled).toBe(true);
     expect(res.json().stalenessRecertThreshold).toBe(1);
   });
 
   it("with mrmEnforced ON, a DRIFTED certified card still dispatches while the knob is off", async () => {
-    await setEnforcement({ enforced: true });
-    await createDrift(); // 1 grant change since certification
+    await setEnforcement({ enforced: true, stalenessRecertEnabled: false });
+    await createDrift(); // 1 risk-register change since certification
     resetProviderCalls();
     const res = await invoke();
     expect(res.statusCode, res.body).toBe(200);
@@ -283,7 +311,7 @@ describe("armed — drift at the threshold refuses on the expiry gate's own 409 
     // the SAME stable caller-facing code every MRM refusal carries
     expect(res.json().error).toBe("mrm_approval_required");
     expect(res.json().detail).toContain("STALE");
-    expect(res.json().detail).toContain("grant change"); // the evidence, named
+    expect(res.json().detail).toContain("risk-register change"); // the evidence, named
     expect(res.json().detail).toContain("recertify");
     expect(providerCalls().length).toBe(0);
     expect(await auditCount("mrm-staleness-recert-required")).toBe(before + 1);
@@ -295,10 +323,10 @@ describe("armed — drift at the threshold refuses on the expiry gate's own 409 
     expect(mine.length).toBe(1);
     expect(mine[0]!.effect).toBe("deny");
     const detail = mine[0]!.detail as {
-      staleness: { changesSinceCertification: { grantChanges: number }; totalChanges: number };
+      staleness: { driftSinceCertification: { riskChanges: number }; totalChanges: number };
       stalenessThreshold: number;
     };
-    expect(detail.staleness.changesSinceCertification.grantChanges).toBe(1);
+    expect(detail.staleness.driftSinceCertification.riskChanges).toBe(1);
     expect(detail.staleness.totalChanges).toBe(1);
     expect(detail.stalenessThreshold).toBe(1);
   });
@@ -335,7 +363,7 @@ describe("armed — drift at the threshold refuses on the expiry gate's own 409 
     resetProviderCalls();
     const res = await invoke();
     expect(res.statusCode).toBe(409);
-    expect(res.json().detail).toContain("grant change");
+    expect(res.json().detail).toContain("risk-register change");
     expect(providerCalls().length).toBe(0);
   });
 });
@@ -349,10 +377,47 @@ describe("the knob deepens the ONE gate — it creates none of its own", () => {
     expect(providerCalls().length).toBe(1);
   });
 
-  it("leaves every knob off for the suites that follow", async () => {
-    await setEnforcement({ enforced: false, stalenessRecertEnabled: false, stalenessRecertThreshold: 1 });
+});
+
+describe("ADR-0181 — an evaluation is not refused for staleness", () => {
+  async function evalDispatch(feature?: "evals") {
+    const [served] = await db.select().from(agents).where(eq(agents.id, agentId));
+    return executeGovernedDispatch(db, DATA_KEY, {
+      userId: maraId,
+      served: served!,
+      requestedAgentId: agentId,
+      baseline: null,
+      input: "msg evaluation probe",
+      maxTokens: 64,
+      projectId: null,
+      // the eval runner's case/probe dispatch: the feature AND the subject flag
+      ...(feature ? { modelFeature: { feature }, evaluationSubject: true } : {}),
+      detail: { purpose: "msg-evaluation" },
+    });
+  }
+
+  it("armed and drifted: an `evals` dispatch proceeds, audited; the same dispatch without it refuses", async () => {
+    await setEnforcement({ enforced: true, stalenessRecertEnabled: true, stalenessRecertThreshold: 1 });
+    await createDrift();
+    const allowedBefore = await auditCount("mrm-staleness-evaluation-allowed");
+    const refusedBefore = await auditCount("mrm-staleness-recert-required");
+    resetProviderCalls();
+
+    const evaluation = await evalDispatch("evals");
+    expect(evaluation.ok, JSON.stringify(evaluation).slice(0, 300)).toBe(true);
+    expect(providerCalls().length).toBe(1);
+    expect(await auditCount("mrm-staleness-evaluation-allowed")).toBe(allowedBefore + 1);
+
+    const production = await evalDispatch();
+    expect(production.ok).toBe(false);
+    expect(providerCalls().length).toBe(1);
+    expect(await auditCount("mrm-staleness-recert-required")).toBe(refusedBefore + 1);
+  });
+
+  it("leaves the strict defaults for the suites that follow", async () => {
+    await setEnforcement({ enforced: true, stalenessRecertEnabled: true, stalenessRecertThreshold: 1 });
     const res = await app.inject({ method: "GET", url: "/v1/mrm/status", headers: AUTH });
-    expect(res.json().enforced).toBe(false);
-    expect(res.json().stalenessRecertEnabled).toBe(false);
+    expect(res.json().enforced).toBe(true);
+    expect(res.json().stalenessRecertEnabled).toBe(true);
   });
 });

@@ -20,6 +20,7 @@ import {
   ne,
   oidcLoginStates,
   oidcProviders,
+  ORG_SETTINGS_ID,
   roleAssignments,
   roles,
   samlProviders,
@@ -46,7 +47,10 @@ import {
   totpDisableSchema,
   updateOidcProviderSchema,
   constantTimeEqual,
+  OIDC_JIT_DOMAINS_REQUIRED,
+  oidcJitDomainsMissing,
 } from "@regulait/shared";
+import { settingTransitions } from "./setting-transitions.js";
 import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -112,6 +116,10 @@ export interface AuthContext {
    * bucket is the STORED id and never anything derived from the presented
    * string. */
   apiKeyId?: string;
+  /** ADR-0181 (FX2): whether the key's OWNER has TOTP enrolled. Set only when
+   * `via === "api-key"`; the route hook refuses an un-enrolled owner's key
+   * wherever the org MFA requirement covers them (`apiKeyMfaEnrollmentRequired`). */
+  totpEnabled?: boolean;
 }
 
 /**
@@ -228,6 +236,7 @@ export async function authenticate(
       disabledAt: users.disabledAt,
       revokedAt: apiKeys.revokedAt,
       expiresAt: apiKeys.expiresAt,
+      totpEnabled: users.totpEnabled,
     })
     .from(apiKeys)
     .innerJoin(users, eq(apiKeys.userId, users.id))
@@ -252,8 +261,33 @@ export async function authenticate(
   }
 
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.keyId));
-  return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key", apiKeyId: row.keyId };
+  return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key", apiKeyId: row.keyId, totpEnabled: row.totpEnabled };
 }
+
+/**
+ * ADR-0181 (FX2, review finding 3) — an API key is not a way around MFA.
+ *
+ * The org MFA requirement used to bind only the cookie session, so an admin
+ * who never enrolled TOTP kept full administrator power through an API key.
+ * A key now answers to the SAME dial as a session (`orgRequiresMfa`): where
+ * the requirement covers the key's owner and the owner has no TOTP, the key is
+ * refused (route hook), it cannot be exchanged for a browser session (where
+ * the self-service enrolment routes would let its holder enrol THEIR OWN
+ * authenticator), and no new key is issued to that person. The bootstrap token
+ * is no user's key and is not affected; a virtual key is never admin.
+ */
+export function apiKeyMfaEnrollmentRequired(org: OrgSettingsRow, ctx: AuthContext): boolean {
+  if (ctx.via !== "api-key" || !ctx.userId || ctx.totpEnabled === true) return false;
+  return orgRequiresMfa(org, ctx.isAdmin);
+}
+
+/** the holder-facing refusal for an un-enrolled owner's key (one wording) */
+export const API_KEY_MFA_REFUSAL = {
+  error: "mfa_enrollment_required",
+  detail:
+    "this organization requires TOTP MFA for this account, and an API key does not satisfy it: the key's owner must " +
+    "sign in and enroll TOTP (POST /auth/totp/enroll) before the key works. An admin may relax mfaRequired (audited).",
+} as const;
 
 /**
  * ADR-0098 — the audit half of "expired ≠ revoked".
@@ -580,6 +614,10 @@ export async function resolveSession(
       expiresAt: authSessions.expiresAt,
       idleExpiresAt: authSessions.idleExpiresAt,
       idleMinutes: authSessions.idleMinutes,
+      lastSeenAt: authSessions.lastSeenAt,
+      // ADR-0181 (FX2, finding 10a): the org's CURRENT idle window, read with
+      // the session in the same query (the singleton row; null before it exists)
+      orgIdleMinutes: sql<number | null>`(select "session_idle_minutes" from "org_settings" where "id" = ${ORG_SETTINGS_ID})`,
       origin: authSessions.origin,
       revokedAt: authSessions.revokedAt,
       idpMfa: authSessions.idpMfa,
@@ -595,13 +633,23 @@ export async function resolveSession(
   if (row.revokedAt) return null;
   const now = Date.now();
   if (row.expiresAt.getTime() <= now || row.idleExpiresAt.getTime() <= now) return null;
+  // ADR-0181 (FX2, finding 10a) — NO GRANDFATHERING of the idle window. A
+  // session snapshots the org's idle minutes when it is created, so a session
+  // opened under a laxer setting used to keep it until it died. The window
+  // that applies is now the SHORTER of the snapshot and the org's current
+  // value: tightening sessionIdleMinutes binds every live session on its next
+  // request (measured from its last use); relaxing it applies to new sessions.
+  const orgIdle = row.orgIdleMinutes === null ? null : Number(row.orgIdleMinutes);
+  const idleMinutes = orgIdle !== null && orgIdle > 0 ? Math.min(row.idleMinutes, orgIdle) : row.idleMinutes;
+  if (row.lastSeenAt.getTime() + idleMinutes * 60_000 <= now) return null;
   if (row.userId === null) {
     // bootstrap-exchanged session: dies with the deploy-time token
     if (!bootstrapConfigured) return null;
     await db
       .update(authSessions)
       .set({
-        idleExpiresAt: new Date(now + row.idleMinutes * 60_000),
+        idleExpiresAt: new Date(now + idleMinutes * 60_000),
+        idleMinutes,
         lastSeenAt: new Date(now),
         ...(clientIp !== undefined ? { lastSeenIp: clientIp } : {}),
       })
@@ -619,7 +667,8 @@ export async function resolveSession(
   await db
     .update(authSessions)
     .set({
-      idleExpiresAt: new Date(now + row.idleMinutes * 60_000),
+      idleExpiresAt: new Date(now + idleMinutes * 60_000),
+      idleMinutes,
       lastSeenAt: new Date(now),
       ...(clientIp !== undefined ? { lastSeenIp: clientIp } : {}),
     })
@@ -703,91 +752,20 @@ export function recoveryReason(user: {
 }
 
 // --- TOTP (RFC 6238 via HMAC-SHA1, zero deps) -------------------------------
-
-const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-export function base32Encode(buf: Buffer): string {
-  let bits = 0;
-  let value = 0;
-  let out = "";
-  for (const byte of buf) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
-  return out;
-}
-
-export function base32Decode(s: string): Buffer {
-  const clean = s.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
-  let bits = 0;
-  let value = 0;
-  const out: number[] = [];
-  for (const ch of clean) {
-    const idx = BASE32_ALPHABET.indexOf(ch);
-    if (idx < 0) throw new Error("invalid base32");
-    value = (value << 5) | idx;
-    bits += 5;
-    if (bits >= 8) {
-      out.push((value >>> (bits - 8)) & 0xff);
-      bits -= 8;
-    }
-  }
-  return Buffer.from(out);
-}
-
-export const TOTP_PERIOD_SECONDS = 30;
-export const TOTP_DIGITS = 6;
-
-export function generateTotpSecret(): string {
-  return base32Encode(randomBytes(20)); // 160-bit secret per RFC 4226
-}
-
-export function totpStep(atMs: number = Date.now()): number {
-  return Math.floor(atMs / 1000 / TOTP_PERIOD_SECONDS);
-}
-
-export function totpCode(secretBase32: string, step: number): string {
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(step));
-  const digest = createHmac("sha1", base32Decode(secretBase32)).update(counter).digest();
-  const offset = digest[digest.length - 1]! & 0x0f;
-  const bin =
-    ((digest[offset]! & 0x7f) << 24) |
-    (digest[offset + 1]! << 16) |
-    (digest[offset + 2]! << 8) |
-    digest[offset + 3]!;
-  return String(bin % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, "0");
-}
-
-/**
- * Verify a code within ±1 time-step (clock skew tolerance) with REPLAY
- * PROTECTION: any step <= lastUsedStep is refused, so a consumed code can
- * never be replayed inside its validity window. Returns the consumed step
- * (to persist as the new lastUsedStep) or null.
- */
-export function verifyTotp(
-  secretBase32: string,
-  code: string,
-  lastUsedStep: number | null,
-  atMs: number = Date.now(),
-): number | null {
-  const now = totpStep(atMs);
-  for (const step of [now, now - 1, now + 1]) {
-    if (lastUsedStep !== null && step <= lastUsedStep) continue;
-    if (constantTimeEqual(totpCode(secretBase32, step), code)) return step;
-  }
-  return null;
-}
-
-export function otpauthUri(email: string, secretBase32: string): string {
-  const label = encodeURIComponent(`RegulAIt:${email}`);
-  return `otpauth://totp/${label}?secret=${secretBase32}&issuer=RegulAIt&algorithm=SHA1&digits=${TOTP_DIGITS}&period=${TOTP_PERIOD_SECONDS}`;
-}
+// The implementation lives in `totp.ts` (ADR-0181: the e2e journeys load it
+// without the rest of this module); every name is re-exported unchanged.
+export {
+  base32Decode,
+  base32Encode,
+  generateTotpSecret,
+  otpauthUri,
+  TOTP_DIGITS,
+  TOTP_PERIOD_SECONDS,
+  totpCode,
+  totpStep,
+  verifyTotp,
+} from "./totp.js";
+import { generateTotpSecret, otpauthUri, verifyTotp } from "./totp.js";
 
 // --- audit helper -----------------------------------------------------------
 
@@ -1299,6 +1277,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       });
     }
     const org = await loadOrgSettings(db);
+    // ADR-0181 (FX2): an un-enrolled owner's key buys no session either — an
+    // exchanged session may reach the TOTP self-service routes, which would
+    // let whoever holds the key enrol their own authenticator.
+    if (apiKeyMfaEnrollmentRequired(org, ctx)) {
+      await auditAuth(db, null, ctx.userId, "api-key-mfa-enrollment-required", "deny",
+        "API-key browser sign-in refused: the org requires MFA for this account and its owner has not enrolled TOTP",
+        { phase: "login", method: "api-key-exchange", mfaRequired: org.mfaRequired, apiKeyId: ctx.apiKeyId ?? null });
+      return reply.status(403).send(API_KEY_MFA_REFUSAL);
+    }
     // ADR-0174 (finding 9): in break-glass mode a browser session from an API
     // key is a local sign-in like any other — only a designated break-glass
     // admin may have one. Everybody else gets the same answer as an unknown
@@ -2450,6 +2437,23 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   // ---- admin CRUD for OIDC providers (default admin gate applies) ----------
 
+  /** ADR-0181: JIT on with no allowed domains is refused by name, audited */
+  const refuseJitWithoutDomains = async (
+    reply: FastifyReply,
+    actorUserId: string | null,
+    name: string,
+    providerId: string | null,
+  ) => {
+    const detail =
+      "JIT provisioning creates an account from whatever email the identity provider asserts, so it needs " +
+      "allowedEmailDomains: name the domains this provider may provision (or turn JIT off). Nothing was saved.";
+    await auditAuth(db, actorUserId, providerId, OIDC_JIT_DOMAINS_REQUIRED, "deny",
+      `OIDC provider '${name}' write refused: JIT provisioning without allowed email domains`,
+      { phase: providerId ? "provider-updated" : "provider-created", name, error: OIDC_JIT_DOMAINS_REQUIRED },
+      "oidc_provider");
+    return reply.status(422).send({ error: OIDC_JIT_DOMAINS_REQUIRED, detail });
+  };
+
   app.get("/v1/auth/oidc-providers", async () => {
     const rows = await db.select().from(oidcProviders);
     return { providers: rows.map(publicProvider) };
@@ -2457,6 +2461,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
   app.post("/v1/auth/oidc-providers", async (req, reply) => {
     const body = createOidcProviderSchema.parse(req.body);
+    // ADR-0181: JIT provisioning needs the email domains it accepts
+    if (oidcJitDomainsMissing(body)) return refuseJitWithoutDomains(reply, req.authCtx.userId, body.name, null);
     if (!opts.dataKey) {
       return reply.status(409).send({
         error: "data_key_required",
@@ -2508,7 +2514,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .returning();
     await auditAuth(db, req.authCtx.userId, null, "oidc-provider-created", "allow",
       `OIDC provider '${body.name}' created (issuer ${body.issuerUrl})`,
-      { phase: "provider-created", name: body.name, issuerUrl: body.issuerUrl, jitProvisioning: body.jitProvisioning ?? false, brokerIdps: body.brokerIdps ?? null },
+      { phase: "provider-created", name: body.name, issuerUrl: body.issuerUrl, jitProvisioning: body.jitProvisioning ?? false, allowedEmailDomains: body.allowedEmailDomains ?? null, brokerIdps: body.brokerIdps ?? null },
       "oidc_provider");
     return reply.status(201).send(publicProvider(row!));
   });
@@ -2518,6 +2524,16 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     const body = updateOidcProviderSchema.parse(req.body);
     const [existing] = await db.select().from(oidcProviders).where(eq(oidcProviders.id, providerId));
     if (!existing) return reply.status(404).send({ error: "unknown_provider" });
+    // ADR-0181: checked over the EFFECTIVE values, so a two-step PATCH cannot
+    // turn JIT on before (or clear the domains after) naming them
+    if (
+      oidcJitDomainsMissing({
+        jitProvisioning: body.jitProvisioning ?? existing.jitProvisioning,
+        allowedEmailDomains: body.allowedEmailDomains !== undefined ? body.allowedEmailDomains : existing.allowedEmailDomains,
+      })
+    ) {
+      return refuseJitWithoutDomains(reply, req.authCtx.userId, existing.name, providerId);
+    }
     if (body.clientSecret && !opts.dataKey) {
       return reply.status(409).send({ error: "data_key_required" });
     }
@@ -2555,7 +2571,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       if (site) await signInInvariantWritten(site);
       await auditAuth(x, req.authCtx.userId, null, "oidc-provider-updated", "allow",
         `OIDC provider '${existing.name}' updated: ${Object.keys(body).join(", ")}`,
-        { phase: "provider-updated", name: existing.name, changed: Object.keys(body), secretRotated: Boolean(clientSecret) },
+        {
+          phase: "provider-updated",
+          name: existing.name,
+          changed: Object.keys(body),
+          // ADR-0181: a relaxed posture flag is answerable as old -> new
+          transitions: settingTransitions(existing, rest),
+          secretRotated: Boolean(clientSecret),
+        },
         "oidc_provider");
       // ADR-0174 (finding 6): a new issuer is a different identity provider —
       // the subjects linked under the old one mean nothing under the new one

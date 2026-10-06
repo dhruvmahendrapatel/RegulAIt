@@ -41,8 +41,17 @@ import {
 } from "@regulait/db";
 import { escapeSlackText, slackSignature } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { backgroundWorkInFlight, drainBackgroundWork } from "./background-work.js";
 import { resolveToolbox, toolNames } from "./builder-tools.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -138,8 +147,14 @@ async function colleague(label: string, tools: ToolName[]) {
   return p;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("bld-pause");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
+  // ADR-0181: the org PII floor ships at block, and a block-mode reply is withheld from
+  // chat. This file pins the channel round trip, so the floor is set off explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(k.db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   owner = await k.person("owner");
   admin = await k.person("admin", { admin: true });
   approver = await k.person("approver");
@@ -225,6 +240,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await restoreSb1Posture?.();
   await drainBackgroundWork(k.db);
   if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
   if (connectorIds.length) {
@@ -234,6 +251,7 @@ afterAll(async () => {
   if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   upstream.closeAllConnections();
   await new Promise<void>((r) => upstream.close(() => r()));
+  await restoreSb2Gates();
   await k.close();
 });
 

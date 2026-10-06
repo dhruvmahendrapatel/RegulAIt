@@ -55,8 +55,12 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { COMPILED_DEFAULT_RULE_ID } from "./compiled-egress.js";
 import { DEPLOY_MODE_ENV, type DeployMode } from "./deploy-posture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -221,10 +225,15 @@ async function runGitStage(): Promise<string> {
   return ctx.lastError ?? "";
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
 
   savedMode = process.env[DEPLOY_MODE_ENV];
   realFetch = globalThis.fetch;
@@ -433,17 +442,19 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   // RESTORE EVERY PIECE OF SHARED STATE THIS FILE TOUCHED. fileParallelism is
   // off, but the process and the org singleton outlive this file.
   globalThis.fetch = realFetch;
   if (savedMode === undefined) delete process.env[DEPLOY_MODE_ENV];
   else process.env[DEPLOY_MODE_ENV] = savedMode;
-  await setOrgPolicy("inherit");
+  await setOrgPolicy("strict"); // ADR-0181: hand on the shipped default
   await db.delete(egressAllowHosts);
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "google"));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "openai"));
   selfHosted.closeAllConnections();
   await new Promise<void>((r) => selfHosted.close(() => r()));
+  await restoreSb2Gates();
   await app.close();
 });
 

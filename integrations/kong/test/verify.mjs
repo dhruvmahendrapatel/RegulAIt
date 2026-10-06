@@ -374,7 +374,7 @@ async function main() {
     PORT: String(GATEWAY_PORT),
   };
   beforeCreating("the seed");
-  execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js")], {
+  execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js"), "--seed-demo"], {
     env, stdio: "pipe", maxBuffer: 16 * 1024 * 1024,
   });
   beforeCreating("the gateway");

@@ -146,6 +146,12 @@ jobs:
 
     env:
       DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
+      # ADR-0181: the gateway's defaults are strict. CI's Postgres service has
+      # no TLS, so the database hop is relaxed EXPLICITLY here (the default is
+      # `require`), and the scheduler (ON by default) is switched off so no
+      # tick loop runs underneath a test.
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_SCHEDULER: 'off'
       # CI-01: when this is SET and unreachable, audit-chain.test.ts throws
       # rather than skips — a broken MinIO service fails the job out loud.
       REGULAIT_TEST_S3_ENDPOINT: http://localhost:9000
@@ -337,6 +343,12 @@ jobs:
 
     env:
       E2E_PG: postgres://regulait:regulait@localhost:5432
+      # ADR-0181: the gateway's defaults are strict. CI's Postgres service has
+      # no TLS, so the database hop is relaxed EXPLICITLY here (the default is
+      # `require`), and the scheduler (ON by default) is switched off so no
+      # tick loop runs underneath a test.
+      REGULAIT_DATABASE_SSL: disable
+      REGULAIT_SCHEDULER: 'off'
 
     steps:
       - uses: actions/checkout@v4

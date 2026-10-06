@@ -33,6 +33,7 @@ import {
   type SchedulerJobDefinition,
 } from "./scheduler.js";
 import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
+import { GUARDRAIL_WINDOW_EXPIRY_JOB_NAME } from "./scheduler-jobs.js"; // ADR-0181 FX3
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -482,22 +483,31 @@ describe("overlap protection", () => {
 });
 
 // ===========================================================================
-// 4. OFF BY DEFAULT — the property that protects the rest of the suite
+// 4. ON BY DEFAULT (ADR-0181), off only when asked — and forced off under test,
+//    the property that protects the rest of the suite
 // ===========================================================================
 
-describe("off by default, and explicitly on", () => {
-  it("resolveSchedulerConfig is OFF with an empty environment", () => {
+describe("on by default, and explicitly off", () => {
+  it("ADR-0181: resolveSchedulerConfig is ON with an empty environment (a fresh deployment runs its sweeps)", () => {
     const cfg = resolveSchedulerConfig({} as NodeJS.ProcessEnv);
-    expect(cfg.enabled).toBe(false);
-    expect(cfg.reason).toMatch(/REGULAIT_SCHEDULER unset/);
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.reason).toMatch(/on \(default; REGULAIT_SCHEDULER unset\)/);
     expect(cfg.tickMs).toBe(DEFAULT_TICK_MS);
   });
 
-  it("resolveSchedulerConfig is ON only when explicitly asked", () => {
+  it("resolveSchedulerConfig is OFF only when explicitly asked, and a typo fails toward ON", () => {
     expect(resolveSchedulerConfig({ REGULAIT_SCHEDULER: "on" } as NodeJS.ProcessEnv).enabled).toBe(true);
     expect(resolveSchedulerConfig({ REGULAIT_SCHEDULER: "true" } as NodeJS.ProcessEnv).enabled).toBe(true);
     expect(resolveSchedulerConfig({ REGULAIT_SCHEDULER: "off" } as NodeJS.ProcessEnv).enabled).toBe(false);
-    expect(resolveSchedulerConfig({ REGULAIT_SCHEDULER: "maybe" } as NodeJS.ProcessEnv).enabled).toBe(false);
+    expect(resolveSchedulerConfig({ REGULAIT_SCHEDULER: "disable" } as NodeJS.ProcessEnv).enabled).toBe(false);
+    expect(resolveSchedulerConfig({ REGULAIT_SCHEDULER: "0" } as NodeJS.ProcessEnv).enabled).toBe(false);
+    const typo = resolveSchedulerConfig({ REGULAIT_SCHEDULER: "maybe" } as NodeJS.ProcessEnv);
+    expect(typo.enabled).toBe(true);
+    expect(typo.reason).toMatch(/not a recognised value/);
+  });
+
+  it("the suite's own environment sets it off EXPLICITLY (vitest.config.ts), not only by the under-test guard", () => {
+    expect(process.env.REGULAIT_SCHEDULER).toBe("off");
   });
 
   it("is FORCED off under test even when the environment says on — a stray CI var cannot start timers", () => {
@@ -532,7 +542,7 @@ describe("off by default, and explicitly on", () => {
     await throwaway.close();
   }, 30_000);
 
-  it("startGateway leaves the scheduler NULL when the environment has not asked for it", async () => {
+  it("startGateway leaves the scheduler NULL when the environment sets it off", async () => {
     const started = await startGateway({
       db,
       migrationsFolder,
@@ -743,6 +753,11 @@ describe("every sweep is registered", () => {
         // ADR-0180 A10: expires lapsed residual-risk acceptances and reopens
         // the risk. Driven end-to-end in zz-adr0180-a10-risk-tolerance.test.ts.
         RISK_ACCEPTANCE_EXPIRY_JOB_NAME,
+        // ===== ADR-0181 FX3 =====
+        // Deletes expired guardrail-window overrides, audited. Driven
+        // end-to-end in zz-adr0181-fx3-strict-fixes.test.ts.
+        GUARDRAIL_WINDOW_EXPIRY_JOB_NAME,
+        // ===== end ADR-0181 FX3 =====
       ].sort(),
     );
     for (const def of registry.values()) {

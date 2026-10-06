@@ -36,7 +36,7 @@
  * creates is deleted, the org_settings singleton is snapshotted and restored,
  * licences and persona rows it touches are restored in afterAll.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createHash, createSign, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -63,6 +63,7 @@ import {
   type OrgSettingsRow,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { enrolAdminTotpForTest, relaxIdentityForTest } from "./testing/identity-posture.js";
 import { totpCode, totpStep } from "./auth.js";
 import { idTokenMfa } from "./federated-identity.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
@@ -567,6 +568,9 @@ describe("local sign-in: break-glass only", () => {
       return r.json().token as string;
     };
     const exchange = (apiKey: string) => app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey } });
+    // ADR-0181 (FX2): an admin's key answers to mfaRequired; this case is about
+    // the break-glass door, so it relaxes the dial for itself and restores it
+    onTestFinished(await relaxIdentityForTest(db, { mfaRequired: "off" }));
     const memberKey = await key(memberId);
     const glassKey = await key(glassId);
     expect((await putSettings({ localSignIn: "break_glass_only", breakGlassUserIds: [glassId] })).statusCode).toBe(200);
@@ -746,6 +750,10 @@ describe("account linking without takeover (§5)", () => {
 
     // self-approval is refused: the request's own user, as an admin
     await db.update(users).set({ isAdmin: true }).where(eq(users.id, uid));
+    // ADR-0181 (FX2): an admin's key answers to mfaRequired; this person has a
+    // password (so is not enrolled the password-less way), and the case is
+    // about self-approval — the dial is relaxed for this case only
+    onTestFinished(await relaxIdentityForTest(db, { mfaRequired: "off" }));
     const keyRes = await app.inject({ method: "POST", url: `/v1/users/${uid}/keys`, headers: AUTH, payload: { name: "self" } });
     expect(keyRes.statusCode, keyRes.body).toBe(201);
     const self = await app.inject({
@@ -902,7 +910,7 @@ describe("account linking without takeover (§5)", () => {
   });
 
   it("finding 7: a look-alike (non-ASCII) email never reaches an ASCII account, and a non-ASCII stored address never matches an ASCII claim", async () => {
-    const jit = (await mkProvider({ name: `jit-${tag}`, jitProvisioning: true })).id;
+    const jit = (await mkProvider({ name: `jit-${tag}`, jitProvisioning: true, allowedEmailDomains: ["adr0174.example"] })).id;
     const victim = `kate-${tag}@adr0174.example`;
     const victimId = await mkUser(victim);
     // U+212A KELVIN SIGN lower-cases to ASCII k in JavaScript and Postgres
@@ -961,7 +969,8 @@ describe("account linking without takeover (§5)", () => {
     const uid = await mkUser(address, true);
     await givePassword(uid, address);
     const sub = `admin-target-${tag}`;
-    expect((await roundTrip(providerId, { email: address, sub })).headers.location).toBe("/ui/login?link=pending");
+    // ADR-0181: MFA is required for admins, so the IdP asserts it (RFC 8176)
+    expect((await roundTrip(providerId, { email: address, sub, amr: ["mfa"] })).headers.location).toBe("/ui/login?link=pending");
     const [pend] = await db.select().from(federatedLinkRequests).where(and(eq(federatedLinkRequests.userId, uid), eq(federatedLinkRequests.status, "pending")));
     const list = await app.inject({ method: "GET", url: "/v1/auth/link-requests", headers: AUTH });
     expect(list.json().requests.find((x: { id: string }) => x.id === pend!.id)).toMatchObject({ approvals: 0, requiredApprovals: 2 });
@@ -975,6 +984,8 @@ describe("account linking without takeover (§5)", () => {
     expect(again.json().error).toBe("already_approved_by_you");
     // a second, different administrator completes it
     const secondAdmin = await mkUser(email("second-admin"), true);
+    // ADR-0181 (FX2): an admin's key answers to mfaRequired — they enrol first
+    await enrolAdminTotpForTest(app, BOOT, secondAdmin);
     const key = await app.inject({ method: "POST", url: `/v1/users/${secondAdmin}/keys`, headers: AUTH, payload: { name: "second" } });
     const second = await app.inject({
       method: "POST", url: `/v1/auth/link-requests/${pend!.id}/approve`,

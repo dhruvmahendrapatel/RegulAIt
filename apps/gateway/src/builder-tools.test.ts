@@ -31,6 +31,14 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { resolveToolbox, runGovernedTool } from "./builder-tools.js";
 import { onBuilderTurnResumed } from "./builder-runtime.js";
 import { drainBackgroundWork } from "./background-work.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -138,6 +146,8 @@ const allSteps = (detail: { messages: Array<{ steps: any[] }> }) => detail.messa
 
 beforeAll(async () => {
   k = await builderKit("bld-tools");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   approver = await k.person("approver");
@@ -164,8 +174,10 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await k.req("PUT", "/v1/execution/mode", k.BOOT, { mode: "normal", reason: "builder-tools test: cleanup" });
   await upstreamClose();
+  await restoreSb2Gates();
   await k.close();
 });
 

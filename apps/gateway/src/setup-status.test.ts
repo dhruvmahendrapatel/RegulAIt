@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -20,6 +24,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * GET /v1/setup/status — the guided "connect your first real provider"
@@ -93,10 +98,15 @@ const stepByKey = (body: { steps: Array<{ key: string }> }, key: string) => {
   };
 };
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   clearEnv();
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  // ADR-0181: the env-key fallback ships OFF. This file pins the checklist's env-key
+  // evidence source, so it switches the fallback on explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { envKeyFallbackEnabled: true }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   // clear exactly what the checklist reads (rows from already-finished files)
@@ -145,6 +155,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await restoreSb1Posture?.();
   if (reactivateIds.length) {
     await db
       .update(users)

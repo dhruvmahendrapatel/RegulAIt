@@ -1,9 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
 import { resolveProvider, type MockGitProvider } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
+import { enrolTotpForTest } from "./testing/identity-posture.js";
 import {
   applyWorkflowApprovalDecision,
   CHECK_PENDING_DETAIL,
@@ -91,9 +93,14 @@ async function makeTemplate(name: string, changeType: string, stages: unknown[])
   expect(rule.statusCode).toBe(201);
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
   const pia = await makeUser("wr-pia@example.com");
   piaAuth = pia.auth;
@@ -186,6 +193,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   delete workflowTestHooks.duringStageEval;
   delete workflowTestHooks.beforeStageCommit;
   await app.close();
@@ -301,6 +309,8 @@ async function consoleCookie(userId: string, email: string): Promise<string> {
     payload: { currentPassword: oneTime, newPassword: "Wr-console-Passw0rd!x" },
   });
   expect(changed.statusCode).toBe(200);
+  // ADR-0181: an admin session enrols TOTP before it reaches the app
+  await enrolTotpForTest(app, cookie);
   return cookie;
 }
 

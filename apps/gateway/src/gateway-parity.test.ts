@@ -43,6 +43,7 @@
  * removed. Nothing here touches `org_settings`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -62,6 +63,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The most recent row by `at`.
@@ -218,10 +222,16 @@ async function auditRows(ruleId: string, userId?: string) {
     );
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
   await app.ready();
 
   const [prior] = await db
@@ -272,6 +282,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // Restore the interception singleton EXACTLY — a leaked `openaiCompatEnabled`
   // would silently change what other suites' 404 assertions mean.
   if (priorInterception) {
@@ -288,6 +299,7 @@ afterAll(async () => {
     await db.delete(users).where(inArray(users.id, createdUserIds));
   }
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

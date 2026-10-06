@@ -105,7 +105,7 @@ export default function ClientAccessPage() {
 function Loaded(props: { data: InterceptionSettingsResponse }) {
   const cur = props.data.settings;
   const posture = props.data.posture ?? { status: "honor_system" as const };
-  const rung = LADDER[cur.enforcementPosture] ?? LADDER.voluntary!;
+  const rung = LADDER[cur.enforcementPosture] ?? LADDER.managed!;
   const postureWarn = posture.status === "honor_system" || posture.status === "declared_not_enforced";
 
   return (
@@ -239,11 +239,11 @@ function PostureForm(props: { cur: InterceptionSettings }) {
           <Field label="Stream on PII-block project">
             <Select value={f.streamingOnBlockMode} onChange={(e) => set("streamingOnBlockMode", e.target.value as InterceptionSettings["streamingOnBlockMode"])}>
               <option value="suppress">suppress (buffer + disclose)</option>
-              <option value="reject">reject (400 the stream request)</option>
+              <option value="reject">reject (400 the stream request — default)</option>
             </Select>
           </Field>
           <Field label="Strict field rejection">
-            {boolSel("strictFieldRejection", ["off — accept & disclose", "on — unsupported fields 400"])}
+            {boolSel("strictFieldRejection", ["off — accept & disclose", "on — unsupported fields 400 (default)"])}
           </Field>
         </div>
         <div className={v.row}>
@@ -268,9 +268,9 @@ function PostureForm(props: { cur: InterceptionSettings }) {
               ["require_agent", "The caller MUST send x-regulait-agent-id; the model string is advisory. Missing header is a 400. Strictest, explicit attribution per call."],
               ["router_decides", "The requested model is a HINT the pillar-6 router may override for cost. The response always carries the model actually served, and the audit row records requested-vs-served."],
               ["Unmapped model", "Always 403 default-deny, in every mode. regulAIt never passes an ungoverned call through to the vendor."],
-              ["Attribution (compat)", "ON rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend — but only enable it for clients that can send custom headers (see the matrix below)."],
-              ["Attribution (MCP)", "Every MCP tool call is METERED whether or not it is attributed; an unattributed call lands in the explicit Unattributed bucket (Cost dashboard). Together the two require-toggles close the unattributed gap entirely."],
-              ["Key custody", "ON: per-user BYO model credentials are refused (409, audited) and dispatch resolution skips stored user credentials. Existing user rows are kept but inert; turning it back off restores them."],
+              ["Attribution (compat)", "ON (the strict default) rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend. A client that cannot send custom headers (see the matrix below) needs it relaxed to OFF; the change is audited."],
+              ["Attribution (MCP)", "ON (the strict default) rejects an MCP tool call with no x-regulait-project-id. Relaxed to OFF, an unattributed call is still METERED and lands in the explicit Unattributed bucket (Cost dashboard). Together the two require-toggles close the unattributed gap entirely."],
+              ["Key custody", "ON (the strict default): per-user BYO model credentials are refused (409, audited) and dispatch resolution skips stored user credentials. Existing user rows are kept but inert; turning it off (audited) restores them."],
               ["Stream on block", "'suppress' (default) answers a stream request on a block-mode PII project with the same governed call fully buffered as JSON, disclosed via streamingSuppressed. 'reject' refuses it with a 400."],
               ["Strict fields", "Off (default): an unsupported-but-harmless field like temperature is accepted, NOT honoured, and disclosed in x-regulait-ignored-fields. On: any unsupported field is a 400."],
             ]}

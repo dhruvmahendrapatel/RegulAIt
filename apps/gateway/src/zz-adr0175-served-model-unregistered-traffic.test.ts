@@ -19,6 +19,7 @@
  * the end, so no condition it created outlives it.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -38,6 +39,9 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { unregisteredTrafficQuery } from "./governance-monitor.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -72,10 +76,16 @@ const ledger = async (values: Partial<typeof usageEvents.$inferInsert>) => {
   usageIds.push(row!.id);
 };
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const u = await call("POST", "/v1/users", AUTH, { email: `g175m-${RUN}@example.com`, displayName: `Monitor admin ${RUN}`, isAdmin: true });
   admin.id = u.json().id;
   admin.auth = { authorization: `Bearer ${(await call("POST", `/v1/users/${admin.id}/keys`, AUTH, { name: "k" })).json().token}` };
@@ -99,6 +109,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // a governed dispatch writes its own rows: collect every row this file's agents and project produced
   const own = await db
     .select({ id: usageEvents.id })
@@ -111,6 +122,7 @@ afterAll(async () => {
   // one last pass so the conditions this file created resolve rather than linger
   await call("POST", "/v1/governance/monitor/evaluate", admin.auth);
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

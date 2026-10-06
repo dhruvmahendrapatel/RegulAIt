@@ -89,6 +89,8 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  // ADR-0181: backup verification ships ON; hand the shipped value back
+  await setOrg({ backupVerifyEnabled: true });
   await app.close();
   resetSchedulerHealth();
 });

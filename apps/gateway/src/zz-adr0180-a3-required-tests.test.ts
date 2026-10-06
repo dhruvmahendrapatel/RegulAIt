@@ -27,6 +27,7 @@
  * gate mode to `enforce` before the file ends.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -51,6 +52,9 @@ import {
 import { buildApp } from "./app.js";
 import { agentConfigHash } from "./evals.js";
 import { requiredTestStatus, requiredTestsMonitorInput } from "./required-tests.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -173,10 +177,16 @@ async function clearRuns() {
   for (const id of evalRunIds.splice(0)) await db.delete(evalRuns).where(eq(evalRuns.id, id));
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   for (const [k, isAdmin] of [["admin", true], ["member", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, { email: `a3-${k}-${RUN}@example.com`, displayName: `a3 ${k} ${RUN}`, isAdmin });
     expect(u.statusCode, u.body).toBe(201);
@@ -202,6 +212,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // M-068: leave the strict defaults and the strict gate mode behind
   await db.update(governanceReviewPolicy).set({ requiredTests: {} });
   await db.execute(sql`UPDATE org_settings SET assurance_gate_mode = 'enforce'`);
@@ -210,6 +221,7 @@ afterAll(async () => {
   if (libraryId) await db.delete(redteamLibraries).where(eq(redteamLibraries.id, libraryId));
   if (datasetId) await db.delete(evalDatasets).where(eq(evalDatasets.id, datasetId));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * MULTIMODAL ATTACHMENTS end to end (mimics Claude's native attach): a chat
@@ -65,6 +68,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
   const res = await app.inject({
     method: "POST",
@@ -202,4 +206,8 @@ describe("multimodal attachments on a governed chat dispatch", () => {
     expect(wire).toBeDefined();
     expect(wire!.messages).toBeUndefined();
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

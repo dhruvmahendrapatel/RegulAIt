@@ -1,4 +1,8 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
@@ -35,6 +39,7 @@ let serverId: string;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT });
   const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: "o9-uma@example.com", displayName: "o9-uma" } });
   userId = u.json().id;
@@ -238,4 +243,8 @@ describe("O9 — the revocation listings expose the scope the endpoint edits", (
     expect(list.statusCode).toBe(200);
     for (const r of list.json().revocations) expect(["full", "read_only"]).toContain(r.scope);
   });
+});
+
+afterAll(async () => {
+  await restoreStrictAdmission?.();
 });

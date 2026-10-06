@@ -51,14 +51,15 @@ export function AddConnectionDialog(props: {
     () =>
       (options.data?.options ?? []).map((o) =>
         o.kind === "connector"
-          ? { kind: o.kind, refId: o.refId, name: o.name, provider: o.provider, sub: `Connector · ${o.provider ?? "custom"}`, defaultApproval: false }
+          ? // ADR-0181: ask-first is on for every new tool; the owner turns it off per tool
+            { kind: o.kind, refId: o.refId, name: o.name, provider: o.provider, sub: `Connector · ${o.provider ?? "custom"}`, defaultApproval: true }
           : {
               kind: o.kind,
               refId: o.refId,
               name: o.name,
               provider: o.provider,
               sub: `${o.provider ?? "MCP server"} · ${o.access === "write" ? "can make changes" : "read only"}`,
-              defaultApproval: o.access === "write",
+              defaultApproval: true,
             },
       ),
     [options.data],

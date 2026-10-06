@@ -923,9 +923,9 @@ export interface UseCaseConditionView {
 export const createApiKeySchema = z.object({
   name: z.string().min(1),
   /** ADR-0098 — the caller-supplied expiry, ISO-8601. Three distinct inputs:
-   *  - ABSENT: the org's `apiKeyDefaultTtlDays` applies, falling back to
-   *    `apiKeyMaxTtlDays` when only a ceiling is configured, and to NO expiry
-   *    when neither is (the shipped defaults — byte-identical to pre-0098).
+   *  - ABSENT: the org's `apiKeyDefaultTtlDays` applies (90 days by default,
+   *    ADR-0181), falling back to `apiKeyMaxTtlDays` when only a ceiling is
+   *    configured, and to NO expiry only when an admin has cleared both.
    *  - a TIMESTAMP: honoured, unless it exceeds `apiKeyMaxTtlDays`, in which
    *    case issuance is REFUSED BY NAME (422) rather than clamped.
    *  - `null`: an explicit request for a key that never expires. Honoured
@@ -1268,7 +1268,8 @@ export const createProjectSchema = z
     /** pillar-5 budget window: 'none' (lifetime) or 'monthly' (calendar month) */
     budgetPeriod: z.enum(["none", "monthly"]).optional(),
     /** warn (non-blocking) when windowed spend crosses this percent of budget;
-     * the hard block stays at 100%, so 1..100 is the meaningful range */
+     * the hard block stays at 100%, so 1..100 is the meaningful range.
+     * Omitted = 80 (ADR-0181). */
     alertThresholdPct: z.number().int().min(1).max(100).optional(),
     /** §9 named arbiter for shared-context conflicts */
     arbiterUserId: z.string().uuid().nullable().optional(),
@@ -2055,10 +2056,12 @@ export const updateInterceptionSettingsSchema = z
      * never deleted. */
     keyCustodyEnforced: z.boolean().optional(),
     /** ADR-0021: a stream=true call on a block-mode PII project — 'suppress'
-     * (default) buffers and answers JSON with a disclosure; 'reject' 400s. */
+     * buffers and answers JSON with a disclosure; 'reject' (ADR-0181: the
+     * default) 400s. */
     streamingOnBlockMode: z.enum(["suppress", "reject"]).optional(),
     /** ADR-0021: true disables the COMPAT_IGNORED_FIELDS accept-and-disclose
-     * tier — an ignorable field (temperature) is a 400 again. */
+     * tier — an ignorable field (temperature) is a 400 again. ADR-0181: true
+     * by default. */
     strictFieldRejection: z.boolean().optional(),
   })
   .strict();
@@ -2210,8 +2213,8 @@ export const updateOrgSettingsSchema = z
      * loosens an air_gapped deployment — the enum has no such member. */
     egressCompiledDefaultPolicy: egressCompiledDefaultPolicySchema.optional(),
     /** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
-     * case gate dispatch? 'off' (default) = approval registers intent and
-     * gates nothing — the shipped honest limit, byte-identical. 'warn'
+     * case gate dispatch? 'enforce' is the ADR-0181 default; 'off' (an audited
+     * admin relaxation) = approval registers intent and gates nothing. 'warn'
      * records the refusal-shaped fact (audit row + response annotation)
      * without blocking. 'enforce' refuses a governed dispatch attributed to a
      * use-case-LINKED project (the `ai_use_cases.projectId` join — the only
@@ -2219,10 +2222,11 @@ export const updateOrgSettingsSchema = z
      * A project no use case links is untouched in every mode. */
     useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
     /** ADR-0080 amendment (migration 0101, batch B6b): must a governed
-     * dispatch NAME a project? false (default) = today, byte-identical — an
-     * unattributed dispatch runs and lands in the explicit "Unattributed" cost
-     * bucket. true = a governed dispatch with no `projectId` is refused 409
-     * `attribution_required`, audited, before any provider work. Independent
+     * dispatch NAME a project? true (the ADR-0181 default) = a governed
+     * dispatch with no `projectId` is refused 409 `attribution_required`,
+     * audited, before any provider work. false (an audited admin relaxation) =
+     * an unattributed dispatch runs and lands in the explicit "Unattributed"
+     * cost bucket. Independent
      * of `useCaseGateMode` by construction: this acts only where projectId is
      * null, that one only where it is not. */
     dispatchAttributionRequired: z.boolean().optional(),
@@ -2324,9 +2328,9 @@ export const updateOrgSettingsSchema = z
     sessionIpAllowlist: z.array(z.string().trim().min(1).max(64)).max(256).nullable().optional(),
     sessionIpPolicy: ipPolicySchema.optional(),
     apiKeyIpPolicy: ipPolicySchema.optional(),
-    /** ADR-0098 (migration 0104): API-KEY LIFETIME. Two dials, both null by
-     * default so the shipped posture is exactly pre-0098 — a newly issued key
-     * never expires. `apiKeyDefaultTtlDays` is the lifetime (in days) applied
+    /** ADR-0098 (migration 0104): API-KEY LIFETIME. Two dials, 90 and 365
+     * days by default (ADR-0181, migration 0156; both were null = never
+     * expires). `apiKeyDefaultTtlDays` is the lifetime (in days) applied
      * to a key issued with no caller-supplied expiry; `apiKeyMaxTtlDays` is
      * the CEILING on what any issuer may request, and a request over it —
      * including an explicit request for no expiry at all — is refused by name
@@ -4481,3 +4485,8 @@ export {
 } from "./required-tests.js";
 // ADR-0180 FA3: the evidence bar a run must meet to count for a required test
 export { REQUIRED_TEST_EVIDENCE_BAR, evidenceShortfall } from "./required-tests.js";
+// ADR-0181 SA — strict identity defaults and the OIDC JIT domain rule
+export * from "./identity-defaults.js";
+
+// ADR-0181 (strict defaults, SB1): the guardrail no-row fallback mode (warn, never off).
+export { GUARDRAIL_FALLBACK_MODE } from "./guardrails.js";

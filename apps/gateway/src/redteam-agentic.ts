@@ -406,6 +406,8 @@ export async function runSequenceProbeTrial(
       // ADR-0173 §3: a red-team run is an EVALUATION, and the model allow-list
       // matrix applies to it exactly as to the eval path (evals.ts)
       modelFeature: REDTEAM_MODEL_FEATURE,
+      // ADR-0181: a probe turn evaluates the agent UNDER TEST
+      evaluationSubject: true,
       detail: {
         purpose: RED_TEAM_ORIGIN_TAG,
         redteamLibrary: args.libraryName,

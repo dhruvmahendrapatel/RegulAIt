@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * PILLAR 7 §5.2 (B1) — the MEASURED per-node budget ceiling. A node's OWN
@@ -69,6 +72,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "m".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const ben = await makeUser("mnb-ben@example.com");
   benId = ben.id; benAuth = ben.auth;
   const ap = await makeUser("mnb-approver@example.com");
@@ -131,4 +135,8 @@ describe("measured per-node budget ceiling (B1)", () => {
     expect(out.json().nodeBudgetBreached).toBeUndefined();
     expect(await pending(runId, "__nodebudget_measured__:n1")).toBeUndefined();
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

@@ -31,7 +31,10 @@ cold.
 The fastest path (Docker):
 
 ```bash
-docker compose up --build
+# a bare `docker compose up --build` starts an EMPTY gateway: no demo users, keys
+# or relaxations (ADR-0181). The demo dataset needs an explicit demo signal:
+echo 'REGULAIT_DEMO_LICENSE=1' >> .env    # the prepared demo (below), or …
+docker compose up --build                 # … `SEED_DEMO=1 docker compose up --build` for the seed alone
 # one-time sign-in passwords AND demo API keys are printed once, at the end of
 # the gateway's first-boot log:
 docker compose logs gateway | grep -A20 "demo data"
@@ -39,7 +42,8 @@ docker compose logs gateway | grep -A20 "demo data"
 
 Then open **http://localhost:3000/ui** and sign in with a username (not an email)
 plus the one-time password from that log. Each persona is forced to set a real
-password on first sign-in.
+password on first sign-in. The demo seed refuses a database that has a real admin
+(anyone outside its own personas), and writes nothing when it refuses.
 
 **Demo personas with a password you choose** (ADR-0174 §6). For a demo you
 would rather not start with the one-time-password dance, set one password for
@@ -72,8 +76,8 @@ and then starts the gateway. This runs **once per database**: `docker compose re
 `down` / `up` keep the prepared data, the licence, the key and a password you set, and skip the
 prep (the log says so); `down -v` deletes it all, and the next `up` prepares again. Details and
 what to do if a step fails: [docs/product/DEMO_RUNBOOK.md §1.3](docs/product/DEMO_RUNBOOK.md).
-**Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch,
-`docker compose up` behaves exactly as before.
+**Demo only:** `scripts/install.sh` refuses the switch and pins it off. Without the switch (or
+`SEED_DEMO=1`), `docker compose up` starts an empty gateway: no demo users, keys or relaxations.
 
 bash / zsh (macOS, Linux) — the password is typed without echo and never appears on a command
 line, in shell history, in compose files, in logs or in audit detail:
@@ -143,16 +147,29 @@ pnpm install && pnpm -r build
 export DATABASE_URL=postgres://user:pass@localhost:5432/regulait
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)
 export REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap
-# Optional — activate a real model provider platform-wide with no admin-UI paste
-# and no key stored in the DB (read at dispatch time only). Any of:
-export ANTHROPIC_API_KEY=sk-ant-...   # (optional ANTHROPIC_BASE_URL) → Claude goes live
-#   OPENAI_API_KEY / OPENAI_BASE_URL, GOOGLE_API_KEY (or GEMINI_API_KEY), XAI_API_KEY
-# A stored per-user or platform credential still takes precedence over the env var.
-pnpm --filter @regulait/gateway seed    # idempotent demo data, prints keys once
+# A local Postgres without TLS: the gateway requires TLS to Postgres by default
+# (ADR-0181), so opt out explicitly. The boot log warns, and the Enforcement
+# posture page shows database TLS as "relaxed".
+export REGULAIT_DATABASE_SSL=disable
+# Optional — a real model provider. Since ADR-0181 the env-key fallback is OFF:
+# a provider key in the environment does nothing by itself. `seed` imports
+# GOOGLE_API_KEY (or GEMINI_API_KEY) ONCE into the encrypted key store (audited;
+# the key is never printed or logged). Store any other provider's key in the
+# admin UI, or relax envKeyFallbackEnabled plus its per-provider allow-list
+# (an audited admin change).
+pnpm --filter @regulait/gateway seed    # idempotent demo data, prints keys once; passes --seed-demo, and refuses a database that has a real admin
 HOST=127.0.0.1 pnpm --filter @regulait/gateway start   # migrations run on boot; HOST unset = every interface
 ```
 
-Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
+Every setting ships strict (ADR-0181): the first admin enrols TOTP at first sign-in (MFA is
+required for admins), and MCP admission, attribution and the guardrails are on. An admin may
+relax any of them; each relaxation is audited old → new. MFA binds admin API keys too: a key
+whose owner the MFA requirement covers is refused (403 `mfa_enrollment_required`) until that
+owner enrols TOTP, and no key is issued to such an owner (409). Issuing and revoking a key are
+audited. The seed enrols Ada's TOTP before it mints her key and prints the authenticator URI once.
+
+Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database, and
+`REGULAIT_DATABASE_SSL=disable` when that Postgres has no TLS.
 
 ### Verifying a clean checkout
 
@@ -230,6 +247,8 @@ dropdb --if-exists "$PGDATABASE_VERIFY" && createdb "$PGDATABASE_VERIFY"
 export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VERIFY"
 # 64-hex fixture key, the shape secrets.ts asserts. Not a secret.
 export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# a local Postgres without TLS (the default is `require`, ADR-0181)
+export REGULAIT_DATABASE_SSL=disable
 pnpm -r test
 
 # 6. Pre-flight the unique constraints, against the database step 5 just

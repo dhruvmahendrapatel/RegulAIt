@@ -84,7 +84,7 @@ export function registerSchedulerRoutes(app: FastifyInstance, db: Db, opts: Sche
       jobs,
       stuckRuns: stuck,
       note:
-        "The scheduler is OFF unless REGULAIT_SCHEDULER=on. It exists so a BYOC or air-gapped install " +
+        "The scheduler is ON unless REGULAIT_SCHEDULER=off (ADR-0181). It exists so a BYOC or air-gapped install " +
         "does not need a cron we cannot reach; it is NOT a distributed job queue, and a job that needs " +
         "to outlive a deploy or run for hours does not belong here. Timeliness is bounded by the tick " +
         "interval AND by this box being up — a sweep scheduled inside a nightly power-off window simply " +

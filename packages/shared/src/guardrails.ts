@@ -696,18 +696,24 @@ export function guardrailWithheldMarker(findings: readonly GuardrailFinding[]): 
   return `[output withheld — guardrail violation: ${guardrailCategoryList(findings)}]`;
 }
 
-/** The shipped org default posture (ADR-0042 §3): heuristic-only, and every
- * added layer at `log` so switching the engine on cannot silently start
- * refusing traffic. PII is NOT defaulted here — it stays governed by the §8.3
- * cascade's `piiMode` exactly as before, which is what "PII at the cascade
- * ceiling" means. */
+/** The shipped org default posture. ADR-0181 (strict defaults) replaced
+ * ADR-0042 §3's all-`log` posture: prompt injection and jailbreak BLOCK, the
+ * other layers WARN. An admin may relax any layer through
+ * `PUT /v1/guardrails/config` (audited old -> new). This map is also the
+ * no-row fallback, and it must equal the `guardrail_configs` column defaults.
+ * PII is NOT defaulted here — it stays governed by the §8.3 cascade's
+ * `piiMode`, which is what "PII at the cascade ceiling" means. */
 export const GUARDRAIL_DEFAULT_MODES: GuardrailModes = {
   pii: "off",
-  prompt_injection: "log",
-  jailbreak: "log",
-  toxicity: "log",
-  semantic_dlp: "log",
+  prompt_injection: "block",
+  jailbreak: "block",
+  toxicity: "warn",
+  semantic_dlp: "warn",
 };
+
+/** ADR-0181: the mode a configurable detector falls back to when nothing
+ * names it at all — `warn`, never `off`. */
+export const GUARDRAIL_FALLBACK_MODE: GuardrailMode = "warn";
 
 /** MAX-of-strictness composition across any number of partial mode maps. Later
  * arguments never relax an earlier one — this is the single definition of

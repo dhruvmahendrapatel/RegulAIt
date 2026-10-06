@@ -16,6 +16,9 @@ import { and, approvals, auditLog, builderAgents, eq, egressAllowHosts, orgSetti
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { resolveToolbox } from "./builder-tools.js";
 import { drainBackgroundWork } from "./background-work.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let owner: Person;
@@ -45,6 +48,7 @@ const approvalRow = async (id: string) => (await k.db.select().from(approvals).w
 
 beforeAll(async () => {
   k = await builderKit("p2bl-conn");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   owner = await k.person("owner");
   other = await k.person("other");
   stranger = await k.person("stranger");
@@ -96,6 +100,7 @@ afterAll(async () => {
   if (allowHostId) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowHostId));
   receiver.closeAllConnections();
   await new Promise<void>((r) => receiver.close(() => r()));
+  await restoreSb2Gates();
   await k.close();
 });
 

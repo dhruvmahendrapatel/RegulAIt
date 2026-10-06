@@ -24,12 +24,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, runMigrations, semanticCache, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import {
   lookupSemanticCache,
   semanticCacheNativeKey,
   type NativeCacheConfig,
   type NativeCacheRequest,
 } from "./semantic-cache-shared.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -118,14 +122,21 @@ async function classify(agentId: string, payload: Record<string, unknown>) {
   return "miss" as const;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the semantic cache ships OFF and the org PII floor at block. This file pins
+  // the opt-in cache key, so it sets opt_in and the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { semanticCachePolicy: "opt_in", defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 }, 120_000);
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

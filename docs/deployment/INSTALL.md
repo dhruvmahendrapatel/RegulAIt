@@ -230,6 +230,15 @@ sed -i '/^REGULAIT_BOOTSTRAP_TOKEN=/d' /opt/regulait/.env
 docker compose -p regulait up -d
 ```
 
+A fresh install starts strict (ADR-0181). The admin's first browser sign-in enrols a TOTP
+authenticator before anything else opens, because MFA is required for admins. Passwords need three
+character classes, an idle session ends after 30 minutes, and an API key issued without an expiry
+lasts 90 days, with a ceiling of 365. Approver delegation is off. An admin can relax each of these
+in the admin portal or through `PUT /v1/org/settings`, and the audit row records the old and new
+values. An OIDC provider with JIT provisioning must name its allowed email domains, and a SAML
+provider requires a signed response unless an admin turns that off for an IdP that signs only the
+assertion.
+
 ### 2. Wire your IdP
 
 OIDC providers are **database rows**, not environment variables — `--oidc-issuer` only records what
@@ -280,6 +289,18 @@ logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mea
 published compose defaults are in use, and a deployment with `REGULAIT_DEPLOY_MODE` or
 `REGULAIT_HSTS` set **refuses to start** on them (override, if you really mean it, with
 `REGULAIT_ALLOW_DEV_SECRETS=1`).
+
+**Strict by default (ADR-0181).** Two environment knobs now default to their strict value:
+
+| Variable | Default | Relaxed value |
+|---|---|---|
+| `REGULAIT_DATABASE_SSL` | `require` (TLS, server certificate verified) | `no-verify` (TLS, self-signed), or `disable` (plaintext; the bundled compose `db` service sets it, the gateway prints a loud boot warning and the enforcement posture reads "database TLS: relaxed") |
+| `REGULAIT_SCHEDULER` | on (the sweeps run) | `off` (drive the sweep endpoints from your own cron) |
+
+An unrecognised value of either fails toward the strict side. A fresh install also starts with MCP
+admission `enforce`, a 7-day release-age cooldown, private MCP ranges closed, compiled vendor
+endpoints adjudicated against the egress allow-list, and backup verification, spend monitoring and
+stale-credential alerts on. Each is relaxable by an admin, and every change is audited old → new.
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always

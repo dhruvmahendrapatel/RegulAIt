@@ -82,8 +82,9 @@ Deployment
                                    printed as the exact admin call to make.
                                    NOTE: no gateway code reads this env var —
                                    OIDC providers are DB rows (see below).
-  --seed-demo                      Load the demo dataset. Default OFF for
-                                   byoc/air_gapped, ON for hosted.
+  --seed-demo                      Load the demo dataset. Default OFF in every
+                                   mode (ADR-0181). The seed refuses a database
+                                   that already has a real admin.
   --hsts <value>                   Strict-Transport-Security value, or "off".
                                    OMITTED unless you pass it — and omitted is
                                    NOT the same as empty, which means "off".
@@ -339,7 +340,11 @@ if [ -f "$ENV_FILE" ]; then
   [ -n "$MODE" ]         || MODE="$PRIOR_MODE"
   [ -n "$DOMAIN" ]       || DOMAIN="$PRIOR_DOMAIN"
   [ -n "$OIDC_ISSUER" ]  || OIDC_ISSUER="$PRIOR_OIDC"
-  [ -n "$SEED_DEMO" ]    || SEED_DEMO="$PRIOR_SEED"
+  # ADR-0181 FX3: a prior SEED_DEMO=1 is NOT carried over (it was the old hosted
+  # default, not necessarily a choice); re-running keeps the demo only with --seed-demo
+  if [ -z "$SEED_DEMO" ] && [ "$PRIOR_SEED" = "1" ]; then
+    warn "the previous $ENV_FILE had SEED_DEMO=1; the demo dataset is now off unless you pass --seed-demo"
+  fi
   [ -n "$HSTS" ]            || HSTS="$(env_get "$ENV_FILE" REGULAIT_HSTS)"
   [ -n "$SAML_ENTITY_ID" ]  || SAML_ENTITY_ID="$(env_get "$ENV_FILE" REGULAIT_SAML_ENTITY_ID)"
   [ -n "$SAML_CLOCK_SKEW" ] || SAML_CLOCK_SKEW="$(env_get "$ENV_FILE" REGULAIT_SAML_CLOCK_SKEW_MINUTES)"
@@ -383,7 +388,10 @@ case "$TLS" in
   *) die "--tls must be one of letsencrypt|internal|none (got '$TLS')" ;;
 esac
 
-[ -n "$SEED_DEMO" ] || { [ "$MODE" = "hosted" ] && SEED_DEMO=1 || SEED_DEMO=0; }
+# ADR-0181 FX3: the demo dataset is OFF by default in EVERY mode, hosted
+# included. Only an explicit --seed-demo turns it on (and the seed itself still
+# refuses a database that has a real admin).
+[ -n "$SEED_DEMO" ] || SEED_DEMO=0
 case "$SEED_DEMO" in 0|1) ;; *) SEED_DEMO=0 ;; esac
 
 if [ -z "$VERSION" ]; then

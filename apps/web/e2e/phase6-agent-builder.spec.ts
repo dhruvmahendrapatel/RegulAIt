@@ -21,6 +21,7 @@
  * network lines for the deliberate 4xx refusals are the only filter.
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,14 +87,14 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
     const welcome = page.getByRole("heading", { name: /Welcome back/ });
     const forcedChange = page.getByText("Your password is one-time");
     const rejected = page.getByText(/password is incorrect/);
-    await expect(welcome.or(forcedChange).or(rejected).first()).toBeVisible();
+    await passTotp(page, email, welcome.or(forcedChange).or(rejected));
     if (await welcome.isVisible()) return;
     if (await forcedChange.isVisible()) {
       await page.getByLabel("Current (one-time) password").fill(password);
       await page.getByLabel("New password", { exact: true }).fill(settleOn);
       await page.getByLabel("Confirm new password").fill(settleOn);
       await page.getByRole("button", { name: "Set password & continue" }).click();
-      await expect(welcome).toBeVisible();
+      await passTotp(page, email, welcome);
       return;
     }
     expect(i, `no candidate password worked for ${email}`).toBeLessThan(candidates.length - 1);
@@ -116,8 +117,24 @@ async function danaSession(browser: Browser) {
   return dana;
 }
 
+/** ADR-0181: the release-age cooldown (7 days by default) holds every NEW skill
+ * version, including the private copies a template makes. This journey is about
+ * the builder, not the cooldown, so it relaxes the cooldown through the real
+ * audited admin route for its lifetime and restores what it found (M-068). */
+let savedMinReleaseAgeDays: number | null = null;
+async function orgSettings(baseURL: string, payload?: Record<string, unknown>) {
+  const res = await fetch(`${baseURL}/v1/org/settings`, {
+    method: payload ? "PUT" : "GET",
+    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
+    ...(payload ? { body: JSON.stringify(payload) } : {}),
+  });
+  expect(res.ok, `org settings ${payload ? "PUT" : "GET"}: ${res.status}`).toBe(true);
+  return (await res.json()) as { settings: { minReleaseAgeDays: number } };
+}
+
 test.afterAll(async () => {
   await dana?.page.close();
+  if (savedMinReleaseAgeDays !== null) await orgSettings(state.baseUrl, { minReleaseAgeDays: savedMinReleaseAgeDays });
 });
 
 /** owner rule (2026-10-04): every builder agent bills to a project. An admin
@@ -127,6 +144,8 @@ const PROJECT_NAME = `Agent builder e2e ${Date.now().toString(36)}`;
 let projectId = "";
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(120_000);
+  savedMinReleaseAgeDays = (await orgSettings(state.baseUrl)).settings.minReleaseAgeDays;
+  await orgSettings(state.baseUrl, { minReleaseAgeDays: 0 });
   const page = await browser.newPage();
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
   const CSRF = { "x-regulait-csrf": "1" };

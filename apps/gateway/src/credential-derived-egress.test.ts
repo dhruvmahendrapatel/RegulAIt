@@ -31,9 +31,15 @@ import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour that is not the strict compiled-egress default (a
+// vendor endpoint answered by a local double) — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -101,9 +107,14 @@ async function latestAudit(ruleId: string) {
   return row ?? null;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, ["egressCompiledDefaultPolicy"]);
+  // ADR-0181: the org PII floor ships at block. This file pins egress adjudication of a
+  // connector's login host, not PII handling, so it sets the floor off explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   loginServer = http.createServer((req, res) => {
@@ -128,6 +139,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
+  await restoreSb1Posture?.();
   if (allowEntryId) {
     await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${allowEntryId}`, headers: AUTH });
   }

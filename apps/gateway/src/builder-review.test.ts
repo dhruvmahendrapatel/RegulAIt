@@ -38,6 +38,14 @@ import { BUILDER_LIMITS } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { BUILDER_TEMPLATES } from "./builder-catalog.js";
 import { buildSystemPrompt, runBuilderScheduleSweep } from "./builder-runtime.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 let k: BuilderKit;
 let owner: Person;
@@ -74,6 +82,8 @@ const usageFor = (userId: string) => k.db.select().from(usageEvents).where(eq(us
 
 beforeAll(async () => {
   k = await builderKit("bld-review");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   admin = await k.person("admin", { admin: true });
@@ -90,10 +100,12 @@ beforeAll(async () => {
 const chatopsRows: Array<{ connectionId: string; connectorId: string }> = [];
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   for (const r of chatopsRows) {
     await k.db.delete(chatopsConnections).where(eq(chatopsConnections.id, r.connectionId));
     await k.db.delete(connectors).where(eq(connectors.id, r.connectorId));
   }
+  await restoreSb2Gates();
   await k.close();
 });
 

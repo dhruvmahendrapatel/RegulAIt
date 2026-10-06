@@ -153,7 +153,7 @@ export function toRegistry(defs: readonly SchedulerJobDefinition[]): SchedulerJo
 }
 
 // ---------------------------------------------------------------------------
-// configuration — OFF by default, everywhere
+// configuration — ON by default (ADR-0181); off only when REGULAIT_SCHEDULER says so
 // ---------------------------------------------------------------------------
 
 export interface SchedulerConfig {
@@ -169,17 +169,22 @@ function truthy(v: string | undefined): boolean | null {
   if (v === undefined) return null;
   const s = v.trim().toLowerCase();
   if (["1", "on", "true", "yes", "enabled"].includes(s)) return true;
-  if (["0", "off", "false", "no", "disabled"].includes(s)) return false;
+  if (["0", "off", "false", "no", "disable", "disabled"].includes(s)) return false;
   return null;
 }
 
 /**
  * Resolve the scheduler's posture from the environment.
  *
- * OFF unless `REGULAIT_SCHEDULER` explicitly says on — including in
- * production. Enabling a background loop that mutates governed state is an
- * operator's decision, not a default we make for them, and it is the only way
- * "turning this on changes nothing else" can be a true statement.
+ * ON unless `REGULAIT_SCHEDULER` explicitly says off (ADR-0181, reversing the
+ * ADR-0064 off-by-default). The sweeps are the controls' clock: MRM expiry,
+ * approval SLAs, admission re-scans, backup verification, spend anomalies.
+ * A deployment where none of them runs looks governed and is not. An operator
+ * who drives the sweep endpoints from their own cron sets
+ * `REGULAIT_SCHEDULER=off`, and the boot log and posture read say so.
+ *
+ * An unrecognised value is ON, not off: a typo must fail toward the controls
+ * running, never toward them silently stopping.
  *
  * Under vitest it is forced off REGARDLESS of the variable: a stray
  * `REGULAIT_SCHEDULER=on` in a CI environment must not be able to start timers
@@ -204,22 +209,26 @@ export function resolveSchedulerConfig(env: NodeJS.ProcessEnv = process.env): Sc
         "inherit one from the environment. Drive a Scheduler directly to test the loop.",
     };
   }
-  if (asked === true) {
+  if (asked === false) {
     return {
-      enabled: true,
+      enabled: false,
       tickMs,
       leaseSeconds,
-      reason: `on (REGULAIT_SCHEDULER=${env.REGULAIT_SCHEDULER}), tick ${Math.round(tickMs / 1000)}s`,
+      reason:
+        "off (REGULAIT_SCHEDULER is set to off) — the sweeps will NOT run; drive their endpoints from your own cron, " +
+        "or unset it (the default is on)",
     };
   }
   return {
-    enabled: false,
+    enabled: true,
     tickMs,
     leaseSeconds,
     reason:
-      asked === false
-        ? "off (REGULAIT_SCHEDULER is set to off) — the six sweeps will NOT run; drive their endpoints from your own cron"
-        : "off (REGULAIT_SCHEDULER unset) — the six sweeps will NOT run; set REGULAIT_SCHEDULER=on, or drive their endpoints from your own cron",
+      asked === true
+        ? `on (REGULAIT_SCHEDULER=${env.REGULAIT_SCHEDULER}), tick ${Math.round(tickMs / 1000)}s`
+        : env.REGULAIT_SCHEDULER === undefined || env.REGULAIT_SCHEDULER.trim() === ""
+          ? `on (default; REGULAIT_SCHEDULER unset), tick ${Math.round(tickMs / 1000)}s`
+          : `on (REGULAIT_SCHEDULER=${JSON.stringify(env.REGULAIT_SCHEDULER)} is not a recognised value; the default is on), tick ${Math.round(tickMs / 1000)}s`,
   };
 }
 

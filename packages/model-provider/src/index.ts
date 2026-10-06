@@ -1953,7 +1953,7 @@ export const TASK_DECOMPOSITION_SENTINEL = "TASK-DECOMPOSITION REQUEST";
 // compaction dispatch puts this sentinel at the top of its summarization
 // system prompt; when the mock sees it, the reply is a deterministic,
 // faithful-looking summary derived from the transcript it was handed —
-// opening/closing topics parsed back out of the "user:"/"assistant:" lines,
+// opening/closing topics parsed back out of the "[user]"/"[assistant]" lines,
 // turn count included — so the whole compaction loop is demoable with zero
 // external keys. A transcript carrying "<<refuse>>" still refuses first
 // (the shared lastUser check), which is exactly the fail-open test hook.
@@ -1962,10 +1962,14 @@ export const TASK_DECOMPOSITION_SENTINEL = "TASK-DECOMPOSITION REQUEST";
 export const CONVERSATION_COMPACTION_SENTINEL = "CONVERSATION-COMPACTION REQUEST";
 
 function mockCompactionSummary(transcript: string): string {
-  const turnLines = transcript.split("\n").filter((l) => /^(user|assistant): /.test(l));
+  // turns arrive labelled "[user] …" / "[assistant] …" (ADR-0181: never
+  // "user: …", the forged-role-turn shape the injection guardrail blocks);
+  // the older "user: " form is still read
+  const TURN = /^(?:\[(user|assistant)\] |(user|assistant): )/;
+  const turnLines = transcript.split("\n").filter((l) => TURN.test(l));
   const userLines = turnLines
-    .filter((l) => l.startsWith("user: "))
-    .map((l) => l.slice("user: ".length));
+    .filter((l) => (TURN.exec(l)?.[1] ?? TURN.exec(l)?.[2]) === "user")
+    .map((l) => l.replace(TURN, ""));
   const opening = mockTopic(userLines[0] ?? "the request");
   const latest = mockTopic(userLines[userLines.length - 1] ?? "the request");
   const cumulative = transcript.includes("Prior summary:");

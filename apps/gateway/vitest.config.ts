@@ -39,6 +39,15 @@ export default defineConfig({
       // (with an empty environment) is enabled, so the shipping posture is
       // still covered.
       REGULAIT_RATE_LIMIT: "off",
+      // ADR-0181: the scheduler is ON by default in a real deployment. The
+      // suite sets it off EXPLICITLY (on top of the under-test guard in
+      // scheduler.ts): no test may run underneath a tick loop. Tests that need
+      // the loop construct a Scheduler directly; scheduler.test.ts asserts the
+      // empty-environment default is on.
+      REGULAIT_SCHEDULER: "off",
+      // REGULAIT_DATABASE_SSL is deliberately NOT set here: its default is
+      // `require`, and the environment that points the suite at a Postgres
+      // without TLS (CI, the local gate) says `disable` itself.
     },
   },
 });

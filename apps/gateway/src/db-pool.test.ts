@@ -30,7 +30,16 @@ describe("the pool configuration", () => {
     expect(cfg).toEqual(DB_POOL_DEFAULTS);
     expect(cfg.connectionTimeoutMillis).toBeGreaterThan(0);
     expect(cfg.max).toBeGreaterThan(10);
-    expect(cfg.ssl).toBe("off");
+  });
+
+  it("ADR-0181: TLS is REQUIRED from an empty environment; only an explicit disable turns it off, and a typo stays on", () => {
+    expect(resolveDbPoolConfig({} as NodeJS.ProcessEnv).ssl).toBe("require");
+    expect(resolveDbPoolConfig({ REGULAIT_DATABASE_SSL: "" } as NodeJS.ProcessEnv).ssl).toBe("require");
+    expect(DB_POOL_DEFAULTS.ssl).toBe("require");
+    for (const v of ["disable", "DISABLE", " off ", "false", "0"]) {
+      expect(resolveDbPoolConfig({ REGULAIT_DATABASE_SSL: v } as NodeJS.ProcessEnv).ssl).toBe("off");
+    }
+    expect(resolveDbPoolConfig({ REGULAIT_DATABASE_SSL: "disabel" } as NodeJS.ProcessEnv).ssl).toBe("require");
   });
 
   it("honours the env knobs and falls back on garbage rather than throwing or going unbounded", () => {
@@ -52,8 +61,8 @@ describe("the pool configuration", () => {
 
   it("describes itself for the posture block, and says when the database hop is plaintext", () => {
     expect(describeDbPool(DB_POOL_DEFAULTS)).toContain("pool max 20");
-    expect(describeDbPool(DB_POOL_DEFAULTS)).toContain("tls off");
-    expect(describeDbPool({ ...DB_POOL_DEFAULTS, ssl: "require" })).toContain("certificate verified");
+    expect(describeDbPool(DB_POOL_DEFAULTS)).toContain("certificate verified");
+    expect(describeDbPool({ ...DB_POOL_DEFAULTS, ssl: "off" })).toContain("TLS OFF — RELAXED");
     expect(describeDbPool({ ...DB_POOL_DEFAULTS, ssl: "no-verify" })).toContain("NOT verified");
   });
 

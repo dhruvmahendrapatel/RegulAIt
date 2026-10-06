@@ -25,6 +25,9 @@ import {
   MRM_AUTOFILL_NOTE,
   MRM_AUTOFILL_UNMEASURED_REDTEAM,
 } from "./mrm-autofill.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0086 — MODEL-CARD AUTOFILL FROM THE LEDGERS, proved by attack.
@@ -142,6 +145,7 @@ async function detail(id = cardId) {
       certified: boolean;
       lastCertifiedAt: string | null;
       changesSinceCertification: Record<string, number> | null;
+      driftSinceCertification: Record<string, number> | null;
       drifted: boolean;
       summary: string | null;
       note: string;
@@ -166,6 +170,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const mara = await makeUser("mrmaf-mara@example.com");
   maraId = mara.id;
@@ -251,6 +256,7 @@ afterAll(async () => {
     await db.delete(modelCardApprovals).where(inArray(modelCardApprovals.cardId, myCardIds));
     await db.delete(modelCards).where(inArray(modelCards.id, myCardIds));
   }
+  await restoreSb2Gates();
 });
 
 // ---------------------------------------------------------------------------
@@ -462,17 +468,17 @@ describe("snapshot-on-sign-off — the record shows what the decider saw", () =>
 // ---------------------------------------------------------------------------
 
 describe("staleness — a certified card whose world moved says so", () => {
-  it("names exactly what changed since the certification, and gates nothing", async () => {
-    // one eval run already landed after the sign-off (previous test); add a
-    // guardrail change so the summary has two distinctly-sourced movements
+  it("names exactly what drifted since the certification; routine evidence is activity, not drift", async () => {
+    // one passing eval run already landed after the sign-off (previous test):
+    // ADR-0181 FX1 — routine evidence is shown as ACTIVITY and is not drift
     const view = await detail();
     expect(view.staleness.certified).toBe(true);
     expect(view.staleness.lastCertifiedAt).toBeTruthy();
     expect(view.staleness.changesSinceCertification!.evalRuns).toBe(1);
-    expect(view.staleness.drifted).toBe(true);
-    expect(view.staleness.summary).toContain("1 eval run");
-    expect(view.staleness.summary).toContain("since certification");
+    expect(view.staleness.drifted).toBe(false);
+    expect(view.staleness.summary).toBeNull();
 
+    // a guardrail write that relaxes nothing is activity too
     const put = await app.inject({
       method: "PUT",
       url: `/v1/guardrails/config/agent/${agentId}`,
@@ -480,17 +486,30 @@ describe("staleness — a certified card whose world moved says so", () => {
       payload: { modes: { prompt_injection: "block" } },
     });
     expect(put.statusCode).toBe(200);
-
-    const after = await detail();
-    expect(after.staleness.changesSinceCertification!.guardrailChanges).toBe(1);
-    expect(after.staleness.summary).toContain("1 guardrail change");
+    const tightened = await detail();
+    expect(tightened.staleness.changesSinceCertification!.guardrailChanges).toBe(1);
+    expect(tightened.staleness.drifted).toBe(false);
     // ...and the override is simultaneously visible in the autofill block
     expect(
-      after.autofill.sections.guardrails.agentOverrides.some(
+      tightened.autofill.sections.guardrails.agentOverrides.some(
         (o) => o.agentId === agentId && o.modes.promptInjection === "block",
       ),
     ).toBe(true);
-    // staleness INFORMS; the sign-off chain itself is untouched by drift
+
+    // a RELAXATION of the subject's guardrail is drift, and the summary names it
+    const relax = await app.inject({
+      method: "PUT",
+      url: `/v1/guardrails/config/agent/${agentId}`,
+      headers: AUTH,
+      payload: { modes: { prompt_injection: "warn" } },
+    });
+    expect(relax.statusCode).toBe(200);
+    const after = await detail();
+    expect(after.staleness.drifted).toBe(true);
+    expect(after.staleness.summary).toContain("1 agent guardrail relaxation");
+    expect(after.staleness.summary).toContain("since certification");
+    // staleness INFORMS here (this file runs with enforcement relaxed); the
+    // sign-off chain itself is untouched by drift
     const [record] = await db.select().from(modelCardApprovals).where(eq(modelCardApprovals.cardId, cardId));
     expect(record!.status).toBe("approved");
 

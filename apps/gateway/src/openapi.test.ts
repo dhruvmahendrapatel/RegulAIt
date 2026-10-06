@@ -211,6 +211,18 @@ describe("declared auth matches enforced auth", () => {
     expect(ok.statusCode).toBe(200);
   });
 
+  it("ADR-0181: the document states the MFA refusal of keys, the key-issue 409, and the guardrail window body", () => {
+    const doc = buildOpenApiDocument(app.routeInventory);
+    const paths = doc.paths as Record<string, Record<string, { responses: Record<string, { description: string }>; requestBody?: unknown }>>;
+    expect(paths["/v1/users"]!.get!.responses["403"]!.description).toContain("mfa_enrollment_required");
+    expect(paths["/v1/me"]!.get!.responses["403"]!.description).toContain("mfa_enrollment_required");
+    expect(paths["/health"]!.get!.responses["403"]).toBeUndefined();
+    expect(paths["/v1/users/{userId}/keys"]!.post!.responses["2XX"]!.description).toContain("409 `mfa_enrollment_required`");
+    const all = buildOpenApiDocument(app.routeInventory, { includeInternal: true });
+    const put = (all.paths as typeof paths)["/v1/guardrails/config/{scope}/{scopeId}"]!.put!;
+    expect(JSON.stringify(put.requestBody)).toContain("assuranceWindow");
+  });
+
   it("a USER route really does admit a non-admin (spec says user)", async () => {
     const doc = buildOpenApiDocument(app.routeInventory);
     expect(authOf(doc, "GET", "/v1/me")).toBe("user");

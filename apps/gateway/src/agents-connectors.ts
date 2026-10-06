@@ -107,8 +107,8 @@ import {
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
 import { loadModelPolicy, modelPolicyDispatchRefusal, withModelPolicy, type ModelPolicyGate } from "./model-policy.js";
-// ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
-// default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
+// ADR-0080 amendment (batch B3): the use-case dispatch gate — default
+// 'enforce' since ADR-0181, the ADR-0045 gate shape beside the MRM rung.
 import {
   attributionDispatchGate,
   useCaseDispatchGate,
@@ -480,6 +480,13 @@ export interface GovernedDispatchArgs {
    * for that feature. Absent = no matrix check here (the caller's own decision
    * already applied it, or the call is not a feature use). */
   modelFeature?: ModelPolicyGate | undefined;
+  /** ADR-0181 (review finding 8) — true ONLY for an eval-suite case or a
+   * red-team probe sent to the agent UNDER TEST, set by the server-side eval
+   * runners (never from a request body). With the `evals` feature it exempts
+   * the dispatch from MRM staleness refusal so a drifted card can gather the
+   * evidence its recertification needs. A judge is not the subject and never
+   * sets it: it goes through the full MRM gate, staleness included. */
+  evaluationSubject?: boolean | undefined;
   /** ADR-0066 §4 — the mode a FALLBACK HOP is re-evaluated under. Only the
    * chain driver reads it; a hop must be entitlement-checked in the same mode
    * the primary was, or a `plan`-only grant could serve an `execute` call. */
@@ -1388,8 +1395,8 @@ async function dispatchAttempt(
   // entitlement decision (every caller of this function has already run
   // evaluateAgent) and before ANY provider work, cost, or content processing.
   //
-  // Default-OFF (`org_settings.mrm_enforced`), so with the toggle untouched
-  // this is one settings read and byte-identical behaviour. When ON it refuses
+  // Default ON since ADR-0181 (`org_settings.mrm_enforced`); an admin may
+  // relax it (audited), and then this is one settings read. When ON it refuses
   // a model that carries no model card with an UNEXPIRED approved risk
   // sign-off — 409 `mrm_approval_required`, audited with a ruleId that
   // distinguishes "never reviewed" from "review lapsed". The gate recomputes
@@ -1403,6 +1410,10 @@ async function dispatchAttempt(
     model: served.model,
     customProviderId: served.customProviderId ?? null,
     projectId: args.projectId ?? null,
+    // ADR-0181: an eval case or red-team probe against the agent under test
+    // (the `evals` feature AND the runner's `evaluationSubject`); staleness does
+    // not refuse it (see MrmGateContext). A judge is gated in full.
+    evaluation: args.modelFeature?.feature === "evals" && args.evaluationSubject === true,
   });
   if (mrmRefusal) {
     return {
@@ -1414,10 +1425,10 @@ async function dispatchAttempt(
   }
 
   // ADR-0080 amendment (batch B6b) — THE ATTRIBUTION MANDATE, one rung above
-  // the use-case gate and with the same placement discipline. Default-OFF
-  // (`org_settings.dispatch_attribution_required`), so an ATTRIBUTED dispatch
-  // never even reads the settings row here and an unattributed one is
-  // byte-identical until an admin flips the knob. When ON, a dispatch naming
+  // the use-case gate and with the same placement discipline. Default ON
+  // since ADR-0181 (`org_settings.dispatch_attribution_required`); an
+  // ATTRIBUTED dispatch never even reads the settings row here, and an admin
+  // may relax the knob (audited). When ON, a dispatch naming
   // no project is refused 409 `attribution_required`, audited, before any
   // provider work — which is what closes B3a's own recorded hole: the
   // use-case gate below can only bind dispatches that NAME a project, so
@@ -1445,8 +1456,8 @@ async function dispatchAttempt(
   // ADR-0080 amendment (batch B3) — THE USE-CASE DISPATCH GATE, beside the
   // MRM rung and with the same placement discipline: after the caller's
   // entitlement decision, before ANY provider work, so a refusal costs
-  // nothing. Default-off (`org_settings.use_case_gate_mode = 'off'`) is
-  // byte-identical — an unattributed dispatch does not even read settings
+  // nothing. Default 'enforce' since ADR-0181 (`org_settings.use_case_gate_mode`;
+  // 'off' is an audited relaxation) — an unattributed dispatch does not even read settings
   // here. The join is honest and narrow: the gate fires only for a dispatch
   // attributed to a project that at least one AI use case LINKS
   // (`ai_use_cases.project_id`, the only join the schema holds); under
@@ -2556,6 +2567,20 @@ export function platformEnvKeyName(provider: string): string | null {
 export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
 
 /**
+ * ADR-0181: the request header a client sends to say "if this call may not
+ * stream, answer it buffered instead". `streamingOnBlockMode: 'reject'` (the
+ * strict default) exists for clients that REQUIRE a stream and must learn at
+ * once that they will not get one; a client that names this header has said
+ * it does not require one, so it gets ADR-0019's buffered, disclosed answer
+ * rather than a 400. The SPA sends it; third-party clients do not.
+ */
+export const ACCEPT_BUFFERED_STREAM_HEADER = "x-regulait-accept-buffered";
+export function acceptsBufferedStream(headers: Record<string, string | string[] | undefined>): boolean {
+  const v = headers[ACCEPT_BUFFERED_STREAM_HEADER];
+  return (Array.isArray(v) ? v[0] : v)?.trim() === "1";
+}
+
+/**
  * ADR-0034 — the key an agent is looked up under in `configuredProviders`'s
  * set. For every shipped vendor this is just the provider kind (today's
  * behaviour, byte-identical). For a custom-provider agent it is the SPECIFIC
@@ -2892,6 +2917,10 @@ export function registerAgentConnectorRoutes(
       keyCiphertext: encryptSecret(opts.dataKey, body.apiKey),
       baseUrl: body.baseUrl ?? null,
     };
+    const [existing] = await db
+      .select({ id: modelCredentials.id, baseUrl: modelCredentials.baseUrl })
+      .from(modelCredentials)
+      .where(eq(modelCredentials.provider, body.provider));
     const [row] = await db
       .insert(modelCredentials)
       .values(values)
@@ -2902,6 +2931,28 @@ export function registerAgentConnectorRoutes(
         baseUrl: modelCredentials.baseUrl,
         createdAt: modelCredentials.createdAt,
       });
+    // ADR-0181: with the env-key fallback off by default, the encrypted store
+    // is THE way a provider goes live, so storing or rotating a platform key is
+    // an audited admin act. The row names the provider and whether a base URL
+    // is set — never the key, a fragment of it, or its ciphertext.
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "model_credential",
+      objectId: row!.id,
+      detail: {
+        via: req.authCtx.via,
+        provider: body.provider,
+        rotated: Boolean(existing),
+        baseUrlSet: values.baseUrl !== null,
+        ...(existing ? { previousBaseUrlSet: existing.baseUrl !== null } : {}),
+      },
+      effect: "allow",
+      ruleId: existing ? "model-credential-rotated" : "model-credential-stored",
+      ruleChain: [],
+      reason: existing
+        ? `platform credential for provider '${body.provider}' rotated (key material never recorded)`
+        : `platform credential for provider '${body.provider}' stored, encrypted at rest (key material never recorded)`,
+    });
     return reply.status(201).send(row);
   });
 
@@ -3015,6 +3066,16 @@ export function registerAgentConnectorRoutes(
       .where(eq(modelCredentials.provider, provider))
       .returning({ id: modelCredentials.id });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "model_credential",
+      objectId: deleted[0]!.id,
+      detail: { via: req.authCtx.via, provider },
+      effect: "allow",
+      ruleId: "model-credential-removed",
+      ruleChain: [],
+      reason: `platform credential for provider '${provider}' removed`,
+    });
     return { removed: true };
   });
 
@@ -3720,7 +3781,9 @@ export function registerAgentConnectorRoutes(
     // streaming learns immediately instead of receiving an unasked-for shape.
     if (streamSuppressed) {
       const iset = await loadInterceptionSettings(db);
-      if (iset.streamingOnBlockMode === "reject") {
+      // ADR-0181: a client that declares it accepts a buffered answer did not
+      // REQUIRE streaming, which is the only client 'reject' exists to warn
+      if (iset.streamingOnBlockMode === "reject" && !acceptsBufferedStream(req.headers)) {
         return reply.status(400).send({
           error: "streaming_rejected_on_block_project",
           detail:

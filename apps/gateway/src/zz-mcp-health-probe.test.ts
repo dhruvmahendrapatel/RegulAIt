@@ -36,6 +36,11 @@ import { resolveBreakerConfig, setBreakerConfig, breakerConfig } from "./upstrea
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -103,6 +108,7 @@ const probeMine = async () => {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   // A threshold of 1 makes "one failure opens it" the unit under test rather
   // than "three failures do", which would only test the loop.
   priorBreaker = breakerConfig();
@@ -110,6 +116,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   setBreakerConfig(priorBreaker);
   for (const id of mine) await db.delete(mcpServers).where(eq(mcpServers.id, id));
   await db.$client.end();

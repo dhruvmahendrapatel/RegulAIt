@@ -19,6 +19,7 @@
  * resolves anything it raised.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -117,9 +118,14 @@ const mine = (body: { credentials: Array<{ id: string }> }) => {
 };
 const row = (body: { credentials: Array<{ id: string }> }, id: string) => body.credentials.find((c) => c.id === id) as any;
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: KEY });
   const mkUser = async (tag: string, isAdmin: boolean) => {
     const r = await call("POST", "/v1/users", AUTH, { email: `g175c-${tag}-${RUN}@example.com`, displayName: `Cred ${tag} ${RUN}`, isAdmin });
@@ -233,6 +239,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   if (orgBefore) {
     await db.update(orgSettings).set({
       tracingOtlpHeadersCiphertext: orgBefore.ciphertext,
@@ -389,8 +396,10 @@ describe("ADR-0175 A7 — the stale_credentials monitor rule", () => {
   };
   const subject = (type: string, flag: string) => `credentials:${type}:${flag}`;
 
-  it("is observe-only by default: flags on the page, no episode", async () => {
-    expect(orgBefore!.alerts).toBe(false);
+  it("alerts by default (ADR-0181); an admin's OFF is observe-only: flags on the page, no episode", async () => {
+    expect(orgBefore!.alerts).toBe(true);
+    const off = await call("PUT", "/v1/org/settings", people.adminAuth, { staleCredentialAlerts: false });
+    expect(off.statusCode, off.body).toBe(200);
     await evaluate();
     const open = (await episodes()).filter((a) => a.status !== "resolved");
     expect(open).toEqual([]);

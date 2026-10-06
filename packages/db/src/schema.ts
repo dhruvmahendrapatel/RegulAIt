@@ -182,7 +182,10 @@ export const authSessions = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     /** idle wall — slides forward on every authenticated use */
     idleExpiresAt: timestamp("idle_expires_at", { withTimezone: true }).notNull(),
-    /** snapshot of org sessionIdleMinutes at creation (what the slide adds) */
+    /** snapshot of org sessionIdleMinutes at creation (what the slide adds).
+     * ADR-0181 (FX2): each use applies the SHORTER of this and the org's
+     * current value (and stores it), so a tightened idle window binds every
+     * live session on its next request — no grandfathering. */
     idleMinutes: integer("idle_minutes").notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     ip: text("ip"),
@@ -244,7 +247,9 @@ export const oidcProviders = pgTable("oidc_providers", {
    * the `regulait_stamp_secret_set` trigger. NULL = set before 0142 (unknown). */
   secretSetAt: timestamp("secret_set_at", { withTimezone: true }),
   enabled: boolean("enabled").notNull().default(true),
-  /** NULL = any domain; else the verified email claim's domain must be listed */
+  /** NULL = any domain; else the verified email claim's domain must be listed.
+   * ADR-0181 (migration 0156): REQUIRED (non-empty) whenever jit_provisioning
+   * is on — CHECK oidc_providers_jit_domains_ck, and a named 422 at the API. */
   allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
   /** role granted to JIT-provisioned users (never admin); NULL = no role */
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
@@ -274,7 +279,14 @@ export const oidcProviders = pgTable("oidc_providers", {
   brokerEnforcesMfa: boolean("broker_enforces_mfa").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  // ADR-0181 (migration 0156): JIT provisioning creates accounts from whatever
+  // email the IdP asserts, so it needs a non-empty domain allow-list.
+  check(
+    "oidc_providers_jit_domains_ck",
+    sql`NOT ${t.jitProvisioning} OR (CASE WHEN jsonb_typeof(${t.allowedEmailDomains}) = 'array' THEN jsonb_array_length(${t.allowedEmailDomains}) > 0 ELSE false END)`,
+  ),
+]);
 
 /** one row per authorization redirect: state (single-use), nonce and the PKCE
  * verifier live server-side, never in the browser. Swept by expiry. */
@@ -316,20 +328,25 @@ export const samlProviders = pgTable("saml_providers", {
   enabled: boolean("enabled").notNull().default(true),
   /** NULL = any domain; else the asserted email's domain must be listed. The
    * MANDATORY backstop — an IdP email attribute is only as trustworthy as the
-   * IdP's own verification, so an empty list is a conscious admin choice. */
+   * IdP's own verification, so an empty list is a conscious admin choice.
+   * ADR-0181 (FX2, migration 0160): REQUIRED (non-empty) whenever
+   * jit_provisioning is on — CHECK saml_providers_jit_domains_ck, and a named
+   * 422 at the API, exactly as for OIDC. */
   allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
   /** role granted to JIT-provisioned users (never admin); NULL = no role */
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
   /** default-deny: an unknown subject with JIT off is 403'd and audited */
   jitProvisioning: boolean("jit_provisioning").notNull().default(false),
-  /** posture flags handed straight to the library. Defaulting BOTH signature
-   * requirements on would break the (common) IdP that signs only the
-   * assertion, so want_authn_response_signed defaults false while
-   * want_assertions_signed defaults TRUE — at least one signature over the
-   * assertion is always required, and turning want_assertions_signed off is
-   * refused at the API (see samlProviderSchema). */
+  /** posture flags handed straight to the library. ADR-0181 (migration
+   * 0156): BOTH default TRUE (want_authn_response_signed was false), so the
+   * Response envelope and the assertion are each signed. An IdP that signs
+   * only the assertion is accommodated by an admin turning
+   * want_authn_response_signed off for that provider, audited. At least one
+   * signature over the assertion is always required: turning
+   * want_assertions_signed off is refused at the API unless the response
+   * signature is on (see samlProviderSchema). */
   wantAssertionsSigned: boolean("want_assertions_signed").notNull().default(true),
-  wantAuthnResponseSigned: boolean("want_authn_response_signed").notNull().default(false),
+  wantAuthnResponseSigned: boolean("want_authn_response_signed").notNull().default(true),
   /** IdP-initiated SSO is a known CSRF / stolen-assertion surface: OPT-IN per
    * provider. Off (the default) means an assertion with no matching
    * outstanding InResponseTo correlation row is REFUSED. */
@@ -364,7 +381,14 @@ export const samlProviders = pgTable("saml_providers", {
   mfaAuthnContexts: jsonb("mfa_authn_contexts").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  // ADR-0181 (FX2, migration 0160): the SAML twin of
+  // oidc_providers_jit_domains_ck — JIT needs a non-empty domain allow-list.
+  check(
+    "saml_providers_jit_domains_ck",
+    sql`NOT ${t.jitProvisioning} OR (CASE WHEN jsonb_typeof(${t.allowedEmailDomains}) = 'array' THEN jsonb_array_length(${t.allowedEmailDomains}) > 0 ELSE false END)`,
+  ),
+]);
 
 /** the twin of oidcLoginStates: one row per SP-initiated AuthnRequest. The
  * request id is what the IdP echoes back as InResponseTo, so this row IS the
@@ -605,8 +629,8 @@ export const mcpServers = pgTable("mcp_servers", {
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
-   * default (org_settings.mcpPrivateRangesDefault, true by default — the
-   * self-hosted `http://mcp.internal:9000` case is the ORDINARY deployment).
+   * default (org_settings.mcpPrivateRangesDefault, false by default since
+   * ADR-0181: a private address needs this flag or an allow entry).
    * 169.254.0.0/16 (IMDS) and the other unconditional ranges are NEVER opened
    * by this flag; a PUBLIC-internet URL still needs an egress_allow_hosts
    * entry regardless of it. */
@@ -2790,9 +2814,10 @@ export const projects = pgTable("projects", {
    * 'monthly' = only spend within the current calendar month (UTC) counts. */
   budgetPeriod: text("budget_period").notNull().default("none"),
   /** warn (non-blocking) when windowed spend crosses budget*pct/100; the hard
-   * block + escalation always stays at 100%. Default 100 = warn only at the cap
-   * (byte-identical to the pre-threshold behaviour). */
-  alertThresholdPct: integer("alert_threshold_pct").notNull().default(100),
+   * block + escalation always stays at 100%. ADR-0181 (migration 0158): the
+   * default is 80, so a budgeted project warns before it reaches the cap; an
+   * admin may set 100 (warn only at the cap) on the audited project PATCH. */
+  alertThresholdPct: integer("alert_threshold_pct").notNull().default(80),
   /** a decided __project_budget__ approval lifts enforcement for this project */
   overageApproved: boolean("overage_approved").notNull().default(false),
   /** the period key (e.g. '2026-07') an overage was approved for; the latch
@@ -2873,11 +2898,13 @@ export const complianceProfiles = pgTable("compliance_profiles", {
   tag: text("tag").notNull().unique(),
   /** workflow templates this framework forces into every governed change */
   requiredTemplateIds: jsonb("required_template_ids").$type<string[]>(),
+  // ADR-0181: strict by default — read_only (was read_write)
   mcpDefaultMode: text("mcp_default_mode", { enum: ["read_only", "read_write"] })
     .notNull()
-    .default("read_write"),
+    .default("read_only"),
   auditRetentionDays: integer("audit_retention_days"),
-  piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("log"),
+  // ADR-0181: strict by default — block (was log)
+  piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("block"),
   /** §8.3 -> §8.2 tie: the backup retention + patch cadence this framework
    * forces onto any infra resource carrying its tag (pillar 3). Null = the
    * framework declares no infra floor of its own. */
@@ -3337,37 +3364,45 @@ export const interceptionSettings = pgTable(
     resolutionMode: text("resolution_mode", { enum: RESOLUTION_MODES })
       .notNull()
       .default("map_by_model"),
+    // ADR-0181 (migration 0158): 'managed' by default — a label, the rung the
+    // deployment declares (the portal shows its real status beside it).
     enforcementPosture: text("enforcement_posture", { enum: ENFORCEMENT_POSTURES })
       .notNull()
-      .default("voluntary"),
+      .default("managed"),
     // The admin's lever to guarantee pillar-5 coverage: when true a compat
     // call with no x-regulait-project-id is REJECTED rather than run
-    // unattributed.
-    requireProjectAttribution: boolean("require_project_attribution").notNull().default(false),
-    // ADR-0024 (O11): the MCP twin of requireProjectAttribution. FALSE
-    // (default) = an unattributed MCP tool call runs, metered with a NULL
-    // project (the explicit "Unattributed" bucket); TRUE = it is rejected
-    // pre-dispatch with an error naming the x-regulait-project-id header.
-    requireMcpAttribution: boolean("require_mcp_attribution").notNull().default(false),
+    // unattributed. ADR-0181: TRUE by default; an admin may relax it (audited,
+    // old -> new) for a client that cannot send the header.
+    requireProjectAttribution: boolean("require_project_attribution").notNull().default(true),
+    // ADR-0024 (O11): the MCP twin of requireProjectAttribution. TRUE (the
+    // ADR-0181 default) = an unattributed MCP tool call is rejected
+    // pre-dispatch with an error naming the x-regulait-project-id header;
+    // FALSE (an audited admin relaxation) = it runs, metered with a NULL
+    // project (the explicit "Unattributed" bucket).
+    requireMcpAttribution: boolean("require_mcp_attribution").notNull().default(true),
     // ADR-0024 (O15): the key_custody rung as an ENFORCED mechanism, not a
-    // declaration. TRUE = per-user BYO model credentials stop working —
-    // creation/update is a 409 and dispatch resolution skips stored user
-    // credentials entirely (org/platform only). Rows are never deleted by the
-    // flip; they are inert while enforced, so it is reversible.
-    keyCustodyEnforced: boolean("key_custody_enforced").notNull().default(false),
+    // declaration. TRUE (the ADR-0181 default) = per-user BYO model
+    // credentials stop working — creation/update is a 409 and dispatch
+    // resolution skips stored user credentials entirely (org/platform only).
+    // Rows are never deleted by the flip; they are inert while enforced, so
+    // an admin can relax it (audited).
+    keyCustodyEnforced: boolean("key_custody_enforced").notNull().default(true),
     // ADR-0021 (migration 0038): what a stream=true call on a block-mode PII
     // project gets. 'suppress' (default, today's ADR-0019 behaviour) runs the
     // same governed dispatch fully buffered and answers plain JSON with a
     // disclosure; 'reject' refuses the call with a 400 so a client that
     // REQUIRES streaming learns immediately rather than getting a shape it
     // did not ask for.
+    // ADR-0181: the shipped default is now 'reject' (strict); an admin may
+    // choose 'suppress' through PUT /v1/interception/settings (audited).
     streamingOnBlockMode: text("streaming_on_block_mode", { enum: STREAMING_ON_BLOCK_MODES })
       .notNull()
-      .default("suppress"),
+      .default("reject"),
     // ADR-0021: when true, the COMPAT_IGNORED_FIELDS accept-and-disclose tier
     // is disabled — an unsupported-but-ignorable field (temperature) is a 400
     // again, restoring the strict pre-#47 posture for orgs that want it.
-    strictFieldRejection: boolean("strict_field_rejection").notNull().default(false),
+    // ADR-0181: on by default (strict); an admin may relax it, audited.
+    strictFieldRejection: boolean("strict_field_rejection").notNull().default(true),
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3505,13 +3540,13 @@ export const orgSettings = pgTable(
      * today's caller-opt-in; always = cache every eligible dispatch. */
     semanticCachePolicy: text("semantic_cache_policy", { enum: SEMANTIC_CACHE_POLICIES })
       .notNull()
-      .default("opt_in"),
+      .default("off"), // ADR-0181: off by default (was opt_in)
     semanticCacheTtlSeconds: integer("semantic_cache_ttl_seconds").notNull().default(3600),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
       .notNull()
-      .default("fail_open"),
+      .default("fail_closed"), // ADR-0181: fail closed by default (was fail_open)
     summarizerSelection: text("summarizer_selection", { enum: SUMMARIZER_SELECTIONS })
       .notNull()
       .default("cheapest"),
@@ -3522,8 +3557,9 @@ export const orgSettings = pgTable(
 
     // --- governance / compliance behavioural defaults ----------------------
     /** effective piiMode for a project whose classifications resolve to none.
-     * 'none' (default) = today's no-enforcement. */
-    defaultPiiMode: text("default_pii_mode", { enum: ORG_PII_MODES }).notNull().default("none"),
+     * ADR-0181: 'block' by default (was 'none'); 'none' = no enforcement, an
+     * audited admin relaxation. */
+    defaultPiiMode: text("default_pii_mode", { enum: ORG_PII_MODES }).notNull().default("block"),
     /** ADR-0117 (migration 0110) — WHICH international national-identifier
      * jurisdictions `detectPII` runs, on top of its four always-on base
      * detectors. Ships EMPTY and the migration's DEFAULT is EMPTY, so an
@@ -3534,10 +3570,11 @@ export const orgSettings = pgTable(
       .$type<string[]>()
       .notNull()
       .default([]),
-    /** platform-key-via-environment fallback (ANTHROPIC_API_KEY etc.). ON =
-     * today; a regulated org can force every credential through the encrypted
-     * store. envFallbackProviders narrows WHICH providers may fall back. */
-    envKeyFallbackEnabled: boolean("env_key_fallback_enabled").notNull().default(true),
+    /** platform-key-via-environment fallback (ANTHROPIC_API_KEY etc.).
+     * ADR-0181: OFF by default — every credential goes through the encrypted
+     * store; an admin may turn the fallback on (audited).
+     * envFallbackProviders narrows WHICH providers may fall back. */
+    envKeyFallbackEnabled: boolean("env_key_fallback_enabled").notNull().default(false),
     envFallbackProviders: jsonb("env_fallback_providers")
       .$type<string[]>()
       .notNull()
@@ -3564,11 +3601,12 @@ export const orgSettings = pgTable(
      * is taken for whatever round is current when it is applied. A person in
      * the console (session) may always omit it. */
     checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
-    /** ADR-0022: master switch for approver delegation. ON (default) = active
+    /** ADR-0022: master switch for approver delegation. ON = active
      * delegation windows widen the delegate's inbox and let them decide
-     * on-behalf-of. OFF = a strict separation-of-duties org: creating
-     * delegations is refused and existing windows stop applying immediately. */
-    approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(true),
+     * on-behalf-of. OFF (the ADR-0181 default, migration 0156; was ON) =
+     * strict separation of duties: creating delegations is refused and
+     * existing windows stop applying immediately. An admin may turn it on. */
+    approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(false),
     /** ADR-0022 (portal defect fix): the org's default infra-remediation
      * approver. Persisted so the Infrastructure page's approver pick survives
      * reloads and admins; each propose call still names its approver
@@ -3607,11 +3645,12 @@ export const orgSettings = pgTable(
       .default(90),
 
     // --- O5 (migration 0045): scheduled backup verification --------------
-    /** OFF (default) = today's behaviour: success ledger rows only ever come
-     * from the seed or a manual write. ON = the boot scheduler verifies
-     * recent recovery points per backup_target on the interval below, via the
-     * existing provider scan path, and writes source-labelled ledger rows. */
-    backupVerifyEnabled: boolean("backup_verify_enabled").notNull().default(false),
+    /** ON (default since ADR-0181, migration 0159) = the boot scheduler
+     * verifies recent recovery points per backup_target on the interval below,
+     * via the existing provider scan path, and writes source-labelled ledger
+     * rows. OFF = success ledger rows only ever come from the seed or a manual
+     * write; an admin may relax it (audited). */
+    backupVerifyEnabled: boolean("backup_verify_enabled").notNull().default(true),
     backupVerifyIntervalHours: integer("backup_verify_interval_hours").notNull().default(24),
 
     // --- orchestration worker caps -----------------------------------------
@@ -3631,11 +3670,15 @@ export const orgSettings = pgTable(
     // for users who HAVE a password, and the defaults are the sane-secure
     // baseline the ADR records.
     passwordMinLength: integer("password_min_length").notNull().default(12),
-    /** how many character classes (lower/upper/digit/other) a password needs */
-    passwordRequireClasses: integer("password_require_classes").notNull().default(2),
+    /** how many character classes (lower/upper/digit/other) a password needs.
+     * ADR-0181 (migration 0156): 3 by default (was 2); an admin may relax it. */
+    passwordRequireClasses: integer("password_require_classes").notNull().default(3),
     sessionLifetimeHours: integer("session_lifetime_hours").notNull().default(24),
-    sessionIdleMinutes: integer("session_idle_minutes").notNull().default(120),
-    mfaRequired: text("mfa_required", { enum: MFA_REQUIREMENTS }).notNull().default("off"),
+    /** ADR-0181 (migration 0156): 30 idle minutes by default (was 120). */
+    sessionIdleMinutes: integer("session_idle_minutes").notNull().default(30),
+    /** ADR-0181 (migration 0156): `admins` by default (was `off`): an admin
+     * enrols TOTP before reaching the app; other users are not forced. */
+    mfaRequired: text("mfa_required", { enum: MFA_REQUIREMENTS }).notNull().default("admins"),
     /** true = password login 403s (SSO or API-key exchange only). Refused
      * while zero ENABLED OIDC providers exist — no self-lockouts. */
     ssoOnly: boolean("sso_only").notNull().default(false),
@@ -3666,35 +3709,37 @@ export const orgSettings = pgTable(
      * empty egress allow-list, enabled=false until a connection test passes,
      * and the ordinary per-user agent grant), so an org that wants it gone
      * entirely flips this and an org that never registers one is unaffected. */
-    customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(true),
+    // ADR-0181: OFF by default (was true); an admin enables it, audited.
+    customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(false),
     /** ADR-0043 (migration 0049): the org default for MCP servers whose
-     * allowPrivateRanges is null. TRUE (default) = a self-hosted MCP server on
-     * a private address Just Works with zero ceremony — the guard fires on the
-     * risky public-internet case, not the ordinary internal one (ADR-0041's
-     * BYOC/air-gapped buyer). FALSE = strict: every server needs an explicit
-     * per-server allowPrivateRanges=true (or an egress_allow_hosts entry with
-     * the private-range opt-in) before a private-range URL is reachable.
+     * allowPrivateRanges is null. FALSE (default since ADR-0181, migration
+     * 0159) = strict: every server needs an explicit per-server
+     * allowPrivateRanges=true (or an egress_allow_hosts entry with the
+     * private-range opt-in) before a private-range URL is reachable. TRUE = a
+     * self-hosted MCP server on a private address is reachable with zero
+     * ceremony; an admin may relax to it (audited).
      * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
-    mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(true),
-    /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'off' (DEFAULT)
-     * runs no manifest scan at all and is byte-identical to pre-0103. 'log'
-     * scans every sync and records the verdict/findings on the server row
-     * without ever refusing. 'enforce' refuses a `held` server BEFORE any
-     * upstream connect and keeps it out of tool discovery until an admin
-     * clears it with a reason. Recommended production setting: 'enforce'. */
+    mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(false),
+    /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'enforce'
+     * (DEFAULT since ADR-0181, migration 0159) refuses a `held` server BEFORE
+     * any upstream connect and keeps it out of tool discovery until an admin
+     * clears it with a reason. 'log' scans every sync and records the
+     * verdict/findings on the server row without ever refusing. 'off' runs no
+     * manifest scan at all. An admin may relax it (audited). */
     mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
       .notNull()
-      .default("off"),
-    /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 0
-     * (DEFAULT) = off and byte-identical to pre-0140. Recommended: 7. */
-    minReleaseAgeDays: integer("min_release_age_days").notNull().default(0),
+      .default("enforce"),
+    /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
+     * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
+     * it (audited). */
+    minReleaseAgeDays: integer("min_release_age_days").notNull().default(7),
     /** ADR-0175 A7 (migration 0142): a credential older than this many days
      * with no use in that many days is flagged "unused" on the inventory. */
     credentialUnusedDays: integer("credential_unused_days").notNull().default(90),
-    /** ADR-0175 A7: false (DEFAULT) = the `stale_credentials` rule only shows
-     * flags on the inventory page; true = it raises one alert episode per
-     * flagged credential. */
-    staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(false),
+    /** ADR-0175 A7: true (DEFAULT since ADR-0181, migration 0159) = the
+     * `stale_credentials` rule raises one alert episode per flagged
+     * credential; false = it only shows flags on the inventory page. */
+    staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(true),
     /** ADR-0175 A15: the grid region whose `energy_factors` intensity
      * overrides the org default for the energy estimate. NULL = default. */
     energyRegion: text("energy_region"),
@@ -3715,23 +3760,18 @@ export const orgSettings = pgTable(
     apiKeyIpPolicy: text("api_key_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
 
     // --- ADR-0098 (migration 0104): API-KEY LIFETIME -----------------------
-    /** THE DEFAULT applied to a key issued with no caller-supplied expiry.
-     * NULL (DEFAULT) = no default lifetime, so a newly issued key still never
-     * expires and behaviour is byte-identical to pre-0104 — ADR-0021's "a
-     * fresh settings row changes nothing" invariant, held here too. A number
-     * is a lifetime in DAYS from the moment of issuance.
-     * Recommended production setting: 90. It is NOT flipped here, because a
-     * control that starts expiring live credentials on upgrade is how a
-     * security feature gets turned back off permanently (ADR-0097's reasoning
-     * for `mcp_admission_mode`, applied verbatim). */
-    apiKeyDefaultTtlDays: integer("api_key_default_ttl_days"),
-    /** THE CEILING on what any issuer may request, in DAYS. NULL (DEFAULT) =
-     * no ceiling, so an issuer may ask for any expiry or none. When set, a
-     * request for a longer lifetime — INCLUDING an explicit request for no
-     * expiry at all — is REFUSED BY NAME (422), never silently clamped: a
-     * clamp hands back a credential with a lifetime nobody asked for and
-     * nobody was told about. Recommended production setting: 365. */
-    apiKeyMaxTtlDays: integer("api_key_max_ttl_days"),
+    /** THE DEFAULT applied to a key issued with no caller-supplied expiry, a
+     * lifetime in DAYS from the moment of issuance. ADR-0181 (migration
+     * 0156): 90 by default (was NULL = never expires). An admin may relax it
+     * (NULL = no default lifetime; the ceiling, if any, then applies). */
+    apiKeyDefaultTtlDays: integer("api_key_default_ttl_days").default(90),
+    /** THE CEILING on what any issuer may request, in DAYS. ADR-0181
+     * (migration 0156): 365 by default (was NULL = no ceiling). A request for
+     * a longer lifetime — INCLUDING an explicit request for no expiry at all —
+     * is REFUSED BY NAME (422), never silently clamped: a clamp hands back a
+     * credential with a lifetime nobody asked for and nobody was told about.
+     * An admin may relax it (NULL = no ceiling), audited. */
+    apiKeyMaxTtlDays: integer("api_key_max_ttl_days").default(365),
 
     // --- ADR-0105 (migration 0107): APPROVAL LIFETIME ----------------------
     /** HOW LONG an approved-but-unspent MCP tool-call consent stays spendable,
@@ -3748,37 +3788,36 @@ export const orgSettings = pgTable(
     approvalTtlHours: integer("approval_ttl_hours").default(72),
 
     // --- ADR-0045 (migration 0057): model risk management -------------------
-    /** THE DISPATCH GATE. false (default) = today's behaviour, byte-identical:
-     * cards are documentation. true = `executeGovernedDispatch` refuses any
-     * agent whose model has no model card carrying an UNEXPIRED approved
-     * sign-off (409 `mrm_approval_required`, audited, effect deny).
+    /** THE DISPATCH GATE. true (the ADR-0181 default) = `executeGovernedDispatch`
+     * refuses any agent whose model has no model card carrying an UNEXPIRED
+     * approved sign-off (409 `mrm_approval_required`, audited, effect deny).
+     * false (an audited admin relaxation) = cards are documentation.
      *
      * Deliberately the exact shape of `keyCustodyEnforced` above (ADR-0024):
      * one org toggle, refuse-with-a-named-reason, fully reversible — turning
-     * it off restores dispatch and destroys no card data. Default-off means no
-     * deployment acquires a production hard-stop by accident. */
-    mrmEnforced: boolean("mrm_enforced").notNull().default(false),
+     * it off restores dispatch and destroys no card data. */
+    mrmEnforced: boolean("mrm_enforced").notNull().default(true),
     /** how many days before `valid_until` a signed-off card counts as
      * "expiring soon" — the window the registry surfaces lapses in as WORK
      * ahead of time rather than as an outage on the day. */
     mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
     /** ADR-0086 §3's named follow-up (migration 0098, batch B3):
-     * staleness-forces-recertification. false (default) = ADR-0086's shipped
-     * posture, byte-identical — staleness informs and gates nothing. true =
+     * staleness-forces-recertification. false (an audited admin relaxation) =
+     * staleness informs and gates nothing. true (the ADR-0181 default) =
      * the ADR-0045 dispatch gate (and ONLY while `mrmEnforced` is on — this
      * knob deepens the one gate, it creates no gate of its own) additionally
      * refuses a card whose ledger drift since the last granting decision has
      * reached the threshold below, on the SAME 409 path expiry uses. Fully
      * reversible; recertifying (a new superseding sign-off) resets the clock. */
-    mrmStalenessRecertEnabled: boolean("mrm_staleness_recert_enabled").notNull().default(false),
+    mrmStalenessRecertEnabled: boolean("mrm_staleness_recert_enabled").notNull().default(true),
     /** how many ledger changes since certification (the `computeCardStaleness`
      * counts, summed) it takes before an armed staleness gate refuses. 1 =
      * any drift at all forces recertification. */
     mrmStalenessRecertThreshold: integer("mrm_staleness_recert_threshold").notNull().default(1),
 
     // --- ADR-0080 amendment (migration 0098): use-case dispatch gate --------
-    /** 'off' (default) = the ADR-0080 honest limit exactly as shipped:
-     * approval registers intent and gates nothing — byte-identical behaviour.
+    /** 'enforce' is the ADR-0181 default (see below); 'off' (an audited admin
+     * relaxation) = approval registers intent and gates nothing.
      * 'warn' = a governed dispatch attributed to a use-case-LINKED project
      * with no approved linked use case proceeds, but the refusal-shaped fact
      * is audited and annotated on the response. 'enforce' = the same dispatch
@@ -3788,7 +3827,7 @@ export const orgSettings = pgTable(
      * in every mode. */
     useCaseGateMode: text("use_case_gate_mode", { enum: USE_CASE_GATE_MODES })
       .notNull()
-      .default("off"),
+      .default("enforce"),
 
     // --- ADR-0180 (migration 0155): the continuous-assurance gate ----------
     /** Secure by default: 'enforce' — the deploy gate HOLDS on the D3 checks
@@ -3802,11 +3841,10 @@ export const orgSettings = pgTable(
       .default("enforce"),
 
     // --- B6b / ADR-0080 amendment (migration 0101): the attribution mandate --
-    /** FALSE (default) = today, byte-identical: a governed dispatch that names
-     * no `projectId` runs and lands in the explicit "Unattributed" cost bucket
-     * (GET /v1/costs/unattributed), which is pillar 5's deliberate opt-in
-     * posture. TRUE = such a dispatch is refused 409 `attribution_required`,
-     * audited, before any provider work.
+    /** TRUE (the ADR-0181 default) = a governed dispatch that names no
+     * `projectId` is refused 409 `attribution_required`, audited, before any
+     * provider work. FALSE (an audited admin relaxation) = it runs and lands
+     * in the explicit "Unattributed" cost bucket (GET /v1/costs/unattributed).
      *
      * This is the hole B3a recorded and could not close from inside itself:
      * `use_case_gate_mode` binds only dispatches that NAME a project, so a
@@ -3822,7 +3860,7 @@ export const orgSettings = pgTable(
      * neither of them touches. */
     dispatchAttributionRequired: boolean("dispatch_attribution_required")
       .notNull()
-      .default(false),
+      .default(true),
 
     // --- ADR-0124: the kill switch and safe modes ------------------------
     /**
@@ -3892,10 +3930,11 @@ export const orgSettings = pgTable(
      * an air-gapped posture a compromised admin account can switch off from a
      * web form is not one.
      *
-     * 'inherit' (default) = today's behaviour: the env-derived mode decides.
-     * 'strict'            = adjudicate compiled vendor endpoints against
-     *                       `egress_allow_hosts` regardless of mode, so a
-     *                       hosted or BYOC box can opt in.
+     * 'strict'  (DEFAULT since ADR-0181, migration 0159) = adjudicate
+     *           compiled vendor endpoints against `egress_allow_hosts`
+     *           regardless of mode, on a hosted or BYOC box too.
+     * 'inherit' = the env-derived mode decides (hosted/BYOC permissive); an
+     *           admin may relax to it (audited).
      *
      * Composition is MAX over {permissive < strict}: there is no value here
      * that loosens an air_gapped deployment, by construction rather than by
@@ -3904,14 +3943,15 @@ export const orgSettings = pgTable(
       enum: EGRESS_COMPILED_DEFAULT_POLICIES,
     })
       .notNull()
-      .default("inherit"),
+      .default("strict"),
 
     // --- ADR-0065 (migration 0077): RegulAIt-LLM ----------------------------
     /** THE MASTER SWITCH over custom-model creation, following ADR-0034's
      * `customModelProvidersEnabled` precedent: a capability an org may not want
      * at all should be refusable in ONE place, honestly, rather than by
      * removing every grant one at a time and hoping none was missed. */
-    llmTrainingEnabled: boolean("llm_training_enabled").notNull().default(true),
+    // ADR-0181: OFF by default (was true); an admin enables it, audited.
+    llmTrainingEnabled: boolean("llm_training_enabled").notNull().default(false),
     /** where the ONE Approvals Queue takes over. A job whose ESTIMATED cost is
      * at or above this does not start — it queues as an ordinary approval
      * (objectType 'training_job') and starts only once a named human approves.
@@ -3930,7 +3970,9 @@ export const orgSettings = pgTable(
     tracingEnabled: boolean("tracing_enabled").notNull().default(true),
     /** May only ever NARROW. Off keeps the tree, the timings, the costs and
      * every deny reason, and stops storing prompts/outputs at all. */
-    tracingCaptureContent: boolean("tracing_capture_content").notNull().default(true),
+    // ADR-0181: OFF by default (was true) — no prompt or output is stored
+    // until an admin opts in, audited.
+    tracingCaptureContent: boolean("tracing_capture_content").notNull().default(false),
     /** the truncation ceiling on a stored preview — the same 4000 default
      * `eval_results.output_text` uses (ADR-0044), not a new posture */
     tracingPreviewMaxChars: integer("tracing_preview_max_chars").notNull().default(4000),
@@ -4392,20 +4434,36 @@ export const guardrailConfigs = pgTable(
     scopeId: uuid("scope_id"),
     // The four ADR-0042 layers. PII is absent on purpose: it stays governed by
     // the §8.3 cascade's own piiMode, byte-for-byte as ADR-0019 left it.
+    // ADR-0181: block for prompt injection and jailbreak, warn for the others
+    // (was log for all four). Must equal GUARDRAIL_DEFAULT_MODES in shared.
     promptInjectionMode: text("prompt_injection_mode", { enum: GUARDRAIL_MODES })
       .notNull()
-      .default("log"),
-    jailbreakMode: text("jailbreak_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
-    toxicityMode: text("toxicity_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
-    semanticDlpMode: text("semantic_dlp_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+      .default("block"),
+    jailbreakMode: text("jailbreak_mode", { enum: GUARDRAIL_MODES }).notNull().default("block"),
+    toxicityMode: text("toxicity_mode", { enum: GUARDRAIL_MODES }).notNull().default("warn"),
+    semanticDlpMode: text("semantic_dlp_mode", { enum: GUARDRAIL_MODES }).notNull().default("warn"),
     /** the org's own vocabulary per detector; additive across scopes */
     customTerms: jsonb("custom_terms").$type<GuardrailTermMap>().notNull().default({}),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // ADR-0181 FX3 (migration 0161): who owns the row. 'assurance-window' is
+    // the time-boxed override the assurance run opens; it MUST carry an expiry,
+    // an admin row never does, and the org row is never a window (DB CHECKs).
+    createdBy: text("created_by", { enum: ["admin", "assurance-window"] }).notNull().default("admin"),
+    /** ADR-0181 FX3: a window override past this instant is ignored by the
+     * resolver and deleted (audited) by the guardrail-window expiry sweep */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (t) => [
     check("guardrail_configs_scope_check", sql`${t.scope} IN ('org','agent','connector')`),
+    check("guardrail_configs_created_by_check", sql`${t.createdBy} IN ('admin', 'assurance-window')`),
+    check(
+      "guardrail_configs_window_expiry_check",
+      sql`(${t.createdBy} = 'assurance-window') = (${t.expiresAt} IS NOT NULL)`,
+    ),
+    check("guardrail_configs_window_scope_check", sql`${t.createdBy} = 'admin' OR ${t.scope} <> 'org'`),
+    index("guardrail_configs_expires_at_idx").on(t.expiresAt).where(sql`${t.expiresAt} IS NOT NULL`),
     check(
       "guardrail_configs_scope_id_check",
       sql`(${t.scope} = 'org') = (${t.scopeId} IS NULL)`,
@@ -5412,17 +5470,17 @@ export const ANOMALY_STATUS_VALUES = ["open", "acknowledged", "dismissed"] as co
 export const FORECAST_METHOD_VALUES = ["run_rate", "ewma"] as const;
 
 /** The admin dial (ADR-0021 conventions). One row per project plus at most one
- * ORG-WIDE DEFAULT (projectId null). `enabled` defaults FALSE — ADR-0049 §3's
- * OFF-by-default posture, so a deployment that never turns this on behaves
- * byte-identically to before migration 0061. `lastEvaluatedAt` staying null is
- * how "nothing fires on a timer" is VISIBLE rather than merely documented. */
+ * ORG-WIDE DEFAULT (projectId null). `enabled` defaults TRUE since ADR-0181
+ * (migration 0159), which reverses ADR-0049 §3's OFF-by-default posture; an
+ * admin may switch it off (audited). `lastEvaluatedAt` staying null is how
+ * "nothing fires on a timer" is VISIBLE rather than merely documented. */
 export const spendMonitorPolicies = pgTable(
   "spend_monitor_policies",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     /** null = the org-wide default; a project row overrides it */
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
-    enabled: boolean("enabled").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(true),
     sensitivity: text("sensitivity", { enum: ANOMALY_SENSITIVITY_VALUES }).notNull().default("medium"),
     baselineDays: integer("baseline_days").notNull().default(30),
     /** ADR-0049 §5's alert-not-block bias, as the column default */
@@ -7037,15 +7095,15 @@ export const policySimulationFlips = pgTable(
 
 /**
  * The singleton that turns ADR-0040's honest-risks note ("activating without
- * previewing should be friction") into an enforceable posture. OFF by default:
- * an existing deployment activates exactly as it did before. ON, activating a
- * version that no completed simulation has previewed is REFUSED — and either
- * way the activation audit row records whether a preview existed, so the
- * omission is a permanent record rather than a missing one.
+ * previewing should be friction") into an enforceable posture. ON by default
+ * (ADR-0181): activating a version that no completed simulation has previewed
+ * is REFUSED. An admin may turn it off (audited, old -> new); either way the
+ * activation audit row records whether a preview existed, so the omission is
+ * a permanent record rather than a missing one.
  */
 export const policySimulationSettings = pgTable("policy_simulation_settings", {
   id: text("id").primaryKey().default("singleton"),
-  requirePreviewBeforeActivate: boolean("require_preview_before_activate").notNull().default(false),
+  requirePreviewBeforeActivate: boolean("require_preview_before_activate").notNull().default(true),
   defaultWindowDays: integer("default_window_days").notNull().default(30),
   defaultRowCap: integer("default_row_cap").notNull().default(5000),
   updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -9314,7 +9372,9 @@ export const builderAgentTools = pgTable(
     /** connectors.id for a connector, mcp_tools.id for an MCP tool. FK-free
      * (two target tables); a dangling ref renders as an unavailable tool. */
     refId: uuid("ref_id").notNull(),
-    requiresApproval: boolean("requires_approval").notNull().default(false),
+    /** Ask-first. ADR-0181: on by default; the agent's owner may turn it off
+     * per tool (the audited PUT /v1/builder/agents/:id/tools). */
+    requiresApproval: boolean("requires_approval").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("builder_agent_tools_uq").on(t.agentId, t.kind, t.refId)],
@@ -10412,3 +10472,26 @@ export const riskAcceptances = pgTable(
   ],
 );
 export type RiskAcceptanceRow = typeof riskAcceptances.$inferSelect;
+
+// --- ADR-0181 FX2 (migration 0160): audit rows written by a migration --------
+/**
+ * A migration that changes existing records (no grandfathering) must leave an
+ * audit trail, but SQL cannot write a CHAINED audit row: the hash chain is
+ * computed at `createDb` (packages/db/src/audit-chain.ts), and a raw INSERT
+ * would land as an un-chained row that verification counts as pre-genesis
+ * legacy. So a migration writes its audit rows HERE, in the same transaction
+ * as the change, and `runMigrations` drains them into `audit_log` through the
+ * chained path straight after (packages/db/src/migrate.ts). A row lives here
+ * only between a migration and the drain that follows it.
+ */
+export const migrationAuditOutbox = pgTable("migration_audit_outbox", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** the migration tag that wrote the row, e.g. `0160_strict_identity_followups` */
+  migration: text("migration").notNull(),
+  objectType: text("object_type").notNull(),
+  objectId: uuid("object_id"),
+  ruleId: text("rule_id").notNull(),
+  reason: text("reason").notNull(),
+  detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

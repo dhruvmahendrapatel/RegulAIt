@@ -3,7 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { snapshotOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the preset is measured from a relaxed (pre-hardening) posture; the strict defaults are restored after
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * AER-013 — THE HARDENED PRESET IS ONE DURABLE FACT (the ADR-0132 pattern).
@@ -39,7 +43,7 @@ const count = async (ruleId: string) =>
 
 async function restoreShippedDefaults() {
   const r = await app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: {
-    defaultPiiMode: "none", mcpAdmissionMode: "off", useCaseGateMode: "off",
+    defaultPiiMode: "none", mcpAdmissionMode: "enforce", useCaseGateMode: "off",
     dispatchAttributionRequired: false, semanticCachePolicy: "opt_in",
   } });
   expect(r.statusCode).toBe(200);
@@ -67,10 +71,16 @@ async function withAuditFailure(run: () => Promise<void>): Promise<void> {
   }
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file hardens FROM a fixed lax starting posture, which its
+  // helper writes; the strict values SB1 owns are recorded here and put back
+  // LAST in afterAll, so the shared database is handed on as it was found.
+  restoreSb1Posture = await snapshotOrgSettingsForTest(db, ["defaultPiiMode", "semanticCachePolicy"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), auditAnchorSink: null });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { useCaseGateMode: "off", dispatchAttributionRequired: false, mrmEnforced: false });
   await restoreShippedDefaults();
 });
 
@@ -78,6 +88,8 @@ afterAll(async () => {
   await db.execute(sql.raw("DROP TRIGGER IF EXISTS aer013_test_reject_audit ON audit_log"));
   await db.execute(sql.raw("DROP FUNCTION IF EXISTS aer013_test_reject_audit()"));
   await restoreShippedDefaults();
+  await restoreSb2Gates();
+  await restoreSb1Posture?.();
   await app.close();
 });
 
@@ -120,7 +132,7 @@ describe("atomicity — a failed audit insert rolls the settings change back", (
       const after = await loadOrgSettings(db);
       expect(after.defaultPiiMode).toBe("none");
       expect(after.mrmEnforced).toBe(false);
-      expect(after.mcpAdmissionMode).toBe("off");
+      expect(after.mcpAdmissionMode).toBe("enforce");
       expect(after.updatedAt?.getTime()).toBe(before.updatedAt?.getTime());
       expect(await count("org-posture-hardened")).toBe(presetBefore);
       expect(await count("mrm-enforcement-enabled")).toBe(mrmBefore);

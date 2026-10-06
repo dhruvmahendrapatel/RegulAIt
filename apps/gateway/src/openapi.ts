@@ -43,6 +43,7 @@
  * dependency-free package.
  */
 import { decideApprovalWithMeasuredSchema } from "./condition-metrics.js";
+import { putOverrideSchema } from "./guardrails.js";
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -187,6 +188,10 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "POST /v1/users/:userId/keys": {
     summary: "Mint an API key for a user. The plaintext is returned exactly once and never stored.",
     body: createApiKeySchema,
+    responseNote:
+      "201 with the token (once) and its `expiresAt`; the issue is audited as `api-key-issued` (never the token). " +
+      "409 `mfa_enrollment_required` when the organization requires MFA for the target user and they have not " +
+      "enrolled TOTP: no key is issued (audited; ADR-0181). A lifetime beyond the org ceiling is refused by name (audited).",
   },
   "GET /v1/keys": { summary: "List API keys (metadata only — never the token)." },
   "POST /v1/keys/:keyId/revoke": { summary: "Revoke an API key immediately." },
@@ -236,6 +241,16 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "200 with `evaluation: \"evaluated\"` (the stage re-evaluated on this report) or `\"stored_for_later\"` (the stage is not executing yet); 202 with `evaluation: \"deferred_to_running_executor\"` when another executor is mid-evaluation of the stage — it folds this report into its verdict, or re-evaluates once if it ends without committing. Always carries `round`.",
   },
   "POST /v1/workflows/instances/:instanceId/advance": { summary: "Advance a workflow instance past its current stage, subject to that stage's gates." },
+
+  // ADR-0181 (security review): internal (rendered only with ?include=all), but
+  // its body is bound so the guardrail window's `assuranceWindow` field is stated
+  "PUT /v1/guardrails/config/:scope/:scopeId": {
+    summary:
+      "Set an agent or connector guardrail override (admin). `assuranceWindow.ttlMinutes` (1-60) makes it a time-boxed " +
+      "window override that the server ignores once expired and the expiry sweep deletes, audited; a window never " +
+      "replaces an admin's override in force (409).",
+    body: putOverrideSchema,
+  },
 
   "GET /v1/audit": { summary: "The audit log — every governed decision, paged, filterable by user, object type, effect and time window." },
   "GET /v1/audit.csv": { summary: "The audit log as a streamed CSV export, with an explicit disclosure when rows fall outside the exported window." },
@@ -390,7 +405,26 @@ export function buildOpenApiDocument(
       ...(auth === "public"
         ? {}
         : { "401": { description: "Missing, invalid, or revoked credential." } }),
-      ...(auth === "admin" ? { "403": { description: "Caller is not an administrator." } } : {}),
+      // ADR-0181: an API key answers to the org MFA requirement like a session
+      // does, so any key-authenticated route can refuse a covered owner who has
+      // not enrolled TOTP
+      ...(auth === "admin"
+        ? {
+            "403": {
+              description:
+                "Caller is not an administrator (`admin_only`), or `mfa_enrollment_required`: the organization requires " +
+                "MFA for the credential's owner, who has not enrolled TOTP (ADR-0181). Audited.",
+            },
+          }
+        : auth === "user"
+          ? {
+              "403": {
+                description:
+                  "Refused. Among the reasons: `mfa_enrollment_required`, when the organization requires MFA for the " +
+                  "credential's owner, who has not enrolled TOTP (ADR-0181). Audited.",
+              },
+            }
+          : {}),
       "429": { description: "Rate limited. Retry after the `retry-after` header." },
     };
 

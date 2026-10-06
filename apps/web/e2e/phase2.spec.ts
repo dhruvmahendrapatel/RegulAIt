@@ -21,6 +21,7 @@
  * proactive settings read, a developer from the 409 they can only learn from.
  */
 import { expect, test, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,13 +116,15 @@ test("admin login: one-time password → forced change → dashboard shows admin
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  await expect(page.getByText("Your password is one-time")).toBeVisible();
+  // ADR-0181: the admin answers the TOTP challenge if already enrolled...
+  await passTotp(page, "admin@regulait.local", page.getByText("Your password is one-time"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(ADMIN_PASSWORD);
   await page.getByLabel("Confirm new password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Set password & continue" }).click();
 
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  // ...or enrols now, from the secret on screen
+  await passTotp(page, "admin@regulait.local", page.getByRole("heading", { name: /Welcome back/ }));
   // ADR-0094 replaced the always-visible 11-section rail with a home launcher
   // plus a suite-scoped sidebar. The old assertion (every ADR-0093 section
   // heading visible at once) is restated at equivalent strength for the new
@@ -729,9 +732,10 @@ test("key custody enforced: the key card explains the state instead of offering 
   devTrack.assertClean("key custody — developer view");
   await dev.close();
 
-  // restore the deployment posture for anything that runs after this
+  // restore the deployment posture for anything that runs after this: key
+  // custody is ON by default (ADR-0181), so the restore is a no-op save
   await nav("Client access", "Client access");
-  await page.getByLabel("Enforce key custody").selectOption("false");
+  await page.getByLabel("Enforce key custody").selectOption("true");
   await page.getByRole("button", { name: "Save posture" }).click();
   await expect(page.getByText("Posture saved").first()).toBeVisible();
   track.assertClean("key custody — restored");

@@ -36,7 +36,7 @@
  *     ADR-0049 §3 describes a scheduled evaluator; ADR-0064 finally built the
  *     scheduler that drives it. `runSpendAnomalyEvaluation` below is the ONE
  *     implementation, reached two ways: by the ADR-0064 tick loop (when
- *     REGULAIT_SCHEDULER=on, which is OFF by default) and by
+ *     REGULAIT_SCHEDULER, ON by default since ADR-0181) and by
  *     `POST /v1/spend/anomalies/evaluate` for an operator or an external cron.
  *     `spend_monitor_policies` rows remain the evaluator's DEFINITION, and
  *     `lastEvaluatedAt` staying null is still how a deployment running neither
@@ -105,6 +105,7 @@ import {
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -349,7 +350,9 @@ export async function computeForecast(
 // ---------------------------------------------------------------------------
 
 /** The effective policy for a project: its own row if it has one, else the
- * org-wide default row, else the built-in defaults (which are OFF). */
+ * org-wide default row, else the built-in defaults (which are ON since
+ * ADR-0181 — the same value as the column default, so "no row" and "a fresh
+ * row" can never disagree). */
 export async function effectivePolicy(
   db: Db,
   projectId: string,
@@ -367,7 +370,7 @@ export async function effectivePolicy(
   return {
     synthetic: true,
     projectId: null,
-    enabled: false,
+    enabled: true,
     sensitivity: "medium",
     baselineDays: 30,
     action: "alert",
@@ -420,7 +423,7 @@ export async function evaluateProjectAnomalies(
       projectName: args.projectName,
       evaluated: false,
       reason:
-        "spend monitoring is not enabled for this project (ADR-0049 §3: OFF by default, admin-enabled) — " +
+        "spend monitoring is switched off for this project by an admin (ON by default since ADR-0181) — " +
         "no baseline is computed and no claim is made",
       verdicts: [],
     };
@@ -986,6 +989,9 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
     const [existing] = body.projectId
       ? await db.select().from(spendMonitorPolicies).where(eq(spendMonitorPolicies.projectId, body.projectId))
       : await db.select().from(spendMonitorPolicies).where(sql`${spendMonitorPolicies.projectId} IS NULL`);
+    // ADR-0181: the audit row records old -> new. With no row of its own the
+    // policy in force was the inherited one (org default row, else built-in).
+    const previous = existing ?? (await effectivePolicy(db, body.projectId ?? "00000000-0000-0000-0000-000000000000"));
     const [row] = existing
       ? await db.update(spendMonitorPolicies).set(values).where(eq(spendMonitorPolicies.id, existing.id)).returning()
       : await db.insert(spendMonitorPolicies).values(values).returning();
@@ -996,7 +1002,21 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
       `admin set the spend-monitor policy for ${body.projectId ? "a project" : "the org-wide default"}: ` +
         `enabled=${body.enabled}, sensitivity=${body.sensitivity}, baseline=${body.baselineDays}d, ` +
         `action=${body.action}. Storing a policy computes nothing — an operator must drive the evaluator.`,
-      { phase: "spend-monitor-policy", enabled: body.enabled, sensitivity: body.sensitivity, action: body.action },
+      {
+        phase: "spend-monitor-policy",
+        enabled: body.enabled,
+        sensitivity: body.sensitivity,
+        action: body.action,
+        transitions: settingTransitions(previous, {
+          enabled: values.enabled,
+          sensitivity: values.sensitivity,
+          baselineDays: values.baselineDays,
+          action: values.action,
+          signals: values.signals,
+          activeHourStart: values.activeHourStart,
+          activeHourEnd: values.activeHourEnd,
+        }),
+      },
     );
     return { policy: row, note: "Nothing drives this. POST /v1/spend/anomalies/evaluate is the driver." };
   });

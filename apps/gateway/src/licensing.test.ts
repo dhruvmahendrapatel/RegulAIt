@@ -1,4 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { generateKeyPairSync, randomBytes, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -27,6 +31,10 @@ import {
 } from "@regulait/db";
 import { LICENSE_SCHEMA_ID, canonicalLicenseBytes, licenseDocumentSchema } from "@regulait/shared";
 import { verifyLicenseArtifact } from "./licensing.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 
 /**
  * ADR-0052 — LICENSING & SEATS, proved by attack.
@@ -178,7 +186,9 @@ beforeAll(async () => {
 
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const u = await makeUser("lic-member@example.com");
   expect(u.statusCode).toBe(201);
@@ -200,12 +210,14 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await db.delete(licenseVerifications);
   await db.delete(licenses);
   if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
   if (prevKeyring === undefined) delete process.env.REGULAIT_LICENSE_KEYRING;
   else process.env.REGULAIT_LICENSE_KEYRING = prevKeyring;
   rmSync(keyring, { recursive: true, force: true });
+  await restoreSb2Gates();
 });
 
 describe("ADR-0052 — a valid license verifies OFFLINE", () => {
@@ -808,9 +820,13 @@ describe("ADR-0052 §4 (B7b) — the remaining four tier flags are ENFORCED at t
     // provider registration passes the LICENSE gate: the next gate (egress
     // preflight of a non-allow-listed loopback URL) answers instead. The full
     // 201 lives in custom-providers.test.ts under its license fixture.
-    const prov = await app.inject({
-      method: "POST", url: "/v1/custom-model-providers", headers: AUTH, payload: providerPayload("lic-flag-prov"),
-    });
+    // ADR-0181: the capability ships OFF, so it is switched on for this call.
+    const restoreCustom = await setOrgSettingsForTest(db, { customModelProvidersEnabled: true });
+    const prov = await Promise.resolve(
+      app.inject({
+        method: "POST", url: "/v1/custom-model-providers", headers: AUTH, payload: providerPayload("lic-flag-prov"),
+      }),
+    ).finally(restoreCustom);
     expect(prov.statusCode, prov.body).toBe(400);
     expect(prov.json().error).toBe("egress_blocked");
   });

@@ -165,7 +165,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
 
   // --- 5b. Use-case dispatch gate (ADR-0080 B3 amendment) ------------------
   const useCaseGate = useSection({
-    useCaseGateMode: str(s, "useCaseGateMode") || "off",
+    useCaseGateMode: str(s, "useCaseGateMode") || "enforce",
   });
 
   // --- 5b1. Continuous-assurance gate (ADR-0180) ---------------------------
@@ -176,7 +176,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
 
   // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
   const attribution = useSection({
-    dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "false",
+    dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "true",
   });
 
   // --- 5b3. Workflow check-report round binding (AER-048) ------------------
@@ -328,8 +328,8 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           </Field>
           <Field label="Semantic cache">
             <Select value={opt.f.semanticCachePolicy} onChange={(e) => opt.set("semanticCachePolicy", e.target.value)}>
-              <option value="opt_in">opt-in (caller asks — default)</option>
-              <option value="off">off (even if the caller asks)</option>
+              <option value="opt_in">opt-in (caller asks)</option>
+              <option value="off">off (even if the caller asks — default)</option>
               <option value="always">always (every eligible dispatch)</option>
             </Select>
           </Field>
@@ -337,7 +337,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           <Field label="Compaction failure">
             <Select value={opt.f.compactionFailureMode} onChange={(e) => opt.set("compactionFailureMode", e.target.value)}>
               <option value="fail_open">fail open (turn proceeds, full history)</option>
-              <option value="fail_closed">fail closed (turn is refused)</option>
+              <option value="fail_closed">fail closed (turn is refused — default)</option>
             </Select>
           </Field>
           <Field label="Summarizer">
@@ -382,14 +382,14 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Compliance defaults saved (audited)",
             )
           }
-          help="Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored; regulated orgs can turn it off to force every key through the encrypted store, or narrow which providers may use it."
+          help="Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored. It is OFF by default, so every key goes through the encrypted store (Model Credentials); turning it on is an audited relaxation, and you can narrow which providers may use it."
         >
           <Field label="Default PII mode (the floor: unclassified projects + unattributed calls)">
             <Select value={comp.f.defaultPiiMode} onChange={(e) => comp.set("defaultPiiMode", e.target.value)}>
-              <option value="none">none — no enforcement (default)</option>
+              <option value="none">none — no enforcement</option>
               <option value="log">log — record category counts</option>
               <option value="warn">warn — proceed with warning</option>
-              <option value="block">block — deny / withhold</option>
+              <option value="block">block — deny / withhold (default)</option>
             </Select>
           </Field>
           <Field label="Env-var key fallback">
@@ -433,8 +433,8 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               value={custom.f.customModelProvidersEnabled}
               onChange={(e) => custom.set("customModelProvidersEnabled", e.target.value)}
             >
-              <option value="true">enabled (default — admins may register endpoints)</option>
-              <option value="false">disabled (capability removed org-wide)</option>
+              <option value="true">enabled (admins may register endpoints)</option>
+              <option value="false">disabled (capability removed org-wide — default)</option>
             </Select>
           </Field>
         </SectionShell>
@@ -452,15 +452,15 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "MCP egress posture saved (audited)",
             )
           }
-          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Open (default) = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony — the guard fires on the risky public-internet case, not the ordinary internal one. Strict = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
+          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Strict (default) = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Open = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony; choosing it relaxes the strict default and is audited. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
         >
           <Field label="Private-range default for MCP servers">
             <Select
               value={mcpEgress.f.mcpPrivateRangesDefault}
               onChange={(e) => mcpEgress.set("mcpPrivateRangesDefault", e.target.value)}
             >
-              <option value="true">open (default — private-LAN MCP servers just work)</option>
-              <option value="false">strict (each server needs an explicit opt-in)</option>
+              <option value="false">strict (default — each server needs an explicit opt-in)</option>
+              <option value="true">open (private-LAN MCP servers just work — relaxed)</option>
             </Select>
           </Field>
         </SectionShell>
@@ -482,15 +482,15 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Deployment egress posture saved (audited)",
             )
           }
-          help="The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — api.anthropic.com, slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'. This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = today's behaviour on a hosted or BYOC box."
+          help="The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — api.anthropic.com, slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'. This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict (default) = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = the deploy mode decides, which on a hosted or BYOC box means compiled endpoints are not adjudicated; choosing it relaxes the strict default and is audited."
         >
           <Field label="Compiled vendor endpoints">
             <Select
               value={compiledEgress.f.egressCompiledDefaultPolicy}
               onChange={(e) => compiledEgress.set("egressCompiledDefaultPolicy", e.target.value)}
             >
-              <option value="inherit">inherit (default — the server's deploy mode decides)</option>
-              <option value="strict">strict (adjudicate them even on a hosted/BYOC box)</option>
+              <option value="strict">strict (default — adjudicate them on every deployment)</option>
+              <option value="inherit">inherit (the server's deploy mode decides — relaxed)</option>
             </Select>
           </Field>
         </SectionShell>
@@ -568,7 +568,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               onChange={(e) => approvals.set("approvalDelegationEnabled", e.target.value)}
             >
               <option value="true">enabled (delegation windows apply)</option>
-              <option value="false">disabled (strict separation of duties)</option>
+              <option value="false">disabled (strict separation of duties — default)</option>
             </Select>
           </Field>
         </SectionShell>
@@ -586,16 +586,16 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Use-case gate saved (audited)",
             )
           }
-          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'off' (default) keeps today's behaviour exactly; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse before arming it; 'enforce' refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Fully reversible."
+          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'enforce' (the strict default) refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue; 'off' lets approval register intent and gate nothing; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Every change is audited with the old and the new value."
         >
           <Field label="Use-case dispatch gate">
             <Select
               value={useCaseGate.f.useCaseGateMode}
               onChange={(e) => useCaseGate.set("useCaseGateMode", e.target.value)}
             >
-              <option value="off">off — approval registers intent, nothing is refused (default)</option>
+              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case (strict default)</option>
               <option value="warn">warn — record + annotate what enforce would refuse</option>
-              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case</option>
+              <option value="off">off — approval registers intent, nothing is refused</option>
             </Select>
           </Field>
         </SectionShell>
@@ -648,18 +648,18 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Attribution mandate saved (audited)",
             )
           }
-          help="Attribution is normally optional: a call that names no project still runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. Turn this on and a governed model dispatch that names no project is refused instead — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. Turn it on when you need chargeback to be complete, or when you are arming the use-case gate above: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Fully reversible."
+          help="Attribution is required by default: a governed model dispatch that names no project is refused — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. That keeps chargeback complete and keeps the use-case gate above honest: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project. Relax it to 'optional' and a call that names no project runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Every change is audited with the old and the new value."
         >
           <Field label="Require project attribution (governed dispatch)">
             <Select
               value={attribution.f.dispatchAttributionRequired}
               onChange={(e) => attribution.set("dispatchAttributionRequired", e.target.value)}
             >
-              <option value="false">
-                optional (default) — an unattributed dispatch runs, cost lands in Unattributed
-              </option>
               <option value="true">
-                required — refuse a dispatch that names no project (409 attribution_required)
+                required (strict default) — refuse a dispatch that names no project (409 attribution_required)
+              </option>
+              <option value="false">
+                optional — an unattributed dispatch runs, cost lands in Unattributed
               </option>
             </Select>
           </Field>

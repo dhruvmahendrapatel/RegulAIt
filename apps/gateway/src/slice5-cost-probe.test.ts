@@ -17,6 +17,14 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * SLICE-5 ADVERSARIAL PROBE — the pillar-5/pillar-6 invariant, attacked at the
@@ -158,7 +166,9 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const up = await startUpstream();
   upstreamClose = up.close;
   const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: "s5-server", url: up.url } });
@@ -170,8 +180,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await upstreamClose();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

@@ -17,6 +17,9 @@ import {
   type GuardrailConfigRow,
 } from "@regulait/db";
 import type { EvalJudge, EvalJudgeRequest, EvalJudgeVerdict } from "@regulait/shared";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0044 — THE EVALUATION HARNESS, proved by attack.
@@ -218,6 +221,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const [existingOrg] = await db
     .select()
@@ -325,6 +329,7 @@ afterAll(async () => {
   // the agent's system prompt is per-agent (ev- prefixed) but reset anyway so a
   // later suite reading the registry sees the shipped shape
   await setSystemPrompt(subjectAgentId, null);
+  await restoreSb2Gates();
 });
 
 // ---------------------------------------------------------------------------

@@ -3,10 +3,11 @@
  *
  * THE PROPERTY EACH BLOCK EXISTS TO HOLD:
  *
- *  1. BYTE-IDENTICAL AT THE SHIPPED DEFAULTS. With both org dials NULL — the
- *     state migration 0104 leaves behind — a key issued with no `expiresAt`
- *     gets `expiresAt: null`, authenticates, and reports `state: "active"`.
- *     An upgrade changes nothing until an admin acts (ADR-0021's invariant).
+ *  1. STRICT AT THE SHIPPED DEFAULTS (ADR-0181, migration 0156). A fresh org
+ *     reads 90 / 365 days, a key issued with no `expiresAt` expires in 90
+ *     days, and "never expires" is refused by the ceiling. An admin who
+ *     clears both dials (audited, old -> new) gets the pre-0181 behaviour:
+ *     no expiry, `state: "active"`.
  *  2. A KEY WITH A TTL AUTHENTICATES BEFORE AND FAILS AFTER. The clock is
  *     moved by writing `expires_at` directly rather than by sleeping — the
  *     test asserts the ENFORCEMENT, not the passage of time.
@@ -25,8 +26,9 @@
  *  6. THE LIFECYCLE READ shows all four states, so an admin sees what is about
  *     to break before it breaks.
  *
- * SHARED-STATE DISCIPLINE. This file mutates the `org_settings` singleton's
- * two API-key TTL dials and restores BOTH to the shipped NULL in `afterAll`;
+ * SHARED-STATE DISCIPLINE (M-068). This file mutates the `org_settings`
+ * singleton's two API-key TTL dials and restores BOTH to the shipped strict
+ * 90 / 365 in `afterAll`;
  * it deletes exactly the users it created (keys cascade); and every audit
  * count assertion is a DELTA over a timestamp taken inside the test, never an
  * absolute count.
@@ -125,9 +127,14 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 });
 
+/** ADR-0181: the shipped strict dials, which every block below restores */
+const STRICT_TTL = { apiKeyDefaultTtlDays: 90, apiKeyMaxTtlDays: 365 } as const;
+/** the pre-0181 posture an admin may still choose: no default, no ceiling */
+const RELAXED_TTL = { apiKeyDefaultTtlDays: null, apiKeyMaxTtlDays: null } as const;
+
 afterAll(async () => {
-  // restore the singleton to the SHIPPED posture for whatever runs next
-  await setTtlDials({ apiKeyDefaultTtlDays: null, apiKeyMaxTtlDays: null });
+  // restore the singleton to the SHIPPED (strict) posture for whatever runs next
+  await setTtlDials(STRICT_TTL);
   if (createdUserIds.length > 0) {
     await db.delete(users).where(inArray(users.id, createdUserIds));
   }
@@ -137,13 +144,38 @@ afterAll(async () => {
 // 1. THE DEFAULTS CHANGE NOTHING
 // ===========================================================================
 
-describe("ADR-0098 — the shipped defaults are byte-identical to pre-0098", () => {
-  it("both TTL dials ship NULL, and a key issued with no expiry never expires", async () => {
+describe("ADR-0181 — the shipped dials are strict, and an admin may relax them", () => {
+  it("both TTL dials ship 90 / 365, and a key issued with no expiry expires in 90 days", async () => {
     const settings = (
       await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" })
     ).json().settings;
-    expect(settings.apiKeyDefaultTtlDays).toBeNull();
-    expect(settings.apiKeyMaxTtlDays).toBeNull();
+    expect(settings.apiKeyDefaultTtlDays).toBe(90);
+    expect(settings.apiKeyMaxTtlDays).toBe(365);
+
+    const userId = await makeUser("strict");
+    const issued = await issueKey(userId, { name: "strict-default" });
+    expect(issued.statusCode).toBe(201);
+    expect(issued.json().expirySource).toBe("org_default");
+    const expiresAt = new Date(issued.json().expiresAt).getTime();
+    expect(expiresAt).toBeGreaterThan(Date.now() + 89 * DAY_MS);
+    expect(expiresAt).toBeLessThan(Date.now() + 91 * DAY_MS);
+    // "never expires" is the longest lifetime there is: over the ceiling
+    const forever = await issueKey(userId, { name: "forever", expiresAt: null });
+    expect(forever.statusCode).toBe(422);
+    expect(forever.json().error).toBe("api_key_expiry_exceeds_ceiling");
+  });
+
+  it("clearing both dials is audited old -> new, and then a key issued with no expiry never expires", async () => {
+    const since = new Date(Date.now() - 1000);
+    await setTtlDials(RELAXED_TTL);
+    const [audit] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "org-settings-updated"), gte(auditLog.at, since)));
+    expect((audit!.detail as { transitions: unknown }).transitions).toEqual({
+      apiKeyDefaultTtlDays: { from: 90, to: null },
+      apiKeyMaxTtlDays: { from: 365, to: null },
+    });
 
     const userId = await makeUser("default");
     const issued = await issueKey(userId, { name: "no-expiry" });
@@ -160,12 +192,15 @@ describe("ADR-0098 — the shipped defaults are byte-identical to pre-0098", () 
     expect(listed.json().keys).toHaveLength(1);
     expect(listed.json().keys[0].expiresAt).toBeNull();
     expect(listed.json().keys[0].state).toBe("active");
+    await setTtlDials(STRICT_TTL);
   });
 
   it("an EXISTING row (expires_at NULL, as migration 0104 leaves every one) still authenticates", async () => {
     const userId = await makeUser("grandfathered");
     const issued = await issueKey(userId, { name: "grandfathered" });
     // exactly the shape migration 0104 leaves behind on an upgraded install
+    // (migration 0156 sets the dials, not the expiry of keys already issued)
+    await db.update(apiKeys).set({ expiresAt: null }).where(eq(apiKeys.id, issued.json().id));
     const [row] = await db.select().from(apiKeys).where(eq(apiKeys.id, issued.json().id));
     expect(row!.expiresAt).toBeNull();
     expect((await callAs(issued.json().token)).statusCode).toBe(200);
@@ -314,6 +349,15 @@ describe("ADR-0098 — enforcement in authenticate()", () => {
 // ===========================================================================
 
 describe("ADR-0098 — the org default and the ceiling", () => {
+  // each case below sets the one dial it is about, from the relaxed posture
+  // (no default, no ceiling); the strict dials come back afterwards (M-068)
+  beforeAll(async () => {
+    await setTtlDials(RELAXED_TTL);
+  });
+  afterAll(async () => {
+    await setTtlDials(STRICT_TTL);
+  });
+
   it("a DEFAULT TTL applies when the caller supplies nothing, and is disclosed", async () => {
     await setTtlDials({ apiKeyDefaultTtlDays: 30 });
     const userId = await makeUser("orgdefault");

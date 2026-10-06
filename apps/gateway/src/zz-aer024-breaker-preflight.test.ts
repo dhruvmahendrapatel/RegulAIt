@@ -9,6 +9,14 @@ import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * AER-024 — AN OPEN BREAKER MUST NOT HIDE AN ADMISSION HOLD OR AN EGRESS REFUSAL.
@@ -44,12 +52,14 @@ const setAdmissionMode = async (mcpAdmissionMode: "off" | "enforce") => {
 beforeAll(async () => {
   db = createDb(databaseUrl);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, {
     bootstrapToken: "aer024-preflight-bootstrap",
     breaker: { failureThreshold: 2, cooldownMs: 30_000 },
     retry: { maxAttempts: 1 },
     timeouts: { mcpConnectMs: 2000, mcpListToolsMs: 2000, mcpCallToolMs: 2000 },
   });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   gatewayUrl = await app.listen({ host: "127.0.0.1", port: 0 });
   const user = await app.inject({ method: "POST", url: "/v1/users", headers: admin,
     payload: { email: `aer024-${Date.now()}@example.test`, displayName: "Preflight test" } });
@@ -61,8 +71,10 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await setAdmissionMode("off");
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

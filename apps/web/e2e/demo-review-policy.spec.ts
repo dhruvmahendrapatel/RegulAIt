@@ -19,6 +19,7 @@
  * uses no policy — is never affected by it.
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { passTotp, reprovisionTotp } from "./totp-sign-in";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
@@ -38,16 +39,21 @@ async function signIn(page: Page, email: string, password: string) {
   const users = (await api("/v1/users")) as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
   expect(id, `seeded persona ${email} must exist`).toBeTruthy();
+  // ADR-0181 (FX2): the seed enrolled the admin's TOTP outside this run; re-provision it
+  await reprovisionTotp(BASE, BOOT, email);
   const minted = (await api(`/v1/users/${id}/set-initial-password`, { method: "POST", body: JSON.stringify({ force: true }) })) as { password: string };
   await page.goto("/ui");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
+  // ADR-0181: an admin who already enrolled answers the TOTP challenge first
+  await passTotp(page, email, page.getByLabel("Current (one-time) password"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(password);
   await page.getByLabel("Confirm new password").fill(password);
   await page.getByRole("button", { name: "Set password & continue" }).click();
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  // ...and an admin who has not enrols now, from the secret on screen
+  await passTotp(page, email, page.getByRole("heading", { name: /Welcome back/ }));
 }
 
 async function persona(browser: Browser, email: string, password: string) {

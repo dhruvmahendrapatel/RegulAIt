@@ -6,8 +6,9 @@
  * REGULAIT_DEMO_LICENSE=1, makes the seed mint its ephemeral licence into a
  * named-volume keyring the gateway also reads. Pinned here:
  *
- *  1. the image's start script: only the exact value "1" (with SEED_DEMO=1,
- *     and not on a byoc/air_gapped deployment) sets REGULAIT_EPHEMERAL_LICENSE
+ *  1. the image's start script: only the exact value "1" (not on a
+ *     byoc/air_gapped deployment; ADR-0181 FX3: it seeds by itself, since
+ *     SEED_DEMO now defaults to 0) sets REGULAIT_EPHEMERAL_LICENSE
  *     and REGULAIT_LICENSE_KEYRING; anything else leaves both UNSET, so the
  *     gateway reads its default keyring exactly as before;
  *  2. an empty REGULAIT_LICENSE_KEYRING falls back to the default keyring;
@@ -30,7 +31,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { auditLog, createDb, eq, inArray, licenses, sql, users, type Db } from "@regulait/db";
+import { and, auditLog, createDb, eq, inArray, licenses, sql, users, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
 import { DEMO_TRAFFIC_KEY_NAME } from "./demo-traffic-lib.js";
@@ -142,11 +143,24 @@ describe("docker-start.sh: the switch", () => {
     expect(r.calls.at(-1)).toBe(`apps/gateway/dist/main.js ${DEMO_ENV}`);
   });
 
-  it("ignored without SEED_DEMO=1 (nothing would mint)", () => {
-    const r = runStart({ SEED_DEMO: "0", REGULAIT_DEMO_LICENSE: "1" });
-    expect(r.calls).toEqual([`apps/gateway/dist/main.js ${UNSET}`]);
-    expect(r.mcp).toEqual([]);
-    expect(r.stderr).toContain("REGULAIT_DEMO_LICENSE=1 ignored");
+  // ADR-0181 FX3: compose and the installer now default SEED_DEMO to 0, and the switch is
+  // itself the explicit demo signal, so it seeds (and prepares) without SEED_DEMO=1
+  it("ON with SEED_DEMO=0 (the compose default): the switch alone seeds and prepares the demo", () => {
+    const r = runStart({ SEED_DEMO: "0", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "0" });
+    expect(r.calls).toEqual([
+      KEY_STEP,
+      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
+      step("demo-docker-prepared"),
+      `apps/gateway/dist/main.js ${DEMO_ENV}`,
+    ]);
+    expect(r.stderr).not.toContain("REGULAIT_DEMO_LICENSE=1 ignored");
+  });
+
+  it("ADR-0181 FX3: every seed the start script runs carries the explicit --seed-demo signal", () => {
+    const src = readFileSync(startScript, "utf8");
+    const seeds = src.split("\n").filter((l) => l.includes("dist/seed.js") && !l.trimStart().startsWith("#"));
+    expect(seeds.length).toBeGreaterThan(0);
+    for (const l of seeds) expect(l).toContain("dist/seed.js --seed-demo");
   });
 
   it.each(["byoc", "air_gapped"])("ignored on a %s deployment", (mode) => {
@@ -425,7 +439,8 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
   let setResult: Awaited<ReturnType<typeof setDemoPasswords>> | undefined;
 
   function seed(): void {
-    const r = spawnSync(process.execPath, [seedScript], {
+    // ADR-0181 FX3: the seed runs only on an explicit demo signal, as docker-start.sh passes it
+    const r = spawnSync(process.execPath, [seedScript, "--seed-demo"], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -506,6 +521,33 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
     expect(runs[1]!.stdout).toContain("(already set — unchanged)");
   });
 
+  it("ADR-0181 FX2: the seed-enrolled admin authenticator is re-provisioned by demo:set-passwords, audited; she enrols at sign-in", async () => {
+    // the first seed enrolled Ada (her key works under mfaRequired) ...
+    expect(runs[0]!.stdout).toContain("admin TOTP (shown ONCE");
+    // ... the presenter's password set cleared that enrolment, audited ...
+    const [ada] = await scratch.select().from(users).where(eq(users.email, "admin@regulait.local"));
+    expect(ada!.totpEnabled).toBe(false);
+    expect(ada!.totpSecretCiphertext).toBeNull();
+    expect(setResult?.lines.join("\n")).toContain("authenticator re-provisioned");
+    const [cleared] = await scratch
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "mfa-cleared-by-admin"), eq(auditLog.objectId, ada!.id)));
+    expect(cleared!.detail).toMatchObject({ via: "demo:set-passwords" });
+    // ... the re-seed neither re-enrolled her nor failed ...
+    expect(runs[1]!.stdout).toContain("admin TOTP: not enrolled");
+    // ... and her password session is held at TOTP enrolment (MFA still required)
+    const login = await app!.inject({
+      method: "POST", url: "/auth/login",
+      headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
+      payload: { identifier: "admin", password: SYNTHETIC },
+    });
+    const cookie = login.cookies.find((c) => c.name === "regulait_session")!.value;
+    const held = await app!.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+    expect(held.statusCode).toBe(403);
+    expect(held.json().error).toBe("mfa_enrollment_required");
+  });
+
   it("each persona signs in with the demo password after the re-seed", async () => {
     for (const identifier of ["admin", "dana", "avery"]) {
       const res = await app!.inject({
@@ -526,11 +568,13 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
     // a seeded database (two seed runs, as after a restart) is NOT prepared: the seed mints no demo-traffic key
     const before = run(scratchUrl);
     expect(before.status, before.stdout + before.stderr).toBe(3);
-    // demo:traffic mints its keys before it sends traffic — the marker
-    const [ada] = await scratch.select({ id: users.id }).from(users).where(eq(users.email, "admin@regulait.local"));
+    // demo:traffic mints its keys before it sends traffic — the marker (Dana's
+    // first: ADR-0181 FX2 issues no key to an admin who has not enrolled TOTP,
+    // and demo:set-passwords re-provisioned Ada's authenticator)
+    const [dana] = await scratch.select({ id: users.id }).from(users).where(eq(users.email, "dana@regulait.local"));
     const minted = await app!.inject({
       method: "POST",
-      url: `/v1/users/${ada!.id}/keys`,
+      url: `/v1/users/${dana!.id}/keys`,
       headers: { authorization: `Bearer ${BOOT}` },
       payload: { name: DEMO_TRAFFIC_KEY_NAME },
     });

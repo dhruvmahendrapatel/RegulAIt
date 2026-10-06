@@ -21,6 +21,13 @@
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { generateTotpSecret, verifyTotp } from "../../gateway/dist/totp.js";
+import { passTotp, recordTotpSecret } from "./totp-sign-in";
+
+/** ADR-0181: the mocked gateway's admins have TOTP enrolled under this
+ * synthetic secret; codes are checked with the gateway's own TOTP code */
+const MOCK_TOTP_SECRET = generateTotpSecret();
+let mockTotpLastStep: number | null = null;
 
 const AGENT = "22222222-2222-4222-8222-222222222222";
 const VENDOR = "99999999-1111-4111-8111-999999999999";
@@ -123,7 +130,12 @@ async function mockGateway(page: Page, patch: Partial<Gateway> = {}): Promise<Ga
     const person = gw.user === "bob"
       ? { id: "b", email: "bob@example.test", displayName: "Bob Other" }
       : { id: "u", email: "ada@example.test", displayName: "Ada Owner" };
-    if (p === "/auth/login") {
+    // ADR-0181: an admin with TOTP enrolled gives a code after the password
+    if (p === "/auth/login") return json(route, { mfaRequired: true, pendingToken: "synthetic-pending-token" });
+    if (p === "/auth/mfa/verify") {
+      const step = verifyTotp(MOCK_TOTP_SECRET, String(body.code ?? ""), mockTotpLastStep);
+      if (step === null) return json(route, { error: "invalid_code" }, 401);
+      mockTotpLastStep = step;
       gw.user = gw.signInAs;
       return json(route, {});
     }
@@ -602,9 +614,11 @@ const submitted = (page: Page) => page.getByRole("status").filter({ hasText: "Su
 const notSaved = (page: Page) => page.getByRole("main").getByRole("alert").filter({ hasText: "Your draft could not be saved" });
 
 async function signIn(page: Page, email: string) {
+  recordTotpSecret(email, MOCK_TOTP_SECRET);
   await page.getByLabel("Email or username").fill(email);
   await page.getByLabel("Password", { exact: true }).fill("synthetic-password-for-a-mock");
   await page.getByRole("button", { name: "Sign in" }).click();
+  await passTotp(page, email, page.locator("button[aria-haspopup=menu]"));
 }
 
 test.describe("ADR-0179: a create waits for a durable draft save", () => {

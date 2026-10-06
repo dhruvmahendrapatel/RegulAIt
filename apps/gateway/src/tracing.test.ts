@@ -51,6 +51,7 @@
  * Everything it creates is `tr-` prefixed and removed.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +84,14 @@ import {
 } from "@regulait/db";
 import { buildSpanTree, flattenSpanTree, buildOtlpPayload, otlpSpanId, otlpTraceId } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -232,14 +241,25 @@ async function spansOf(traceId: string): Promise<TraceSpanRow[]> {
     .orderBy(traceSpans.seq);
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await app.ready();
 
   const [prior] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   priorOrg = prior ? { ...prior } : null;
+  // ADR-0181: content capture ships OFF. This file pins what a CAPTURED
+  // preview looks like, so it opts in explicitly; afterAll restores the prior
+  // value (the strict default on a fresh database).
+  await db.update(orgSettings).set({ tracingCaptureContent: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 
   const ana = await makeUser("tr-ana@example.com");
   anaId = ana.id;
@@ -340,6 +360,8 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
+  await restoreStrictAdmission?.();
   // Restore the org singleton EXACTLY — every other suite reads it.
   if (priorOrg) {
     await db
@@ -369,6 +391,7 @@ afterAll(async () => {
   if (trTemplateId) await db.delete(workflowTemplates).where(eq(workflowTemplates.id, trTemplateId));
   if (trConnectorId) await db.delete(connectors).where(eq(connectors.id, trConnectorId));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   if (upstream) await upstream.close();
 });

@@ -39,8 +39,12 @@ import {
 import { reservedChatControl } from "@regulait/connector-provider";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { drainBackgroundWork } from "./background-work.js";
+import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { resolveToolbox } from "./builder-tools.js";
 import { builderAgents, builderMessages } from "@regulait/db";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let admin: Person;
@@ -255,10 +259,16 @@ async function pausedInSlack(agent: { toolName: string }, note: string, channel 
 }
 
 let agent: { id: string; toolName: string };
+let restorePiiFloor: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
   process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS = "0";
   k = await builderKit("p2bl-chat");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  // ADR-0181: the strict PII floor withholds a model output that carries an
+  // identifier, tool calls included. This file pins the Ask-first pause and
+  // its chat buttons, not PII handling, so it sets the floor off explicitly.
+  restorePiiFloor = await setOrgSettingsForTest(k.db, { defaultPiiMode: "none" });
   APP_ID = `bot-app-${k.RUN}`;
   admin = await k.person("admin", { admin: true });
   owner = await k.person("owner");
@@ -372,6 +382,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await drainBackgroundWork(k.db);
+  await restorePiiFloor?.();
   delete process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS;
   if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
   if (connectorIds.length) {
@@ -381,6 +392,7 @@ afterAll(async () => {
   if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   upstream.closeAllConnections();
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  await restoreSb2Gates();
   await k.close();
 });
 

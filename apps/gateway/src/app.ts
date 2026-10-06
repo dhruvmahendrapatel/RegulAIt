@@ -133,8 +133,10 @@ import { refuseMcpServerWrite } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
   AUTH_REFUSAL_DETAIL,
+  API_KEY_MFA_REFUSAL,
   CSRF_HEADER,
   SESSION_COOKIE,
+  apiKeyMfaEnrollmentRequired,
   authenticate,
   clearSessionCookie,
   isAuthRefusal,
@@ -292,7 +294,7 @@ export interface BuildAppOptions {
   logger?: FastifyServerOptions["logger"];
   /** ADR-0029 amendment: the Strict-Transport-Security value sent on genuinely
    * secure responses, or `null` for none. Defaults to REGULAIT_HSTS (which
-   * itself defaults to `max-age=86400`). Exposed so a test can assert both
+   * itself defaults to `max-age=31536000`, one year, since ADR-0181). Exposed so a test can assert both
    * directions without touching process.env — see hsts.ts for why this is a
    * deployment env var rather than an org_settings toggle. */
   hsts?: string | null;
@@ -860,8 +862,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0029's stated "HSTS deliberately OFF" — the Caddyfile abstained and the
   // gateway asserted a one-year pin anyway. The gateway is now the single
   // owner (it is what ships into BYOC/air-gapped installs where no Caddy of
-  // ours exists), the default is a bounded `max-age=86400`, and an operator on
-  // a real domain raises it via REGULAIT_HSTS. See hsts.ts.
+  // ours exists). Since ADR-0181 the default is the strict `max-age=31536000`
+  // (one year); an operator whose hostname may change hands relaxes it via
+  // REGULAIT_HSTS (e.g. `max-age=86400` or `off`). See hsts.ts.
   app.addHook("onSend", async (req, reply, payload) => {
     const contentType = reply.getHeader("content-type");
     const headers = securityHeaders(
@@ -1191,6 +1194,29 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             detail: "API-key requests from this network address are not permitted by organization policy",
           });
         }
+      }
+      // ADR-0181 (FX2, review finding 3): the org MFA requirement binds the
+      // key path too. Gate 2 above covers the cookie session; without this an
+      // admin who never enrolled TOTP kept full administrator power through
+      // an API key. Settings are re-read per request, like the IP envelope,
+      // so relaxing mfaRequired (audited) takes effect on the next request.
+      if (apiKeyMfaEnrollmentRequired(org, ctx)) {
+        await db.insert(auditLog).values({
+          userId: ctx.userId ?? "00000000-0000-0000-0000-000000000000",
+          objectType: "api_key",
+          objectId: ctx.apiKeyId ?? null,
+          detail: {
+            phase: "api-key-mfa-enrollment-required",
+            mfaRequired: org.mfaRequired,
+            isAdmin: ctx.isAdmin,
+            route: `${req.method} ${req.routeOptions.url ?? ""}`,
+          },
+          effect: "deny",
+          ruleId: "api-key-mfa-enrollment-required",
+          ruleChain: [],
+          reason: `API-key request refused: the org requires MFA (mfaRequired='${org.mfaRequired}') for the key's owner, who has not enrolled TOTP`,
+        });
+        return reply.status(403).send(API_KEY_MFA_REFUSAL);
       }
     }
     req.authCtx = ctx;
@@ -1542,7 +1568,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0022: a deactivated user cannot be handed a fresh credential — the
     // key would 401 anyway; refuse loudly instead of minting a dead secret.
     const [keyTarget] = await db
-      .select({ disabledAt: users.disabledAt })
+      .select({ disabledAt: users.disabledAt, isAdmin: users.isAdmin, totpEnabled: users.totpEnabled })
       .from(users)
       .where(eq(users.id, userId));
     if (keyTarget?.disabledAt) {
@@ -1558,6 +1584,37 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // REFUSED BY NAME rather than clamped: a clamp hands back a credential
     // with a lifetime nobody asked for and nobody was told about.
     const org = await loadOrgSettings(db);
+    // ADR-0181 (FX2, review finding 3): a key for someone the org MFA
+    // requirement covers, who has not enrolled TOTP, would be refused on its
+    // first use — refuse to mint it at all, by name and audited, rather than
+    // hand out a credential that is dead on arrival.
+    if (
+      keyTarget &&
+      apiKeyMfaEnrollmentRequired(org, { userId, isAdmin: keyTarget.isAdmin, via: "api-key", totpEnabled: keyTarget.totpEnabled })
+    ) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "api_key",
+        objectId: null,
+        detail: {
+          phase: "issue-refused",
+          targetUserId: userId,
+          name: body.name,
+          mfaRequired: org.mfaRequired,
+          error: API_KEY_MFA_REFUSAL.error,
+        },
+        effect: "deny",
+        ruleId: API_KEY_MFA_REFUSAL.error,
+        ruleChain: [],
+        reason: `API key not issued: the org requires MFA (mfaRequired='${org.mfaRequired}') for this user, who has not enrolled TOTP`,
+      });
+      return reply.status(409).send({
+        error: API_KEY_MFA_REFUSAL.error,
+        detail:
+          "this user must enroll TOTP before an API key can be issued to them: the organization requires MFA for this " +
+          "account, and a key would otherwise bypass it. An admin may relax mfaRequired (audited).",
+      });
+    }
     const resolved = resolveIssuedExpiry(
       body.expiresAt === undefined ? undefined : body.expiresAt === null ? null : new Date(body.expiresAt),
       { defaultTtlDays: org.apiKeyDefaultTtlDays, maxTtlDays: org.apiKeyMaxTtlDays },
@@ -1596,6 +1653,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         createdAt: apiKeys.createdAt,
         expiresAt: apiKeys.expiresAt,
       });
+    // ADR-0181 (FX2, review finding 4): issuing a credential is audited — who
+    // issued which key to whom, and the lifetime it got. NEVER the token.
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "api_key",
+      objectId: row!.id,
+      detail: {
+        phase: "api-key-issued",
+        actor: req.authCtx.userId ?? null,
+        actorVia: req.authCtx.via,
+        targetUserId: userId,
+        keyId: row!.id,
+        name: row!.name,
+        expiresAt: row!.expiresAt ? row!.expiresAt.toISOString() : null,
+        expirySource: resolved.source,
+      },
+      effect: "allow",
+      ruleId: "api-key-issued",
+      ruleChain: [],
+      reason: `API key '${row!.name}' issued to user ${userId} (${row!.expiresAt ? `expires ${row!.expiresAt.toISOString()}` : "never expires"}; ${resolved.source})`,
+    });
     // The plaintext token is returned exactly once and never stored. The
     // EXPIRY is returned with it, always — including the null that means
     // "never", so a caller never has to infer what it was given.
@@ -1632,9 +1710,28 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .update(apiKeys)
       .set({ revokedAt: new Date() })
       .where(and(eq(apiKeys.id, keyId), isNull(apiKeys.revokedAt)))
-      .returning({ id: apiKeys.id, revokedAt: apiKeys.revokedAt });
+      .returning({ id: apiKeys.id, revokedAt: apiKeys.revokedAt, userId: apiKeys.userId, name: apiKeys.name });
     if (!row) return reply.status(404).send({ error: "unknown_or_already_revoked" });
-    return row;
+    // ADR-0181 (FX2, review finding 4): killing a credential is audited too
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "api_key",
+      objectId: row.id,
+      detail: {
+        phase: "api-key-revoked",
+        actor: req.authCtx.userId ?? null,
+        actorVia: req.authCtx.via,
+        targetUserId: row.userId,
+        keyId: row.id,
+        name: row.name,
+        revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
+      },
+      effect: "allow",
+      ruleId: "api-key-revoked",
+      ruleChain: [],
+      reason: `API key '${row.name}' of user ${row.userId} revoked`,
+    });
+    return { id: row.id, revokedAt: row.revokedAt };
   });
 
   app.post("/v1/servers", async (req, reply) => {

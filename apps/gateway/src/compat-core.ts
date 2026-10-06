@@ -89,6 +89,7 @@ import {
   virtualKeyAllowListRefusal,
   type VirtualKeyContext,
 } from "./virtual-keys.js";
+import { settingTransitions } from "./setting-transitions.js";
 
 export { PROJECT_HEADER };
 
@@ -1314,7 +1315,8 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "interception_settings",
       objectId: null,
-      detail: { via: req.authCtx.via, changed, after },
+      // ADR-0181: every relaxation is audited old -> new
+      detail: { via: req.authCtx.via, changed, transitions: settingTransitions(before, changed), after },
       effect: "allow",
       ruleId: "interception-settings-updated",
       ruleChain: [],

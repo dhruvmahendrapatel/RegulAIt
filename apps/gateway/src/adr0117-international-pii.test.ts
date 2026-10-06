@@ -12,6 +12,14 @@ import { buildApp } from "./app.js";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { executeGovernedToolCall, PROJECT_HEADER } from "./mcp-proxy.js";
 import { AGENT_HEADER } from "./compat-core.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * ADR-0117 — INTERNATIONAL NATIONAL-IDENTIFIER PII, ENFORCED ON EVERY PATH.
@@ -137,7 +145,9 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "c".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false, requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
   const u = await app.inject({
@@ -204,11 +214,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await setOrgCategories([]);
   // restore ADR-0020's shipped posture — the database is shared (M-040), and a
   // later file asserting "compat ships OFF" must not depend on file order
   await app.inject({ method: "PUT", url: "/v1/interception/settings", headers: AUTH, payload: { anthropicCompatEnabled: false } });
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await upstreamClose();
 });

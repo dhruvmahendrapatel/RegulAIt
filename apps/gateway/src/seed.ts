@@ -20,9 +20,15 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
+import { auditLog, mcpServers } from "@regulait/db"; // ADR-0181 (SC): seedStrictAdmission
 import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
+import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
+import { enrolAdminTotp, type AdminTotpEnrolment } from "./demo-identity.js"; // ADR-0181 (FX2): seedAdminMfa
+import { ensureDemoModelCards } from "./demo-strict-governance.js";
+import { seedStrictData } from "./seed-strict-data.js";
+import { demoSeedRefusal, demoSeedSignal, realAdminEmails } from "./seed-demo-guard.js"; // ADR-0181 FX3
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -66,12 +72,36 @@ if (DATA_KEY !== undefined && DATA_KEY.trim() !== "") {
 // afterwards must declare it itself (DEMO_SCRIPT §0 exports it).
 process.env.REGULAIT_OFFLINE_CHECKS ??= "1";
 
+// ===== ADR-0181 FX3: the demo seed needs an explicit demo signal ============
+// Checked before a pool exists; the real-admin check below runs before
+// migrations, so a refusal writes nothing. See seed-demo-guard.ts.
+const demoSignal = demoSeedSignal(process.argv.slice(2), process.env);
+{
+  const refusal = demoSeedRefusal(demoSignal, []);
+  if (refusal) {
+    console.error(`\n${refusal}\n`);
+    process.exit(2);
+  }
+}
+// ===== end ADR-0181 FX3 =====================================================
+
 const db = createDb(connectionString);
 // An idle pooled connection killed out from under us (e.g. a scratch database
 // dropped WITH (FORCE) right after seeding finishes) must not crash the
 // process via an unhandled 'error' event — all real query failures still
 // surface through their own awaited promises.
 (db.$client as { on: (ev: string, fn: (err: Error) => void) => void }).on("error", () => {});
+// ===== ADR-0181 FX3: never seed a database a real admin uses ================
+{
+  const refusal = demoSeedRefusal(demoSignal, await realAdminEmails(db));
+  if (refusal) {
+    console.error(`\n${refusal}\n`);
+    await db.$client.end();
+    process.exit(2);
+  }
+  console.log(`demo seed: explicit demo signal ${demoSignal}; no admin outside the demo personas`);
+}
+// ===== end ADR-0181 FX3 =====================================================
 await runMigrations(
   db,
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),
@@ -93,6 +123,9 @@ async function call(method: string, url: string, payload?: unknown, headers = AU
     return {};
   }
 }
+
+// ADR-0181 (SB1): the guardrails / data / runtime strict-default configuration the demo needs
+for (const line of (await seedStrictData(app, { bootstrapToken: BOOT })).lines) console.log(line);
 
 // --- users ---------------------------------------------------------------
 async function ensureUser(email: string, displayName: string, isAdmin = false): Promise<string> {
@@ -118,13 +151,22 @@ for (const [username, id] of [
   await call("PUT", `/v1/users/${id}/username`, { username });
 }
 
+// ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
+// un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
+const adminMfa = await seedAdminMfa(adminId);
+
 const keys: Record<string, string> = {};
+const keyIds: Record<string, string> = {};
 for (const [name, id] of [
   ["admin", adminId],
   ["dana", danaId],
   ["avery", averyId],
 ] as const) {
-  keys[name] = (await call("POST", `/v1/users/${id}/keys`, { name: "seed" })).token;
+  // ADR-0181 (FX2): an admin who has not enrolled TOTP is issued no key
+  if (name === "admin" && adminMfa.status === "refused") continue;
+  const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
+  keys[name] = minted.token;
+  keyIds[name] = minted.id;
 }
 const danaAuth = { authorization: `Bearer ${keys.dana}` };
 const averyAuth = { authorization: `Bearer ${keys.avery}` };
@@ -143,6 +185,11 @@ const passwords: Record<string, string> = {};
     ["avery", averyId],
   ] as const) {
     const row = userRows.find((u: Json) => u.id === id);
+    // ADR-0181 (FX2): Ada's one-time password was issued by her TOTP enrolment
+    if (name === "admin" && adminMfa.status === "enrolled") {
+      passwords[name] = adminMfa.password;
+      continue;
+    }
     if (row?.hasPassword) {
       passwords[name] = "(already set — unchanged)";
       continue;
@@ -214,9 +261,15 @@ for (const userId of [adminId, danaId, averyId]) {
         : {}),
     });
     // a review recorded today (by Ada) schedules the next one by the cadence
-    if (plan.reviewInDays === "record") await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
+    if (plan.reviewInDays === "record" && keys.admin) await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
   }
 }
+
+// ADR-0181: that was the last use of Ada's seed key. An admin-owned API key
+// carries administrator power on every admin route, so the stale-credential
+// monitor flags it as over-scoped (a true finding). It is revoked here rather
+// than handed to the presenter; Dana's and Avery's keys (not admins) are kept.
+for (const n of await revokeScriptKeys(app, BOOT, [keyIds.admin])) console.log(`  ${n}`);
 
 // --- per-user agent policy (§4 default + ceiling, §5.2 run budget) -------
 // Upsert, so re-running converges rather than duplicating. The ceilings are
@@ -241,6 +294,7 @@ await call("POST", `/v1/users/${averyId}/agent-policy`, {
 // Hostnames are deliberately unreachable (RFC 2606 `.invalid`): registering a
 // server and its tool inventory is a governance act and needs no live
 // upstream — nothing here proxies anywhere.
+await seedStrictAdmission(); // ADR-0181 (SC): demo admission + egress posture, block at the end of this file
 const serverList = (await call("GET", "/v1/servers")).servers ?? [];
 async function ensureServer(name: string, url: string): Promise<string> {
   const existing = serverList.find((s: Json) => s.name === name);
@@ -250,7 +304,7 @@ async function ensureServer(name: string, url: string): Promise<string> {
 // ADR-0043: demo registry rows are never connected to, but /v1/servers now
 // runs the egress guard at write time and RESOLVES every destination — a
 // `.invalid` hostname fails closed. The loopback dead port (discard) is
-// permitted with zero ceremony under the private-ranges-open default posture.
+// permitted by the demo allow-list entry seedStrictAdmission adds (ADR-0181).
 const repoServerId = await ensureServer("repo-tools", "http://127.0.0.1:9/repo-mcp");
 const warehouseServerId = await ensureServer("data-warehouse", "http://127.0.0.1:9/warehouse-mcp");
 
@@ -759,6 +813,9 @@ if (DATA_KEY) {
     pmWebhookSecret = created.webhookSecret ?? null;
   }
 }
+
+// --- ADR-0181 SB2: approved model cards (mrmEnforced is on by default) ------
+for (const n of (await ensureDemoModelCards(app, { bootstrapToken: BOOT, averyAuth, averyId })).notes) console.log(`  ${n}`);
 
 // --- demo activity: governed evaluations + real metered spend ------------
 // Unlike every object above, activity is append-only by nature (audit rows
@@ -1353,6 +1410,7 @@ if (process.env.REGULAIT_EPHEMERAL_LICENSE === "1") {
   console.log(result.line);
 }
 
+await seedStrictIdentity((m, u) => call(m, u)); // ADR-0181 SA
 await app.close();
 // end the pool so the process exits NOW instead of lingering on idle
 // connections for the pool timeout (a window in which a killed connection
@@ -1368,6 +1426,7 @@ RegulAIt demo data ready.
   simply 'admin' if you prefer.
 
     admin  admin  admin@regulait.local   ${passwords.admin}
+${adminMfaLine(adminMfa)}
     dana   dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
     avery  avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
 
@@ -1375,7 +1434,9 @@ RegulAIt demo data ready.
   keeps a "sign in with an API key" fallback that exchanges one for a
   session). Shown ONCE:
 
-    admin  ${keys.admin}
+    admin  (none kept: the seed's own admin key was revoked after its last use;
+            an admin-owned key is over-scoped by definition, so issue one in
+            /admin → Users only when a task needs it)
     dana   ${keys.dana}
     avery  ${keys.avery}
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
@@ -1404,16 +1465,16 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   $0.002; jira-cloud stays governance-only), 7 agents
   (3 mock = usable with no external keys; anthropic/openai/google/xai go live
   once you add a model credential in /admin → Model Credentials (which also
-  lists exactly which agents are still waiting on one), OR set the provider's
-  API-key env var — e.g. ANTHROPIC_API_KEY (optionally ANTHROPIC_BASE_URL) — to
-  activate Claude platform-wide with no admin-UI paste and no key in the DB;
-  likewise OPENAI_API_KEY / GOOGLE_API_KEY (or GEMINI_API_KEY) / XAI_API_KEY),
+  lists exactly which agents are still waiting on one). Provider env vars
+  (ANTHROPIC_API_KEY, …) are NOT read at dispatch: the env-key fallback ships
+  off (ADR-0181) and an admin turns it on in /admin → Organization, audited.
+  The one exception is this seed: GOOGLE_API_KEY, when set, is imported once
+  into the encrypted store — see the "provider key:" line at the top),
   and per-user agent policies with a per-run budget cap (/admin → Agents).
 
-  No provider credential is seeded, deliberately — a placeholder key would
-  make routing believe those four providers work and turn a clean 409 into a
-  failed dispatch. Add a real one (stored credential or the *_API_KEY env var),
-  or stay on the mock agents.
+  No placeholder provider credential is seeded, deliberately — it would make
+  routing believe those providers work and turn a clean 409 into a failed
+  dispatch. Add a real one in Model Credentials, or stay on the mock agents.
 
   Onboarding anyone else (ADR-0025): create them in /admin → Users, hit
   'set one-time pw' for their browser sign-in (shown once, must-change on
@@ -1496,3 +1557,109 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
     search_code  deny (her per-user revocation beats the role)
     write_file   require_approval (named approver: Avery)
 `);
+
+// ===========================================================================
+// ADR-0181 (agent SC) — THE DEMO'S ADMISSION AND EGRESS POSTURE, configured
+// truthfully under the strict defaults. Called from ONE line, just before the
+// MCP section above. Nothing here relaxes a control:
+//
+//  - mcpPrivateRangesDefault is false, so the demo's local MCP hosts get an
+//    explicit, audited egress allow-list entry with the private-range and
+//    plaintext opt-ins (the demo MCP server listens on 127.0.0.1/127.0.0.2
+//    over http). Every other private address stays refused.
+//  - egressCompiledDefaultPolicy is strict, so the one vendor endpoint the demo
+//    story dispatches to (the seeded gemini-pro agent, when a key is supplied)
+//    gets its allow-list entry. The other seeded real-provider agents are not
+//    allow-listed: an admin adds their hosts when they add their keys.
+//  - minReleaseAgeDays is 7 and the two demo MCP servers are HISTORIC in the
+//    story (registered long before the meeting), so their registration is
+//    dated 60 days back. That is a dataset fact, written once, and recorded in
+//    the audit trail under its own rule id so nobody mistakes it for a
+//    real-time registration. A server registered during the demo still waits.
+//  - mcpAdmissionMode is enforce: the demo servers are scanned at their first
+//    sync and admitted on a clean manifest, like any other server.
+// ===========================================================================
+async function seedStrictAdmission(): Promise<void> {
+  const localHosts = [
+    ...new Set(
+      ["127.0.0.1", "127.0.0.2", process.env.REGULAIT_DEMO_MCP_HOST_REPO, process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE].filter(
+        (h): h is string => !!h && h.trim() !== "",
+      ),
+    ),
+  ];
+  const allowed = new Set(
+    (((await call("GET", "/v1/egress-allow-hosts")).hosts ?? []) as Json[]).map((h) => h.host as string),
+  );
+  for (const host of localHosts) {
+    if (allowed.has(host)) continue;
+    await call("POST", "/v1/egress-allow-hosts", {
+      host,
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "demo: the local demo MCP server (loopback, http). ADR-0181 keeps every other private address refused.",
+    });
+  }
+  if (!allowed.has("generativelanguage.googleapis.com")) {
+    await call("POST", "/v1/egress-allow-hosts", {
+      host: "generativelanguage.googleapis.com",
+      note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
+    });
+  }
+
+  const historic: Array<[string, string]> = [
+    ["repo-tools", "http://127.0.0.1:9/repo-mcp"],
+    ["data-warehouse", "http://127.0.0.1:9/warehouse-mcp"],
+  ];
+  const registeredAt = new Date(Date.now() - 60 * 86_400_000);
+  const have = ((await call("GET", "/v1/servers")).servers ?? []) as Json[];
+  for (const [name, url] of historic) {
+    const id: string = have.find((s) => s.name === name)?.id ?? (await call("POST", "/v1/servers", { name, url })).id;
+    const [row] = await db
+      .select({ releaseDigest: mcpServers.releaseDigest, releaseSeenAt: mcpServers.releaseSeenAt })
+      .from(mcpServers)
+      .where(eq(mcpServers.id, id));
+    // once only: a server that has synced a manifest, or is already dated, is left alone
+    if (!row || row.releaseDigest !== null || row.releaseSeenAt.getTime() <= registeredAt.getTime()) continue;
+    await db
+      .update(mcpServers)
+      .set({ createdAt: registeredAt, releaseSeenAt: registeredAt })
+      .where(eq(mcpServers.id, id));
+    await db.insert(auditLog).values({
+      userId: "00000000-0000-0000-0000-000000000000",
+      serverId: id,
+      objectType: "mcp_server",
+      objectId: id,
+      detail: { phase: "demo-seed", registeredAt: registeredAt.toISOString(), minReleaseAgeDays: 7 },
+      effect: "allow",
+      ruleId: "demo-seed-historic-server-dated",
+      ruleChain: [],
+      reason:
+        `demo seed: MCP server '${name}' is a historic server in the demo story, so its registration is dated ` +
+        `${registeredAt.toISOString().slice(0, 10)}, past the 7-day release-age cooldown. A dataset fact, not a ` +
+        `cooldown override; a server registered during the demo still waits.`,
+    });
+  }
+}
+
+// --- ADR-0181 (FX2): seedAdminMfa -------------------------------------------
+// MFA is required for admins, and since FX2 an admin's API key answers to it
+// too, so the admin persona the prep tooling acts as must be enrolled before a
+// key is minted for her. Enrolled through the real routes (enrolAdminTotp:
+// one-time password -> sign-in -> enrol -> activate), never by relaxing
+// mfaRequired. The authenticator secret is printed ONCE, beside her one-time
+// password, for the presenter to add to an authenticator app.
+async function seedAdminMfa(userId: string): Promise<AdminTotpEnrolment> {
+  const result = await enrolAdminTotp(app, BOOT, userId);
+  // a re-seed after the presenter set her password (demo:set-passwords, which
+  // re-provisions her authenticator): she enrols at her own sign-in, and the
+  // seed acts without her key — never by relaxing anything
+  if (result.status === "refused") console.log(`  admin TOTP not enrolled by the seed: ${result.reason}`);
+  return result;
+}
+
+function adminMfaLine(r: AdminTotpEnrolment): string {
+  if (r.status === "enrolled") return `           admin TOTP (shown ONCE; add it to an authenticator app): ${r.otpauthUri}`;
+  return r.status === "already"
+    ? "           admin TOTP: already enrolled (unchanged)"
+    : "           admin TOTP: not enrolled — she enrols an authenticator at her first sign-in";
+}

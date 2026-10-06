@@ -10,6 +10,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, createWriteStream } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { recordTotpSecret, resetTotpStore } from "./totp-sign-in";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -44,6 +45,8 @@ export default async function globalSetup() {
     `DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`, `${PG}/postgres`]);
   execFileSync("psql", ["-v", "ON_ERROR_STOP=1", "-c",
     `CREATE DATABASE ${DB_NAME}`, `${PG}/postgres`]);
+  // ADR-0181: a fresh database has no TOTP enrolments, so no recorded secrets
+  resetTotpStore();
 
   // The suite licenses itself, with an EPHEMERAL key the seeder mints and
   // throws away (see seed.ts). Without it, tier-gated features default CLOSED
@@ -85,10 +88,17 @@ export default async function globalSetup() {
     // suite tests the app THROUGH HTTP, so give the bucket suite-sized
     // headroom rather than testing the limiter by accident.
     REGULAIT_RATE_LIMIT_MAX: "20000",
+    // ADR-0181: the scheduler is ON by default; the journeys assert what a
+    // human's action did, so no background sweep may run underneath them.
+    // Set off EXPLICITLY here. (REGULAIT_DATABASE_SSL is not set here: it
+    // comes from the caller's environment, and CI sets `disable` for its
+    // TLS-less Postgres service.)
+    REGULAIT_SCHEDULER: "off",
   };
 
   // 2. seed via the real API (prints one-time passwords exactly once)
-  const seedOut = execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js")], {
+  // ADR-0181 FX3: the seed runs only on an explicit demo signal
+  const seedOut = execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js"), "--seed-demo"], {
     env,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
@@ -106,6 +116,17 @@ export default async function globalSetup() {
     dana: password("dana", "dana@regulait.local"),
     avery: password("avery", "avery@regulait.local"),
   };
+  // ADR-0181 (FX2): an admin's API key answers to the MFA requirement, so the
+  // seed enrols Ada's TOTP before minting her key and prints the authenticator
+  // URI ONCE, beside her one-time password — taken from there exactly as a
+  // presenter would add it to an authenticator app, and kept in the run's
+  // git-ignored secret store (cleared above) for the TOTP challenge.
+  {
+    const uri = /admin TOTP \(shown ONCE[^)]*\): (otpauth:\/\/totp\/\S+)/.exec(seedOut)?.[1];
+    const secret = uri ? new URL(uri).searchParams.get("secret") : null;
+    if (!secret) throw new Error("could not capture the admin's TOTP enrolment from the seed output");
+    recordTotpSecret("admin@regulait.local", secret);
+  }
 
   // 3. boot the gateway (dist) — logs to a file for post-mortems
   const logDir = process.env.E2E_LOG_DIR ?? here;

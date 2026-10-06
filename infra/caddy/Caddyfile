@@ -68,14 +68,17 @@
 		# single owner of this header, because the gateway is what ships (into
 		# BYOC / air-gapped installs that terminate TLS on someone else's proxy,
 		# where no Caddyfile of ours exists) while this file is only our dev
-		# stack. Its default is now a bounded `max-age=86400` with NO
-		# includeSubDomains and NO preload, configurable per deployment via the
-		# gateway's REGULAIT_HSTS env var. See apps/gateway/src/hsts.ts.
+		# stack. Since ADR-0181 its default is `max-age=31536000` (one year)
+		# with NO includeSubDomains and NO preload, configurable per deployment
+		# via the gateway's REGULAIT_HSTS env var. See apps/gateway/src/hsts.ts.
+		# The dev box's compose override (infra/modules/app-instance/
+		# user-data.sh.tftpl) sets REGULAIT_HSTS=max-age=86400, because this
+		# sslip.io name can change hands on a stop/start.
 		#
 		# So: do NOT add a Strict-Transport-Security directive here. Two layers
 		# setting it is exactly the defect that was fixed. Change the gateway's
-		# REGULAIT_HSTS instead — and raise the max-age only once a stable real
-		# domain replaces this sslip.io name.
+		# REGULAIT_HSTS instead — and raise the dev box's max-age only once a
+		# stable real domain replaces this sslip.io name.
 
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY

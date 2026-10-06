@@ -43,7 +43,7 @@
  *    counts that match what actually happened.
  *
  * SHARED-STATE DISCIPLINE. This file mutates the `org_settings` singleton's
- * `mcpAdmissionMode` and restores it to the shipped `off` in `afterAll`; it
+ * `mcpAdmissionMode` and restores the value it found in `afterAll`; it
  * deletes exactly the servers and users it created; every count assertion is a
  * DELTA or is scoped to a server this file alone created — never an absolute
  * table count, because the sweep is estate-wide by design and other suites
@@ -78,6 +78,14 @@ import {
   runMcpAdmissionRescan,
 } from "./mcp-admission-rescan.js";
 import { SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { LOCAL_MCP_DOUBLE, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -289,7 +297,9 @@ async function grandfather(serverId: string) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, [...LOCAL_MCP_DOUBLE, "mcpAdmissionMode"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   await app.ready();
 
   ghostUpstream = await startUpstream("poisoned");
@@ -325,14 +335,15 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // restore the org singleton to the SHIPPED posture for whatever runs next
-  await setMode("off");
+  // restores the posture it FOUND, mcpAdmissionMode included (ADR-0181 ships `enforce`)
+  await restoreStrictAdmission?.();
   if (createdServerIds.length > 0) {
     await db.delete(mcpServers).where(inArray(mcpServers.id, createdServerIds));
   }
   if (createdUserIds.length > 0) {
     await db.delete(users).where(inArray(users.id, createdUserIds));
   }
+  await restoreSb2Gates();
   await app.close();
   await ghostUpstream.close();
   await honestUpstream.close();

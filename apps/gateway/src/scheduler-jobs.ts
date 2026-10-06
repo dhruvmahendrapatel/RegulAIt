@@ -671,6 +671,7 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       },
     },
     ...adr0180A10Jobs(opts),
+    ...adr0181Fx3Jobs(), // ADR-0181 FX3: block at the end of this file
   ];
 }
 
@@ -713,3 +714,32 @@ function adr0180A10Jobs(_opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [riskAcceptanceExpiryJobDefinition()];
 }
 // ===== end A10 block ==================================================
+
+// ===== ADR-0181 FX3 — APPEND-ONLY BLOCK, owner FX3 ===========================
+// The guardrail window's expiry sweep. `schedulerJobDefinitions` spreads
+// `adr0181Fx3Jobs` (one line, after A10's hook). Enforcement does not depend on
+// the sweep: the resolver ignores an expired window override anyway.
+import { runGuardrailWindowExpirySweep } from "./guardrails.js";
+
+export const GUARDRAIL_WINDOW_EXPIRY_JOB_NAME = "guardrail-window-expiry-sweep";
+
+export function guardrailWindowExpiryJobDefinition(): SchedulerJobDefinition {
+  return {
+    name: GUARDRAIL_WINDOW_EXPIRY_JOB_NAME,
+    description:
+      "Delete guardrail window overrides (agent or connector overrides tagged assurance-window) past their expiry, up " +
+      "to 500 per pass, with one audit row each recording the override's modes and the org default that applies " +
+      "again. Enforcement does not depend on it: an expired window override is never in force.",
+    adr: "ADR-0181",
+    defaultIntervalSeconds: 5 * 60,
+    run: async (ctx) => {
+      // audited as the deployment, never as a person
+      const out = await runGuardrailWindowExpirySweep(ctx.db, { now: ctx.now });
+      return { itemsProcessed: out.expired, detail: { ...out } };
+    },
+  };
+}
+function adr0181Fx3Jobs(): SchedulerJobDefinition[] {
+  return [guardrailWindowExpiryJobDefinition()];
+}
+// ===== end ADR-0181 FX3 block ================================================

@@ -26,6 +26,7 @@
  * always narrowed to this file's own use cases.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,9 +156,14 @@ const auditFor = (objectId: string, ruleId: string) =>
 
 const future = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "c".repeat(64) });
   [originalPolicy = null] = await db.select().from(governanceReviewPolicy);
   const [org] = await db.select().from(orgSettings);
@@ -178,10 +184,11 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // org singletons: put back exactly what was there
   await db.delete(governanceReviewPolicy);
   if (originalPolicy) await db.insert(governanceReviewPolicy).values(originalPolicy);
-  await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "off" });
+  await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "enforce" });
   app.server.closeAllConnections();
   await app.close();
 });
@@ -380,7 +387,7 @@ describe("§6 an approval without an end date is not an approval without end", (
     // NULL (only a row the backfill could not reach) is not treated as expired
     await db.update(aiUseCases).set({ approvedAt: null, approvedUntil: null }).where(eq(aiUseCases.id, uc.id));
     expect(await useCaseDispatchGate(db, ctx)).toBeNull();
-    await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "off" });
+    await db.update(orgSettings).set({ useCaseGateMode: originalGateMode ?? "enforce" });
   });
 });
 

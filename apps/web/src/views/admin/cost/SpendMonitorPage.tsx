@@ -254,8 +254,8 @@ export default function SpendMonitorPage() {
                 </Field>
                 <Field label="Enabled">
                   <Select value={polEnabled} onChange={(e) => setPolEnabled(e.target.value)}>
-                    <option value="true">enabled</option>
-                    <option value="false">disabled (default)</option>
+                    <option value="true">enabled (default)</option>
+                    <option value="false">disabled</option>
                   </Select>
                 </Field>
                 <Field label="Sensitivity">
@@ -315,7 +315,7 @@ export default function SpendMonitorPage() {
                 the static budget and compliance caps protect a brand-new project.
               </div>
               {(overview.data?.policies ?? []).length === 0 ? (
-                <EmptyState title="No policies" body="Spend monitoring is OFF by default. Nothing is evaluated until a policy enables it." />
+                <EmptyState title="No policies" body="Spend monitoring is ON by default: with no policy row every project is evaluated with the built-in defaults. Add a policy to tune it, or to switch it off (audited)." />
               ) : (
                 <Table
                   rows={overview.data!.policies}

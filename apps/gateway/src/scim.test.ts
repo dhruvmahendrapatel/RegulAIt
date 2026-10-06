@@ -25,7 +25,7 @@
  * Retry-After, and every provisioning act is in the audit trail with the
  * acting token named as the actor.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -46,6 +46,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { hashToken } from "./auth.js";
 import { parseScimFilter, scimErrorBody, SCIM_TOKEN_PREFIX } from "./scim.js";
 
@@ -265,6 +266,10 @@ describe("ADR-0037 — the token is the ONLY credential", () => {
       payload: { email, displayName: "Key Holder", isAdmin: true },
     });
     const userId = created.json().id as string;
+    // ADR-0181 (FX2): an admin's key answers to mfaRequired, and this app has
+    // no data key to enrol TOTP under; the subject is the SCIM door, so the
+    // dial is relaxed for this case only and restored after it
+    onTestFinished(await relaxIdentityForTest(db, { mfaRequired: "off" }));
     const key = await keyFor(userId);
     // the key is genuinely valid on the normal surface...
     const me = await app.inject({ method: "GET", url: "/v1/me", headers: { authorization: `Bearer ${key}` } });
@@ -283,6 +288,12 @@ describe("ADR-0037 — the token is the ONLY credential", () => {
       headers: ADMIN,
       payload: { email, displayName: "Cookie Admin", isAdmin: true },
     });
+    // ADR-0181: an admin session would be held at TOTP enrolment (and, since
+    // FX2, an admin's key is refused and none is issued), and this app has no
+    // data key to enrol under; the subject here is the SCIM door, so the MFA
+    // dial is relaxed for this case only and restored after it
+    const restoreMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+    onTestFinished(restoreMfa);
     const key = await keyFor(created.json().id as string);
     const cookie = await sessionFor(key);
     // the cookie works on the normal surface

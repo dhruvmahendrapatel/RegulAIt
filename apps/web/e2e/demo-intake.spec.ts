@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { passTotp, reprovisionTotp } from "./totp-sign-in";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,16 +20,21 @@ async function freshUser(page: Page, email: string, password: string) {
   const users = await (await fetch(`${state.baseUrl}/v1/users`, { headers })).json() as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
   expect(id, `seeded persona ${email} must exist`).toBeTruthy();
+  // ADR-0181 (FX2): the seed enrolled the admin's TOTP outside this run; re-provision it
+  await reprovisionTotp(state.baseUrl, headers, email);
   const minted = await (await fetch(`${state.baseUrl}/v1/users/${id}/set-initial-password`, { method: "POST", headers, body: JSON.stringify({ force: true }) })).json() as { password: string };
   await page.goto("/ui");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
+  // ADR-0181: an admin who already enrolled answers the TOTP challenge first
+  await passTotp(page, email, page.getByLabel("Current (one-time) password"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(password);
   await page.getByLabel("Confirm new password").fill(password);
   await page.getByRole("button", { name: "Set password & continue" }).click();
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  // ...and an admin who has not enrols now, from the secret on screen
+  await passTotp(page, email, page.getByRole("heading", { name: /Welcome back/ }));
 }
 
 async function shotBoth(page: Page, name: string) {

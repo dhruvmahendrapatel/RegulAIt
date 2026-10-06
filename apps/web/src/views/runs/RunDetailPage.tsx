@@ -82,7 +82,7 @@ const EDITABLE: NodeStatus[] = ["not_started", "in_progress", "blocked"];
 const defaultInstruction = (n: RunGraphNode) => n.instruction ?? n.title;
 
 const STREAM_SUPPRESSED_NOTE =
-  "Streaming is disabled for this project: its PII mode is block, so worker output is checked in full before it is shown.";
+  "Streaming is disabled here: an output control (the PII mode or a guardrail) is in block mode, so worker output is checked in full before it is shown.";
 
 export default function RunDetailPage() {
   const { runId } = useParams<{ runId: string }>();

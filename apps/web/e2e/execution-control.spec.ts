@@ -23,6 +23,7 @@
  * Every step asserts ZERO console errors, like every other spec here.
  */
 import { expect, test, type Page } from "@playwright/test";
+import { passTotp } from "./totp-sign-in";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,11 +85,13 @@ test.beforeAll(async ({ browser }) => {
   await page.getByLabel("Email").fill("admin@regulait.local");
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
+  // ADR-0181: the admin answers the TOTP challenge (or enrols, below)
+  await passTotp(page, "admin@regulait.local", page.getByLabel("Current (one-time) password"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(ADMIN_PASSWORD);
   await page.getByLabel("Confirm new password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Set password & continue" }).click();
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  await passTotp(page, "admin@regulait.local", page.getByRole("heading", { name: /Welcome back/ }));
 });
 
 test.afterAll(async () => {

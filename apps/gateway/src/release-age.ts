@@ -11,8 +11,9 @@
  *
  * The cooldown itself is enforced where each kind of item is used: the MCP
  * connect gate and tool discovery (mcp-admission.ts), and skill attach and run
- * time (skill-admission.ts). With `org_settings.min_release_age_days = 0` (the
- * default) nothing here is consulted and nothing is written.
+ * time (skill-admission.ts). The default is 7 days since ADR-0181 (migration
+ * 0159). With `org_settings.min_release_age_days = 0` (an admin's audited
+ * relaxation) nothing here is consulted and nothing is written.
  */
 import type { FastifyInstance } from "fastify";
 import {

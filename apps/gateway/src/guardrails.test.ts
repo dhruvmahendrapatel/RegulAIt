@@ -25,6 +25,14 @@ import {
   GUARDRAIL_DETECTOR_IDS,
   type GuardrailModes,
 } from "@regulait/shared";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * The most recent row by `at`.
@@ -155,6 +163,7 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 // the dispatch core is imported AFTER the mock declaration (vi.mock is hoisted)
 const { executeGovernedDispatch } = await import("./agents-connectors.js");
 const { buildApp } = await import("./app.js");
+const { relaxDataPostureForTest } = await import("./testing/strict-data-posture.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -263,10 +272,23 @@ async function startUpstream() {
   };
 }
 
+let restoreDataPosture: () => Promise<void>;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  // ADR-0181: this file pins the GUARDRAIL engine. The strict PII floor
+  // ('block' on every unclassified project) would buffer every stream and
+  // decide its PII-coexistence case, and the strict 'reject' would turn its
+  // disclosed stream suppression into a 400 — so both are set explicitly here
+  // (classified projects keep their own PII mode) and restored in afterAll.
+  restoreDataPosture = await relaxDataPostureForTest(db, {
+    org: { defaultPiiMode: "none" },
+    interception: { streamingOnBlockMode: "suppress" },
+    guardrails: false,
+  });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gwUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
   await app.inject({
@@ -391,11 +413,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // SHARED SINGLETON RESTORED. Every row this file wrote to guardrail_configs
   // goes, so a suite running after it sees the shipped default posture again
   // and cannot fail because of an org-wide `block` this file left behind.
   await db.delete(guardrailConfigs);
+  await restoreDataPosture();
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await mcpUpstream.close();
 });

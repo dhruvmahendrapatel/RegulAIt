@@ -10,6 +10,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, auditLog, builderAgentSchedules, builderMessages, builderThreads, eq, usageEvents } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { schedulerJobRegistry, SCHEDULER_JOB_NAMES } from "./scheduler-jobs.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 let k: BuilderKit;
 let owner: Person;
@@ -33,6 +36,7 @@ const usageCount = async (userId: string) =>
 
 beforeAll(async () => {
   k = await builderKit("bld-chat");
+  restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   owner = await k.person("owner");
   colleague = await k.person("colleague");
   // $100k per million tokens: any reply costs well over a cent
@@ -46,7 +50,10 @@ beforeAll(async () => {
   await k.grantModel(owner.id, undispatchable);
 }, 120_000);
 
-afterAll(async () => k.close());
+afterAll(async () => {
+  await restoreSb2Gates();
+  await k.close();
+});
 
 describe("chat through the governed core", () => {
   it("dispatches as the caller, records both messages with model and cost, and continues a thread", async () => {

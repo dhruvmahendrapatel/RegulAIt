@@ -21,6 +21,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import {
   agents,
   and,
@@ -41,7 +42,11 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { recordTraceScore } from "./trace-scores.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -130,13 +135,23 @@ let anaRich: string;
 let borisRich: string;
 let anaPlain: string;
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await app.ready();
   const [prior] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   priorOrg = prior ? { ...prior } : null;
+  // ADR-0181: trace content capture ships OFF. This file pins exported content
+  // attributes, so it opts in before any trace is written; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { tracingCaptureContent: true }, interception: false, guardrails: false });
   ana = await makeUser("t2c-ana");
   boris = await makeUser("t2c-boris");
   admin = await makeUser("t2c-admin", true);
@@ -146,6 +161,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
+  await restoreSb1Posture?.();
   if (priorOrg) {
     await db
       .update(orgSettings)
@@ -165,6 +182,7 @@ afterAll(async () => {
   if (agentId) await db.delete(agents).where(eq(agents.id, agentId));
   if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

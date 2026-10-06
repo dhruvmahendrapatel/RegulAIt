@@ -3,6 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, runMigrations, usageEvents, workflowInstances, auditLog, inArray, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * SLICE-7 ADVERSARIAL PROBE — quality gates, at the SEAMS the existing suites
@@ -103,6 +106,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a1".repeat(32) });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
 
   // snapshot both singletons this file will flip (M-012 discipline)
   const mrmStatus = await app.inject({ method: "GET", headers: AUTH, url: "/v1/mrm/status" });
@@ -147,6 +151,7 @@ afterAll(async () => {
   // table — remove the refusal rows this file's agents produced
   await db.delete(auditLog).where(inArray(auditLog.objectId, [agentId]));
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
 });
 

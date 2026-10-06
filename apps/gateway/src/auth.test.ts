@@ -42,6 +42,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { hashToken, totpCode, totpStep } from "./auth.js";
+import { enrolTotpForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -571,6 +572,8 @@ describe("CSRF custom-header wall", () => {
   beforeAll(async () => {
     adminId = await mkUser("csrf-admin@auth-test.example", "Csrf Admin", true);
     adminCookie = await onboard(adminId, "csrf-admin@auth-test.example", "csrf-Admin-pw-9");
+    // ADR-0181: an admin session enrols TOTP before it reaches the app
+    await enrolTotpForTest(app, adminCookie);
     const k = await app.inject({
       method: "POST", headers: AUTH, url: `/v1/users/${adminId}/keys`, payload: { name: "csrf" },
     });
@@ -844,7 +847,7 @@ describe("OIDC SSO (fake IdP: discovery + jwks + token)", () => {
       method: "POST", headers: AUTH, url: "/v1/roles", payload: { name: "sso-baseline" },
     });
     const roleId = roleRes.json().id;
-    const p = await mkProvider({ name: "jit-on", jitProvisioning: true, defaultRoleId: roleId });
+    const p = await mkProvider({ name: "jit-on", jitProvisioning: true, allowedEmailDomains: ["auth-test.example"], defaultRoleId: roleId });
     const { cb } = await oidcRoundTrip(p.id, { email: "newcomer@auth-test.example", name: "New Comer" });
     expect(cb.statusCode).toBe(302);
     const [row] = await db.select().from(users).where(eq(users.email, "newcomer@auth-test.example"));
@@ -994,28 +997,37 @@ describe("API-key path regression (byte-identical to pre-0042)", () => {
     expect(r.json()).toEqual({ error: "unauthenticated" });
   });
 
-  it("mfa_required=all gates SESSION users into enrollment but never touches API-key requests", async () => {
+  it("mfa_required=all gates SESSION users into enrollment — and, since ADR-0181 FX2, their API keys too", async () => {
     const on = await app.inject({
       method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "all" },
     });
     expect(on.statusCode).toBe(200);
-    // key path: untouched
+    try {
+      // key path: an un-enrolled person's key answers to the same dial
+      // (ADR-0181 FX2 — it used to be untouched, which made a key a way around MFA)
+      const keyed = await app.inject({ method: "GET", url: "/v1/me", headers: { authorization: `Bearer ${key}` } });
+      expect(keyed.statusCode).toBe(403);
+      expect(keyed.json().error).toBe("mfa_enrollment_required");
+      // session path: gated until enrolled
+      const pw = "keyer-Password-55";
+      const cookie = await onboard(uid, "keyer@auth-test.example", pw);
+      const gated = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+      expect(gated.statusCode).toBe(403);
+      expect(gated.json().error).toBe("mfa_enrollment_required");
+      // /auth/me still reachable and says so
+      const meRes = await me(cookie);
+      expect(meRes.statusCode).toBe(200);
+      expect(meRes.json().mfaSetupRequired).toBe(true);
+    } finally {
+      // back to the shipped strict default (ADR-0181), not to off (M-068)
+      const back = await app.inject({
+        method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "admins" },
+      });
+      expect(back.statusCode).toBe(200);
+    }
+    // under the default ('admins') this member's key works again
     const keyed = await app.inject({ method: "GET", url: "/v1/me", headers: { authorization: `Bearer ${key}` } });
     expect(keyed.statusCode).toBe(200);
-    // session path: gated until enrolled
-    const pw = "keyer-Password-55";
-    const cookie = await onboard(uid, "keyer@auth-test.example", pw);
-    const gated = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
-    expect(gated.statusCode).toBe(403);
-    expect(gated.json().error).toBe("mfa_enrollment_required");
-    // /auth/me still reachable and says so
-    const meRes = await me(cookie);
-    expect(meRes.statusCode).toBe(200);
-    expect(meRes.json().mfaSetupRequired).toBe(true);
-    const off = await app.inject({
-      method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "off" },
-    });
-    expect(off.statusCode).toBe(200);
   });
 });
 
@@ -1124,7 +1136,7 @@ describe("ADR-0028 — session origin + API-key password recovery", () => {
   });
 
   it("the OIDC callback records origin 'oidc'", async () => {
-    const provider = await mkProvider({ name: "origin-oidc-idp", jitProvisioning: true });
+    const provider = await mkProvider({ name: "origin-oidc-idp", jitProvisioning: true, allowedEmailDomains: ["auth-test.example"] });
     const { cb } = await oidcRoundTrip(provider.id, { email: "origin-oidc@auth-test.example" });
     expect(cb.statusCode).toBe(302);
     expect(await originOf(cookieOf(cb))).toBe("oidc");

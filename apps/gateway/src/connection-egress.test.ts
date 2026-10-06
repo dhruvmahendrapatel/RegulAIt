@@ -48,6 +48,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { encryptSecret } from "./secrets.js";
 import { checkConnectionBaseUrl } from "./connection-egress.js";
 
@@ -148,9 +149,13 @@ async function allowLoopback(note: string): Promise<string> {
   return res.json().id as string;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   // HERMETIC DEFAULT-DENY. Every suite shares one database (fileParallelism is
   // off) and several of them legitimately allow-list 127.0.0.1 for their own
@@ -218,6 +223,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await db.delete(egressAllowHosts);
   collector.closeAllConnections();
   redirectSrv.closeAllConnections();

@@ -12,6 +12,7 @@
  * (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agents, aiUseCases, and, createDb, eq, governanceAlerts, inArray, runMigrations, usageEvents, type Db } from "@regulait/db";
@@ -45,9 +46,14 @@ const dispatch = async (requestedAgentId: string, servedAgentId: string, at = ne
   usageIds.push(row!.id);
 };
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   const u = await call("POST", "/v1/users", AUTH, { email: `g164-${RUN}@example.com`, displayName: "Monitor admin", isAdmin: true });
   admin.id = u.json().id;
@@ -69,6 +75,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   if (usageIds.length) await db.delete(usageEvents).where(inArray(usageEvents.id, usageIds));
   await db.update(aiUseCases).set({ status: "proposed" }).where(eq(aiUseCases.id, ids.useCase)); // out of the monitor's scope
   app.server.closeAllConnections();

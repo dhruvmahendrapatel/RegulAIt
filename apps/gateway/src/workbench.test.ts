@@ -16,6 +16,11 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 /**
  * ADR-0046 — THE REVIEW WORKBENCH, proved by attack.
@@ -161,6 +166,7 @@ async function backdate(approvalId: string, minutes: number) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
   const owner = await makeUser("wb-owner@example.com");
@@ -204,6 +210,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // a leaked routing rule would re-route another suite's approvals, and a
   // leaked assignment would change another suite's inbox shape
   if (createdApprovalIds.length) {

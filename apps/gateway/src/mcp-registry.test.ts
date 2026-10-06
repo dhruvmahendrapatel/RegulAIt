@@ -74,6 +74,14 @@ import {
   type RegistryRow,
 } from "./mcp-registry.js";
 import { SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { LOCAL_MCP_DOUBLE, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+
+// ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
+// seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -409,7 +417,9 @@ const sync = (opts: Parameters<typeof syncRegistry>[2] = {}) => syncRegistry(db,
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db, [...LOCAL_MCP_DOUBLE, "mcpAdmissionMode"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
   fake = await startFakeRegistry();
@@ -434,9 +444,9 @@ beforeAll(async () => {
   userId = created.json().id;
   createdUserIds.push(userId);
 
-  // ADR-0043: a 127.0.0.1 destination is ordinary private LAN space and is open
-  // by default (mcpPrivateRangesDefault), so this suite adds NO egress
-  // allow-list entry — the guard is exercised at its shipped posture, and the
+  // ADR-0043: a 127.0.0.1 destination is ordinary private LAN space. ADR-0181
+  // closes it by default; this suite opens it with the org default (relaxed in
+  // beforeAll, restored after) rather than an egress allow-list entry, so the
   // refusal cases below get their refusals from the guard rather than from a
   // missing fixture.
   const res = await app.inject({
@@ -458,7 +468,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await setMode("off");
+  // restores the posture it FOUND, mcpAdmissionMode included (ADR-0181 ships `enforce`)
+  await restoreStrictAdmission?.();
   delete process.env[DEPLOY_MODE_ENV];
   if (createdRegistryIds.length > 0) {
     await db.delete(mcpRegistries).where(inArray(mcpRegistries.id, createdRegistryIds));
@@ -470,6 +481,7 @@ afterAll(async () => {
     await db.delete(users).where(inArray(users.id, createdUserIds));
   }
   app.server.closeAllConnections();
+  await restoreSb2Gates();
   await app.close();
   await fake.close();
   await cleanUpstream.close();

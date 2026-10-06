@@ -39,6 +39,7 @@
  * the deployment ends the run exactly as it started.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -67,6 +68,10 @@ import {
 } from "@regulait/db";
 import { planCopilotQuery, type CopilotNarration, type CopilotNarrator } from "@regulait/shared";
 import { COPILOT_RULE_IDS } from "./copilot.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * The most recent row by `at`.
@@ -136,10 +141,17 @@ async function seedAudit(userId: string, projectId: string, n: number, reason: s
   }
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await app.ready();
 
   const [tA] = await db.insert(teams).values({ name: `${PREFIX}-team-a` }).returning();
@@ -196,9 +208,16 @@ beforeAll(async () => {
     .from(guardrailConfigs)
     .where(eq(guardrailConfigs.scope, "org"));
   priorGuardrail = existing;
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly, and the injection and jailbreak
+  // layers to warn (they are not under test here); restored in afterAll
+  // (taken AFTER the guardrail snapshot above, so that snapshot stays the true prior).
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
+  await restoreSb1Posture?.();
   await db.delete(copilotProposals);
   const mine = (
     await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${"%@" + PREFIX + ".example"}`)
@@ -222,6 +241,7 @@ afterAll(async () => {
   if (priorGuardrail) {
     await db.insert(guardrailConfigs).values(priorGuardrail);
   }
+  await restoreSb2Gates();
   await app.close();
 });
 

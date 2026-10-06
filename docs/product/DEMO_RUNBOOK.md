@@ -15,6 +15,13 @@ reports waits for a report unless the gateway declares offline mode — the seed
 then auto-pass their checks, labelled "auto-passed · no report". A database seeded before
 2026-10-03 predates that opt-in and must be recreated.
 
+**Database TLS (ADR-0181).** The gateway and every demo script require TLS to Postgres by default.
+The demo's Postgres is local and has none, so **every terminal** also exports
+`REGULAIT_DATABASE_SSL=disable` — an explicit, visible relaxation: the gateway prints a loud
+boot warning and Settings → Enforcement posture shows "database TLS: relaxed". Without it every
+step fails at its first query with "The server does not support SSL connections". Docker compose
+sets it for the bundled `db` service itself.
+
 **Whole stack in Docker, no pnpm?** §1.3 does steps 1–5 below (and `demo:intake`, `demo:traffic`,
 `demo:check`, the export key) inside the containers with one `.env` switch.
 
@@ -51,6 +58,13 @@ pnpm --filter @regulait/gateway demo:set-passwords && unset REGULAIT_DEMO_USER_P
 HOST=127.0.0.1 REGULAIT_OFFLINE_CHECKS=1 pnpm --filter @regulait/gateway start
 ```
 
+**Ada enrols two-factor once (ADR-0181).** MFA is required for admins by default. At Ada's first
+sign-in the app shows an enrolment secret: add it to an authenticator app on the presenting phone
+and type the 6-digit code. Every later sign-in as Ada asks for a code. Dana and Avery are not
+admins and are not asked. Do this during preparation, not in front of the audience. The API keys
+that `seed` and `demo:setup` print expire after 30 days; the keys the intake, traffic, check and
+gate scripts mint for their own run expire after one day.
+
 ### 1.1 Without docker — a native Postgres path
 
 Docker is not available everywhere this gets demoed (a locked-down laptop, a cloud dev box, a
@@ -83,8 +97,9 @@ Then paste **that same literal** into **every** terminal, and run §1 steps 2–
 export DATABASE_URL="postgres://regulait:regulait@127.0.0.1:5432/regulait"
 export REGULAIT_BOOTSTRAP_TOKEN="dev-bootstrap"
 export REGULAIT_DATA_KEY="<the value you just minted>"
-export REGULAIT_SCHEDULER=on
+export REGULAIT_DATABASE_SSL=disable   # local Postgres without TLS (ADR-0181: the default is require)
 export REGULAIT_OFFLINE_CHECKS=1
+# the scheduler is ON by default since ADR-0181; REGULAIT_SCHEDULER=off switches it off
 ```
 
 Do **not** put `$(openssl rand -hex 32)` in each terminal's export — that mints a different key
@@ -121,11 +136,11 @@ gateway looks broken rather than governed. `demo:setup` repoints the rows at the
 ### 1.2 Approve the use case — **the step that is easy to skip and will cost you the demo**
 
 `demo:setup` ends by dispatching as a real user **before and after** applying the preset. On a
-first run the second one comes back **`409 use_case_approval_required`**, and that is the script's
+first run both come back **`409 use_case_approval_required`**, and that is the script's
 own doing: the setup script (`demo-setup.ts` §3b) creates the *Checkout assistant* use case and deliberately leaves it `proposed`,
 because driving it to `approved` means walking the pillar-2 intake sign-off and that walk is worth
-showing. With `useCaseGateMode=enforcing` a proposal legitimately blocks every dispatch attributed
-to its project.
+showing. `useCaseGateMode` is `enforce` by default (ADR-0181), so a proposal legitimately blocks
+every dispatch attributed to its project, before the preset as well as after it.
 
 So **as Avery, approve it before you present**, then re-run `demo:setup` and expect `200`. The
 script names this case explicitly rather than telling you to stop — the gate is working, and it is
@@ -164,7 +179,8 @@ When the whole stack runs under `docker compose` (no pnpm on the box), one switc
 3. Set the password with the bash or PowerShell commands in the README ("Demo with your own
    password (Docker)"). The value goes from your shell into one `docker compose exec` process via
    `-e REGULAIT_DEMO_USER_PASSWORD`. It is never on a command line or in a file.
-4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2.
+4. Sign in at `http://localhost:3000/ui` as `admin`, `dana` or `avery`, and go to §1.2. The first
+   `admin` sign-in enrols two-factor (see §1).
 
 **Once per database.** The prep steps run only when the database has not been prepared yet: the
 marker is the API key `demo:traffic` mints (a row in the database, so it goes with the data).
@@ -180,12 +196,14 @@ failure in demo:setup or demo:intake is retried on the next start (`docker compo
 gateway`); from demo:traffic on, use `down -v` and `up`. You can re-run the dry run any time
 without changing anything: `docker compose exec gateway node apps/gateway/dist/demo-check.js`.
 
-Without the switch nothing changes: no licence is minted, the gateway reads its default keyring,
-no MCP server, export key, offline checks or prep step runs, and `demo:set-passwords` refuses as
-before. **The switch is demo-only.** `scripts/install.sh` refuses it from the environment or a
+Without the switch (or `SEED_DEMO=1`) the gateway starts empty: no demo users, keys or relaxations
+are seeded (ADR-0181), no licence is minted, the gateway reads its default keyring, no MCP server,
+export key, offline checks or prep step runs, and `demo:set-passwords` refuses as before. **The switch is demo-only.** `scripts/install.sh` refuses it from the environment or a
 `.env`, and its rendered override pins it to `"0"`. The image's start script
 (`apps/gateway/docker-start.sh`) also ignores it on a `byoc` / `air_gapped`
-`REGULAIT_DEPLOY_MODE` and without `SEED_DEMO=1`.
+`REGULAIT_DEPLOY_MODE`. Since ADR-0181 the switch is itself the explicit demo signal: it seeds
+without `SEED_DEMO=1` (which now defaults to `0`), every seed runs with `--seed-demo`, and the
+seed refuses a database that has a real admin (anyone outside its own personas).
 
 Verified on 2026-10-05 in real containers (Linux, Docker 29, compose 5.1) with a CRLF `.env`: a
 fresh stack prepared itself (18 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
@@ -199,17 +217,20 @@ booted and prepared the same way. The PowerShell commands are written for Docker
 
 ---
 
-## 2. The two controls that are not settable from any API
+## 2. The controls that are not settable from any API
 
-`demo:setup` will report **5 of 7** enforcement controls and an overall verdict of **not hardened**.
-That is correct, not a failure: the audit anchor and the scheduler are resolved from the process
-environment at start-up, and an API call cannot set an environment variable. The product reports them
-with their *observed* state and refuses to count them on its own say-so.
+`demo:setup` reports an overall verdict of **not hardened**. That is correct, not a failure: the
+audit anchor, the scheduler and database TLS are resolved from the process environment at start-up,
+and an API call cannot set an environment variable. The product reports them with their *observed*
+state and refuses to count them on its own say-so.
 
-To reach **7 of 7 / `hardened: true`**:
+- **The scheduler** is ON by default since ADR-0181; its row satisfies unless `REGULAIT_SCHEDULER=off`.
+- **Database TLS** reads **relaxed** on every local demo: the demo sets `REGULAIT_DATABASE_SSL=disable`
+  for its TLS-less local Postgres (§1). That row never satisfies in the demo, by design, and the page
+  says "database TLS: relaxed" so nobody mistakes the demo for a hardened install.
+- **The audit anchor** satisfies only against a real Object Lock bucket:
 
 ```bash
-export REGULAIT_SCHEDULER=on            # docker compose does NOT pass this through by default
 docker compose up -d minio minio-init   # a REAL S3 Object Lock COMPLIANCE bucket
 ```
 
@@ -222,8 +243,8 @@ fake it, which is the point and is worth saying out loud.
 deliberately — an honest "here is what this install has not got" lands better than a number nobody
 can interrogate.
 
-**On the §1.1 native path the ceiling is 6 of 7, and the missing row is the good one.** With
-`REGULAIT_SCHEDULER=on` exported, the scheduler row satisfies; the anchor row cannot, because
+**On the §1.1 native path the anchor row is also unmet, and it is the good one.** The scheduler row
+satisfies (it is on by default); the anchor row cannot, because
 without MinIO there is no Object Lock bucket to ask. It will read a **local buffer** with
 `tamperResistant: false`, and the control's own text says why: *"A local directory is a buffer,
 never WORM."*
@@ -249,7 +270,10 @@ and say why they cannot be switched on from a page.
 
 ### (b) Block a policy-violating tool call — *lead with this, it is the strongest*
 
-As **Dana**, against **repo-tools**, over the real MCP protocol:
+As **Dana**, against **repo-tools**, over the real MCP protocol, with the transport carrying
+`x-regulait-project-id: <demo-project's id>`. MCP attribution is required by default (ADR-0181):
+the same client without the header is refused at connect with **`400 mcp_attribution_required`**,
+audited, before any entitlement decision. That refusal is worth a sentence of its own.
 
 | tool | result | why |
 |---|---|---|
@@ -343,11 +367,11 @@ Two things to say out loud while it is on screen, because the payload says them:
 
 ## 4. Do not do these
 
-- **Do not claim hardening blocks unattributed calls everywhere.** It binds the native dispatch only.
-  There are three independent attribution switches and the preset sets one; the MCP proxy and the
-  compat edge have their own. The posture page says so in the attribution control's own text — read
-  it rather than talking past it. (A hardened environment will happily serve an unattributed MCP tool
-  call, and a technical buyer may well try exactly that.)
+- **Do not credit the hardening preset with blocking unattributed calls.** There are three
+  independent attribution switches (the native dispatch, the MCP proxy and the compat edge), and
+  since ADR-0181 all three are **on by default**; the preset sets only the native one. An admin can
+  relax each one separately, audited. If a technical buyer tries an unattributed MCP tool call, it
+  is refused with `mcp_attribution_required`.
 - **Do not demo the optimisation cache.** It is deliberately left off. A cached answer looks like a
   fast model and is not one, and being caught on that costs more than the feature is worth here.
 - **Do not present discovery as autonomous.** See (a).

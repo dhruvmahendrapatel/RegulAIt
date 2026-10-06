@@ -11,10 +11,12 @@
  *
  * This page exists for the same reason the scheduled-jobs page does: a fact
  * that decides everything was documented in ADRs and visible on no screen.
- * Every control this product is sold on ships OFF — each default deliberate,
- * because an existing deployment must behave identically across an upgrade —
- * and the consequence was that nobody could answer "so what is enforcing right
- * now?" without reading the schema.
+ * Until ADR-0181 every control this product is sold on shipped OFF, and the
+ * consequence was that nobody could answer "so what is enforcing right now?"
+ * without reading the schema. Since ADR-0181 every enforcement control ships
+ * at its strict value (except the WORM audit anchor, which needs a bucket only
+ * the operator can supply); an admin may relax one, the relaxation is audited,
+ * and this page is where that relaxed state stays visible.
  *
  * THE READ IS THE POINT, NOT THE BUTTON. The column that earns this page its
  * place is "what turning it on would refuse". A posture screen that lists
@@ -24,8 +26,8 @@
  *
  * Three honesty rules the UI keeps rather than leaving to the ADR:
  *
- *  - The two environment-backed controls (the WORM audit anchor, the
- *    scheduler) render as NOT SETTABLE with their OBSERVED state, never as a
+ *  - The environment-backed controls (the WORM audit anchor, the scheduler,
+ *    database TLS) render as NOT SETTABLE with their OBSERVED state, never as a
  *    switch. An API call cannot set an environment variable, and a button that
  *    implied otherwise would be a lie with a cursor on it.
  *  - The overall verdict stays "not hardened" while those two are unmet even
@@ -105,6 +107,8 @@ export default function EnforcementPosturePage() {
   const enforcement = controls.filter((c) => c.group === "enforcement");
   const optimisation = controls.filter((c) => c.group === "optimisation");
   const blocked = report?.summary.blockedByEnvironment ?? [];
+  // ADR-0181: the database hop's TLS posture (environment-backed, never a switch)
+  const dbTls = controls.find((c) => c.key === "databaseTls")?.current as string | undefined;
 
   const harden = () =>
     void act.run(async () => {
@@ -150,8 +154,8 @@ export default function EnforcementPosturePage() {
     <>
       <PageHeader
         title="Enforcement posture"
-        sub="What is enforcing in this deployment right now. Every control below ships OFF."
-        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Every control below ships OFF so that an existing install behaves identically across an upgrade; that makes a fresh deployment's posture a decision somebody has to take deliberately rather than one it arrives with.</p>}
+        sub="What is enforcing in this deployment right now. Every enforcement control below ships strict (ADR-0181); a relaxed one is an audited admin decision."
+        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Since ADR-0181 every enforcement control below ships at its strict value, except the WORM audit anchor, which needs a bucket only the operator can supply. An admin may relax a settable control, and that relaxation is audited old → new, so a relaxed posture is always a decision somebody took deliberately rather than one the deployment arrived with. The environment-backed rows (database TLS, the scheduler, the audit anchor) are set by the operator, not here. The optimisation group (the semantic cache) ships off: it changes answers, and turning it on is a cost decision.</p>}
       />
       <div className={v.stack}>
         <QueryGate
@@ -176,6 +180,12 @@ export default function EnforcementPosturePage() {
                   </Badge>
                 }
                 label="execution"
+              />
+              <Stat
+                value={
+                  <Badge tone={dbTls === "required" ? "ok" : "danger"}>{dbTls ?? "—"}</Badge>
+                }
+                label="database TLS"
               />
               <Stat
                 value={`${report?.summary.enforcementSatisfied ?? 0} of ${report?.summary.enforcementTotal ?? 0}`}
@@ -209,6 +219,19 @@ export default function EnforcementPosturePage() {
                 }
                 // the page that can actually DO something about it
                 action={<Link to="/admin/execution">Open execution control</Link>}
+              />
+            )}
+
+            {/* ADR-0181: TLS to Postgres is the default; running without it is
+                an explicit, visible relaxation (REGULAIT_DATABASE_SSL=disable). */}
+            {dbTls === "relaxed" && (
+              <EmptyState
+                title="database TLS: relaxed"
+                body={
+                  "REGULAIT_DATABASE_SSL=disable is set, so the gateway talks to Postgres in plaintext. " +
+                  "That is acceptable only for a database on the same host (the local demo, docker-compose). " +
+                  "Unset it, or set require, for any other deployment; the gateway also says so loudly at boot."
+                }
               />
             )}
 

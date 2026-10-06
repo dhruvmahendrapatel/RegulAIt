@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, afterAll } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, createDb, eq, modelCredentials, runMigrations, userModelCredentials, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * The credential + key layer as the two UIs actually drive it (ADR-0012: the
@@ -49,6 +52,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { keyCustodyEnforced: false });
 
   // ADR-0034 amendment — a credential `baseUrl` override is now behind the
   // egress guard, and the guard is DEFAULT-DENY: no allow entry, no
@@ -270,8 +274,8 @@ describe("/admin API key issuance", () => {
     expect(listed.statusCode).toBe(200);
     const mine = listed.json().keys.filter((k: { userId: string }) => k.userId === ninaId);
     expect(mine).toHaveLength(2);
-    // ADR-0098 added `expiresAt` (null = never, the shipped default) and the
-    // derived lifecycle `state` — still no token field of any kind.
+    // ADR-0098 added `expiresAt` and the derived lifecycle `state` — still no
+    // token field of any kind. ADR-0181: the shipped default is 90 days.
     expect(Object.keys(mine[0]).sort()).toEqual([
       "createdAt",
       "expiresAt",
@@ -282,7 +286,12 @@ describe("/admin API key issuance", () => {
       "state",
       "userId",
     ]);
-    expect(mine.every((k: { expiresAt: string | null }) => k.expiresAt === null)).toBe(true);
+    expect(
+      mine.every((k: { expiresAt: string | null }) => {
+        const days = (new Date(k.expiresAt!).getTime() - Date.now()) / 86_400_000;
+        return days > 89.9 && days <= 90;
+      }),
+    ).toBe(true);
     expect(mine.every((k: { state: string }) => k.state === "active")).toBe(true);
     expect(listed.body).not.toContain(secondToken);
     expect(listed.body).not.toContain(ninaToken);
@@ -429,4 +438,8 @@ describe("/admin agent-policy editor", () => {
       runBudgetBreachAction: null,
     });
   });
+});
+
+afterAll(async () => {
+  await restoreSb2Gates();
 });

@@ -18,7 +18,7 @@
  *     the requesting user is exposed as selfReview, requires a recorded
  *     reason to decide, and stamps the audit trail.
  */
-import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { beforeAll, afterAll, describe, expect, it, onTestFinished } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { approvals, createDb, eq, runMigrations, type Db } from "@regulait/db";
@@ -511,7 +511,16 @@ describe("finding 6: self-review is exposed, reason-gated, and audited", () => {
     expect(signoff.userId).toBe(rexId);
     expect(signoff.selfReview).toBe(false);
 
-    // ada delegates to rex — the requester now holds his own approval
+    // ada delegates to rex — the requester now holds his own approval.
+    // ADR-0181: delegation ships OFF, so an admin turns it on first, through
+    // the real route, and it goes back off when this test ends (M-068).
+    const on = await app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { approvalDelegationEnabled: true },
+    });
+    expect(on.statusCode).toBe(200);
+    onTestFinished(async () => {
+      await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { approvalDelegationEnabled: false } });
+    });
     const now = Date.now();
     const deleg = await app.inject({
       method: "POST", headers: AUTH, url: "/v1/delegations",

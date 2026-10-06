@@ -16,6 +16,9 @@ import {
   type Db,
 } from "@regulait/db";
 import { canaryBucket } from "@regulait/shared";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+// ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
+let restoreSb2Gates: () => Promise<void> = async () => {};
 
 /**
  * ADR-0048 — IMMUTABLE VERSIONING / CANARY / ROLLBACK, proved by attack.
@@ -205,6 +208,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   // ONE AGENT PER USER, deliberately — the same discipline the ADR-0045 suite
   // adopted. Pillar-6 routing may serve a DIFFERENT registry entry than the one
@@ -265,6 +269,7 @@ afterAll(async () => {
   await db
     .delete(configVersions)
     .where(and(eq(configVersions.artifactType, "agent_system_prompt"), inArray(configVersions.artifactId, ids)));
+  await restoreSb2Gates();
 });
 
 describe("ADR-0048 — the migration backfills a lineage without changing behaviour", () => {

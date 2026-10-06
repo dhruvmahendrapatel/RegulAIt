@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { backupRuns, createDb, auditLog, eq, runMigrations, type Db } from "@regulait/db";
@@ -31,9 +32,14 @@ let adminAuth: { authorization: string };
 let freshResourceId: string;
 let staleResourceId: string;
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: "o5-admin@example.com", displayName: "o5-admin", isAdmin: true } });
   const k = await app.inject({ method: "POST", url: `/v1/users/${u.json().id}/keys`, headers: AUTH, payload: { name: "o5" } });
@@ -92,19 +98,19 @@ describe("runBackupVerifyOnce — honest, source-labelled ledger rows", () => {
 describe("org toggle + scheduler shape", () => {
   it("backupVerifyEnabled defaults OFF with a 24h interval; the PUT flips it and is audited", async () => {
     const s = await app.inject({ method: "GET", url: "/v1/org/settings", headers: adminAuth });
-    expect(s.json().settings.backupVerifyEnabled).toBe(false); // default = today
+    expect(s.json().settings.backupVerifyEnabled).toBe(true); // ADR-0181: on by default
     expect(s.json().settings.backupVerifyIntervalHours).toBe(24);
     const put = await app.inject({
       method: "PUT", url: "/v1/org/settings", headers: adminAuth,
-      payload: { backupVerifyEnabled: true, backupVerifyIntervalHours: 6 },
+      payload: { backupVerifyEnabled: false, backupVerifyIntervalHours: 6 },
     });
     expect(put.statusCode).toBe(200);
-    expect(put.json().settings.backupVerifyEnabled).toBe(true);
+    expect(put.json().settings.backupVerifyEnabled).toBe(false);
     expect(put.json().settings.backupVerifyIntervalHours).toBe(6);
-    // restore the default so the rest of the suite sees today's behaviour
+    // restore the shipped default (ADR-0181: on) for the rest of the suite
     await app.inject({
       method: "PUT", url: "/v1/org/settings", headers: adminAuth,
-      payload: { backupVerifyEnabled: false, backupVerifyIntervalHours: 24 },
+      payload: { backupVerifyEnabled: true, backupVerifyIntervalHours: 24 },
     });
   });
 
@@ -113,4 +119,9 @@ describe("org toggle + scheduler shape", () => {
     expect(typeof stop).toBe("function");
     stop();
   });
+});
+
+// ADR-0181 (FX2): hand the shared database back strict (M-068)
+afterAll(async () => {
+  await restoreAdminKeyMfa?.();
 });

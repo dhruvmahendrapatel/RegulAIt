@@ -210,6 +210,9 @@ export class ModelBackedJudge implements EvalJudge {
       maxTokens: 1024,
       projectId: this.ctx.projectId,
       modelFeature: EVALS_FEATURE,
+      // ADR-0181 (review finding 8): NO `evaluationSubject` — the judge is a
+      // measuring instrument, not the agent under test, so a judge whose own
+      // model card is stale is refused like any other dispatch of it
       detail: {
         purpose: "eval-judge",
         evalRunId: this.ctx.evalRunId,
@@ -1097,6 +1100,9 @@ export async function runEvalSuite(
       // the dispatch's own span nests UNDER this case (null when tracing is off)
       trace: caseTrace,
       modelFeature: EVALS_FEATURE,
+      // ADR-0181: this case dispatch evaluates the agent UNDER TEST (the
+      // judge's dispatch above does not set it and is gated in full)
+      evaluationSubject: true,
       detail: {
         purpose,
         ...originDetail,

@@ -28,6 +28,10 @@
  * deleted in afterAll.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -160,6 +164,7 @@ async function listedAgent(agentId: string): Promise<ListedAgent> {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "c".repeat(64) });
 
   const holder = await makeUser("iv-holder@example.com");
@@ -240,6 +245,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   if (createdUsageIds.length) {
     await db.delete(usageEvents).where(inArray(usageEvents.id, createdUsageIds));
   }
