@@ -27,7 +27,12 @@
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { sql, type Db } from "@regulait/db";
-import { incidentEvidenceHoldRefused, incidentsHoldingAgent } from "./incidents.js";
+// incidents.ts is imported LAZILY, at call time (FA10, ADR-0180). This module is imported by config-versions.ts,
+// which sits on inventory.ts's own import chain (inventory → risks → … → rule-writes → config-versions); a static edge
+// to incidents.ts (→ use-cases / builder-access → agents-connectors → mrm → mrm-autofill, which reads inventory's
+// INVENTORY_WINDOW_DAYS at load) made `import "inventory.js"` first die with a TDZ ReferenceError
+// (adr0180-load-order.test.ts).
+const incidents = () => import("./incidents.js");
 import { loadOrgSettings } from "./org-settings.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -88,6 +93,7 @@ export async function agentEvidenceHoldRefused(
       if (id === root && !includeSelf) continue;
       if (asked.has(id)) continue;
       asked.add(id);
+      const { incidentEvidenceHoldRefused, incidentsHoldingAgent } = await incidents();
       const holding = await incidentsHoldingAgent(db, id);
       // an incident already answered (refused or overridden) for another id is not asked twice
       if (holding.length === 0 || holding.every((h) => covered.has(h.id))) continue;

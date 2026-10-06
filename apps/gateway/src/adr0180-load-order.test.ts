@@ -46,6 +46,10 @@ const ENTRY_MODULES = [
   "alert-ownership",
   "eu-ai-act-role",
   "execution-control",
+  // the D4 security review's evidence hold at every agent-config write (DFX2), and the module that brought it onto
+  // inventory's import chain
+  "agent-evidence-hold",
+  "config-versions",
 ];
 
 function loadAlone(mod: string): string | null {
