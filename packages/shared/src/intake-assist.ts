@@ -312,6 +312,16 @@ export interface IntakeSuggestions {
   blocking: string | null;
 }
 
+/**
+ * ADR-0182 (D4) A11 — THE VERSION OF THE SUGGESTION RULES above (frameworks,
+ * risk rules, `CATEGORY_SUGGESTED_CONTROLS`). Every use-case decision record
+ * cites it, so a decision can be traced to the rules that suggested its
+ * frameworks and controls. Bump it in the same commit as any change to those
+ * rules; the decision-regression golden test (`decision-regression.test.ts`)
+ * fails until the expected outcomes AND this version are updated together.
+ */
+export const INTAKE_ASSIST_RULES_VERSION = "2026-10-06.1";
+
 export function suggestIntake(req: IntakeAssistRequest): IntakeSuggestions {
   const tierResult = classifyEuAiActTier(req.euAiAct as EuAiActAnswers);
   const tier = tierResult.tier;

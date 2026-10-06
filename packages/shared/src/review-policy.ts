@@ -13,6 +13,7 @@
  * tier have members) and stores the policy.
  */
 import { z } from "zod";
+import { decisionRegressionAcceptanceFields } from "./accountability.js";
 
 /** the tier keys a policy can route on — the four screening outcomes plus
  * `unscreened` (no valid answers block, so no computed tier) */
@@ -55,9 +56,41 @@ export const reviewPolicyInputSchema = z
     riskAcceptorUserIds: z.array(z.string().uuid()).max(200).default([]),
     updatedAt: z.unknown().optional(),
     updatedByName: z.unknown().optional(),
+    version: z.unknown().optional(),
+    /** ADR-0182 A11: the decision-regression preview this write activates
+     * (`regressionRunId`), and the acceptance of any outcomes it changes.
+     * Not part of the policy: never stored, never in the digest. */
+    ...decisionRegressionAcceptanceFields,
   })
   .strict();
 export type ReviewPolicyInput = z.infer<typeof reviewPolicyInputSchema>;
+
+/** the policy as stored and versioned: roles, tiers (only the tiers named,
+ * each with its role ids and optional lifetime), risk acceptors */
+export interface ReviewPolicyStoredBody {
+  roles: Array<{ id: string; name: string; memberUserIds: string[] }>;
+  tiers: Partial<Record<ReviewPolicyTierKey, { roleIds: string[]; validityMonths?: number }>>;
+  riskAcceptorUserIds: string[];
+}
+
+/**
+ * ADR-0182 A11 — THE ONE NORMALISATION of a parsed policy body. The PUT
+ * stores exactly this, and the decision-regression preview digests exactly
+ * this, so a preview of a body and the write of the same body have the same
+ * digest (read-only echoes and the acceptance fields are dropped).
+ */
+export function reviewPolicyStoredBody(input: ReviewPolicyInput): ReviewPolicyStoredBody {
+  const tiers: ReviewPolicyStoredBody["tiers"] = {};
+  for (const key of REVIEW_POLICY_TIER_KEYS) {
+    const t = input.tiers[key];
+    if (t) tiers[key] = { roleIds: t.roleIds, ...(t.validityMonths !== undefined ? { validityMonths: t.validityMonths } : {}) };
+  }
+  return {
+    roles: input.roles.map((r) => ({ id: r.id, name: r.name, memberUserIds: r.memberUserIds })),
+    tiers,
+    riskAcceptorUserIds: input.riskAcceptorUserIds,
+  };
+}
 
 /** what `GET /v1/governance/review-policy` returns */
 export interface ReviewPolicyView {
@@ -66,6 +99,8 @@ export interface ReviewPolicyView {
   riskAcceptorUserIds: string[];
   updatedAt: string | null;
   updatedByName: string | null;
+  /** ADR-0182 A11: the live policy version (null before the first write) */
+  version?: number | null;
 }
 
 /** one required review of the CURRENT round, as `GET /v1/use-cases/:id` lists it */
