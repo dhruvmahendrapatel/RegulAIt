@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, runMigrations, workflowTemplates, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { regressionAcceptance } from "./testing/decision-regression.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -78,8 +79,13 @@ describe("ADR-0165 intake template variants", () => {
   });
 
   it("a variant with a concrete approver routes every new use case to that approver", async () => {
+    // ADR-0182 A11: an intake variant decides every new sign-off, so it is
+    // previewed first under the strict decision-regression gate
+    const acceptance = await regressionAcceptance(app, users.admin.auth, "intake_template", {
+      galleryId: "ai-use-case-intake", name: VARIANT, approverUserId: users.owner.id,
+    });
     const created = await call("POST", "/v1/workflows/template-gallery/ai-use-case-intake/create", users.admin.auth, {
-      name: VARIANT, approverUserId: users.owner.id,
+      name: VARIANT, approverUserId: users.owner.id, ...acceptance,
     });
     expect(created.statusCode, created.body).toBe(201);
     variantId = created.json().id;

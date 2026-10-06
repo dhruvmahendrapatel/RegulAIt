@@ -57,6 +57,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { previewedPut } from "./testing/decision-regression.js";
 import { ModelBackedJudge } from "./evals.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 
@@ -548,12 +549,12 @@ describe("residual decision — a risk counts once an admin or a risk acceptor h
 
     // name rika as a risk acceptor through the real admin route; restored below
     const before = (await app.inject({ method: "GET", url: "/v1/governance/review-policy", headers: AUTH })).json();
+    // ADR-0182 A11: previewed first, under the strict decision-regression gate
     const put = (acceptors: string[]) =>
-      app.inject({
-        method: "PUT",
-        url: "/v1/governance/review-policy",
-        headers: AUTH,
-        payload: { roles: before.roles ?? [], tiers: before.tiers ?? {}, riskAcceptorUserIds: acceptors },
+      previewedPut(app, "/v1/governance/review-policy", AUTH, "review_policy", {
+        roles: before.roles ?? [],
+        tiers: before.tiers ?? {},
+        riskAcceptorUserIds: acceptors,
       });
     const named = await put([...(before.riskAcceptorUserIds ?? []), rikaId]);
     expect(named.statusCode, named.body).toBe(200);

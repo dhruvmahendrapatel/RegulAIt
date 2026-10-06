@@ -41,6 +41,7 @@ import {
 } from "@regulait/db";
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { previewedPut } from "./testing/decision-regression.js";
 import { ensureAssignment, reassignApprovalApprover } from "./workbench.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
@@ -96,7 +97,8 @@ const policy = () => ({
   riskAcceptorUserIds: [users.admin.id, users.priv.id],
 });
 const setPolicy = async (body: unknown = policy()) => {
-  const r = await put("/v1/governance/review-policy", users.admin.auth, body);
+  // ADR-0182 A11: previewed first, under the strict decision-regression gate
+  const r = await previewedPut(app, "/v1/governance/review-policy", users.admin.auth, "review_policy", body);
   expect(r.statusCode, r.body).toBe(200);
 };
 

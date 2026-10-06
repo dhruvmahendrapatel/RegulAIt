@@ -63,6 +63,11 @@ import { SHIPPED_GOLDEN_CASES, type GoldenCase } from "./decision-regression/gol
 import { GOLDEN_EXPECTED, GOLDEN_EXPECTED_VERSIONS } from "./decision-regression/golden-expected.js";
 
 export { SHIPPED_GOLDEN_CASES, GOLDEN_EXPECTED, GOLDEN_EXPECTED_VERSIONS, type GoldenCase };
+// the package barrel names review-policy.ts's exports one by one (index.ts is
+// P0's); the A11 normalisation reaches the gateway through this file instead
+export { reviewPolicyStoredBody, type ReviewPolicyStoredBody };
+// likewise the suggestion-rules version (intake-assist.ts is named one by one there)
+export { INTAKE_ASSIST_RULES_VERSION };
 
 /** the outcome fields, in the order every diff lists them */
 export const DECISION_OUTCOME_FIELDS: readonly DecisionOutcomeField[] = [

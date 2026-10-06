@@ -44,6 +44,7 @@ import {
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { setAssuranceGateModeForTest } from "./testing/assurance-mode.js";
+import { regressionAcceptance } from "./testing/decision-regression.js";
 import { schedulerJobRegistry, SCHEDULER_JOB_NAMES } from "./scheduler-jobs.js";
 import { RECERTIFICATION_SYSTEM_ACTOR, runUseCaseRecertificationSweep } from "./review-policy.js";
 
@@ -103,8 +104,15 @@ const policy = () => ({
   },
   riskAcceptorUserIds: [users.priv.id],
 });
+/** ADR-0182 A11: under the strict decision-regression gate an admin previews
+ * the exact body, then writes it with the run's id (and accepts the changes) */
+const previewedPolicyPut = async (body: unknown) =>
+  put("/v1/governance/review-policy", users.admin.auth, {
+    ...(body as object),
+    ...(await regressionAcceptance(app, users.admin.auth, "review_policy", body)),
+  });
 const setPolicy = async (body: unknown = policy()) => {
-  const r = await put("/v1/governance/review-policy", users.admin.auth, body);
+  const r = await previewedPolicyPut(body);
   expect(r.statusCode, r.body).toBe(200);
   return r;
 };
@@ -256,7 +264,7 @@ describe("review policy: read, write, validation", () => {
     // nothing above was stored
     expect((await get("/v1/governance/review-policy", users.admin.auth)).json().tiers).toEqual(policy().tiers);
     // control: a member-less role is fine while NO tier routes to it
-    const ok = await put("/v1/governance/review-policy", users.admin.auth, {
+    const ok = await previewedPolicyPut({
       ...base,
       roles: [...base.roles, { id: "legal", name: "Legal", memberUserIds: [] }],
     });
@@ -420,7 +428,7 @@ describe("multi-role review routing", () => {
     await db.delete(governanceReviewPolicy);
     try {
       expect((await get("/v1/governance/review-policy", users.stranger.auth)).json()).toEqual({
-        roles: [], tiers: {}, riskAcceptorUserIds: [], updatedAt: null, updatedByName: null,
+        roles: [], tiers: {}, riskAcceptorUserIds: [], updatedAt: null, updatedByName: null, version: null,
       });
       const uc = await proposeToReview("no-policy", highAnswers);
       const rows = await signoffRows(uc.instanceId);

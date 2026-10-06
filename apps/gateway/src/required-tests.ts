@@ -68,6 +68,8 @@ import {
   requiredTestPolicyProblems,
   requiredTestPolicySchema,
   requiredTestThresholds,
+  requiredTestsDigest,
+  withoutAcceptance,
   type AssuranceMonitorRuleId,
   type MonitorAssuranceInput,
   type RequiredTestConditionsForFn,
@@ -77,6 +79,17 @@ import {
   type ReviewPolicyTierKey,
 } from "@regulait/shared";
 import { agentConfigHash, runConfigHash } from "./evals.js";
+import {
+  appendReviewPolicyVersion,
+  baselineDigestFor,
+  checkDecisionRegressionGate,
+  computeRegression,
+  loadLiveDecisionConfig,
+  nextReviewPolicyVersion,
+  parseAcceptance,
+  recordDecisionRegressionActivation,
+  refuseDecisionRegression,
+} from "./decision-regression.js";
 import { tierKeyFor } from "./review-policy.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -363,7 +376,11 @@ export function registerRequiredTestRoutes(app: FastifyInstance, db: Db): void {
   app.get(REQUIRED_TESTS_PATH, async () => view(db));
 
   app.put(REQUIRED_TESTS_PATH, async (req, reply) => {
-    const parsed = requiredTestPolicySchema.safeParse(req.body ?? {});
+    // ADR-0182 A11: the acceptance fields ride beside the policy; they are not
+    // part of it (never stored, never in the digest)
+    const acc = parseAcceptance(req.body);
+    if (!acc.ok) return reply.status(422).send({ error: "invalid_regression_acceptance", issues: acc.issues });
+    const parsed = requiredTestPolicySchema.safeParse(withoutAcceptance(req.body));
     if (!parsed.success) {
       return reply.status(422).send({ error: "invalid_required_tests", issues: parsed.error.issues });
     }
@@ -379,21 +396,68 @@ export function registerRequiredTestRoutes(app: FastifyInstance, db: Db): void {
         problems,
       });
     }
+    const candidateDigest = requiredTestsDigest(next);
+    const actor = req.authCtx.userId ?? null;
     // ONE transaction: the row is locked while `before` is read, so two admins
-    // writing at once each audit the value they actually replaced, and the
-    // policy never changes without its audit row (or the reverse)
-    await db.transaction(async (tx) => {
-      await tx.insert(governanceReviewPolicy).values({ id: POLICY_ID }).onConflictDoNothing({ target: governanceReviewPolicy.id });
+    // writing at once each audit the value they actually replaced, the gate
+    // compares the preview's baseline with the policy this write replaces, and
+    // the policy never changes without its version and audit rows (or the reverse)
+    const out = await db.transaction(async (tx) => {
       const [locked] = await tx
-        .select({ requiredTests: governanceReviewPolicy.requiredTests })
+        .select()
         .from(governanceReviewPolicy)
         .where(eq(governanceReviewPolicy.id, POLICY_ID))
         .for("update");
+      const live = await loadLiveDecisionConfig(tx);
+      const verdict = await checkDecisionRegressionGate(tx, {
+        subject: "required_tests",
+        candidateDigest,
+        baselineDigest: baselineDigestFor("required_tests", live),
+        acceptance: acc.value,
+      });
+      if (!verdict.ok) return { kind: "refused" as const, verdict };
       const before = (locked?.requiredTests ?? {}) as RequiredTestPolicy;
-      await tx.update(governanceReviewPolicy).set({ requiredTests: next }).where(eq(governanceReviewPolicy.id, POLICY_ID));
-      await tx.insert(auditLog).values(requiredTestsAuditRow(req.authCtx.userId ?? NO_IDENTITY, before, next));
+      const version = await nextReviewPolicyVersion(tx, locked?.version ?? null);
+      if (locked) {
+        await tx.update(governanceReviewPolicy).set({ requiredTests: next, version }).where(eq(governanceReviewPolicy.id, POLICY_ID));
+      } else {
+        await tx.insert(governanceReviewPolicy).values({ id: POLICY_ID, requiredTests: next, version });
+      }
+      const appended = await appendReviewPolicyVersion(
+        tx,
+        version,
+        {
+          roles: (locked?.roles ?? []) as unknown[],
+          tiers: (locked?.tiers ?? {}) as Record<string, unknown>,
+          riskAcceptorUserIds: (locked?.riskAcceptorUserIds ?? []) as string[],
+          requiredTests: next as Record<string, unknown>,
+        },
+        actor,
+      );
+      const gate = await recordDecisionRegressionActivation(tx, verdict, {
+        subject: "required_tests",
+        candidateDigest,
+        acceptance: acc.value,
+        actorUserId: actor,
+        computeNow: () => computeRegression(tx, "required_tests", candidateDigest, { requiredTests: next }, live),
+      });
+      const row = requiredTestsAuditRow(actor ?? NO_IDENTITY, before, next);
+      await tx.insert(auditLog).values({
+        ...row,
+        detail: {
+          ...row.detail,
+          version,
+          digest: appended.digest,
+          decisionRegression: { outcome: gate.outcome, mode: gate.mode, runId: gate.runId, activationRunId: gate.activationRunId },
+        },
+      });
+      return { kind: "saved" as const, gate };
     });
-    return view(db);
+    if (out.kind === "refused") {
+      const refused = await refuseDecisionRegression(db, out.verdict, { subject: "required_tests", candidateDigest, actorUserId: actor });
+      return reply.status(refused.status).send(refused.body);
+    }
+    return { ...(await view(db)), decisionRegression: out.gate };
   });
 }
 
