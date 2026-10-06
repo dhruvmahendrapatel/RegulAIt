@@ -120,6 +120,44 @@ export function literacyOf(execution: ExecutionPosture): LiteracyPosture {
   return execution.literacy ?? LITERACY_NOT_REQUIRED;
 }
 
+/** ADR-0182 A14 — the refusal's stable rule id (shared `AI_LITERACY_NOT_CURRENT` is the same string) */
+export const LITERACY_RULE_ID = "ai-literacy-not-current";
+
+/**
+ * ADR-0182 A14 — THE LITERACY GATE. Pure.
+ *
+ * Refuses when the person behind the call must be current on an applicable published AI policy or training
+ * (`required`), is not (`current` false), and the org's gate is `enforce` (an absent mode reads as `enforce`: the
+ * strict default). `warn` never refuses here; `evaluate` records the gap on the decision's trace instead. The
+ * reason names the documents, so the person knows exactly what to acknowledge.
+ *
+ * Who is exempt (platform sweeps, evaluation dispatches, the bootstrap identity, break-glass) is decided by the
+ * gateway, which then hands the kernel `LITERACY_NOT_REQUIRED`; the kernel never looks anything up.
+ */
+export function literacyGate(
+  execution: ExecutionPosture,
+  subjectLabel: string,
+): { effect: "deny"; ruleId: string; reason: string } | null {
+  const l = literacyOf(execution);
+  if (!l.required || l.current || (l.mode ?? "enforce") !== "enforce") return null;
+  const missing = l.missing?.length ? l.missing.join("; ") : "an applicable AI policy or training";
+  return {
+    effect: "deny",
+    ruleId: LITERACY_RULE_ID,
+    reason:
+      `${subjectLabel} was refused because the person it runs for has not acknowledged the current version of: ` +
+      `${missing}. The organisation requires this before governed calls, as one of its measures to support the ` +
+      "development of AI literacy (Regulation (EU) 2024/1689, Article 4, as amended). Acknowledge it under " +
+      "Account > AI policies; nothing was executed or billed.",
+  };
+}
+
+/** ADR-0182 A14 — `warn` mode: an allowed or refused decision still records the gap on its trace */
+function literacyWarned(execution: ExecutionPosture): boolean {
+  const l = literacyOf(execution);
+  return l.required && !l.current && l.mode === "warn";
+}
+
 /** the stable rule ids an operator alerts on — one per reason, never shared */
 export const EXECUTION_RULE_IDS = {
   halted: "execution-halted",
@@ -196,6 +234,10 @@ export function executionGate(
     };
   }
 
+  // ADR-0182 A14 — after the hard stops (a halt names the bigger problem), before the conditional
+  // `require_approval` hold: a person who must first acknowledge an AI policy is refused, not queued.
+  const literacyStop = () => literacyGate(execution, subjectLabel);
+
   switch (execution.mode) {
     case "halted":
       return {
@@ -208,7 +250,7 @@ export function executionGate(
       };
     case "read_only":
       // reads pass untouched — that is the entire point of a safe mode
-      if (!isWrite) return null;
+      if (!isWrite) return literacyStop();
       return {
         effect: "deny",
         ruleId: EXECUTION_RULE_IDS.readOnly,
@@ -216,7 +258,9 @@ export function executionGate(
           `this deployment is in READ-ONLY mode and ${subjectLabel} is a write. Reads continue to ` +
           "be served; nothing that changes state is executed.",
       };
-    case "require_approval":
+    case "require_approval": {
+      const refusedForLiteracy = literacyStop();
+      if (refusedForLiteracy) return refusedForLiteracy;
       if (canQueue) {
         // AER-017 — THE HOLD IS NOT A STOP, AND MUST NOT BE RETURNED FROM HERE
         // WHEN THE CALLER WILL EVALUATE ENTITLEMENT.
@@ -255,8 +299,9 @@ export function executionGate(
           "cannot be queued for sign-off the way an MCP tool call or a connector write can. It is therefore REFUSED " +
           "rather than queued. Use read-only mode instead if reads should keep flowing.",
       };
+    }
     case "normal":
-      return null;
+      return literacyStop();
   }
 }
 
@@ -562,6 +607,8 @@ export type RuleName =
   | "execution-subject-halted"
   | "execution-read-only"
   | "execution-require-approval"
+  /** ADR-0182 A14 — the person behind the call is not current on an applicable AI policy or training */
+  | "ai-literacy-not-current"
   | "tool-allow-list"
   | "role-tool-allow-list"
   | "server-read-only-all"
@@ -728,6 +775,14 @@ export function executionApprovalHold(
  * signed off) and approval rules before the final allow.
  */
 export function evaluate(input: EvaluationInput): Decision {
+  const decision = evaluateTool(input);
+  // ADR-0182 A14 — `warn`: the call is decided exactly as without the gate, and its trace records the gap
+  // first (outcome `no-match`: the rule looked and did not refuse), so the audit row carries it.
+  if (!literacyWarned(input.execution)) return decision;
+  return { ...decision, ruleChain: [{ rule: LITERACY_RULE_ID, outcome: "no-match" }, ...decision.ruleChain] };
+}
+
+function evaluateTool(input: EvaluationInput): Decision {
   // ADR-0124 — FIRST, ahead of every grant, rule, limit and scope. A stop that
   // ran after entitlement resolution would still be a stop, but it would also
   // be one more thing to get right in the wrong order later.
@@ -1267,6 +1322,8 @@ export type AgentRuleName =
   | "execution-subject-halted"
   | "execution-read-only"
   | "execution-require-approval"
+  /** ADR-0182 A14 — the person behind the call is not current on an applicable AI policy or training */
+  | "ai-literacy-not-current"
   | "agent-registry-enabled"
   | "agent-allow-list"
   | "role-agent-allow-list"
@@ -1522,6 +1579,8 @@ export type ConnectorRuleName =
   | "execution-subject-halted"
   | "execution-read-only"
   | "execution-require-approval"
+  /** ADR-0182 A14 — the person behind the call is not current on an applicable AI policy or training */
+  | "ai-literacy-not-current"
   | "connector-allow-list"
   | "role-connector-allow-list"
   | "connector-revoked"

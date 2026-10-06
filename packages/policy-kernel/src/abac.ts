@@ -67,9 +67,10 @@ export const ABAC_DEFAULT_TIMEZONE = "UTC";
  * arrival of v2; it simply keeps meaning what it meant. That is the entire
  * reason this field is versioned rather than global.
  */
-export type AbacSchemaVersion = "v1" | "v2";
-export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2"];
-export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v2";
+export type AbacSchemaVersion = "v1" | "v2" | "v3";
+export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2", "v3"];
+/** ADR-0182 A14: new policies are stamped v3, so `principal.aiTrainingCurrent` is reachable */
+export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v3";
 
 /**
  * v1 of the Cedar schema. It is code, not data, on purpose: the attributes a
@@ -211,7 +212,34 @@ const SCHEMA_V2 = (() => {
   return base;
 })();
 
-const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2 };
+/**
+ * ADR-0182 (ADR-0175 batch D4) A14 — v3 = v2 plus ONE principal attribute: `aiTrainingCurrent`, so a policy can
+ * require current AI literacy for a grant or a sensitive tool:
+ *
+ *   forbid (principal, action == RegulAIt::Action::"McpToolCall", resource)
+ *   when { resource.kind == "write" } unless { principal.aiTrainingCurrent };
+ *
+ * It is true only when at least one published AI policy or training applies to the person AND every one is
+ * acknowledged at its current version and unexpired (shared `aiTrainingCurrentOf`). Never vacuously true: an org
+ * that published nothing does not satisfy a policy that asks for current training.
+ *
+ * REQUIRED, not optional: the gateway always knows the answer (it is a fact about stored rows, unlike `clientIp`),
+ * so an author need not guard it with `has`. v1 and v2 policies never see it — `entitiesFor` emits it only for a
+ * v3 group, because an undeclared entity attribute fails request validation and this engine fails closed.
+ */
+const SCHEMA_V3 = (() => {
+  const base = structuredClone(SCHEMA_V2) as typeof SCHEMA_V2;
+  const user = base[ABAC_NAMESPACE].entityTypes.User.shape;
+  (user.attributes as Record<string, unknown>).aiTrainingCurrent = { type: "Boolean" as const };
+  return base;
+})();
+
+const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2, v3: SCHEMA_V3 };
+
+/** does this schema version carry `principal.aiTrainingCurrent`? (v3 and later) */
+function hasAiTrainingAttribute(schemaVersion: string): boolean {
+  return schemaVersion !== "v1" && schemaVersion !== "v2";
+}
 
 export function abacSchema(version: string): unknown | null {
   return SCHEMAS[version as AbacSchemaVersion] ?? null;
@@ -257,6 +285,12 @@ export interface AbacPrincipalAttrs {
   isAdmin: boolean;
   sessionOrigin: string;
   mfaCompleted: boolean;
+  /**
+   * Schema v3 (ADR-0182 A14). Built by the gateway's `assembleAbacRequest` — the one place enforcement AND the
+   * simulation surface build the bag — from the stored AI policies and acknowledgements. Absent reads as false
+   * (the strict answer) for a v3 policy; v1/v2 policies never see it.
+   */
+  aiTrainingCurrent?: boolean | undefined;
 }
 
 export interface AbacResourceAttrs {
@@ -390,7 +424,12 @@ function compact(attrs: Record<string, unknown>): Record<string, cedar.CedarValu
   return out;
 }
 
-function entitiesFor(req: AbacRequest): cedar.Entities {
+/**
+ * The entities, per SCHEMA VERSION — for the same reason `contextFor` takes one: `isAuthorized` validates entities
+ * against the group's schema, so an attribute v1/v2 do not declare (`aiTrainingCurrent`) would fail every v1/v2
+ * evaluation closed. v3 and later get it, defaulting to false when the caller did not supply it.
+ */
+function entitiesFor(req: AbacRequest, schemaVersion: string): cedar.Entities {
   return [
     {
       uid: entityUid("User", req.principal.id),
@@ -401,6 +440,7 @@ function entitiesFor(req: AbacRequest): cedar.Entities {
         isAdmin: req.principal.isAdmin,
         sessionOrigin: req.principal.sessionOrigin,
         mfaCompleted: req.principal.mfaCompleted,
+        ...(hasAiTrainingAttribute(schemaVersion) ? { aiTrainingCurrent: req.principal.aiTrainingCurrent === true } : {}),
       }),
       parents: [],
     },
@@ -601,7 +641,6 @@ class CedarAbacEngine implements AbacEngine {
       byZone.set(tz, list);
     }
 
-    const entities = entitiesFor(request);
     const matched: AbacPolicy[] = [];
     for (const [tz, group] of byZone) {
       const bySchema = new Map<string, AbacPolicy[]>();
@@ -623,7 +662,7 @@ class CedarAbacEngine implements AbacEngine {
           schema: schema as cedar.Schema,
           validateRequest: true,
           policies: { staticPolicies },
-          entities,
+          entities: entitiesFor(request, schemaVersion),
         });
         if (answer.type === "failure") {
           // A malformed request/policy set must FAIL CLOSED, not silently
