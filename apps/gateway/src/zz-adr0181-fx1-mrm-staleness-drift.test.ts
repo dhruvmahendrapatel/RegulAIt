@@ -495,6 +495,87 @@ describe("finding 1 — governance-level changes ARE drift", () => {
 
 // ---------------------------------------------------------------------------
 
+describe("residual decision — a risk counts once an admin or a risk acceptor has written it", () => {
+  async function anaRegistersRisk(title: string): Promise<string> {
+    const r = await app.inject({
+      method: "POST",
+      url: "/v1/risks",
+      headers: anaAuth,
+      payload: {
+        title,
+        description: "fx1: raised by an entitled non-admin",
+        category: "hallucination",
+        likelihood: "high",
+        impact: "high",
+        agentId: subjectId,
+      },
+    });
+    expect(r.statusCode, r.body).toBe(201);
+    return r.json().id as string;
+  }
+  let triageRiskId: string;
+
+  it("a non-admin registering a risk on the agent does NOT stale the card: it awaits triage", async () => {
+    await certify(subjectCardId, "fx1: recertified");
+    triageRiskId = await anaRegistersRisk("fx1 non-admin risk awaiting triage");
+    expect((await invoke()).statusCode).toBe(200);
+    const s = (await staleness()) as Staleness & { pendingTriage: string | null };
+    expect(s.drifted).toBe(false);
+    expect(s.driftSinceCertification!.riskChanges).toBe(0);
+    expect(s.changesSinceCertification!.risksAwaitingTriage).toBe(1);
+    expect(s.pendingTriage).toContain("1 risk registered, awaiting triage");
+  });
+
+  it("an admin editing that risk DOES stale the card", async () => {
+    const e = await app.inject({
+      method: "PATCH",
+      url: `/v1/risks/${triageRiskId}`,
+      headers: AUTH,
+      payload: { mitigation: "fx1: triaged by an admin — answers are grounded in the ticket" },
+    });
+    expect(e.statusCode, e.body).toBe(200);
+    const s = await staleness();
+    expect(s.driftSinceCertification!.riskChanges).toBe(1);
+    expect(s.changesSinceCertification!.risksAwaitingTriage).toBe(0);
+    expect(s.drifted).toBe(true);
+    expect((await invoke()).statusCode).toBe(409);
+  });
+
+  it("a named risk acceptor accepting a non-admin's risk DOES stale the card", async () => {
+    await certify(subjectCardId, "fx1: recertified");
+    const riskId = await anaRegistersRisk("fx1 non-admin risk for the acceptor");
+    expect((await staleness()).drifted).toBe(false);
+
+    // name rika as a risk acceptor through the real admin route; restored below
+    const before = (await app.inject({ method: "GET", url: "/v1/governance/review-policy", headers: AUTH })).json();
+    const put = (acceptors: string[]) =>
+      app.inject({
+        method: "PUT",
+        url: "/v1/governance/review-policy",
+        headers: AUTH,
+        payload: { roles: before.roles ?? [], tiers: before.tiers ?? {}, riskAcceptorUserIds: acceptors },
+      });
+    const named = await put([...(before.riskAcceptorUserIds ?? []), rikaId]);
+    expect(named.statusCode, named.body).toBe(200);
+    try {
+      const a = await app.inject({
+        method: "POST",
+        url: `/v1/risks/${riskId}/acceptances`,
+        headers: rikaAuth,
+        payload: { responseType: "accept", rationale: "fx1: accepted at arm's length after review" },
+      });
+      expect(a.statusCode, a.body).toBe(201);
+      const s = await staleness();
+      expect(s.driftSinceCertification!.riskChanges).toBe(1);
+      expect(s.drifted).toBe(true);
+    } finally {
+      expect((await put(before.riskAcceptorUserIds ?? [])).statusCode).toBe(200);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe("finding 8 — a judge is gated in full, staleness included", () => {
   it("a judge whose own card is stale is REFUSED, never exempted as an evaluation", async () => {
     const r = await app.inject({

@@ -185,6 +185,8 @@ interface StalenessView {
   changesSinceCertification: Record<string, number> | null;
   drifted: boolean;
   summary: string | null;
+  /** ADR-0181: risks only non-admins have written, awaiting triage (not drift) */
+  pendingTriage?: string | null;
   note: string;
 }
 
@@ -329,7 +331,7 @@ export default function ModelRiskPage() {
                     <option value="off">off — drift informs, nothing more</option>
                   </Select>
                 </Field>
-                <Field label="Drift threshold (ledger changes since certification)">
+                <Field label="Drift threshold (regressions and changes since certification)">
                   <Input
                     type="number"
                     min={1}
@@ -366,8 +368,9 @@ export default function ModelRiskPage() {
                 that measured worse than at certification, or a scheduled run that failed its gate),
                 a risk-register change, an agent guardrail relaxation, a model, prompt or endpoint
                 change, or an edit of the card — the same events the card&apos;s certification-drift
-                banner names. Passing runs and grants are routine evidence, not drift. Off keeps
-                drift purely informational.
+                banner names. A risk counts once an admin or a named risk acceptor has written it; one
+                only a non-admin has registered shows as awaiting triage. Passing runs and grants are
+                routine evidence, not drift. Off keeps drift purely informational.
               </div>
               <div className={v.faint}>{status.data?.note}</div>
               <div className={a.formRow}>
@@ -595,6 +598,12 @@ export default function ModelRiskPage() {
                     <Badge tone="warn">certification drift</Badge>{" "}
                     <strong>{staleness.summary}</strong>
                     <div className={v.faint}>{staleness.note}</div>
+                  </div>
+                )}
+                {staleness?.pendingTriage && (
+                  <div>
+                    <Badge tone="info">awaiting triage</Badge>{" "}
+                    <span>{staleness.pendingTriage}</span>
                   </div>
                 )}
 

@@ -40,6 +40,7 @@ import {
   auditLog,
   configActivationEvents,
   count,
+  governanceReviewPolicy,
   desc,
   eq,
   evalDatasets,
@@ -58,6 +59,7 @@ import {
   roles,
   sql,
   usageEvents,
+  users,
   type Db,
   type ModelCardApprovalRow,
   type ModelCardRow,
@@ -588,7 +590,13 @@ export function summarizeAutofillForSnapshot(a: CardAutofill): Record<string, un
  *    red-team run's own gate verdict is not used: `POST /v1/redteam/runs`
  *    lets the caller choose its trigger and thresholds.
  *  - `riskChanges`: a risk-register row scoped to the subject created or
- *    edited.
+ *    edited since certification that an ADMIN or a named RISK ACCEPTOR
+ *    (`governance_review_policy.risk_acceptor_user_ids`) has authored or
+ *    touched (its audited `ai_risk` rows, at any time). Registering a risk is
+ *    open to everyone, so a risk only a non-admin has written does not count:
+ *    it is shown as `risksAwaitingTriage` until an admin or acceptor triages,
+ *    accepts or edits it, and from then on its changes count. Privilege is
+ *    read as it stands now (the bootstrap identity counts as admin).
  *  - `guardrailRelaxations`: an agent-scope guardrail override written or
  *    removed so that some detector ends LESS strict (its audited
  *    `transitions`; a removal recorded without transitions counts, as its
@@ -624,6 +632,9 @@ export interface CardStaleness {
     guardrailChanges: number;
     grantChanges: number;
     riskChanges: number;
+    /** risks changed since certification that only non-admins have written:
+     * registered, awaiting triage by an admin or a risk acceptor — not drift */
+    risksAwaitingTriage: number;
     scheduledRegressions: number;
   } | null;
   /** ADR-0181: the drift events since certification, by kind (see
@@ -635,6 +646,8 @@ export interface CardStaleness {
   drifted: boolean;
   /** the human sentence the UI leads with — null when nothing drifted */
   summary: string | null;
+  /** ADR-0181: "N risks registered, awaiting triage" — null when none */
+  pendingTriage: string | null;
   note: string;
 }
 
@@ -642,7 +655,7 @@ export const MRM_STALENESS_NOTE =
   "drift is counted from the ledgers since the last granting sign-off: an eval run that scored worse " +
   "than the certification-era run of the same suite (or a server-started run that failed its gate), a " +
   "red-team run with a worse attack-success rate than the certification-era run of the same library, a " +
-  "risk-register change, an agent guardrail relaxation, a model, prompt or endpoint configuration change, " +
+  "risk-register change an admin or risk acceptor made or triaged, an agent guardrail relaxation, a model, prompt or endpoint configuration change, " +
   "or an edit of this card. Passing runs, grants and revocations are routine evidence, not drift. With " +
   "staleness-forces-recertification on, drift at the org's threshold refuses dispatch until a new " +
   "sign-off; expiry stays ADR-0045's validUntil recomputation at dispatch.";
@@ -746,6 +759,53 @@ function isGuardrailRelaxation(ruleId: string, detail: unknown): boolean {
   );
 }
 
+/** the audit identity the bootstrap token writes under — admin by definition */
+const BOOTSTRAP_IDENTITY = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * ADR-0181 (coordinator decision on the review's residual): split the subject's
+ * risk-register changes since certification into those an admin or a named
+ * risk acceptor has authored or touched (drift) and those only non-admins have
+ * written (awaiting triage, not drift). No single non-admin can stale a model
+ * for everyone by registering a risk on it.
+ */
+async function classifyRiskChanges(
+  db: Db,
+  agentIds: string[],
+  since: Date,
+  sequential: boolean,
+): Promise<{ counted: number; awaitingTriage: number }> {
+  if (agentIds.length === 0) return { counted: 0, awaitingTriage: 0 };
+  const changed = await db
+    .select({ id: aiRisks.id })
+    .from(aiRisks)
+    .where(and(inArray(aiRisks.agentId, agentIds), gt(aiRisks.updatedAt, since)));
+  if (changed.length === 0) return { counted: 0, awaitingTriage: 0 };
+  const riskIds = changed.map((r) => r.id);
+  const [writes, policy] = await readAll([
+    db
+      .selectDistinct({ riskId: auditLog.objectId, userId: auditLog.userId })
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "ai_risk"), inArray(auditLog.objectId, riskIds))),
+    db.select({ acceptors: governanceReviewPolicy.riskAcceptorUserIds }).from(governanceReviewPolicy),
+  ], sequential);
+  const actorIds = [...new Set(writes.map((w) => w.userId).filter((u) => u !== BOOTSTRAP_IDENTITY))];
+  const admins = actorIds.length
+    ? await db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(inArray(users.id, actorIds), eq(users.isAdmin, true)))
+    : [];
+  const privileged = new Set<string>([
+    BOOTSTRAP_IDENTITY,
+    ...admins.map((a) => a.id),
+    ...policy.flatMap((p) => p.acceptors ?? []),
+  ]);
+  const triaged = new Set(writes.filter((w) => privileged.has(w.userId)).map((w) => w.riskId));
+  const counted = riskIds.filter((id) => triaged.has(id)).length;
+  return { counted, awaitingTriage: riskIds.length - counted };
+}
+
 /**
  * What changed since the last sign-off decision. "Certified" here means the
  * most recent decision that GRANTED an acceptance — a record now `approved`,
@@ -773,6 +833,7 @@ export async function computeCardStaleness(
       driftEvents: 0,
       drifted: false,
       summary: null,
+      pendingTriage: null,
       note:
         "never certified — staleness measures drift since a sign-off, and no " +
         "sign-off has been granted on this card",
@@ -1007,18 +1068,20 @@ export async function computeCardStaleness(
     if (run.asr != null && refAsr !== undefined && run.asr > refAsr) redteamRegressions += 1;
   }
 
+  const risks = await classifyRiskChanges(db, agentIds, since, sequential);
   const changes = {
     evalRuns: evalsSince[0]?.n ?? 0,
     redteamRuns: rtSince[0]?.n ?? 0,
     guardrailChanges: guardrailsSince[0]?.n ?? 0,
     grantChanges: (grantsSince[0]?.n ?? 0) + (revocationsSince[0]?.n ?? 0),
     riskChanges: risksSince[0]?.n ?? 0,
+    risksAwaitingTriage: risks.awaitingTriage,
     scheduledRegressions: regressionsSince[0]?.n ?? 0,
   };
   const drift: StalenessDrift = {
     evalRegressions,
     redteamRegressions,
-    riskChanges: risksSince[0]?.n ?? 0,
+    riskChanges: risks.counted,
     guardrailRelaxations: guardrailWrites.filter((w) => isGuardrailRelaxation(w.ruleId ?? "", w.detail)).length,
     configChanges:
       (activationsSince[0]?.n ?? 0) + (agentConfigEditsSince[0]?.n ?? 0) + (providerEditsSince[0]?.n ?? 0),
@@ -1044,6 +1107,11 @@ export async function computeCardStaleness(
     summary: drifted
       ? `${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)!}` : parts[0]!} since certification — the evidence this sign-off rested on has moved`
       : null,
+    pendingTriage:
+      risks.awaitingTriage > 0
+        ? `${plural(risks.awaitingTriage, "risk")} registered, awaiting triage by an admin or a risk acceptor ` +
+          "(not drift until one of them triages, accepts or edits it)"
+        : null,
     note: MRM_STALENESS_NOTE,
   };
 }
