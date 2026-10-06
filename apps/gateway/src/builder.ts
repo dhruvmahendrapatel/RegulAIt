@@ -138,6 +138,7 @@ import {
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
+import { incidentEvidenceHoldRefused } from "./incidents.js"; // ADR-0182 A12: Art. 73(6) evidence hold
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
  * control or invisible formatting characters (422 `skill_name_invalid`) */
@@ -782,6 +783,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderUpdateAgentSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    if ((body.instructions !== undefined || body.modelAgentId !== undefined || body.computerUse !== undefined) && (await incidentEvidenceHoldRefused(db, req, reply, agent.id, "instructions, model or computer use"))) return reply;
     if (body.connectionFormat !== undefined) {
       return reply.status(409).send({
         error: "connection_format_locked",
@@ -866,6 +868,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderSetToolsSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    if (await incidentEvidenceHoldRefused(db, req, reply, agent.id, "tools")) return reply;
     const connectorIds = body.tools.filter((t) => t.kind === "connector").map((t) => t.refId);
     const toolIds = body.tools.filter((t) => t.kind === "mcp_tool").map((t) => t.refId);
     const [connectorRows, mcpRows] = await Promise.all([loadConnectorsById(db, connectorIds), loadMcpTools(db, toolIds)]);

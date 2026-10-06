@@ -176,6 +176,7 @@ import type { ArtifactModelProvider } from "@regulait/training-provider";
 import { egressRefusal } from "./egress-guard.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
+import { incidentEvidenceHoldRefused } from "./incidents.js"; // ADR-0182 A12: Art. 73(6) evidence hold
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
@@ -2848,6 +2849,7 @@ export function registerAgentConnectorRoutes(
       });
     }
     const patch = updateAgentConfigSchema.parse(req.body ?? {});
+    if (await incidentEvidenceHoldRefused(db, req, reply, agentId, "model and prices")) return reply;
     const res = await applyRuleEdit(db, {
       artifactType: "agent_config",
       artifactId: agentId,
@@ -2884,6 +2886,7 @@ export function registerAgentConnectorRoutes(
     const body = setAgentSystemPromptSchema.parse(req.body);
     const [existing] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    if (await incidentEvidenceHoldRefused(db, req, reply, agentId, "system prompt")) return reply;
     const created = await newVersion(db, {
       artifactType: "agent_system_prompt",
       artifactId: agentId,
@@ -3225,6 +3228,7 @@ export function registerAgentConnectorRoutes(
     const body = setAgentFallbacksSchema.parse(req.body);
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    if (await incidentEvidenceHoldRefused(db, req, reply, agentId, "fallback endpoints")) return reply;
 
     if (body.fallbackAgentIds.includes(agentId)) {
       return reply.status(422).send({
