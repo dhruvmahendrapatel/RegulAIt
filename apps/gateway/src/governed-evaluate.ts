@@ -36,7 +36,7 @@ import {
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
-import { literacyPostureFor, type GovernedCallOrigin } from "./ai-literacy.js";
+import { withLiteracyPosture, type GovernedCallOrigin } from "./ai-literacy.js";
 import {
   applyRuleVersions,
   loadVersionsForArtifacts,
@@ -637,10 +637,9 @@ export async function governedEvaluate(
   // ADR-0182 A14 — THE LITERACY SLOT. Filled only on the enforcement path (a simulation evaluates under
   // EVALUATION_ONLY_EXECUTION below and never reads it), and only when something published applies to this
   // person; otherwise the posture is exactly the one above, so a fresh install decides as before.
-  const literacy = simulate
-    ? null
-    : await literacyPostureFor(db, userId, { origin: opts?.origin, principal });
-  const executionPosture = literacy?.required ? { ...resolvedPosture, literacy } : resolvedPosture;
+  const executionPosture = simulate
+    ? resolvedPosture
+    : await withLiteracyPosture(db, resolvedPosture, userId, { origin: opts?.origin, principal });
 
   const evaluateWith = (
     rules: typeof servedARules,

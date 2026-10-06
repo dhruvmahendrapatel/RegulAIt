@@ -82,7 +82,7 @@ import {
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
 } from "@regulait/shared";
-import { LITERACY_NOT_REQUIRED, type LiteracyPosture } from "@regulait/policy-kernel";
+import { LITERACY_NOT_REQUIRED, type ExecutionPosture, type LiteracyPosture } from "@regulait/policy-kernel";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { loadScopeMemberships } from "./entitlements.js";
@@ -285,6 +285,22 @@ export async function literacyPostureFor(
   const status = await loadLiteracyStatus(db, userId, opts.now ?? new Date(), org);
   if (!status.required) return LITERACY_NOT_REQUIRED;
   return { required: true, current: status.current, missing: literacyMissing(status), mode };
+}
+
+/**
+ * The same slot for any OTHER governed entry point (model dispatch `evaluateAgent`, connector calls
+ * `evaluateConnector`): the posture the caller already built, plus the literacy slot when something published
+ * applies. Returns the posture unchanged otherwise, so a call site that adopts it decides exactly as before until
+ * a document is published. `governedEvaluate` uses it for the MCP tool path.
+ */
+export async function withLiteracyPosture<P extends ExecutionPosture>(
+  db: Db,
+  posture: P,
+  userId: string,
+  opts: { origin?: GovernedCallOrigin | undefined; principal?: AbacPrincipalContext | undefined } = {},
+): Promise<P> {
+  const literacy = await literacyPostureFor(db, userId, opts);
+  return literacy.required ? { ...posture, literacy } : posture;
 }
 
 // ---------------------------------------------------------------------------
