@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X12: verify existing Windows import renames and add a filesystem regression guard | X13 intake recovery/navigation; X14 accessibility; X15 adversarial review | — | 10-06 23:00 | — |
+| Codex | X12 ready: filesystem guard and planted-collision proof pass; Linux web gates pass | X13 intake recovery and navigation | — | 10-06 23:02 | Draft PR creation needs api.github.com egress; saved in environment draft |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -199,7 +199,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   case-insensitive filesystem. Rename so no two files in `apps/web/src` differ only by case, and fix the
   imports. Add a web unit test that walks `apps/web/src` and fails on any case-only collision (red proof:
   plant a collision). Evidence: web tsc + build on Linux, and on Windows if you have it.
-  Status: IN-PROGRESS (Codex, 2026-10-06 23:00 UTC)
+  Status: READY-FOR-REVIEW (1a5599db; draft PR pending api.github.com egress)
+  Evidence: `pnpm --filter @regulait/web test` 317/317; `pnpm exec vitest run --dir scripts` 36/36; web `exec tsc --noEmit` and `build` exit 0 on Linux. Filesystem guard 2/2; planted `X12Collision.tsx` / `x12Collision.ts` makes it fail (exit 1), removed afterward. Existing main renames retained. Windows unavailable; no Windows pass claimed. Source commit `1a5599db`.
 - **X13 — AER-050 recovery and navigation** (codexInputs.md): finish the remaining intake recovery and
   navigation behaviour and its mock Playwright tests (draft restored after reload, back/forward keeps
   state, leaving with unsaved changes asks first). Axe in light and dark. Evidence: spec names, pass
