@@ -228,7 +228,7 @@ for (const agent of agents.filter((a) => DEMO_AGENTS.includes(a.name))) {
     const created = await call("POST", "/v1/mrm/cards", {
       agentId: agent.id,
       intendedUse:
-        "Demonstration dispatch on the RegulAIt capability demo. Mock provider: no customer data, no external call.",
+        "Demonstration dispatch on the regulAIt capability demo. Mock provider: no customer data, no external call.",
       // `dataClaims` is a RECORD, not prose — it is meant to be queried.
       dataClaims: {
         trainingData: "none — deterministic mock provider, no model was trained",

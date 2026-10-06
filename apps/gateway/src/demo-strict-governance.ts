@@ -40,7 +40,7 @@ export const DEMO_CARD_AGENTS = ["fast-mock", "balanced-mock", "premium-mock"] a
 
 const DEMO_CARD = {
   intendedUse:
-    "Demonstration dispatch on the RegulAIt capability demo. Mock provider: no customer data, no external call.",
+    "Demonstration dispatch on the regulAIt capability demo. Mock provider: no customer data, no external call.",
   dataClaims: {
     trainingData: "none — deterministic mock provider, no model was trained",
     customerData: "none reaches this agent; the provider is in-process",
