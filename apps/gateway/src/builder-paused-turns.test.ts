@@ -553,7 +553,7 @@ describe("3 + 7. channel turns: resumed replies go back, links are absolute, tex
     const link = "open regulAIt to view the thread"; // REGULAIT_PUBLIC_URL unset; the request Host is never used
     // (Slack text is escaped: the link's `&` travels as `&amp;`, which Slack shows and links as `&`)
     expect(repliesIn(ts)).toEqual([expect.stringContaining(escapeSlackText(`Waiting for your confirmation in RegulAIt before using a tool: ${link}`))]);
-    expect(map).toMatchObject({ replyTarget: CHANNEL, replyThreadRef: ts, linkOrigin: "http://localhost:80" });
+    expect(map).toMatchObject({ replyTarget: CHANNEL, replyThreadRef: ts, linkOrigin: null }); // the request Host is no longer even stored (ADR-0183 batch 2 review)
     const detail = (await k.req("GET", `/v1/builder/threads/${map.builderThreadId}`, owner.auth)).json();
     const before = hit("plain");
     const ok = await confirm(owner, map.builderThreadId, detail.pending.stepId, "approve");
