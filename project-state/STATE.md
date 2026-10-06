@@ -1,6 +1,6 @@
 ---
-phase: adr0168-amendment-review-policy-stewardship-aer049-built-on-wt-g2-int-gate-pending-demo-2026-10-05-next
-last_updated: 2026-10-03
+phase: adr0181-strict-defaults-integrated-on-strict-int-security-review-next
+last_updated: 2026-10-06
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,19 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-06 - Strict defaults (ADR-0181) built by four agents and integrated on `strict-int`.**
+- Migrations 0156–0159 (identity; guardrails, data and runtime; governance gates; admission and infrastructure). The
+  next migration is **0160**, and the next ADR is **0182**.
+- Every relaxable setting ships strict, and each relaxation is audited as `detail.transitions` (`{ from, to }` per
+  key), one shape on every settings write.
+- The demo stays truthful: `demo:check` passes 18/18 with 15 active alerts. The prep scripts revoke their own keys, so
+  no admin-owned API key is left behind to be flagged over-scoped.
+- Product changes for the security review to verify:
+  - the MRM staleness exemption for `evals` dispatches (SB2);
+  - the demo's audited guardrail window for red-team probes (SB1);
+  - the `x-regulait-accept-buffered` header (SB1).
+- Next: the batch security review, then the PR, then D4.
 
 **2026-10-05 - D3 continuous assurance (ADR-0180) built, reviewed and fixed on `d3-int`.**
 - Migration 0155; the next migration is **0156**, and the next ADR is **0181** (strict defaults).
@@ -4529,6 +4542,11 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **ADR-0181 follow-ups (2026-10-06):**
+  - Replace the hand-written TOTP with the `otpauth` library (MIT), per open source first (ADR-0176).
+  - SAML JIT provisioning should require allowed email domains, as OIDC JIT now does.
+  - The dev-box `user-data` should set `REGULAIT_HSTS=max-age=86400` for its sslip.io host, since the gateway default
+    is now one year.
 - ~~**Concurrent reads on one pg client in MRM autofill (pg@9 hazard).**~~ **CLOSED 2026-10-02 by
   PR #115 (0f5d0b2): card-autofill reads run sequentially on a transaction handle.** `computeCardAutofill` /
   `computeCardStaleness` (`apps/gateway/src/mrm-autofill.ts`) run reads through `Promise.all`;
