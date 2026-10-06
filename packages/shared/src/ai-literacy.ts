@@ -150,6 +150,11 @@ export interface LiteracyDocumentStanding extends LiteracyDocumentStatus {
   acknowledgedVersion: number | null;
 }
 
+/** `LiteracyStatus` with each document's counted acknowledgement */
+export interface LiteracyStanding extends Omit<LiteracyStatus, "documents"> {
+  documents: LiteracyDocumentStanding[];
+}
+
 /**
  * A person's standing on each applicable document.
  *
@@ -164,7 +169,7 @@ export function literacyStatusOf(
   documents: readonly LiteracyDocumentInput[],
   acknowledgements: readonly LiteracyAckInput[],
   now: Date,
-): LiteracyStatus & { documents: LiteracyDocumentStanding[] } {
+): LiteracyStanding {
   const t = now.getTime();
   const out: LiteracyDocumentStanding[] = documents.map((d) => {
     const forKey = acknowledgements.filter((a) => a.key === d.key);

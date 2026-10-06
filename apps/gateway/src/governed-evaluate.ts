@@ -36,6 +36,7 @@ import {
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
+import { literacyPostureFor, type GovernedCallOrigin } from "./ai-literacy.js";
 import {
   applyRuleVersions,
   loadVersionsForArtifacts,
@@ -273,6 +274,13 @@ export async function governedEvaluate(
    * derived from the current server row, for callers that never execute.
    */
   target?: ApprovalTargetRef | null,
+  /**
+   * ADR-0182 A14 — who originated this call, for the AI literacy gate. Absent = `human` (the strict reading):
+   * a person's own call, or an agent or automation they run or own, evaluated AS them, which therefore inherits
+   * their literacy status. `evaluation` (an evaluation or red-team dispatch) and `platform` (a platform sweep)
+   * are exempt.
+   */
+  opts?: { origin?: GovernedCallOrigin },
 ): Promise<GovernedEvaluation> {
   if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
     throw new Error("Prepared PII action does not match the original arguments");
@@ -622,10 +630,17 @@ export async function governedEvaluate(
    * Anything else varying between them would make a divergence unattributable
    * to the version change it is supposed to measure. */
   // Resolved once per governed call: org dial + this tool's own halt.
-  const executionPosture = await resolveExecutionPosture(db, {
+  const resolvedPosture = await resolveExecutionPosture(db, {
     serverId,
     toolName: tool.name,
   });
+  // ADR-0182 A14 — THE LITERACY SLOT. Filled only on the enforcement path (a simulation evaluates under
+  // EVALUATION_ONLY_EXECUTION below and never reads it), and only when something published applies to this
+  // person; otherwise the posture is exactly the one above, so a fresh install decides as before.
+  const literacy = simulate
+    ? null
+    : await literacyPostureFor(db, userId, { origin: opts?.origin, principal });
+  const executionPosture = literacy?.required ? { ...resolvedPosture, literacy } : resolvedPosture;
 
   const evaluateWith = (
     rules: typeof servedARules,
