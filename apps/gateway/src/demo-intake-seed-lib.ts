@@ -359,6 +359,9 @@ async function seedDemoIntakeRun(
   // --- required AI tests (ADR-0180 A3): real red-team runs for the agents the story ships ---
   await seedRequiredTestRuns(call, ada, agentId, fixtures, report);
 
+  // --- accountability records (ADR-0182 D4): one feedback item that became a closed incident ---
+  await seedDemoAccountability(call, { ada, dana, avery }, useCaseId, report);
+
   // --- shadow AI evidence (imported, never claimed as discovered) --------------------------
   if (fixtures.shadowAi.length > 0) {
     // the matcher holds no provider names — with an empty signature catalogue
@@ -386,6 +389,126 @@ async function seedDemoIntakeRun(
   }
 
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0182 (D4) — the accountability records the demo shows
+// ---------------------------------------------------------------------------
+
+/** the closed demo incident (idempotency key: this title on the use case below) */
+export const DEMO_INCIDENT_TITLE = "Sentiment scores under-rated complaints written in a second language";
+/** the high-tier, approved use case the story's incident and feedback belong to */
+const DEMO_ACCOUNTABILITY_USE_CASE = "uc-2";
+
+/**
+ * One end-user problem report on the Customer Sentiment Analyzer, acknowledged
+ * by its owner, who opens an incident from it (A13 → A12, pre-linked). The
+ * incident is marked serious (fundamental rights), so the platform starts the
+ * EU AI Act clocks itself; each clock reaches a terminal state through the real
+ * routes (reports recorded to clearly synthetic recipients), the corrective
+ * action is done with its evidence, and the owner closes the incident with a
+ * root cause and lessons learned. The feedback item is then resolved with a
+ * note. Every step is a real, audited API call; nothing is inserted directly.
+ * Idempotent: an incident with this title on this use case means it is done.
+ */
+async function seedDemoAccountability(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  useCaseId: Map<string, string>,
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const fail = (what: string, r: { status: number; body: Json }): void => {
+    report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+  };
+  const uc = useCaseId.get(DEMO_ACCOUNTABILITY_USE_CASE);
+  if (!uc) {
+    report.notes.push(`accountability records: use case '${DEMO_ACCOUNTABILITY_USE_CASE}' not seeded`);
+    return;
+  }
+  const existing: Json[] = (await call("GET", `/v1/incidents?useCaseId=${uc}`, undefined, who.ada.auth)).body.incidents ?? [];
+  if (existing.some((i) => i.title === DEMO_INCIDENT_TITLE)) {
+    report.skipped.push("demo incident and feedback");
+    return;
+  }
+  const { dana } = who;
+
+  // 1. an end user (Avery) reports a problem; it routes to the use case's owner (Dana)
+  const fb = await call("POST", `/v1/use-cases/${uc}/feedback`, {
+    kind: "problem",
+    body:
+      "Synthetic demo report: complaints I wrote in Spanish were scored as neutral although they were clearly " +
+      "negative, so none of them was escalated to a person.",
+  }, who.avery.auth);
+  if (!ok(fb.status)) return fail("demo feedback", fb);
+  const feedbackId = fb.body.id as string;
+  report.created.push("feedback: a problem report on the Customer Sentiment Analyzer");
+  const ack = await call("PATCH", `/v1/feedback/${feedbackId}`, { status: "acknowledged" }, dana.auth);
+  if (!ok(ack.status)) return fail("demo feedback acknowledge", ack);
+
+  // 2. the owner opens an incident from it (user_report, linked to the item)
+  const opened = await call("POST", `/v1/feedback/${feedbackId}/open-incident`, { title: DEMO_INCIDENT_TITLE, severity: "high" }, dana.auth);
+  if (!ok(opened.status)) return fail("demo incident from feedback", opened);
+  const incidentId = opened.body.incidentId as string;
+  const inc = `/v1/incidents/${incidentId}`;
+
+  // 3. it is serious (fundamental rights): the platform starts the EU AI Act clocks
+  const serious = await call("PATCH", inc, {
+    serious: true,
+    seriousCriteria: ["fundamental_rights"],
+    summary:
+      "Complaints written in a second language were scored neutral, so they skipped human escalation. Treated as a " +
+      "possible infringement of non-discrimination obligations (synthetic demo record).",
+  }, dana.auth);
+  if (!ok(serious.status)) return fail("demo incident serious", serious);
+  const detail = await call("GET", inc, undefined, dana.auth);
+  const clocks: Json[] = detail.body.notifications ?? [];
+  if (clocks.length === 0) report.notes.push("demo incident: no notification clocks started (check incident_clock_regimes)");
+
+  // 4. every clock reaches a terminal state: reports recorded to synthetic recipients
+  for (const c of clocks) {
+    const authority = String(c.clockId).startsWith("art73");
+    const recipient = authority
+      ? "Market surveillance authority (synthetic demo recipient)"
+      : "The system's provider (synthetic demo recipient)";
+    const url = `${inc}/notifications/${c.id}/sent`;
+    if (authority) {
+      const first = await call("POST", url, { stage: "initial", recipient, reference: "DEMO-SYNTHETIC-INITIAL" }, dana.auth);
+      if (!ok(first.status) && first.body.error !== "initial_report_not_allowed") {
+        fail(`demo incident clock ${c.clockId} initial`, first);
+        continue;
+      }
+    }
+    const done = await call("POST", url, { stage: "complete", recipient, reference: "DEMO-SYNTHETIC-COMPLETE" }, dana.auth);
+    if (!ok(done.status)) fail(`demo incident clock ${c.clockId}`, done);
+  }
+
+  // 5. the corrective action, done with its evidence
+  const act = await call("POST", `${inc}/actions`, {
+    title: "Add second-language complaints to the golden cases and re-validate the scoring threshold",
+    ownerUserId: dana.id,
+  }, dana.auth);
+  if (!ok(act.status)) return fail("demo incident action", act);
+  const actDone = await call("PATCH", `${inc}/actions/${act.body.action.id}`, {
+    status: "done",
+    evidenceRef: "Re-validation report VR-DEMO-001 (synthetic)",
+  }, dana.auth);
+  if (!ok(actDone.status)) return fail("demo incident action done", actDone);
+
+  // 6. closed with a root cause and lessons learned
+  const closed = await call("POST", `${inc}/close`, {
+    rootCause: "The sentiment threshold was validated on single-language samples only.",
+    lessonsLearned: "Validation sets cover every language customers write in; a regression case guards it.",
+  }, dana.auth);
+  if (!ok(closed.status)) return fail("demo incident close", closed);
+  report.created.push("incident: closed, every clock in a terminal state");
+
+  // 7. the reporter's item is resolved with a note
+  const resolved = await call("PATCH", `/v1/feedback/${feedbackId}`, {
+    status: "no_change",
+    resolutionNote: "Confirmed and fixed under the linked incident; the scoring threshold was re-validated.",
+  }, dana.auth);
+  if (!ok(resolved.status)) fail("demo feedback resolve", resolved);
 }
 
 // ---------------------------------------------------------------------------
