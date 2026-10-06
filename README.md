@@ -143,16 +143,26 @@ pnpm install && pnpm -r build
 export DATABASE_URL=postgres://user:pass@localhost:5432/regulait
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)
 export REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap
-# Optional — activate a real model provider platform-wide with no admin-UI paste
-# and no key stored in the DB (read at dispatch time only). Any of:
-export ANTHROPIC_API_KEY=sk-ant-...   # (optional ANTHROPIC_BASE_URL) → Claude goes live
-#   OPENAI_API_KEY / OPENAI_BASE_URL, GOOGLE_API_KEY (or GEMINI_API_KEY), XAI_API_KEY
-# A stored per-user or platform credential still takes precedence over the env var.
+# A local Postgres without TLS: the gateway requires TLS to Postgres by default
+# (ADR-0181), so opt out explicitly. The boot log warns, and the Enforcement
+# posture page shows database TLS as "relaxed".
+export REGULAIT_DATABASE_SSL=disable
+# Optional — a real model provider. Since ADR-0181 the env-key fallback is OFF:
+# a provider key in the environment does nothing by itself. `seed` imports
+# GOOGLE_API_KEY (or GEMINI_API_KEY) ONCE into the encrypted key store (audited;
+# the key is never printed or logged). Store any other provider's key in the
+# admin UI, or relax envKeyFallbackEnabled plus its per-provider allow-list
+# (an audited admin change).
 pnpm --filter @regulait/gateway seed    # idempotent demo data, prints keys once
 HOST=127.0.0.1 pnpm --filter @regulait/gateway start   # migrations run on boot; HOST unset = every interface
 ```
 
-Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
+Every setting ships strict (ADR-0181): the first admin enrols TOTP at first sign-in (MFA is
+required for admins), and MCP admission, attribution and the guardrails are on. An admin may
+relax any of them; each relaxation is audited old → new.
+
+Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database, and
+`REGULAIT_DATABASE_SSL=disable` when that Postgres has no TLS.
 
 ### Verifying a clean checkout
 
@@ -230,6 +240,8 @@ dropdb --if-exists "$PGDATABASE_VERIFY" && createdb "$PGDATABASE_VERIFY"
 export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VERIFY"
 # 64-hex fixture key, the shape secrets.ts asserts. Not a secret.
 export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# a local Postgres without TLS (the default is `require`, ADR-0181)
+export REGULAIT_DATABASE_SSL=disable
 pnpm -r test
 
 # 6. Pre-flight the unique constraints, against the database step 5 just

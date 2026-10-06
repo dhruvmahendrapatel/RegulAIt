@@ -11,10 +11,12 @@
  *
  * This page exists for the same reason the scheduled-jobs page does: a fact
  * that decides everything was documented in ADRs and visible on no screen.
- * Every control this product is sold on ships OFF — each default deliberate,
- * because an existing deployment must behave identically across an upgrade —
- * and the consequence was that nobody could answer "so what is enforcing right
- * now?" without reading the schema.
+ * Until ADR-0181 every control this product is sold on shipped OFF, and the
+ * consequence was that nobody could answer "so what is enforcing right now?"
+ * without reading the schema. Since ADR-0181 every enforcement control ships
+ * at its strict value (except the WORM audit anchor, which needs a bucket only
+ * the operator can supply); an admin may relax one, the relaxation is audited,
+ * and this page is where that relaxed state stays visible.
  *
  * THE READ IS THE POINT, NOT THE BUTTON. The column that earns this page its
  * place is "what turning it on would refuse". A posture screen that lists
@@ -152,8 +154,8 @@ export default function EnforcementPosturePage() {
     <>
       <PageHeader
         title="Enforcement posture"
-        sub="What is enforcing in this deployment right now. Every control below ships OFF."
-        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Every control below ships OFF so that an existing install behaves identically across an upgrade; that makes a fresh deployment's posture a decision somebody has to take deliberately rather than one it arrives with.</p>}
+        sub="What is enforcing in this deployment right now. Every enforcement control below ships strict (ADR-0181); a relaxed one is an audited admin decision."
+        info={<p>What is enforcing in this deployment right now — and, per control, what turning it on would start refusing. Since ADR-0181 every enforcement control below ships at its strict value, except the WORM audit anchor, which needs a bucket only the operator can supply. An admin may relax a settable control, and that relaxation is audited old → new, so a relaxed posture is always a decision somebody took deliberately rather than one the deployment arrived with. The environment-backed rows (database TLS, the scheduler, the audit anchor) are set by the operator, not here. The optimisation group (the semantic cache) ships off: it changes answers, and turning it on is a cost decision.</p>}
       />
       <div className={v.stack}>
         <QueryGate

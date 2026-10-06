@@ -292,7 +292,7 @@ export interface BuildAppOptions {
   logger?: FastifyServerOptions["logger"];
   /** ADR-0029 amendment: the Strict-Transport-Security value sent on genuinely
    * secure responses, or `null` for none. Defaults to REGULAIT_HSTS (which
-   * itself defaults to `max-age=86400`). Exposed so a test can assert both
+   * itself defaults to `max-age=31536000`, one year, since ADR-0181). Exposed so a test can assert both
    * directions without touching process.env — see hsts.ts for why this is a
    * deployment env var rather than an org_settings toggle. */
   hsts?: string | null;
@@ -860,8 +860,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0029's stated "HSTS deliberately OFF" — the Caddyfile abstained and the
   // gateway asserted a one-year pin anyway. The gateway is now the single
   // owner (it is what ships into BYOC/air-gapped installs where no Caddy of
-  // ours exists), the default is a bounded `max-age=86400`, and an operator on
-  // a real domain raises it via REGULAIT_HSTS. See hsts.ts.
+  // ours exists). Since ADR-0181 the default is the strict `max-age=31536000`
+  // (one year); an operator whose hostname may change hands relaxes it via
+  // REGULAIT_HSTS (e.g. `max-age=86400` or `off`). See hsts.ts.
   app.addHook("onSend", async (req, reply, payload) => {
     const contentType = reply.getHeader("content-type");
     const headers = securityHeaders(
