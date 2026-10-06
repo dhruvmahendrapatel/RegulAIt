@@ -11,10 +11,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
+import { aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
 import type { DemoIntakeFixtures, IntakeAssistRequest } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
@@ -110,6 +110,9 @@ afterAll(async () => {
     .update(workflowTemplates)
     .set({ retiredAt: new Date(), retiredReason: "zz-c6 cleanup" })
     .where(and(sql`${workflowTemplates.name} like ${"ai-use-case-intake/governance-owner%"}`, isNull(workflowTemplates.retiredAt)));
+  // ADR-0182 A14 (M-068): the seeder publishes an acceptable-use document for EVERYONE; under the strict
+  // literacy gate it would refuse every later file's governed calls, so it goes (its acknowledgements cascade)
+  await db.delete(aiPolicyDocuments).where(eq(aiPolicyDocuments.key, DEMO_AUP_KEY));
   app.server.closeAllConnections();
   await restoreSb2Gates();
   await app.close();

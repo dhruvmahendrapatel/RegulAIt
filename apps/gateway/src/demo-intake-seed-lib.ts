@@ -388,7 +388,65 @@ async function seedDemoIntakeRun(
     } else fail("shadow-AI import", r);
   }
 
+  // --- AI literacy (ADR-0182 A14): one published acceptable-use document, acknowledged by the personas.
+  // LAST, because the strict literacy gate refuses a governed call from anyone not current once it is published.
+  await seedDemoAcceptableUse(call, { ada, dana, avery }, report);
+
   return report;
+}
+
+/** the demo's acceptable-use document (its key; a test that runs the seeder deletes it afterwards, M-068) */
+export const DEMO_AUP_KEY = "demo-acceptable-use";
+
+/**
+ * ADR-0182 A14: publish one acceptable-use document (a synthetic link, applying
+ * to everyone) and have the three personas acknowledge exactly its published
+ * version and digest, each for themselves, through the real routes. The
+ * literacy gate stays at its strict default (`enforce`): demo:traffic runs as
+ * Dana and Ada, who are current after this. Idempotent: a published version is
+ * reused, and a persona already current is skipped.
+ */
+async function seedDemoAcceptableUse(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const fail = (what: string, r: { status: number; body: Json }): void => {
+    report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+  };
+  const docs: Json[] = (await call("GET", "/v1/ai-policies", undefined, who.ada.auth)).body.documents ?? [];
+  let doc = docs.find((d) => d.key === DEMO_AUP_KEY && d.status === "published");
+  if (doc) report.skipped.push("acceptable-use document");
+  else {
+    let draft = docs.find((d) => d.key === DEMO_AUP_KEY && d.status === "draft");
+    if (!draft) {
+      const created = await call("POST", "/v1/ai-policies", {
+        key: DEMO_AUP_KEY,
+        kind: "acceptable_use",
+        title: "Acme Bank AI acceptable-use policy",
+        url: "https://policies.example.com/acme-bank/ai-acceptable-use",
+        audience: { all: true, teamIds: [], roleIds: [] },
+      }, who.ada.auth);
+      if (!ok(created.status)) return fail("acceptable-use document", created);
+      draft = created.body.document as Json;
+    }
+    const published = await call("POST", `/v1/ai-policies/${draft!.id}/publish`, {}, who.ada.auth);
+    if (!ok(published.status)) return fail("acceptable-use publish", published);
+    doc = (published.body.document as Json | undefined) ?? { ...draft, status: "published" };
+    report.created.push("acceptable-use document (published, applies to everyone)");
+  }
+  for (const [name, p] of [["Ada", who.ada], ["Dana", who.dana], ["Avery", who.avery]] as const) {
+    const me = await call("GET", "/v1/me/ai-literacy", undefined, p.auth);
+    const mine = ((me.body.documents ?? []) as Json[]).find((d) => d.documentId === doc!.id);
+    if (mine?.state === "current") {
+      report.skipped.push(`acceptable-use acknowledgement (${name})`);
+      continue;
+    }
+    const ack = await call("POST", `/v1/ai-policies/${doc!.id}/acknowledge`, { version: doc!.version, digest: doc!.contentDigest }, p.auth);
+    if (ok(ack.status)) report.created.push(`acceptable-use acknowledgement (${name})`);
+    else fail(`acceptable-use acknowledgement (${name})`, ack);
+  }
 }
 
 // ---------------------------------------------------------------------------
