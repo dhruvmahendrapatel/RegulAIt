@@ -45,7 +45,8 @@
  * disagrees with its operation rather than quietly reclassifying.
  */
 
-import { createHash, createPrivateKey, createPublicKey, createSign, timingSafeEqual } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
+import { constantTimeEqual } from "@regulait/shared";
 import { z } from "zod";
 
 export const CONNECTOR_PROVIDER_KINDS = [
@@ -1115,11 +1116,6 @@ export const OUTLOOK_TOKEN_CACHE_MAX = 64;
 // equal (constant-time), so a rotated secret never reuses the old token.
 const outlookTokenCache = new Map<string, { accessToken: string; expiresAtMs: number; appPassword: string }>();
 
-function sameSecret(a: string, b: string): boolean {
-  const x = Buffer.from(a, "utf8");
-  const y = Buffer.from(b, "utf8");
-  return x.length === y.length && timingSafeEqual(x, y);
-}
 
 /** forget every cached outlook token (tests; an operator-initiated reset) */
 export function clearOutlookTokenCache(): void {
@@ -1176,7 +1172,7 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     const cached = outlookTokenCache.get(this.cacheKey);
     if (
       cached &&
-      sameSecret(cached.appPassword, this.cred.appPassword) &&
+      constantTimeEqual(cached.appPassword, this.cred.appPassword) &&
       cached.expiresAtMs - OUTLOOK_TOKEN_REFRESH_MARGIN_MS > this.now()
     ) {
       return { token: cached.accessToken, fromCache: true };
