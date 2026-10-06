@@ -16,6 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { generateSessionToken, generateToken, hashPassword, MFA_PENDING_COOKIE, mfaPendingCookie } from "./auth.js";
+import { generateFeedbackLinkToken } from "./feedback.js";
 import { generateScimToken } from "./scim.js";
 import { hashToken } from "./token-hash.js";
 import { generateVirtualKeyToken } from "./virtual-keys.js";
@@ -32,6 +33,7 @@ describe("hashToken only ever sees high-entropy, server-generated tokens", () =>
     ["virtual key (generateVirtualKeyToken)", generateVirtualKeyToken, "rglv_", 192],
     ["session / pending-MFA handle (generateSessionToken)", generateSessionToken, "rgls_", 256],
     ["SCIM token (generateScimToken)", generateScimToken, "rglscim_", 256],
+    ["signed feedback link (generateFeedbackLinkToken, ADR-0182 A13)", generateFeedbackLinkToken, "rglf_", 256],
   ];
 
   for (const [name, generate, prefix, bits] of generators) {

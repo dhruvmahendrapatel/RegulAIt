@@ -84,6 +84,7 @@ import {
   MONITOR_RULES,
   appealSodConflict,
   createFeedbackLinkSchema,
+  createIncidentSchema,
   feedbackDueDates,
   feedbackRouteTo,
   feedbackSlaState,
@@ -106,6 +107,7 @@ import { hashToken } from "./token-hash.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { notifyGovernanceAlerts } from "./chatops.js";
+import { createIncident, IncidentError } from "./incidents.js";
 
 export const FEEDBACK_SLA_SWEEP_JOB_NAME = "feedback-sla-sweep";
 export const FEEDBACK_RETENTION_SWEEP_JOB_NAME = "feedback-retention-sweep";
@@ -531,9 +533,6 @@ const listQuery = z
   })
   .strict();
 
-/** the credential headers an internal call on the caller's behalf carries */
-const FORWARDED_HEADERS = ["authorization", "cookie", "x-api-key", "x-regulait-csrf"] as const;
-
 export interface FeedbackRouteOptions {
   dataKey?: string | undefined;
 }
@@ -909,22 +908,20 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
     const out = await openIncidentFromFeedback(
       {
         createIncident: async (payload) => {
-          // A12's own route contract (`POST /v1/incidents`), called as the caller:
-          // the incident gets A12's rules, clocks and audit, and the caller's own
-          // entitlements decide whether it may be created.
-          const headers: Record<string, string> = { "content-type": "application/json" };
-          for (const h of FORWARDED_HEADERS) {
-            const v = req.headers[h];
-            if (typeof v === "string") headers[h] = v;
-          }
-          const res = await app.inject({ method: "POST", url: "/v1/incidents", headers, payload, remoteAddress: req.ip });
-          let json: Record<string, unknown> = {};
+          // A12's own create (the same function `POST /v1/incidents` runs), as
+          // the caller: the incident gets A12's rules, clocks and audit. Called
+          // directly — no internal HTTP hop, so no credential is forwarded.
           try {
-            json = res.json() as Record<string, unknown>;
-          } catch {
-            json = { error: "incident_create_failed" };
+            const incident = await createIncident(db, createIncidentSchema.parse(payload), {
+              userId: req.authCtx.userId ?? null,
+              isAdmin: req.authCtx.isAdmin,
+              via: req.authCtx.via,
+            });
+            return { status: 201, body: { incident: { id: incident.id } } };
+          } catch (e) {
+            if (e instanceof IncidentError) return { status: e.status, body: { error: e.code, detail: e.message, ...e.extra } };
+            throw e;
           }
-          return { status: res.statusCode, body: json };
         },
         linkIncident: async (incidentId) => {
           return db.transaction(async (rawTx) => {
@@ -1187,7 +1184,7 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
 // ---------------------------------------------------------------------------
 
 export interface OpenIncidentDeps {
-  /** create the incident through A12's `POST /v1/incidents` contract */
+  /** create the incident with A12's `createIncident` (the `POST /v1/incidents` contract: 201 + `{ incident: { id } }`, or A12's error) */
   createIncident: (payload: Record<string, unknown>) => Promise<{ status: number; body: Record<string, unknown> }>;
   /** set the item's `incident_id` if still unset (audited); false if another incident won */
   linkIncident: (incidentId: string) => Promise<boolean>;

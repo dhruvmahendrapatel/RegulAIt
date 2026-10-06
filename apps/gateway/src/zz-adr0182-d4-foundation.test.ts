@@ -499,32 +499,8 @@ describe("ADR-0182 D4 routes: registered with a deliberate auth class, 501 until
   const X = "00000000-0000-4000-8000-000000000002";
   const ROUTES: Array<{ method: Method; pattern: string; url: string; cls: "admin" | "user" | "public" }> = [
     // A11: built — classes and behaviour pinned by zz-adr0182-a11-decision-regression.test.ts
-    // A12
-    { method: "GET", pattern: "/v1/incidents", url: "/v1/incidents", cls: "user" },
-    { method: "POST", pattern: "/v1/incidents", url: "/v1/incidents", cls: "user" },
-    { method: "GET", pattern: "/v1/incidents/:incidentId", url: `/v1/incidents/${X}`, cls: "user" },
-    { method: "PATCH", pattern: "/v1/incidents/:incidentId", url: `/v1/incidents/${X}`, cls: "user" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/events", url: `/v1/incidents/${X}/events`, cls: "user" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/links", url: `/v1/incidents/${X}/links`, cls: "user" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/actions", url: `/v1/incidents/${X}/actions`, cls: "user" },
-    { method: "PATCH", pattern: "/v1/incidents/:incidentId/actions/:actionId", url: `/v1/incidents/${X}/actions/${U}`, cls: "user" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/notifications/:notificationId/sent", url: `/v1/incidents/${X}/notifications/${U}/sent`, cls: "user" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/notifications/:notificationId/not-required", url: `/v1/incidents/${X}/notifications/${U}/not-required`, cls: "admin" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/notifications/:notificationId/toll", url: `/v1/incidents/${X}/notifications/${U}/toll`, cls: "admin" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/close", url: `/v1/incidents/${X}/close`, cls: "user" },
-    { method: "POST", pattern: "/v1/incidents/:incidentId/contain", url: `/v1/incidents/${X}/contain`, cls: "admin" },
-    { method: "GET", pattern: "/v1/incidents/:incidentId/export", url: `/v1/incidents/${X}/export`, cls: "admin" },
-    // A13
-    { method: "POST", pattern: "/v1/use-cases/:useCaseId/feedback", url: `/v1/use-cases/${U}/feedback`, cls: "user" },
-    { method: "GET", pattern: "/v1/feedback", url: "/v1/feedback", cls: "user" },
-    { method: "GET", pattern: "/v1/feedback/:feedbackId", url: `/v1/feedback/${X}`, cls: "user" },
-    { method: "PATCH", pattern: "/v1/feedback/:feedbackId", url: `/v1/feedback/${X}`, cls: "user" },
-    { method: "POST", pattern: "/v1/feedback/:feedbackId/open-incident", url: `/v1/feedback/${X}/open-incident`, cls: "user" },
-    { method: "POST", pattern: "/v1/use-cases/:useCaseId/feedback-links", url: `/v1/use-cases/${U}/feedback-links`, cls: "user" },
-    { method: "GET", pattern: "/v1/use-cases/:useCaseId/feedback-links", url: `/v1/use-cases/${U}/feedback-links`, cls: "user" },
-    { method: "DELETE", pattern: "/v1/use-cases/:useCaseId/feedback-links/:linkId", url: `/v1/use-cases/${U}/feedback-links/${X}`, cls: "user" },
-    { method: "POST", pattern: "/v1/feedback/l/:token", url: "/v1/feedback/l/synthetic-token", cls: "public" },
-    { method: "GET", pattern: "/v1/feedback/l/:token", url: "/v1/feedback/l/synthetic-token", cls: "public" },
+    // A12: built — classes and behaviour pinned by zz-adr0182-a12-incidents.test.ts
+    // A13: built — classes and behaviour pinned by zz-adr0182-a13-feedback.test.ts
     // A14
     { method: "GET", pattern: "/v1/ai-policies", url: "/v1/ai-policies", cls: "user" },
     { method: "POST", pattern: "/v1/ai-policies", url: "/v1/ai-policies", cls: "admin" },

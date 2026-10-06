@@ -35,6 +35,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  aiIncidentLinks,
+  aiIncidents,
   aiUseCases,
   and,
   auditLog,
@@ -63,6 +65,7 @@ import {
   runFeedbackSlaSweep,
 } from "./feedback.js";
 import { measureAssuranceMetric } from "./condition-metrics.js";
+import { runAlertSlaSweep } from "./alert-ownership.js";
 import { routeAuthClass } from "./route-classes.js";
 import { hashToken } from "./token-hash.js";
 
@@ -425,6 +428,36 @@ describe("A13 sweeps: SLA breach raises the rule; retention purges bodies", () =
     expect(after.feedback_sla_breached!.breaches.map((b) => b.subjectKey)).not.toContain(subjectKey);
   });
 
+  it("an UNOWNED breached item (routed to the admins) is escalated to them by the alert-SLA sweep, once (integrator, S5 x A13)", async () => {
+    const uc = await mkUseCase("sla-unowned", null);
+    // the owner's own appeal cannot be decided by the owner: routed to the admins, no owner on the item
+    const sent = await submit(uc, "owner", { kind: "appeal", body: "x" });
+    expect(sent.statusCode, sent.body).toBe(201);
+    const id = sent.json().id as string;
+    const [item] = await db.select({ ownerUserId: useCaseFeedback.ownerUserId }).from(useCaseFeedback).where(eq(useCaseFeedback.id, id));
+    expect(item!.ownerUserId).toBeNull();
+    const now = new Date();
+    await db
+      .update(useCaseFeedback)
+      .set({ createdAt: new Date(now.getTime() - 4 * DAY), ackDueAt: new Date(now.getTime() - DAY), resolveDueAt: new Date(now.getTime() + 26 * DAY) })
+      .where(eq(useCaseFeedback.id, id));
+    await runFeedbackSlaSweep(db, now);
+    const subjectKey = `use_case:${uc}>feedback:${id}>acknowledge`;
+    const [alert] = await db.select().from(governanceAlerts).where(eq(governanceAlerts.subjectKey, subjectKey));
+    expect(alert!.ownerUserId).toBeNull();
+    const escalations = () =>
+      db.select().from(auditLog).where(and(eq(auditLog.ruleId, "governance-alert-escalated"), eq(auditLog.objectId, alert!.id)));
+    expect(await escalations()).toHaveLength(0);
+    await runAlertSlaSweep(db, now);
+    const first = await escalations();
+    expect(first).toHaveLength(1);
+    expect(first[0]!.detail).toMatchObject({ reason: "unowned" });
+    expect((first[0]!.detail as { recipients: string[] }).recipients).toContain(users.admin.id);
+    // once: a second sweep adds nothing for this episode
+    await runAlertSlaSweep(db, now);
+    expect(await escalations()).toHaveLength(1);
+  });
+
   it("the retention sweep deletes bodies and contacts past the window and keeps the resolution record", async () => {
     const uc = await mkUseCase("retention", null);
     const oldId = (await submit(uc, "member", { kind: "problem", body: "OLD-a13", contact: "old@example.com" })).json().id as string;
@@ -650,14 +683,21 @@ describe("A13 open incident: A12's contract, pre-linked, no copy of the body", (
     const id = (await submit(uc, "member", { kind: "problem", body: "x" })).json().id as string;
     expect((await inject("POST", `/v1/feedback/${id}/open-incident`, users.member.auth, { title: "t", severity: "high" })).statusCode).toBe(403);
     const r = await inject("POST", `/v1/feedback/${id}/open-incident`, users.owner.auth, { title: "From feedback", severity: "high" });
+    expect(r.statusCode, r.body).toBe(201);
     const [row] = await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.id, id));
-    if (r.statusCode === 201) {
-      expect(row!.incidentId).toBe(r.json().incidentId);
-    } else {
-      // A12's create is not in this branch (501 stub): relayed, and nothing linked
-      expect(r.statusCode, r.body).toBe(501);
-      expect(row!.incidentId).toBeNull();
-    }
+    const incidentId = r.json().incidentId as string;
+    expect(row!.incidentId).toBe(incidentId);
+    // A12's own create ran as the owner: a user_report incident on this use case, linked back to the item
+    const [inc] = await db.select().from(aiIncidents).where(eq(aiIncidents.id, incidentId));
+    expect(inc).toMatchObject({ detectionSource: "user_report", sourceRef: `feedback:${id}`, useCaseId: uc, createdBy: users.owner.id });
+    const links = await db.select().from(aiIncidentLinks).where(eq(aiIncidentLinks.incidentId, incidentId));
+    expect(links.map((l) => `${l.objectType}:${l.objectId}`)).toContain(`feedback:${id}`);
+    // a second open is refused: one incident per item
+    const again = await inject("POST", `/v1/feedback/${id}/open-incident`, users.owner.auth, { title: "again", severity: "high" });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe("incident_already_linked");
+    await db.update(useCaseFeedback).set({ incidentId: null }).where(eq(useCaseFeedback.id, id));
+    await db.delete(aiIncidents).where(eq(aiIncidents.id, incidentId));
   });
 });
 
