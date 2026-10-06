@@ -1,0 +1,10 @@
+# Proposed by ADR-0184 (batch 1 security review B1-05): the security gates and
+# their exceptions can be edited by the PR they gate, so a change to any of
+# them needs the owner's review. Takes effect when branch protection on `main`
+# requires review from code owners (an owner setting).
+/.gitleaks.toml                      @dhruvmahendrapatel
+/security/                           @dhruvmahendrapatel
+/.github/workflows/                  @dhruvmahendrapatel
+/.github/CODEOWNERS                  @dhruvmahendrapatel
+/scripts/security-*                  @dhruvmahendrapatel
+/Dockerfile                          @dhruvmahendrapatel

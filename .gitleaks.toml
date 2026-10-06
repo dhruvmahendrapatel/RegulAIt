@@ -1,0 +1,130 @@
+# gitleaks configuration for security.yml (ADR-0184).
+#
+# The default rule set stays on in full. The only exceptions below are the
+# SYNTHETIC values our own tests and docs use to prove that redaction, DLP and
+# secret scrubbing work, plus four non-secrets the generic rule misreads.
+#
+# Every exception is (path AND exact value), never a path alone: a real secret
+# pasted into one of these test files is still a finding, because its value is
+# not on the list. Nothing here allow-lists a production code path wholesale.
+#
+# To add an exception: use an obviously synthetic value (repeated or sequential
+# characters, "test"/"synthetic"/"never-echoed" in the string), add one
+# [[allowlists]] block naming the file and the anchored value, and say why. See
+# docs/ops/SECURITY_CI.md "Adding an allow-list entry".
+
+title = "regulAIt gitleaks config"
+
+[extend]
+useDefault = true
+
+# --- Test fixtures: synthetic secrets the scrub/DLP/redaction tests feed in ---
+
+[[allowlists]]
+description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
+condition = "AND"
+paths = [
+  '''^apps/gateway/src/adr0122-mcp-discovery\.test\.ts$''',
+  '''^apps/gateway/src/adr0181-fx2-identity-keys\.test\.ts$''',
+  '''^apps/gateway/src/adr0181-strict-identity\.test\.ts$''',
+  '''^apps/gateway/src/credential-derived-egress\.test\.ts$''',
+  '''^apps/gateway/src/data-key-custody\.test\.ts$''',
+  '''^apps/gateway/src/dev-secrets\.test\.ts$''',
+  '''^apps/gateway/src/gateway-logger\.test\.ts$''',
+  '''^apps/gateway/src/guardrails\.test\.ts$''',
+  '''^apps/gateway/src/process-lifecycle\.test\.ts$''',
+  '''^apps/gateway/src/prose-scrub\.test\.ts$''',
+  '''^apps/gateway/src/rate-limit\.test\.ts$''',
+  '''^apps/web/e2e/phase1\.spec\.ts$''',
+  '''^packages/pm-provider/src/inbound\.test\.ts$''',
+  '''^packages/shared/src/audit-scrub-redos\.test\.ts$''',
+  '''^packages/shared/src/audit-scrub\.test\.ts$''',
+  '''^packages/shared/src/chatops\.test\.ts$''',
+  '''^packages/shared/src/credential-energy-adr0175-review\.test\.ts$''',
+  '''^packages/shared/src/mcp-discovery\.test\.ts$''',
+  '''^packages/shared/src/outbound-secret-evaluation\.test\.ts$''',
+]
+regexTarget = "secret"
+regexes = [
+  # the jwt.io sample token and two hand-made unsigned JWTs
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk$''',
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxIn0\.c2lnbmF0dXJlX2hlcmVfb2s$''',
+  # test passwords for the identity suites
+  '''^Fx2-Strong-pass-1$''',
+  '''^Sa0181-Strong-pass$''',
+  '''^definitely-Wrong-1$''',
+  # sequential / patterned hex and named test keys
+  '''^0123456789abcdef$''',
+  '''^3f9a1c7e2b8d4f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718$''',
+  '''^rgl_this-must-never-be-logged-0123456789abcdef$''',
+  '''^sk_live_abcdefghijklmnop$''',
+  '''^sk-e2e-never-echoed-0123456789$''',
+  '''^rglwh_test_secret_0123456789abcdef$''',
+  '''^s3cr3t-signing-key$''',
+  '''^3f2b9c1e-0d4a-4c55-9a77-1b2c3d4e5f60$''',
+  '''^AKIAABCDEFGHIJKLMNOP$''',
+  # mcp-discovery.test.ts: one synthetic value per credential shape it scrubs
+  '''^4f1c9a2e7b3d8e6f0a5c2b9d1e8f7a6c3b4d5e6f$''',
+  '''^7d2f9c1b4a8e6f3d0c5b2a9e8d7f6c1b3a4e5d6f$''',
+  '''^9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e$''',
+  '''^c3a1e5f7b9d2468ace0f13579bdf2468ace13579$''',
+  '''^Qm9ndXNTaWduYXR1cmVWYWx1ZTEyMzQ1Njc4OTA$''',
+  '''^Zq8vLm2PxR7tWy4KbN6s$''',
+  '''^dXNlcjpzdXBlcnNlY3JldHBhc3N3b3Jk$''',
+  '''^regulait-test-key-0123456789abcdef$''',
+]
+
+# --- Header-only PEM test inputs (review B1-08) ---
+# gitleaks' private-key rule matches lazily from a BEGIN header to the next
+# "KEY-----", so these two matches span code, not key material, and a prefix
+# regex alone would also cover a real key placed after the header. They are
+# allowed only in the exact commits that introduced them: any later change to
+# that text is a new commit and is scanned with no exception.
+
+[[allowlists]]
+description = "Header-only PEM inputs, in the commits that added them"
+condition = "AND"
+paths = [
+  '''^apps/gateway/src/credential-derived-egress\.test\.ts$''',
+  '''^packages/shared/src/audit-scrub-redos\.test\.ts$''',
+]
+commits = [
+  "4462cde8fc635989ff9a0dcc68db998c0d3452fc",
+  "3f9af9a010137ce5b9768f6ea5bbbd4257d4b1e9",
+]
+regexTarget = "secret"
+regexes = [
+  '''^-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\n" \}\),\n''',
+  '''^-----BEGIN RSA PRIVATE KEY-----";\n\nfunction timed\(''',
+]
+
+# --- Non-secrets in source and docs that the generic rule misreads ---
+
+[[allowlists]]
+description = "Demo scenario keys are identifiers, not credentials"
+condition = "AND"
+paths = ['''^packages/shared/src/demo-intake/scenario-library\.ts$''']
+regexTarget = "secret"
+regexes = ['''^(hallucination|scope-drift|shadow-ai)-scenario-[0-9]+$''']
+
+[[allowlists]]
+description = "A HIPAA citation key (45 CFR 164.408), not a credential"
+condition = "AND"
+paths = ['''^packages/shared/src/incident-clocks\.ts$''']
+regexTarget = "secret"
+regexes = ['''^164\.408-secretary-annual$''']
+
+[[allowlists]]
+description = "A code comment naming the documented placeholder shape of a key"
+condition = "AND"
+paths = ['''^packages/shared/src/guardrails\.ts$''']
+regexTarget = "secret"
+regexes = ['''^sk_live_x+$''']
+
+[[allowlists]]
+description = "README quickstart: the local dev bootstrap token, documented as dev-only"
+condition = "AND"
+paths = ['''^README\.md$''']
+regexTarget = "secret"
+regexes = ['''^dev-bootstrap$''']

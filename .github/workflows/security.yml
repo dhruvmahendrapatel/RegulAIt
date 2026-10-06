@@ -1,0 +1,447 @@
+name: Security
+
+# ADR-0184 — our own build's security gates (ADR-0183 §2 lifted the PENDING S4
+# deferral). What each job proves, and what it does NOT, is in
+# docs/ops/SECURITY_CI.md; read that before relaxing anything here.
+#
+#   sast          CodeQL (JavaScript/TypeScript + the workflows themselves).
+#                 Fails on any security-severity >= 7.0 result not in
+#                 security/sast-allowlist.json (the triaged baseline).
+#   secrets       gitleaks over the PR/push diff AND the full history, with
+#                 .gitleaks.toml exceptions limited to (path AND exact value).
+#   dependencies  `pnpm audit --audit-level=high` against
+#                 security/audit-allowlist.json, with the pnpm that
+#                 `packageManager` pins (corepack), checked.
+#   image         builds the image, Trivy scan (fixable HIGH/CRITICAL fail,
+#                 security/image-allowlist.json), CycloneDX SBOMs for the
+#                 workspace and the image; on PRs, proves the cosign verify step
+#                 REFUSES an unsigned image.
+#   sign          push to main only, after every gate passed: cosign keyless
+#                 signature of the exact scanned image, then verify it.
+#
+# Every gate fails CLOSED: a scanner that cannot run, a report that cannot be
+# parsed, a malformed or expired allow-list entry, or a stale one is a failure.
+#
+# Supply chain of the gates themselves: every third-party action is pinned by
+# commit SHA (tag in the trailing comment); the scanner binaries are pinned by
+# version AND SHA-256 of a vetted release (the real control: a widely used
+# scanner shipped malicious releases from a stolen credential in March 2026).
+# Trivy's release is also checked against its Sigstore bundle with the release
+# workflow's identity pinned; that proves where it was built, not that the tag
+# was benign, so it adds to the hash pin rather than replacing it.
+#
+# No scanner side door: scripts/security-suppressions.mjs fails on any
+# .gitleaksignore / .trivyignore / trivy.yaml / pnpm auditConfig in the tree,
+# gitleaks runs with --ignore-gitleaks-allow, and Trivy runs from an empty
+# directory, so the only exceptions are the reviewed, expiring allow-lists.
+# Bumping a tool: docs/ops/SECURITY_CI.md "Bumping a pinned tool".
+#
+# Cost: the repository is public, so standard GitHub-hosted runners do not draw
+# on the private-repo minutes budget ci.yml's arithmetic describes. Docs-only
+# PRs still run: a secret pasted into a Markdown file is still a secret.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # New advisories arrive without a commit of ours: re-run the gates weekly.
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: '8.30.1'
+  GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+  TRIVY_VERSION: '0.74.0'
+  TRIVY_SHA256: '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
+  COSIGN_VERSION: '3.1.3'
+  COSIGN_SHA256: '4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71'
+  TRIVY_SKIP_VERSION_CHECK: 'true'
+  TRIVY_DISABLE_TELEMETRY: 'true'
+  TRIVY_NO_PROGRESS: 'true'
+
+jobs:
+  sast:
+    name: SAST (CodeQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: read
+    env:
+      # On pull_request, codeql-action by default runs "diff-informed" queries:
+      # path-problem queries report only results touching the PR's changed
+      # lines. The gate compares against a full baseline, so it needs the full
+      # result set on every event (PR #131's first run reported 5 baseline
+      # entries as stale because of this).
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # CodeQL default setup is also enabled on this repository and owns the
+      # Security tab. GitHub refuses an advanced-setup SARIF upload while
+      # default setup is on, so this job does NOT upload (`upload: never`): it
+      # gates on the SARIF itself and keeps it as an artifact. Same CLI bundle
+      # and the same default query suite as default setup (the bundle, and so
+      # the query packs, are pinned by the action's commit: CodeQL 2.27.1 at
+      # v4.38.2). Reproduce locally with the commands in docs/ops/SECURITY_CI.md.
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: javascript-typescript, actions
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /security-gate
+          upload: never
+          output: ${{ runner.temp }}/codeql-sarif
+
+      - name: Gate — no untriaged high-severity finding
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/codeql-sarif/*.sarif)
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "::error::expected 2 SARIF files (javascript, actions), found ${#files[@]}"
+            exit 2
+          fi
+          args=()
+          for f in "${files[@]}"; do args+=(--report "$f"); done
+          node scripts/security-gate.mjs --kind sarif "${args[@]}" --allowlist security/sast-allowlist.json
+
+      - name: Keep the SARIF
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-sarif
+          path: ${{ runner.temp }}/codeql-sarif
+          if-no-files-found: ignore
+          retention-days: 30
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${tgz}" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/gitleaks" version
+
+      # The allow-lists live in the repository, so a PR can edit its own gate.
+      # That cannot be blocked without blocking every legitimate entry, so it
+      # is made impossible to miss instead: a warning on the PR and the diff in
+      # the job summary. Reviewers check it (docs/ops/SECURITY_CI.md).
+      - name: Call out any change to a security allow-list
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # the gates' own code and configuration (unquoted on purpose: a path list)
+          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED})"
+          if [ -n "$changed" ]; then
+            while IFS= read -r f; do echo "::warning file=${f}::This PR changes a security gate or allow-list (${f}); review it as a security change."; done <<< "$changed"
+            { echo "### Security gate or allow-list changed in this PR"; echo '```diff'; git diff "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED}; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No security allow-list changed."
+          fi
+
+      - name: No scanner side door (suppression files or settings)
+        run: node scripts/security-suppressions.mjs .
+
+      - name: Scan the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            range="${BASE_SHA}..${HEAD_SHA}"
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            range="${BEFORE}..${AFTER}"
+          else
+            echo "No commit range for ${EVENT}; the full-history scan below covers it."
+            exit 0
+          fi
+          echo "Scanning ${range}"
+          gitleaks git --config .gitleaks.toml --redact --no-banner --ignore-gitleaks-allow --log-opts="${range}" .
+
+      # Everything reachable from the checked-out commit (for a PR, the merge
+      # of the PR into main), not every fetched branch: another branch is
+      # scanned by its own PR, and its synthetic test secrets are allow-listed
+      # by the config on that branch, not this one.
+      - name: Scan the full history of this commit
+        run: |
+          set -euo pipefail
+          gitleaks git --config .gitleaks.toml --redact --no-banner --ignore-gitleaks-allow --log-opts="HEAD" \
+            --report-format sarif --report-path "$RUNNER_TEMP/gitleaks.sarif" .
+
+      - name: Keep the (redacted) report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitleaks-report
+          path: ${{ runner.temp }}/gitleaks.sarif
+          if-no-files-found: ignore
+          retention-days: 7
+
+  dependencies:
+    name: Dependency audit (pnpm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+
+      # corepack resolves pnpm from `packageManager` and checks the download
+      # against the npm registry's signature. The version check then holds
+      # regardless of how pnpm reached PATH (PathForward PF-04: a host running
+      # a different major resolves a different tree from the same lockfile).
+      - name: pnpm as pinned by packageManager
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          corepack enable
+          want="$(node -p "require('./package.json').packageManager.replace(/^pnpm@/, '').split('+')[0]")"
+          got="$(pnpm --version)"
+          echo "packageManager pins pnpm ${want}; running pnpm ${got}"
+          if [ "$want" != "$got" ]; then
+            echo "::error::pnpm ${got} is not the pinned ${want}"
+            exit 1
+          fi
+
+      - name: Gate — no unlisted HIGH or CRITICAL advisory
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/pnpm-audit.json"
+          # pnpm exits non-zero when it finds anything; the gate below decides,
+          # and fails closed (exit 2) if pnpm wrote an error instead of a report.
+          pnpm audit --audit-level=high --json > "$report" || echo "pnpm audit exited $? (the gate decides)"
+          node scripts/security-gate.mjs --kind pnpm-audit --report "$report" --allowlist security/audit-allowlist.json
+
+  image:
+    name: Image scan and SBOMs (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      # A throwaway local registry: cosign signs and verifies registry objects,
+      # and this keeps the proof inside the job (nothing is published).
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports:
+          - 5000:5000
+    outputs:
+      image-id: ${{ steps.build.outputs.image-id }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install Trivy (pinned SHA-256 AND its Sigstore signature)
+        run: |
+          set -euo pipefail
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tgz="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz" "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz.sigstore.json" "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz.sigstore.json"
+          echo "${TRIVY_SHA256}  ${tgz}" | sha256sum -c -
+          "$RUNNER_TEMP/bin/cosign" verify-blob --bundle "$tgz.sigstore.json" \
+            --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$tgz"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/bin" trivy
+          "$RUNNER_TEMP/bin/trivy" --version
+
+      # Every Trivy step runs from an empty directory, so no .trivyignore or
+      # trivy.yaml in the checkout can configure it (review B1-01).
+      - name: SBOM — workspace (CycloneDX)
+        working-directory: ${{ runner.temp }}
+        # --include-dev-deps: the build toolchain is part of our supply chain too.
+        run: trivy fs --include-dev-deps --format cyclonedx --output "$RUNNER_TEMP/sbom-workspace.cdx.json" "$GITHUB_WORKSPACE"
+
+      - name: Build the image
+        id: build
+        run: |
+          set -euo pipefail
+          docker build -t regulait:scan .
+          echo "image-id=$(docker image inspect --format '{{.Id}}' regulait:scan)" >> "$GITHUB_OUTPUT"
+
+      # The runtime stage must hold production dependencies only. PR #131's first
+      # image scan found 22 HIGH/CRITICAL Go stdlib CVEs inside the esbuild
+      # binary the old single-stage image shipped; this makes "no build tool in
+      # the image" a deterministic check rather than a scanner finding.
+      - name: Gate — the runtime image carries no build tool or package manager
+        run: |
+          set -euo pipefail
+          docker run -i --rm --user root --entrypoint node regulait:scan --input-type=module - /app --system < scripts/security-runtime-contents.mjs
+          size="$(docker image inspect --format '{{.Size}}' regulait:scan)"
+          echo "Runtime image size: $((size / 1048576)) MiB" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: SBOM — image (CycloneDX)
+        working-directory: ${{ runner.temp }}
+        run: trivy image --format cyclonedx --output "$RUNNER_TEMP/sbom-image.cdx.json" regulait:scan
+
+      - name: Gate — no unlisted fixable HIGH or CRITICAL in the image
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/trivy-image.json"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --format json --output "$report" regulait:scan
+          trivy convert --format table "$report" || true
+          # --expect-classes: a scan that saw no OS packages or no Node packages proves nothing
+          node "$GITHUB_WORKSPACE/scripts/security-gate.mjs" --kind trivy --report "$report" \
+            --allowlist "$GITHUB_WORKSPACE/security/image-allowlist.json" --expect-classes os-pkgs,lang-pkgs
+
+      - name: Keep the SBOMs and the scan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-and-image-scan
+          path: |
+            ${{ runner.temp }}/sbom-workspace.cdx.json
+            ${{ runner.temp }}/sbom-image.cdx.json
+            ${{ runner.temp }}/trivy-image.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      # The verify step is only worth something if it can say no. Every run that
+      # does not sign pushes the unsigned image and requires the SAME verify
+      # command main uses to refuse it, for the right reason.
+      - name: Verify REFUSES the unsigned image (red proof)
+        if: github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          docker tag regulait:scan "localhost:5000/regulait:${GITHUB_SHA}"
+          docker push -q "localhost:5000/regulait:${GITHUB_SHA}"
+          ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "localhost:5000/regulait:${GITHUB_SHA}")"
+          COSIGN="$RUNNER_TEMP/bin/cosign" scripts/security-cosign-verify.sh "$ref" unsigned
+
+      - name: Hand the scanned image to the signing job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          docker save regulait:scan | gzip -1 > "$RUNNER_TEMP/image.tar.gz"
+
+      - name: Upload the scanned image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scanned-image
+          path: ${{ runner.temp }}/image.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  sign:
+    name: Sign and verify the image (cosign keyless)
+    # Only main, and only an image that passed every other gate.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [sast, secrets, dependencies, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    services:
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: scanned-image
+          path: ${{ runner.temp }}
+
+      - name: Load the scanned image and check it is the one the gates passed
+        id: ref
+        env:
+          SCANNED_ID: ${{ needs.image.outputs.image-id }}
+        run: |
+          set -euo pipefail
+          gunzip -c "$RUNNER_TEMP/image.tar.gz" | docker load
+          got="$(docker image inspect --format '{{.Id}}' regulait:scan)"
+          if [ -z "$SCANNED_ID" ] || [ "$got" != "$SCANNED_ID" ]; then
+            echo "::error::loaded image ${got} is not the scanned image ${SCANNED_ID}"
+            exit 1
+          fi
+          docker tag regulait:scan "localhost:5000/regulait:${GITHUB_SHA}"
+          docker push -q "localhost:5000/regulait:${GITHUB_SHA}"
+          echo "ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "localhost:5000/regulait:${GITHUB_SHA}")" >> "$GITHUB_OUTPUT"
+
+      - name: Sign (keyless, this workflow's OIDC identity, logged to Rekor)
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/bin/cosign" sign --yes --allow-http-registry "$REF"
+
+      - name: Verify the signature
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          COSIGN="$RUNNER_TEMP/bin/cosign" scripts/security-cosign-verify.sh "$REF" signed
+          {
+            echo "### Image signed"
+            echo ""
+            echo "Digest: \`${REF#*@}\` (image ID \`$(docker image inspect --format '{{.Id}}' regulait:scan)\`)"
+            echo ""
+            echo "Signed keylessly by \`.github/workflows/security.yml@refs/heads/main\`; the Rekor entry is public."
+          } >> "$GITHUB_STEP_SUMMARY"
