@@ -44,6 +44,13 @@ name: CI
 #   chromium, one Playwright invocation). On that estimate a PR push is ~21–23
 #   min, weekly ~26 x 4 = ~104, => (2,000 - 104) / 22 ~= 86 PR pushes a month.
 #   Replace this paragraph with the measured figure after its first runs.
+#   2026-10-06 (ADR-0183 2.4): the mocked UI suite left `spa-journeys` for
+#   `spa-mock` (mock-ui-shards.yml): three shard jobs that need no build, no
+#   database and no gateway, plus a ~1-minute coverage job. Wall clock for the
+#   suite drops from ~11.5 min to the slowest shard (~4–5 min here); the billed
+#   sum rises by roughly two extra setups (~2–3 min each) and the coverage job,
+#   ~6–8 min a PR push. NOT YET MEASURED on a runner — replace with the real
+#   figure after the first runs, as above.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next cheap lever is `vitest --shard=1/2`
 # across two jobs with their own databases (halves wall clock, same billed sum).
@@ -331,10 +338,10 @@ jobs:
   # rest of this workflow.
   spa-journeys:
     runs-on: ubuntu-latest
-    # 20, not 15: the serial mocked suite alone measured ~11.5 min on 2026-10-05
-    # (ADR-0179 added specs), on top of ~4 min of install, build and SPA journeys.
-    # Re-measure, or shard the mocked suite, before raising it again.
-    timeout-minutes: 20
+    # 12, down from 20 (ADR-0183 2.4): the serial mocked suite (~11.5 min on
+    # 2026-10-05) moved to the sharded `spa-mock` job below, leaving ~4 min of
+    # install, build and the four real-gateway journeys. A blast-radius cap.
+    timeout-minutes: 12
 
     services:
       postgres:
@@ -382,14 +389,6 @@ jobs:
       - name: SPA journeys — developer (phase1), admin (phase2) and agent builder (phase6) personas
         run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts e2e/phase6-agent-builder.spec.ts e2e/phase6-builder-tools.spec.ts --reporter=list,github
 
-      # The mocked UI suite (every *.mock.spec.ts: the intake wizard's retry and
-      # start-over journeys, the axe scans of each intake stage in both themes,
-      # the registry, the use-case record and the review panel). It needs no
-      # gateway — Vite plus route mocks — and until now ran only locally, so CI
-      # never executed the browser acceptance tests for AER-029 and AER-046.
-      - name: Mocked UI suite — intake, registry, record, review, accessibility
-        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --reporter=list,github
-
       - name: Keep the evidence when it fails
         if: failure()
         uses: actions/upload-artifact@v4
@@ -399,3 +398,14 @@ jobs:
             apps/web/test-results
             apps/web/e2e/gateway-e2e.log
           retention-days: 7
+
+  # The mocked UI suite (every *.mock.spec.ts: the intake wizard's retry and
+  # start-over journeys, the axe scans of each intake stage in both themes,
+  # the registry, the use-case record, the review panel and the admin pages).
+  # It needs no gateway — Vite plus route mocks. ADR-0183 2.4: sharded across
+  # parallel jobs, with a final job proving every listed spec ran exactly once;
+  # the layout and the proof live in mock-ui-shards.yml, shared with demo.yml.
+  spa-mock:
+    uses: ./.github/workflows/mock-ui-shards.yml
+    with:
+      artifact-prefix: ci-mock

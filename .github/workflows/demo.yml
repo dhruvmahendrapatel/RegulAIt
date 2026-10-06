@@ -4,10 +4,12 @@ name: Demo journey
 # database: `demo:prepare` on an empty Postgres → the gateway → the seeded-DB
 # Playwright journey (register from shadow AI → independent approval → alert →
 # remediation approved by a second person → graph → regulatory → signed audit
-# export), then the mocked UI suite.
+# export); the mocked UI suite runs beside it, sharded (`demo-mock`).
 #
-# BUDGET (see ci.yml's header): ~6 billed minutes a run (install + build
-# dominate). A `pull_request` path filter matches the PR's WHOLE diff, so on a
+# BUDGET (see ci.yml's header): demo-journey is ~6 billed minutes (install +
+# build dominate); the mocked suite adds one job per shard (~2 min of install
+# and browser download each, plus its share of the tests) and a ~1-minute
+# coverage job. A `pull_request` path filter matches the PR's WHOLE diff, so on a
 # long-lived PR it would fire on every push — hourly board check-ins included.
 # The `changes` job (one billed minute) therefore diffs THIS push against the
 # previous head and the journey runs only when demo code changed in it; it
@@ -80,10 +82,13 @@ jobs:
       group: demo-journey-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    # 30, not 20: re-measured on 2026-10-06 (ADR-0182, D4 specs): every step passed,
-    # but the job reached 20m02s and was cancelled, with the serial mocked suite
-    # alone at 16.0 min (261 tests). Shard the mocked suite before raising it again.
-    timeout-minutes: 30
+    # 12, down from 30 (ADR-0183 2.4). Measured 2026-10-06 (ADR-0182, D4 specs):
+    # the job reached 20m02s, of which the serial mocked suite was 16.0 min
+    # (261 tests), so everything else — install, build, demo:prepare, the
+    # gateway and the real journey — was ~4 min. The mocked suite now runs in
+    # `demo-mock` below, sharded; this cap is ~4 min plus margin for a slow
+    # runner. It is a blast-radius cap: re-measure before raising it.
+    timeout-minutes: 12
 
     services:
       postgres:
@@ -153,9 +158,6 @@ jobs:
       - name: Real seeded-database journey
         run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts --reporter=list,github
 
-      - name: Mocked UI suite
-        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --reporter=list,github
-
       - name: Keep the evidence when it fails
         if: failure()
         uses: actions/upload-artifact@v4
@@ -166,6 +168,21 @@ jobs:
             apps/web/e2e/artifacts/demo/real-*.png
             ${{ runner.temp }}/gateway.log
           retention-days: 7
+
+  # The mocked UI suite (ADR-0183 2.4): every *.mock.spec.ts, sharded across
+  # parallel jobs on fresh runners, then one job proving every listed spec ran
+  # in exactly one shard. It needs no database or gateway (Vite plus route
+  # mocks), so it does not wait for demo-journey. Layout and proof are shared
+  # with ci.yml in mock-ui-shards.yml.
+  demo-mock:
+    needs: changes
+    if: needs.changes.outputs.demo == 'true'
+    concurrency:
+      group: demo-mock-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    uses: ./.github/workflows/mock-ui-shards.yml
+    with:
+      artifact-prefix: demo-mock
 
   # AER-040: the ADR-0144 approver-review journeys (effective-action review,
   # malformed/legacy/expired refusal, metadata impersonation, re-review on a
