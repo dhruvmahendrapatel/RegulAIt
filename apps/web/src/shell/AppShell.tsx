@@ -17,6 +17,8 @@ import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import { NavGlyph, RailGlyph } from "./navIcons";
 import { CommandPalette } from "./CommandPalette";
+// ADR-0182 (D4) A14: the acknowledgement interstitial's slot (A14's file)
+import AcknowledgeGate from "../views/account/AcknowledgeGate";
 import s from "./shell.module.css";
 
 
@@ -511,7 +513,7 @@ export default function AppShell(props: { children: ReactNode }) {
         {/* tabindex="-1" makes this a valid skip-link target without adding it
             to the tab order. It must keep a resolved height — see .content. */}
         <main id="rgMain" tabIndex={-1} className={s.content}>
-          {props.children}
+          <AcknowledgeGate>{props.children}</AcknowledgeGate>
         </main>
       </div>
       <CommandPalette

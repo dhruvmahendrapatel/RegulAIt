@@ -112,6 +112,13 @@ import DataKeyPage from "./views/admin/settings/DataKeyPage";
 import SchedulerPage from "./views/admin/settings/SchedulerPage";
 import EnforcementPosturePage from "./views/admin/settings/EnforcementPosturePage";
 import ExecutionControlPage from "./views/admin/settings/ExecutionControlPage";
+// ADR-0182 (ADR-0175 batch D4) — each page is its slice's file (P0 stubs)
+import DecisionRegressionPage from "./views/admin/governance/DecisionRegressionPage";
+import LiteracyPage from "./views/admin/governance/LiteracyPage";
+import IncidentsPage from "./views/incidents/IncidentsPage";
+import IncidentDetailPage from "./views/incidents/IncidentDetailPage";
+import FeedbackPage from "./views/feedback/FeedbackPage";
+import FeedbackFormPage from "./views/feedback/FeedbackFormPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -160,6 +167,9 @@ export default function App() {
           <BrowserRouter basename="/ui">
             <Routes>
               <Route path="/login" element={<LoginPage />} />
+              {/* ADR-0182 A13: a PUBLIC signed feedback link — no app chrome, no
+                  session; the gateway authenticates the link itself (shipped off) */}
+              <Route path="/f/:token" element={<FeedbackFormPage public />} />
               <Route element={<Protected />}>
                 <Route path="/" element={<HomePage />} />
                 <Route path="/chat" element={<ChatPage />} />
@@ -190,6 +200,12 @@ export default function App() {
                 <Route path="/context" element={<ContextIndexPage />} />
                 <Route path="/spend" element={<SpendPage />} />
                 <Route path="/account" element={<AccountPage />} />
+                {/* ADR-0182 (D4): outside RequireAdmin — anyone may report an incident
+                    or a problem; the server filters what each person may see */}
+                <Route path="/incidents" element={<IncidentsPage />} />
+                <Route path="/incidents/:incidentId" element={<IncidentDetailPage />} />
+                <Route path="/feedback" element={<FeedbackPage />} />
+                <Route path="/feedback/:useCaseId" element={<FeedbackFormPage />} />
                 <Route
                   path="/admin/*"
                   element={
@@ -226,6 +242,9 @@ export default function App() {
                         <Route path="governance/alerts" element={<GovernanceAlertsPage />} />
                         <Route path="governance/graph" element={<DependencyGraphPage />} />
                         <Route path="governance/regulatory" element={<RegulatoryIntelligencePage />} />
+                        {/* ADR-0182 (D4): A11 decision regression, A14 AI literacy */}
+                        <Route path="governance/decision-regression" element={<DecisionRegressionPage />} />
+                        <Route path="governance/literacy" element={<LiteracyPage />} />
                         {/* ADR-0084 */}
                         <Route path="vendors" element={<VendorsPage />} />
                         {/* ADR-0081 */}

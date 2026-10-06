@@ -106,6 +106,9 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/projects": "folder",
   "/context": "layers",
   "/spend": "wallet",
+  // ADR-0182 (D4)
+  "/incidents": "warning",
+  "/feedback": "chatCheck",
   "/admin/posture": "gauge",
   "/admin/governance/trust": "shield",
   "/admin/governance/alerts": "bell",
@@ -123,6 +126,8 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/governance/review-policy": "checklist",
   "/admin/governance/graph": "graph",
   "/admin/governance/regulatory": "scales",
+  "/admin/governance/decision-regression": "history", // ADR-0182 A11
+  "/admin/governance/literacy": "ribbon", // ADR-0182 A14
   "/admin/model-risk": "cube",
   "/admin/vendors": "building",
   "/admin/risks": "warning",

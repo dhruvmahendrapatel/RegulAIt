@@ -35,6 +35,12 @@ export const WORKSPACE: NavEntry[] = [
   // pillars 5 + 6 for the person who generates the spend — self-scoped, and
   // the only place a non-admin can see their own cost and savings ledgers
   { label: "Spend & savings", to: "/spend" },
+  // ADR-0182 (D4) A12: anyone may report an AI incident; the list shows what
+  // the person may see (their own, their use cases', everything for an admin)
+  { label: "AI incidents", to: "/incidents" },
+  // ADR-0182 (D4) A13: problem reports and appeals about the use cases a
+  // person owns (an admin sees all)
+  { label: "Feedback & appeals", to: "/feedback" },
 ];
 
 /**
@@ -111,6 +117,12 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Review policy", to: "/admin/governance/review-policy" },
       { label: "Dependency graph", to: "/admin/governance/graph" },
       { label: "Regulatory intelligence", to: "/admin/governance/regulatory" },
+      // ADR-0182 (D4) A11 — before a policy change lands, which past
+      // decisions would it change? The golden cases, their runs and the diff.
+      { label: "Decision regression", to: "/admin/governance/decision-regression" },
+      // ADR-0182 (D4) A14 — AI policies and trainings, versioned, and who has
+      // acknowledged the current version (EU AI Act Art. 4 as amended in 2026)
+      { label: "AI literacy", to: "/admin/governance/literacy" },
       // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a
       // human accepted the risk of using this model for this purpose, and is
       // that acceptance still valid?" A high eval score is an input to that
