@@ -281,9 +281,12 @@ export function apiKeyMfaEnrollmentRequired(org: OrgSettingsRow, ctx: AuthContex
   return orgRequiresMfa(org, ctx.isAdmin);
 }
 
-/** the holder-facing refusal for an un-enrolled owner's key (one wording) */
+/** the holder-facing refusal for an un-enrolled owner's key (one wording).
+ * `credential` tells it apart from the session gate's refusal with the same
+ * code, so a client can say "this key" rather than "your session" (ADR-0183 2.3). */
 export const API_KEY_MFA_REFUSAL = {
   error: "mfa_enrollment_required",
+  credential: "api_key",
   detail:
     "this organization requires TOTP MFA for this account, and an API key does not satisfy it: the key's owner must " +
     "sign in and enroll TOTP (POST /auth/totp/enroll) before the key works. An admin may relax mfaRequired (audited).",
@@ -755,8 +758,6 @@ export function recoveryReason(user: {
 // The implementation lives in `totp.ts` (ADR-0181: the e2e journeys load it
 // without the rest of this module); every name is re-exported unchanged.
 export {
-  base32Decode,
-  base32Encode,
   generateTotpSecret,
   otpauthUri,
   TOTP_DIGITS,

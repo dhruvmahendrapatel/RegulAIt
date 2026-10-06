@@ -147,6 +147,8 @@ describe("ADR-0181 FX2 finding 3 — an admin's API key answers to mfaRequired",
     const exchanged = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: json(minted).token } });
     expect(exchanged.statusCode).toBe(403);
     expect(json(exchanged).error).toBe("mfa_enrollment_required");
+    // ADR-0183 2.3: the web app tells "this key" apart from the session gate by this field
+    expect(json(exchanged).credential).toBe("api_key");
     expect(exchanged.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
 
     await enrolAdminTotpForTest(app, BOOT, a.id);

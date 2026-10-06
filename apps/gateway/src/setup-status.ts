@@ -22,6 +22,7 @@
  *   REAL dispatch", with mock dispatch counts reported alongside.
  */
 
+import { publicUrlPosture } from "./public-url.js";
 import type { FastifyInstance } from "fastify";
 import {
   and,
@@ -276,6 +277,8 @@ export function registerSetupStatusRoutes(
       doneCount: steps.filter((s) => s.done).length,
       totalCount: steps.length,
       steps,
+      // ADR-0121 amendment: outbound mail links only to this origin; unset = no mail courier
+      publicUrl: publicUrlPosture(),
     };
   });
 }

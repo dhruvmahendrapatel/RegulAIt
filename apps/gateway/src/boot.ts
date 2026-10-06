@@ -37,6 +37,7 @@ import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-
 import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
 import { describeHsts, resolveHsts } from "./hsts.js";
 import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
+import { describePublicUrl, resolvePublicUrl } from "./public-url.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
@@ -80,6 +81,11 @@ export interface StartedGateway {
  */
 export async function startGateway(opts: StartGatewayOptions): Promise<StartedGateway> {
   const { db, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
+
+  // ADR-0121 amendment: a REGULAIT_PUBLIC_URL that is set but invalid refuses
+  // the boot FIRST — before an app, a migration or a socket exists — because
+  // it is the only origin outbound mail may link to. Unset is fine.
+  resolvePublicUrl(env);
 
   // ADR-0167 (CFG-02): the SERVING process logs. Resolved here, not inside
   // buildApp, so the ~100 test files that construct apps stay silent; forced
@@ -301,6 +307,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     .then((o) => o.egressCompiledDefaultPolicy)
     .catch(() => undefined);
   log(`  egress:    ${describeEgressPosture(resolveDeployMode(), egressOrgPolicy)}`);
+  // ADR-0121 amendment: the one origin outbound mail links to, or why mail is off
+  log(`  public url: ${describePublicUrl(env)}`);
   // ADR-0063: say out loud WHICH KEY this box is running, and whether anybody
   // has ever claimed to hold a copy of it. The fingerprint is a PRF output, so
   // printing it costs nothing; not printing it costs an operator the one string
