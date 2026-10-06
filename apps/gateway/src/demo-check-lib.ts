@@ -11,9 +11,16 @@
  * for one thing it must do to check the Monitor beat: a monitor evaluation
  * pass (which is itself idempotent and audited). It never decides an approval
  * or proposes a remediation — those are live demo moments.
+ *
+ * ADR-0181: it holds NO admin-owned API key. Its admin reads use the
+ * deployment's bootstrap token (as every prep script already does for user
+ * lookups and key issue), and the one beat that needs a person — the intake
+ * assistant — runs as Dana, the proposer who uses it in the story, on a
+ * one-day key this run revokes before it returns. An admin key minted here
+ * would be flagged over-scoped by the very monitor pass this check reports.
  */
 import type { FastifyInstance } from "fastify";
-import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
@@ -29,6 +36,22 @@ type Json = Record<string, any>;
 export async function runDemoCheck(
   app: FastifyInstance,
   opts: { bootstrapToken: string; fixtures?: DemoIntakeFixtures | null },
+): Promise<DemoCheck[]> {
+  const minted: string[] = [];
+  let out: DemoCheck[] | undefined;
+  try {
+    out = await runDemoCheckRun(app, opts, minted);
+    return out;
+  } finally {
+    const notes = await revokeScriptKeys(app, opts.bootstrapToken, minted);
+    for (const n of notes) out?.push({ beat: "0 Personas", level: "WARN", detail: n });
+  }
+}
+
+async function runDemoCheckRun(
+  app: FastifyInstance,
+  opts: { bootstrapToken: string; fixtures?: DemoIntakeFixtures | null },
+  minted: string[],
 ): Promise<DemoCheck[]> {
   const out: DemoCheck[] = [];
   const add = (beat: string, level: CheckLevel, detail: string, fix?: string) =>
@@ -60,8 +83,9 @@ export async function runDemoCheck(
     else add("0 Personas", "PASS", `${role}: ${email}`);
   }
   if (!ada) return out;
-  const key = await call("POST", `/v1/users/${ada.id}/keys`, boot, { name: "demo-check", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
-  const auth = { authorization: `Bearer ${key.body.token}` };
+  // admin reads: the bootstrap token, so no admin-owned key exists while the
+  // monitor pass below counts credentials (see the header)
+  const auth = boot;
 
   // --- 1 Discover: shadow AI ---------------------------------------------------------------
   const shadow = await call("GET", "/v1/shadow-ai/findings", auth);
@@ -72,7 +96,14 @@ export async function runDemoCheck(
 
   // --- 1 Intake assistant: the hero's answers must land on HIGH -----------------------------
   if (opts.fixtures) {
-    const a = await call("POST", "/v1/use-cases/intake/assist", auth, opts.fixtures.hero.intake);
+    // the proposer runs the intake assistant in the story; it needs a person
+    const dana = byEmail("dana@regulait.local");
+    const key = dana
+      ? await call("POST", `/v1/users/${dana.id}/keys`, boot, { name: "demo-check", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) })
+      : null;
+    if (typeof key?.body.id === "string") minted.push(key.body.id);
+    const danaAuth = key ? { authorization: `Bearer ${key.body.token}` } : boot;
+    const a = await call("POST", "/v1/use-cases/intake/assist", danaAuth, opts.fixtures.hero.intake);
     if (a.status !== 200) add("1 Intake assistant", "FAIL", `assist ${a.status} ${a.body.error ?? ""}`);
     else {
       const tier = a.body.tier?.value;

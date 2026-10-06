@@ -28,7 +28,7 @@
  * did not produce its intended effect says so. Synthetic data only.
  */
 import type { FastifyInstance } from "fastify";
-import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import type { DemoIntakeFixtures } from "@regulait/shared";
 
 type Json = Record<string, any>;
@@ -60,6 +60,25 @@ export async function runDemoTraffic(
   app: FastifyInstance,
   opts: { bootstrapToken: string; fixtures: DemoIntakeFixtures | null; routinePerAgent?: number },
 ): Promise<DemoTrafficReport> {
+  // ADR-0181: the keys this run mints are revoked when it ends, however it
+  // ends (see revokeScriptKeys). The revoked rows stay, so the Docker demo's
+  // "already prepared" marker (DEMO_TRAFFIC_KEY_NAME) still reads them.
+  const minted: string[] = [];
+  let report: DemoTrafficReport | undefined;
+  try {
+    report = await runDemoTrafficRun(app, opts, minted);
+    return report;
+  } finally {
+    const notes = await revokeScriptKeys(app, opts.bootstrapToken, minted);
+    report?.notes.push(...notes);
+  }
+}
+
+async function runDemoTrafficRun(
+  app: FastifyInstance,
+  opts: { bootstrapToken: string; fixtures: DemoIntakeFixtures | null; routinePerAgent?: number },
+  minted: string[],
+): Promise<DemoTrafficReport> {
   const report: DemoTrafficReport = { results: [], traceEvaluation: null, monitor: null, notes: [] };
   const boot = { authorization: `Bearer ${opts.bootstrapToken}` };
   const call = async (method: "GET" | "POST", url: string, headers: Record<string, string>, payload?: unknown) => {
@@ -80,8 +99,11 @@ export async function runDemoTraffic(
     report.notes.push("dana@ / admin@regulait.local missing — run `seed` and `demo:intake` first");
     return report;
   }
-  const keyFor = async (id: string) =>
-    ({ authorization: `Bearer ${(await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME, expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) })).body.token}` });
+  const keyFor = async (id: string) => {
+    const k = (await call("POST", `/v1/users/${id}/keys`, boot, { name: DEMO_TRAFFIC_KEY_NAME, expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) })).body;
+    if (typeof k.id === "string") minted.push(k.id);
+    return { authorization: `Bearer ${k.token}` };
+  };
   const danaAuth = await keyFor(dana.id);
   const adaAuth = await keyFor(ada.id);
 

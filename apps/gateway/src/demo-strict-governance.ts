@@ -27,6 +27,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { nistAiRmfLabel } from "@regulait/shared";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 
 type Json = Record<string, any>;
 
@@ -144,8 +145,16 @@ export async function recertifyDemoModelCards(app: FastifyInstance, bootstrapTok
   const users: Json[] = (await call("GET", "/v1/users", boot)).body.users ?? [];
   const avery = users.find((u) => u.email === "avery@regulait.local");
   if (!avery) return ["mrm     avery@regulait.local missing — cards not recertified (run `seed` first)"];
-  const key = await call("POST", `/v1/users/${avery.id}/keys`, boot, { name: "demo-recertify" });
+  // ADR-0181: a one-day key for this step, revoked when the step ends
+  const key = await call("POST", `/v1/users/${avery.id}/keys`, boot, {
+    name: "demo-recertify",
+    expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS),
+  });
   const averyAuth = { authorization: `Bearer ${String(key.body.token)}` };
-  const report = await ensureDemoModelCards(app, { bootstrapToken, averyAuth, averyId: avery.id, recertify: true });
-  return report.notes;
+  try {
+    const report = await ensureDemoModelCards(app, { bootstrapToken, averyAuth, averyId: avery.id, recertify: true });
+    return report.notes;
+  } finally {
+    await revokeScriptKeys(app, bootstrapToken, [typeof key.body.id === "string" ? key.body.id : undefined]);
+  }
 }

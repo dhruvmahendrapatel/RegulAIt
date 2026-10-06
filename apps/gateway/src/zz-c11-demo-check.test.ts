@@ -102,6 +102,24 @@ describe("demo:check over the real dataset", () => {
     expect(checks.find((c) => c.beat === "1 Intake assistant")!.level).toBe("PASS");
   });
 
+  it("ADR-0181: the scripts leave no key of their own active, and demo:check never mints an admin-owned one", async () => {
+    const rows = (
+      (await db.execute(sql`
+        select k.name, k.revoked_at, u.is_admin
+          from api_keys k join users u on u.id = k.user_id
+         where k.name in ('demo-intake-seed', 'demo-check')`)) as unknown as {
+        rows: Array<{ name: string; revoked_at: Date | null; is_admin: boolean }>;
+      }
+    ).rows;
+    expect(rows.filter((r) => r.name === "demo-intake-seed").length).toBeGreaterThan(0);
+    expect(rows.filter((r) => r.name === "demo-check").length).toBeGreaterThan(0);
+    // every key a script minted for its own run is revoked when the run ends
+    expect(rows.filter((r) => r.revoked_at === null)).toEqual([]);
+    // the check's admin reads use the bootstrap token: an admin-owned key minted
+    // here would be over-scoped by definition, flagged by the monitor pass it reports
+    expect(rows.filter((r) => r.name === "demo-check" && r.is_admin)).toEqual([]);
+  });
+
   it("3 Evidence FAILs — with the fix — when the export-signing key is missing (the 3E button would 409)", async () => {
     expect(checks.find((c) => c.beat === "3 Evidence")!.level).toBe("PASS");
     const key = process.env.REGULAIT_EXPORT_SIGNING_KEY;

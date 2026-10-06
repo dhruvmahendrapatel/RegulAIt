@@ -24,7 +24,7 @@ import { auditLog, mcpServers } from "@regulait/db"; // ADR-0181 (SC): seedStric
 import { buildApp } from "./app.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
-import { demoKeyExpiresAt, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
+import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
 import { ensureDemoModelCards } from "./demo-strict-governance.js";
 import { seedStrictData } from "./seed-strict-data.js";
 
@@ -126,12 +126,15 @@ for (const [username, id] of [
 }
 
 const keys: Record<string, string> = {};
+const keyIds: Record<string, string> = {};
 for (const [name, id] of [
   ["admin", adminId],
   ["dana", danaId],
   ["avery", averyId],
 ] as const) {
-  keys[name] = (await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) })).token;
+  const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
+  keys[name] = minted.token;
+  keyIds[name] = minted.id;
 }
 const danaAuth = { authorization: `Bearer ${keys.dana}` };
 const averyAuth = { authorization: `Bearer ${keys.avery}` };
@@ -224,6 +227,12 @@ for (const userId of [adminId, danaId, averyId]) {
     if (plan.reviewInDays === "record") await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
   }
 }
+
+// ADR-0181: that was the last use of Ada's seed key. An admin-owned API key
+// carries administrator power on every admin route, so the stale-credential
+// monitor flags it as over-scoped (a true finding). It is revoked here rather
+// than handed to the presenter; Dana's and Avery's keys (not admins) are kept.
+for (const n of await revokeScriptKeys(app, BOOT, [keyIds.admin])) console.log(`  ${n}`);
 
 // --- per-user agent policy (§4 default + ceiling, §5.2 run budget) -------
 // Upsert, so re-running converges rather than duplicating. The ceilings are
@@ -1387,7 +1396,9 @@ RegulAIt demo data ready.
   keeps a "sign in with an API key" fallback that exchanges one for a
   session). Shown ONCE:
 
-    admin  ${keys.admin}
+    admin  (none kept: the seed's own admin key was revoked after its last use;
+            an admin-owned key is over-scoped by definition, so issue one in
+            /admin → Users only when a task needs it)
     dana   ${keys.dana}
     avery  ${keys.avery}
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}

@@ -26,6 +26,39 @@ export function demoKeyExpiresAt(days: number, now: Date = new Date()): string {
 
 type Call = (method: string, url: string) => Promise<Record<string, unknown>>;
 
+/** the one method of a Fastify app the revocation below needs */
+type Injector = {
+  inject(opts: { method: "POST"; url: string; headers: Record<string, string> }): PromiseLike<{ statusCode: number }>;
+};
+
+/**
+ * ADR-0181 (integration): a prep script's own key is revoked at the END of its
+ * own run, through the real admin route. An admin-owned API key carries
+ * administrator power on every admin route, so the stale-credential monitor
+ * flags each one as over-scoped — a TRUE finding about the demo's own hygiene
+ * if a script left one behind. The one-day expiry above stays as the backstop
+ * when a run dies before it gets here. Returns one note per key that could not
+ * be revoked (the id only, never a token).
+ */
+export async function revokeScriptKeys(
+  app: Injector,
+  bootstrapToken: string,
+  keyIds: ReadonlyArray<string | undefined>,
+): Promise<string[]> {
+  const notes: string[] = [];
+  for (const id of keyIds) {
+    if (!id) continue;
+    const r = await app.inject({
+      method: "POST",
+      url: `/v1/keys/${id}/revoke`,
+      headers: { authorization: `Bearer ${bootstrapToken}` },
+    });
+    // 404 = already revoked, which is the state this wants
+    if (r.statusCode !== 200 && r.statusCode !== 404) notes.push(`could not revoke script key ${id}: ${r.statusCode}`);
+  }
+  return notes;
+}
+
 /** Prints the identity posture the demo runs under. It reads the live
  * settings rather than restating the defaults, so a relaxed dial shows. */
 export async function seedStrictIdentity(call: Call): Promise<void> {

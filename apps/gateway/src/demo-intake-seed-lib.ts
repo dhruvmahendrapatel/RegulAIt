@@ -29,7 +29,7 @@ import {
   type DemoUseCase,
 } from "@regulait/shared";
 import { VENDOR_QUESTIONNAIRE_TEMPLATE } from "./vendors.js";
-import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt } from "./demo-identity.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import { openAssuranceGuardrailWindow } from "./seed-strict-data.js";
 
 type Json = Record<string, any>;
@@ -51,6 +51,25 @@ export async function seedDemoIntake(
   app: FastifyInstance,
   fixtures: DemoIntakeFixtures,
   opts: { bootstrapToken: string },
+): Promise<DemoSeedReport> {
+  // ADR-0181: the persona keys this run mints are revoked when it ends,
+  // however it ends (see revokeScriptKeys)
+  const minted: string[] = [];
+  let report: DemoSeedReport | undefined;
+  try {
+    report = await seedDemoIntakeRun(app, fixtures, opts, minted);
+    return report;
+  } finally {
+    const notes = await revokeScriptKeys(app, opts.bootstrapToken, minted);
+    report?.notes.push(...notes);
+  }
+}
+
+async function seedDemoIntakeRun(
+  app: FastifyInstance,
+  fixtures: DemoIntakeFixtures,
+  opts: { bootstrapToken: string },
+  minted: string[],
 ): Promise<DemoSeedReport> {
   const BOOT: Headers = { authorization: `Bearer ${opts.bootstrapToken}` };
   const report: DemoSeedReport = { created: [], skipped: [], failed: [], notes: [] };
@@ -85,6 +104,7 @@ export async function seedDemoIntake(
       report.created.push(`user ${email}`);
     }
     const key = await call("POST", `/v1/users/${u!.id}/keys`, { name: "demo-intake-seed", expiresAt: demoKeyExpiresAt(DEMO_SCRIPT_KEY_TTL_DAYS) });
+    if (typeof key.body.id === "string") minted.push(key.body.id);
     return { id: u!.id as string, auth: { authorization: `Bearer ${key.body.token}` } };
   }
   const ada = await persona("admin@regulait.local", "Ada Admin", true);
