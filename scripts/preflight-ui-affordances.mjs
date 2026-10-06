@@ -45,10 +45,6 @@ const DELIBERATELY_API_ONLY = new Map([
     "/v1/governance/decision-regression/cases/:x",
     "TEMPORARY — D4 P0 stub; A11 adds the retire-case control on DecisionRegressionPage and deletes this entry",
   ],
-  [
-    "/v1/use-cases/:x/feedback-links/:x",
-    "TEMPORARY — D4 P0 stub; A13 adds the revoke-link control on FeedbackTab and deletes this entry",
-  ],
 ]);
 
 const walk = (dir, out = []) => {

@@ -1,0 +1,45 @@
+/* ADR-0182 A13 — the public signed-link page: no app chrome, the app-wide
+   shaded field (global.css) shows through, tokens only (light and dark). */
+.public {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: var(--s5) var(--s3);
+  background: transparent;
+}
+.panel {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.brand {
+  display: flex;
+  align-items: center;
+}
+.kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.kind {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s1);
+  flex: 1 1 14rem;
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  cursor: pointer;
+}
+.kindSelected {
+  border-color: var(--primary);
+}
+.counter {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  align-self: flex-end;
+}
