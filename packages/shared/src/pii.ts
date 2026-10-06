@@ -31,7 +31,8 @@ export interface PiiHit {
 }
 
 // Email: a pragmatic RFC-lite pattern. Global so we can count every match.
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// Matched by `visitEmails` (linear time); this regex is its specification.
+export const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
 // US SSN: AAA-GG-SSSS with the standard invalid-range exclusions — area
 // 000/666/900-999, group 00, serial 0000 are never issued.
@@ -64,6 +65,49 @@ function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+const isEmailLocalChar = (c: number): boolean =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
+const isEmailDomainChar = (c: number): boolean =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 45;
+const isAsciiLetter = (c: number): boolean => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+
+/**
+ * Every match of EMAIL_RE, left to right, in linear time (ADR-0184 review).
+ * The regex restarts its greedy local part at every character of a long run
+ * with no usable `@` after it (`ab.ab.ab.…`), so it cost the square of the run:
+ * 40,000 characters took 1.7 s, on a path every guardrailed prompt takes.
+ *
+ * Same matches: a match needs an `@`; its local part is the run of local
+ * characters right before that `@` (back to the previous match's end), all of
+ * which reach the same `@`, so the regex's leftmost start is the run's start.
+ * Its domain is the run of domain characters after the `@`; the greedy
+ * `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` backtracks to the LAST dot in that run that has
+ * at least one domain character before it and two letters after it, then takes
+ * every letter that follows. `pii.test.ts` checks this against EMAIL_RE.
+ */
+export function visitEmails(text: string, onMatch: PiiMatchVisitor): void {
+  const n = text.length;
+  let lastEnd = 0;
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > lastEnd && isEmailLocalChar(text.charCodeAt(start - 1))) start -= 1;
+    if (start === at) continue;
+    let runEnd = at + 1;
+    while (runEnd < n && isEmailDomainChar(text.charCodeAt(runEnd))) runEnd += 1;
+    let dot = runEnd - 3;
+    while (dot >= at + 2) {
+      if (text.charCodeAt(dot) === 46 && isAsciiLetter(text.charCodeAt(dot + 1)) && isAsciiLetter(text.charCodeAt(dot + 2))) break;
+      dot -= 1;
+    }
+    if (dot < at + 2) continue;
+    let end = dot + 3;
+    while (end < n && isAsciiLetter(text.charCodeAt(end))) end += 1;
+    onMatch(start, end);
+    lastEnd = end;
+    at = end - 1;
+  }
+}
+
 function visitMatches(text: string, pattern: RegExp, onMatch: PiiMatchVisitor): void {
   const re = new RegExp(pattern.source, pattern.flags);
   let m: RegExpExecArray | null;
@@ -77,7 +121,7 @@ function visitPII(
   international: readonly InternationalPiiCategory[],
   onMatch: (category: PiiCategory, start: number, end: number) => void,
 ): void {
-  visitMatches(text, EMAIL_RE, (start, end) => onMatch("email", start, end));
+  visitEmails(text, (start, end) => onMatch("email", start, end));
   visitMatches(text, SSN_RE, (start, end) => onMatch("ssn", start, end));
   visitMatches(text, CC_CANDIDATE_RE, (start, end) => {
     const digits = text.slice(start, end).replace(/[ -]/g, "");
