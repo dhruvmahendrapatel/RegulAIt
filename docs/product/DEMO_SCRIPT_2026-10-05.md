@@ -360,10 +360,13 @@ back afterwards; a live run leaves it set — recreate the database before the n
   serious started the EU AI Act clocks (Art. 26(5) and Art. 73(2), each labelled "confirm with counsel"), and both
   show their reports recorded (the recipients are synthetic). The corrective action is done with its evidence, and
   the incident is closed with a root cause and lessons learned. The decision record shows which policy versions
-  produced the sign-off. On Account, the acceptable-use policy shows as acknowledged.
+  produced the sign-off. On the AI literacy page, the acceptable-use policy shows as current for the three personas.
+  Their completions were recorded by the demo tooling (`admin_recorded`), and the evidence says they were not
+  acknowledged in person.
 - **Say:** "When something goes wrong, the record shows who was told, by when, and what changed. The clocks are
-  reminders computed from when we became aware, not legal advice. Every person here has acknowledged the
-  acceptable-use policy; regulAIt refuses a governed call from anyone whose acknowledgement isn't current."
+  reminders computed from when we became aware, not legal advice. A person acknowledges the acceptable-use
+  policy themselves, from a signed-in session; regulAIt refuses a governed call from anyone whose acknowledgement or
+  recorded completion isn't current."
 - `demo:check` beat **3 Accountability** proves these records exist before you present.
 
 ---

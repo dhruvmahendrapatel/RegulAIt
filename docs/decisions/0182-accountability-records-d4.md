@@ -313,7 +313,9 @@ Everything hand-written is governance semantics: routing, separation of duties, 
   `audit_log_alert_escalated_idx`.
 - **Retired, never to be reused:** 0163 (A11), 0164 (A12), 0165 (A13) and 0166 (A14) were reserved and not needed.
   The journal skips from 162 to 167; it already had such gaps.
-- The next migration is **0168**.
+- **0168** `0168_accountability_record_integrity` (security review, DFX1): decision records outlive their use case, and
+  the append-only trigger admits only FK nulling and its own parent's cascade.
+- The next migration is **0169**.
 
 ### Demo
 
@@ -325,13 +327,15 @@ Everything hand-written is governance semantics: routing, separation of duties, 
 3. Marking the incident serious (fundamental rights) starts the art26-5 and art73-2 clocks.
 4. Both clocks reach `sent_complete`: art73-2 through an initial and then a complete report. The recipients are labelled
    synthetic.
-5. The corrective action is done with evidence, the incident closes with a root cause and lessons learned, and the
-   feedback item is resolved with a note.
+5. The corrective action is done with evidence. Ada (an admin, since a high incident needs one to close) closes the
+   incident with a root cause and lessons learned, and the feedback item is resolved with a note.
 
 **Acceptable use.**
 - As its last step, the seeder publishes one acceptable-use document. It uses a synthetic `example.com` link and applies
   to everyone.
-- Ada, Dana and Avery acknowledge it for themselves.
+- The demo tooling records a completion for each of Ada, Dana and Avery (`admin_recorded`, as the operator). The
+  evidence reference says it was recorded for a synthetic persona and not acknowledged in person. The personas do not
+  acknowledge it themselves: since the security review, acknowledging needs an interactive session (D4A-03).
 - `literacy_gate_mode` stays `enforce`, and `demo:traffic` is served unchanged.
 
 **Check.** `demo:check` has a new beat, **3 Accountability**. It FAILs unless:
@@ -372,6 +376,88 @@ authenticator, which set-passwords clears (ADR-0181 FX2). A later seeder run the
 running zz-c6, then adr0174, then zz-c6 on one database passes with the restore; without it, the second zz-c6 fails
 with "already has a password but no TOTP".
 
+## Security review fixes (2026-10-06)
+
+Two reviews of the integrated batch (access: D4A-xx; gates and evidence: D4G-xx) were triaged by the main session.
+Every finding was fixed in D4 and none was deferred. Each fix has a red proof in its group's commits. The fixes ran as
+three groups: DFX1 (incidents, migration **0168** `0168_accountability_record_integrity`), DFX2 (evidence-hold coverage
+and feedback) and DFX3 (literacy and decision regression).
+
+**Main-session triage decisions:**
+- An incident holds the deploy gate in every status except `closed`.
+- Closing a serious, high or critical incident is an admin's act.
+- A reporter may name only objects they can already see. Holds apply at once (safety first); the audited admin
+  override releases one change.
+- A feedback retention value below the default is a relaxation, as a longer one is.
+- Acknowledging an AI policy needs an interactive session.
+
+**Access review:**
+- **D4A-01** (high): an owner setting `resolved` no longer releases the gate (it holds until `closed`). Closing a
+  serious, high or critical incident needs an admin (`403 incident_close_admin_only`, audited). The close conditions
+  apply to everyone.
+- **D4A-02** (medium): a reporter may link or target only a use case, agent, alert, red-team run or feedback item they
+  can see. On create, `PATCH useCaseId` and `POST links`, an unknown and an invisible object both answer the same 404.
+  The steward of a covered agent can read the incident, and a hold refusal names the incidents the caller can open
+  (`youCanOpen`). One predicate, `incidentCoversAgent`, decides both the hold and that read access.
+- **D4A-03** (medium): acknowledging a policy needs an interactive session. An API key or virtual key gets
+  `403 acknowledgement_requires_session` (audited with the method and session origin). An admin recording their own
+  completion follows the same rule. The demo now records `admin_recorded` completions as the operator, with evidence
+  that says so.
+- **D4A-04** (low): policy document links must be `https:`. Every screen renders them through the same check.
+- **D4A-05** (low): a public link token never reaches the log. Every log line passes through `redactLogText`
+  (`/feedback/l/…` and `rglf_…` become `[redacted]`), and request paths are redacted too.
+- **D4A-06** (low): `POST /v1/incidents` is no longer a read path for arbitrary ids. The create response shows only what
+  the caller can see.
+- **D4A-07** (low):
+  - (a) The reporter always reads their own incident, read-only.
+  - (b) `resolution_note` is encrypted with the data key like bodies. Reading it is audited. It is registered in the
+    ciphertext registry and re-encrypted with the key.
+
+**Gates and evidence review:**
+- **D4G-01** (high): see D4A-01.
+- **D4G-02** (high): the Art. 73(6) evidence hold now covers every `config-versions` write for `agent_system_prompt` and
+  `agent_config`: create-and-activate, activate, rollback, canary start and abandon, and promote. A draft stays allowed.
+- **D4G-03** (high): the retention sweep never purges a feedback item linked to an incident that is not closed. A link
+  is either `incident_id` or an `ai_incident_links` row. The item purges once the incident closes.
+  `feedback_retention_days` other than 365 is audited as a relaxation.
+- **D4G-04** (medium): retiring the deciding `ai-use-case-intake` template or variant goes through the
+  decision-regression gate (candidate `{retireTemplateId}`). Integration added that, when every intake template is
+  retired, the built-in shape is minted under a fresh `ai-use-case-intake/built-in-…` name. The retired built-in name
+  is never reused, so the proposal no longer fails with a bare 409 `conflict`.
+- **D4G-05** (medium): the evidence hold also covers builder sub-agents, skills, skill re-attach, memory, name and
+  description, autonomy, archive (for the parents it leaves), library skill removal and visibility, skill admission and
+  the expected served model. It also covers every agent that depends on the changed one (one recursive query in
+  `agent-evidence-hold.ts`): builder agents running on a registry agent, and the parents of a sub-agent.
+- **D4G-06** (medium): a report's `sentAt` must lie between the clock start and now. A report dated more than an hour
+  back needs a reason, which is audited and kept on the timeline.
+- **D4G-07** (low): an intake-template write and its gate record are written in one transaction under an advisory lock.
+  When two creates were previewed against one baseline, the second is refused with `baseline_moved`.
+- **D4G-08** (low, latent): migration 0168 makes `use_case_decision_records.use_case_id` `ON DELETE SET NULL`, so
+  records outlive their use case. The append-only trigger now admits a nested statement only in two cases: an UPDATE
+  that solely nulls a SET NULL foreign key, and a DELETE that is the cascade from the record's own incident. An
+  incident that is not closed cannot be deleted.
+- **D4G-09** (low): a person who starts an evaluation or red-team run is checked against the literacy gate at the start.
+  The dispatches inside the run, and platform-scheduled runs, keep the evaluation exemption.
+- **D4G-10** (low): fixed by D4A-02. A user can no longer put an evidence hold on an agent they cannot see.
+- **D4G-11** (low): retiring an AI policy version needs a reason of at least 10 characters. Retiring a published
+  version is audited as a relaxation.
+- **D4G-12** (low): an intake candidate is digested over the resolved `{name, definition}` exactly as the create stores
+  it, so the preview and the stored template cannot differ.
+
+**Integration of the three groups.**
+- There were no merge conflicts. DFX2's dependents walk (`agent-evidence-hold.ts`) composes with DFX1's one predicate,
+  `incidentCoversAgent`, through `incidentsHoldingAgent`, whose signature is unchanged.
+- **Import cycle.** Combining the groups put `incidents.ts` on `inventory.ts`'s import chain, through config-versions
+  and then agent-evidence-hold. Importing the inventory first then died on load with a temporal-dead-zone
+  `ReferenceError` (the FA10 load-order suite, 3 tests red). `agent-evidence-hold.ts` now imports `incidents.ts` at call
+  time, and the suite now also loads both of the new modules first.
+- **Test cleanup.** The DFX2 test suite now closes its incident fixtures before deleting them, because migration 0168
+  refuses to delete an open incident.
+- **All intake templates retired** (the path DFX3 flagged). Proposing a use case had failed with a bare 409
+  `conflict` (the red proof). It now mints the built-in shape under a fresh name.
+
+Migrations after the review: **0168** is used, so the next migration is **0169**.
+
 ## Consequences
 
 - A use-case decision can be traced to the exact configuration that produced it. Changing that configuration needs a
@@ -392,3 +478,7 @@ with "already has a password but no TOTP".
 - `demo:check` could also prove the feedback item's link to the incident.
 - The web app shows generic errors for some new refusals (`ai-literacy-not-current` on a governed call outside the
   interstitial).
+- DFX2 encrypts any plaintext resolution note left by an earlier build in an `onReady` hook. A data-key re-encryption
+  run before a new build's first start would log such notes as failures. This is moot today, because no live database
+  holds D4 data.
+- Shard the mocked Playwright suite. It runs about 18 minutes on one worker, and CI's demo-journey cap was raised to 30.
