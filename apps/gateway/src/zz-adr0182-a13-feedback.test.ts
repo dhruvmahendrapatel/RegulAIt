@@ -68,6 +68,7 @@ import { measureAssuranceMetric } from "./condition-metrics.js";
 import { runAlertSlaSweep } from "./alert-ownership.js";
 import { routeAuthClass } from "./route-classes.js";
 import { hashToken } from "./token-hash.js";
+import { decryptSecret } from "./secrets.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -478,7 +479,8 @@ describe("A13 sweeps: SLA breach raises the rule; retention purges bodies", () =
     expect(o!.contactCiphertext).toBeNull();
     expect(o!.bodyPurgedAt).not.toBeNull();
     expect(o!.status).toBe("no_change");
-    expect(o!.resolutionNote).toBe("Resolved long ago.");
+    // D4 DFX2 (D4A-07b): the kept resolution record is a data-key envelope
+    expect(decryptSecret(DATA_KEY, o!.resolutionNote!)).toBe("Resolved long ago.");
     expect(o!.resolvedAt).not.toBeNull();
     const [n] = await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.id, newId));
     expect(n!.bodyCiphertext).not.toBeNull();

@@ -138,7 +138,7 @@ import {
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
-import { incidentEvidenceHoldRefused } from "./incidents.js"; // ADR-0182 A12: Art. 73(6) evidence hold
+import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
  * control or invisible formatting characters (422 `skill_name_invalid`) */
@@ -600,6 +600,13 @@ async function ensureSkill(
   return row!;
 }
 
+/** D4 DFX2: the builder agents that pinned a library skill (the evidence hold
+ * asks about each before a library change reaches them) */
+async function agentsPinning(db: Db, skillId: string): Promise<string[]> {
+  const rows = await db.select({ agentId: builderAgentSkills.agentId }).from(builderAgentSkills).where(eq(builderAgentSkills.skillId, skillId));
+  return [...new Set(rows.map((r) => r.agentId))];
+}
+
 /** the pinned attachment row for a skill (its body, digest, version and
  * verdict now) */
 const pinned = (agentId: string, skill: BuilderSkillRow) => pinnedFrom(agentId, skill);
@@ -783,7 +790,12 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderUpdateAgentSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
-    if ((body.instructions !== undefined || body.modelAgentId !== undefined || body.computerUse !== undefined) && (await incidentEvidenceHoldRefused(db, req, reply, agent.id, "instructions, model or computer use"))) return reply;
+    // D4 DFX2 (D4G-05): the name and description are prompt text too (the
+    // prompt falls back to them when there are no instructions)
+    if (
+      (body.instructions !== undefined || body.modelAgentId !== undefined || body.computerUse !== undefined || (body.name !== undefined && body.name !== agent.name) || (body.description !== undefined && body.description !== agent.description)) &&
+      (await agentEvidenceHoldRefused(db, req, reply, agent.id, "instructions, name, description, model or computer use"))
+    ) return reply;
     if (body.connectionFormat !== undefined) {
       return reply.status(409).send({
         error: "connection_format_locked",
@@ -854,6 +866,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (!viewer) return;
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    // D4 DFX2 (D4G-05): archiving takes the agent itself out of service
+    // (containment, allowed), but it also stops being its parents' sub-agent —
+    // a change to each parent, so a held parent holds it
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "archive (removes it as a sub-agent)", { includeSelf: false })) return reply;
     await db.update(builderAgents).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderAgents.id, agent.id));
     // an archived agent stops being anyone's sub-agent, and its schedules stop
     await db.delete(builderAgentSubagents).where(eq(builderAgentSubagents.childId, agent.id));
@@ -868,7 +884,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderSetToolsSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
-    if (await incidentEvidenceHoldRefused(db, req, reply, agent.id, "tools")) return reply;
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "tools")) return reply;
     const connectorIds = body.tools.filter((t) => t.kind === "connector").map((t) => t.refId);
     const toolIds = body.tools.filter((t) => t.kind === "mcp_tool").map((t) => t.refId);
     const [connectorRows, mcpRows] = await Promise.all([loadConnectorsById(db, connectorIds), loadMcpTools(db, toolIds)]);
@@ -952,6 +968,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
     const childIds = [...new Set(body.subagents.map((s) => s.childId))];
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "sub-agents")) return reply; // D4 DFX2 (D4G-05)
     if (childIds.includes(agent.id)) {
       return reply.status(422).send({ error: "subagent_self", detail: "an agent cannot be its own sub-agent" });
     }
@@ -986,6 +1003,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderSetSkillsSchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "skills")) return reply; // D4 DFX2 (D4G-05)
     const ids = [...new Set(body.skillIds)];
     const rows = ids.length ? await db.select().from(builderSkills).where(inArray(builderSkills.id, ids)) : [];
     for (const id of ids) {
@@ -1040,6 +1058,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
     const [found] = link ? await db.select().from(builderSkills).where(eq(builderSkills.id, skillId)) : [];
     if (!link || !found || !skillVisible(found, viewer)) return reply.status(404).send({ error: "unknown_skill", skillId });
+    // D4 DFX2 (D4G-05): a re-attach moves the agent to new prompt text
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, `skill re-attach (${skillId})`)) return reply;
     // a row that predates the scanner is scanned before it can be pinned
     const skill = await ensureSkillScanned(db, found);
     // ADR-0175: a held source skill (or a version still in cooldown) is not
@@ -1082,6 +1102,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const body = builderAddMemorySchema.parse(req.body ?? {});
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    // D4 DFX2 (D4G-05): memory is part of the agent's system prompt
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "memory (add)")) return reply;
     // a ceiling, refused by name: memory is append-only, so nothing is ever
     // pruned behind the owner's back — they choose what to remove
     const [held] = await db.select({ n: count() }).from(builderAgentMemory).where(eq(builderAgentMemory.agentId, agent.id));
@@ -1112,6 +1134,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const { memoryId } = memoryParam.parse(req.params);
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "memory (remove)")) return reply; // D4 DFX2 (D4G-05)
     const deleted = await db
       .delete(builderAgentMemory)
       .where(and(eq(builderAgentMemory.id, memoryId), eq(builderAgentMemory.agentId, agent.id)))
@@ -1866,6 +1889,14 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // ADR-0175 — visibility: narrowing applies (and withdraws any request);
     // a non-admin's widening becomes a request for an admin
     let requested = false;
+    // D4 DFX2 (D4G-05): who may see a skill decides whether an agent that
+    // pinned it carries it (`skillVisible` in the runtime), so a visibility
+    // change that applies now (a narrowing, or an admin's widening; anyone
+    // else's widening is only a request) is a change to every agent holding a copy
+    if (body.visibility !== undefined && body.visibility !== s.visibility && (body.visibility === "private" || viewer.isAdmin)) {
+      const pinnedBy = await agentsPinning(db, s.id);
+      if (await agentEvidenceHoldRefused(db, req, reply, pinnedBy, `visibility of skill ${s.id} (pinned by this agent)`)) return reply;
+    }
     if (body.visibility !== undefined) {
       if (body.visibility === "private") Object.assign(set, { visibility: "private", requestedVisibility: null, visibilityRequestedAt: null });
       else if (body.visibility !== s.visibility && body.visibility !== s.requestedVisibility) {
@@ -1920,6 +1951,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (!viewer) return;
     const s = await visibleSkill(req, reply, viewer, true);
     if (!s) return;
+    // D4 DFX2 (D4G-05): an archived skill drops out of every agent that pinned it
+    if (await agentEvidenceHoldRefused(db, req, reply, await agentsPinning(db, s.id), `removal of skill ${s.id} (pinned by this agent)`)) return reply;
     await db.update(builderSkills).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderSkills.id, s.id));
     await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-deleted", `skill '${s.name}' removed from the library`);
     return reply.status(204).send();

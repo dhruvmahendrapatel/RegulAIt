@@ -13,7 +13,13 @@
  *     else 422 `trace_not_in_use_case`, the same answer for "no such trace";
  *   - what a person wrote, and how to reach them, are REGULAIT_DATA_KEY
  *     envelopes (`encryptSecret`); with no data key the gateway refuses to
- *     store them (503) rather than store plaintext;
+ *     store them (503) rather than store plaintext. So is the owner's
+ *     `resolution_note` (D4 DFX2, D4A-07b: it may quote the body): scrubbed of
+ *     credential material (ADR-0102's own scrub, before encryption, since the
+ *     column's write-time scrub only ever sees ciphertext), enveloped, read
+ *     only in the audited single-item read; a plaintext note left by an
+ *     earlier build is enveloped when the app becomes ready
+ *     (`envelopeLegacyResolutionNotes`), never served as it was;
  *   - a body is read only by the item's owner or an admin, and every read
  *     (and every refused read) is audited. The queue lists metadata only;
  *   - an item is routed to the use case's owner with `ack_due_at` and
@@ -29,7 +35,9 @@
  *     episode resolves once the item is acknowledged or resolved;
  *   - `feedback-retention-sweep` deletes the body and contact of every item
  *     older than `feedback_retention_days`, sets `body_purged_at` and keeps the
- *     resolution record;
+ *     resolution record — except an item linked to an incident that is not
+ *     closed (its `incident_id`, or `ai_incident_links`): a legal hold until
+ *     the incident closes (D4 DFX2, D4G-03);
  *   - PUBLIC SIGNED LINKS (built, shipped OFF — owner decision 7): minted by
  *     the owner or an admin only while `feedback_signed_links_enabled`; an
  *     opaque `rglf_` token of 256 random bits, shown once, stored as its
@@ -93,6 +101,7 @@ import {
   isResolvedFeedbackStatus,
   openIncidentFromFeedbackSchema,
   publicFeedbackSchema,
+  scrubAuditText,
   submitFeedbackSchema,
   updateFeedbackSchema,
   type AccountabilityMonitorRuleId,
@@ -126,6 +135,7 @@ export const FEEDBACK_RULE_IDS = {
   linkRevoked: "feedback-link-revoked",
   slaBreached: "feedback-sla-breached",
   purged: "feedback-body-purged",
+  notesEnveloped: "feedback-resolution-notes-enveloped",
 } as const;
 /** the monitor's own "raised" rule id (governance-monitor.ts MONITOR_AUDIT_RULE_IDS.raised;
  * not imported, because governance-monitor.ts imports this module) */
@@ -171,6 +181,47 @@ export function generateFeedbackLinkToken(): { token: string; tokenHash: string 
 }
 
 const kindWord = (k: FeedbackKind) => (k === "appeal" ? "appeal" : "problem report");
+
+/** the shape of a `secrets.ts` envelope: iv.tag.ciphertext[.key fingerprint], hex */
+const ENVELOPE_RE = /^[0-9a-f]{24}\.[0-9a-f]{32}\.[0-9a-f]*(\.[0-9a-f]+)?$/;
+
+/** D4 DFX2 (D4A-07b): a resolution note as stored — credential-scrubbed, then enveloped */
+export function sealResolutionNote(dataKey: string, note: string): string {
+  return encryptSecret(dataKey, scrubAuditText(note));
+}
+
+/**
+ * D4 DFX2 (D4A-07b) — no grandfathering: every resolution note an earlier
+ * build stored in the clear is enveloped under the running data key (one
+ * audit row with the count). Runs when the app becomes ready (before it
+ * serves a request) and is idempotent: an envelope is never touched again.
+ */
+export async function envelopeLegacyResolutionNotes(db: Db, dataKey: string): Promise<number> {
+  const rows = await db
+    .select({ id: useCaseFeedback.id, note: useCaseFeedback.resolutionNote })
+    .from(useCaseFeedback)
+    .where(isNotNull(useCaseFeedback.resolutionNote));
+  const legacy = rows.filter((r) => r.note !== null && !ENVELOPE_RE.test(r.note));
+  if (legacy.length === 0) return 0;
+  await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    for (const r of legacy) {
+      await tx
+        .update(useCaseFeedback)
+        .set({ resolutionNote: sealResolutionNote(dataKey, r.note!) })
+        .where(and(eq(useCaseFeedback.id, r.id), eq(useCaseFeedback.resolutionNote, r.note!)));
+    }
+    await audit(tx, {
+      userId: null,
+      objectType: "use_case_feedback",
+      objectId: null,
+      ruleId: FEEDBACK_RULE_IDS.notesEnveloped,
+      reason: `${legacy.length} feedback resolution note(s) stored in the clear by an earlier build enveloped under the data key`,
+      detail: { count: legacy.length, feedbackIds: legacy.slice(0, 100).map((r) => r.id) },
+    });
+  });
+  return legacy.length;
+}
 
 // ---------------------------------------------------------------------------
 // Reads shared by the routes, the sweeps and the monitor
@@ -392,25 +443,50 @@ export async function runFeedbackSlaSweep(
 }
 
 /**
+ * D4 DFX2 (D4G-03) — THE INCIDENT LEGAL HOLD on feedback. An item that is
+ * evidence in an incident not yet closed — named by `use_case_feedback.
+ * incident_id`, or linked through `ai_incident_links` (object type
+ * `feedback`) — is never purged, whatever its age; the hold ends when the
+ * incident closes. The same predicate selects and re-checks at the update,
+ * so an incident opened between the two still holds the item.
+ */
+const heldByOpenIncident = sql`EXISTS (
+  SELECT 1 FROM ai_incidents i
+  WHERE i.status <> 'closed'
+    AND (i.id = ${useCaseFeedback.incidentId}
+      OR EXISTS (SELECT 1 FROM ai_incident_links l
+                 WHERE l.incident_id = i.id AND l.object_type = 'feedback' AND l.object_id = ${useCaseFeedback.id}::text))
+)`;
+
+/**
  * `feedback-retention-sweep`: past `feedback_retention_days`, delete what the
  * person wrote and how to reach them, stamp `body_purged_at`, keep everything
  * else (kind, status, dates, owner, resolution). One audit row per item.
+ * Items held by an open incident are kept and reported (`held`).
  */
 export async function runFeedbackRetentionSweep(
   db: Db,
   now: Date,
   actorUserId: string | null = null,
-): Promise<{ purged: number; retentionDays: number }> {
+): Promise<{ purged: number; retentionDays: number; held: number; heldIds: string[] }> {
   const settings = await loadOrgSettings(db);
   const retentionDays = settings.feedbackRetentionDays;
   const cutoff = new Date(now.getTime() - retentionDays * DAY_MS);
+  const pastWindow = and(isNull(useCaseFeedback.bodyPurgedAt), lt(useCaseFeedback.createdAt, cutoff));
+  const heldRows = await db
+    .select({ id: useCaseFeedback.id })
+    .from(useCaseFeedback)
+    .where(and(pastWindow, heldByOpenIncident))
+    .orderBy(asc(useCaseFeedback.createdAt))
+    .limit(SWEEP_BATCH);
+  const heldIds = heldRows.map((r) => r.id);
   const due = await db
     .select({ id: useCaseFeedback.id })
     .from(useCaseFeedback)
-    .where(and(isNull(useCaseFeedback.bodyPurgedAt), lt(useCaseFeedback.createdAt, cutoff)))
+    .where(and(pastWindow, sql`NOT ${heldByOpenIncident}`))
     .orderBy(asc(useCaseFeedback.createdAt))
     .limit(SWEEP_BATCH);
-  if (due.length === 0) return { purged: 0, retentionDays };
+  if (due.length === 0) return { purged: 0, retentionDays, held: heldIds.length, heldIds };
   const purged = await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
     const rows = await tx
@@ -423,6 +499,7 @@ export async function runFeedbackRetentionSweep(
             due.map((d) => d.id),
           ),
           isNull(useCaseFeedback.bodyPurgedAt),
+          sql`NOT ${heldByOpenIncident}`,
         ),
       )
       .returning({ id: useCaseFeedback.id, useCaseId: useCaseFeedback.useCaseId, createdAt: useCaseFeedback.createdAt });
@@ -438,7 +515,7 @@ export async function runFeedbackRetentionSweep(
     }
     return rows.length;
   });
-  return { purged, retentionDays };
+  return { purged, retentionDays, held: heldIds.length, heldIds };
 }
 
 /** The scheduler jobs this slice owns (spread by scheduler-jobs.ts). */
@@ -459,7 +536,8 @@ export function feedbackJobDefinitions(_opts: { dataKey?: string | undefined } =
     {
       name: FEEDBACK_RETENTION_SWEEP_JOB_NAME,
       description:
-        "Deletes the text and contact details of feedback older than the org's retention, keeping the resolution record.",
+        "Deletes the text and contact details of feedback older than the org's retention, keeping the resolution record. " +
+        "An item that is evidence in an incident not yet closed is kept until the incident closes.",
       adr: "ADR-0182",
       defaultIntervalSeconds: 24 * 3600,
       run: async (ctx) => {
@@ -553,6 +631,12 @@ export interface FeedbackRouteOptions {
 export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: FeedbackRouteOptions = {}): void {
   const dataKey = opts.dataKey;
   const limitPublic = publicLimiter(app);
+  // D4 DFX2 (D4A-07b): before the first request is served, no resolution note is left in the clear
+  if (dataKey) {
+    app.addHook("onReady", async () => {
+      await envelopeLegacyResolutionNotes(db, dataKey);
+    });
+  }
 
   const noDataKey = (reply: FastifyReply) =>
     reply.status(503).send({
@@ -733,6 +817,19 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
     let body: string | null = null;
     let contact: string | null = null;
     let bodyUnavailable: null | "purged" | "no_data_key" | "undecryptable" = null;
+    // D4 DFX2 (D4A-07b): the note is an envelope too (kept after a purge: it is the resolution record)
+    let resolutionNote: string | null = null;
+    let resolutionNoteUnavailable: null | "no_data_key" | "undecryptable" = null;
+    if (item.resolutionNote !== null) {
+      if (!dataKey) resolutionNoteUnavailable = "no_data_key";
+      else {
+        try {
+          resolutionNote = decryptSecret(dataKey, item.resolutionNote);
+        } catch {
+          resolutionNoteUnavailable = "undecryptable";
+        }
+      }
+    }
     if (item.bodyPurgedAt) bodyUnavailable = "purged";
     else if (!dataKey) bodyUnavailable = "no_data_key";
     else {
@@ -750,8 +847,17 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
       ruleId: FEEDBACK_RULE_IDS.bodyRead,
       reason:
         `feedback ${feedbackId}: ${body !== null ? "body read" : `opened (body ${bodyUnavailable})`}` +
-        `${contact !== null ? " with contact details" : ""} by ${req.authCtx.isAdmin ? "an admin" : "its owner"}`,
-      detail: { useCaseId: item.useCaseId, bodyRead: body !== null, contactRead: contact !== null, bodyUnavailable, asAdmin: req.authCtx.isAdmin },
+        `${contact !== null ? " with contact details" : ""}${resolutionNote !== null ? " and its resolution note" : ""}` +
+        ` by ${req.authCtx.isAdmin ? "an admin" : "its owner"}`,
+      detail: {
+        useCaseId: item.useCaseId,
+        bodyRead: body !== null,
+        contactRead: contact !== null,
+        resolutionNoteRead: resolutionNote !== null,
+        bodyUnavailable,
+        resolutionNoteUnavailable,
+        asAdmin: req.authCtx.isAdmin,
+      },
     });
     const contestedUserId = await contestedUserOf(db, item);
     const sod = me
@@ -764,7 +870,8 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
       contact,
       bodyUnavailable,
       bodyPurgedAt: item.bodyPurgedAt?.toISOString() ?? null,
-      resolutionNote: item.resolutionNote,
+      resolutionNote,
+      resolutionNoteUnavailable,
       resolvedBy: item.resolvedBy,
       contestedUserId,
       youMayResolve: !isResolvedFeedbackStatus(item.status) && sod === null,
@@ -856,7 +963,11 @@ export function registerFeedbackRoutes(app: FastifyInstance, db: Db, opts: Feedb
       }
     }
     if (body.ownerUserId !== undefined && body.ownerUserId !== pre.ownerUserId) next.ownerUserId = body.ownerUserId;
-    if (body.resolutionNote !== undefined && body.resolutionNote !== pre.resolutionNote) next.resolutionNote = body.resolutionNote;
+    if (body.resolutionNote !== undefined) {
+      // D4 DFX2 (D4A-07b): never stored in the clear — no data key, no note (as for bodies)
+      if (!dataKey) return noDataKey(reply);
+      next.resolutionNote = sealResolutionNote(dataKey, body.resolutionNote);
+    }
     if (Object.keys(next).length === 0) return reply.send({ ...listView(pre, now), changed: false });
 
     const transitions = settingTransitions(

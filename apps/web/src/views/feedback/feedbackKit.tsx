@@ -55,6 +55,8 @@ export interface FeedbackDetailView extends FeedbackItem {
   bodyUnavailable: null | "purged" | "no_data_key" | "undecryptable";
   bodyPurgedAt: string | null;
   resolutionNote: string | null;
+  /** D4 DFX2: the note is stored under the data key like the body */
+  resolutionNoteUnavailable?: null | "no_data_key" | "undecryptable";
   resolvedBy: string | null;
   contestedUserId: string | null;
   youMayResolve: boolean;
@@ -254,7 +256,17 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
 
             {final ? (
               <Card title="Resolution">
-                <p style={{ whiteSpace: "pre-wrap" }}>{d.resolutionNote}</p>
+                {d.resolutionNote !== null ? (
+                  <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }} data-testid="feedback-resolution-note">
+                    {d.resolutionNote}
+                  </p>
+                ) : d.resolutionNoteUnavailable ? (
+                  <p className={v.faint}>
+                    {d.resolutionNoteUnavailable === "no_data_key"
+                      ? "This gateway has no data key, so the resolution note cannot be opened."
+                      : "The resolution note could not be opened with this gateway's data key."}
+                  </p>
+                ) : null}
                 <p className={v.faint}>Resolved {d.resolvedAt ? fmtAt(d.resolvedAt) : ""}. The record is final.</p>
               </Card>
             ) : (
@@ -381,13 +393,22 @@ const COPY: Record<SettingKey, { label: string; strict: string; relaxed: string;
   feedbackRetentionDays: {
     label: "Feedback body retention (days)",
     strict: "365 days: the text and contact details are deleted after a year; the resolution record is kept.",
-    relaxed: "A longer retention (up to 2555 days) keeps what people wrote, and how to reach them, for longer.",
+    relaxed:
+      "A longer retention (up to 2555 days) keeps what people wrote, and how to reach them, for longer; a shorter one " +
+      "(down to 30 days) deletes complaints and appeals sooner, before a late investigation can read them. An item " +
+      "linked to an incident that is not closed is never deleted.",
     min: 30,
     max: 2555,
   },
 };
 const NUMERIC: Array<Exclude<SettingKey, "feedbackSignedLinksEnabled">> = ["feedbackAckSlaHours", "feedbackResolveSlaDays", "feedbackRetentionDays"];
-const isRelaxed = (k: SettingKey, val: unknown) => (k === "feedbackSignedLinksEnabled" ? val === true : Number(val) > (STRICT[k] as number));
+/** mirrors `accountabilitySettingRelaxed`: retention relaxes both ways (D4 DFX2) — longer keeps personal data, shorter deletes evidence */
+const isRelaxed = (k: SettingKey, val: unknown) =>
+  k === "feedbackSignedLinksEnabled"
+    ? val === true
+    : k === "feedbackRetentionDays"
+      ? Number(val) !== STRICT[k]
+      : Number(val) > (STRICT[k] as number);
 
 export function FeedbackSettings() {
   const act = useAction();

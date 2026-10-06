@@ -82,6 +82,9 @@ describe("ADR-0182: what counts as a relaxation", () => {
     ["feedbackAckSlaHours", 73],
     ["feedbackResolveSlaDays", 31],
     ["feedbackRetentionDays", 366],
+    // D4 DFX2 (D4G-03): shorter than a year deletes complaint evidence sooner — a relaxation too
+    ["feedbackRetentionDays", 364],
+    ["feedbackRetentionDays", 30],
     ["literacyGateMode", "warn"],
     ["literacyDefaultValidityDays", 366],
     ["alertSlaHours", { high: 25, medium: 72, low: 168 }],
@@ -95,7 +98,6 @@ describe("ADR-0182: what counts as a relaxation", () => {
     ["decisionRegressionMaxAgeMinutes", 30],
     ["feedbackAckSlaHours", 24],
     ["feedbackResolveSlaDays", 14],
-    ["feedbackRetentionDays", 90],
     ["literacyDefaultValidityDays", 180],
     ["alertSlaHours", { high: 4, medium: 24, low: 72 }],
     ["incidentClockRegimes", ["hipaa", "eu-ai-act"]],

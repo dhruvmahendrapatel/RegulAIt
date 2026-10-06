@@ -267,6 +267,13 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // the data key, purged by the retention sweep.
   { table: "use_case_feedback", column: "body_ciphertext", what: "feedback and appeal bodies" },
   { table: "use_case_feedback", column: "contact_ciphertext", what: "feedback contact details" },
+  // D4 DFX2 (D4A-07b): the owner's resolution note may quote the body, so it
+  // is enveloped like it. The one entry whose column is not `*_ciphertext`
+  // (it shipped plaintext in migration 0162; renaming it would be a migration
+  // for a name): the registry checks (`data-key-custody.test.ts`,
+  // `findCiphertextRegistryDrift`) take the suffix columns from the schema and
+  // check this one by name.
+  { table: "use_case_feedback", column: "resolution_note", what: "feedback resolution notes" },
 ];
 
 export interface CiphertextProbe {
