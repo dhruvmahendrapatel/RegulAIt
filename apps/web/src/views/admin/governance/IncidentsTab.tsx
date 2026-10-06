@@ -107,7 +107,7 @@ export function IncidentsTab(props: { useCaseId: string }) {
     >
       <div className={v.stack}>
         <p className={v.faint}>
-          An open or contained serious, high or critical incident holds this use case&apos;s deploy gate until it is resolved. {CLOCK_DISCLAIMER}
+          A serious, high or critical incident holds this use case&apos;s deploy gate until it is closed; marking it resolved does not release it. {CLOCK_DISCLAIMER}
         </p>
         <Table
           rows={list.data?.incidents ?? []}

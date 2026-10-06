@@ -99,7 +99,8 @@ export interface IncidentDetail {
   events: Array<{ id: string; kind: string; at: string; actorName: string | null; note: string | null; detail: Record<string, unknown> }>;
   evidenceHold: { setting: boolean; binds: boolean; paragraph: string; quote: string };
   gate: { mode: GateMode; holds: "open_serious_incident" | "open_high_incident" | null };
-  permissions: { canEdit: boolean; isAdmin: boolean };
+  /** canClose: closing a serious, high or critical incident is an admin's (closeNeedsAdmin) */
+  permissions: { canEdit: boolean; canClose: boolean; closeNeedsAdmin: boolean; isAdmin: boolean };
   disclaimer: string;
 }
 
@@ -171,7 +172,7 @@ export const INCIDENT_SETTING_COPY = {
   incidentGateMode: {
     label: "Incident deploy gate",
     strict:
-      "Enforce: an open high or critical incident, or an open serious incident, on a use case holds that use case's deploy gate until it is resolved.",
+      "Enforce: a high or critical incident, or a serious incident, on a use case holds that use case's deploy gate until it is closed (resolved does not release it).",
     relaxed: "Warn reports the open incident without holding; off skips the check and the gate says so.",
   },
   incidentEvidenceHold: {
@@ -207,6 +208,18 @@ export function localInputToIso(v: string): string | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
+/**
+ * Is a report's sentAt backdated (more than an hour before now)? The server
+ * then requires a reason (D4 review D4G-06); the form asks for one up front.
+ */
+export function sentAtBackdated(iso: string | undefined, now = new Date()): boolean {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  return !Number.isNaN(t) && now.getTime() - t > SENT_AT_BACKDATE_MS;
+}
+/** mirrors `INCIDENT_SENT_AT_BACKDATE_MS` in @regulait/shared (one hour) */
+const SENT_AT_BACKDATE_MS = 60 * 60 * 1000;
+
 /** now, as a `<input type="datetime-local">` value */
 export function nowLocalInput(now = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -227,7 +240,10 @@ export function eventSentence(e: { kind: string; detail: Record<string, unknown>
     case "notification":
       if (d.started) return `Clock started: ${String(d.paragraph ?? d.clockId)} — due ${utc(String(d.dueAt))}`;
       if (d.flag) return `Clock ${String(d.clockId)} ${d.flag === "overdue" ? "is overdue" : "falls due within 24 hours"}`;
-      return `Clock ${String(d.clockId)}: ${String(d.from ?? "").replace(/_/g, " ")} → ${String(d.to ?? "").replace(/_/g, " ")}`;
+      return (
+        `Clock ${String(d.clockId)}: ${String(d.from ?? "").replace(/_/g, " ")} → ${String(d.to ?? "").replace(/_/g, " ")}` +
+        (d.backdated ? ` (recorded late: sent ${utc(String(d.sentAt))}, recorded ${utc(String(d.recordedAt))})` : "")
+      );
     case "link":
       return `Linked ${LINK_LABEL[String(d.objectType)] ?? String(d.objectType)} ${String(d.objectId)}${d.byContainment ? " (by containment)" : ""}`;
     case "containment":

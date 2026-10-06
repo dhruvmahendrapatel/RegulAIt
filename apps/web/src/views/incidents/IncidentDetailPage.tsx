@@ -5,7 +5,9 @@
  *
  * Who can do what is the server's decision; this page shows controls by the
  * `permissions` the detail carries (the incident's owner or an admin edits;
- * setting a clock aside, containment and the export are an admin's).
+ * setting a clock aside, containment, the export and closing a serious, high
+ * or critical incident are an admin's; its reporter, its use case's owner and
+ * a linked agent's steward read it).
  */
 import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -34,6 +36,7 @@ import {
   eventSentence,
   impliesSerious,
   localInputToIso,
+  sentAtBackdated,
   utc,
   type IncidentClock,
   type IncidentDetail,
@@ -108,7 +111,7 @@ function EditModal(props: { open: boolean; d: IncidentDetail; onClose: () => voi
       <div className={v.stack}>
         <p className={v.faint}>
           Lowering the severity below high, un-marking an incident serious or moving it off its use case releases the deploy gate, so only an admin
-          may do it; the change is audited. Clocks already started are never removed.
+          may do it; the change is audited. Marking it resolved releases nothing: only closing does. Clocks already started are never removed.
         </p>
         <div className={a.formRow}>
           <Field label="Title" grow>
@@ -179,6 +182,7 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
   const [lessons, setLessons] = useState(props.d.incident.lessonsLearned ?? "");
   const openClocks = props.d.notifications.filter((n) => n.status === "pending" || n.status === "sent_initial");
   const openActions = props.d.actions.filter((x) => x.status === "open");
+  const adminOnly = !props.d.permissions.canClose;
   return (
     <Modal
       open={props.open}
@@ -190,7 +194,7 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
           <Button onClick={props.onClose}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={act.busy || !rootCause.trim() || !lessons.trim() || openClocks.length > 0 || openActions.length > 0}
+            disabled={act.busy || adminOnly || !rootCause.trim() || !lessons.trim() || openClocks.length > 0 || openActions.length > 0}
             onClick={() =>
               void act
                 .run(() => api.post(`/v1/incidents/${props.d.incident.id}/close`, { rootCause: rootCause.trim(), lessonsLearned: lessons.trim() }), `${props.d.incident.ref} closed`)
@@ -208,6 +212,12 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
       }
     >
       <div className={v.stack}>
+        {adminOnly && (
+          <div className={v.errLine} role="alert">
+            Closing a serious, high or critical incident releases the use case&apos;s deploy gate, so an admin closes it. You may mark it resolved
+            (Edit), which releases nothing.
+          </div>
+        )}
         {openClocks.length > 0 && (
           <div className={v.errLine} role="alert">
             {openClocks.length} notification clock(s) are not final: record the complete report, or an admin marks them not required or tolled
@@ -306,14 +316,18 @@ function SentModal(props: { clock: IncidentClock | null; stage: "initial" | "com
   const [recipient, setRecipient] = useState("");
   const [reference, setReference] = useState("");
   const [sentAt, setSentAt] = useState("");
+  const [reason, setReason] = useState("");
   const key = props.clock ? `${props.clock.id}:${props.stage}` : null;
   if (key !== lastKey) {
     setLastKey(key);
     setRecipient(props.clock?.recipient ?? "");
     setReference(props.clock?.reference ?? "");
     setSentAt("");
+    setReason("");
   }
   const c = props.clock;
+  // D4G-06: a report recorded more than an hour after it was sent needs a reason
+  const backdated = sentAtBackdated(localInputToIso(sentAt));
   return (
     <Modal
       open={c !== null}
@@ -324,7 +338,7 @@ function SentModal(props: { clock: IncidentClock | null; stage: "initial" | "com
           <Button onClick={props.onClose}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={act.busy || !recipient.trim()}
+            disabled={act.busy || !recipient.trim() || (backdated && reason.trim().length < 10)}
             onClick={() =>
               void act
                 .run(
@@ -334,6 +348,7 @@ function SentModal(props: { clock: IncidentClock | null; stage: "initial" | "com
                       recipient: recipient.trim(),
                       ...(reference.trim() ? { reference: reference.trim() } : {}),
                       ...(localInputToIso(sentAt) ? { sentAt: localInputToIso(sentAt) } : {}),
+                      ...(backdated ? { reason: reason.trim() } : {}),
                     }),
                   "Report recorded",
                 )
@@ -362,9 +377,14 @@ function SentModal(props: { clock: IncidentClock | null; stage: "initial" | "com
           <Field label="Reference (optional)" help="The authority's case number, a ticket or a letter reference.">
             <Input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={500} />
           </Field>
-          <Field label="Sent at (local time; empty = now)">
+          <Field label="Sent at (local time; empty = now)" help={`Not before the clock started (${utc(c.clockStart)}) and not in the future.`}>
             <Input type="datetime-local" value={sentAt} onChange={(e) => setSentAt(e.target.value)} />
           </Field>
+          {backdated && (
+            <Field label="Why is this recorded late? (at least 10 characters, audited)" help="More than an hour back: the record keeps both times and your reason.">
+              <Textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={2000} />
+            </Field>
+          )}
           {act.error && (
             <div className={v.errLine} role="alert">
               {act.error}
@@ -725,7 +745,7 @@ export default function IncidentDetailPage() {
             {d.gate.holds && (
               <p className={v.errLine} role="status">
                 {d.gate.mode === "enforce" ? "This incident holds the use case's deploy gate" : "The deploy gate reports this incident as a warning"} until it is
-                resolved.
+                closed{d.permissions.closeNeedsAdmin ? " by an admin" : ""}; marking it resolved does not release it.
               </p>
             )}
             <Card title="Facts">
@@ -736,7 +756,7 @@ export default function IncidentDetailPage() {
                   ["Became aware", utc(i.awareAt)],
                   ["Occurred", utc(i.occurredAt)],
                   ["Owner", i.ownerName ?? "unassigned"],
-                  ["Use case", d.useCase ? <Link key="u" to={`/admin/governance/use-cases/${d.useCase.id}`}>{d.useCase.name}</Link> : "none"],
+                  ["Use case", d.useCase ? <Link key="u" to={`/admin/governance/use-cases/${d.useCase.id}`}>{d.useCase.name}</Link> : i.useCaseId ? "a use case you cannot open" : "none"],
                   ...(d.useCase
                     ? ([["EU AI Act", `${d.useCase.euAiActTier ? `${d.useCase.euAiActTier} tier` : "not screened"} · role ${d.useCase.euAiActRole}`]] as Array<[string, ReactNode]>)
                     : []),

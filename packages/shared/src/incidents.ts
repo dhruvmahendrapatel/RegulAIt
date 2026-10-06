@@ -118,13 +118,18 @@ export function evidenceHoldBinds(
     authority.some((n) => n.status === "pending" || n.status === "tolled");
 }
 
-/** the statuses in which an incident still holds its use case's deploy gate */
-export const INCIDENT_GATE_HOLDING_STATUSES: readonly IncidentStatus[] = ["open", "contained"];
+/**
+ * The statuses in which an incident still holds its use case's deploy gate:
+ * every status but `closed` (D4 review D4A-01 / D4G-01). `resolved` is a
+ * working state the owner may set; it releases nothing, because only closing
+ * checks the root cause, the lessons learned, the clocks and the actions.
+ */
+export const INCIDENT_GATE_HOLDING_STATUSES: readonly IncidentStatus[] = ["open", "contained", "resolved"];
 
 /**
  * Does this incident hold its use case's deploy gate (under `incident_gate_mode`)?
- * An open or contained incident that is serious, or high or critical.
- * `resolved` and `closed` release it.
+ * An incident that is not closed and is serious, or high or critical.
+ * Only `closed` releases it.
  */
 export function incidentHoldsGate(i: { status: IncidentStatus; severity: IncidentSeverity; serious: boolean }):
   | "open_serious_incident"
@@ -146,6 +151,60 @@ export function incidentClockUrgency(n: { status: string; dueAt: Date | string }
   if (due <= now.getTime()) return "overdue";
   if (due - now.getTime() <= INCIDENT_CLOCK_DUE_SOON_MS) return "due_soon";
   return "pending";
+}
+
+/**
+ * Closing this incident is an admin's (D4 review D4A-01 / D4G-01): a serious
+ * incident, or a high or critical one — exactly the incidents that can hold
+ * the deploy gate, whatever the gate's mode. The owner may close a low or
+ * medium incident that is not serious. The close conditions (root cause,
+ * lessons learned, final clocks, finished actions) apply to everyone.
+ */
+export function incidentCloseNeedsAdmin(i: { severity: IncidentSeverity; serious: boolean }): boolean {
+  return i.serious || severityRank(i.severity) >= severityRank("high");
+}
+
+/**
+ * A notification recorded as sent more than this long before the moment it
+ * is recorded counts as BACKDATED (D4 review D4G-06): it needs a reason, and
+ * the audit row and the timeline say so.
+ */
+export const INCIDENT_SENT_AT_BACKDATE_MS = 60 * 60 * 1000;
+
+/**
+ * Is this `sentAt` acceptable for this clock (D4 review D4G-06)? It must lie
+ * within [clock start, now] (one minute of clock skew is tolerated in the
+ * future), and a backdated one needs a reason.
+ */
+export function incidentSentAtVerdict(
+  sentAt: Date,
+  clockStart: Date,
+  now: Date,
+  reason: string | null | undefined,
+):
+  | { ok: true; backdated: boolean }
+  | { ok: false; code: "time_in_future" | "sent_before_clock_start" | "backdated_sent_at_reason_required"; detail: string } {
+  if (sentAt.getTime() > now.getTime() + 60_000) {
+    return { ok: false, code: "time_in_future", detail: "sentAt is in the future; record when the report was actually sent" };
+  }
+  if (sentAt.getTime() < clockStart.getTime()) {
+    return {
+      ok: false,
+      code: "sent_before_clock_start",
+      detail: `a report cannot have been sent before its clock started (${clockStart.toISOString()})`,
+    };
+  }
+  const backdated = now.getTime() - sentAt.getTime() > INCIDENT_SENT_AT_BACKDATE_MS;
+  if (backdated && (!reason || reason.trim().length < 10)) {
+    return {
+      ok: false,
+      code: "backdated_sent_at_reason_required",
+      detail:
+        "this report is recorded more than an hour after it was sent; say why (10 to 2000 characters). " +
+        "The record keeps both times and the reason",
+    };
+  }
+  return { ok: true, backdated };
 }
 
 /** severities in order, for "is this a downgrade?" */

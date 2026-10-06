@@ -553,11 +553,13 @@ async function seedDemoAccountability(
   }, dana.auth);
   if (!ok(actDone.status)) return fail("demo incident action done", actDone);
 
-  // 6. closed with a root cause and lessons learned
+  // 6. closed with a root cause and lessons learned — by an admin (Ada): closing a
+  //    serious or high incident releases the use case's deploy gate, so the
+  //    owner may mark it resolved but only an admin closes it (D4 review D4A-01)
   const closed = await call("POST", `${inc}/close`, {
     rootCause: "The sentiment threshold was validated on single-language samples only.",
     lessonsLearned: "Validation sets cover every language customers write in; a regression case guards it.",
-  }, dana.auth);
+  }, who.ada.auth);
   if (!ok(closed.status)) return fail("demo incident close", closed);
   report.created.push("incident: closed, every clock in a terminal state");
 

@@ -36,6 +36,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  agentGrants,
   agents,
   aiIncidentActions,
   aiIncidentEvents,
@@ -44,6 +45,7 @@ import {
   aiUseCases,
   and,
   auditLog,
+  builderAgents,
   createDb,
   desc,
   eq,
@@ -56,7 +58,13 @@ import {
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { buildApp } from "./app.js";
 import { routeAuthClass } from "./route-classes.js";
-import { incidentEvidenceHoldRefused, incidentMonitorInput, runIncidentClockSweep, EVIDENCE_HOLD_OVERRIDE_HEADER } from "./incidents.js";
+import {
+  incidentEvidenceHoldRefused,
+  incidentMonitorInput,
+  incidentsHoldingAgent,
+  runIncidentClockSweep,
+  EVIDENCE_HOLD_OVERRIDE_HEADER,
+} from "./incidents.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -68,7 +76,7 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 const users = {} as Record<"admin" | "owner" | "member" | "other", { id: string; auth: { authorization: string } }>;
-const created = { useCases: [] as string[], incidents: [] as string[], agents: [] as string[], alerts: [] as string[] };
+const created = { useCases: [] as string[], incidents: [] as string[], agents: [] as string[], alerts: [] as string[], builderAgents: [] as string[] };
 
 type Method = "GET" | "PUT" | "POST" | "PATCH" | "DELETE";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
@@ -145,8 +153,16 @@ afterAll(async () => {
     incident_clock_regimes = '["eu-ai-act", "hipaa"]'::jsonb`);
   await restoreMfa?.();
   // incidents cascade to their events, links, actions and clocks (the
-  // referential path the append-only and no-delete triggers admit)
-  if (created.incidents.length) await db.delete(aiIncidents).where(inArray(aiIncidents.id, created.incidents));
+  // referential path the append-only and no-delete triggers admit). Since
+  // migration 0168 an incident that is not closed is never deleted, so the
+  // fixtures are closed first (a test-only shortcut past the API's rules).
+  if (created.incidents.length) {
+    await db.execute(sql`UPDATE ai_incidents SET status = 'closed', closed_at = now(),
+      root_cause = COALESCE(root_cause, 'a12 fixture cleanup'), lessons_learned = COALESCE(lessons_learned, 'a12 fixture cleanup')
+      WHERE id IN (${sql.join(created.incidents.map((i) => sql`${i}::uuid`), sql`, `)}) AND status <> 'closed'`);
+    await db.delete(aiIncidents).where(inArray(aiIncidents.id, created.incidents));
+  }
+  if (created.builderAgents.length) await db.delete(builderAgents).where(inArray(builderAgents.id, created.builderAgents));
   if (created.alerts.length) await db.delete(governanceAlerts).where(inArray(governanceAlerts.id, created.alerts));
   if (created.useCases.length) await db.delete(aiUseCases).where(inArray(aiUseCases.id, created.useCases));
   if (created.agents.length) await db.delete(agents).where(inArray(agents.id, created.agents));
@@ -289,18 +305,23 @@ describe("ADR-0182 A12: closing", () => {
   it("without lessons learned → 422; with a clock open → 409; with every clock final → closed, and a closed incident is not changed", async () => {
     const d = await open("owner", { useCaseId: await mkUseCase("close", "high"), serious: true, seriousCriteria: ["health"] });
     const url = `/v1/incidents/${d.incident.id}/close`;
-    const noLessons = await inject("POST", url, users.owner.auth, { rootCause: "a prompt regression" });
+    // the close conditions apply to everyone, the admin included
+    const noLessons = await inject("POST", url, users.admin.auth, { rootCause: "a prompt regression" });
     expect(noLessons.statusCode, noLessons.body).toBe(422);
     expect(noLessons.json().error).toBe("close_requires_root_cause_and_lessons");
     const body = { rootCause: "a prompt regression", lessonsLearned: "pin the prompt version in the release" };
-    const open409 = await inject("POST", url, users.owner.auth, body);
+    const open409 = await inject("POST", url, users.admin.auth, body);
     expect(open409.statusCode).toBe(409);
     expect(open409.json().openClocks.sort()).toEqual(["art26-5-inform-provider", "art73-2-general"]);
     for (const n of d.notifications) {
       const r = await inject("POST", `/v1/incidents/${d.incident.id}/notifications/${n.id}/sent`, users.owner.auth, { stage: "complete", recipient: "recorded recipient" });
       expect(r.statusCode, r.body).toBe(200);
     }
-    const closed = await inject("POST", url, users.owner.auth, body);
+    // D4A-01: a serious incident is closed by an admin; the close conditions held for the admin too (above: as the admin below)
+    const ownerClose = await inject("POST", url, users.owner.auth, body);
+    expect(ownerClose.statusCode, ownerClose.body).toBe(403);
+    expect(ownerClose.json().error).toBe("incident_close_admin_only");
+    const closed = await inject("POST", url, users.admin.auth, body);
     expect(closed.statusCode, closed.body).toBe(200);
     expect(closed.json().incident).toMatchObject({ status: "closed", rootCause: body.rootCause, lessonsLearned: body.lessonsLearned });
     expect(closed.json().incident.closedAt).not.toBeNull();
@@ -336,7 +357,8 @@ describe("ADR-0182 A12: closing needs every corrective action done or cancelled 
 describe("ADR-0182 A12: visibility, audited reads, pre-linking", () => {
   it("the list is scoped: owner and use-case owner see it, another user does not; admin sees all", async () => {
     const uc = await mkUseCase("scope", null, users.owner.id);
-    const d = await open("member", { useCaseId: uc, ownerUserId: users.member.id });
+    // the use case's owner reports it and names the member as the incident's owner
+    const d = await open("owner", { useCaseId: uc, ownerUserId: users.member.id });
     const ids = async (who: keyof typeof users) =>
       ((await inject("GET", "/v1/incidents?limit=500", users[who].auth)).json().incidents as Array<{ id: string }>).map((i) => i.id);
     expect(await ids("member")).toContain(d.incident.id); // the owner
@@ -372,7 +394,8 @@ describe("ADR-0182 A12: visibility, audited reads, pre-linking", () => {
     const bad = await inject("POST", "/v1/incidents", users.admin.auth, {
       title: "x", severity: "low", detectionSource: "monitor_alert", sourceRef: "00000000-0000-4000-8000-00000000abcd",
     });
-    expect(bad.statusCode).toBe(422);
+    expect(bad.statusCode).toBe(404); // D4A-06: unknown and invisible answer the same
+    expect(bad.json().error).toBe("unknown_source");
   });
 
   it("releasing the gate is an admin's: the owner cannot lower a high incident below high or un-mark serious", async () => {
@@ -412,12 +435,36 @@ describe("ADR-0182 A12: the deploy gate", () => {
     } finally {
       expect((await inject("PUT", "/v1/org/settings", users.admin.auth, { incidentGateMode: "enforce" })).statusCode).toBe(200);
     }
-    const closed = await inject("POST", `/v1/incidents/${d.incident.id}/close`, users.owner.auth, {
-      rootCause: "synthetic root cause",
-      lessonsLearned: "synthetic lesson",
-    });
+    // D4A-01 / D4G-01: the owner may mark it resolved, which releases NOTHING
+    const resolved = await inject("PATCH", `/v1/incidents/${d.incident.id}`, users.owner.auth, { status: "resolved" });
+    expect(resolved.statusCode, resolved.body).toBe(200);
+    expect(resolved.json().gate).toMatchObject({ holds: "open_high_incident" });
+    const stillHeld = await gate();
+    expect(codes(stillHeld)).toEqual([expect.objectContaining({ code: "open_high_incident", severity: "block" })]);
+    expect(stillHeld.decision).toBe("deny");
+    // … and closing a high incident is an admin's (403 for the owner, audited)
+    const close = (who: keyof typeof users) =>
+      inject("POST", `/v1/incidents/${d.incident.id}/close`, users[who].auth, { rootCause: "synthetic root cause", lessonsLearned: "synthetic lesson" });
+    const ownerClose = await close("owner");
+    expect(ownerClose.statusCode, ownerClose.body).toBe(403);
+    expect(ownerClose.json().error).toBe("incident_close_admin_only");
+    expect((await lastAudit("ai-incident-close-refused", d.incident.id))?.detail).toMatchObject({ adminOnly: true });
+    expect(codes(await gate())).toEqual([expect.objectContaining({ code: "open_high_incident" })]);
+    const closed = await close("admin");
     expect(closed.statusCode, closed.body).toBe(200);
     expect(codes(await gate())).toEqual([]);
+  });
+
+  it("the owner closes a low or medium incident that is not serious; the detail says who may close", async () => {
+    const uc = await mkUseCase("lowclose", "limited");
+    const low = await open("owner", { useCaseId: uc, severity: "medium" });
+    const asOwner = (await inject("GET", `/v1/incidents/${low.incident.id}`, users.owner.auth)).json();
+    expect(asOwner.permissions).toMatchObject({ canEdit: true, canClose: true, closeNeedsAdmin: false });
+    const r = await inject("POST", `/v1/incidents/${low.incident.id}/close`, users.owner.auth, { rootCause: "synthetic", lessonsLearned: "synthetic" });
+    expect(r.statusCode, r.body).toBe(200);
+    const high = await open("owner", { useCaseId: uc, severity: "critical" });
+    const view = (await inject("GET", `/v1/incidents/${high.incident.id}`, users.owner.auth)).json();
+    expect(view.permissions).toMatchObject({ canEdit: true, canClose: false, closeNeedsAdmin: true });
   });
 });
 
@@ -593,6 +640,166 @@ describe("ADR-0182 A12: the monitor inputs and the clock sweep", () => {
     expect(row!.doneAt).not.toBeNull();
     const after = await incidentMonitorInput(db, new Date());
     expect(after.incident_action_overdue!.breaches.filter((b) => b.subjectKey.startsWith(`incident:${d.incident.id}>`))).toEqual([]);
+  });
+});
+
+describe("ADR-0182 A12 (D4 review D4G-06): a report's sentAt", () => {
+  it("before the clock start → 422; backdated over an hour without a reason → 422; with one → audited as backdated, both times kept", async () => {
+    const aware = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+    const d = await open("owner", { useCaseId: await mkUseCase("sentat", "high"), serious: true, seriousCriteria: ["health"], awareAt: aware.toISOString() });
+    const art = d.notifications.find((n) => n.clockId === "art73-2-general")!;
+    const url = `/v1/incidents/${d.incident.id}/notifications/${art.id}/sent`;
+    const status = async () =>
+      (await db.select({ s: aiIncidentNotifications.status }).from(aiIncidentNotifications).where(eq(aiIncidentNotifications.id, art.id)))[0]!.s;
+
+    const early = await inject("POST", url, users.owner.auth, {
+      stage: "complete", recipient: "authority", sentAt: new Date(aware.getTime() - 24 * 3600 * 1000).toISOString(),
+    });
+    expect(early.statusCode, early.body).toBe(422);
+    expect(early.json().error).toBe("sent_before_clock_start");
+    expect(await status()).toBe("pending");
+    expect((await lastAudit("ai-incident-notification-refused", d.incident.id))?.detail).toMatchObject({ code: "sent_before_clock_start" });
+
+    const backdatedAt = new Date(aware.getTime() + 3600 * 1000).toISOString();
+    const noReason = await inject("POST", url, users.owner.auth, { stage: "complete", recipient: "authority", sentAt: backdatedAt });
+    expect(noReason.statusCode, noReason.body).toBe(422);
+    expect(noReason.json().error).toBe("backdated_sent_at_reason_required");
+    expect(await status()).toBe("pending");
+
+    const reason = "the report went by registered post; the receipt arrived today";
+    const ok = await inject("POST", url, users.owner.auth, { stage: "complete", recipient: "authority", sentAt: backdatedAt, reason });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().notification).toMatchObject({ status: "sent_complete", sentAt: backdatedAt });
+    const a = await lastAudit("ai-incident-notification-sent", d.incident.id);
+    expect(a?.detail).toMatchObject({ backdated: true, backdateReason: reason, sentAt: backdatedAt });
+    expect(new Date(String((a?.detail as { recordedAt?: string } | undefined)?.recordedAt)).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    expect(a?.reason).toContain("BACKDATED");
+    const ev = await db
+      .select()
+      .from(aiIncidentEvents)
+      .where(and(eq(aiIncidentEvents.incidentId, d.incident.id), sql`${aiIncidentEvents.detail} ->> 'backdated' = 'true'`));
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.note).toContain(reason);
+
+    // within the hour: no reason needed, and not marked backdated
+    const other = d.notifications.find((n) => n.clockId === "art26-5-inform-provider")!;
+    const recent = await inject("POST", `/v1/incidents/${d.incident.id}/notifications/${other.id}/sent`, users.owner.auth, {
+      stage: "complete", recipient: "provider", sentAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
+    expect(recent.statusCode, recent.body).toBe(200);
+    expect((await lastAudit("ai-incident-notification-sent", d.incident.id))?.detail).toMatchObject({ backdated: false });
+  });
+});
+
+describe("ADR-0182 A12 (D4 review D4A-02 / D4A-06 / D4A-07a): a reporter names only what they can see", () => {
+  const seriousLow = { severity: "low", serious: true, seriousCriteria: [] as string[] };
+
+  it("an agent, use case, alert or builder agent the reporter cannot see → 404, the same answer as an unknown id; nothing is held", async () => {
+    const victimAgent = await mkAgent("victim");
+    await db.update(agents).set({ ownerUserId: users.owner.id }).where(eq(agents.id, victimAgent));
+    const victimUc = await mkUseCase("victim", "high", users.owner.id);
+    const [al] = await db
+      .insert(governanceAlerts)
+      .values({ ruleId: "kri_threshold_breached", subjectKey: `use_case:${victimUc}>agent:${victimAgent}`, severity: "high", title: `a12 hidden ${RUN}` })
+      .returning({ id: governanceAlerts.id });
+    created.alerts.push(al!.id);
+    const [ba] = await db
+      .insert(builderAgents)
+      .values({ name: `a12-builder-${RUN}`, ownerUserId: users.owner.id, connectionFormat: "shared", sharing: "private" })
+      .returning({ id: builderAgents.id });
+    created.builderAgents.push(ba!.id);
+    const unknown = "00000000-0000-4000-8000-0000000a1202";
+    const post = (body: Record<string, unknown>) =>
+      inject("POST", "/v1/incidents", users.other.auth, { title: `a12 m ${RUN}`, detectionSource: "manual", ...seriousLow, ...body });
+    const refusal = async (body: Record<string, unknown>) => {
+      const r = await post(body);
+      expect(r.statusCode, r.body).toBe(404);
+      expect(r.body).not.toContain(`a12-victim-${RUN}`); // no agent name leaks
+      return r.json() as { error: string; detail: string };
+    };
+    const hidden = await refusal({ links: [{ objectType: "agent", objectId: victimAgent }] });
+    const none = await refusal({ links: [{ objectType: "agent", objectId: unknown }] });
+    expect(hidden.error).toBe("unknown_link_target");
+    expect({ ...hidden, detail: hidden.detail.replace(victimAgent, "ID") }).toEqual({ ...none, detail: none.detail.replace(unknown, "ID") });
+    expect((await refusal({ links: [{ objectType: "agent", objectId: ba!.id }] })).error).toBe("unknown_link_target");
+    expect((await refusal({ useCaseId: victimUc })).error).toBe("unknown_use_case");
+    expect((await refusal({ detectionSource: "monitor_alert", sourceRef: al!.id })).error).toBe("unknown_source");
+    expect((await refusal({ detectionSource: "monitor_alert", sourceRef: unknown })).error).toBe("unknown_source");
+    // nothing was opened by them, nothing holds the agent or the use case's gate
+    expect(await db.select().from(aiIncidents).where(eq(aiIncidents.createdBy, users.other.id))).toEqual([]);
+    expect(await incidentsHoldingAgent(db, victimAgent)).toEqual([]);
+    const gate = (await inject("POST", "/v1/gates/deploy", users.admin.auth, { useCaseId: victimUc })).json();
+    expect(gate.reasons.filter((r: { code: string }) => r.code.endsWith("_incident"))).toEqual([]);
+
+    // the same through an incident of their own: moving it onto the use case, or linking the agent
+    const mine = await open("other", { severity: "low" });
+    const moved = await inject("PATCH", `/v1/incidents/${mine.incident.id}`, users.other.auth, { useCaseId: victimUc, serious: true });
+    expect(moved.statusCode, moved.body).toBe(404);
+    expect(moved.json().error).toBe("unknown_use_case");
+    const linked = await inject("POST", `/v1/incidents/${mine.incident.id}/links`, users.other.auth, { objectType: "agent", objectId: victimAgent });
+    expect(linked.statusCode, linked.body).toBe(404);
+    expect(linked.json().error).toBe("unknown_link_target");
+  });
+
+  it("a person granted the agent may report on it (the hold applies at once); its steward then sees the incident, read-only", async () => {
+    const agentId = await mkAgent("granted");
+    await db.update(agents).set({ ownerUserId: users.owner.id }).where(eq(agents.id, agentId));
+    await db.insert(agentGrants).values({ userId: users.member.id, agentId });
+    const d = await open("member", { ...seriousLow, links: [{ objectType: "agent", objectId: agentId }] });
+    expect(d.links).toContainEqual(expect.objectContaining({ objectType: "agent", objectId: agentId }));
+    expect(await incidentsHoldingAgent(db, agentId)).toEqual([{ id: d.incident.id, ref: d.incident.ref }]);
+    // the steward (not the owner, not the reporter, no use case) sees what froze their agent
+    const read = await inject("GET", `/v1/incidents/${d.incident.id}`, users.owner.auth);
+    expect(read.statusCode, read.body).toBe(200);
+    expect(read.json().permissions).toMatchObject({ canEdit: false, canClose: false });
+    expect(read.json().links).toContainEqual(expect.objectContaining({ objectId: agentId, label: `a12-granted-${RUN}` }));
+    const list = (await inject("GET", "/v1/incidents?limit=500", users.owner.auth)).json().incidents as Array<{ id: string }>;
+    expect(list.map((i) => i.id)).toContain(d.incident.id);
+    expect((await inject("PATCH", `/v1/incidents/${d.incident.id}`, users.owner.auth, { title: "x" })).statusCode).toBe(403);
+    expect((await inject("GET", `/v1/incidents/${d.incident.id}`, users.other.auth)).statusCode).toBe(404);
+  });
+
+  it("the reporter always reads their own report (read-only), also when someone else owns it", async () => {
+    const d = await open("member", { severity: "low", ownerUserId: users.owner.id });
+    expect(d.incident.ownerUserId).toBe(users.owner.id);
+    const read = await inject("GET", `/v1/incidents/${d.incident.id}`, users.member.auth);
+    expect(read.statusCode, read.body).toBe(200);
+    expect(read.json().permissions).toMatchObject({ canEdit: false });
+    const list = (await inject("GET", "/v1/incidents?limit=500", users.member.auth)).json().incidents as Array<{ id: string }>;
+    expect(list.map((i) => i.id)).toContain(d.incident.id);
+    expect((await inject("PATCH", `/v1/incidents/${d.incident.id}`, users.member.auth, { title: "x" })).statusCode).toBe(403);
+    expect((await inject("GET", `/v1/incidents/${d.incident.id}`, users.other.auth)).statusCode).toBe(404);
+  });
+
+  it("an alert's owner opens from it; the response names only what they can see (D4A-06)", async () => {
+    const agentId = await mkAgent("behind-alert");
+    const uc = await mkUseCase("behind-alert", "high", users.owner.id);
+    const [al] = await db
+      .insert(governanceAlerts)
+      .values({
+        ruleId: "kri_threshold_breached",
+        subjectKey: `use_case:${uc}>agent:${agentId}`,
+        severity: "high",
+        title: `a12 owned ${RUN}`,
+        ownerUserId: users.member.id,
+        ownerSource: "assigned",
+      })
+      .returning({ id: governanceAlerts.id });
+    created.alerts.push(al!.id);
+    const res = await inject("POST", "/v1/incidents", users.member.auth, {
+      title: `a12 from alert ${RUN}`, severity: "high", detectionSource: "monitor_alert", sourceRef: al!.id,
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    const body = res.json();
+    created.incidents.push(body.incident.id);
+    expect(res.body).not.toContain(`a12-behind-alert-${RUN}`); // the agent's name
+    expect(res.body).not.toContain(`a12 behind-alert ${RUN}`); // the use case's name
+    expect(body.links).toContainEqual(expect.objectContaining({ objectType: "agent", objectId: agentId, label: null, agentKind: null, halted: null }));
+    expect(body.useCase).toBeNull();
+    expect(body.incident.useCaseId).toBe(uc); // the hold and the gate still apply (safety first)
+    const asAdmin = (await inject("GET", `/v1/incidents/${body.incident.id}`, users.admin.auth)).json();
+    expect(asAdmin.links).toContainEqual(expect.objectContaining({ objectId: agentId, label: `a12-behind-alert-${RUN}` }));
+    expect(asAdmin.useCase).toMatchObject({ id: uc });
   });
 });
 

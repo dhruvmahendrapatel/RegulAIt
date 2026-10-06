@@ -29,7 +29,9 @@ import {
   evidenceHoldBinds,
   incidentClockUrgency,
   incidentCloseBlockers,
+  incidentCloseNeedsAdmin,
   incidentHoldsGate,
+  incidentSentAtVerdict,
   nextNotificationStatus,
 } from "./incidents.js";
 import { evaluateDeployGate } from "./deploy-gate.js";
@@ -229,12 +231,32 @@ describe("ADR-0182 A12 the register's pure rules", () => {
     expect(evidenceHoldBinds({ status: "closed", serious: true }, [{ clockId: "art73-2-general", status: "pending" }])).toBe(false);
     expect(evidenceHoldBinds({ status: "open", serious: false }, [{ clockId: "art73-2-general", status: "pending" }])).toBe(false);
   });
-  it("the gate: open or contained serious / high / critical holds; resolved, closed and low/medium do not", () => {
+  it("the gate: serious / high / critical holds until CLOSED — resolved releases nothing (D4A-01); low/medium never hold", () => {
     expect(incidentHoldsGate({ status: "open", severity: "low", serious: true })).toBe("open_serious_incident");
     expect(incidentHoldsGate({ status: "contained", severity: "critical", serious: false })).toBe("open_high_incident");
     expect(incidentHoldsGate({ status: "open", severity: "medium", serious: false })).toBeNull();
-    expect(incidentHoldsGate({ status: "resolved", severity: "critical", serious: true })).toBeNull();
+    expect(incidentHoldsGate({ status: "resolved", severity: "critical", serious: true })).toBe("open_serious_incident");
+    expect(incidentHoldsGate({ status: "resolved", severity: "high", serious: false })).toBe("open_high_incident");
     expect(incidentHoldsGate({ status: "closed", severity: "critical", serious: true })).toBeNull();
+  });
+  it("closing a serious, high or critical incident is an admin's; a low or medium one that is not serious is the owner's", () => {
+    expect(incidentCloseNeedsAdmin({ severity: "low", serious: true })).toBe(true);
+    expect(incidentCloseNeedsAdmin({ severity: "high", serious: false })).toBe(true);
+    expect(incidentCloseNeedsAdmin({ severity: "critical", serious: false })).toBe(true);
+    expect(incidentCloseNeedsAdmin({ severity: "medium", serious: false })).toBe(false);
+    expect(incidentCloseNeedsAdmin({ severity: "low", serious: false })).toBe(false);
+  });
+  it("a report's sentAt lies within [clock start, now]; more than an hour back it needs a reason (D4G-06)", () => {
+    const start = new Date("2026-10-01T00:00:00Z");
+    const now = new Date("2026-10-05T12:00:00Z");
+    const at = (iso: string, reason?: string) => incidentSentAtVerdict(new Date(iso), start, now, reason);
+    expect(at("2026-09-30T23:59:59Z")).toMatchObject({ ok: false, code: "sent_before_clock_start" });
+    expect(at("2026-10-05T12:02:00Z")).toMatchObject({ ok: false, code: "time_in_future" });
+    expect(at("2026-10-05T12:00:30Z")).toEqual({ ok: true, backdated: false }); // a minute of clock skew
+    expect(at("2026-10-05T11:30:00Z")).toEqual({ ok: true, backdated: false });
+    expect(at("2026-10-05T10:59:00Z")).toMatchObject({ ok: false, code: "backdated_sent_at_reason_required" });
+    expect(at("2026-10-05T10:59:00Z", "too short")).toMatchObject({ ok: false, code: "backdated_sent_at_reason_required" });
+    expect(at("2026-10-01T00:00:00Z", "sent by post; the receipt came today")).toEqual({ ok: true, backdated: true });
   });
   it("evaluateDeployGate: enforce blocks, warn warns, off skips and says so", () => {
     const base = {

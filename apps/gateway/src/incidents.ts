@@ -32,20 +32,34 @@
  *    with 409 `incident_evidence_hold`, unless an ADMIN overrides that one
  *    change with a reason (header `x-regulait-evidence-hold-override`), which
  *    is audited and noted on the incident's timeline.
- *  - THE DEPLOY GATE (`incident_gate_mode`, strict default `enforce`): an open
- *    or contained serious, high or critical incident holds its use case's
- *    gate (`deploy-gate.ts` reads `incidentGateInputs`).
+ *  - THE DEPLOY GATE (`incident_gate_mode`, strict default `enforce`): a
+ *    serious, high or critical incident that is not CLOSED holds its use
+ *    case's gate (`deploy-gate.ts` reads `incidentGateInputs`). `resolved`
+ *    releases nothing (D4 review D4A-01 / D4G-01).
  *  - Changes that would RELEASE that gate or the hold — downgrading severity
- *    below high, un-marking serious, moving the incident off its use case —
- *    are an admin's (403 for anyone else), audited with transitions.
+ *    below high, un-marking serious, moving the incident off its use case,
+ *    and CLOSING a serious, high or critical incident — are an admin's (403
+ *    for anyone else), audited. The owner closes a low or medium incident
+ *    that is not serious; the close conditions apply to everyone.
+ *  - A report recorded as sent carries a `sentAt` within [the clock's start,
+ *    now] (422 otherwise); more than an hour back it is BACKDATED: it needs a
+ *    reason and is audited as such, with both times (D4G-06).
+ *  - WHAT A REPORTER MAY NAME: only a use case, agent, alert, red-team run or
+ *    feedback item they can already see (404 otherwise — the same answer as
+ *    for an unknown id, so nothing leaks). A hold applies at once (safety
+ *    first); an admin releases one change through the override (D4A-02).
  *  - THE MONITOR: `incident_notification_due` (a clock due within 24 hours or
  *    overdue) and `incident_action_overdue`. `incident-clock-sweep` writes one
  *    timeline event per clock when it first falls due soon and when it
  *    becomes overdue.
  *  - VISIBILITY: an admin sees every incident; anyone else sees those they
- *    own and those on a use case they own. Writes are the incident's owner's
- *    or an admin's (an action's owner may update that action). A read of an
- *    incident's narrative by anyone but its reporter is audited.
+ *    own, those they reported (D4A-07a), those on a use case they own and
+ *    those linked to an agent they steward (D4A-02) — the last three
+ *    read-only. A reader sees a linked agent's name or the use case's
+ *    details only when they can see that agent or use case (D4A-06). Writes
+ *    are the incident's owner's or an admin's (an action's owner may update
+ *    that action). A read of an incident's narrative by anyone but its
+ *    reporter is audited.
  *  - EXPORT (admin): a signed bundle (ADR-0116 `buildExportBundle`, subject
  *    kind `ai-incident`) with the full record and the timeline, or the
  *    timeline as CSV. No signing key = an audited 409 refusal, never an
@@ -64,6 +78,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  agentGrants,
   agents,
   aiIncidentActions,
   aiIncidentEvents,
@@ -108,7 +123,9 @@ import {
   incidentClockDueLabel,
   incidentClockUrgency,
   incidentCloseBlockers,
+  incidentCloseNeedsAdmin,
   incidentHoldsGate,
+  incidentSentAtVerdict,
   incidentLinkSchema,
   incidentNoteSchema,
   incidentNotificationReasonSchema,
@@ -138,6 +155,9 @@ import { settingTransitions } from "./setting-transitions.js";
 import { buildExportBundle, resolveExportSigningKey } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
 import { securityHeaders } from "./security-headers.js";
+import { loadVisibleAgent } from "./builder-access.js";
+import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import { canReadUseCase } from "./use-cases.js";
 
 export const INCIDENT_CLOCK_SWEEP_JOB_NAME = "incident-clock-sweep";
 
@@ -237,7 +257,8 @@ async function addEvent(
 interface UseCaseFacts {
   id: string;
   name: string;
-  ownerUserId: string | null;
+  ownerUserId: string;
+  workflowInstanceId: string | null;
   euAiActTier: string | null;
   euAiActRole: "provider" | "deployer" | "both";
 }
@@ -249,6 +270,7 @@ async function loadUseCase(db: Writer, id: string | null): Promise<UseCaseFacts 
       id: aiUseCases.id,
       name: aiUseCases.name,
       ownerUserId: aiUseCases.ownerUserId,
+      workflowInstanceId: aiUseCases.workflowInstanceId,
       euAiActTier: aiUseCases.euAiActTier,
       euAiActRole: aiUseCases.euAiActRole,
     })
@@ -341,11 +363,45 @@ interface Access {
   canWrite: boolean;
   useCase: UseCaseFacts | null;
 }
+
+/**
+ * Is one of this incident's linked agents stewarded by this person (a
+ * registry agent's steward, or a builder agent's owner)? They may READ the
+ * incident: its evidence hold may freeze their agent, so they see what froze
+ * it (D4 review D4A-02).
+ */
+async function stewardsLinkedAgent(db: Writer, incidentId: string, userId: string): Promise<boolean> {
+  const [hit] = await db
+    .select({ id: aiIncidentLinks.objectId })
+    .from(aiIncidentLinks)
+    .where(
+      and(
+        eq(aiIncidentLinks.incidentId, incidentId),
+        eq(aiIncidentLinks.objectType, "agent"),
+        or(
+          sql`${aiIncidentLinks.objectId} IN (SELECT ${agents.id}::text FROM ${agents} WHERE ${agents.ownerUserId} = ${userId})`,
+          sql`${aiIncidentLinks.objectId} IN (SELECT ${builderAgents.id}::text FROM ${builderAgents} WHERE ${builderAgents.ownerUserId} = ${userId})`,
+        ),
+      ),
+    )
+    .limit(1);
+  return Boolean(hit);
+}
+
+/**
+ * WHO SEES AND CHANGES AN INCIDENT. Writes: its owner or an admin. Reads, as
+ * well: whoever reported it (D4A-07a), the owner of its use case, and the
+ * steward of an agent linked to it (D4A-02) — all read-only.
+ */
 async function accessTo(db: Writer, actor: IncidentActor, i: AiIncidentRow): Promise<Access> {
   const useCase = await loadUseCase(db, i.useCaseId);
-  const isOwner = actor.userId !== null && actor.userId === i.ownerUserId;
+  const me = actor.userId;
+  const isOwner = me !== null && me === i.ownerUserId;
   const canWrite = actor.isAdmin || isOwner;
-  const canRead = canWrite || (actor.userId !== null && useCase?.ownerUserId === actor.userId);
+  const canRead =
+    canWrite ||
+    (me !== null &&
+      (me === i.createdBy || useCase?.ownerUserId === me || (await stewardsLinkedAgent(db, i.id, me))));
   return { canRead, canWrite, useCase };
 }
 
@@ -381,36 +437,99 @@ async function userExists(db: Writer, id: string): Promise<boolean> {
   return Boolean(u);
 }
 
-/** does a link's target exist? Only the types whose ids are rows of this deployment are checked. */
-async function linkTargetExists(db: Writer, objectType: IncidentLinkObjectType, objectId: string): Promise<boolean> {
+/**
+ * May this person see this registry or builder agent? The existing rules:
+ * an admin; for a registry agent its steward or a person holding a grant to
+ * it (direct or through a role, and not revoked); for a builder agent the
+ * builder's own visibility (owner, workspace, named people). An unknown id is
+ * `false`, so an unknown and an invisible agent answer the same.
+ */
+async function agentVisibleTo(db: Writer, actor: IncidentActor, agentId: string): Promise<boolean> {
+  if (!UUID_RE.test(agentId)) return false;
+  const [reg] = await db.select({ id: agents.id, ownerUserId: agents.ownerUserId }).from(agents).where(eq(agents.id, agentId));
+  const me = actor.userId;
+  if (reg) {
+    if (actor.isAdmin) return true;
+    if (!me) return false;
+    if (reg.ownerUserId === me) return true;
+    if ((await loadAgentRevocations(db as Db, me)).some((r) => r.agentId === agentId)) return false;
+    const [direct] = await db
+      .select({ id: agentGrants.id })
+      .from(agentGrants)
+      .where(and(eq(agentGrants.userId, me), eq(agentGrants.agentId, agentId)))
+      .limit(1);
+    if (direct) return true;
+    return (await loadRoleAgentGrants(db as Db, me)).some((g) => g.agentId === agentId);
+  }
+  if (actor.isAdmin) {
+    const [b] = await db.select({ id: builderAgents.id }).from(builderAgents).where(eq(builderAgents.id, agentId));
+    return Boolean(b);
+  }
+  if (!me) return false;
+  return (await loadVisibleAgent(db as Db, agentId, { userId: me, isAdmin: false })) !== null;
+}
+
+/**
+ * May this person name this object on an incident (D4 review D4A-02 / D4A-06)?
+ * Only what they can already see: an agent (above), a monitor alert they own,
+ * a red-team run they started, a feedback item on a use case they own — or
+ * anything, for an admin. Unknown and invisible answer the same (`false`), so
+ * the refusal reveals nothing. The free-text link types (model, vendor, risk…)
+ * name nothing a hold or a gate reads, and are accepted as given.
+ */
+async function linkTargetVisible(db: Writer, actor: IncidentActor, objectType: IncidentLinkObjectType, objectId: string): Promise<boolean> {
   const isUuid = UUID_RE.test(objectId);
+  const me = actor.userId;
   switch (objectType) {
-    case "agent": {
-      if (!isUuid) return false;
-      const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, objectId));
-      if (a) return true;
-      const [b] = await db.select({ id: builderAgents.id }).from(builderAgents).where(eq(builderAgents.id, objectId));
-      return Boolean(b);
-    }
+    case "agent":
+      return agentVisibleTo(db, actor, objectId);
     case "governance_alert": {
       if (!isUuid) return false;
-      const [g] = await db.select({ id: governanceAlerts.id }).from(governanceAlerts).where(eq(governanceAlerts.id, objectId));
-      return Boolean(g);
+      const [g] = await db
+        .select({ id: governanceAlerts.id, ownerUserId: governanceAlerts.ownerUserId })
+        .from(governanceAlerts)
+        .where(eq(governanceAlerts.id, objectId));
+      return Boolean(g) && (actor.isAdmin || (me !== null && g!.ownerUserId === me));
     }
     case "redteam_run": {
       if (!isUuid) return false;
-      const [r] = await db.select({ id: redteamRuns.id }).from(redteamRuns).where(eq(redteamRuns.id, objectId));
-      return Boolean(r);
+      const [r] = await db
+        .select({ id: redteamRuns.id, by: redteamRuns.initiatedByUserId })
+        .from(redteamRuns)
+        .where(eq(redteamRuns.id, objectId));
+      return Boolean(r) && (actor.isAdmin || (me !== null && r!.by === me));
     }
     case "feedback": {
       if (!isUuid) return false;
-      const [f] = await db.select({ id: useCaseFeedback.id }).from(useCaseFeedback).where(eq(useCaseFeedback.id, objectId));
-      return Boolean(f);
+      const [f] = await db
+        .select({ id: useCaseFeedback.id, ownerUserId: aiUseCases.ownerUserId })
+        .from(useCaseFeedback)
+        .innerJoin(aiUseCases, eq(aiUseCases.id, useCaseFeedback.useCaseId))
+        .where(eq(useCaseFeedback.id, objectId));
+      return Boolean(f) && (actor.isAdmin || (me !== null && f!.ownerUserId === me));
     }
     default:
       return true;
   }
 }
+
+/** does a link's target exist? (for the links a SOURCE implies — the source itself was checked for visibility) */
+async function linkTargetExists(db: Writer, objectType: IncidentLinkObjectType, objectId: string): Promise<boolean> {
+  return linkTargetVisible(db, { userId: null, isAdmin: true }, objectType, objectId);
+}
+
+/** a use case this person may name on an incident: one they can read (owner, admin, its intake reviewers) */
+async function useCaseVisibleTo(db: Writer, actor: IncidentActor, uc: UseCaseFacts | null): Promise<boolean> {
+  return uc !== null && (await canReadUseCase(db as Db, uc, actor));
+}
+
+/** the one refusal for an unknown OR invisible target: 404, the same words either way */
+const notVisible = (what: "use case" | "link target" | "source", id: string) =>
+  new IncidentError(
+    404,
+    what === "use case" ? "unknown_use_case" : what === "source" ? "unknown_source" : "unknown_link_target",
+    `no ${what} '${id}' that you can see`,
+  );
 
 type LinkSpec = { objectType: IncidentLinkObjectType; objectId: string };
 
@@ -422,10 +541,21 @@ type LinkSpec = { objectType: IncidentLinkObjectType; objectId: string };
 async function sourceLinks(
   db: Writer,
   body: CreateIncidentInput,
+  actor: IncidentActor,
 ): Promise<{ links: LinkSpec[]; useCaseId: string | null }> {
   const ref = body.sourceRef;
   if (!ref) return { links: [], useCaseId: null };
-  const unknown = () => new IncidentError(422, "unknown_source", `the source '${ref}' was not found for detection source ${body.detectionSource}`);
+  // D4A-06: an unknown source and one the reporter cannot see answer the same 404
+  const unknown = () => notVisible("source", ref);
+  const kind: IncidentLinkObjectType | null =
+    body.detectionSource === "monitor_alert"
+      ? "governance_alert"
+      : body.detectionSource === "red_team"
+        ? "redteam_run"
+        : body.detectionSource === "user_report" && UUID_RE.test(ref)
+          ? "feedback"
+          : null;
+  if (kind && !(await linkTargetVisible(db, actor, kind, ref))) throw unknown();
   if (body.detectionSource === "monitor_alert") {
     if (!UUID_RE.test(ref)) throw unknown();
     const [al] = await db
@@ -483,22 +613,26 @@ export async function createIncident(db: Db, input: CreateIncidentInput, actor: 
   if (body.phiIndividuals !== undefined && !body.seriousCriteria.includes("phi_breach")) {
     throw new IncidentError(422, "phi_individuals_without_phi_breach", "a PHI head count is recorded only with the phi_breach criterion");
   }
-  const fromSource = await sourceLinks(db, body);
+  const fromSource = await sourceLinks(db, body, actor);
   const useCaseId = body.useCaseId ?? fromSource.useCaseId;
   const uc = await loadUseCase(db, useCaseId ?? null);
-  if (useCaseId && !uc) throw new IncidentError(422, "unknown_use_case", "no such use case");
+  // D4A-02: a reporter names only a use case they can see (one a source
+  // implies came with a source they can see); unknown and invisible are one 404
+  if (body.useCaseId && !(await useCaseVisibleTo(db, actor, uc))) throw notVisible("use case", body.useCaseId);
+  if (useCaseId && !uc) throw notVisible("use case", useCaseId);
   if (body.ownerUserId && !(await userExists(db, body.ownerUserId))) {
     throw new IncidentError(422, "unknown_user", "the named owner is not a user of this deployment");
   }
   const links: LinkSpec[] = [];
   const seen = new Set<string>();
-  for (const l of [...fromSource.links, ...body.links]) {
+  // D4A-02: what the reporter names, they must be able to see; what the
+  // (visible) source implies is linked as the source states it
+  for (const [l, implied] of [...fromSource.links.map((x) => [x, true] as const), ...body.links.map((x) => [x, false] as const)]) {
     const k = `${l.objectType}:${l.objectId}`;
     if (seen.has(k)) continue;
     seen.add(k);
-    if (!(await linkTargetExists(db, l.objectType, l.objectId))) {
-      throw new IncidentError(422, "unknown_link_target", `no ${l.objectType.replace(/_/g, " ")} '${l.objectId}' to link`);
-    }
+    const ok = implied ? await linkTargetExists(db, l.objectType, l.objectId) : await linkTargetVisible(db, actor, l.objectType, l.objectId);
+    if (!ok) throw notVisible("link target", l.objectId);
     links.push(l);
   }
   // Art. 3(49): any of these criteria IS a serious incident
@@ -629,7 +763,16 @@ async function incidentDetail(db: Writer, incident: AiIncidentRow, access: Acces
     ...agentRows.map((a) => [a.id, { name: a.name, halted: a.haltedAt !== null, kind: "registry" as const }] as const),
     ...builderRows.map((b) => [b.id, { name: b.name, halted: null, kind: "builder" as const }] as const),
   ]);
+  // D4A-06: a reader learns only what they can already see — a linked agent's
+  // name and state only when that agent is visible to them, the use case's
+  // details only when they may read the use case (or work the incident)
+  const agentShown = new Map<string, boolean>();
+  for (const id of agentIds) agentShown.set(id, actor.isAdmin || (await agentVisibleTo(db, actor, id)));
+  const useCaseShown =
+    access.useCase !== null && (actor.isAdmin || access.canWrite || (await useCaseVisibleTo(db, actor, access.useCase)));
+  const shownAgent = (id: string) => (agentShown.get(id) ? agentInfo.get(id) : undefined);
   const mode = org.incidentGateMode as AccountabilityGateMode;
+  const canEdit = access.canWrite && incident.status !== "closed";
   return {
     incident: {
       id: incident.id,
@@ -658,15 +801,16 @@ async function incidentDetail(db: Writer, incident: AiIncidentRow, access: Acces
       createdAt: incident.createdAt.toISOString(),
       updatedAt: incident.updatedAt.toISOString(),
     },
-    useCase: access.useCase
-      ? { id: access.useCase.id, name: access.useCase.name, euAiActTier: access.useCase.euAiActTier, euAiActRole: access.useCase.euAiActRole }
-      : null,
+    useCase:
+      access.useCase && useCaseShown
+        ? { id: access.useCase.id, name: access.useCase.name, euAiActTier: access.useCase.euAiActTier, euAiActRole: access.useCase.euAiActRole }
+        : null,
     links: links.map((l) => ({
       objectType: l.objectType,
       objectId: l.objectId,
-      label: agentInfo.get(l.objectId)?.name ?? null,
-      agentKind: l.objectType === "agent" ? (agentInfo.get(l.objectId)?.kind ?? null) : null,
-      halted: l.objectType === "agent" ? (agentInfo.get(l.objectId)?.halted ?? null) : null,
+      label: l.objectType === "agent" ? (shownAgent(l.objectId)?.name ?? null) : null,
+      agentKind: l.objectType === "agent" ? (shownAgent(l.objectId)?.kind ?? null) : null,
+      halted: l.objectType === "agent" ? (shownAgent(l.objectId)?.halted ?? null) : null,
       createdAt: l.createdAt.toISOString(),
     })),
     actions: actions.map((a) => ({
@@ -697,7 +841,13 @@ async function incidentDetail(db: Writer, incident: AiIncidentRow, access: Acces
       quote: ART_73_6_QUOTE,
     },
     gate: { mode, holds: mode === "off" ? null : incidentHoldsGate(incident) },
-    permissions: { canEdit: access.canWrite && incident.status !== "closed", isAdmin: actor.isAdmin },
+    permissions: {
+      canEdit,
+      // D4A-01: closing a serious, high or critical incident is an admin's
+      closeNeedsAdmin: incidentCloseNeedsAdmin(incident),
+      canClose: canEdit && (actor.isAdmin || !incidentCloseNeedsAdmin(incident)),
+      isAdmin: actor.isAdmin,
+    },
     disclaimer: INCIDENT_CLOCK_DISCLAIMER,
   };
 }
@@ -1023,7 +1173,7 @@ function send(reply: FastifyReply, e: unknown) {
  * Routes (classified in route-classes.ts and openapi-registry.ts, A12 block):
  *   GET   /v1/incidents                                         user: filtered to what the caller may see
  *   POST  /v1/incidents                                         user: anyone may report an incident
- *   GET   /v1/incidents/:incidentId                             user: owner, linked use-case owner or admin
+ *   GET   /v1/incidents/:incidentId                             user: owner, reporter, use-case owner, linked agent's steward or admin
  *   PATCH /v1/incidents/:incidentId                             user: owner or admin
  *   POST  /v1/incidents/:incidentId/events                      user: owner or admin
  *   POST  /v1/incidents/:incidentId/links                       user: owner or admin
@@ -1032,7 +1182,7 @@ function send(reply: FastifyReply, e: unknown) {
  *   POST  /v1/incidents/:incidentId/notifications/:notificationId/sent          user: owner or admin
  *   POST  /v1/incidents/:incidentId/notifications/:notificationId/not-required  admin, reason required
  *   POST  /v1/incidents/:incidentId/notifications/:notificationId/toll          admin, reason required
- *   POST  /v1/incidents/:incidentId/close                       user: owner or admin
+ *   POST  /v1/incidents/:incidentId/close                       user: owner (low/medium, not serious) or admin
  *   POST  /v1/incidents/:incidentId/contain                     admin (halts a linked agent)
  *   GET   /v1/incidents/:incidentId/export                      admin (signed bundle, or the timeline as CSV)
  */
@@ -1044,8 +1194,14 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
     const conds = [];
     if (!actor.isAdmin) {
       if (!actor.userId) return { incidents: [], scope: "none", disclaimer: INCIDENT_CLOCK_DISCLAIMER };
-      const ownedUseCases = db.select({ id: aiUseCases.id }).from(aiUseCases).where(eq(aiUseCases.ownerUserId, actor.userId));
-      conds.push(or(eq(aiIncidents.ownerUserId, actor.userId), inArray(aiIncidents.useCaseId, ownedUseCases)));
+      const me = actor.userId;
+      const ownedUseCases = db.select({ id: aiUseCases.id }).from(aiUseCases).where(eq(aiUseCases.ownerUserId, me));
+      // the same readers as `accessTo`: owner, reporter (D4A-07a), use-case
+      // owner, and the steward of a linked agent (D4A-02)
+      const stewarded = sql`${aiIncidents.id} IN (SELECT ${aiIncidentLinks.incidentId} FROM ${aiIncidentLinks} WHERE ${aiIncidentLinks.objectType} = 'agent' AND (
+        ${aiIncidentLinks.objectId} IN (SELECT ${agents.id}::text FROM ${agents} WHERE ${agents.ownerUserId} = ${me})
+        OR ${aiIncidentLinks.objectId} IN (SELECT ${builderAgents.id}::text FROM ${builderAgents} WHERE ${builderAgents.ownerUserId} = ${me})))`;
+      conds.push(or(eq(aiIncidents.ownerUserId, me), eq(aiIncidents.createdBy, me), inArray(aiIncidents.useCaseId, ownedUseCases), stewarded));
     }
     if (q.status === "active") conds.push(ne(aiIncidents.status, "closed"));
     else if (q.status) conds.push(eq(aiIncidents.status, q.status));
@@ -1112,7 +1268,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
           actions: { open: acts.length, overdue: acts.filter((a) => a.dueAt !== null && a.dueAt.getTime() < now.getTime()).length },
         };
       }),
-      scope: actor.isAdmin ? "all" : "owned",
+      scope: actor.isAdmin ? "all" : "visible",
       disclaimer: INCIDENT_CLOCK_DISCLAIMER,
     };
   });
@@ -1121,10 +1277,14 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
   app.post("/v1/incidents", async (req, reply) => {
     const body = createIncidentSchema.parse(req.body ?? {});
     try {
-      const incident = await createIncident(db, body, actorOf(req));
+      const actor = actorOf(req);
+      const incident = await createIncident(db, body, actor);
       const org = await loadOrgSettings(db);
-      const access = await accessTo(db, actorOf(req), incident);
-      return reply.status(201).send(await incidentDetail(db, incident, { ...access, canRead: true }, actorOf(req), org));
+      // D4A-06: the response carries only what the caller may read (never a
+      // forced read), and the detail itself shows only what they can see
+      const access = await accessTo(db, actor, incident);
+      if (!access.canRead) return reply.status(201).send({ incident: { id: incident.id, ref: incident.ref } });
+      return reply.status(201).send(await incidentDetail(db, incident, access, actor, org));
     } catch (e) {
       return send(reply, e);
     }
@@ -1197,7 +1357,9 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       let uc: UseCaseFacts | null = await loadUseCase(db, incident.useCaseId);
       if (body.useCaseId !== undefined && body.useCaseId !== incident.useCaseId) {
         uc = await loadUseCase(db, body.useCaseId);
-        if (body.useCaseId !== null && !uc) throw new IncidentError(422, "unknown_use_case", "no such use case");
+        // D4A-02: putting the incident on a use case is like opening it there —
+        // only on one the caller can see (unknown and invisible are one 404)
+        if (body.useCaseId !== null && !(await useCaseVisibleTo(db, actor, uc))) throw notVisible("use case", body.useCaseId);
       }
       if (body.ownerUserId && !(await userExists(db, body.ownerUserId))) {
         throw new IncidentError(422, "unknown_user", "the named owner is not a user of this deployment");
@@ -1290,9 +1452,8 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
     const actor = actorOf(req);
     try {
       const { incident } = await writable(db, actor, incidentId, "link this incident");
-      if (!(await linkTargetExists(db, body.objectType, body.objectId))) {
-        throw new IncidentError(422, "unknown_link_target", `no ${body.objectType.replace(/_/g, " ")} '${body.objectId}' to link`);
-      }
+      // D4A-02: only what the caller can see (unknown and invisible are one 404)
+      if (!(await linkTargetVisible(db, actor, body.objectType, body.objectId))) throw notVisible("link target", body.objectId);
       const added = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         const rows = await tx
@@ -1465,7 +1626,25 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
         throw new IncidentError(409, next.code, next.detail);
       }
       const now = new Date();
-      if (extra.sentAt) validTimes({ sentAt: extra.sentAt }, now);
+      // D4G-06: a report's `sentAt` lies within [the clock's start, now]; one
+      // recorded more than an hour after it was sent is BACKDATED — it needs a
+      // reason, and the audit row and the timeline keep both times
+      let backdated = false;
+      if (move.kind === "sent" && extra.sentAt) {
+        const verdict = incidentSentAtVerdict(new Date(extra.sentAt), clock.clockStart, now, extra.reason);
+        if (!verdict.ok) {
+          await audit(db, {
+            userId: actor.userId,
+            objectId: incident.id,
+            ruleId: INCIDENT_RULE_IDS.notificationRefused,
+            effect: "deny",
+            reason: `incident ${incident.ref}: clock ${clock.clockId} ${verb} refused — ${verdict.detail}`,
+            detail: { clockId: clock.clockId, code: verdict.code, sentAt: extra.sentAt, clockStart: clock.clockStart.toISOString(), recordedAt: now.toISOString() },
+          });
+          throw new IncidentError(422, verdict.code, verdict.detail, { clockStart: clock.clockStart.toISOString() });
+        }
+        backdated = verdict.backdated;
+      }
       const ruleId =
         move.kind === "sent" ? INCIDENT_RULE_IDS.notificationSent : move.kind === "toll" ? INCIDENT_RULE_IDS.notificationTolled : INCIDENT_RULE_IDS.notificationNotRequired;
       const paragraph = incidentClockById(clock.clockId)?.paragraph ?? clock.clockId;
@@ -1492,8 +1671,15 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
           incident.id,
           "notification",
           actor.userId,
-          { clockId: clock.clockId, from: clock.status, to: next.status, ...(move.kind === "sent" ? { stage: move.stage } : {}) },
-          move.kind === "sent" ? undefined : extra.reason,
+          {
+            clockId: clock.clockId,
+            from: clock.status,
+            to: next.status,
+            ...(move.kind === "sent"
+              ? { stage: move.stage, sentAt: row!.sentAt?.toISOString() ?? null, recordedAt: now.toISOString(), ...(backdated ? { backdated: true } : {}) }
+              : {}),
+          },
+          move.kind === "sent" ? (backdated ? `Recorded late (backdated): ${extra.reason}` : undefined) : extra.reason,
         );
         await audit(tx, {
           userId: actor.userId,
@@ -1501,12 +1687,23 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
           ruleId,
           reason:
             `incident ${incident.ref}: ${paragraph} clock ${clock.status} -> ${next.status}` +
-            (move.kind === "sent" ? ` (${move.stage} report to ${extra.recipient})` : ` by an admin: ${extra.reason}`),
+            (move.kind === "sent"
+              ? ` (${move.stage} report to ${extra.recipient})` +
+                (backdated ? ` — BACKDATED: sent ${row!.sentAt?.toISOString()}, recorded ${now.toISOString()}: ${extra.reason}` : "")
+              : ` by an admin: ${extra.reason}`),
           detail: {
             clockId: clock.clockId,
             notificationId: clock.id,
             transitions: { status: { from: clock.status, to: next.status } },
-            ...(move.kind === "sent" ? { stage: move.stage, sentAt: row!.sentAt?.toISOString() ?? null } : { relaxed: true }),
+            ...(move.kind === "sent"
+              ? {
+                  stage: move.stage,
+                  sentAt: row!.sentAt?.toISOString() ?? null,
+                  recordedAt: now.toISOString(),
+                  backdated,
+                  ...(backdated ? { backdateReason: extra.reason } : {}),
+                }
+              : { relaxed: true }),
           },
         });
         return row!;
@@ -1523,6 +1720,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       recipient: body.recipient,
       ...(body.reference ? { reference: body.reference } : {}),
       ...(body.sentAt ? { sentAt: body.sentAt } : {}),
+      ...(body.reason ? { reason: body.reason } : {}),
     });
   });
 
@@ -1555,6 +1753,24 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
     const actor = actorOf(req);
     try {
       const { incident } = await writable(db, actor, incidentId, "close this incident");
+      // D4A-01 / D4G-01: closing releases the deploy gate, so closing a serious,
+      // high or critical incident is an admin's; the owner closes the rest
+      if (incidentCloseNeedsAdmin(incident) && !actor.isAdmin) {
+        await audit(db, {
+          userId: actor.userId,
+          objectId: incident.id,
+          ruleId: INCIDENT_RULE_IDS.closeRefused,
+          effect: "deny",
+          reason: `incident ${incident.ref}: close refused — closing a ${incident.serious ? "serious" : incident.severity} incident releases the deploy gate, so it is an admin's`,
+          detail: { severity: incident.severity, serious: incident.serious, adminOnly: true },
+        });
+        throw new IncidentError(
+          403,
+          "incident_close_admin_only",
+          "closing a serious, high or critical incident releases the use case's deploy gate, so only an admin may close it; " +
+            "the owner may mark it resolved, which releases nothing",
+        );
+      }
       const parsed = closeIncidentSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
         await audit(db, {

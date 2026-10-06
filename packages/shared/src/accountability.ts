@@ -111,8 +111,8 @@ export const ACCOUNTABILITY_SETTING_COPY: Readonly<
   incidentGateMode: {
     label: "Incident deploy gate",
     strict:
-      "Enforce: an open high or critical incident, or an open serious incident, on a use case holds that use " +
-      "case's deploy gate until it is resolved.",
+      "Enforce: a high or critical incident, or a serious incident, on a use case holds that use case's deploy " +
+      "gate until it is closed (resolved does not release it).",
     relaxed: "Warn reports the open incident without holding; off skips the check and the gate says so.",
   },
   incidentEvidenceHold: {
@@ -558,7 +558,10 @@ export const incidentNotificationSentSchema = z
     stage: z.enum(["initial", "complete"]),
     recipient: z.string().trim().min(1).max(500),
     reference: z.string().trim().min(1).max(500).optional(),
+    /** within [the clock's start, now]; more than an hour back it is BACKDATED and needs `reason` (D4G-06) */
     sentAt: optionalDate,
+    /** why a backdated report is recorded late (required then; audited and kept on the timeline) */
+    reason: z.string().trim().min(10).max(2000).optional(),
   })
   .strict();
 
