@@ -30,7 +30,7 @@ identical — the only thing you lose is the WORM anchor, and §2 says exactly w
 
 ```bash
 # (1) Postgres. On a laptop, docker compose also gives you the WORM audit anchor — see §2.
-docker compose up -d db minio minio-init
+docker compose up -d db objectstore objectstore-init
 
 # (2) Seed the playground. Prints the personas' one-time passwords and API keys — KEEP THIS OUTPUT.
 pnpm --filter @regulait/gateway seed
@@ -68,8 +68,8 @@ gate scripts mint for their own run expire after one day.
 ### 1.1 Without docker — a native Postgres path
 
 Docker is not available everywhere this gets demoed (a locked-down laptop, a cloud dev box, a
-customer-supplied machine). Nothing in §1 actually needs containers except Postgres and MinIO, and
-only one of those is load-bearing for the run of show.
+customer-supplied machine). Nothing in §1 actually needs containers except Postgres and the object
+store, and only one of those is load-bearing for the run of show.
 
 **Postgres 16, installed natively.** One-time, as root:
 
@@ -117,8 +117,8 @@ Three things worth knowing rather than discovering:
 - **`demo:setup` talks to Postgres directly**, not over HTTP, and already defaults to
   `postgres://regulait:regulait@localhost:5432/regulait`. It does not care that there is no docker.
 
-**What you give up: MinIO, and therefore the WORM anchor.** There is no S3 Object Lock bucket, so
-`resolveAnchorSink` falls through to the local buffer (`audit-chain.ts:601-606`) — not to `off`.
+**What you give up: the object store, and therefore the WORM anchor.** There is no S3 Object Lock
+bucket, so `resolveAnchorSink` falls through to the local buffer (`audit-chain.ts:601-606`) — not to `off`.
 The posture page will show the anchor row with a local destination and **`tamperResistant: false`**,
 and §2's ceiling drops from 7 of 7 to **6 of 7**. See §2 for how to present that, because it is a
 better beat than it sounds.
@@ -231,7 +231,7 @@ state and refuses to count them on its own say-so.
 - **The audit anchor** satisfies only against a real Object Lock bucket:
 
 ```bash
-docker compose up -d minio minio-init   # a REAL S3 Object Lock COMPLIANCE bucket
+docker compose up -d objectstore objectstore-init   # a REAL S3 Object Lock COMPLIANCE bucket
 ```
 
 Then restart the gateway and re-read `/admin → Enforcement posture`. The anchor grade comes from
@@ -245,7 +245,7 @@ can interrogate.
 
 **On the §1.1 native path the anchor row is also unmet, and it is the good one.** The scheduler row
 satisfies (it is on by default); the anchor row cannot, because
-without MinIO there is no Object Lock bucket to ask. It will read a **local buffer** with
+without the object store there is no Object Lock bucket to ask. It will read a **local buffer** with
 `tamperResistant: false`, and the control's own text says why: *"A local directory is a buffer,
 never WORM."*
 
@@ -255,7 +255,7 @@ configuration.** No environment variable can flip that boolean, a GOVERNANCE-mod
 `false` too, and a competitor's green tick here would mean nothing. Say: *"this install has no WORM
 medium, and rather than let me claim one, the product grades itself down."*
 
-If the buyer wants to see the `true` case, that needs docker (`minio` + `minio-init`) or a real S3
+If the buyer wants to see the `true` case, that needs docker (`objectstore` + `objectstore-init`) or a real S3
 Object Lock **COMPLIANCE** bucket. Do not stand one up against a live AWS account for a demo.
 
 ---

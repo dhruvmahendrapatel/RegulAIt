@@ -281,8 +281,9 @@ non-deterministic on an all-green run, closed by
 
 ### Tamper-evident audit anchoring (no cloud account needed)
 
-The compose stack brings up **MinIO with a real S3 Object Lock bucket in
-COMPLIANCE mode**, created automatically before the gateway starts. Nothing to
+The compose stack brings up **SeaweedFS with a real S3 Object Lock bucket in
+COMPLIANCE mode** (the `objectstore` service), created automatically before the
+gateway starts. Nothing to
 configure — `docker compose up --build` gets it. The audit hash chain's head is
 anchored there, and for the retention period no principal can delete or alter a
 written anchor, so a full-recompute forgery diverges from a head nobody can

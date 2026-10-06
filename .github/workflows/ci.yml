@@ -32,7 +32,7 @@ name: CI
 #    37042881890; the 2026-08-01 figures below it were 2.5x stale — CI-03) ───
 # Billing rounds each job UP to the whole minute, so bill the rounded figures:
 #     build-and-test  11m31s–14m28s -> 13–15 min  (`pnpm -r test` alone ~11.5 min
-#                                     for 226 files / 3,175 tests; +~30 s for MinIO)
+#                                     for 226 files / 3,175 tests; +~30 s for the object store)
 #     docker-build     1m07s -> 2 min  (self-skipped; a real build is ~5 min)
 #     PR push                 ~ 15–17 min
 #     Weekly (image built unconditionally)  ~20 min x 4  = ~80 min
@@ -44,6 +44,13 @@ name: CI
 #   chromium, one Playwright invocation). On that estimate a PR push is ~21–23
 #   min, weekly ~26 x 4 = ~104, => (2,000 - 104) / 22 ~= 86 PR pushes a month.
 #   Replace this paragraph with the measured figure after its first runs.
+#   2026-10-06 (ADR-0183 2.4): the mocked UI suite left `spa-journeys` for
+#   `spa-mock` (mock-ui-shards.yml): three shard jobs that need no build, no
+#   database and no gateway, plus a ~1-minute coverage job. Wall clock for the
+#   suite drops from ~11.5 min to the slowest shard (~4–5 min here); the billed
+#   sum rises by roughly two extra setups (~2–3 min each) and the coverage job,
+#   ~6–8 min a PR push. NOT YET MEASURED on a runner — replace with the real
+#   figure after the first runs, as above.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next cheap lever is `vitest --shard=1/2`
 # across two jobs with their own databases (halves wall clock, same billed sum).
@@ -112,37 +119,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      # CI-01 — the ADR-0060 "proof by attack" tests need a REAL Object-Lock
-      # bucket. They are `describe.skipIf(!minioReachable)`, and with no MinIO
-      # here they had skipped on every CI run since they were written: the
-      # tamper-resistance claim shipped green on nine tests that never ran.
-      # The same dev credentials as docker-compose.yml; ~30 s of runner time.
-      #
-      # WHY THIS IMAGE (2026-10-03): MinIO archived its community edition and
-      # then removed `minio/minio` and `minio/mc` from Docker Hub (September
-      # 2026); anonymous pulls of the historical releases from quay.io started
-      # failing on 2026-10-02 as well. `bitnamilegacy/minio` is the frozen
-      # Bitnami build of the last community release, still served by Docker
-      # Hub (manifest verified the day this was written), bundling the `mc`
-      # client. Its entrypoint runs `minio server` by itself, which is what a
-      # GitHub service needs — a service cannot pass a command. Pinned to the
-      # exact tag because the line is unmaintained: nothing newer will ever
-      # appear under it, so a pin cannot rot, only protect.
-      # Same image and tag as docker-compose.yml — keep them together.
-      minio:
-        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
-        env:
-          MINIO_ROOT_USER: regulait
-          MINIO_ROOT_PASSWORD: regulait-dev-minio
-        ports:
-          - 9000:9000
-        # No curl in this image; `mc ready` is MinIO's own readiness probe and
-        # the MC_HOST_<alias> form needs no written config (HOME is / here).
-        options: >-
-          --health-cmd "MC_CONFIG_DIR=/tmp/.mc MC_HOST_local=http://regulait:regulait-dev-minio@localhost:9000 mc ready local"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
 
     env:
       DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
@@ -152,8 +128,9 @@ jobs:
       # tick loop runs underneath a test.
       REGULAIT_DATABASE_SSL: disable
       REGULAIT_SCHEDULER: 'off'
-      # CI-01: when this is SET and unreachable, audit-chain.test.ts throws
-      # rather than skips — a broken MinIO service fails the job out loud.
+      # CI-01: when this is SET and a signed ListBuckets against it fails,
+      # audit-chain.test.ts throws rather than skips — a broken object-store
+      # service (or a wrong credential) fails the job out loud.
       REGULAIT_TEST_S3_ENDPOINT: http://localhost:9000
       REGULAIT_TEST_S3_ACCESS_KEY_ID: regulait
       REGULAIT_TEST_S3_SECRET_ACCESS_KEY: regulait-dev-minio
@@ -169,6 +146,31 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # CI-01 — the ADR-0060 "proof by attack" tests need a REAL Object-Lock
+      # bucket. They are `describe.skipIf(!s3TestReachable)`, and with no
+      # object store here they had skipped on every CI run since they were
+      # written: the tamper-resistance claim shipped green on nine tests that
+      # never ran.
+      #
+      # SeaweedFS (Apache-2.0, ADR-0183 §3) replaced the frozen
+      # `bitnamilegacy/minio` build after the ADR-0060 suite passed 9/9 against
+      # it locally (PENDING.md, "Dev/CI object store after MinIO").
+      #
+      # Started FROM docker-compose.yml, not as a `services:` entry: a service
+      # cannot pass a command, so it would run the image's default `mini` and
+      # none of the compose service's settings — the loopback-only filer, the
+      # per-boot signing key that closes the S3 gRPC identity API, one volume
+      # per bucket and the explicit slot count. This way CI tests exactly the
+      # store a `docker compose up` gets, and its bucket-init job too. The only
+      # CI addition is publishing S3 on the runner's loopback (compose
+      # publishes no port), so the endpoint below stays localhost:9000.
+      - name: Object store — the compose `objectstore` service, plus its bucket init
+        run: |
+          printf 'services:\n  objectstore:\n    ports: ["127.0.0.1:9000:9000"]\n' > "$RUNNER_TEMP/ci-objectstore.yml"
+          docker compose -f docker-compose.yml -f "$RUNNER_TEMP/ci-objectstore.yml" up -d --wait objectstore \
+            || { docker compose logs objectstore; exit 1; }
+          docker compose run --rm objectstore-init
 
       # `pnpm -r build` also typechecks + bundles the React SPA (apps/web),
       # which is the ONLY UI since ADR-0033 deleted the two single-file
@@ -321,10 +323,10 @@ jobs:
   # rest of this workflow.
   spa-journeys:
     runs-on: ubuntu-latest
-    # 20, not 15: the serial mocked suite alone measured ~11.5 min on 2026-10-05
-    # (ADR-0179 added specs), on top of ~4 min of install, build and SPA journeys.
-    # Re-measure, or shard the mocked suite, before raising it again.
-    timeout-minutes: 20
+    # 12, down from 20 (ADR-0183 2.4): the serial mocked suite (~11.5 min on
+    # 2026-10-05) moved to the sharded `spa-mock` job below, leaving ~4 min of
+    # install, build and the four real-gateway journeys. A blast-radius cap.
+    timeout-minutes: 12
 
     services:
       postgres:
@@ -372,14 +374,6 @@ jobs:
       - name: SPA journeys — developer (phase1), admin (phase2) and agent builder (phase6) personas
         run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts e2e/phase6-agent-builder.spec.ts e2e/phase6-builder-tools.spec.ts --reporter=list,github
 
-      # The mocked UI suite (every *.mock.spec.ts: the intake wizard's retry and
-      # start-over journeys, the axe scans of each intake stage in both themes,
-      # the registry, the use-case record and the review panel). It needs no
-      # gateway — Vite plus route mocks — and until now ran only locally, so CI
-      # never executed the browser acceptance tests for AER-029 and AER-046.
-      - name: Mocked UI suite — intake, registry, record, review, accessibility
-        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --reporter=list,github
-
       - name: Keep the evidence when it fails
         if: failure()
         uses: actions/upload-artifact@v4
@@ -389,3 +383,14 @@ jobs:
             apps/web/test-results
             apps/web/e2e/gateway-e2e.log
           retention-days: 7
+
+  # The mocked UI suite (every *.mock.spec.ts: the intake wizard's retry and
+  # start-over journeys, the axe scans of each intake stage in both themes,
+  # the registry, the use-case record, the review panel and the admin pages).
+  # It needs no gateway — Vite plus route mocks. ADR-0183 2.4: sharded across
+  # parallel jobs, with a final job proving every listed spec ran exactly once;
+  # the layout and the proof live in mock-ui-shards.yml, shared with demo.yml.
+  spa-mock:
+    uses: ./.github/workflows/mock-ui-shards.yml
+    with:
+      artifact-prefix: ci-mock
