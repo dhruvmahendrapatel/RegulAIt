@@ -38,6 +38,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   GetObjectLockConfigurationCommand,
+  ListBucketsCommand,
   ListObjectVersionsCommand,
   PutObjectCommand,
   PutObjectLockConfigurationCommand,
@@ -809,7 +810,7 @@ describe("anchoring is on by default, and does not overclaim", () => {
 // The S3 Object-Lock sink. Same principle as the rest of this file: the claim
 // under test is an ADVERSARIAL one ("nobody can rewrite this"), so the tests
 // try to make the sink LIE — by handing it a bucket that enforces nothing, by
-// breaking the call it uses to find out, and finally, against a real MinIO, by
+// breaking the call it uses to find out, and finally, against a real store, by
 // attacking an anchor it has already written.
 // -----------------------------------------------------------------------------
 
@@ -967,7 +968,7 @@ describe("ADR-0060: tamperResistant is OBSERVED, never configured", () => {
 });
 
 describe("ADR-0060: an anchor past the head on a WORM store withholds the verdict", () => {
-  // The MinIO "proof by attack" below is skipped without a bucket; this is the
+  // The real-store "proof by attack" below is skipped without a bucket; this is the
   // same rule against the fake S3, so it runs everywhere. A locked store that
   // holds an anchor past this chain's head is EITHER another chain sharing the
   // store OR this chain with its tail removed — and a verifier that cannot
@@ -1196,30 +1197,48 @@ describe("ADR-0060: sink precedence", () => {
 // SKIPS CLEANLY when no such server is reachable, because a suite that silently
 // passed without one would be asserting the guarantee rather than testing it.
 // Point REGULAIT_TEST_S3_ENDPOINT at any S3-compatible endpoint with Object
-// Lock support, or run MinIO with the compose defaults:
+// Lock support, or run SeaweedFS (Apache-2.0; what CI and the compose stack
+// use) with the compose credentials:
 //
-//   minio server /tmp/anchors --address 127.0.0.1:9000
-//   (MINIO_ROOT_USER=regulait MINIO_ROOT_PASSWORD=regulait-dev-minio)
+//   AWS_ACCESS_KEY_ID=regulait AWS_SECRET_ACCESS_KEY=regulait-dev-minio \
+//     weed mini -dir=/tmp/anchors -s3.port=9000
 // -----------------------------------------------------------------------------
 
-const MINIO_ENDPOINT = process.env.REGULAIT_TEST_S3_ENDPOINT ?? "http://127.0.0.1:9000";
-const MINIO_KEY = process.env.REGULAIT_TEST_S3_ACCESS_KEY_ID ?? "regulait";
-const MINIO_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait-dev-minio";
-const minioReachable = await fetch(`${MINIO_ENDPOINT}/minio/health/live`, { signal: AbortSignal.timeout(2_000) })
-  .then((r) => r.ok)
-  .catch(() => false);
+const S3_TEST_ENDPOINT = process.env.REGULAIT_TEST_S3_ENDPOINT ?? "http://127.0.0.1:9000";
+const S3_TEST_KEY = process.env.REGULAIT_TEST_S3_ACCESS_KEY_ID ?? "regulait";
+const S3_TEST_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait-dev-minio";
+// Reachability is a SIGNED S3 call with the suite's own credentials, not a
+// vendor health path: `/minio/health/live` exists only on MinIO (SeaweedFS
+// answers it 403, as a request for a bucket called "minio"). ListBuckets is in
+// every S3 implementation, and succeeding at it also proves the credentials
+// work — so a wrong key fails the CI-01 check below instead of failing nine
+// tests later with an opaque AccessDenied.
+let s3TestUnreachableReason = "";
+const s3TestReachable = await new S3Client({
+  region: "us-east-1",
+  endpoint: S3_TEST_ENDPOINT,
+  forcePathStyle: true,
+  credentials: { accessKeyId: S3_TEST_KEY, secretAccessKey: S3_TEST_SECRET },
+  maxAttempts: 1,
+})
+  .send(new ListBucketsCommand({}), { abortSignal: AbortSignal.timeout(2_000) })
+  .then(() => true)
+  .catch((err: unknown) => {
+    s3TestUnreachableReason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    return false;
+  });
 // CI-01: a deliberately named endpoint that is NOT there is a broken setup,
-// never a skip — on CI (which now runs a MinIO service for exactly these nine
-// tests) a silent skip would ship a regression in the tamper-resistance claim
-// green. Unset, the suite still skips on a laptop without MinIO.
-if (process.env.REGULAIT_TEST_S3_ENDPOINT && !minioReachable) {
+// never a skip — on CI (which runs an object-store service for exactly these
+// nine tests) a silent skip would ship a regression in the tamper-resistance
+// claim green. Unset, the suite still skips on a laptop without a store.
+if (process.env.REGULAIT_TEST_S3_ENDPOINT && !s3TestReachable) {
   throw new Error(
-    `REGULAIT_TEST_S3_ENDPOINT=${MINIO_ENDPOINT} is set but /minio/health/live did not answer — ` +
+    `REGULAIT_TEST_S3_ENDPOINT=${S3_TEST_ENDPOINT} is set but a signed ListBuckets did not succeed (${s3TestUnreachableReason}) — ` +
       "the Object-Lock proof-by-attack tests cannot run and will not be skipped silently",
   );
 }
 
-describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Object-Lock bucket", () => {
+describe.skipIf(!s3TestReachable)("ADR-0060: proof by attack against a REAL Object-Lock bucket", () => {
   const suffix = randomUUID().slice(0, 8);
   const COMPLIANCE_BUCKET = `regulait-anchors-compliance-${suffix}`;
   const GOVERNANCE_BUCKET = `regulait-anchors-governance-${suffix}`;
@@ -1227,8 +1246,8 @@ describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Objec
 
   /** the credentials the GATEWAY uses — the attacker in these tests is the
    * gateway's own compromised credential, which is the realistic case */
-  const credentials = { accessKeyId: MINIO_KEY, secretAccessKey: MINIO_SECRET };
-  const s3 = new S3Client({ region: "us-east-1", endpoint: MINIO_ENDPOINT, forcePathStyle: true, credentials });
+  const credentials = { accessKeyId: S3_TEST_KEY, secretAccessKey: S3_TEST_SECRET };
+  const s3 = new S3Client({ region: "us-east-1", endpoint: S3_TEST_ENDPOINT, forcePathStyle: true, credentials });
 
   /** Each test gets its OWN key prefix in the shared bucket. Not tidiness:
    * these tests plant fabricated anchors at high `seq` values, and `readLatest`
@@ -1239,7 +1258,7 @@ describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Objec
     bucket,
     prefix: `audit-anchors-${prefix}`,
     region: "us-east-1",
-    endpoint: MINIO_ENDPOINT,
+    endpoint: S3_TEST_ENDPOINT,
     forcePathStyle: true,
     retentionDays: 1,
     credentials,

@@ -32,7 +32,7 @@ name: CI
 #    37042881890; the 2026-08-01 figures below it were 2.5x stale — CI-03) ───
 # Billing rounds each job UP to the whole minute, so bill the rounded figures:
 #     build-and-test  11m31s–14m28s -> 13–15 min  (`pnpm -r test` alone ~11.5 min
-#                                     for 226 files / 3,175 tests; +~30 s for MinIO)
+#                                     for 226 files / 3,175 tests; +~30 s for the object store)
 #     docker-build     1m07s -> 2 min  (self-skipped; a real build is ~5 min)
 #     PR push                 ~ 15–17 min
 #     Weekly (image built unconditionally)  ~20 min x 4  = ~80 min
@@ -113,33 +113,42 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       # CI-01 — the ADR-0060 "proof by attack" tests need a REAL Object-Lock
-      # bucket. They are `describe.skipIf(!minioReachable)`, and with no MinIO
-      # here they had skipped on every CI run since they were written: the
-      # tamper-resistance claim shipped green on nine tests that never ran.
-      # The same dev credentials as docker-compose.yml; ~30 s of runner time.
+      # bucket. They are `describe.skipIf(!s3TestReachable)`, and with no
+      # object store here they had skipped on every CI run since they were
+      # written: the tamper-resistance claim shipped green on nine tests that
+      # never ran. The same dev credentials as docker-compose.yml.
       #
-      # WHY THIS IMAGE (2026-10-03): MinIO archived its community edition and
-      # then removed `minio/minio` and `minio/mc` from Docker Hub (September
-      # 2026); anonymous pulls of the historical releases from quay.io started
-      # failing on 2026-10-02 as well. `bitnamilegacy/minio` is the frozen
-      # Bitnami build of the last community release, still served by Docker
-      # Hub (manifest verified the day this was written), bundling the `mc`
-      # client. Its entrypoint runs `minio server` by itself, which is what a
-      # GitHub service needs — a service cannot pass a command. Pinned to the
-      # exact tag because the line is unmaintained: nothing newer will ever
-      # appear under it, so a pin cannot rot, only protect.
-      # Same image and tag as docker-compose.yml — keep them together.
-      minio:
-        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+      # WHY THIS IMAGE (2026-10-06, ADR-0183 §3): SeaweedFS (Apache-2.0)
+      # replaces the frozen `bitnamilegacy/minio` build, which MinIO's removal
+      # of its community images (September 2026) had left unmaintained. The
+      # switch was conditional on proof and the proof came first: the ADR-0060
+      # suite passed 9/9 against SeaweedFS 4.48 run locally both as `mini` (what
+      # this service runs) and as compose's `server` command, with COMPLIANCE
+      # refusing a versioned delete, a retention shortening and a GOVERNANCE
+      # downgrade even with BypassGovernanceRetention set (PENDING.md, "Dev/CI
+      # object store after MinIO").
+      #
+      # The official image, pinned by DIGEST (multi-arch index of tag 4.48).
+      # Its default CMD is `mini -dir=/data` (master + volume + filer + S3 in
+      # one process), which is what a GitHub service needs — a service cannot
+      # pass a command. `mini` sizes its volumes from free disk, so a runner's
+      # disk cannot run it out of volume slots. AWS_ACCESS_KEY_ID/SECRET become
+      # its admin S3 identity; any other signature is refused (403).
+      # S3 listens on 8333 in the container; it is published on 9000 so the
+      # endpoint below is unchanged.
+      # Same image and digest as docker-compose.yml — keep them together.
+      objectstore:
+        image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
         env:
-          MINIO_ROOT_USER: regulait
-          MINIO_ROOT_PASSWORD: regulait-dev-minio
+          AWS_ACCESS_KEY_ID: regulait
+          AWS_SECRET_ACCESS_KEY: regulait-dev-minio
         ports:
-          - 9000:9000
-        # No curl in this image; `mc ready` is MinIO's own readiness probe and
-        # the MC_HOST_<alias> form needs no written config (HOME is / here).
+          - 9000:8333
+        # A SIGNED ListBuckets (curl's built-in SigV4; curl ships in the
+        # image): healthy means the S3 API answers, its filer is up and the
+        # credential works, not merely that a port is open.
         options: >-
-          --health-cmd "MC_CONFIG_DIR=/tmp/.mc MC_HOST_local=http://regulait:regulait-dev-minio@localhost:9000 mc ready local"
+          --health-cmd "curl -fsS -o /dev/null --aws-sigv4 aws:amz:us-east-1:s3 --user regulait:regulait-dev-minio http://127.0.0.1:8333/"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -152,8 +161,9 @@ jobs:
       # tick loop runs underneath a test.
       REGULAIT_DATABASE_SSL: disable
       REGULAIT_SCHEDULER: 'off'
-      # CI-01: when this is SET and unreachable, audit-chain.test.ts throws
-      # rather than skips — a broken MinIO service fails the job out loud.
+      # CI-01: when this is SET and a signed ListBuckets against it fails,
+      # audit-chain.test.ts throws rather than skips — a broken object-store
+      # service (or a wrong credential) fails the job out loud.
       REGULAIT_TEST_S3_ENDPOINT: http://localhost:9000
       REGULAIT_TEST_S3_ACCESS_KEY_ID: regulait
       REGULAIT_TEST_S3_SECRET_ACCESS_KEY: regulait-dev-minio
