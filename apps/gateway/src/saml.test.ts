@@ -344,6 +344,9 @@ const latestAudit = async (ruleId: string) => {
   return row ?? null;
 };
 
+// M-068: the loopback allow entry the lockout-guard case creates is global state on the
+// shared database; its id is recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -375,6 +378,11 @@ afterAll(async () => {
       .update(orgSettings)
       .set(orgSettingsSnapshot)
       .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  }
+  // M-068: remove the loopback allow entry the lockout-guard case created
+  if (loopbackAllowHostId && app) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
   }
   await removeLicenseFixture(db);
   await app?.close();
@@ -911,6 +919,7 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
       },
     });
     expect([200, 201]).toContain(allow.statusCode);
+    loopbackAllowHostId = allow.json().id;
     const oidc2 = await app.inject({
       method: "POST", headers: AUTH, url: "/v1/auth/oidc-providers",
       payload: {

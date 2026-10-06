@@ -148,6 +148,9 @@ afterAll(() => {
   else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
 });
 
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -181,6 +184,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   const alice = await app.inject({
     method: "POST",
@@ -209,6 +213,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreStrictAdmission?.();
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId && app) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
+  }
   // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
   // upserts a PLATFORM credential for anthropic, openai, google and xai, each
   // pointing at a loopback fake it closes on the way out and each encrypted

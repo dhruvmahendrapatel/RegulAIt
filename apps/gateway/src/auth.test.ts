@@ -270,6 +270,9 @@ const oidcRoundTrip = async (
  */
 const createdOidcProviderIds = new Set<string>();
 let orgSettingsSnapshot: OrgSettingsRow | null = null;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 
 const mkProvider = async (payload: Record<string, unknown>) => {
   const r = await app.inject({
@@ -310,6 +313,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
   // snapshot the shared singleton so whatever this file flips is handed back
   // exactly as it was found (see the SUITE-ORDER ISOLATION note above)
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
@@ -327,6 +331,11 @@ afterAll(async () => {
       .update(orgSettings)
       .set(orgSettingsSnapshot)
       .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  }
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
   }
   await app.close();
   await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
