@@ -1,7 +1,9 @@
 /**
  * ADR-0182 A14 — the pure literacy rules. Each case pins one rule and fails with the rule reverted.
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { ACCOUNTABILITY_SETTING_COPY, ACCOUNTABILITY_STRICT_DEFAULTS } from "./accountability.js";
 import {
   AI_LITERACY_ARTICLE_4_TEXT,
   acceptedVersions,
@@ -128,5 +130,17 @@ describe("dates, digests, coverage, copy", () => {
   it("Article 4 copy uses the amended wording and claims no guaranteed level", () => {
     expect(AI_LITERACY_ARTICLE_4_TEXT).toContain("support the development of AI literacy");
     expect(AI_LITERACY_ARTICLE_4_TEXT).not.toMatch(/ensure|sufficient level/);
+  });
+});
+
+describe("the console mirrors the A14 settings copy (the SPA does not depend on this package)", () => {
+  it("LiteracyPage.tsx carries the shared label, strict and relaxed text, and the strict defaults, verbatim", () => {
+    const src = readFileSync(new URL("../../../apps/web/src/views/admin/governance/LiteracyPage.tsx", import.meta.url), "utf8");
+    for (const key of ["literacyGateMode", "literacyDefaultValidityDays"] as const) {
+      const c = ACCOUNTABILITY_SETTING_COPY[key];
+      for (const text of [c.label, c.strict, c.relaxed]) expect(src, `${key}: ${text}`).toContain(JSON.stringify(text));
+    }
+    expect(src).toContain(`literacyGateMode: "${ACCOUNTABILITY_STRICT_DEFAULTS.literacyGateMode}"`);
+    expect(src).toContain(`literacyDefaultValidityDays: ${ACCOUNTABILITY_STRICT_DEFAULTS.literacyDefaultValidityDays}`);
   });
 });
