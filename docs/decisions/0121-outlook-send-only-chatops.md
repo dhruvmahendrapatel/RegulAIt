@@ -176,3 +176,68 @@ runs next.
 - The Outlook courier has no UI: registering one is an API call. The admin ChatOps surface should
   learn the third provider, including rendering "send-only, no signing secret" rather than an empty
   field that looks unconfigured.
+
+## Amendment — the send half built (2026-10-06)
+
+ADR-0179 (AER-015) found that the courier §3 describes was never reachable: `CHATOPS_OUTBOUND_PROVIDERS` held only
+slack and teams, so every card to an outlook workspace answered 501, and registration was then refused with 422
+`outbound_provider_unavailable`. ADR-0183 §5 (batch 2.6) builds the send half. Inbound is unchanged and stays
+`inbound_unsupported_by_design`.
+
+**What was built.**
+
+- `outlook` joins `CHATOPS_OUTBOUND_PROVIDERS`, so the ADR-0179 refusal lifts by itself (it reads that list). The
+  courier posts through the existing `OutlookConnectorProvider`: a client-credentials token from the Microsoft identity
+  platform token endpoint, then `POST /v1.0/users/{senderUpn}/sendMail`.
+- **The message.** `outlookMessageForCard` renders the already-composed approval card, so the ADR-0061 sensitivity
+  fence is decided once, as for Slack and Teams: a fenced approval's mail names nothing and its subject says the
+  content is withheld. The mail carries the request summary and a link to the approval's page in the portal. It
+  carries no decision affordance of any kind: no button, no decide link, no token in a link, and a footnote saying a
+  reply is not acted on. Opening the link means signing in. A mail card is recorded as not decidable whatever the fence
+  or the workspace says, and registration refuses `allowFencedDecide: true` for outlook
+  (`fenced_decide_not_applicable`).
+- **The link.** Mail is read away from the portal, so the link is absolute. It is built on the origin the posting
+  request reached the gateway on (`baseUrlFor`), the same derivation the builder-channel links and the SSO redirect
+  URIs use, because there is no configured public URL. Only an authenticated caller can post a card. A governance
+  alert sent by the scheduler has no request, so its mail carries the portal path as text, not a link.
+- **Governance alerts** (ADR-0162) reach an outlook workspace as information-only mail (`outlookMessageForAlert`).
+  Builder-agent replies and decided-card retirement are not sent as mail, because outlook has no inbound conversation
+  or decision; the courier answers 501 `message_kind_unsupported` if either is ever asked for.
+- **The credential** is the app registration: tenant ID, client ID (`appId`), client secret (`appPassword`) and sender
+  mailbox (`senderUpn`), stored as the connector's credential, encrypted, in the same store and ADR-0023 JSON shape
+  as the Teams credential. The admin ChatOps page asks for the four fields and writes them to the chosen connector
+  before registering. Registration is strict: the connector must already hold a credential that parses
+  (`connector_credential_missing`, `invalid_connector_credential`), the default channel must be one mailbox
+  (`invalid_recipient`), and a signing secret is refused (`signing_secret_not_applicable`, unchanged). The client
+  secret is never written to a response, an audit row or a log line; the suite asserts all three.
+- **Egress.** Both hosts, the Microsoft identity platform login host and Graph, are adjudicated by the egress guard on
+  every request, exactly as for Teams. With no allow entry for Graph, the post is refused before any request; with no
+  entry for the login host, it is refused mid-call. Both are a named 403 `egress_blocked` with an audit row. Under
+  `REGULAIT_DEPLOY_MODE=air_gapped` they are refused unless an admin allow-lists them, so an air-gapped install has no
+  mail courier by default. A provider refusal (a bad client secret, a Graph 4xx or 429) is a named 502
+  `chatops_post_failed`, not an opaque 500. This now applies to every provider.
+
+**The token cache: a reversal of §3's "one token per invoke", with the reason.** A courier that sends every approval
+and alert paid a second round trip for a token that lives about an hour. The adapter now caches the app-only token in
+the gateway process:
+
+- The cache key is a sha256 over the login host, tenant, client ID and client secret. Rotating the credential misses
+  the cache at once, and the secret is never a key or a value.
+- An entry is used while it has more than five minutes left. Inside that margin the next send mints a fresh token.
+- A token Graph refuses with 401 before its expiry (revoked, or consent withdrawn) is evicted, and the send is retried
+  once with a fresh token. A 401 means nothing was sent, so the retry cannot send twice. A fresh token that is refused
+  is reported, not retried.
+- A token response without a usable `expires_in` is not cached. At most 64 credentials are held.
+
+The revocation concern ADR-0113 §2 raised does not grow: Graph honours an app-only token until its own expiry whether
+it was minted a second ago or cached, so the cache adds no lifetime the token did not already have.
+
+Open-source check (ADR-0176): `@azure/identity`'s `ClientSecretCredential` caches and refreshes tokens, but it makes
+its own HTTP calls (including an instance-discovery request) through the Azure SDK pipeline, outside the injected,
+egress-guarded fetch. The unmet hard requirement is that every request URL is adjudicated by the egress guard.
+
+**Honest limits, unchanged in kind.** The courier is proved against a local fake token endpoint and a local fake Graph
+(`adr0183-outlook-courier.test.ts`), not a real tenant. Tenant consent for the `Mail.Send` application permission, an
+application access policy that limits which mailboxes the app may send as, and real mail rendering are not exercised
+from this repository. Graph's 202 means accepted for delivery, not delivered. The token cache is per gateway process;
+replicas each mint their own token.
