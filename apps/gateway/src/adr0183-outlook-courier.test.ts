@@ -23,7 +23,10 @@
  *  6. a provider refusal (bad client secret) is a named 502, nothing sent;
  *  7. a governance alert reaches outlook as information-only mail;
  *  8. inbound is still `inbound_unsupported_by_design` on every inbound route;
- *  9. the client secret never appears in a response, an audit row or a log line.
+ *  9. the client secret never appears in a response, an audit row or a log line;
+ * 10. the mail link's origin is REGULAIT_PUBLIC_URL ONLY: a forged Host header
+ *     never reaches a mail; unset (or unusable), registration is refused with
+ *     422 `public_url_required` and a post to an existing workspace sends nothing.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
@@ -64,7 +67,10 @@ const CLIENT_SECRET = `SYNTHETIC-outlook-client-secret-${RUN}`;
 const TENANT = `tenant-${RUN}.example.test`;
 const SENDER = "regulait-approvals@example.test";
 const RECIPIENT = "approvers@example.test";
-const PORTAL_HOST = "regulait.example.test";
+/** the deployment's public URL (with a base path), and a Host a caller forges */
+const PUBLIC_URL = "https://approvals.regulait.example.test/gov";
+const FORGED_HOST = "login-regulait.evil.example";
+const priorPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 /** loopback hosts no sibling suite allow-lists (M-048) */
 const LOGIN_HOST = "127.0.0.16";
 const GRAPH_HOST = "127.0.0.17";
@@ -157,7 +163,7 @@ async function makeApproval(projectId?: string) {
 }
 
 const postCard = (approvalId: string) =>
-  inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION }, { ...AUTH, host: PORTAL_HOST });
+  inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION }, { ...AUTH, host: FORGED_HOST });
 
 const sends = () => graphHits.filter((h) => h.url.includes("/sendMail"));
 const lastMail = () =>
@@ -167,6 +173,7 @@ const lastMail = () =>
   };
 
 beforeAll(async () => {
+  process.env.REGULAIT_PUBLIC_URL = PUBLIC_URL;
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   // ADR-0181: the org PII floor ships at block, which fences every approval;
@@ -222,6 +229,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   delete process.env.REGULAIT_DEPLOY_MODE;
+  if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+  else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
   await restoreOrg?.();
   if (approvalIds.length) {
     await db.delete(chatopsMessages).where(inArray(chatopsMessages.approvalId, approvalIds));
@@ -249,6 +258,22 @@ const connectionRows = async () => (await db.select().from(chatopsConnections).w
 describe("1. registration opens — strictly", () => {
   it("outlook is an outbound provider now", () => {
     expect(CHATOPS_OUTBOUND_PROVIDERS).toContain("outlook");
+  });
+
+  it("10: refuses with 422 public_url_required while REGULAIT_PUBLIC_URL is unset or unusable, writing nothing", async () => {
+    for (const value of [undefined, "http://evil.example"]) {
+      if (value === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+      else process.env.REGULAIT_PUBLIC_URL = value;
+      try {
+        const res = await inject("POST", "/v1/chatops/connections", { name: CONNECTION, provider: "outlook", connectorId, defaultChannel: RECIPIENT }, { ...AUTH, host: FORGED_HOST });
+        expect(res.statusCode, res.body).toBe(422);
+        expect(res.json().error).toBe("public_url_required");
+        expect(String(res.json().detail)).toContain("REGULAIT_PUBLIC_URL");
+      } finally {
+        process.env.REGULAIT_PUBLIC_URL = PUBLIC_URL;
+      }
+    }
+    expect(await connectionRows()).toBe(0);
   });
 
   it("refuses by name, writing nothing: no credential, a bad credential, a bad recipient, chat decide, a signing secret", async () => {
@@ -328,7 +353,9 @@ describe("2–4. an approval card is delivered as mail: summary, portal link, no
     const html = mail.message.body.content;
     expect(html).toContain("<code>patients.read</code>");
     expect(html).toContain("<code>prod-signoff</code>");
-    expect(html).toContain(`<a href="http://${PORTAL_HOST}/ui/admin/review-workbench?approval=${approvalId}">Open this approval in RegulAIt to decide</a>`);
+    // the link is built from REGULAIT_PUBLIC_URL; the forged Host the request carried is nowhere
+    expect(html).toContain(`<a href="${PUBLIC_URL}/ui/admin/review-workbench?approval=${approvalId}">Open this approval in RegulAIt to decide</a>`);
+    expect(sends().at(-1)!.body).not.toContain(FORGED_HOST);
     expect(html).toContain("never by replying to this message");
     // NO decision affordance: no button, no decide link, no bearer token in a link
     expect(html).not.toMatch(/Action\.Submit|regulait_approve|regulait_reject|mailto:|token=|[?&](action|decision)=/i);
@@ -455,8 +482,25 @@ describe("6–8. failures, alerts and the inbound path that does not exist", () 
     const mail = lastMail();
     expect(mail.message.subject).toMatch(/^RegulAIt: governance alert \(HIGH\) — /);
     expect(mail.message.body.content).toContain(`b26 spend spike ${RUN}`);
-    expect(mail.message.body.content).toContain(`/ui/admin/governance/alerts?alert=${alertId}`);
+    expect(mail.message.body.content).toContain(`<a href="${PUBLIC_URL}/ui/admin/governance/alerts?alert=${alertId}">`);
     expect(mail.message.body.content).toContain("Replies to this message are not read.");
+  });
+
+  it("10: with REGULAIT_PUBLIC_URL unset, a post to the existing workspace is refused by name and nothing is sent", async () => {
+    delete process.env.REGULAIT_PUBLIC_URL;
+    try {
+      const before = { login: loginHits.length, graph: graphHits.length };
+      const res = await postCard(await makeApproval());
+      expect(res.statusCode, res.body).toBe(422);
+      expect(res.json().error).toBe("public_url_required");
+      expect({ login: loginHits.length, graph: graphHits.length }).toEqual(before);
+      // the alert path is refused the same way (the alert route reports the failure)
+      const alertRes = await inject("POST", `/v1/governance/alerts/${alertId}/post`, { connectionName: CONNECTION });
+      expect(alertRes.statusCode).toBe(502);
+      expect(graphHits.length).toBe(before.graph);
+    } finally {
+      process.env.REGULAIT_PUBLIC_URL = PUBLIC_URL;
+    }
   });
 
   it("8: every inbound route still refuses outlook BY NAME", async () => {

@@ -196,10 +196,16 @@ slack and teams, so every card to an outlook workspace answered 501, and registr
   reply is not acted on. Opening the link means signing in. A mail card is recorded as not decidable whatever the fence
   or the workspace says, and registration refuses `allowFencedDecide: true` for outlook
   (`fenced_decide_not_applicable`).
-- **The link.** Mail is read away from the portal, so the link is absolute. It is built on the origin the posting
-  request reached the gateway on (`baseUrlFor`), the same derivation the builder-channel links and the SSO redirect
-  URIs use, because there is no configured public URL. Only an authenticated caller can post a card. A governance
-  alert sent by the scheduler has no request, so its mail carries the portal path as text, not a link.
+- **The link.** Mail is read away from the portal, so the link is absolute, and its origin is the deployment's
+  `REGULAIT_PUBLIC_URL` alone. The request's Host header is never read for it: a first draft derived it from the
+  posting request (`baseUrlFor`), which let any caller who could post a card choose the domain in a mail sent from the
+  organisation's own mailbox (rejected in review, ADR-0180). `REGULAIT_PUBLIC_URL` is a deployment fact, like
+  `REGULAIT_DEPLOY_MODE`, not an admin setting: an absolute https URL (http only for localhost or loopback), no
+  credentials, query or fragment, an optional base path. A set-but-invalid value refuses the boot. While it is unset,
+  registering an outlook workspace is refused with 422 `public_url_required`, and a post or alert to an existing one
+  is refused by name with nothing sent. `GET /v1/org/posture` and `GET /v1/setup/status` report whether it is set and
+  its value. The Host-derived URLs elsewhere (SSO redirect URIs, MCP protected-resource metadata, builder-channel
+  links) are unchanged here and go to the batch security review.
 - **Governance alerts** (ADR-0162) reach an outlook workspace as information-only mail (`outlookMessageForAlert`).
   Builder-agent replies and decided-card retirement are not sent as mail, because outlook has no inbound conversation
   or decision; the courier answers 501 `message_kind_unsupported` if either is ever asked for.

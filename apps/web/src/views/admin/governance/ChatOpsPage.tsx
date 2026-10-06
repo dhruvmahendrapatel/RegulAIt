@@ -344,6 +344,10 @@ export default function ChatOpsPage() {
               connector above, like every other credential, and is never displayed again. Leave these empty if the
               connector already holds it.
             </p>
+            <p className={v.faint}>
+              The link in each email uses only the gateway&apos;s configured public URL (REGULAIT_PUBLIC_URL); an Outlook
+              workspace cannot be registered until it is set.
+            </p>
             <Field label="Tenant ID">
               <Input value={outlookApp.tenantId} onChange={setApp("tenantId")} placeholder="contoso.onmicrosoft.com" autoComplete="off" />
             </Field>

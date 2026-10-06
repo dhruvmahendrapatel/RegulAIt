@@ -134,6 +134,7 @@ import {
 import { ConnectionEgressBlockedError, guardConnectionCall } from "./connection-egress.js";
 import { EgressBlockedError } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { PUBLIC_URL_ENV, resolvePublicUrl } from "./public-url.js";
 import { projectPiiMode } from "./projects.js";
 import { baseUrlFor } from "./mcp-auth-metadata.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
@@ -166,6 +167,34 @@ export const CHATOPS_OUTBOUND_PROVIDERS: readonly ChatOpsProvider[] = ["slack", 
 const MAIL_PROVIDERS: readonly ChatOpsProvider[] = ["outlook"];
 /** an outlook "channel" is one recipient mailbox */
 const mailboxSchema = z.string().email().max(200);
+
+/**
+ * ADR-0121 amendment — the ONLY origin a link in mail may use. Never the
+ * request's Host: whoever posts a card must not choose the domain in a mail the
+ * organisation's own mailbox sends. Null (with the refusal body) when
+ * REGULAIT_PUBLIC_URL is unset or unusable.
+ */
+function mailPublicUrl(): { ok: true; url: string } | { ok: false; status: 422; body: Record<string, unknown> } {
+  let url: string | null = null;
+  let why = "it is unset";
+  try {
+    url = resolvePublicUrl();
+  } catch (err) {
+    why = err instanceof Error ? err.message : String(err);
+  }
+  if (url) return { ok: true, url };
+  return {
+    ok: false,
+    status: 422,
+    body: {
+      error: "public_url_required",
+      detail:
+        `outlook mail links to the approval in RegulAIt, and that link may only use the deployment's public URL ` +
+        `(${PUBLIC_URL_ENV}) — never the origin a request happened to arrive on. ${why === "it is unset" ? `${PUBLIC_URL_ENV} is unset` : why}. ` +
+        `Set it to this deployment's https origin and restart; nothing was sent.`,
+    },
+  };
+}
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const CHATOPS_RULE_IDS = {
@@ -433,6 +462,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     // the encrypted connector credential store — checked by parsing it, so a
     // workspace that would fail its first send is refused now, by name.
     if (body.provider === "outlook") {
+      const pub = mailPublicUrl();
+      if (!pub.ok) return reply.status(pub.status).send(pub.body);
       if (!mailboxSchema.safeParse(body.defaultChannel).success) {
         return reply.status(400).send({
           error: "invalid_recipient",
@@ -718,6 +749,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (kind === "outlook" && !mailboxSchema.safeParse(channel).success) {
       return { ok: false, status: 400, body: { error: "invalid_recipient", detail: "an outlook message is sent to ONE mailbox address" } };
     }
+    if (kind === "outlook") {
+      const pub = mailPublicUrl();
+      if (!pub.ok) return pub;
+    }
     const payload = payloadFor(kind);
     if (payload === null) {
       return {
@@ -867,6 +902,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
     const fenced = await fenceFor(row);
     const mail = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider);
+    // mail links ONLY to REGULAIT_PUBLIC_URL; unset → refused, nothing composed or sent
+    const pub = mail ? mailPublicUrl() : null;
+    if (pub && !pub.ok) return reply.status(pub.status).send(pub.body);
     // ADR-0121 §2: mail is never decidable, whatever the fence or the workspace says
     const decidable = !mail && chatDecidable({ fenced, allowFencedDecide: conn.allowFencedDecide });
     const [requester] = await db.select({ email: users.email }).from(users).where(eq(users.id, row.userId));
@@ -879,12 +917,11 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       stageId: row.stageId,
       requesterLabel: requester?.email ?? null,
       approverLabel: approver?.email ?? null,
-      // mail is read away from the portal, so it carries an ABSOLUTE link on the
-      // origin this request reached the gateway on (`baseUrlFor`, the same
-      // derivation the builder-channel links and SSO redirect URIs use — there
-      // is no configured public URL). The link is the approval's page, never a
-      // token: opening it means signing in.
-      portalUrl: mail ? `${baseUrlFor(req)}/ui${portalUrl(approvalId)}` : portalUrl(approvalId),
+      // mail is read away from the portal, so it carries an ABSOLUTE link, and
+      // its origin is REGULAIT_PUBLIC_URL alone — the request's Host is never
+      // read for it. The link is the approval's page, never a token: opening it
+      // means signing in.
+      portalUrl: pub?.ok ? `${pub.url}/ui${portalUrl(approvalId)}` : portalUrl(approvalId),
       fenced,
       decidable,
     });
@@ -923,20 +960,24 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       portalUrl: alertPortalUrl(alert.id),
     });
     let posted: Awaited<ReturnType<typeof postCard>>;
+    const pub = conn.provider === "outlook" ? mailPublicUrl() : null;
     try {
-      posted = await postCard(
-        conn,
-        channel,
-        card,
-        actorUserId,
-        "monitor-alert",
-        outlookMessageForAlert({
-          severity: alert.severity,
-          ruleLabel: (MONITOR_RULES as Record<string, { label: string }>)[alert.ruleId]?.label ?? alert.ruleId,
-          title: alert.title,
-          portalUrl: `/ui${alertPortalUrl(alert.id)}`,
-        }),
-      );
+      posted =
+        pub && !pub.ok
+          ? pub
+          : await postCard(
+              conn,
+              channel,
+              card,
+              actorUserId,
+              "monitor-alert",
+              outlookMessageForAlert({
+                severity: alert.severity,
+                ruleLabel: (MONITOR_RULES as Record<string, { label: string }>)[alert.ruleId]?.label ?? alert.ruleId,
+                title: alert.title,
+                portalUrl: `${pub?.ok ? pub.url : ""}/ui${alertPortalUrl(alert.id)}`,
+              }),
+            );
     } catch (err) {
       posted = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
     }

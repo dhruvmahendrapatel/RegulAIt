@@ -131,7 +131,10 @@ const rowFor = async (name: string) =>
 const connectionCount = async () => (await db.select().from(chatopsConnections)).length;
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+const priorPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 beforeAll(async () => {
+  // ADR-0121 amendment: outlook registers only with a deployment public URL
+  process.env.REGULAIT_PUBLIC_URL = "https://regulait.example.test";
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
@@ -172,6 +175,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+  else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
   await restoreSb1Posture?.();
   await db
     .delete(chatopsConnections)
