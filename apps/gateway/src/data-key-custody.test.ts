@@ -895,7 +895,23 @@ describe("the ciphertext inventory", () => {
       const col = /text\("(\w*_ciphertext)"\)/.exec(line);
       if (col && table) found.add(`${table}.${col[1]}`);
     }
-    const declared = new Set(CIPHERTEXT_COLUMNS.map((c) => `${c.table}.${c.column}`));
+    // D4 DFX2: an entry whose column is not `*_ciphertext` (the feedback
+    // resolution note) is checked by name: it must be a text column of its table
+    const named = CIPHERTEXT_COLUMNS.filter((c) => !c.column.endsWith("_ciphertext"));
+    for (const c of named) {
+      let inTable: string | null = null;
+      let seen = false;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.includes("pgTable(")) {
+          const inline = /pgTable\(\s*"([a-z_]+)"/.exec(line);
+          inTable = inline ? inline[1]! : (/"([a-z_]+)"/.exec(lines[i + 1] ?? "")?.[1] ?? null);
+        }
+        if (inTable === c.table && line.includes(`text("${c.column}")`)) seen = true;
+      }
+      expect(seen, `${c.table}.${c.column} is a text column in schema.ts`).toBe(true);
+    }
+    const declared = new Set(CIPHERTEXT_COLUMNS.filter((c) => c.column.endsWith("_ciphertext")).map((c) => `${c.table}.${c.column}`));
     expect([...found].sort()).toEqual([...declared].sort());
   });
 });

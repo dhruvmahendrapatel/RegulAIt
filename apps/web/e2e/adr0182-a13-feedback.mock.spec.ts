@@ -223,6 +223,45 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     expect(state.settingsPuts[0]).toEqual({ feedbackAckSlaHours: 96 });
     await expect(card.getByText("relaxed", { exact: true })).toHaveCount(1);
     await expect(card).toContainText("A longer time (up to 168 hours) lets a report wait longer before anyone is alerted.");
+    // D4 DFX2 (D4G-03): a SHORTER retention is a relaxation too (it deletes complaint evidence sooner)
+    await card.getByLabel("Feedback body retention (days)").fill("90");
+    await card.getByRole("button", { name: "Save feedback settings" }).click();
+    await expect.poll(() => state.settingsPuts.length).toBe(2);
+    expect(state.settingsPuts[1]).toEqual({ feedbackRetentionDays: 90 });
+    await expect(card.getByText("relaxed", { exact: true })).toHaveCount(2);
+    await expect(card).toContainText("a shorter one (down to 30 days) deletes complaints and appeals sooner");
+  });
+
+  test("a resolved item shows its resolution note, or says it cannot be opened (D4 DFX2: notes are encrypted)", async ({ page }) => {
+    await mockGateway(page);
+    const resolved = (note: string | null, unavailable: string | null) => ({
+      ...item(F_LATE, "problem", "breached", { status: "no_change", resolvedAt: "2026-10-06T10:00:00Z", acknowledgedAt: "2026-10-06T09:30:00Z" }),
+      submitterUserId: "sam",
+      body: "The answer quoted my policy number.",
+      contact: null,
+      bodyUnavailable: null,
+      bodyPurgedAt: null,
+      resolutionNote: note,
+      resolutionNoteUnavailable: unavailable,
+      resolvedBy: "ada",
+      contestedUserId: null,
+      youMayResolve: false,
+      sodConflict: null,
+    });
+    let detail = resolved(null, "undecryptable");
+    await page.route(`**/v1/feedback/${F_LATE}`, (route) => (route.request().method() === "GET" ? json(route, detail) : route.fallback()));
+    await page.goto("/ui/feedback");
+    const open = () => page.getByRole("table").getByRole("row").filter({ hasText: "Overdue" }).getByRole("button", { name: /^Open problem report/ }).click();
+    await open();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("The resolution note could not be opened with this gateway's data key.");
+    await expect(dialog.getByTestId("feedback-resolution-note")).toHaveCount(0);
+    await expectAxeClean(page, "resolved item, note unavailable", '[role="dialog"]');
+    // a fresh page load (no cached detail) with the note readable
+    detail = resolved("Fixed: the <i>threshold</i> was re-validated.", null);
+    await page.goto("/ui/feedback");
+    await open();
+    await expect(page.getByRole("dialog").getByTestId("feedback-resolution-note")).toHaveText("Fixed: the <i>threshold</i> was re-validated.");
   });
 
   test("the use case's feedback tab mints a link shown once and revokes one through a confirmation", async ({ page }) => {
