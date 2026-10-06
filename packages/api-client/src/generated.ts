@@ -56,7 +56,7 @@ export type PostV1ApprovalsByApprovalIdDecideBody = {
       ownerUserId?: string;
       dueAt?: string;
       blocking: boolean;
-      metric: "trace_eval_flag_rate" | "guardrail_hits" | "guardrail_mode" | "redteam_asr" | "eval_mean_score" | "eval_pass_rate" | "spend_usd" | "error_rate" | "pack_control_evidenced";
+      metric: "trace_eval_flag_rate" | "guardrail_hits" | "guardrail_mode" | "redteam_asr" | "eval_mean_score" | "eval_pass_rate" | "spend_usd" | "error_rate" | "pack_control_evidenced" | "user_report_rate" | "appeal_overturn_rate";
       params?: Record<string, unknown>;
       operator: "lt" | "lte" | "gt" | "gte" | "eq";
       threshold: number;
