@@ -50,6 +50,9 @@
  *     compliant with the EU AI Act and is not a certification of anything.
  */
 import { z } from "zod";
+// ADR-0182 S5 — the ISACA AI agents pack is authored data in its own file
+// (type-only imports back into this one, so there is no runtime cycle)
+import { ISACA_AI_AGENTS_PACK } from "./isaca-pack.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -74,6 +77,8 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "pci-dss",
   "finra",
   "soc-2",
+  // ADR-0182 S5 (ROADMAP I2): the ISACA AI agents checklist (`isaca-pack.ts`)
+  "isaca-ai-agents",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -131,6 +136,25 @@ export const EVIDENCE_COLLECTORS = [
    * passed, or a red-team run in which the class was not defeated). Test
    * evidence: a run that did not happen, or did not pass, is never counted. */
   "evaluator_tested",
+  /** ADR-0182 S5: AI incidents RECORDED in the incident register in the period
+   * (`ai_incidents.created_at`; scoped through the incident's use case's
+   * project). Evidence that incidents are identified and tracked — a period
+   * with no incident has no row, which is not a gap in the register. */
+  "incident_register",
+  /** ADR-0182 S5: end-user problem reports and appeals RECEIVED in the period
+   * (`use_case_feedback.created_at`; scoped through the use case's project).
+   * Evidence that the feedback and appeal channel is used, never what it said. */
+  "user_feedback_channel",
+  /** ADR-0182 S5: acknowledgements and recorded completions of published AI
+   * policy and training documents made in the period
+   * (`ai_policy_acknowledgements.acknowledged_at`; scoped to members of the
+   * caller's projects). Evidence of literacy MEASURES, not of anyone's level. */
+  "literacy_acknowledgements",
+  /** ADR-0182 S5: decision regression runs (golden cases replayed against a
+   * review-policy, required-test or intake-template change) in the period
+   * (`decision_regression_runs.created_at`). Org-wide configuration testing
+   * with no project: counted under an org-scoped report only. */
+  "decision_regression_runs",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;
@@ -1585,4 +1609,179 @@ DEFAULT_COMPLIANCE_PACKS.push(
       }),
     ],
   }),
+);
+
+/**
+ * ADR-0182 (ADR-0175 batch D4) S5 — the accountability records as evidence.
+ *
+ * nist-ai-rmf v4 and eu-ai-act v3 are REVISIONS (`reviseVersion`): every
+ * earlier version stays byte-for-byte as published (pinned by content hash in
+ * the tests), and its reports keep the version that produced them.
+ *
+ *  - nist-ai-rmf v4 = v3, with GOVERN 2.2 (training) now evidenced by
+ *    acknowledgements instead of attestation alone, and GOVERN 4.3, GOVERN
+ *    5.1, MEASURE 2.13, MEASURE 3.3 and MANAGE 4.3 added on the four new
+ *    collectors (incident register, feedback channel, literacy
+ *    acknowledgements, decision regression runs). Every id is one of the 72
+ *    (the existing guard checks it).
+ *  - eu-ai-act v3 = v2, with Article 4 restated in the wording of Regulation
+ *    (EU) 2026/1744 ("take measures to support the development of AI
+ *    literacy"; no individual level guaranteed) and evidenced by
+ *    acknowledgements, and Article 73 (serious-incident reporting) added on the
+ *    incident register.
+ */
+type RevisionControl = CreateCompliancePackInput["controls"][number];
+
+const nistV3 = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "nist-ai-rmf" && p.version === 3)!;
+/** v3's controls, copied (never the same objects, so v3 cannot be mutated through v4) */
+const nistV4Controls: RevisionControl[] = [];
+const NIST_V4_AFTER: Record<string, RevisionControl[]> = {
+  "nist-ai-rmf:GOVERN-4.1": [
+    nistEvidenced("GOVERN-4.3", {
+      title: "Incident identification is practised: AI incidents are recorded in the incident register",
+      description:
+        "Counts incidents recorded in the period (opened by hand or from a monitor alert, a trace evaluation, a user " +
+        "report or a red-team run).",
+      coverage: "partial",
+      collector: "incident_register",
+      ownerNote:
+        "A period with no incident shows no evidence; that is not a gap in the register. Testing practice is MEASURE 2.x " +
+        "and information sharing outside the organisation is the organisation's.",
+    }),
+    nistEvidenced("GOVERN-5.1", {
+      title: "Feedback from people outside the team is collected: end-user problem reports and appeals were received",
+      coverage: "partial",
+      collector: "user_feedback_channel",
+      ownerNote:
+        "Counts reports and appeals received in the period, never their content. Integrating the feedback into design " +
+        "is GOVERN 5.2 and is the organisation's.",
+    }),
+  ],
+  "nist-ai-rmf:MEASURE-2.11": [
+    nistEvidenced("MEASURE-2.13", {
+      title: "The evaluation process itself is checked: decision regression runs replay the golden cases against a change",
+      description:
+        "A change to the review policy, the required tests or an intake template is previewed against the shipped and " +
+        "reviewer-added cases before it applies.",
+      coverage: "partial",
+      collector: "decision_regression_runs",
+      ownerNote: "Counted on an org-scoped report only: the runs test organisation-wide policy, not one project.",
+    }),
+  ],
+  "nist-ai-rmf:MEASURE-3.1": [
+    nistEvidenced("MEASURE-3.3", {
+      title: "End users can report problems and appeal outcomes: reports and appeals were received in the period",
+      coverage: "evidenced",
+      collector: "user_feedback_channel",
+      ownerNote: "Counts what was received, never what it said.",
+    }),
+  ],
+};
+for (const c of nistV3.controls) {
+  if (c.controlRef === "nist-ai-rmf:GOVERN-2.2") {
+    nistV4Controls.push(
+      nistEvidenced("GOVERN-2.2", {
+        title:
+          "Personnel receive AI risk-management training: published AI policies and training are acknowledged or completed",
+        coverage: "partial",
+        collector: "literacy_acknowledgements",
+        ownerNote:
+          "Counts acknowledgements and admin-recorded completions in the period. The training's content and adequacy are " +
+          "the organisation's. v3 and earlier: attestation only.",
+      }),
+    );
+  } else {
+    nistV4Controls.push(JSON.parse(JSON.stringify(c)) as RevisionControl);
+  }
+  for (const added of NIST_V4_AFTER[c.controlRef] ?? []) nistV4Controls.push(added);
+}
+nistV4Controls.push(
+  nistEvidenced("MANAGE-4.3", {
+    title: "Incidents are tracked, communicated and recovered from: the register's timeline, actions and notification clocks",
+    description:
+      "Counts incidents recorded in the period. Each carries a timeline, owned actions, and (for a serious incident or a " +
+      "PHI breach) reminder clocks for the regulatory notifications.",
+    coverage: "partial",
+    collector: "incident_register",
+    ownerNote:
+      "A period with no incident shows no evidence. Communicating to affected people and authorities is the " +
+      "organisation's act; regulAIt records that it happened.",
+  }),
+);
+
+const euV2 = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "eu-ai-act" && p.version === 2)!;
+const euV3Controls: RevisionControl[] = euV2.controls.map((c) =>
+  c.controlRef === "eu-ai-act:art-4-ai-literacy"
+    ? {
+        controlRef: "eu-ai-act:art-4-ai-literacy",
+        title:
+          "AI literacy — measures support the development of AI literacy of staff and others operating the system " +
+          "(Art. 4 as replaced by Regulation (EU) 2026/1744)",
+        description:
+          'Article 4 as replaced by Regulation (EU) 2026/1744: providers and deployers "shall take measures to support the ' +
+          'development of AI literacy of their staff and other persons dealing with the operation and use of AI systems on ' +
+          'their behalf". It adds: "This obligation does not require providers or deployers to guarantee any specific level ' +
+          'of AI literacy of any individual." Evidenced by acknowledgements and recorded completions of published AI ' +
+          "policy and training documents.",
+        coverage: "partial",
+        collector: "literacy_acknowledgements",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote:
+          "Counts the measures regulAIt records (acknowledgements, completions). The measures' content, and taking into " +
+          "account each person's knowledge and the context of use, are the organisation's. v1 and v2 quoted the 2024 " +
+          "wording and were attestation only.",
+      }
+    : (JSON.parse(JSON.stringify(c)) as RevisionControl),
+);
+euV3Controls.push({
+  controlRef: "eu-ai-act:art-73-serious-incident-reporting",
+  title: "Serious incidents are reported to the market surveillance authority within the Article 73 time limits",
+  description:
+    "Article 73(2) sets 15 days from awareness, 73(3) two days for a widespread infringement or a critical-infrastructure " +
+    "incident, 73(4) ten days in the event of a death; 73(5) allows an initial incomplete report; Article 26(5) has a " +
+    "deployer inform the provider first. The incident register starts a reminder clock for each applicable period from the " +
+    "recorded awareness time. Counts incidents recorded in the period.",
+  coverage: "partial",
+  collector: "incident_register",
+  collectorParams: {},
+  minEvidenceCount: 1,
+  attestationRequired: false,
+  ownerNote:
+    "The clocks are reminders computed from the recorded awareness time, not legal advice: whether Article 73 applies " +
+    "depends on the organisation's role and the system's classification date, so confirm with counsel. Sending the report " +
+    "is the provider's or deployer's act. A period with no incident shows no evidence.",
+});
+
+DEFAULT_COMPLIANCE_PACKS.push(
+  reviseVersion("nist-ai-rmf", 3, {
+    version: 4,
+    titleSuffix: "v4 evidences training, incidents, feedback and evaluation checks",
+    description:
+      "Maps NIST AI RMF 1.0 subcategories onto regulAIt configuration and ledgers. v4 keeps every v3 control and adds the " +
+      "accountability records: AI literacy acknowledgements (GOVERN 2.2), the incident register (GOVERN 4.3, MANAGE " +
+      "4.3), the end-user feedback and appeal channel (GOVERN 5.1, MEASURE 3.3) and decision regression runs (MEASURE " +
+      "2.13). Organisational subcategories stay attestation-required.",
+    note:
+      "GOVERN 2.2 moves from attestation to partial, evidenced by AI policy and training acknowledgements; adds GOVERN 4.3 " +
+      "and MANAGE 4.3 (incident register), GOVERN 5.1 and MEASURE 3.3 (feedback and appeals received) and MEASURE 2.13 " +
+      "(decision regression runs). Every other v3 control is unchanged. v1, v2 and v3 are unchanged.",
+    controls: nistV4Controls,
+  }),
+  reviseVersion("eu-ai-act", 2, {
+    version: 3,
+    titleSuffix: "v3 restates Article 4 as amended and adds Article 73",
+    description:
+      "Maps the record-keeping, human-oversight, accuracy/robustness, risk-management, AI-literacy and serious-incident " +
+      "obligations of Regulation (EU) 2024/1689 onto regulAIt configuration and ledgers. v3 restates Article 4 in the " +
+      "wording of Regulation (EU) 2026/1744 and adds Article 73. The interpretation is regulAIt's and is contestable.",
+    note:
+      "Article 4 restated from Regulation (EU) 2026/1744 (OJ 24.7.2026, https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/" +
+      "?uri=OJ:L_202601744, retrieved 2026-10-06), evidenced by literacy acknowledgements; adds Article 73 serious-incident " +
+      "reporting (Regulation (EU) 2024/1689, https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=OJ:L_202401689, which " +
+      "the 2026 amendment does not change), evidenced by the incident register. v1 and v2 are unchanged.",
+    controls: euV3Controls,
+  }),
+  ISACA_AI_AGENTS_PACK,
 );

@@ -18,6 +18,18 @@
  * A proposal must equal a CURRENT candidate for its alert: the API cannot be
  * used to smuggle an arbitrary control link or owner change under a monitor
  * alert's name. Admin-only through the default gate.
+ *
+ * ADR-0182 S5 (PF-03) — `halt_agent`, the SUGGESTED halt. A KRI set to
+ * `on_breach = propose_halt` makes its breach episode carry
+ * `detail.suggestedAction`; the planner turns that into one executable
+ * candidate and the alerts page shows "Propose halt". Owner decision 4:
+ *   - nothing files it but a person's click on this route, with THAT person
+ *     recorded as proposer (the monitor never calls it);
+ *   - ONE proposal per episode: a second click returns the first (200,
+ *     `idempotent: true`), whatever its status;
+ *   - the proposer cannot approve it (`precheckRemediationDecision`), and the
+ *     decide path applies it through `haltAgentInTx` (ADR-0124's one halt);
+ *   - nothing ever trips on its own.
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -45,11 +57,13 @@ import {
 import {
   REMEDIATION_STATUSES,
   isExecutableRemediation,
+  type ExecutableRemediationKind,
   proposeRemediations,
   type AiRiskCategory,
   type RemediationRiskInput,
 } from "@regulait/shared";
 import { RISK_RULE_IDS } from "./risks.js";
+import { haltAgentInTx } from "./execution-control.js";
 
 export const REMEDIATION_PREFIX = "__remediation__:";
 export const REMEDIATION_RULE_IDS = {
@@ -133,6 +147,12 @@ export async function candidatesForAlert(db: Db, alert: typeof governanceAlerts.
   } else if (tail.type === "vendor") {
     const [v] = await db.select({ name: aiVendors.name }).from(aiVendors).where(eq(aiVendors.id, tail.id));
     if (v) labels.set(parts[parts.length - 1]!, v.name);
+  }
+  // ADR-0182 S5 (PF-03): the suggested halt names its agent; label it
+  const suggested = detail.suggestedAction as { kind?: unknown; agentId?: unknown } | undefined;
+  if (suggested?.kind === "halt_agent" && typeof suggested.agentId === "string" && /^[0-9a-f-]{36}$/i.test(suggested.agentId)) {
+    const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, suggested.agentId));
+    if (a) labels.set(`agent:${suggested.agentId}`, a.name);
   }
   if (typeof detail.sourceNodeKey === "string" && Array.isArray(detail.path) && Array.isArray(detail.pathLabels)) {
     const i = (detail.path as string[]).indexOf(detail.sourceNodeKey);
@@ -286,6 +306,23 @@ export async function applyRemediationDecision(
     return true;
   }
 
+  if (p.kind === "halt_agent") {
+    // ADR-0182 S5 (PF-03): the halt a PERSON proposed from a KRI breach's
+    // suggestion, applied only now that a DIFFERENT person approved it
+    // (`precheckRemediationDecision` refused the proposer). ADR-0124's one
+    // halt, inside the decision's transaction; already halted = no change.
+    const { agentId } = p.params;
+    const halted = await haltAgentInTx(
+      tx,
+      agentId!,
+      `halted by approved remediation: proposed from governance alert ${p.alertId ?? "(deleted)"} by a user (id ${p.proposedByUserId}), approved by a user (id ${deciderUserId})`,
+      { userId: deciderUserId, detail: { remediationId: p.id, approvalId: approval.id, alertId: p.alertId, proposedByUserId: p.proposedByUserId } },
+    );
+    if (!halted) return (await finish("failed", { error: "agent_not_found" }), false);
+    await finish("applied", { halted: true, changed: halted.changed });
+    return true;
+  }
+
   await finish("failed", { error: "unknown_kind" });
   return false;
 }
@@ -348,6 +385,17 @@ export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
         detail: "a proposal must equal one of this alert's current executable candidates (GET …/remediation)",
       });
     }
+    // ADR-0182 S5 (PF-03): ONE halt proposal per episode — a second click
+    // (by anyone, naming any approver) returns the first, whatever its status
+    if (match.kind === "halt_agent") {
+      const [existing] = await db
+        .select()
+        .from(remediationProposals)
+        .where(and(eq(remediationProposals.alertId, alertId), eq(remediationProposals.kind, "halt_agent")))
+        .orderBy(remediationProposals.createdAt)
+        .limit(1);
+      if (existing) return reply.status(200).send({ ...serialize(existing), idempotent: true });
+    }
     const [approver] = await db
       .select({ id: users.id })
       .from(users)
@@ -359,7 +407,7 @@ export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
       .from(remediationProposals)
       .where(
         and(
-          eq(remediationProposals.kind, match.kind as "link_control" | "assign_agent_owner"),
+          eq(remediationProposals.kind, match.kind as ExecutableRemediationKind),
           eq(remediationProposals.status, "pending_approval"),
           sql`${remediationProposals.params} = ${JSON.stringify(match.params)}::jsonb`,
         ),
@@ -373,7 +421,7 @@ export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
         .insert(remediationProposals)
         .values({
           alertId,
-          kind: match.kind as "link_control" | "assign_agent_owner",
+          kind: match.kind as ExecutableRemediationKind,
           params: match.params,
           title: match.title,
           rationale: match.rationale,
@@ -408,7 +456,19 @@ export function registerRemediationRoutes(app: FastifyInstance, db: Db): void {
       });
       return updated!;
     });
-    if (!created) return reply.status(409).send({ error: "already_pending" });
+    if (!created) {
+      // a concurrent click on the same episode won the insert: same answer as a second click
+      if (match.kind === "halt_agent") {
+        const [first] = await db
+          .select()
+          .from(remediationProposals)
+          .where(and(eq(remediationProposals.alertId, alertId), eq(remediationProposals.kind, "halt_agent")))
+          .orderBy(remediationProposals.createdAt)
+          .limit(1);
+        if (first) return reply.status(200).send({ ...serialize(first), idempotent: true });
+      }
+      return reply.status(409).send({ error: "already_pending" });
+    }
     return reply.status(201).send(serialize(created));
   });
 

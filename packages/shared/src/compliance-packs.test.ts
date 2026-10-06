@@ -202,12 +202,17 @@ describe("the launch packs are honest data", () => {
 
   it("covers the launch frameworks and the ISO 27001 partial mapping", () => {
     const frameworks = [...new Set(DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework))].sort();
-    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-27001", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
+    // ADR-0182 S5: the ISACA AI agents checklist joins the launch set
+    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "isaca-ai-agents", "iso-27001", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
     // ADR-0150: exactly two frameworks ship a second version (bias/safety controls)
     const versions = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`).sort();
     expect(versions.filter((v) => v.endsWith("@2"))).toEqual(["eu-ai-act@2", "nist-ai-rmf@2"]);
-    // ADR-0175: the NIST AI RMF pack alone ships a third version (ID correction)
-    expect(versions.filter((v) => v.endsWith("@3"))).toEqual(["nist-ai-rmf@3"]);
+    // ADR-0175: the NIST AI RMF pack ships a third version (ID correction);
+    // ADR-0182 S5: the EU AI Act a third (Art. 4 as amended, Art. 73) and NIST
+    // a fourth (the accountability records as evidence)
+    expect(versions.filter((v) => v.endsWith("@3"))).toEqual(["eu-ai-act@3", "nist-ai-rmf@3"]);
+    expect(versions.filter((v) => v.endsWith("@4"))).toEqual(["nist-ai-rmf@4"]);
+    expect(versions.filter((v) => /@([5-9]|\d\d)$/.test(v))).toEqual([]);
     expect(new Set(versions).size).toBe(versions.length);
   });
 

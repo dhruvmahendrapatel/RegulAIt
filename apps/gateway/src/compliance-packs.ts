@@ -17,7 +17,9 @@
  *     control gets a number, and every branch of it is a SELECT against a
  *     ledger this deployment already writes — `audit_log`, `approvals`,
  *     `model_card_approvals`, `eval_runs`, `guardrail_configs`,
- *     `abac_policies`, `lineage_edges`, `usage_events`, `compliance_profiles`.
+ *     `abac_policies`, `lineage_edges`, `usage_events`, `compliance_profiles`,
+ *     and (ADR-0182 S5) `ai_incidents`, `use_case_feedback`,
+ *     `ai_policy_acknowledgements`, `decision_regression_runs`.
  *     There is no column anywhere in migration 0073 that an admin could set to
  *     make a control green. Seed the evidence and the control goes green;
  *     delete it and the control goes red again, in the same period, with no
@@ -50,6 +52,9 @@ import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
   abacPolicies,
+  aiIncidents,
+  aiPolicyAcknowledgements,
+  aiUseCases,
   and,
   approvals,
   auditLog,
@@ -60,6 +65,7 @@ import {
   compliancePacks,
   complianceProfiles,
   count,
+  decisionRegressionRuns,
   desc,
   energyFactors,
   eq,
@@ -75,6 +81,7 @@ import {
   projectMembers,
   sql,
   usageEvents,
+  useCaseFeedback,
   type CompliancePackControlRow,
   type CompliancePackRow,
   type Db,
@@ -362,6 +369,73 @@ export async function runCollector(
       // by" chip, so the scorecard and the chip cannot disagree.
       if (!ctx.controlRef) return 0;
       return countTestedEvaluators(db, ctx.controlRef, { periodStart, periodEnd, projectIds });
+    }
+
+    // ADR-0182 S5 — the accountability records. Each counts rows CREATED in
+    // the period, read by SQL over the tables A11–A14 write (their modules
+    // are not imported), and selects ids only, never a body or a narrative.
+    case "incident_register": {
+      // incidents recorded in the period; scoped through the incident's use
+      // case's project (an incident with no use case is un-attributed, so it
+      // is reached only by an org-scoped report)
+      const where = and(
+        gte(aiIncidents.createdAt, periodStart),
+        lt(aiIncidents.createdAt, periodEnd),
+        ...(projectIds === null
+          ? []
+          : [
+              inArray(
+                aiIncidents.useCaseId,
+                db.select({ id: aiUseCases.id }).from(aiUseCases).where(inArray(aiUseCases.projectId, safeIds(projectIds))),
+              ),
+            ]),
+      );
+      const [row] = await db.select({ n: count() }).from(aiIncidents).where(where);
+      return row?.n ?? 0;
+    }
+
+    case "user_feedback_channel": {
+      // problem reports and appeals received in the period, through the use
+      // case's project when scoped
+      const where = and(
+        gte(useCaseFeedback.createdAt, periodStart),
+        lt(useCaseFeedback.createdAt, periodEnd),
+        ...(projectIds === null
+          ? []
+          : [
+              inArray(
+                useCaseFeedback.useCaseId,
+                db.select({ id: aiUseCases.id }).from(aiUseCases).where(inArray(aiUseCases.projectId, safeIds(projectIds))),
+              ),
+            ]),
+      );
+      const [row] = await db.select({ n: count() }).from(useCaseFeedback).where(where);
+      return row?.n ?? 0;
+    }
+
+    case "literacy_acknowledgements": {
+      // acknowledgements and recorded completions made in the period; the
+      // ledger has no project, so a scoped report counts the people who are
+      // members of the caller's projects (as `approvals` does)
+      const where = and(
+        gte(aiPolicyAcknowledgements.acknowledgedAt, periodStart),
+        lt(aiPolicyAcknowledgements.acknowledgedAt, periodEnd),
+        ...(memberIds === null ? [] : [inArray(aiPolicyAcknowledgements.userId, safeIds(memberIds))]),
+      );
+      const [row] = await db.select({ n: count() }).from(aiPolicyAcknowledgements).where(where);
+      return row?.n ?? 0;
+    }
+
+    case "decision_regression_runs": {
+      // organisation-wide policy testing with no project: un-attributed, so
+      // only an org-scoped report reaches it (fail closed, as audit rows
+      // without a project are)
+      if (projectIds !== null) return 0;
+      const [row] = await db
+        .select({ n: count() })
+        .from(decisionRegressionRuns)
+        .where(and(gte(decisionRegressionRuns.createdAt, periodStart), lt(decisionRegressionRuns.createdAt, periodEnd)));
+      return row?.n ?? 0;
     }
 
     default: {
