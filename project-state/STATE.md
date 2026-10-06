@@ -1,5 +1,5 @@
 ---
-phase: adr0182-d4-accountability-records-integrated-on-d4-int-pr-next
+phase: adr0183-delivery-plan-batches-1-and-2-in-progress
 last_updated: 2026-10-06
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -21,6 +21,19 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-06 - D4 merged (PR #129, 3db120a). ADR-0183: the post-D4 delivery plan, confirmed by the owner.**
+- The owner's ordered list is done (ADR-0173 2a–2c, ADR-0175 D1–D4, ADR-0181). The consolidated plan is
+  [docs/product/DELIVERY_PLAN_2026-10-06.md](../docs/product/DELIVERY_PLAN_2026-10-06.md).
+- Order: batch 1, trust our own build (SAST, secret, dependency and container scanning, SBOM, signing; the S4 deferral
+  is lifted), and batch 2, the debt tail (`otpauth`, staleness in SQL, refusal messages, Playwright sharding, SeaweedFS,
+  the Outlook send half), in parallel. Then batch 3 (retention, `/metrics`, MCP coverage), batch 4 (approvals and
+  detection content), batch 5 (sidecar engines), batch 6 (structural, one ADR each).
+- Owner decisions: SeaweedFS replaces the frozen MinIO image only if the ADR-0060 Object Lock attack suite passes on it
+  (Garage was chosen first, then dropped: it has no Object Lock); vendored detection patterns redact on match; Outlook
+  gets the send half ADR-0121 designed, and inbound stays refused.
+- The next migration is **0169**; batch 1's ADR takes **0184**.
+- M-070 added: a deterministic failure was called a flake after re-running it on a different tree.
+
 **2026-10-06 - D4 accountability records (ADR-0182) built by six agents and integrated on `d4-int`.**
 - P0 (migration **0162**) built the foundation. A11 (decision records and the decision-regression gate), A12 (the AI
   incident register with EU AI Act and HIPAA clocks and the Art. 73(6) evidence hold), A13 (feedback and appeal;
@@ -38,7 +51,7 @@ roadmap: ../docs/product/ROADMAP.md
   clock terminal, plus one acceptable-use document with a completion recorded for Ada, Dana and Avery by the demo tooling
   (`admin_recorded`; the evidence says it was not acknowledged in person). The literacy gate stays
   `enforce`. `demo:check` has a new **3 Accountability** beat; `demo:prepare` gives 19 pass, 0 warn, 0 fail.
-- Next: the batch PR from `d4-int` to `main`.
+- Merged as PR #129 (3db120a); `dhruv/active` fast-forwarded.
 
 **2026-10-06 - ADR-0181 security review fixed and integrated on `strict-int` (PR #127).**
 - Three fix agents (`strict-fx1`, `strict-fx3`, `strict-fx2`) merged in that order. Migrations **0160** (SAML JIT
