@@ -8,16 +8,21 @@
  * code, and the card says so. An admin may relax a tier (the change is
  * audited). An OWASP id that no red-team class or eval scorer can measure is
  * offered disabled, with the reason, because the gateway refuses it.
+ *
+ * ADR-0182 A11: saving is a "Preview impact" step first (the golden cases
+ * replayed under the draft); the save carries the run's id and any accepted
+ * changes, as the gateway's decision-regression gate requires.
  */
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { api, ApiError } from "../../../api/client";
 import { Badge, Button, Card, Field, Input, Select } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { QueryGate } from "../adminKit";
 import { shortDate } from "./useCaseLifecycle";
 import { TIERS } from "./reviewPolicy";
 import p from "./reviewPolicy.module.css";
+import { PreviewImpactModal, type RegressionAcceptance } from "./DecisionRegressionPage";
 
 type Tier = (typeof TIERS)[number]["id"];
 
@@ -127,7 +132,10 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
       },
     }));
 
-  const save = async () => {
+  const [candidate, setCandidate] = useState<Partial<Record<Tier, TierPolicy>> | null>(null);
+
+  /** validate the draft, then open the "Preview impact" step with its body */
+  const preview = () => {
     const found: Partial<Record<Tier, string>> = {};
     const body: Partial<Record<Tier, TierPolicy>> = {};
     for (const t of TIERS) {
@@ -155,20 +163,33 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
     setErrors(found);
     if (Object.keys(found).length > 0) return;
     setSubmitError(null);
+    setCandidate(body);
+  };
+
+  /** the save itself, from the preview step. A field-level refusal (422)
+   * closes the step and is shown on the card, as before. */
+  const save = async (acceptance: RegressionAcceptance) => {
+    if (!candidate) return;
     setBusy(true);
     try {
-      await api.put(REQUIRED_TESTS_PATH, body);
+      await api.put(REQUIRED_TESTS_PATH, { ...candidate, ...acceptance });
+      setCandidate(null);
       toast("Required AI tests saved", "success");
       await queryClient.invalidateQueries({ queryKey: KEY });
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : String(e));
+      if (e instanceof ApiError && e.status === 422) {
+        setCandidate(null);
+        setSubmitError(e.message);
+        return;
+      }
+      throw e;
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <form noValidate onSubmit={(e) => { e.preventDefault(); void save(); }}>
+    <form noValidate onSubmit={(e) => { e.preventDefault(); preview(); }}>
       <Card title="Required AI tests by tier">
         <p className={p.lead}>
           Before a use case may ship, every agent in its stack needs a completed red-team or eval run that measured each
@@ -273,9 +294,18 @@ function RequiredTestsForm(props: { view: RequiredTestsView }) {
             {view.updatedAt ? `Last changed ${shortDate(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ""}.` : "Not changed yet: every tier uses the strict default."}
           </p>
           {submitError ? <p className={p.error} role="alert">The required tests were not saved: {submitError}</p> : null}
-          <Button type="submit" variant="primary" disabled={busy}>{busy ? "Saving…" : "Save required tests"}</Button>
+          <Button type="submit" variant="primary" disabled={busy}>{busy ? "Saving…" : "Preview impact"}</Button>
         </div>
       </Card>
+      <PreviewImpactModal
+        open={candidate !== null}
+        subject="required_tests"
+        candidate={candidate ?? {}}
+        what="the required AI tests"
+        saveLabel="Save required tests"
+        onCancel={() => setCandidate(null)}
+        onSave={save}
+      />
     </form>
   );
 }

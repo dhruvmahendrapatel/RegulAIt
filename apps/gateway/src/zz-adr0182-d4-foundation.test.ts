@@ -491,14 +491,7 @@ describe("ADR-0182 D4 routes: registered with a deliberate auth class, 501 until
   const U = "00000000-0000-4000-8000-000000000001";
   const X = "00000000-0000-4000-8000-000000000002";
   const ROUTES: Array<{ method: Method; pattern: string; url: string; cls: "admin" | "user" | "public" }> = [
-    // A11
-    { method: "POST", pattern: "/v1/governance/decision-regression/preview", url: "/v1/governance/decision-regression/preview", cls: "admin" },
-    { method: "GET", pattern: "/v1/governance/decision-regression/runs", url: "/v1/governance/decision-regression/runs", cls: "admin" },
-    { method: "GET", pattern: "/v1/governance/decision-regression/runs/:runId", url: `/v1/governance/decision-regression/runs/${X}`, cls: "admin" },
-    { method: "GET", pattern: "/v1/governance/decision-regression/cases", url: "/v1/governance/decision-regression/cases", cls: "admin" },
-    { method: "POST", pattern: "/v1/governance/decision-regression/cases", url: "/v1/governance/decision-regression/cases", cls: "admin" },
-    { method: "DELETE", pattern: "/v1/governance/decision-regression/cases/:caseId", url: `/v1/governance/decision-regression/cases/${X}`, cls: "admin" },
-    { method: "GET", pattern: "/v1/use-cases/:useCaseId/decision-records", url: `/v1/use-cases/${U}/decision-records`, cls: "user" },
+    // A11: built — classes and behaviour pinned by zz-adr0182-a11-decision-regression.test.ts
     // A12
     { method: "GET", pattern: "/v1/incidents", url: "/v1/incidents", cls: "user" },
     { method: "POST", pattern: "/v1/incidents", url: "/v1/incidents", cls: "user" },

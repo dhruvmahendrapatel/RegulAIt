@@ -7,10 +7,15 @@
  *
  * ADR-0180 A3: below it, the required AI test classes per tier
  * (RequiredTestsEditor), saved through their own admin-only, audited route.
+ *
+ * ADR-0182 A11: saving is a "Preview impact" step first — the golden cases are
+ * replayed under the draft and every case whose outcome it changes is shown;
+ * the save carries the run's id, and any changed outcomes are accepted with a
+ * reason (the gateway's decision-regression gate refuses anything else).
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { api, ApiError } from "../../../api/client";
 import type { DirectoryUser, ReviewPolicy } from "../../../api/types";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, Field, Input, Select } from "../../../ui/kit";
@@ -34,6 +39,7 @@ import {
 } from "./reviewPolicy";
 import p from "./reviewPolicy.module.css";
 import { RequiredTestsEditor } from "./RequiredTestsEditor";
+import { PreviewImpactModal, type RegressionAcceptance } from "./DecisionRegressionPage";
 
 export default function ReviewPolicyPage() {
   const policy = useQuery({ queryKey: REVIEW_POLICY_KEY, queryFn: () => api.get<ReviewPolicy>("/v1/governance/review-policy") });
@@ -81,7 +87,10 @@ function PolicyForm(props: { policy: ReviewPolicy; people: DirectoryUser[] }) {
       return { ...d, tiers: { ...d.tiers, [tier]: { ...t, roleKeys: on ? [...t.roleKeys, key] : t.roleKeys.filter((k) => k !== key) } } };
     });
 
-  const save = async () => {
+  const [previewing, setPreviewing] = useState(false);
+
+  /** validate, then open the "Preview impact" step (nothing is saved yet) */
+  const preview = () => {
     const found = validatePolicy(draft);
     if (policyHasErrors(found)) {
       setErrors(found);
@@ -90,13 +99,26 @@ function PolicyForm(props: { policy: ReviewPolicy; people: DirectoryUser[] }) {
     }
     setErrors(null);
     setSubmitError(null);
+    setPreviewing(true);
+  };
+
+  /** the save itself, from the preview step, with the run's id and acceptance.
+   * A field-level refusal (422) closes the step and is shown on the page; a
+   * gate refusal (409, the preview went stale) stays in the step. */
+  const save = async (acceptance: RegressionAcceptance) => {
     setBusy(true);
     try {
-      await api.put("/v1/governance/review-policy", policyBody(draft));
+      await api.put("/v1/governance/review-policy", { ...policyBody(draft), ...acceptance });
+      setPreviewing(false);
       toast("Review policy saved", "success");
       await queryClient.invalidateQueries({ queryKey: REVIEW_POLICY_KEY });
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : String(e));
+      if (e instanceof ApiError && e.status === 422) {
+        setPreviewing(false);
+        setSubmitError(e.message);
+        return;
+      }
+      throw e;
     } finally {
       setBusy(false);
     }
@@ -105,7 +127,7 @@ function PolicyForm(props: { policy: ReviewPolicy; people: DirectoryUser[] }) {
   const roleLabel = (r: RoleDraft, i: number) => r.name.trim() || `Role ${i + 1}`;
 
   return (
-    <form ref={form} className={v.stack} noValidate onSubmit={(e) => { e.preventDefault(); void save(); }}>
+    <form ref={form} className={v.stack} noValidate onSubmit={(e) => { e.preventDefault(); preview(); }}>
       <Card title="Reviewer roles">
         <p className={p.lead}>A role is a group of reviewers; any one member can complete that role&apos;s review.</p>
         {draft.roles.length === 0 ? <p className={p.none}>No reviewer roles yet. Every use case goes to a single named approver.</p> : (
@@ -198,13 +220,23 @@ function PolicyForm(props: { policy: ReviewPolicy; people: DirectoryUser[] }) {
       <Card>
         <div className={p.footer}>
           <p className={p.footerNote}>
+            {typeof (props.policy as { version?: number | null }).version === "number" ? `Version ${(props.policy as { version?: number }).version}. ` : ""}
             {props.policy.updatedAt ? `Last changed ${shortDate(props.policy.updatedAt)}${props.policy.updatedByName ? ` by ${props.policy.updatedByName}` : ""}.` : "Not changed yet."}
           </p>
           {errors && policyHasErrors(errors) ? <p className={p.error} role="alert">Fix the highlighted fields, then save.</p> : null}
           {submitError ? <p className={p.error} role="alert">The policy was not saved: {submitError}</p> : null}
-          <Button type="submit" variant="primary" disabled={busy}>{busy ? "Saving…" : "Save policy"}</Button>
+          <Button type="submit" variant="primary" disabled={busy}>{busy ? "Saving…" : "Preview impact"}</Button>
         </div>
       </Card>
+      <PreviewImpactModal
+        open={previewing}
+        subject="review_policy"
+        candidate={policyBody(draft)}
+        what="the review policy"
+        saveLabel="Save policy"
+        onCancel={() => setPreviewing(false)}
+        onSave={save}
+      />
     </form>
   );
 }

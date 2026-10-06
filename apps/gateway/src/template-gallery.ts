@@ -40,6 +40,8 @@ import { createFromGallerySchema } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { createWorkflowTemplateValidated } from "./workflows.js";
+import { isIntakeTemplateName } from "@regulait/shared";
+import { admitIntakeTemplateWrite } from "./decision-regression.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -307,6 +309,19 @@ export async function buildTemplateGallery(
   return { entries, profiles };
 }
 
+/** a gallery shape with its `requesting_user` placeholder replaced by a named
+ * approver (unchanged without one). The one substitution "create from
+ * gallery" and the decision-regression preview of a variant both apply. */
+export function galleryDefinitionWithApprover(definition: WorkflowDefinition, approverUserId: string | undefined): WorkflowDefinition {
+  if (!approverUserId) return definition;
+  return {
+    ...definition,
+    stages: definition.stages.map((s) =>
+      s.approvers ? { ...s, approvers: s.approvers.map((a) => (a === APPROVER_PLACEHOLDER ? approverUserId : a)) } : s,
+    ),
+  };
+}
+
 export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): void {
   // admin-gated by the default route class (not in NON_ADMIN_ROUTES)
   app.get("/v1/workflows/template-gallery", async () => {
@@ -329,24 +344,25 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
 
     // substitute the requesting_user placeholder with the named approver (if
     // any); resolution/validation happens in the ONE creation path below
-    const definition: WorkflowDefinition = body.approverUserId
-      ? {
-          ...entry.definition,
-          stages: entry.definition.stages.map((s) =>
-            s.approvers
-              ? {
-                  ...s,
-                  approvers: s.approvers.map((a) =>
-                    a === APPROVER_PLACEHOLDER ? body.approverUserId! : a,
-                  ),
-                }
-              : s,
-          ),
-        }
-      : entry.definition;
+    const definition: WorkflowDefinition = galleryDefinitionWithApprover(entry.definition, body.approverUserId);
+
+    // ADR-0182 A11: an `ai-use-case-intake` template or variant decides who
+    // signs off every new use case, so creating one is an activation the
+    // decision-regression gate admits (a preview of this exact body).
+    const gate = isIntakeTemplateName(body.name)
+      ? await admitIntakeTemplateWrite(
+          db,
+          req.body,
+          { galleryId, name: body.name, ...(body.approverUserId ? { approverUserId: body.approverUserId } : {}) },
+          { name: body.name, definition },
+          req.authCtx.userId ?? null,
+        )
+      : null;
+    if (gate && !gate.ok) return reply.status(gate.status).send(gate.body);
 
     const result = await createWorkflowTemplateValidated(db, { name: body.name, definition });
     if (!result.ok) return reply.status(result.status).send(result.body);
+    const decisionRegression = gate ? await gate.record() : null;
 
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
@@ -367,6 +383,6 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
         `workflow template '${body.name}' created from gallery shape '${galleryId}' — ` +
         `instantiated through the one template-creation path, so full validation applied`,
     });
-    return reply.status(201).send({ ...result.row, galleryId });
+    return reply.status(201).send({ ...result.row, galleryId, ...(decisionRegression ? { decisionRegression } : {}) });
   });
 }

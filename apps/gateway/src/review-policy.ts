@@ -45,8 +45,10 @@ import {
 } from "@regulait/db";
 import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
+  accountabilityDigest,
   recertificationSweepSchema,
   reviewPolicyInputSchema,
+  reviewPolicyStoredBody,
   REVIEW_POLICY_TIER_KEYS,
   type ReviewPolicyTierKey,
   type ReviewPolicyView,
@@ -54,6 +56,16 @@ import {
 } from "@regulait/shared";
 import type { ApprovalPostCommit } from "./orchestration.js";
 import { reopenWorkflowInstance } from "./workflows.js";
+import {
+  appendReviewPolicyVersion,
+  baselineDigestFor,
+  checkDecisionRegressionGate,
+  computeRegression,
+  loadLiveDecisionConfig,
+  nextReviewPolicyVersion,
+  recordDecisionRegressionActivation,
+  refuseDecisionRegression,
+} from "./decision-regression.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const POLICY_ID = "default";
@@ -507,7 +519,7 @@ export async function runUseCaseRecertificationSweep(
 // ---------------------------------------------------------------------------
 
 async function policyView(db: Db, row: StoredReviewPolicy | null): Promise<ReviewPolicyView> {
-  if (!row) return { roles: [], tiers: {}, riskAcceptorUserIds: [], updatedAt: null, updatedByName: null };
+  if (!row) return { roles: [], tiers: {}, riskAcceptorUserIds: [], updatedAt: null, updatedByName: null, version: null };
   let updatedByName: string | null = null;
   if (row.updatedByUserId) {
     const [u] = await db
@@ -522,6 +534,7 @@ async function policyView(db: Db, row: StoredReviewPolicy | null): Promise<Revie
     riskAcceptorUserIds: [...row.riskAcceptorUserIds],
     updatedAt: row.updatedAt.toISOString(),
     updatedByName,
+    version: row.version,
   };
 }
 
@@ -631,42 +644,83 @@ export function registerReviewPolicyRoutes(app: FastifyInstance, db: Db): void {
         });
       }
     }
-    const tiers: Record<string, { roleIds: string[]; validityMonths?: number }> = {};
-    for (const key of REVIEW_POLICY_TIER_KEYS) {
-      const t = body.tiers[key];
-      if (t) tiers[key] = { roleIds: t.roleIds, ...(t.validityMonths !== undefined ? { validityMonths: t.validityMonths } : {}) };
-    }
-    const values = {
-      roles: body.roles.map((r) => ({ id: r.id, name: r.name, memberUserIds: r.memberUserIds })),
-      tiers,
-      riskAcceptorUserIds: body.riskAcceptorUserIds,
-      updatedAt: new Date(),
-      updatedByUserId: req.authCtx.userId ?? null,
+    // ADR-0182 A11: the stored body is the ONE normalisation the preview
+    // digests, so a preview of this body and this write agree byte for byte
+    const stored = reviewPolicyStoredBody(body);
+    const tiers = stored.tiers;
+    const candidateDigest = accountabilityDigest(stored);
+    const acceptance = {
+      ...(body.regressionRunId !== undefined ? { regressionRunId: body.regressionRunId } : {}),
+      ...(body.acceptChangedOutcomes !== undefined ? { acceptChangedOutcomes: body.acceptChangedOutcomes } : {}),
+      ...(body.acceptReason !== undefined ? { acceptReason: body.acceptReason } : {}),
     };
-    const before = await loadReviewPolicy(db);
-    const [row] = await db
-      .insert(governanceReviewPolicy)
-      .values({ id: POLICY_ID, ...values })
-      .onConflictDoUpdate({ target: governanceReviewPolicy.id, set: values })
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "org_settings",
-      objectId: null,
-      detail: {
-        phase: "review-policy-updated",
-        before: before ? { roles: before.roles, tiers: before.tiers, riskAcceptorUserIds: before.riskAcceptorUserIds } : null,
-        after: { roles: values.roles, tiers: values.tiers, riskAcceptorUserIds: values.riskAcceptorUserIds },
-      },
-      effect: "allow",
-      ruleId: "review-policy-updated",
-      ruleChain: [],
-      reason:
-        `review policy updated: ${values.roles.length} reviewer role(s), ` +
-        `${Object.values(tiers).filter((t) => t.roleIds.length > 0).length} tier(s) routed to roles, ` +
-        `${values.riskAcceptorUserIds.length} risk acceptor(s)`,
+    const actor = req.authCtx.userId ?? null;
+    const values = {
+      roles: stored.roles,
+      tiers: tiers as Record<string, { roleIds: string[]; validityMonths?: number }>,
+      riskAcceptorUserIds: stored.riskAcceptorUserIds,
+      updatedAt: new Date(),
+      updatedByUserId: actor,
+    };
+    // ONE transaction, the policy row locked: the gate compares the preview's
+    // baseline with the policy this write replaces, the policy and its version
+    // row move together, and the write never lands without its audit rows
+    const out = await db.transaction(async (tx) => {
+      const [before] = await tx.select().from(governanceReviewPolicy).where(eq(governanceReviewPolicy.id, POLICY_ID)).for("update");
+      const live = await loadLiveDecisionConfig(tx);
+      const verdict = await checkDecisionRegressionGate(tx, {
+        subject: "review_policy",
+        candidateDigest,
+        baselineDigest: baselineDigestFor("review_policy", live),
+        acceptance,
+      });
+      if (!verdict.ok) return { kind: "refused" as const, verdict };
+      const version = await nextReviewPolicyVersion(tx, before?.version ?? null);
+      const [row] = await tx
+        .insert(governanceReviewPolicy)
+        .values({ id: POLICY_ID, ...values, version })
+        .onConflictDoUpdate({ target: governanceReviewPolicy.id, set: { ...values, version } })
+        .returning();
+      const appended = await appendReviewPolicyVersion(
+        tx,
+        version,
+        { roles: values.roles, tiers: values.tiers, riskAcceptorUserIds: values.riskAcceptorUserIds, requiredTests: (row!.requiredTests ?? {}) as Record<string, unknown> },
+        actor,
+      );
+      const gate = await recordDecisionRegressionActivation(tx, verdict, {
+        subject: "review_policy",
+        candidateDigest,
+        acceptance,
+        actorUserId: actor,
+        computeNow: () => computeRegression(tx, "review_policy", candidateDigest, { reviewPolicy: stored }, live),
+      });
+      await tx.insert(auditLog).values({
+        userId: actor ?? NO_IDENTITY,
+        objectType: "org_settings",
+        objectId: null,
+        detail: {
+          phase: "review-policy-updated",
+          before: before ? { roles: before.roles, tiers: before.tiers, riskAcceptorUserIds: before.riskAcceptorUserIds } : null,
+          after: { roles: values.roles, tiers: values.tiers, riskAcceptorUserIds: values.riskAcceptorUserIds },
+          version,
+          digest: appended.digest,
+          decisionRegression: { outcome: gate.outcome, mode: gate.mode, runId: gate.runId, activationRunId: gate.activationRunId },
+        },
+        effect: "allow",
+        ruleId: "review-policy-updated",
+        ruleChain: [],
+        reason:
+          `review policy updated to version ${version}: ${values.roles.length} reviewer role(s), ` +
+          `${Object.values(values.tiers).filter((t) => t.roleIds.length > 0).length} tier(s) routed to roles, ` +
+          `${values.riskAcceptorUserIds.length} risk acceptor(s)`,
+      });
+      return { kind: "saved" as const, row: row!, gate };
     });
-    return policyView(db, row!);
+    if (out.kind === "refused") {
+      const refused = await refuseDecisionRegression(db, out.verdict, { subject: "review_policy", candidateDigest, actorUserId: actor });
+      return reply.status(refused.status).send(refused.body);
+    }
+    return { ...(await policyView(db, out.row)), decisionRegression: out.gate };
   });
 
   // Admin (the default gate): run the recertification sweep now. The scheduler

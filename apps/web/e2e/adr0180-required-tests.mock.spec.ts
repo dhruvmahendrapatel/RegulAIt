@@ -58,6 +58,17 @@ const viewOf = (policy: Record<string, { classes: Array<{ testClass: string; max
   updatedByName: null,
 });
 
+const RUN_ID = "22222222-2222-4222-8222-222222222222";
+
+/** the "Preview impact" step: nothing changes, so the save needs no acceptance */
+async function previewAndSave(page: Page) {
+  await card(page).getByRole("button", { name: "Preview impact" }).click();
+  const dialog = page.getByRole("dialog", { name: "Preview impact: the required AI tests" });
+  await expect(dialog.getByRole("status").filter({ hasText: "0 of 17 golden cases change" })).toBeVisible();
+  await expect(dialog).toContainText("No golden case changes its outcome.");
+  await dialog.getByRole("button", { name: "Save required tests" }).click();
+}
+
 interface Captured {
   testPuts: unknown[];
   policyPuts: unknown[];
@@ -85,6 +96,10 @@ async function mockApi(page: Page, opts: { refuse?: boolean } = {}): Promise<Cap
       return json(route, view);
     }
     if (p === "/v1/governance/review-policy/required-tests") return json(route, view);
+    // ADR-0182 A11: saving is a "Preview impact" step first (here: no outcome changes)
+    if (p === "/v1/governance/decision-regression/preview" && method === "POST") {
+      return json(route, { id: RUN_ID, trigger: "preview", subject: "required_tests", candidateDigest: "c".repeat(64), baselineDigest: "d".repeat(64), cases: 17, changed: 0, entries: [], createdAt: "2026-10-05T12:00:00.000Z", createdByName: "Avery Admin", expiresAt: "2026-10-05T13:00:00.000Z" }, 201);
+    }
     if (p === "/v1/governance/review-policy" && method === "PUT") {
       cap.policyPuts.push(req.postDataJSON());
       return json(route, {});
@@ -145,10 +160,12 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     await high.getByLabel("Add a required test class to the high tier").selectOption("owasp:llm:09");
     await expect(high.getByLabel("High tier: LLM09 minimum eval score (0 to 1)")).toHaveValue("0.8");
     await high.getByLabel("High tier: freshness in days (1 to 90)").fill("14");
-    await card(page).getByRole("button", { name: "Save required tests" }).click();
+    await previewAndSave(page);
     await expect.poll(() => cap.testPuts.length).toBe(1);
     const body = cap.testPuts[0] as Record<string, { classes: unknown[]; freshnessDays: number }>;
-    expect(Object.keys(body).sort()).toEqual(["high", "limited"]);
+    // ADR-0182 A11: the policy, and the preview run that admits it
+    expect(Object.keys(body).sort()).toEqual(["high", "limited", "regressionRunId"]);
+    expect(body.regressionRunId as unknown).toBe(RUN_ID);
     expect(body.limited).toEqual({ classes: [{ testClass: "owasp:llm:01", maxAsr: 5 }], freshnessDays: 30 });
     expect(body.high!.freshnessDays).toBe(14);
     expect(body.high!.classes).toContainEqual({ testClass: "owasp:llm:09", minScore: 0.8 });
@@ -162,11 +179,11 @@ test.describe("ADR-0180 A3: required AI tests per tier", () => {
     await page.goto("/ui/admin/governance/review-policy");
     const minimal = tierRow(page, "minimal");
     await minimal.getByLabel("Minimal tier: freshness in days (1 to 90)").fill("120");
-    await card(page).getByRole("button", { name: "Save required tests" }).click();
+    await card(page).getByRole("button", { name: "Preview impact" }).click();
     await expect(minimal.getByRole("alert")).toContainText("Freshness must be a whole number of days from 1 to 90.");
     expect(cap.testPuts).toEqual([]);
     await minimal.getByLabel("Minimal tier: freshness in days (1 to 90)").fill("30");
-    await card(page).getByRole("button", { name: "Save required tests" }).click();
+    await previewAndSave(page);
     await expect(card(page).getByRole("alert")).toContainText("The required tests were not saved");
     await expect(card(page).getByRole("alert")).toContainText("Data and Model Poisoning");
     await expect(minimal.getByRole("button", { name: "Reset minimal tier to the strict default" })).toBeVisible();
