@@ -387,6 +387,16 @@ jobs:
       - name: SPA journeys — developer (phase1), admin (phase2) and agent builder (phase6) personas
         run: pnpm --filter @regulait/web exec playwright test e2e/phase1.spec.ts e2e/phase2.spec.ts e2e/phase6-agent-builder.spec.ts e2e/phase6-builder-tools.spec.ts --reporter=list,github
 
+      # The artifact below needs a download; this puts the page snapshot at the
+      # failure and the gateway's last lines straight into the job log.
+      - name: Print the failure context
+        if: failure()
+        run: |
+          find apps/web/test-results -name error-context.md -exec sh -c 'echo "== $1"; cat "$1"' _ {} \; || true
+          # public repo, public log: drop anything credential-shaped even though the run is synthetic
+          echo "== gateway-e2e.log (last 120 lines, credential-like lines dropped)"
+          tail -n 120 apps/web/e2e/gateway-e2e.log | grep -viE "password|token|secret|key|bearer|cookie" || true
+
       - name: Keep the evidence when it fails
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
