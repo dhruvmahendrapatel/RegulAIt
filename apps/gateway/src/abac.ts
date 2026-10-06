@@ -331,8 +331,6 @@ export function runAbacPolicyTests(
 ): { passed: number; failed: number; results: AbacTestCaseResult[] } {
   const results = cases.map((c) => {
     const classifications = c.resource.classifications ?? [];
-    // schema v3 (ADR-0182 A14): a stored case may name it; absent = false, the strict answer
-    const principal = c.principal as AbacPolicyTestCase["principal"] & { aiTrainingCurrent?: boolean };
     const request: AbacRequest = {
       principal: {
         id: c.principal.id ?? NIL_UUID,
@@ -342,7 +340,8 @@ export function runAbacPolicyTests(
         isAdmin: c.principal.isAdmin ?? false,
         sessionOrigin: c.principal.sessionOrigin ?? "unknown",
         mfaCompleted: c.principal.mfaCompleted ?? false,
-        aiTrainingCurrent: principal.aiTrainingCurrent ?? false,
+        // schema v3 (ADR-0182 A14): a stored case may name it; absent = false, the strict answer
+        aiTrainingCurrent: c.principal.aiTrainingCurrent ?? false,
       },
       resource: {
         id: `${c.resource.serverId ?? "server"}/${c.resource.toolName}`,

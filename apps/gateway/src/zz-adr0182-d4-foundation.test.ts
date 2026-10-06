@@ -494,40 +494,10 @@ describe("ADR-0182 the use case's EU AI Act role", () => {
   });
 });
 
-describe("ADR-0182 D4 routes: registered with a deliberate auth class, 501 until their slice lands", () => {
-  const U = "00000000-0000-4000-8000-000000000001";
-  const X = "00000000-0000-4000-8000-000000000002";
-  const ROUTES: Array<{ method: Method; pattern: string; url: string; cls: "admin" | "user" | "public" }> = [
-    // A11: built — classes and behaviour pinned by zz-adr0182-a11-decision-regression.test.ts
-    // A12: built — classes and behaviour pinned by zz-adr0182-a12-incidents.test.ts
-    // A13: built — classes and behaviour pinned by zz-adr0182-a13-feedback.test.ts
-    // A14
-    { method: "GET", pattern: "/v1/ai-policies", url: "/v1/ai-policies", cls: "user" },
-    { method: "POST", pattern: "/v1/ai-policies", url: "/v1/ai-policies", cls: "admin" },
-    { method: "GET", pattern: "/v1/ai-policies/coverage", url: "/v1/ai-policies/coverage", cls: "admin" },
-    { method: "POST", pattern: "/v1/ai-policies/:policyId/publish", url: `/v1/ai-policies/${X}/publish`, cls: "admin" },
-    { method: "POST", pattern: "/v1/ai-policies/:policyId/retire", url: `/v1/ai-policies/${X}/retire`, cls: "admin" },
-    { method: "POST", pattern: "/v1/ai-policies/:policyId/acknowledge", url: `/v1/ai-policies/${X}/acknowledge`, cls: "user" },
-    { method: "POST", pattern: "/v1/ai-policies/:policyId/records", url: `/v1/ai-policies/${X}/records`, cls: "admin" },
-    { method: "GET", pattern: "/v1/me/ai-literacy", url: "/v1/me/ai-literacy", cls: "user" },
-    // S5 landed: its routes are classed in its own suite (zz-adr0182-s5-alert-ownership)
-  ];
-
-  it.each(ROUTES)("$method $pattern is classed $cls and answers 501", async (r) => {
-    expect(routeAuthClass(r.method, r.pattern)).toBe(r.cls);
-    const asAdmin = await inject(r.method, r.url, users.admin.auth, r.method === "GET" || r.method === "DELETE" ? undefined : {});
-    expect(asAdmin.statusCode, asAdmin.body).toBe(501);
-    expect(asAdmin.json().error).toBe("not_implemented");
-    const asMember = await inject(r.method, r.url, users.member.auth, r.method === "GET" || r.method === "DELETE" ? undefined : {});
-    expect(asMember.statusCode, asMember.body).toBe(r.cls === "admin" ? 403 : 501);
-    if (r.cls === "public") {
-      const anon = await inject(r.method, r.url, {}, r.method === "GET" ? undefined : {});
-      expect(anon.statusCode, anon.body).toBe(501);
-    } else {
-      expect((await inject(r.method, r.url, {}, r.method === "GET" || r.method === "DELETE" ? undefined : {})).statusCode).toBe(401);
-    }
-  });
-});
+// ADR-0182 D4 routes: P0 registered every slice route as a 501 stub with its
+// deliberate auth class; each slice replaced its stubs and now pins the classes
+// in its own suite — zz-adr0182-a11-decision-regression, -a12-incidents,
+// -a13-feedback, -a14-literacy and -s5-alert-ownership. No stub remains.
 
 describe("ADR-0182 monitor and scheduler: the four accountability rules, the five jobs", () => {
   it("the rules are in the catalogue at their stated severities", () => {

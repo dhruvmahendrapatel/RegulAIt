@@ -4492,6 +4492,8 @@ export interface AbacPolicyTestCase {
     isAdmin?: boolean;
     sessionOrigin?: string;
     mfaCompleted?: boolean;
+    /** ADR-0182 A14 (Cedar schema v3): the principal's AI-literacy training is current */
+    aiTrainingCurrent?: boolean;
   };
   resource: {
     serverId?: string | null;
