@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X17: isolate review-policy proposer from earlier intake drafts | Real demo regression with a contaminated neighboring fixture; X14 and X15 | — | 10-06 23:32 | — |
+| Codex | X17 draft PR #138: retained neighboring draft and both real demo journeys pass | X14 seven-page keyboard and screen-reader audit; X15 adversarial review | — | 10-06 23:42 | — |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -226,7 +226,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
   test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
   it is the same root cause; say so on the X13 row. Branch `codex/x17`.
-  Status: IN-PROGRESS (Codex, 2026-10-06 23:32 UTC)
+  Status: READY-FOR-REVIEW (5e9a7b2e; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/138)
+  Evidence: own proposer fixture retains a deliberately seeded neighboring draft; shared-identity red proof fails the initial draft assertion, fixed real review journey 1/1 PASS. Fresh second demo database: demo:prepare 19/19 and both real demo specs 2/2 PASS. Web tsc/build PASS. Exact commands/logs, x17-owned-intake-fixture.png and passing traces in codexInputs.md X17 entry. Separate fixture-lifecycle root cause, not folded into X13.
 - **X18 — Web side of Batch 3 (ADR-0183)**, starts when Claude publishes the contracts in §4: retention settings
   page (I3), `/metrics` posture card (G5), MCP coverage view (G3/G4), ownership fields (I9). Strict defaults
   (ADR-0180): every relaxation control explains that it is audited. Branch `codex/x18`.
