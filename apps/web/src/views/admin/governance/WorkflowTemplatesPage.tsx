@@ -43,6 +43,8 @@ interface PendingIntakeWrite {
   candidate: Record<string, unknown>;
   create: (acceptance: RegressionAcceptance) => Promise<unknown>;
   done: string;
+  /** the save button (default "Create template") */
+  saveLabel?: string;
 }
 
 /** the Preview impact step for an intake-template write, shared by the
@@ -57,7 +59,7 @@ function useIntakePreview() {
       subject="intake_template"
       candidate={pending?.candidate ?? {}}
       what="the intake template"
-      saveLabel="Create template"
+      saveLabel={pending?.saveLabel ?? "Create template"}
       onCancel={() => setPending(null)}
       onSave={async (acceptance) => {
         if (!pending) return;
@@ -102,6 +104,9 @@ export default function WorkflowTemplatesPage() {
   const profiles = useComplianceProfiles();
 
   const [retire, setRetire] = useState<WorkflowTemplate | null>(null);
+  // D4G-04: retiring an intake template can hand sign-off to another variant
+  // (or the built-in shape), so it goes through the same Preview impact step
+  const retireIntake = useIntakePreview();
   const tplName = useMemo(
     () => new Map((templates.data?.templates ?? []).map((t) => [t.id, t.name])),
     [templates.data],
@@ -224,6 +229,15 @@ export default function WorkflowTemplatesPage() {
         onConfirm={(reason) => {
           const t = retire;
           setRetire(null);
+          if (t && isIntakeName(t.name)) {
+            retireIntake.start({
+              candidate: { retireTemplateId: t.id },
+              saveLabel: "Retire template",
+              create: (acceptance) => api.post(`/v1/workflows/templates/${t.id}/retire`, { reason, ...acceptance }),
+              done: "Template retired — sign-off moves as previewed; in-flight instances are unaffected",
+            });
+            return;
+          }
           if (t)
             void act.run(
               () => api.post(`/v1/workflows/templates/${t.id}/retire`, { reason }),
@@ -231,6 +245,7 @@ export default function WorkflowTemplatesPage() {
             );
         }}
       />
+      {retireIntake.modal}
     </>
   );
 }

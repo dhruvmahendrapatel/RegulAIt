@@ -321,7 +321,9 @@ export function decisionRuleVersions(): { euAiActRulesetVersion: number; intakeA
 // ---------------------------------------------------------------------------
 
 /** an `ai-use-case-intake/*` variant: created from a gallery shape (with an
- * optional concrete approver), or from a whole definition */
+ * optional concrete approver), or from a whole definition; or (D4G-04) the
+ * retirement of an intake template, whose candidate is whatever decides
+ * sign-off once it is gone (the next active variant, or the built-in shape) */
 export const intakeTemplateCandidateSchema = z.union([
   z
     .object({
@@ -336,8 +338,24 @@ export const intakeTemplateCandidateSchema = z.union([
       definition: z.record(z.string(), z.unknown()),
     })
     .strict(),
+  z.object({ retireTemplateId: z.string().uuid() }).strict(),
 ]);
 export type IntakeTemplateCandidate = z.infer<typeof intakeTemplateCandidateSchema>;
+
+/** the intake template that decides sign-off; null = the built-in shape */
+export type ResolvedIntakeTemplate = DecisionRegressionTemplate | null;
+
+/**
+ * D4G-12: the digest of an intake-template candidate is the digest of WHAT IT
+ * RESOLVES TO — the name and the validated definition the write stores, or
+ * the built-in shape — never of the request that names it. A gallery shape is
+ * derived live from the compliance profiles, so a request-level digest
+ * ({galleryId, name, approver}) could admit a definition nobody previewed.
+ * Every candidate form that resolves to the same template has one digest.
+ */
+export function intakeTemplateDigest(t: ResolvedIntakeTemplate): string {
+  return accountabilityDigest(t ? { name: t.name, definition: t.definition } : { builtIn: "ai-use-case-intake" });
+}
 
 /** the fields an activation write carries besides the body itself */
 export const DECISION_REGRESSION_ACCEPTANCE_KEYS = ["regressionRunId", "acceptChangedOutcomes", "acceptReason"] as const;
@@ -352,13 +370,15 @@ export function withoutAcceptance(body: unknown): Record<string, unknown> {
 export type DecisionRegressionCandidate =
   | { ok: true; subject: "review_policy"; normalized: ReviewPolicyStoredBody; digest: string }
   | { ok: true; subject: "required_tests"; normalized: RequiredTestPolicy; digest: string }
-  | { ok: true; subject: "intake_template"; normalized: IntakeTemplateCandidate; digest: string }
+  /** an intake-template candidate is digested only once resolved (`intakeTemplateDigest`), so `digest` is null */
+  | { ok: true; subject: "intake_template"; normalized: IntakeTemplateCandidate; digest: null }
   | { ok: false; issues: z.ZodIssue[] };
 
 /**
  * Parse and normalise a candidate body exactly as its write would, and digest
- * it. The acceptance fields are not part of the body. The intake-template
- * name is part of the digest (it is what the intake resolution reads).
+ * it. The acceptance fields are not part of the body. An intake-template
+ * candidate is digested by the gateway once resolved (`intakeTemplateDigest`
+ * over the name and the stored definition, D4G-12).
  */
 export function decisionRegressionCandidate(subject: DecisionRegressionSubject, raw: unknown): DecisionRegressionCandidate {
   const body = withoutAcceptance(raw);
@@ -378,8 +398,7 @@ export function decisionRegressionCandidate(subject: DecisionRegressionSubject, 
     case "intake_template": {
       const p = intakeTemplateCandidateSchema.safeParse(body);
       if (!p.success) return { ok: false, issues: p.error.issues };
-      const normalized = p.data;
-      return { ok: true, subject, normalized, digest: accountabilityDigest(normalized) };
+      return { ok: true, subject, normalized: p.data, digest: null };
     }
   }
 }

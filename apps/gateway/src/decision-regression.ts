@@ -21,8 +21,12 @@
  *    cases whose outcome the change would alter.
  *
  * 3. THE ACTIVATION GATE. `checkDecisionRegressionGate` is called by the
- *    review-policy PUT, the required-tests PUT and the creation of an
- *    `ai-use-case-intake/*` template variant. Under `enforce` (the strict
+ *    review-policy PUT, the required-tests PUT and every write that changes
+ *    which intake template decides sign-off: creating an
+ *    `ai-use-case-intake/*` template or variant (from a definition or the
+ *    gallery) and retiring the active one (D4G-04), through
+ *    `writeIntakeTemplateGated`, which takes one lock, checks, writes and
+ *    records in ONE transaction (D4G-07). Under `enforce` (the strict
  *    default, ADR-0180 §1) the write needs `regressionRunId` naming a
  *    preview of the SAME subject whose candidate digest equals the submitted
  *    body's, no older than `decision_regression_max_age_minutes`, taken
@@ -44,6 +48,7 @@
 import type { FastifyInstance } from "fastify";
 import { diffArrays } from "diff";
 import { z } from "zod";
+import { validateDefinition } from "@regulait/workflow-kernel";
 import {
   aiUseCases,
   and,
@@ -80,6 +85,7 @@ import {
   decisionRegressionPreviewSchema,
   decisionRuleVersions,
   expectedFields,
+  intakeTemplateDigest,
   isIntakeTemplateName,
   requiredTestsDigest,
   reviewPolicyBodyDigest,
@@ -99,6 +105,7 @@ import {
   type DecisionRegressionTemplate,
   type IntakeTemplateCandidate,
   type RegressionDiff,
+  type ResolvedIntakeTemplate,
   type RequiredTestPolicy,
   type UseCaseDecision,
   type UseCaseDecisionRecordView,
@@ -520,51 +527,74 @@ export async function recordDecisionRegressionActivation(
   };
 }
 
+/** D4G-07: every write that changes which intake template decides sign-off holds this transaction-scoped lock,
+ * so two writes admitted by one preview (or a create racing a retire) serialise and the second sees the moved
+ * baseline. */
+export async function lockIntakeTemplateWrites(tx: Writer): Promise<void> {
+  await asDb(tx).execute(sql`select pg_advisory_xact_lock(hashtext('regulait:intake-template-writes'))`);
+}
+
+type IntakeWriteResult<R> = { ok: true; value: R } | { ok: false; status: number; body: Record<string, unknown> };
+
 /**
- * THE GATE FOR AN INTAKE TEMPLATE WRITE (an `ai-use-case-intake` template or
- * variant decides who signs off every new use case). Checks the gate for
- * `candidate` (the body a preview names); on a refusal it is audited and the
- * 409 is returned; otherwise the caller creates the template and then calls
- * `record()` to write the activation run and audit row. Used by "create from
- * gallery" (template-gallery.ts) and offered to `POST /v1/workflows/templates`.
+ * THE GATE FOR AN INTAKE TEMPLATE WRITE (an `ai-use-case-intake` template or variant decides who signs off every
+ * new use case). In ONE transaction (D4G-07): take the intake-template lock, resolve the candidate to the template
+ * that will decide afterwards (D4G-12: its digest is over that resolved name and definition), check the gate against
+ * the live configuration read under the lock, run the caller's write, and record the activation run and audit row.
+ * A gate refusal is audited after the transaction (nothing else is written); a write that fails rolls back with
+ * the record. `changesDecider` (a retirement) says whether this write changes the decider at all; when it does not,
+ * the write runs under the lock without the gate, and the response says so (`decisionRegression: null`).
  */
-export async function admitIntakeTemplateWrite(
+export async function writeIntakeTemplateGated<R>(
   db: Db,
-  raw: unknown,
-  candidateBody: IntakeTemplateCandidate,
-  template: DecisionRegressionTemplate,
-  actorUserId: string | null,
+  args: {
+    raw: unknown;
+    candidate: IntakeTemplateCandidate;
+    actorUserId: string | null;
+    write: (tx: Db, resolved: ResolvedIntakeTemplate) => Promise<IntakeWriteResult<R>>;
+    changesDecider?: (tx: Db, live: LiveDecisionConfig) => Promise<boolean>;
+  },
 ): Promise<
+  | { ok: true; value: R; decisionRegression: DecisionRegressionGateReport | null }
   | { ok: false; status: number; body: Record<string, unknown> }
-  | { ok: true; record: () => Promise<DecisionRegressionGateReport> }
 > {
-  const acc = parseAcceptance(raw);
+  const acc = parseAcceptance(args.raw);
   if (!acc.ok) return { ok: false, status: 422, body: { error: "invalid_regression_acceptance", issues: acc.issues } };
-  const candidate = decisionRegressionCandidate("intake_template", candidateBody);
-  if (!candidate.ok) return { ok: false, status: 422, body: { error: "invalid_candidate", issues: candidate.issues } };
-  const live = await loadLiveDecisionConfig(db);
-  const verdict = await checkDecisionRegressionGate(db, {
-    subject: "intake_template",
-    candidateDigest: candidate.digest,
-    baselineDigest: baselineDigestFor("intake_template", live),
-    acceptance: acc.value,
+  const out = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    await lockIntakeTemplateWrites(tx);
+    const live = await loadLiveDecisionConfig(tx);
+    if (args.changesDecider && !(await args.changesDecider(tx, live))) {
+      const written = await args.write(tx, live.template ? { name: live.template.name, definition: live.template.definition as DecisionRegressionTemplate["definition"] } : null);
+      return written.ok ? ({ kind: "ok", value: written.value, report: null } as const) : ({ kind: "failed", result: written } as const);
+    }
+    const resolved = await resolveIntakeTemplateCandidate(args.candidate, tx);
+    if (!resolved.ok) return { kind: "failed", result: resolved } as const;
+    const verdict = await checkDecisionRegressionGate(tx, {
+      subject: "intake_template",
+      candidateDigest: resolved.digest,
+      baselineDigest: baselineDigestFor("intake_template", live),
+      acceptance: acc.value,
+    });
+    if (!verdict.ok) return { kind: "refused", verdict, digest: resolved.digest } as const;
+    const written = await args.write(tx, resolved.template);
+    if (!written.ok) return { kind: "failed", result: written } as const;
+    const report = await recordDecisionRegressionActivation(tx, verdict, {
+      subject: "intake_template",
+      candidateDigest: resolved.digest,
+      acceptance: acc.value,
+      actorUserId: args.actorUserId,
+      // computed only if warn mode let an unpreviewed write through
+      computeNow: () => computeRegression(tx, "intake_template", resolved.digest, { template: resolved.template }, live),
+    });
+    return { kind: "ok", value: written.value, report } as const;
   });
-  if (!verdict.ok) {
-    const refused = await refuseDecisionRegression(db, verdict, { subject: "intake_template", candidateDigest: candidate.digest, actorUserId });
+  if (out.kind === "refused") {
+    const refused = await refuseDecisionRegression(db, out.verdict, { subject: "intake_template", candidateDigest: out.digest, actorUserId: args.actorUserId });
     return { ok: false, status: refused.status, body: refused.body };
   }
-  return {
-    ok: true,
-    record: () =>
-      recordDecisionRegressionActivation(db, verdict, {
-        subject: "intake_template",
-        candidateDigest: candidate.digest,
-        acceptance: acc.value,
-        actorUserId,
-        // computed only if warn mode let an unpreviewed write through
-        computeNow: () => computeRegression(db, "intake_template", candidate.digest, { template }, live),
-      }),
-  };
+  if (out.kind === "failed") return { ok: false, status: out.result.status, body: out.result.body };
+  return { ok: true, value: out.value, decisionRegression: out.report };
 }
 
 // ---------------------------------------------------------------------------
@@ -705,27 +735,62 @@ const runsQuery = z
   })
   .strict();
 
-/** resolve an intake-template candidate to the definition it would create */
+/** the newest ACTIVE intake template other than `excludeId` (what decides once `excludeId` is retired) */
+async function activeIntakeTemplateExcept(db: Writer, excludeId: string): Promise<{ id: string; name: string; definition: unknown } | null> {
+  const rows = await asDb(db)
+    .select({ id: workflowTemplates.id, name: workflowTemplates.name, definition: workflowTemplates.definition })
+    .from(workflowTemplates)
+    .where(
+      and(
+        isNull(workflowTemplates.retiredAt),
+        sql`${workflowTemplates.id} <> ${excludeId}`,
+        or(eq(workflowTemplates.name, "ai-use-case-intake"), sql`${workflowTemplates.name} like ${"ai-use-case-intake/%"}`),
+      ),
+    )
+    .orderBy(desc(workflowTemplates.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+const NOT_AN_INTAKE_TEMPLATE = {
+  ok: false as const,
+  status: 422,
+  body: { error: "not_an_intake_template", detail: "an intake template is named 'ai-use-case-intake' or 'ai-use-case-intake/<label>'" },
+};
+
+/**
+ * Resolve an intake-template candidate to the template that decides sign-off once its write lands, and digest THAT
+ * (D4G-12): `{name, definition}` with the definition validated exactly as the create stores it (the gallery shape
+ * with its approver substituted, read now), or — for a retirement — the next active variant, or the built-in shape
+ * (null) when none is left.
+ */
 export async function resolveIntakeTemplateCandidate(
   c: IntakeTemplateCandidate,
-  db: Db,
-): Promise<{ ok: true; template: DecisionRegressionTemplate } | { ok: false; status: number; body: Record<string, unknown> }> {
-  if (!isIntakeTemplateName(c.name)) {
-    return {
-      ok: false,
-      status: 422,
-      body: { error: "not_an_intake_template", detail: "an intake template is named 'ai-use-case-intake' or 'ai-use-case-intake/<label>'" },
-    };
+  db: Writer,
+): Promise<{ ok: true; template: ResolvedIntakeTemplate; digest: string } | { ok: false; status: number; body: Record<string, unknown> }> {
+  let template: ResolvedIntakeTemplate;
+  if ("retireTemplateId" in c) {
+    const [tpl] = await asDb(db)
+      .select({ id: workflowTemplates.id, name: workflowTemplates.name })
+      .from(workflowTemplates)
+      .where(eq(workflowTemplates.id, c.retireTemplateId));
+    if (!tpl) return { ok: false, status: 404, body: { error: "unknown_template" } };
+    if (!isIntakeTemplateName(tpl.name)) return NOT_AN_INTAKE_TEMPLATE;
+    const next = await activeIntakeTemplateExcept(db, tpl.id);
+    template = next ? { name: next.name, definition: next.definition as DecisionRegressionTemplate["definition"] } : null;
+  } else if ("definition" in c) {
+    if (!isIntakeTemplateName(c.name)) return NOT_AN_INTAKE_TEMPLATE;
+    template = { name: c.name, definition: validateDefinition(c.definition) as unknown as DecisionRegressionTemplate["definition"] };
+  } else {
+    if (!isIntakeTemplateName(c.name)) return NOT_AN_INTAKE_TEMPLATE;
+    const gallery = await import("./template-gallery.js");
+    const { entries } = await gallery.buildTemplateGallery(asDb(db));
+    const entry = entries.find((e) => e.galleryId === c.galleryId);
+    if (!entry) return { ok: false, status: 404, body: { error: "unknown_gallery_entry" } };
+    const definition = validateDefinition(gallery.galleryDefinitionWithApprover(entry.definition, c.approverUserId));
+    template = { name: c.name, definition: definition as unknown as DecisionRegressionTemplate["definition"] };
   }
-  if ("definition" in c) return { ok: true, template: { name: c.name, definition: c.definition as DecisionRegressionTemplate["definition"] } };
-  const gallery = await import("./template-gallery.js");
-  const { entries } = await gallery.buildTemplateGallery(db);
-  const entry = entries.find((e) => e.galleryId === c.galleryId);
-  if (!entry) return { ok: false, status: 404, body: { error: "unknown_gallery_entry" } };
-  return {
-    ok: true,
-    template: { name: c.name, definition: gallery.galleryDefinitionWithApprover(entry.definition, c.approverUserId) as DecisionRegressionTemplate["definition"] },
-  };
+  return { ok: true, template, digest: intakeTemplateDigest(template) };
 }
 
 /**
@@ -747,15 +812,22 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
     if (!candidate.ok) return reply.status(422).send({ error: "invalid_candidate", subject, issues: candidate.issues });
     const live = await loadLiveDecisionConfig(db);
     let override: Partial<DecisionRegressionConfig>;
-    if (candidate.subject === "review_policy") override = { reviewPolicy: candidate.normalized };
-    else if (candidate.subject === "required_tests") override = { requiredTests: candidate.normalized };
-    else {
+    let candidateDigest: string;
+    if (candidate.subject === "review_policy") {
+      override = { reviewPolicy: candidate.normalized };
+      candidateDigest = candidate.digest;
+    } else if (candidate.subject === "required_tests") {
+      override = { requiredTests: candidate.normalized };
+      candidateDigest = candidate.digest;
+    } else {
+      // D4G-12: digested over what it resolves to, exactly as the write will store it
       const t = await resolveIntakeTemplateCandidate(candidate.normalized, db);
       if (!t.ok) return reply.status(t.status).send(t.body);
       override = { template: t.template };
+      candidateDigest = t.digest;
     }
     const actor = req.authCtx.userId ?? null;
-    const computed = await computeRegression(db, subject, candidate.digest, override, live);
+    const computed = await computeRegression(db, subject, candidateDigest, override, live);
     const row = await db.transaction(async (tx) => {
       const r = await insertRun(tx, "preview", { ...computed, cases: computed.diff.cases, changed: computed.diff.changed }, actor);
       await tx.insert(auditLog).values({
@@ -765,7 +837,7 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
         detail: {
           phase: "previewed",
           subject,
-          candidateDigest: candidate.digest,
+          candidateDigest,
           baselineDigest: computed.baselineDigest,
           cases: computed.diff.cases,
           changed: computed.diff.changed,

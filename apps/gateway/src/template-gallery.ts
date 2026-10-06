@@ -41,7 +41,7 @@ import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { createWorkflowTemplateValidated } from "./workflows.js";
 import { isIntakeTemplateName } from "@regulait/shared";
-import { admitIntakeTemplateWrite } from "./decision-regression.js";
+import { writeIntakeTemplateGated } from "./decision-regression.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -342,47 +342,56 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
     const entry = gallery.entries.find((e) => e.galleryId === galleryId);
     if (!entry) return reply.status(404).send({ error: "unknown_gallery_entry" });
 
-    // substitute the requesting_user placeholder with the named approver (if
-    // any); resolution/validation happens in the ONE creation path below
-    const definition: WorkflowDefinition = galleryDefinitionWithApprover(entry.definition, body.approverUserId);
+    const audit = (w: Db, row: typeof workflowTemplates.$inferSelect) =>
+      w.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "workflow_template",
+        objectId: row.id,
+        detail: {
+          phase: "template-gallery-create",
+          galleryId,
+          name: body.name,
+          source: entry.source,
+          profileTag: entry.profileTag ?? null,
+          cascadeDemandedStages: entry.stageAnnotations.filter((a) => a.demandedByTags.length > 0),
+        },
+        effect: "allow",
+        ruleId: "workflow-template-gallery-created",
+        ruleChain: [],
+        reason:
+          `workflow template '${body.name}' created from gallery shape '${galleryId}' — ` +
+          `instantiated through the one template-creation path, so full validation applied`,
+      });
+
+    if (!isIntakeTemplateName(body.name)) {
+      // substitute the requesting_user placeholder with the named approver (if
+      // any); resolution/validation happens in the ONE creation path below
+      const definition: WorkflowDefinition = galleryDefinitionWithApprover(entry.definition, body.approverUserId);
+      const result = await createWorkflowTemplateValidated(db, { name: body.name, definition });
+      if (!result.ok) return reply.status(result.status).send(result.body);
+      await audit(db, result.row);
+      return reply.status(201).send({ ...result.row, galleryId });
+    }
 
     // ADR-0182 A11: an `ai-use-case-intake` template or variant decides who
     // signs off every new use case, so creating one is an activation the
-    // decision-regression gate admits (a preview of this exact body).
-    const gate = isIntakeTemplateName(body.name)
-      ? await admitIntakeTemplateWrite(
-          db,
-          req.body,
-          { galleryId, name: body.name, ...(body.approverUserId ? { approverUserId: body.approverUserId } : {}) },
-          { name: body.name, definition },
-          req.authCtx.userId ?? null,
-        )
-      : null;
-    if (gate && !gate.ok) return reply.status(gate.status).send(gate.body);
-
-    const result = await createWorkflowTemplateValidated(db, { name: body.name, definition });
-    if (!result.ok) return reply.status(result.status).send(result.body);
-    const decisionRegression = gate ? await gate.record() : null;
-
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "workflow_template",
-      objectId: result.row.id,
-      detail: {
-        phase: "template-gallery-create",
-        galleryId,
-        name: body.name,
-        source: entry.source,
-        profileTag: entry.profileTag ?? null,
-        cascadeDemandedStages: entry.stageAnnotations.filter((a) => a.demandedByTags.length > 0),
+    // decision-regression gate admits. D4G-12: the preview digested the
+    // RESOLVED definition (the gallery shape, derived live, with the approver
+    // substituted, validated), and that exact definition is what is stored.
+    // D4G-07: gate, create, gallery audit and activation record are ONE
+    // transaction under the intake-template lock.
+    const gated = await writeIntakeTemplateGated<typeof workflowTemplates.$inferSelect>(db, {
+      raw: req.body,
+      candidate: { galleryId, name: body.name, ...(body.approverUserId ? { approverUserId: body.approverUserId } : {}) },
+      actorUserId: req.authCtx.userId ?? null,
+      write: async (tx, resolved) => {
+        const result = await createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition });
+        if (!result.ok) return result;
+        await audit(tx, result.row);
+        return { ok: true, value: result.row };
       },
-      effect: "allow",
-      ruleId: "workflow-template-gallery-created",
-      ruleChain: [],
-      reason:
-        `workflow template '${body.name}' created from gallery shape '${galleryId}' — ` +
-        `instantiated through the one template-creation path, so full validation applied`,
     });
-    return reply.status(201).send({ ...result.row, galleryId, ...(decisionRegression ? { decisionRegression } : {}) });
+    if (!gated.ok) return reply.status(gated.status).send(gated.body);
+    return reply.status(201).send({ ...gated.value, galleryId, ...(gated.decisionRegression ? { decisionRegression: gated.decisionRegression } : {}) });
   });
 }

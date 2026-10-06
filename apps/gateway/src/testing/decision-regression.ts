@@ -49,6 +49,19 @@ export async function previewedPut(
   return app.inject({ method: "PUT", url, headers, payload: { ...(body as object), ...acceptance } });
 }
 
+/** D4G-04: retire a workflow template the way an admin must when it is the
+ * deciding intake template — preview `{retireTemplateId}` (what decides once it
+ * is gone), then retire with the run's id and an accepted reason */
+export async function previewedRetire(
+  app: Injectable,
+  headers: Headers,
+  templateId: string,
+  reason: string,
+): Promise<LightMyRequestResponse> {
+  const acceptance = await regressionAcceptance(app, headers, "intake_template", { retireTemplateId: templateId });
+  return app.inject({ method: "POST", url: `/v1/workflows/templates/${templateId}/retire`, headers, payload: { reason, ...acceptance } });
+}
+
 /** relax (or restore) the gate through the audited `PUT /v1/org/settings`;
  * the returned `restore()` puts `enforce` back */
 export async function setDecisionRegressionGateForTest(
