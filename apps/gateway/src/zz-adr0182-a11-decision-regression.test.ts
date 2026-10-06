@@ -44,6 +44,7 @@ import {
   governanceReviewPolicy,
   governanceReviewPolicyVersions,
   gte,
+  inArray,
   isNull,
   orgSettings,
   runMigrations,
@@ -651,5 +652,51 @@ describe("DFX3: every write that changes the deciding intake template (D4G-04, D
     expect(out.find((r) => r.statusCode === 409)!.json().reason).toBe("baseline_moved");
     const winner = out.find((r) => r.statusCode === 201)!.json().id as string;
     expect((await previewedRetire(app, users.admin.auth, winner, "a11 dfx3 race cleanup")).statusCode).toBe(200);
+  });
+});
+
+describe("A11 integrator: every intake template retired", () => {
+  it("proposing a use case mints the built-in shape under a fresh name (the retired built-in name is never reused)", async () => {
+    const BASE = "ai-use-case-intake";
+    const intakeRows = () =>
+      db
+        .select({ id: workflowTemplates.id, name: workflowTemplates.name, retiredAt: workflowTemplates.retiredAt, definition: workflowTemplates.definition })
+        .from(workflowTemplates)
+        .where(sql`${workflowTemplates.name} = ${BASE} or ${workflowTemplates.name} like ${`${BASE}/%`}`);
+    let inserted: string | null = null;
+    // the built-in name must exist (as it does after the first use case) so a re-mint under it would collide
+    if (!(await intakeRows()).some((r) => r.name === BASE)) {
+      const [row] = await db.insert(workflowTemplates).values({ name: BASE, definition: aiUseCaseIntakeDefinition() }).returning({ id: workflowTemplates.id });
+      inserted = row!.id;
+    }
+    const active = (await intakeRows()).filter((r) => r.retiredAt === null).map((r) => r.id);
+    const known = new Set((await intakeRows()).map((r) => r.id));
+    let minted: string | null = null;
+    try {
+      if (active.length) {
+        await db.update(workflowTemplates).set({ retiredAt: new Date(), retiredReason: "a11 integrator: all retired" }).where(inArray(workflowTemplates.id, active));
+      }
+      const r = await inject("POST", "/v1/use-cases", users.owner.auth, {
+        name: `a11 none-active ${RUN}`,
+        description: "synthetic: every intake template is retired",
+        businessContext: "decision records",
+        dataSensitivity: "internal",
+      });
+      expect(r.statusCode, r.body).toBe(201);
+      const fresh = (await intakeRows()).filter((x) => !known.has(x.id));
+      expect(fresh).toHaveLength(1);
+      minted = fresh[0]!.id;
+      expect(fresh[0]!.name).toMatch(/^ai-use-case-intake\/built-in-/);
+      expect(fresh[0]!.retiredAt).toBeNull();
+      // exactly the built-in shape (what D4G-04's retire preview resolved to)
+      expect((fresh[0]!.definition as { stages: unknown[] }).stages).toEqual(aiUseCaseIntakeDefinition().stages);
+    } finally {
+      const restore = active.filter((id) => id !== inserted);
+      if (restore.length) await db.update(workflowTemplates).set({ retiredAt: null, retiredReason: null }).where(inArray(workflowTemplates.id, restore));
+      const retireIds = [inserted, minted].filter((x): x is string => x !== null);
+      if (retireIds.length) {
+        await db.update(workflowTemplates).set({ retiredAt: new Date(), retiredReason: "a11 integrator cleanup" }).where(and(inArray(workflowTemplates.id, retireIds), isNull(workflowTemplates.retiredAt)));
+      }
+    }
   });
 });

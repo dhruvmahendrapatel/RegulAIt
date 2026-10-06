@@ -1029,8 +1029,9 @@ function approvalExpired(row: AiUseCaseRow, now: Date): boolean {
  * approvals to a governance owner by creating a variant from the gallery shape
  * with a concrete approver; template names are unique even once retired, so
  * without variants the built-in shape — minted on the first use case — could
- * never be superseded. Only when none exists is the built-in shape minted,
- * through the ONE template-creation path (ADR-0077 discipline).
+ * never be superseded. Only when none is active is the built-in shape minted,
+ * through the ONE template-creation path (ADR-0077 discipline) — under a dated
+ * `ai-use-case-intake/built-in-…` name when the built-in name is retired.
  */
 async function resolveIntakeTemplate(
   db: Db,
@@ -1047,8 +1048,15 @@ async function resolveIntakeTemplate(
     .orderBy(desc(workflowTemplates.createdAt));
   const active = rows.find((t) => t.retiredAt === null);
   if (active) return { ok: true, templateId: active.id };
+  // No active intake template: the built-in shape decides (D4G-04's retire preview resolves to exactly this, so
+  // it was previewed when the last active one was retired). Template names are unique even once retired, so when
+  // the built-in name is already taken by a retired row the shape is minted as a dated built-in variant rather than
+  // failing as a bare unique-violation conflict (ADR-0182 integration).
+  const name = rows.some((t) => t.name === AI_USE_CASE_INTAKE_TEMPLATE_NAME)
+    ? `${AI_USE_CASE_INTAKE_TEMPLATE_NAME}/built-in-${new Date().toISOString().replace(/[-:.]/g, "").toLowerCase()}`
+    : AI_USE_CASE_INTAKE_TEMPLATE_NAME;
   const created = await createWorkflowTemplateValidated(db, {
-    name: AI_USE_CASE_INTAKE_TEMPLATE_NAME,
+    name,
     definition: aiUseCaseIntakeDefinition(),
   });
   if (!created.ok) return created;
