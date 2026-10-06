@@ -36,6 +36,7 @@ import {
   governanceAlerts,
   inArray,
   kris,
+  orgSettings,
   pmConnections,
   pmLinks,
   runMigrations,
@@ -115,7 +116,7 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     // M-068: the two alert settings back to strict, whatever happened above
-    await db.execute(sql`UPDATE org_settings SET alert_sla_hours = '{"high": 24, "medium": 72, "low": 168}'::jsonb, alert_ticket_mode = 'manual'`);
+    await db.execute(sql`UPDATE org_settings SET alert_sla_hours = '{"high": 24, "medium": 72, "low": 168}'::jsonb, alert_ticket_mode = 'manual', alert_ticket_connection_id = NULL`);
     if (subjects.length) await db.delete(governanceAlerts).where(inArray(governanceAlerts.subjectKey, subjects));
     if (made.conns.length) await db.delete(pmConnections).where(inArray(pmConnections.id, made.conns));
     if (made.kris.length) await db.delete(kris).where(inArray(kris.id, made.kris));
@@ -321,10 +322,6 @@ describe("PF-14 the ticket: one PM work item per episode", () => {
     expect(r.statusCode, r.body).toBe(201);
     connectionId = r.json().id as string;
     made.conns.push(connectionId);
-    // auto_high files on the OLDEST connection; the shared database holds other
-    // suites' connections (encrypted under their own data keys), so this one is
-    // made the oldest for the duration of the file
-    await db.update(pmConnections).set({ createdAt: new Date("2000-01-01T00:00:00Z") }).where(eq(pmConnections.id, connectionId));
   });
   const links = (alertId: string) => db.select().from(pmLinks).where(and(eq(pmLinks.objectType, "governance_alert" as never), eq(pmLinks.objectId, alertId)));
 
@@ -346,22 +343,68 @@ describe("PF-14 the ticket: one PM work item per episode", () => {
     expect(audit!.detail).toMatchObject({ trigger: "manual", connectionId });
   });
 
-  it("manual (strict default) files nothing on its own; auto_high files one for a new high episode and none for a medium", async () => {
+  it("auto_high is refused without a named, existing PM connection (never an implicit choice)", async () => {
+    const bare = await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "auto_high" });
+    expect(bare.statusCode, bare.body).toBe(422);
+    expect(bare.json().error).toBe("alert_ticket_connection_required");
+    const unknown = await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "auto_high", alertTicketConnectionId: "00000000-0000-4000-8000-0000000000aa" });
+    expect(unknown.statusCode, unknown.body).toBe(422);
+    expect(unknown.json().error).toBe("unknown_pm_connection");
+    const [row] = await db.select({ mode: orgSettings.alertTicketMode }).from(orgSettings);
+    expect(row!.mode).toBe("manual"); // nothing was saved
+  });
+
+  it("manual (strict default) files nothing on its own; auto_high files on the NAMED connection, for high episodes only", async () => {
     const high = await raise(`use_case:${fx.useCase}>agent:${fx.agentGone}`, "high");
     expect(await links(high.id)).toHaveLength(0);
 
-    const put = await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "auto_high" });
+    const put = await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "auto_high", alertTicketConnectionId: connectionId });
     expect(put.statusCode, put.body).toBe(200);
+    const [audit0] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "org-settings-updated")).orderBy(desc(auditLog.seq)).limit(1);
+    expect((audit0!.detail as { transitions: Record<string, unknown> }).transitions).toMatchObject({
+      alertTicketMode: { from: "manual", to: "auto_high" },
+      alertTicketConnectionId: { from: null, to: connectionId },
+    });
     try {
       const high2 = await raise(`vendor:${fx.vendor}`, "high");
-      expect(await links(high2.id)).toHaveLength(1);
+      const filed = await links(high2.id);
+      expect(filed).toHaveLength(1);
+      expect(filed[0]!.connectionId).toBe(connectionId); // the named one, whatever else exists
       const medium = await raise(`risk:${fx.risk}`, "medium");
       expect(medium.severity).toBe("medium");
       expect(await links(medium.id)).toHaveLength(0);
       const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, ALERT_OWNERSHIP_RULE_IDS.ticketFiled), eq(auditLog.objectId, high2.id)));
       expect(audit!.detail).toMatchObject({ trigger: "auto_high" });
     } finally {
-      await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "manual" });
+      await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "manual", alertTicketConnectionId: null });
     }
   });
+
+  it("when the named connection is deleted, automatic filing STOPS (no fallback) and the sweep records it once", async () => {
+    const other = await inject("POST", "/v1/pm/connections", u.admin.auth, { name: `s5o-pm-other-${RUN}`, provider: "mock", project: `S5P${RUN}`, token: "synthetic-token" });
+    made.conns.push(other.json().id);
+    const named = await inject("POST", "/v1/pm/connections", u.admin.auth, { name: `s5o-pm-named-${RUN}`, provider: "mock", project: `S5N${RUN}`, token: "synthetic-token" });
+    const namedId = named.json().id as string;
+    expect((await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "auto_high", alertTicketConnectionId: namedId })).statusCode).toBe(200);
+    try {
+      await db.delete(pmConnections).where(eq(pmConnections.id, namedId));
+      const [row] = await db.select({ mode: orgSettings.alertTicketMode, conn: orgSettings.alertTicketConnectionId }).from(orgSettings);
+      expect(row).toEqual({ mode: "auto_high", conn: null }); // the mode is left alone; the connection is gone
+
+      const high = await raise(`agent:${fx.agent}`, "high");
+      expect(await links(high.id)).toHaveLength(0); // the other connection is NOT used
+      const [failed] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, ALERT_OWNERSHIP_RULE_IDS.ticketFailed), eq(auditLog.objectId, high.id)));
+      expect(failed!.detail).toMatchObject({ trigger: "auto_high", error: "ticket_connection_missing" });
+
+      const first = await runAlertSlaSweep(db, new Date(), null);
+      expect(first.ticketConnectionMissing).toBe(true);
+      await runAlertSlaSweep(db, new Date(), null);
+      const recorded = await db.select().from(auditLog).where(eq(auditLog.ruleId, ALERT_OWNERSHIP_RULE_IDS.ticketConnectionMissing)).orderBy(desc(auditLog.seq));
+      expect(recorded.filter((r) => Date.now() - r.at.getTime() < 60_000)).toHaveLength(1);
+      expect(recorded[0]!.effect).toBe("deny");
+    } finally {
+      await inject("PUT", "/v1/org/settings", u.admin.auth, { alertTicketMode: "manual", alertTicketConnectionId: null });
+    }
+  });
+
 });

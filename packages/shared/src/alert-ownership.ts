@@ -178,3 +178,34 @@ export function kriOnBreachProblem(scope: KriScope, onBreach: KriOnBreach): stri
   }
   return null;
 }
+
+/**
+ * ADR-0182 S5 (PF-14, main-session decision 2026-10-06) — the alert ticket
+ * settings must hang together. `auto_high` sends alert data to an outside PM
+ * tool without a person deciding each time, so the tool is never an implicit
+ * choice (ADR-0180): relaxing to `auto_high` needs `alertTicketConnectionId`,
+ * set in the same write or an earlier one, naming a connection that exists.
+ * A named connection must exist in either mode. Returns the 422 body, or null.
+ * `PUT /v1/org/settings` calls this over the MERGED values.
+ */
+export function alertTicketSettingsProblem(next: {
+  mode: "manual" | "auto_high";
+  connectionId: string | null;
+  connectionExists: boolean;
+}): { error: string; detail: string } | null {
+  if (next.connectionId && !next.connectionExists) {
+    return {
+      error: "unknown_pm_connection",
+      detail: "alertTicketConnectionId names no PM connection. Nothing was saved.",
+    };
+  }
+  if (next.mode === "auto_high" && !next.connectionId) {
+    return {
+      error: "alert_ticket_connection_required",
+      detail:
+        "automatic tickets for high alerts need the PM connection they are filed on: set alertTicketConnectionId in " +
+        "the same write (or an earlier one). regulAIt never picks a connection for you. Nothing was saved.",
+    };
+  }
+  return null;
+}

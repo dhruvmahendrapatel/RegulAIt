@@ -30,8 +30,11 @@
  * `sla_breached_at` (once — a conditional UPDATE) and tells people.
  *
  * THE TICKET. `alert_ticket_mode = manual` (strict) files a work item only when
- * an admin asks; `auto_high` files one for each NEW high episode, on the oldest
- * PM connection. Either way one episode has at most one work item.
+ * an admin asks; `auto_high` files one for each NEW high episode, on the ONE
+ * connection the admin named (`alert_ticket_connection_id`, required to relax
+ * to auto_high). Never an implicit choice (ADR-0180): if that connection is
+ * gone, automatic filing STOPS and the sweep records it; nothing falls back to
+ * another connection. Either way one episode has at most one work item.
  *
  * NO PERSONAL DATA in a chat post or a ticket title (ADR-0175 D2 rule 12): the
  * texts come from `alertSlaChatText` / `alertTicketText`, where a person is "a
@@ -92,7 +95,21 @@ export const ALERT_OWNERSHIP_RULE_IDS = {
   escalated: "governance-alert-escalated",
   ticketFiled: "governance-alert-ticket-filed",
   ticketFailed: "governance-alert-ticket-failed",
+  ticketConnectionMissing: "governance-alert-ticket-connection-missing",
 } as const;
+
+/** the connection `auto_high` files on: the one the admin named, if it still
+ * exists. Never another one. (The column is migration 0167's; read through the
+ * loaded row so this compiles before schema.ts names it.) */
+async function namedTicketConnection(
+  db: Db,
+  settings: Awaited<ReturnType<typeof loadOrgSettings>>,
+): Promise<{ named: string | null; id: string | null }> {
+  const named = (settings as { alertTicketConnectionId?: string | null }).alertTicketConnectionId ?? null;
+  if (!named) return { named: null, id: null };
+  const [conn] = await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, named));
+  return { named, id: conn?.id ?? null };
+}
 
 /** where the console shows an episode (relative; chat and tickets carry it) */
 export const alertPortalPath = (alertId: string) => `/admin/governance/alerts?alert=${alertId}`;
@@ -218,20 +235,19 @@ export async function afterAlertsRaised(db: Db, raisedIds: readonly string[], ac
   const high = raised.filter((a) => a.severity === "high");
   if (high.length === 0) return;
   const dataKey = ticketKeys.get(db as object);
-  const [conn] = await db
-    .select({ id: pmConnections.id })
-    .from(pmConnections)
-    .orderBy(asc(pmConnections.createdAt), asc(pmConnections.id))
-    .limit(1);
+  const conn = await namedTicketConnection(db, settings);
   for (const a of high) {
-    if (!dataKey || !conn) {
+    if (!dataKey || !conn.id) {
+      const error = !conn.id ? "ticket_connection_missing" : "no_data_key";
       await audit(
         db,
         actorUserId,
         a.id,
         ALERT_OWNERSHIP_RULE_IDS.ticketFailed,
-        `governance alert ${a.id}: no work item filed automatically — ${!conn ? "no PM connection is configured" : "no data key to open the PM connection"}`,
-        { trigger: "auto_high", error: !conn ? "no_pm_connection" : "no_data_key" },
+        `governance alert ${a.id}: no work item filed automatically — ${
+          !conn.id ? "the PM connection named for automatic tickets no longer exists (no other connection is used)" : "no data key to open the PM connection"
+        }`,
+        { trigger: "auto_high", error, namedConnectionId: conn.named },
         "deny",
       );
       continue;
@@ -298,6 +314,8 @@ export interface AlertSlaSweepResult {
   breached: number;
   escalatedUnowned: number;
   chat: { posted: number; failed: number; courier: boolean };
+  /** `auto_high` whose named connection is gone: filing has stopped */
+  ticketConnectionMissing: boolean;
 }
 
 async function adminIds(db: Db): Promise<string[]> {
@@ -318,7 +336,7 @@ async function adminIds(db: Db): Promise<string[]> {
  */
 export async function runAlertSlaSweep(db: Db, now: Date, actorUserId: string | null = null): Promise<AlertSlaSweepResult> {
   const hours = await slaHours(db);
-  const out: AlertSlaSweepResult = { dueSet: 0, breached: 0, escalatedUnowned: 0, chat: { posted: 0, failed: 0, courier: false } };
+  const out: AlertSlaSweepResult = { dueSet: 0, breached: 0, escalatedUnowned: 0, chat: { posted: 0, failed: 0, courier: false }, ticketConnectionMissing: false };
   const courier = slaCouriers.get(db as object);
   out.chat.courier = Boolean(courier);
   const post = async (a: AlertRow, kind: "breached" | "unowned") => {
@@ -360,6 +378,38 @@ export async function runAlertSlaSweep(db: Db, now: Date, actorUserId: string | 
   }
 
   const admins = await adminIds(db);
+
+  // 0. automatic tickets whose named connection is gone have STOPPED (no
+  //    fallback): recorded once per settings change, for the admins
+  const settings = await loadOrgSettings(db);
+  if (settings.alertTicketMode === "auto_high" && !(await namedTicketConnection(db, settings)).id) {
+    out.ticketConnectionMissing = true;
+    const since = settings.updatedAt ?? new Date(0);
+    const [already] = await db
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, ALERT_OWNERSHIP_RULE_IDS.ticketConnectionMissing), sql`${auditLog.at} >= ${since}`))
+      .limit(1);
+    if (!already) {
+      await db.insert(auditLog).values({
+        userId: actorUserId ?? NIL,
+        objectType: "org_settings",
+        objectId: null,
+        detail: {
+          subsystem: "alert-ownership",
+          alertTicketMode: "auto_high",
+          namedConnectionId: (settings as { alertTicketConnectionId?: string | null }).alertTicketConnectionId ?? null,
+          recipients: admins,
+        },
+        effect: "deny",
+        ruleId: ALERT_OWNERSHIP_RULE_IDS.ticketConnectionMissing,
+        ruleChain: [],
+        reason:
+          "automatic alert tickets have STOPPED: alert_ticket_mode is auto_high but the PM connection named for them no " +
+          "longer exists. No other connection is used. An admin names a connection, or sets the mode back to manual.",
+      });
+    }
+  }
 
   // 2. breached, once
   const breached = await db

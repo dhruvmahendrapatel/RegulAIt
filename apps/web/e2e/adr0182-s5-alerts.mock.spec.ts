@@ -91,7 +91,7 @@ async function json(route: Route, body: unknown, status = 200) {
 async function mockApi(page: Page): Promise<Captured> {
   const cap: Captured = { ownerPuts: [], ticketPosts: [], remediationPosts: [], settingsPuts: [], kriPosts: [] };
   const me = { userId: "u", isAdmin: true, user: { id: "u", email: "admin@example.test", displayName: "Avery Admin" } };
-  const settings = { alertSlaHours: { high: 24, medium: 72, low: 168 }, alertTicketMode: "manual" as string };
+  const settings = { alertSlaHours: { high: 24, medium: 72, low: 168 }, alertTicketMode: "manual" as string, alertTicketConnectionId: null as string | null };
   await page.route("**/*", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
@@ -222,10 +222,15 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await card.getByRole("button", { name: "Save SLA" }).click();
     await expect.poll(() => cap.settingsPuts).toEqual([{ alertSlaHours: { high: 48, medium: 72, low: 168 } }]);
     await expect(card.getByText("relaxed", { exact: true })).toHaveCount(1);
+    // automatic filing needs a named connection: nothing is sent without one
+    await card.getByLabel("Filing").selectOption("auto_high");
+    await expect(card.getByRole("alert")).toContainText("never picks one for you");
+    expect(cap.settingsPuts).toHaveLength(1);
+    await card.getByLabel("PM connection for automatic tickets").selectOption("c1");
     await card.getByLabel("Filing").selectOption("auto_high");
     await expect.poll(() => cap.settingsPuts.length).toBe(2);
-    expect(cap.settingsPuts[1]).toEqual({ alertTicketMode: "auto_high" });
-    await expect(card).toContainText("for every new high episode");
+    expect(cap.settingsPuts[1]).toEqual({ alertTicketMode: "auto_high", alertTicketConnectionId: "c1" });
+    await expect(card).toContainText("in the work item description; people appear as 'a user (id …)'");
     await expectAxeClean(page, "alerts settings, relaxed");
   });
 });

@@ -332,7 +332,9 @@ const SLA_COPY = {
 };
 const TICKET_COPY = {
   strict: "Manual: a work item is filed in the PM tool only when a person asks for one.",
-  relaxed: "Automatic for high alerts files a work item, with the alert's title, in a third-party PM tool for every new high episode.",
+  relaxed:
+    "Automatic for high alerts files a work item in the chosen third-party PM tool for every new high episode, with the " +
+    "alert's title in the work item description; people appear as 'a user (id …)'.",
 };
 type Sev = keyof typeof ALERT_SLA_STRICT;
 const SEVERITIES: Sev[] = ["high", "medium", "low"];
@@ -341,8 +343,16 @@ function AlertSettingsCard() {
   const action = useAction();
   const settings = useQuery({
     queryKey: ["org", "settings"],
-    queryFn: () => api.get<{ settings: { alertSlaHours?: Record<Sev, number>; alertTicketMode?: "manual" | "auto_high" } }>("/v1/org/settings"),
+    queryFn: () =>
+      api.get<{ settings: { alertSlaHours?: Record<Sev, number>; alertTicketMode?: "manual" | "auto_high"; alertTicketConnectionId?: string | null } }>(
+        "/v1/org/settings",
+      ),
   });
+  const connections = useQuery({
+    queryKey: ["pm", "connections"],
+    queryFn: () => api.get<{ connections: Array<{ id: string; name: string; provider: string }> }>("/v1/pm/connections"),
+  });
+  const [pickedConnection, setPickedConnection] = useState<string | null>(null);
   const current = settings.data?.settings;
   const [draft, setDraft] = useState<Partial<Record<Sev, string>>>({});
   if (!current?.alertSlaHours || !current.alertTicketMode) return null;
@@ -353,6 +363,10 @@ function AlertSettingsCard() {
   const changed = SEVERITIES.some((sev) => next[sev] !== hours[sev]);
   const slaRelaxed = SEVERITIES.some((sev) => hours[sev] > ALERT_SLA_STRICT[sev]);
   const ticketRelaxed = current.alertTicketMode !== "manual";
+  // the ONE connection automatic tickets go to: never chosen for the admin
+  const savedConnection = current.alertTicketConnectionId ?? null;
+  const connection = pickedConnection ?? savedConnection ?? "";
+  const stopped = current.alertTicketMode === "auto_high" && !savedConnection;
   return (
     <Card title="Alert SLA and tickets — settings">
       <div className={v.stack} data-testid="alert-settings">
@@ -385,12 +399,39 @@ function AlertSettingsCard() {
           {ticketRelaxed ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
         </div>
         <p className={v.faint}>Strict default: {TICKET_COPY.strict} {ticketRelaxed ? TICKET_COPY.relaxed : null}</p>
+        {stopped ? (
+          <p className={v.errLine} role="alert">
+            Automatic tickets have stopped: the PM connection named for them no longer exists. regulAIt does not switch to another
+            connection; name one below or set filing back to manual.
+          </p>
+        ) : null}
         <div className={v.row}>
+          <Field label="PM connection for automatic tickets">
+            <Select value={connection} onChange={(event) => {
+              const id = event.target.value || null;
+              setPickedConnection(id ?? "");
+              if (current.alertTicketMode === "auto_high" && id) {
+                void action.run(async () => {
+                  await api.put("/v1/org/settings", { alertTicketConnectionId: id });
+                  setPickedConnection(null);
+                  await settings.refetch();
+                }, "Automatic tickets now go to the chosen connection (audited)");
+              }
+            }}>
+              <option value="">None named</option>
+              {(connections.data?.connections ?? []).map((c) => <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>)}
+            </Select>
+          </Field>
           <Field label="Filing">
             <Select value={current.alertTicketMode} onChange={(event) => {
               const mode = event.target.value as "manual" | "auto_high";
+              if (mode === "auto_high" && !connection) {
+                action.setError("Choose the PM connection automatic tickets go to first; regulAIt never picks one for you.");
+                return;
+              }
               void action.run(async () => {
-                await api.put("/v1/org/settings", { alertTicketMode: mode });
+                await api.put("/v1/org/settings", mode === "auto_high" ? { alertTicketMode: mode, alertTicketConnectionId: connection } : { alertTicketMode: mode });
+                setPickedConnection(null);
                 await settings.refetch();
               }, mode === "manual" ? "Alert tickets: manual (strict default)" : "Alert tickets: automatic for high alerts (relaxed, audited)");
             }}>
