@@ -54,17 +54,43 @@ CodeQL has no expiring baseline. None fails on an expired or stale exception.
 
 - **SAST.** CodeQL runs with `upload: never`, because GitHub refuses an advanced-setup upload while default setup is on.
   The job gates on the SARIF: any result with `security-severity` ≥ 7.0 not in `security/sast-allowlist.json` fails
-  ("new high findings only"). The baseline was triaged finding by finding (below).
-- **Secrets.** gitleaks scans the PR or push range and the full fetched history, redacted (the CI logs are public).
+  ("new high findings only"). An entry names the rule, the file and the result's
+  `partialFingerprints.primaryLocationLineHash`, so it never covers a new result of the same rule in the same file. A
+  run that did not execute, scanned no file, or has a result with no rule metadata or no fingerprint fails closed.
+  `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: by default codeql-action runs path-problem queries "diff-informed" on a
+  pull request, reporting only results on changed lines. PR #131's first run therefore reported five baseline entries
+  (the three taint-tracking rules) as stale; the gate needs the full result set on every event, so CI and a local
+  `codeql database analyze` with the same bundle and suite now agree. The baseline was triaged finding by finding
+  (below).
+- **Secrets.** gitleaks scans the PR or push range and the full history of the checked-out commit (another branch is
+  scanned by its own PR), redacted (the CI logs are public), with `--ignore-gitleaks-allow`.
   `.gitleaks.toml` keeps the default rules and allows only (path AND exact value) pairs: the synthetic secrets our
   scrub, DLP and redaction tests use, and four non-secrets the generic rule misreads. A real secret in an allow-listed
-  test file is still caught.
+  test file is still caught. Two header-only PEM inputs, whose lazy matches span code, are allowed only in the exact
+  commits that introduced them (any later change is scanned with no exception).
+- **No scanner side door** (review B1-01). Each scanner also honours its own suppression file with no reason or
+  expiry. `scripts/security-suppressions.mjs` fails on `.gitleaksignore`, `.trivyignore`, `.trivyignore.yaml`,
+  `trivy.yaml`, `trivy.yml` anywhere in the tree and on `auditConfig` in a `package.json` `pnpm` block or in
+  `pnpm-workspace.yaml`; gitleaks ignores inline `gitleaks:allow`; Trivy runs from an empty directory.
 - **Allow-lists** (`security/audit-allowlist.json`, `image-allowlist.json`, `sast-allowlist.json`): each entry has the
   advisory or rule id, the package or file it covers, a reason of at least 40 characters, `reviewedOn`, and `expires`
-  no more than 90 days later. An expired entry fails the gate on its expiry day; a stale entry (matching no current
-  finding) fails it too. A PR that changes an allow-list, `.gitleaks.toml` or `security.yml` gets a warning and the
-  diff in the job summary, because a gate stored in the repository can be edited by the PR it gates.
-- **Image.** The job builds the image, writes both SBOMs, and fails on a fixable HIGH or CRITICAL not allow-listed.
+  no more than 90 days later; `reviewedOn` may not be in the future, so the 90 days run from today at most. An expired
+  entry fails the gate on its expiry day; a stale entry (matching no current finding) fails it too. A PR that changes
+  an allow-list, `.gitleaks.toml`, `security.yml`, the Dockerfile or a `scripts/security-*` gate script gets a warning
+  and the diff in the job summary, because a gate stored in the repository can be edited by the PR it gates.
+  `.github/CODEOWNERS` proposes the owner as required reviewer for those paths.
+- **Image.** The job builds the image, writes both SBOMs, and fails on a fixable HIGH or CRITICAL not allow-listed, or
+  on a scan that found no OS or no Node packages (`--expect-classes`). It also fails if the runtime image holds a build
+  tool or package manager (`scripts/security-runtime-contents.mjs`, run inside the image).
+- **Production-only runtime image.** The first CI run on PR #131 failed the Trivy gate: 22 HIGH/CRITICAL (one
+  CRITICAL, CVE-2025-68121) in Go stdlib 1.23.12 compiled into `@esbuild/linux-x64@0.25.12/bin/esbuild`. My local
+  proof had not seen it because Docker is unavailable here: I scanned the base image (remote) and `trivy fs` over a
+  source export, and a lockfile scan reads package versions, not the Go binary that only exists after install. A
+  `trivy rootfs` of a fully installed tree reproduces the same 22. esbuild is a build tool (vite, vitest, drizzle-kit);
+  nothing at runtime uses it. The Dockerfile is now two stages: `build` installs, builds, then reinstalls offline with
+  `--prod --filter "@regulait/gateway..."`; `runtime` copies that tree. Locally the pruned tree has no build tool
+  (409 packages; `node_modules` 501 MB to 336 MB), `trivy rootfs` finds 0 at the gate threshold, every bare import in
+  the runtime `dist` resolves, and `demo:prepare` (19/19) plus the real demo journey (2/2) pass when run from it.
 - **Signing.** On a push to `main`, after every other job passed, `sign` loads the exact scanned image (image ID
   checked), pushes it to a throwaway local registry, signs it keylessly and verifies it with
   `scripts/security-cosign-verify.sh`, which pins the identity to `security.yml@refs/heads/main` and the GitHub issuer
@@ -78,13 +104,16 @@ CodeQL has no expiring baseline. None fails on an expired or stale exception.
 - Every third-party action in `security.yml` is pinned by commit SHA. The other workflows are not edited here (their
   owners are batch 2); the exact pins are an integrator follow-up.
 - Scanner binaries: version plus SHA-256 in `env`. Trivy is also verified against its Sigstore bundle with the signer
-  pinned to `aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v0.74.0`. The job uses no
+  pinned to `aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v0.74.0`. That proves where it was
+  built, not that the tag was benign (a compromised maintainer credential can run that workflow); the SHA-256 of a
+  vetted release is the real control. gitleaks and cosign are verified by SHA-256 only (cosign verifying itself would
+  be circular), and that is accepted. The job uses no
   `trivy-action`, no `setup-trivy` and no Trivy container image. Releases are chosen at least about two weeks old
   (Trivy 0.74.0 is from 2026-08-14 rather than 0.75.0 from 2026-10-01).
 - **Base image:** `node:22-trixie-slim@sha256:154ba2f4…a98dfa` (published 2026-10-06), replacing
   `node:22-slim@sha256:43ac6c60…b772c`. The `22-slim` tag's current digest (`sha256:c3de60bf…978392`, Debian 12) still
-  carried the perl-base CVEs, so the base moves to Debian 13 rather than allow-listing them. npm, npx and corepack's
-  pnpm cache are removed from the image after the build: the runtime runs only `node` and `sh`.
+  carried the perl-base CVEs, so the base moves to Debian 13 rather than allow-listing them. npm and npx are removed from
+  the runtime stage, and pnpm exists only in the build stage: the runtime runs only `node` and `sh`.
 - **pnpm:** `packageManager` moves from 10.33.0 to **10.34.5** (2026-07-10), the first 10.x release with all eleven
   advisories fixed. The lockfile does not change (`pnpm install --frozen-lockfile` with 10.34.5: "Already up to date").
   The `dependencies` job installs pnpm through corepack and fails if `pnpm --version` differs from the pin.
@@ -102,7 +131,13 @@ CodeQL 2.27.1 found 27 results at security-severity ≥ 7.0 on `main` @ 3db120a 
   - the trailing-slash trim of a path from an uploaded discovery log (`mcp-discovery`, 149 s on 400,000 slashes) and
     of the git providers' base URLs (Azure DevOps, Bitbucket, GitLab; 140.6 s for the three on 400,000 slashes), by a
     backward scan (`trimTrailingSlashes`).
-- **False positives, allow-listed for 90 days:** the CSP inline-script hasher reading our own build output; a
+  - review B1-04: `mcp-discovery`'s bare `host:port` regex restarted a greedy run at every word boundary (`ab.ab.…`:
+    111.5 s on 400,000 characters); `bareHostBeforePort` finds the same host by scanning back from each port.
+    Following that path into the evidence scrub found one more: `detectPII`/`redactPII` scanned `EMAIL_RE` with
+    `RegExp.exec`, quadratic on a long run with no usable `@` (404 s on 400,000 characters), on the path every
+    guardrailed prompt takes. `visitEmails` finds the same matches in one pass. Both have equivalence tests against
+    the original regex (20,000 generated inputs each) and timing tests that fail with the regex restored.
+- **False positives, allow-listed for 90 days** (one entry per result, by fingerprint): the CSP inline-script hasher reading our own build output; a
   specificity tie-breaker mistaken for a sanitizer; the pending-MFA cookie and `hashToken` (already triaged on PR #117:
   opaque 192–256-bit server tokens); `constantTimeEqual`'s pre-hash; the SPA file server's contained path; URL-substring
   checks inside test mocks.
@@ -133,7 +168,27 @@ Run locally with the pinned tool binaries on planted fixtures in a scratch direc
 | Unsigned image at the verify step, on every PR (CI) | the `image` job passes only if verify printed `no signatures found` |
 | Keyless sign and verify on `main` (CI) | first proven on the first push to `main` after merge; not runnable here (no OIDC, no Docker daemon) |
 | ReDoS fixes, old regexes restored in the 8 files | timing tests fail: each judge parser about 21.6 s, `findMcpEndpoints` 149 s, the three git adapters 140.6 s (`expected 140595.87 to be less than 1000`); restored, all pass |
+| **First CI run on PR #131 (CI)**: the image gate | failed as designed: 22 `NOT ALLOWED` Go stdlib CVEs (1 CRITICAL) in the esbuild binary; reproduced locally by `trivy rootfs` of an installed tree (22, exit 1); the production-only tree gives 0 |
+| Runtime-contents check on a fully installed tree vs the production-only tree | `BUILD TOOLS IN THE RUNTIME IMAGE (23): @esbuild+linux-x64@0.25.12 …`, exit 1; pruned tree: `runtime contents clean: 409 packages`, exit 0 |
+| `// gitleaks:allow` on a planted synthetic key | without `--ignore-gitleaks-allow`: `no leaks found`; with it: `leaks found: 1`, exit 1 |
+| `.gitleaksignore`, `.trivyignore`, nested `trivy.yaml`, `pnpm.auditConfig`, workspace `auditConfig` (unit tests on scratch repos) | each `SCANNER SUPPRESSION: …`, exit 1 |
+| A synthetic PEM block after the allowed header, in a new commit | `leaks found: 1`, exit 1 (the commit-pinned exception does not cover it) |
+| Two results of one rule in one file, one fingerprinted entry (review B1-02) | `NOT ALLOWED: js/sql-injection … (fingerprint cccc3333dddd4444:1)`, exit 1 |
+| `reviewedOn: 2099-01-01` (review B1-03) | `reviewedOn 2099-01-01 is in the future`, exit 2 |
+| SARIF with no runs, a failed run, no artifacts, an unknown rule or no fingerprint; Trivy report with no `os-pkgs` (B1-06, B1-07) | `GATE ERROR`, exit 2 |
+| B1-04 host regex and the email scan restored | timing tests fail: `expected 111540.10 to be less than 1000`; `ab.ab.ab.ab.: expected 404101.46 to be less than 1000` |
 | Gate unit tests, rule reverted | expiry check disabled: 3 tests fail; unlisted-finding check disabled: 7 tests fail |
+
+## CI notes from PR #131
+
+- The first `demo-journey` run (job 112483989979, attempt 1, head 9d2503f) failed at `demo-intake.spec.ts:179`: after
+  "Evaluate now" the page showed only its loading status for 15 s. Attempt 2 of the same job on the same SHA passed
+  (267 + 2 passed), and three local runs of the real journey on that SHA (two on the full tree, one on the
+  production-only tree) passed; `POST /v1/governance/monitor/evaluate` answers in about 0.2 s locally. The evaluation
+  path does not use any code this batch changed (the reviewer's 300,000-case fuzz of the new parsers against the old
+  regexes found no difference). The failing attempt's gateway log is in that run's `demo-journey-failure` artifact,
+  which this environment cannot download, so the root cause is not established; it is recorded here, not called a
+  flake (M-070).
 
 ## Consequences
 

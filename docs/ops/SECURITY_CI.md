@@ -21,7 +21,22 @@ a high-severity issue (`security-severity` of 7.0 or more) that is not in `secur
 **How it runs:** CodeQL default setup is also on for this repository and owns the Security tab. GitHub refuses an
 advanced-setup upload while default setup is on, so this job runs with `upload: never`, gates on the SARIF file itself,
 and keeps the SARIF as the `codeql-sarif` artifact. The CodeQL bundle is the one pinned by the `github/codeql-action`
-commit (CLI 2.27.1 at v4.38.2).
+commit (CLI 2.27.1 at v4.38.2). The job sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES=false`: otherwise, on a pull request,
+the taint-tracking queries report only results on changed lines, and the baseline's entries for them read as stale.
+
+An allow-list entry covers one result: the rule, the file and the result's `partialFingerprints.primaryLocationLineHash`
+(a hash of the line's content plus an occurrence index, so it survives the line moving). A new result of the same rule
+in the same file is not covered. A run that did not execute, scanned no file, or has a result whose rule or fingerprint
+is missing fails the gate (exit 2).
+
+**Reproduce CI locally** (CodeQL bundle `codeql-bundle-v2.27.1` from the `github/codeql-action` releases):
+
+```bash
+codeql database create db --db-cluster --language=javascript-typescript,actions --build-mode=none --source-root=.
+codeql database analyze db/javascript codeql/javascript-queries:codeql-suites/javascript-code-scanning.qls --format=sarif-latest --output=js.sarif
+codeql database analyze db/actions codeql/actions-queries:codeql-suites/actions-code-scanning.qls --format=sarif-latest --output=actions.sarif
+node scripts/security-gate.mjs --kind sarif --report js.sarif --report actions.sarif --allowlist security/sast-allowlist.json
+```
 
 **Licence note:** the CodeQL CLI is free for public repositories. If this repository becomes private again, the job
 needs GitHub Advanced Security, or it is replaced with Semgrep OSS on a pinned ruleset (ADR-0184 records that fallback).
@@ -38,11 +53,19 @@ checked-out commit (for a PR, its merge into `main`) contains a string matching 
 - anything about other branches: each is scanned by its own PR (and `main` on every push);
 - that a secret removed from history is safe. A leaked secret is rotated, not just deleted.
 
-Output is redacted (`--redact`), because this repository and its CI logs are public.
+Output is redacted (`--redact`), because this repository and its CI logs are public. gitleaks runs with
+`--ignore-gitleaks-allow`, so an inline `gitleaks:allow` comment does not hide a finding.
 
 **Exceptions** are (path AND exact value), never a path alone, so a real secret pasted into an allow-listed test file
-is still caught. A PR that changes `.gitleaks.toml`, anything in `security/`, or `security.yml` gets a warning
-annotation and the diff in the job summary: those changes are reviewed as security changes.
+is still caught. Two header-only PEM test inputs, whose private-key matches span code, are also pinned to the commits
+that introduced them. A PR that changes `.gitleaks.toml`, anything in `security/`, `security.yml`, the Dockerfile or a
+`scripts/security-*` gate script gets a warning annotation and the diff in the job summary: those changes are reviewed
+as security changes, and `.github/CODEOWNERS` proposes the owner as their required reviewer.
+
+**No side doors.** `scripts/security-suppressions.mjs` (run first in this job) fails if the tree holds a
+`.gitleaksignore`, `.trivyignore`, `.trivyignore.yaml`, `trivy.yaml` or `trivy.yml`, or an `auditConfig` in a
+`package.json` `pnpm` block or in `pnpm-workspace.yaml`. Each of those would suppress a finding with no reason and no
+expiry. Trivy also runs from an empty directory, so it cannot pick up such a file.
 
 ### 3. Dependency audit: `pnpm audit` (`dependencies` job)
 
@@ -64,10 +87,18 @@ advisories on 0.8.13.
 
 ### 4. Container scan: Trivy (`image` job)
 
-**Proves:** the image built from this commit's `Dockerfile` (operating-system packages and every `package.json` in
-the final filesystem) has no HIGH or CRITICAL vulnerability that has a fixed version, other than those in
+**Proves:** the image built from this commit's `Dockerfile` (operating-system packages, every `package.json` and every
+Go binary in the final filesystem) has no HIGH or CRITICAL vulnerability that has a fixed version, other than those in
 `security/image-allowlist.json`. Unfixable ones are listed in the report but do not fail the gate, because nothing can
-be done about them yet.
+be done about them yet. A report with no OS-package or no Node-package result fails (`--expect-classes`): a scan that
+saw nothing proves nothing.
+
+**Runtime contents.** The Dockerfile's `runtime` stage holds the gateway's production dependencies only (the `build`
+stage reinstalls with `pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..."` before the copy).
+`scripts/security-runtime-contents.mjs`, run inside the built image, fails if any build tool (esbuild, vite, vitest,
+typescript, tsx, drizzle-kit, playwright, rollup) or a package manager (npm, npx, a corepack pnpm cache) is present.
+That is why: the first CI scan (PR #131) found 22 HIGH/CRITICAL Go standard-library CVEs in the esbuild binary the old
+single-stage image carried. A lockfile scan cannot see that; only a scan of an installed tree or the image can.
 
 **Does not prove:**
 - that the image is safe to run as configured (Trivy's misconfiguration and secret scanners are not enabled here);
@@ -155,9 +186,13 @@ waiting for an upstream fix.
 - `id`: the advisory id pnpm prints (GHSA), the Trivy `VulnerabilityID` (CVE or GHSA), or the CodeQL rule id.
 - `package` (pnpm audit, Trivy) or `path` (CodeQL, the repository-relative file): the entry covers that id in that
   package or file only.
+- `fingerprint` (CodeQL only): the result's `partialFingerprints.primaryLocationLineHash` from the SARIF artifact. The
+  entry then covers that one result, not a new one of the same rule in the same file.
 - `reason`: at least 40 characters. Say why it is safe, not just that it is.
+- `reviewedOn`: the day of the review, never in the future.
 - `expires`: at most 90 days after `reviewedOn`. On that day the gate fails until someone re-argues the entry or fixes
-  the finding. Use 30 days for a real finding waiting on a fix.
+  the finding. A real finding is fixed, not allow-listed (ADR-0180); an entry is for a false positive or for a fix
+  that genuinely waits on someone else, with the shortest expiry that covers it.
 
 Remove an entry in the same PR that fixes its finding: a stale entry fails the gate.
 
@@ -177,5 +212,7 @@ Each gate must be seen to fail. The recorded proofs for ADR-0184 (2026-10-06) ar
 | Trivy binary | append one byte to the tarball; or verify the bundle against another tag's identity | `sha256sum: … FAILED`; cosign `invalid signature` / `no matching CertificateIdentity` |
 | cosign verify | every PR runs it on the unsigned image | the PR job passes only because verify printed `no signatures found` |
 | CodeQL | a SARIF result with security-severity 7.5 not in the baseline (unit test), or revert a fixed ReDoS | exit 1, `NOT ALLOWED: js/… at <file>:<line>` |
+| Runtime contents | `node scripts/security-runtime-contents.mjs .` in a full development install | exit 1, `BUILD TOOLS IN THE RUNTIME IMAGE (23): @esbuild+linux-x64@…` |
+| Side doors | add a `.trivyignore`, a `.gitleaksignore`, or `pnpm.auditConfig` to `package.json` | `node scripts/security-suppressions.mjs .` exits 1, `SCANNER SUPPRESSION: …` |
 
 `scripts/security-gate.test.mjs` holds the gate's own red proofs and runs in `ci.yml`'s script-test step.
