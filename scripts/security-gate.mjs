@@ -13,19 +13,27 @@
 //   --kind trivy        `trivy image|fs --format json`; HIGH and CRITICAL that
 //                       have a fixed version count (unfixable ones cannot be
 //                       acted on and are reported, not gated).
+//                       `--expect-classes os-pkgs,lang-pkgs` fails a report
+//                       that has no result of a named class (an empty scan).
 //   --kind sarif        SARIF 2.1.0 (CodeQL); a result counts when its rule's
 //                       `security-severity` is >= 7.0 (GitHub's "high").
-//                       `--report` may repeat (one SARIF per language).
+//                       `--report` may repeat (one SARIF per language). An
+//                       entry names the result's fingerprint too, so it never
+//                       covers a NEW result of the same rule in the same file;
+//                       a run that did not execute, scanned no file, or has a
+//                       result with no rule or no fingerprint fails closed.
 //
 // Allow-list file (JSON):
 //   { "entries": [ { "id": "GHSA-…" | "CVE-…" | "js/…",
 //                    "package": "name"   (pnpm-audit, trivy)  — or —
 //                    "path": "repo/relative/file.ts" (sarif),
+//                    "fingerprint": "<primaryLocationLineHash>" (sarif),
 //                    "reason": "the reachability argument, in full",
 //                    "reviewedOn": "YYYY-MM-DD",
 //                    "expires": "YYYY-MM-DD" } ] }
-// `expires` is at most MAX_DAYS after `reviewedOn`: an exception is re-argued,
-// not renewed by default. The day an entry expires, the gate fails.
+// `expires` is at most MAX_DAYS after `reviewedOn` and after today, and
+// `reviewedOn` is not in the future: an exception is re-argued, not renewed by
+// default. The day an entry expires, the gate fails.
 //
 // Exit codes: 0 pass; 1 a finding is not allowed, or an entry is expired or
 // stale; 2 the report or the allow-list could not be read or is malformed.
@@ -53,8 +61,11 @@ function dayNumber(s) {
 
 class GateInputError extends Error {}
 
-/** Findings at or above the gate threshold, as {id, scope, detail}. */
-export function findingsFrom(kind, report) {
+/** Findings at or above the gate threshold, as {id, scope, fingerprint?, detail}.
+ * `expectClasses` (trivy): Result classes that must be present, so a scan that
+ * silently saw nothing (an undetected OS, an unreadable filesystem) fails
+ * closed instead of passing as clean. */
+export function findingsFrom(kind, report, { expectClasses = [] } = {}) {
   if (report === null || typeof report !== "object") throw new GateInputError("report is not a JSON object");
   if (kind === "pnpm-audit") {
     if (report.error) throw new GateInputError(`pnpm audit reported an error: ${JSON.stringify(report.error)}`);
@@ -71,6 +82,10 @@ export function findingsFrom(kind, report) {
   }
   if (kind === "trivy") {
     if (!("Results" in report) && !("ArtifactName" in report)) throw new GateInputError("not a Trivy JSON report");
+    const classes = new Set((report.Results ?? []).map((r) => r.Class));
+    for (const c of expectClasses) {
+      if (!classes.has(c)) throw new GateInputError(`the Trivy report has no "${c}" result: the scan saw nothing of that class, so it proves nothing`);
+    }
     const out = [];
     for (const r of report.Results ?? []) {
       for (const v of r.Vulnerabilities ?? []) {
@@ -86,10 +101,13 @@ export function findingsFrom(kind, report) {
     return out;
   }
   if (kind === "sarif") {
-    if (!Array.isArray(report.runs)) throw new GateInputError("not a SARIF report (no runs[])");
+    if (!Array.isArray(report.runs) || report.runs.length === 0) throw new GateInputError("not a SARIF report with at least one run");
     const out = [];
     for (const run of report.runs) {
       if (!run || typeof run !== "object") throw new GateInputError("a SARIF run is not an object");
+      // an analysis that did not run, or scanned no file, is not a clean one
+      if (run.invocations?.[0]?.executionSuccessful !== true) throw new GateInputError("a SARIF run does not report a successful execution");
+      if (!Array.isArray(run.artifacts) || run.artifacts.length === 0) throw new GateInputError("a SARIF run scanned no file (no artifacts[])");
       const rules = new Map();
       const components = [run.tool?.driver, ...(run.tool?.extensions ?? [])];
       for (const c of components) for (const rule of c?.rules ?? []) rules.set(rule.id, rule);
@@ -99,14 +117,23 @@ export function findingsFrom(kind, report) {
         if (!rule && res.rule?.toolComponent?.index !== undefined && res.rule?.index !== undefined) {
           rule = components[res.rule.toolComponent.index + 1]?.rules?.[res.rule.index];
         }
-        const sev = Number.parseFloat(rule?.properties?.["security-severity"] ?? "");
+        // a result whose rule cannot be found cannot be ranked: fail closed, never skip it
+        if (!rule) throw new GateInputError(`SARIF result for rule ${ruleId} has no rule metadata to read its severity from`);
+        const sev = Number.parseFloat(rule.properties?.["security-severity"] ?? "");
         if (!(sev >= 7.0)) continue;
         const loc = res.locations?.[0]?.physicalLocation;
         const path = loc?.artifactLocation?.uri ?? "(no location)";
+        // CodeQL's line-content hash (with an occurrence index): an entry covers
+        // THIS result, not every result of the rule in the file
+        const fingerprint = res.partialFingerprints?.primaryLocationLineHash;
+        if (typeof fingerprint !== "string" || !fingerprint) {
+          throw new GateInputError(`SARIF result ${ruleId} at ${path} has no partialFingerprints.primaryLocationLineHash`);
+        }
         out.push({
           id: ruleId,
           scope: path,
-          detail: `security-severity ${sev} ${ruleId} at ${path}:${loc?.region?.startLine ?? "?"} — ${res.message?.text ?? ""}`,
+          fingerprint,
+          detail: `security-severity ${sev} ${ruleId} at ${path}:${loc?.region?.startLine ?? "?"} (fingerprint ${fingerprint}) — ${res.message?.text ?? ""}`,
         });
       }
     }
@@ -116,7 +143,7 @@ export function findingsFrom(kind, report) {
 }
 
 /** Validates the allow-list shape; throws GateInputError on the first problem. */
-export function validateAllowlist(kind, allowlist) {
+export function validateAllowlist(kind, allowlist, today = isoDay()) {
   if (!allowlist || !Array.isArray(allowlist.entries)) throw new GateInputError("allow-list has no entries[] array");
   const scopeKey = kind === "sarif" ? "path" : "package";
   allowlist.entries.forEach((e, i) => {
@@ -124,6 +151,9 @@ export function validateAllowlist(kind, allowlist) {
     if (!e || typeof e !== "object") throw new GateInputError(`${where}: not an object`);
     if (typeof e.id !== "string" || !e.id) throw new GateInputError(`${where}: id is required`);
     if (typeof e[scopeKey] !== "string" || !e[scopeKey]) throw new GateInputError(`${where}: ${scopeKey} is required for --kind ${kind}`);
+    if (kind === "sarif" && (typeof e.fingerprint !== "string" || !e.fingerprint)) {
+      throw new GateInputError(`${where}: fingerprint (the result's partialFingerprints.primaryLocationLineHash) is required for --kind sarif`);
+    }
     if (typeof e.reason !== "string" || e.reason.trim().length < MIN_REASON) {
       throw new GateInputError(`${where}: reason must state the reachability argument (at least ${MIN_REASON} characters)`);
     }
@@ -135,6 +165,11 @@ export function validateAllowlist(kind, allowlist) {
     const span = dayNumber(e.expires) - dayNumber(e.reviewedOn);
     if (span <= 0) throw new GateInputError(`${where}: expires must be after reviewedOn`);
     if (span > MAX_DAYS) throw new GateInputError(`${where}: expires is ${span} days after reviewedOn; the most is ${MAX_DAYS}`);
+    // measured from today too: a reviewedOn in the future would otherwise push the window out indefinitely
+    if (dayNumber(e.reviewedOn) > dayNumber(today)) throw new GateInputError(`${where}: reviewedOn ${e.reviewedOn} is in the future`);
+    if (dayNumber(e.expires) - dayNumber(today) > MAX_DAYS) {
+      throw new GateInputError(`${where}: expires ${e.expires} is more than ${MAX_DAYS} days from today`);
+    }
   });
   return scopeKey;
 }
@@ -143,13 +178,13 @@ export function validateAllowlist(kind, allowlist) {
  * The gate decision. Pure: no I/O, `today` injected.
  * @returns {{ exitCode: 0|1|2, lines: string[] }}
  */
-export function evaluate({ kind, report, allowlist, today = isoDay() }) {
+export function evaluate({ kind, report, allowlist, today = isoDay(), expectClasses = [] }) {
   const lines = [];
   let findings;
   let scopeKey;
   try {
-    findings = findingsFrom(kind, report);
-    scopeKey = validateAllowlist(kind, allowlist);
+    findings = findingsFrom(kind, report, { expectClasses });
+    scopeKey = validateAllowlist(kind, allowlist, today);
   } catch (err) {
     if (err instanceof GateInputError) return { exitCode: 2, lines: [`GATE ERROR (${kind}): ${err.message}`] };
     throw err;
@@ -167,7 +202,9 @@ export function evaluate({ kind, report, allowlist, today = isoDay() }) {
   });
 
   for (const f of findings) {
-    const idx = entries.findIndex((e) => e.id === f.id && e[scopeKey] === f.scope);
+    const idx = entries.findIndex(
+      (e) => e.id === f.id && e[scopeKey] === f.scope && (kind !== "sarif" || e.fingerprint === f.fingerprint),
+    );
     if (idx === -1) {
       failures.push(`NOT ALLOWED: ${f.id} — ${f.detail}`);
       continue;
@@ -228,6 +265,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       report,
       allowlist: readJson(args.allowlist, "allow-list"),
       today: args.today ?? isoDay(),
+      expectClasses: args["expect-classes"] ? args["expect-classes"].split(",").filter(Boolean) : [],
     });
   } catch (err) {
     if (!(err instanceof GateInputError)) throw err;

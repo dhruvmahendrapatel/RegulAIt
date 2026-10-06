@@ -86,6 +86,15 @@ describe("security-gate: pnpm audit", () => {
     expect(MAX_DAYS).toBe(90);
   });
 
+  it("RED (review B1-03): a reviewedOn in the future is refused (2), so the 90-day cap holds from today", () => {
+    const future = evaluate({ kind: "pnpm-audit", report: audit(MINIMIST), allowlist: { entries: [entry({ reviewedOn: "2099-01-01", expires: "2099-03-31" })] }, today: TODAY });
+    expect(future.exitCode).toBe(2);
+    expect(future.lines[0]).toContain("in the future");
+    // reviewed today, 90 days is the most
+    expect(evaluate({ kind: "pnpm-audit", report: audit(MINIMIST), allowlist: { entries: [entry({ reviewedOn: TODAY, expires: "2027-01-04" })] }, today: TODAY }).exitCode).toBe(0);
+    expect(evaluate({ kind: "pnpm-audit", report: audit(MINIMIST), allowlist: { entries: [entry({ reviewedOn: TODAY, expires: "2027-01-05" })] }, today: TODAY }).exitCode).toBe(2);
+  });
+
   it("fails closed (2) when pnpm audit itself errored or the report is not an audit", () => {
     for (const report of [{ error: { code: "ERR_PNPM_AUDIT_BAD_RESPONSE" } }, {}, null, { advisories: {} }]) {
       expect(evaluate({ kind: "pnpm-audit", report, allowlist: { entries: [] }, today: TODAY }).exitCode).toBe(2);
@@ -112,25 +121,36 @@ describe("security-gate: trivy", () => {
   it("a report with no Results key (nothing detected) is clean, not malformed", () => {
     expect(evaluate({ kind: "trivy", report: { ArtifactName: "x" }, allowlist: { entries: [] }, today: TODAY }).exitCode).toBe(0);
   });
+
+  it("RED (review B1-07): with expected classes, a scan that saw no OS or no language packages fails closed (2)", () => {
+    const expectClasses = ["os-pkgs", "lang-pkgs"];
+    for (const report of [{ ArtifactName: "x" }, { ArtifactName: "x", Results: [] }, { ArtifactName: "x", Results: [{ Target: "app", Class: "lang-pkgs" }] }]) {
+      expect(evaluate({ kind: "trivy", report, allowlist: { entries: [] }, today: TODAY, expectClasses }).exitCode).toBe(2);
+    }
+    const both = { ArtifactName: "x", Results: [{ Target: "debian", Class: "os-pkgs" }, { Target: "Node.js", Class: "lang-pkgs" }] };
+    expect(evaluate({ kind: "trivy", report: both, allowlist: { entries: [] }, today: TODAY, expectClasses }).exitCode).toBe(0);
+  });
 });
 
 describe("security-gate: sarif", () => {
-  const sarif = (sev) => ({
+  const result = (line, fp) => ({
+    ruleId: "js/sql-injection",
+    rule: { id: "js/sql-injection", index: 0, toolComponent: { index: 0 } },
+    message: { text: "This query depends on a user-provided value." },
+    partialFingerprints: { primaryLocationLineHash: fp },
+    locations: [{ physicalLocation: { artifactLocation: { uri: "apps/gateway/src/x.ts" }, region: { startLine: line } } }],
+  });
+  const sarif = (sev, results = [result(7, "aaaa1111bbbb2222:1")]) => ({
     version: "2.1.0",
     runs: [
       {
+        invocations: [{ executionSuccessful: true }],
+        artifacts: [{ location: { uri: "apps/gateway/src/x.ts" } }],
         tool: {
           driver: { name: "CodeQL", rules: [] },
           extensions: [{ name: "codeql/javascript-queries", rules: [{ id: "js/sql-injection", properties: { "security-severity": sev } }] }],
         },
-        results: [
-          {
-            ruleId: "js/sql-injection",
-            rule: { id: "js/sql-injection", index: 0, toolComponent: { index: 0 } },
-            message: { text: "This query depends on a user-provided value." },
-            locations: [{ physicalLocation: { artifactLocation: { uri: "apps/gateway/src/x.ts" }, region: { startLine: 7 } } }],
-          },
-        ],
+        results,
       },
     ],
   });
@@ -143,9 +163,34 @@ describe("security-gate: sarif", () => {
   });
 
   it("is scoped by path: an entry for another file does not cover it", () => {
-    const e = { id: "js/sql-injection", path: "apps/gateway/src/x.ts", reason: REASON, reviewedOn: "2026-10-06", expires: "2026-12-01" };
+    const e = { id: "js/sql-injection", path: "apps/gateway/src/x.ts", fingerprint: "aaaa1111bbbb2222:1", reason: REASON, reviewedOn: "2026-10-06", expires: "2026-12-01" };
     expect(evaluate({ kind: "sarif", report: sarif("8.8"), allowlist: { entries: [e] }, today: TODAY }).exitCode).toBe(0);
     expect(evaluate({ kind: "sarif", report: sarif("8.8"), allowlist: { entries: [{ ...e, path: "apps/gateway/src/y.ts" }] }, today: TODAY }).exitCode).toBe(1);
+  });
+
+  it("RED (review B1-02): an entry covers one result, not a NEW result of the same rule in the same file", () => {
+    const e = { id: "js/sql-injection", path: "apps/gateway/src/x.ts", fingerprint: "aaaa1111bbbb2222:1", reason: REASON, reviewedOn: "2026-10-06", expires: "2026-12-01" };
+    const two = sarif("8.8", [result(7, "aaaa1111bbbb2222:1"), result(500, "cccc3333dddd4444:1")]);
+    const r = evaluate({ kind: "sarif", report: two, allowlist: { entries: [e] }, today: TODAY });
+    expect(r.exitCode).toBe(1);
+    expect(r.lines.join("\n")).toContain("NOT ALLOWED: js/sql-injection");
+    expect(r.lines.join("\n")).toContain("cccc3333dddd4444:1");
+    // an entry without a fingerprint is malformed for SARIF
+    const { fingerprint: _drop, ...noFp } = e;
+    expect(evaluate({ kind: "sarif", report: sarif("8.8"), allowlist: { entries: [noFp] }, today: TODAY }).exitCode).toBe(2);
+  });
+
+  it("RED (review B1-06/B1-07): unknown rules, missing fingerprints, and empty or failed runs fail closed (2)", () => {
+    const bad = [
+      { runs: [] },
+      { runs: [{ invocations: [{ executionSuccessful: false }], artifacts: [{}], tool: { driver: { rules: [] } }, results: [] }] },
+      { runs: [{ invocations: [{ executionSuccessful: true }], artifacts: [], tool: { driver: { rules: [] } }, results: [] }] },
+      { runs: [{ invocations: [{ executionSuccessful: true }], artifacts: [{}], tool: { driver: { name: "CodeQL" } }, results: [{ ruleId: "js/x" }] }] },
+      sarif("8.8", [{ ...result(7, "x"), partialFingerprints: undefined }]),
+    ];
+    for (const report of bad) {
+      expect(evaluate({ kind: "sarif", report, allowlist: { entries: [] }, today: TODAY }).exitCode, JSON.stringify(report).slice(0, 120)).toBe(2);
+    }
   });
 });
 
@@ -176,13 +221,15 @@ describe("security-gate: CLI and the committed allow-lists", () => {
     const allow = path.join(dir, "allow.json");
     writeFileSync(allow, JSON.stringify({ entries: [] }));
     const clean = path.join(dir, "actions.sarif");
-    writeFileSync(clean, JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "CodeQL", rules: [] } }, results: [] }] }));
+    const ok = { invocations: [{ executionSuccessful: true }], artifacts: [{ location: { uri: "a.ts" } }] };
+    writeFileSync(clean, JSON.stringify({ version: "2.1.0", runs: [{ ...ok, tool: { driver: { name: "CodeQL", rules: [] } }, results: [] }] }));
     const hot = path.join(dir, "javascript.sarif");
     writeFileSync(hot, JSON.stringify({
       version: "2.1.0",
       runs: [{
+        ...ok,
         tool: { driver: { name: "CodeQL", rules: [{ id: "js/path-injection", properties: { "security-severity": "7.5" } }] } },
-        results: [{ ruleId: "js/path-injection", locations: [{ physicalLocation: { artifactLocation: { uri: "a.ts" } } }] }],
+        results: [{ ruleId: "js/path-injection", partialFingerprints: { primaryLocationLineHash: "f00d:1" }, locations: [{ physicalLocation: { artifactLocation: { uri: "a.ts" } } }] }],
       }],
     }));
     expect(cli(["--kind", "sarif", "--report", clean, "--allowlist", allow]).code).toBe(0);
@@ -198,7 +245,8 @@ describe("security-gate: CLI and the committed allow-lists", () => {
     for (const [kind, file] of [["pnpm-audit", "audit-allowlist.json"], ["trivy", "image-allowlist.json"], ["sarif", "sast-allowlist.json"]]) {
       const allowlist = JSON.parse(readFileSync(path.join(root, "security", file), "utf8"));
       // Evaluate against a report that holds exactly the allow-listed findings, so stale-ness is not what is tested here.
-      const r = evaluate({ kind, report: kind === "pnpm-audit" ? audit() : kind === "trivy" ? { ArtifactName: "x" } : { runs: [] }, allowlist, today: new Date().toISOString().slice(0, 10) });
+      const emptyRun = { invocations: [{ executionSuccessful: true }], artifacts: [{}], tool: { driver: { rules: [] } }, results: [] };
+      const r = evaluate({ kind, report: kind === "pnpm-audit" ? audit() : kind === "trivy" ? { ArtifactName: "x" } : { runs: [emptyRun] }, allowlist, today: new Date().toISOString().slice(0, 10) });
       expect(r.lines.join("\n")).not.toContain("GATE ERROR");
       expect(r.lines.join("\n")).not.toContain("EXPIRED");
     }

@@ -24,9 +24,16 @@ name: Security
 #
 # Supply chain of the gates themselves: every third-party action is pinned by
 # commit SHA (tag in the trailing comment); the scanner binaries are pinned by
-# version AND SHA-256, and Trivy's release is also verified against its
-# Sigstore bundle with the signing workflow's identity pinned (a widely used
+# version AND SHA-256 of a vetted release (the real control: a widely used
 # scanner shipped malicious releases from a stolen credential in March 2026).
+# Trivy's release is also checked against its Sigstore bundle with the release
+# workflow's identity pinned; that proves where it was built, not that the tag
+# was benign, so it adds to the hash pin rather than replacing it.
+#
+# No scanner side door: scripts/security-suppressions.mjs fails on any
+# .gitleaksignore / .trivyignore / trivy.yaml / pnpm auditConfig in the tree,
+# gitleaks runs with --ignore-gitleaks-allow, and Trivy runs from an empty
+# directory, so the only exceptions are the reviewed, expiring allow-lists.
 # Bumping a tool: docs/ops/SECURITY_CI.md "Bumping a pinned tool".
 #
 # Cost: the repository is public, so standard GitHub-hosted runners do not draw
@@ -69,6 +76,13 @@ jobs:
       contents: read
       actions: read
       security-events: read
+    env:
+      # On pull_request, codeql-action by default runs "diff-informed" queries:
+      # path-problem queries report only results touching the PR's changed
+      # lines. The gate compares against a full baseline, so it needs the full
+      # result set on every event (PR #131's first run reported 5 baseline
+      # entries as stale because of this).
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -78,7 +92,9 @@ jobs:
       # Security tab. GitHub refuses an advanced-setup SARIF upload while
       # default setup is on, so this job does NOT upload (`upload: never`): it
       # gates on the SARIF itself and keeps it as an artifact. Same CLI bundle
-      # and the same default query suite as default setup.
+      # and the same default query suite as default setup (the bundle, and so
+      # the query packs, are pinned by the action's commit: CodeQL 2.27.1 at
+      # v4.38.2). Reproduce locally with the commands in docs/ops/SECURITY_CI.md.
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: javascript-typescript, actions
@@ -143,15 +159,20 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # the gates' own code and configuration (unquoted on purpose: a path list)
+          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile
         run: |
           set -euo pipefail
-          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- .gitleaks.toml security/ .github/workflows/security.yml)"
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED})"
           if [ -n "$changed" ]; then
             while IFS= read -r f; do echo "::warning file=${f}::This PR changes a security gate or allow-list (${f}); review it as a security change."; done <<< "$changed"
-            { echo "### Security gate or allow-list changed in this PR"; echo '```diff'; git diff "$BASE_SHA" "$HEAD_SHA" -- .gitleaks.toml security/ .github/workflows/security.yml; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "### Security gate or allow-list changed in this PR"; echo '```diff'; git diff "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED}; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No security allow-list changed."
           fi
+
+      - name: No scanner side door (suppression files or settings)
+        run: node scripts/security-suppressions.mjs .
 
       - name: Scan the new commits
         env:
@@ -171,7 +192,7 @@ jobs:
             exit 0
           fi
           echo "Scanning ${range}"
-          gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="${range}" .
+          gitleaks git --config .gitleaks.toml --redact --no-banner --ignore-gitleaks-allow --log-opts="${range}" .
 
       # Everything reachable from the checked-out commit (for a PR, the merge
       # of the PR into main), not every fetched branch: another branch is
@@ -180,7 +201,7 @@ jobs:
       - name: Scan the full history of this commit
         run: |
           set -euo pipefail
-          gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="HEAD" \
+          gitleaks git --config .gitleaks.toml --redact --no-banner --ignore-gitleaks-allow --log-opts="HEAD" \
             --report-format sarif --report-path "$RUNNER_TEMP/gitleaks.sarif" .
 
       - name: Keep the (redacted) report
@@ -275,9 +296,12 @@ jobs:
           tar -xzf "$tgz" -C "$RUNNER_TEMP/bin" trivy
           "$RUNNER_TEMP/bin/trivy" --version
 
+      # Every Trivy step runs from an empty directory, so no .trivyignore or
+      # trivy.yaml in the checkout can configure it (review B1-01).
       - name: SBOM — workspace (CycloneDX)
+        working-directory: ${{ runner.temp }}
         # --include-dev-deps: the build toolchain is part of our supply chain too.
-        run: trivy fs --include-dev-deps --format cyclonedx --output "$RUNNER_TEMP/sbom-workspace.cdx.json" .
+        run: trivy fs --include-dev-deps --format cyclonedx --output "$RUNNER_TEMP/sbom-workspace.cdx.json" "$GITHUB_WORKSPACE"
 
       - name: Build the image
         id: build
@@ -286,16 +310,31 @@ jobs:
           docker build -t regulait:scan .
           echo "image-id=$(docker image inspect --format '{{.Id}}' regulait:scan)" >> "$GITHUB_OUTPUT"
 
+      # The runtime stage must hold production dependencies only. PR #131's first
+      # image scan found 22 HIGH/CRITICAL Go stdlib CVEs inside the esbuild
+      # binary the old single-stage image shipped; this makes "no build tool in
+      # the image" a deterministic check rather than a scanner finding.
+      - name: Gate — the runtime image carries no build tool or package manager
+        run: |
+          set -euo pipefail
+          docker run -i --rm --user root --entrypoint node regulait:scan --input-type=module - /app --system < scripts/security-runtime-contents.mjs
+          size="$(docker image inspect --format '{{.Size}}' regulait:scan)"
+          echo "Runtime image size: $((size / 1048576)) MiB" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: SBOM — image (CycloneDX)
+        working-directory: ${{ runner.temp }}
         run: trivy image --format cyclonedx --output "$RUNNER_TEMP/sbom-image.cdx.json" regulait:scan
 
       - name: Gate — no unlisted fixable HIGH or CRITICAL in the image
+        working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
           report="$RUNNER_TEMP/trivy-image.json"
           trivy image --scanners vuln --severity HIGH,CRITICAL --format json --output "$report" regulait:scan
           trivy convert --format table "$report" || true
-          node scripts/security-gate.mjs --kind trivy --report "$report" --allowlist security/image-allowlist.json
+          # --expect-classes: a scan that saw no OS packages or no Node packages proves nothing
+          node "$GITHUB_WORKSPACE/scripts/security-gate.mjs" --kind trivy --report "$report" \
+            --allowlist "$GITHUB_WORKSPACE/security/image-allowlist.json" --expect-classes os-pkgs,lang-pkgs
 
       - name: Keep the SBOMs and the scan
         if: always()
@@ -323,7 +362,9 @@ jobs:
 
       - name: Hand the scanned image to the signing job
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker save regulait:scan | gzip -1 > "$RUNNER_TEMP/image.tar.gz"
+        run: |
+          set -euo pipefail
+          docker save regulait:scan | gzip -1 > "$RUNNER_TEMP/image.tar.gz"
 
       - name: Upload the scanned image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

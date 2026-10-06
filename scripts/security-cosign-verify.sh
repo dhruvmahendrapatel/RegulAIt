@@ -11,7 +11,9 @@
 #                              so every PR re-proves that verify is not a no-op.
 #
 # A signature made anywhere else (another workflow, a branch, a PR merge ref, a
-# developer's key) does not match the pinned identity and is refused too.
+# developer's key) does not match the pinned identity and is refused too. CI
+# exercises only the unsigned case on every PR; the foreign-key case was proven
+# locally (ADR-0184 red-proof table), not by CI.
 #
 # usage: security-cosign-verify.sh <registry/repo@sha256:digest> <signed|unsigned>
 # env:   COSIGN (path to the verified cosign binary; default `cosign`)
