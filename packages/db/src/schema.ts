@@ -1380,6 +1380,11 @@ export const auditLog = pgTable(
     index("audit_log_prune_marker_at_idx")
       .on(t.at)
       .where(sql`${t.ruleId} = 'audit-log-pruned'`),
+    // migration 0167 (ADR-0182 S5): the alert-SLA sweep's escalation markers
+    // only, so "escalated once" never scans the trail
+    index("audit_log_alert_escalated_idx")
+      .on(t.objectId)
+      .where(sql`${t.ruleId} = 'governance-alert-escalated'`),
     // migration 0155 (ADR-0180 A2): the guardrail hit rows only (the ids
     // guardrails.ts writes as `guardrail-${outcome}`), so the guardrail_hits
     // condition metric never scans the trail
@@ -2626,7 +2631,9 @@ export const pmLinks = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => pmConnections.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance", "decision"] }).notNull(),
+    /** ADR-0182 S5 (PF-14): `governance_alert` = an alert episode's one work item
+     * (the column has no DB CHECK) */
+    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance", "decision", "governance_alert"] }).notNull(),
     objectId: uuid("object_id").notNull(),
     /** task-graph node id when objectType is run_node */
     nodeId: text("node_id"),
@@ -4073,6 +4080,10 @@ export const orgSettings = pgTable(
       .default({ high: 24, medium: 72, low: 168 }),
     /** S5 (PF-14): `manual` files a PM work item only when a person asks */
     alertTicketMode: text("alert_ticket_mode", { enum: ALERT_TICKET_MODES }).notNull().default("manual"),
+    /** S5 (PF-14, migration 0167): the ONE PM connection `auto_high` files on;
+     * null (strict) = none named. Deleting it stops automatic filing — there is
+     * no fallback to another connection (ADR-0180). */
+    alertTicketConnectionId: uuid("alert_ticket_connection_id").references(() => pmConnections.id, { onDelete: "set null" }),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

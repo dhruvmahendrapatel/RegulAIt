@@ -34,6 +34,7 @@ import {
   count,
   orgSettings,
   ORG_SETTINGS_ID,
+  pmConnections,
   revocations,
   sql,
   traceRetentionHolds,
@@ -46,6 +47,7 @@ import {
 import {
   ACCOUNTABILITY_SETTING_KEYS,
   accountabilitySettingRelaxed,
+  alertTicketSettingsProblem,
   type AccountabilitySettingKey,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
@@ -750,6 +752,20 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
             `every key issued with no explicit expiry would be refused by the ceiling it was given. Nothing was saved.`,
         });
       }
+    }
+    // ADR-0182 S5 (PF-14): automatic alert tickets go to the ONE PM connection
+    // an admin named — never an implicit choice (ADR-0180). Checked over the
+    // MERGED values, so auto_high needs the connection in this write or an
+    // earlier one.
+    if (body.alertTicketMode !== undefined || body.alertTicketConnectionId !== undefined) {
+      const mode = body.alertTicketMode ?? before.alertTicketMode;
+      const connectionId =
+        body.alertTicketConnectionId !== undefined ? body.alertTicketConnectionId : before.alertTicketConnectionId;
+      const [conn] = connectionId
+        ? await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, connectionId))
+        : [];
+      const problem = alertTicketSettingsProblem({ mode, connectionId, connectionExists: Boolean(conn) });
+      if (problem) return reply.status(422).send(problem);
     }
     // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes
     // behind ADR-0043's guard at WRITE time exactly as `mcp_servers.url` and

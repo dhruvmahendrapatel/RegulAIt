@@ -131,6 +131,8 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { projectPiiMode } from "./projects.js";
 import { baseUrlFor } from "./mcp-auth-metadata.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
+// ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
+import { registerAlertSlaCourier } from "./alert-ownership.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -845,6 +847,25 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         if (await postAlert(alert, conn, conn.defaultChannel, actorUserId)) out.posted += 1;
         else out.failed += 1;
       }
+    }
+    return out;
+  });
+
+  // ADR-0182 S5 (PF-14): the SLA sweep's breach and unowned escalations, to
+  // the same opted-in workspaces, with the sweep's own PII-free text in place
+  // of the alert's title
+  registerAlertSlaCourier(db, async (message, actorUserId) => {
+    const out = { posted: 0, failed: 0 };
+    const conns = await db
+      .select()
+      .from(chatopsConnections)
+      .where(and(eq(chatopsConnections.enabled, true), isNotNull(chatopsConnections.notifyAlertMinSeverity)));
+    const [alert] = conns.length ? await db.select().from(governanceAlerts).where(eq(governanceAlerts.id, message.alertId)) : [];
+    if (!alert) return out;
+    for (const conn of conns) {
+      if (!alertMeetsThreshold(message.severity, conn.notifyAlertMinSeverity)) continue;
+      if (await postAlert({ ...alert, title: message.text }, conn, conn.defaultChannel, actorUserId)) out.posted += 1;
+      else out.failed += 1;
     }
     return out;
   });

@@ -172,7 +172,9 @@ export const ACCOUNTABILITY_SETTING_COPY: Readonly<
   alertTicketMode: {
     label: "Alert tickets",
     strict: "Manual: a work item is filed in the PM tool only when a person asks for one.",
-    relaxed: "Automatic for high alerts files a work item, with the alert's title, in a third-party PM tool for every new high episode.",
+    relaxed:
+      "Automatic for high alerts files a work item in the chosen third-party PM tool for every new high episode, with the " +
+      "alert's title in the work item description; people appear as 'a user (id …)'.",
   },
 };
 
@@ -262,8 +264,11 @@ export const accountabilityOrgSettingsFields = {
     })
     .strict()
     .optional(),
-  /** strict `manual`; `auto_high` relaxes it */
+  /** strict `manual`; `auto_high` relaxes it, and needs alertTicketConnectionId */
   alertTicketMode: z.enum(ALERT_TICKET_MODES).optional(),
+  /** S5 (migration 0167): the PM connection `auto_high` files on (null = none);
+   * never chosen implicitly (`alertTicketSettingsProblem`) */
+  alertTicketConnectionId: z.string().uuid().nullable().optional(),
 } as const;
 
 // ---------------------------------------------------------------------------

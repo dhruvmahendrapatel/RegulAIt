@@ -40,6 +40,7 @@ import {
   governanceAlerts,
   governanceReviewPolicyVersions,
   kris,
+  pmConnections,
   runMigrations,
   sql,
   useCaseDecisionRecords,
@@ -219,6 +220,10 @@ describe("ADR-0182 secure by default: the D4 org settings", () => {
   });
 
   it("each relaxation is audited with detail.transitions and named as relaxed; strict values come back", async () => {
+    // S5: auto_high needs the PM connection it files on, named beforehand
+    const conn = await inject("POST", "/v1/pm/connections", users.admin.auth, { name: `a182-pm-${RUN}`, provider: "mock", project: "A182", token: "synthetic-token" });
+    expect(conn.statusCode, conn.body).toBe(201);
+    expect((await inject("PUT", "/v1/org/settings", users.admin.auth, { alertTicketConnectionId: conn.json().id })).statusCode).toBe(200);
     try {
       for (const [key, value] of Object.entries(RELAXED)) {
         const put = await inject("PUT", "/v1/org/settings", users.admin.auth, { [key]: value });
@@ -251,6 +256,8 @@ describe("ADR-0182 secure by default: the D4 org settings", () => {
     const detail = restore!.detail as { transitions: Record<string, unknown>; relaxed?: string[] };
     expect(Object.keys(detail.transitions).sort()).toEqual(Object.keys(ACCOUNTABILITY_STRICT_DEFAULTS).sort());
     expect(detail.relaxed).toBeUndefined();
+    expect((await inject("PUT", "/v1/org/settings", users.admin.auth, { alertTicketConnectionId: null })).statusCode).toBe(200);
+    await db.delete(pmConnections).where(eq(pmConnections.id, conn.json().id));
   });
 
   it("refuses a value outside its bounds (400), and the database holds the same bounds", async () => {
@@ -527,9 +534,7 @@ describe("ADR-0182 D4 routes: registered with a deliberate auth class, 501 until
     { method: "POST", pattern: "/v1/ai-policies/:policyId/acknowledge", url: `/v1/ai-policies/${X}/acknowledge`, cls: "user" },
     { method: "POST", pattern: "/v1/ai-policies/:policyId/records", url: `/v1/ai-policies/${X}/records`, cls: "admin" },
     { method: "GET", pattern: "/v1/me/ai-literacy", url: "/v1/me/ai-literacy", cls: "user" },
-    // S5
-    { method: "PUT", pattern: "/v1/governance/alerts/:alertId/owner", url: `/v1/governance/alerts/${X}/owner`, cls: "user" },
-    { method: "POST", pattern: "/v1/governance/alerts/:alertId/ticket", url: `/v1/governance/alerts/${X}/ticket`, cls: "admin" },
+    // S5 landed: its routes are classed in its own suite (zz-adr0182-s5-alert-ownership)
   ];
 
   it.each(ROUTES)("$method $pattern is classed $cls and answers 501", async (r) => {
@@ -590,8 +595,9 @@ describe("ADR-0182 monitor and scheduler: the four accountability rules, the fiv
       expect(raised.notEvaluated).not.toContain("incident_notification_due");
       const rows = await open();
       expect(rows).toHaveLength(1);
-      // the S5 stub assigns no owner and no due time yet
-      expect(rows[0]).toMatchObject({ status: "open", severity: "high", ownerUserId: null, dueAt: null });
+      // S5: no owner on record for an incident subject; due 24 h after raise (high)
+      expect(rows[0]).toMatchObject({ status: "open", severity: "high", ownerUserId: null });
+      expect(rows[0]!.dueAt).not.toBeNull();
 
       await runGovernanceMonitor(db, { actorUserId: users.admin.id });
       expect((await open())[0]?.status).toBe("resolved");
@@ -607,7 +613,6 @@ describe("ADR-0182 monitor and scheduler: the four accountability rules, the fiv
       SCHEDULER_JOB_NAMES.feedbackSlaSweep,
       SCHEDULER_JOB_NAMES.feedbackRetentionSweep,
       SCHEDULER_JOB_NAMES.literacyExpirySweep,
-      SCHEDULER_JOB_NAMES.alertSlaSweep,
     ]) {
       const d = defs.get(name);
       expect(d, name).toBeDefined();
@@ -615,6 +620,8 @@ describe("ADR-0182 monitor and scheduler: the four accountability rules, the fiv
       const out = await d!.run({ db, now: new Date(), actorUserId: null } as never);
       expect(out.itemsProcessed, name).toBe(0);
     }
+    // S5 landed: alert-sla-sweep is registered and runs (its behaviour is pinned in zz-adr0182-s5-alert-ownership)
+    expect(defs.get(SCHEDULER_JOB_NAMES.alertSlaSweep)?.adr).toBe("ADR-0182");
   });
 });
 

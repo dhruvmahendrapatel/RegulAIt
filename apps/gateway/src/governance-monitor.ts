@@ -88,7 +88,7 @@ import { residualRiskMonitorInput } from "./risk-tolerance.js";
 import { incidentMonitorInput } from "./incidents.js";
 import { feedbackMonitorInput } from "./feedback.js";
 import { literacyMonitorInput } from "./ai-literacy.js";
-import { afterAlertsRaised, alertOwnershipAtRaise } from "./alert-ownership.js";
+import { afterAlertsRaised, alertOwnershipAtRaise, alertOwnershipViews } from "./alert-ownership.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -876,6 +876,8 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
       }
     }
 
+    // ADR-0182 S5 (PF-14): each episode's owner, SLA state and work item
+    const ownership = await alertOwnershipViews(db, rows.map((r) => r.a));
     return {
       alerts: rows.map(({ a, ackName, ackEmail }) => ({
         id: a.id,
@@ -894,6 +896,7 @@ export function registerGovernanceMonitorRoutes(app: FastifyInstance, db: Db): v
           : null,
         ackNote: a.ackNote,
         resolvedAt: a.resolvedAt?.toISOString() ?? null,
+        ...ownership.get(a.id),
       })),
       counts,
       lastEvaluatedAt: last?.at?.toISOString() ?? null,
