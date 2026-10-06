@@ -234,6 +234,25 @@ describe("ADR-0182 A12: clocks are set aside only by an admin with a reason, and
     expect(again.json().error).toBe("notification_final");
   });
 
+  it("the ROUTE CLASS refuses a non-admin before the handler: the admin gate's 403, and the clock stays pending", async () => {
+    // Integrator (D4): the handler's own isAdmin check is the second lock; this
+    // pins the FIRST one — a non-admin with a valid reason on a real clock gets
+    // the app-wide admin gate's `admin_only`, never the handler's `forbidden`.
+    const d = await open("owner", { useCaseId: await mkUseCase("gate", "high"), serious: true, seriousCriteria: ["health"] });
+    const n = d.notifications.find((x) => x.clockId === "art73-2-general")!;
+    for (const move of ["not-required", "toll"] as const) {
+      for (const who of ["owner", "member"] as const) {
+        const res = await inject("POST", `/v1/incidents/${d.incident.id}/notifications/${n.id}/${move}`, users[who].auth, {
+          reason: "a valid reason that is long enough to pass the schema",
+        });
+        expect(res.statusCode, `${move} as ${who}`).toBe(403);
+        expect(res.json().error, `${move} as ${who}`).toBe("admin_only");
+      }
+    }
+    const [row] = await db.select({ status: aiIncidentNotifications.status }).from(aiIncidentNotifications).where(eq(aiIncidentNotifications.id, n.id));
+    expect(row!.status).toBe("pending");
+  });
+
   it("a clock row cannot be deleted (the database refuses it) and the API exposes no delete", async () => {
     const d = await open("owner", { useCaseId: await mkUseCase("nodelete", "high"), serious: true, seriousCriteria: ["health"] });
     const n = d.notifications[0]!;

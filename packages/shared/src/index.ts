@@ -4469,6 +4469,12 @@ export {
   DEPLOY_GATE_REASON_INFO,
   type DeployGateAssuranceSummary,
 } from "./deploy-gate.js";
+// ADR-0182 A12 — the incident gate reason codes and the gate's incident input/summary
+export {
+  INCIDENT_GATE_REASON_CODES,
+  type DeployGateIncidentInput,
+  type DeployGateIncidentSummary,
+} from "./deploy-gate.js";
 export {
   DEFAULT_REQUIRED_MAX_ASR_PCT,
   DEFAULT_REQUIRED_MIN_SCORE,

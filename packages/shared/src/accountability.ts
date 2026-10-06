@@ -546,6 +546,8 @@ export const updateIncidentActionSchema = z
     dueAt: z.string().datetime({ offset: true }).nullable().optional(),
     status: z.enum(INCIDENT_ACTION_STATUSES).optional(),
     evidenceRef: z.string().trim().min(1).max(1000).optional(),
+    /** required (by the route) when the status moves to `cancelled`; audited and kept on the timeline */
+    reason: z.string().trim().min(10).max(2000).optional(),
   })
   .strict();
 

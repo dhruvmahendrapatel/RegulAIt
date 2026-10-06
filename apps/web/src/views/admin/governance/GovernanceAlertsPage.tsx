@@ -186,6 +186,8 @@ export default function GovernanceAlertsPage() {
                       <div><strong>Inherited-risk path</strong><ol className={s.pathList}>{(selected.detail.pathLabels ?? selected.detail.path ?? []).map((part) => <li key={part}>{part}</li>)}</ol></div>
                     ) : null}
                     {selected.detail.sourceRiskId ? <Link to={`/admin/risks?riskId=${selected.detail.sourceRiskId}`}>Open source risk</Link> : null}
+                    {/* ADR-0182 A12: report an incident from this alert (the form arrives pre-linked to it) */}
+                    <div><Link to={`/incidents?new=1&detectionSource=monitor_alert&sourceRef=${selected.id}`}>Open incident</Link></div>
                     {selected.ackNote ? <p className={v.dim}>Acknowledgement note: {selected.ackNote}</p> : null}
                     {selected.status === "open" ? (
                       <div className={v.stack}>

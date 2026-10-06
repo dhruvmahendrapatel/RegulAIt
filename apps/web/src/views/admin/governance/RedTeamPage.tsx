@@ -21,6 +21,7 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -450,7 +451,13 @@ export default function RedTeamPage() {
           </Card>
 
           {selectedRun && runDetail.data ? (
-            <Card title="Run detail">
+            <Card
+              title="Run detail"
+              actions={
+                // ADR-0182 A12: report an incident from this run (the form arrives pre-linked to it)
+                <Link to={`/incidents?new=1&detectionSource=red_team&sourceRef=${selectedRun}`}>Open incident</Link>
+              }
+            >
               <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
                 {runDetail.data.run.gateReason}
               </div>

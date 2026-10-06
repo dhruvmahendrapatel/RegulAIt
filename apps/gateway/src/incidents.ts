@@ -1012,8 +1012,6 @@ const listQuery = z
     limit: z.coerce.number().int().min(1).max(500).default(200),
   })
   .strict();
-/** the action PATCH body: the shared schema plus the reason a cancellation needs (main-session decision 2026-10-06) */
-const updateActionBody = updateIncidentActionSchema.extend({ reason: z.string().trim().min(10).max(2000).optional() });
 const exportQuery = z.object({ format: z.enum(["bundle", "csv"]).default("bundle") }).strict();
 
 function send(reply: FastifyReply, e: unknown) {
@@ -1359,7 +1357,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
 
   app.patch("/v1/incidents/:incidentId/actions/:actionId", async (req, reply) => {
     const { incidentId, actionId } = actionParam.parse(req.params);
-    const body = updateActionBody.parse(req.body ?? {});
+    const body = updateIncidentActionSchema.parse(req.body ?? {});
     const actor = actorOf(req);
     try {
       const incident = await loadIncident(db, incidentId);
