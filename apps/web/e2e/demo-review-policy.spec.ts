@@ -87,9 +87,15 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   // the review policy is an org singleton: put back exactly what was there
   if (!originalPolicy) return;
+  const body = { roles: originalPolicy.roles, tiers: originalPolicy.tiers, riskAcceptorUserIds: originalPolicy.riskAcceptorUserIds };
+  // ADR-0182 A11: previewed first, under the strict decision-regression gate
+  const run = await api("/v1/governance/decision-regression/preview", {
+    method: "POST",
+    body: JSON.stringify({ subject: "review_policy", candidate: body }),
+  });
   await api("/v1/governance/review-policy", {
     method: "PUT",
-    body: JSON.stringify({ roles: originalPolicy.roles, tiers: originalPolicy.tiers, riskAcceptorUserIds: originalPolicy.riskAcceptorUserIds }),
+    body: JSON.stringify({ ...body, regressionRunId: run.id, acceptChangedOutcomes: true, acceptReason: "demo spec: put the policy back as found" }),
   });
 });
 
@@ -112,7 +118,14 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
   await expect(page.getByRole("group", { name: "Required reviews for the high tier" })).toContainText("2 required reviews");
   await page.getByLabel("High tier: approval valid for (months)").fill("12");
   await page.getByRole("combobox", { name: "Add a person to risk acceptors" }).selectOption({ label: "Avery Approver" });
-  await page.getByRole("button", { name: "Save policy" }).click();
+  // ADR-0182 A11: the "Preview impact" step shows the golden cases the policy
+  // changes (the high tier now needs two reviews); the admin accepts them
+  await page.getByRole("button", { name: "Preview impact" }).first().click();
+  const impact = page.getByRole("dialog", { name: "Preview impact: the review policy" });
+  await expect(impact.getByRole("status").filter({ hasText: /golden cases? changes?/ })).toBeVisible();
+  await impact.getByRole("checkbox", { name: /I have reviewed these changed outcomes/ }).check();
+  await impact.getByLabel("Why these outcomes should change").fill("High-tier use cases need a security and a privacy review.");
+  await impact.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText(/Last changed .* by Ada Admin\./)).toBeVisible();
   const policy = await api("/v1/governance/review-policy");
   expect(policy.roles).toEqual(expect.arrayContaining([

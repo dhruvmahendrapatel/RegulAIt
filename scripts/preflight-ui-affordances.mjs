@@ -39,12 +39,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DELIBERATELY_API_ONLY = new Map([
   // TEMPORARY (ADR-0182 D4 P0, M-053): registered as 501 stubs before their
   // screens exist. Deleting each entry is part of the owning slice's
-  // acceptance: A11 builds DecisionRegressionPage's retire-case control, A13
-  // builds FeedbackTab's revoke-link control.
-  [
-    "/v1/governance/decision-regression/cases/:x",
-    "TEMPORARY — D4 P0 stub; A11 adds the retire-case control on DecisionRegressionPage and deletes this entry",
-  ],
+  // acceptance: A13 builds FeedbackTab's revoke-link control. (A11's entry is
+  // gone: DecisionRegressionPage retires a case.)
   [
     "/v1/use-cases/:x/feedback-links/:x",
     "TEMPORARY — D4 P0 stub; A13 adds the revoke-link control on FeedbackTab and deletes this entry",
