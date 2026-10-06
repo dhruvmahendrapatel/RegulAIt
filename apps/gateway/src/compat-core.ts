@@ -83,6 +83,8 @@ import {
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import {
   loadVirtualKeyContext,
   virtualKeyAdmits,
@@ -657,6 +659,7 @@ export async function prepareCompatCall(
     ceilingTier = ceiling?.tier ?? null;
   }
   const compatExecutionMode = await loadExecutionMode(db);
+  const compatLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) }); // ADR-0182 A14
   // ADR-0173 §3 — the org's model allow-list for the "compat" feature, applied
   // to the requested binding and every routing candidate through the shared helper
   const compatModelPolicy = await loadModelPolicy(db);
@@ -666,7 +669,7 @@ export async function prepareCompatCall(
         userId,
         // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
         // Developers' traffic is exactly what a halt is usually thrown for.
-        execution: postureOf(compatExecutionMode, agentHaltOf(a)),
+        execution: { ...postureOf(compatExecutionMode, agentHaltOf(a)), ...compatLiteracy },
         agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
         mode: COMPAT_MODE,
         agentGrants: grants,

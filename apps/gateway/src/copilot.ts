@@ -62,6 +62,7 @@ import {
   loadExecutionMode,
   postureOf,
 } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import {
   agentGrants,
   agents,
@@ -1508,7 +1509,7 @@ export async function agentDecision(
     userId,
     // ADR-0124 — the copilot's narrator really dispatches, and its own comment
     // says it "is not exempt from anything". A halt is no exception.
-    execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
+    execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...(await literacySlot(db, userId)) },
     agent: {
       id: agent.id,
       name: agent.name,

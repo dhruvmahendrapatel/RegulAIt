@@ -37,6 +37,8 @@ import { refuseSodMint } from "./sod.js";
 import { refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js";
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
@@ -669,12 +671,14 @@ export async function executeGovernedDispatch(
     // served-binding check every attempt takes when the caller names its
     // feature — and a refusal there is recorded as a DENIED hop.)
     const hopExecutionMode = await loadExecutionMode(db);
+    // ADR-0182 A14 — the hop runs for the same person: same literacy slot (an eval or red-team dispatch is exempt)
+    const hopLiteracy = await literacySlot(db, args.userId, { origin: args.evaluationSubject === true || args.modelFeature?.feature === "evals" ? "evaluation" : "human" });
     const decision = evaluateAgent({
       userId: args.userId,
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
       // stop traffic being routed INTO it by somebody else's fallback chain.
-      execution: postureOf(hopExecutionMode, agentHaltOf(hopAgent)),
+      execution: { ...postureOf(hopExecutionMode, agentHaltOf(hopAgent)), ...hopLiteracy },
       agent: {
         id: hopAgent.id,
         name: hopAgent.name,
@@ -3820,10 +3824,12 @@ export function registerAgentConnectorRoutes(
     // ADR-0173 §3 — the org's model allow-list for the "chat" feature, applied
     // to the kernel's allow below and to every routing candidate.
     const invokeModelPolicy = await loadModelPolicy(db);
+    // ADR-0182 A14 — the literacy slot, once per request (the routing roster below reuses it)
+    const invokeLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) });
     const kernelDecision = evaluateAgent({
       userId,
       // ADR-0124 — the kill switch on the native dispatch path.
-      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
+      execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...invokeLiteracy },
       // the display name rides along so denial prose says "premium-mock
       // (c8d62183…)" instead of a bare UUID (the id stays in the trace)
       agent: {
@@ -4074,7 +4080,7 @@ export function registerAgentConnectorRoutes(
           withModelPolicy(
             evaluateAgent({
               userId,
-              execution: postureOf(routingExecutionMode, agentHaltOf(a)),
+              execution: { ...postureOf(routingExecutionMode, agentHaltOf(a)), ...invokeLiteracy },
               agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
               mode: body.mode,
               agentGrants: grants,

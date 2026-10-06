@@ -1,7 +1,7 @@
 /**
  * Account — identity, password change and TOTP MFA self-service (ADR-0025),
  * plus per-user BYO model keys (ModelKeysCard). Reached from the topbar user
- * menu; ?section= deep-links (password | mfa | keys).
+ * menu; ?section= deep-links (password | mfa | keys | ai-policies). ADR-0182 A14 adds the AI policies section.
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -14,6 +14,7 @@ import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
+import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
 import s from "../auth/auth.module.css";
 
@@ -25,12 +26,14 @@ export default function AccountPage() {
   const mfaRef = useRef<HTMLDivElement>(null);
   const sessionsRef = useRef<HTMLDivElement>(null);
   const keysRef = useRef<HTMLDivElement>(null);
+  const policiesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (section === "password") pwRef.current?.scrollIntoView({ block: "start" });
     if (section === "mfa") mfaRef.current?.scrollIntoView({ block: "start" });
     if (section === "sessions") sessionsRef.current?.scrollIntoView({ block: "start" });
     if (section === "keys") keysRef.current?.scrollIntoView({ block: "start" });
+    if (section === "ai-policies") policiesRef.current?.scrollIntoView({ block: "start" });
   }, [section]);
 
   return (
@@ -85,8 +88,56 @@ export default function AccountPage() {
         <div ref={keysRef}>
           <ModelKeysCard />
         </div>
+        <div ref={policiesRef} data-testid="account-ai-policies">
+          <AiPoliciesCard hasUser={Boolean(auth?.userId)} />
+        </div>
       </div>
     </>
+  );
+}
+
+/**
+ * ADR-0182 A14 — the AI policies and trainings that apply to me, and acknowledging them. The same list the
+ * acknowledgement interstitial shows; this page is never interrupted by it, so the way through is always here.
+ */
+function AiPoliciesCard(props: { hasUser: boolean }) {
+  const q = useMyLiteracy(props.hasUser);
+  const d = q.data;
+  return (
+    <Card
+      title={
+        <span className={v.rowTight}>
+          AI policies
+          {d && d.required && (d.current ? <Badge tone="ok">all acknowledged</Badge> : <Badge tone="warn">to acknowledge</Badge>)}
+        </span>
+      }
+    >
+      {!props.hasUser ? (
+        <div className={v.faint}>The bootstrap identity is not a person and acknowledges nothing.</div>
+      ) : q.isLoading ? (
+        <div className={v.faint}>Loading…</div>
+      ) : q.error || !d ? (
+        // deliberately not role="alert": this card must never compete with the security forms above for the
+        // page's one urgent announcement (a wrong password, a failed MFA step)
+        <div className={v.row}>
+          <span className={v.faint}>Your AI policies could not be loaded right now.</span>
+          <Button size="sm" onClick={() => void q.refetch()}>
+            Retry
+          </Button>
+        </div>
+      ) : (
+        <div className={v.stack}>
+          <div className={v.faint}>
+            Your organisation asks you to read and acknowledge these as one of its measures to support the
+            development of AI literacy (Regulation (EU) 2024/1689, Article 4, as amended). An acknowledgement records
+            that you read the version shown; it expires and is asked for again, and a new version (other than an
+            editorial correction) needs a new acknowledgement.
+            {d.exempt === "break_glass" ? " As a designated break-glass admin, your governed calls are not held for it." : ""}
+          </div>
+          <LiteracyDocumentList data={d} />
+        </div>
+      )}
+    </Card>
   );
 }
 
