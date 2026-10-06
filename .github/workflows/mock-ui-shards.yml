@@ -71,6 +71,11 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      # Some mocked specs sign in through e2e/totp-sign-in.ts, which imports the
+      # BUILT gateway (apps/gateway/dist/totp.js). Without this step every shard,
+      # and the --list in the coverage job, fails with "Cannot find module".
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
 
       - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
 
@@ -119,6 +124,11 @@ jobs:
 
       # `--list` loads the spec files but launches no browser and no web server
       - run: pnpm install --frozen-lockfile
+      # Some mocked specs sign in through e2e/totp-sign-in.ts, which imports the
+      # BUILT gateway (apps/gateway/dist/totp.js). Without this step every shard,
+      # and the --list in the coverage job, fails with "Cannot find module".
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

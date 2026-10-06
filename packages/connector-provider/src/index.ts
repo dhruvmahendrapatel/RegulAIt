@@ -45,7 +45,7 @@
  * disagrees with its operation rather than quietly reclassifying.
  */
 
-import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, createSign, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 export const CONNECTOR_PROVIDER_KINDS = [
@@ -1109,7 +1109,17 @@ export interface OutlookAdapterOptions {
 
 export const OUTLOOK_TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
 export const OUTLOOK_TOKEN_CACHE_MAX = 64;
-const outlookTokenCache = new Map<string, { accessToken: string; expiresAtMs: number }>();
+// Keyed by the non-secret identifiers only. Nothing is derived from the client
+// secret (no hash of it is ever computed); instead the entry remembers the
+// secret it was minted with and a lookup only hits when the presented secret is
+// equal (constant-time), so a rotated secret never reuses the old token.
+const outlookTokenCache = new Map<string, { accessToken: string; expiresAtMs: number; appPassword: string }>();
+
+function sameSecret(a: string, b: string): boolean {
+  const x = Buffer.from(a, "utf8");
+  const y = Buffer.from(b, "utf8");
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 
 /** forget every cached outlook token (tests; an operator-initiated reset) */
 export function clearOutlookTokenCache(): void {
@@ -1157,16 +1167,18 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     this.login = (opts.credential.loginBaseUrl ?? OUTLOOK_DEFAULT_LOGIN_BASE_URL).replace(/\/$/, "");
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
     this.now = opts.now ?? Date.now;
-    this.cacheKey = createHash("sha256")
-      .update(JSON.stringify([this.login, this.cred.tenantId, this.cred.appId, this.cred.appPassword]))
-      .digest("hex");
+    this.cacheKey = JSON.stringify([this.login, this.cred.tenantId, this.cred.appId]);
   }
 
   /** A cached token while it has more than the refresh margin left, else a
    * freshly minted one (see the cache header above). */
   private async accessToken(): Promise<{ token: string; fromCache: boolean }> {
     const cached = outlookTokenCache.get(this.cacheKey);
-    if (cached && cached.expiresAtMs - OUTLOOK_TOKEN_REFRESH_MARGIN_MS > this.now()) {
+    if (
+      cached &&
+      sameSecret(cached.appPassword, this.cred.appPassword) &&
+      cached.expiresAtMs - OUTLOOK_TOKEN_REFRESH_MARGIN_MS > this.now()
+    ) {
       return { token: cached.accessToken, fromCache: true };
     }
     outlookTokenCache.delete(this.cacheKey);
@@ -1215,7 +1227,11 @@ export class OutlookConnectorProvider implements ConnectorProvider {
         const oldest = outlookTokenCache.keys().next().value;
         if (oldest !== undefined) outlookTokenCache.delete(oldest);
       }
-      outlookTokenCache.set(this.cacheKey, { accessToken: token, expiresAtMs: this.now() + expiresIn * 1000 });
+      outlookTokenCache.set(this.cacheKey, {
+        accessToken: token,
+        expiresAtMs: this.now() + expiresIn * 1000,
+        appPassword: this.cred.appPassword,
+      });
     }
     return token;
   }
