@@ -1,0 +1,131 @@
+{
+  "$comment": "SAST (CodeQL) baseline, triaged 2026-10-06 for ADR-0184. One entry per (rule, file). Each needs a reason and expires at most 90 days after review; see docs/ops/SECURITY_CI.md.",
+  "entries": [
+    {
+      "id": "js/bad-tag-filter",
+      "path": "apps/gateway/src/security-headers.ts",
+      "reason": "False positive. inlineScriptBodies() reads only our own built index.html (apps/web/dist) to compute CSP sha256 hashes for its inline scripts; it is not a sanitizer and never sees request input. A missed tag shape would only omit a hash, which makes CSP stricter, not weaker.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-sanitization",
+      "path": "packages/shared/src/shadow-discovery.ts",
+      "reason": "False positive. literalLength() removes the first '*' only to rank wildcard specificity for tie-breaking between catalog patterns; it is not a sanitizer, and matching itself is done by wildcardMatch() and the dot-boundary check in endpointEntryMatches().",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/clear-text-storage-of-sensitive-data",
+      "path": "apps/gateway/src/auth.ts",
+      "reason": "False positive (PR #117 triage, d0feaf8). The pending-MFA cookie carries only an opaque server-generated handle (randomBytes(32)); the database row stores sha256(handle), the cookie is HttpOnly and Secure on TLS, single-use and short-lived. token-hash.test.ts fails if the handle loses entropy or the cookie loses HttpOnly.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/clear-text-storage-of-sensitive-data",
+      "path": "apps/gateway/src/saml.ts",
+      "reason": "False positive (PR #117 triage, d0feaf8). The pending-MFA cookie carries only an opaque server-generated handle (randomBytes(32)); the database row stores sha256(handle), the cookie is HttpOnly and Secure on TLS, single-use and short-lived. token-hash.test.ts fails if the handle loses entropy or the cookie loses HttpOnly.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/insufficient-password-hash",
+      "path": "apps/gateway/src/token-hash.ts",
+      "reason": "False positive (PR #117 triage, d0feaf8). hashToken() only ever receives server-generated tokens with 192-256 random bits (caller list in token-hash.ts); SHA-256 is the right lookup hash for those, and passwords go through hashPassword/verifyPassword. token-hash.test.ts pins every generator's entropy. The 'onboard' source is a test helper's password reaching an API-key path, not a stored password hash.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/insufficient-password-hash",
+      "path": "packages/shared/src/constant-time.ts",
+      "reason": "False positive. constantTimeEqual() hashes both inputs with SHA-256 only so timingSafeEqual compares 32 bytes and leaks neither content nor length; nothing is stored. Stored passwords use hashPassword (scrypt) elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/path-injection",
+      "path": "apps/gateway/src/web-serving.ts",
+      "reason": "False positive. The SPA file path is path.resolve(distDir, rest) and is refused unless it equals distDir or starts with distDir + path.sep (line ~104), so a traversal resolves to index.html, never to a file outside apps/web/dist; the read stream at line ~78 only receives that contained path.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/mode-scoped-egress.test.ts",
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/gateway/src/zz-c11-demo-check.test.ts",
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-url-substring-sanitization",
+      "path": "apps/web/e2e/webhooks-admin.mock.spec.ts",
+      "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/git-provider/src/azure-devops.ts",
+      "reason": "Real but admin-only. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is the git connection's baseUrl, set by an administrator and short in practice. Fix: trim trailing slashes by scan, as 885a122 did in api-client.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/git-provider/src/bitbucket.ts",
+      "reason": "Real but admin-only. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is the git connection's baseUrl, set by an administrator and short in practice. Fix: trim trailing slashes by scan, as 885a122 did in api-client.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/git-provider/src/gitlab.ts",
+      "reason": "Real but admin-only. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is the git connection's baseUrl, set by an administrator and short in practice. Fix: trim trailing slashes by scan, as 885a122 did in api-client.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/shared/src/mcp-discovery.ts",
+      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a path parsed from an uploaded discovery log line (admin-supplied content, request body capped at 1 MiB, so a crafted line can hold the event loop for minutes). Fix in the next batch: trim trailing slashes by scan.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/shared/src/access-recommendations.ts",
+      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/shared/src/copilot.ts",
+      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/shared/src/evals.ts",
+      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    },
+    {
+      "id": "js/polynomial-redos",
+      "path": "packages/shared/src/groundedness.ts",
+      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2026-11-05"
+    }
+  ]
+}
