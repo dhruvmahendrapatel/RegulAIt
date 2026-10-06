@@ -759,6 +759,38 @@ describe("ADR-0182 A12 (D4 review D4A-02 / D4A-06 / D4A-07a): a reporter names o
     expect((await inject("GET", `/v1/incidents/${d.incident.id}`, users.other.auth)).statusCode).toBe(404);
   });
 
+  it("the steward of an agent in the use case's approved stack reads the incident and the 409 names it; a steward of an unrelated agent does not", async () => {
+    const stackAgent = await mkAgent("stack-steward");
+    const unrelated = await mkAgent("unrelated-steward");
+    await db.update(agents).set({ ownerUserId: users.member.id }).where(eq(agents.id, stackAgent));
+    await db.update(agents).set({ ownerUserId: users.other.id }).where(eq(agents.id, unrelated));
+    const uc = await mkUseCase("stack-steward", "high", users.owner.id);
+    await db.update(aiUseCases).set({ intendedAgentIds: [stackAgent] }).where(eq(aiUseCases.id, uc));
+    const d = await open("admin", { useCaseId: uc, serious: true, seriousCriteria: ["health"] });
+    expect(d.links.filter((l) => l.objectType === "agent")).toEqual([]); // covered by the stack, not linked
+    expect(await incidentsHoldingAgent(db, stackAgent)).toEqual([{ id: d.incident.id, ref: d.incident.ref }]);
+    const read = await inject("GET", `/v1/incidents/${d.incident.id}`, users.member.auth);
+    expect(read.statusCode, read.body).toBe(200);
+    expect(read.json().permissions).toMatchObject({ canEdit: false });
+    const list = (await inject("GET", "/v1/incidents?limit=500", users.member.auth)).json().incidents as Array<{ id: string }>;
+    expect(list.map((i) => i.id)).toContain(d.incident.id);
+    expect((await inject("GET", `/v1/incidents/${d.incident.id}`, users.other.auth)).statusCode).toBe(404);
+    expect(((await inject("GET", "/v1/incidents?limit=500", users.other.auth)).json().incidents as Array<{ id: string }>).map((i) => i.id)).not.toContain(d.incident.id);
+    // the refusal the steward meets names the incident they can now open
+    const refuse = async (who: "member" | "other") => {
+      const sent: { status?: number; body?: { error: string; detail: string; youCanOpen: Array<{ id: string; ref: string }> } } = {};
+      const fakeReply = { status(c: number) { sent.status = c; return this; }, send(b: typeof sent.body) { sent.body = b; return this; } };
+      const fakeReq = { headers: {}, authCtx: { userId: users[who].id, isAdmin: false, via: "session" } };
+      expect(await incidentEvidenceHoldRefused(db, fakeReq as never, fakeReply as never, stackAgent, "instructions")).toBe(true);
+      return sent;
+    };
+    const mine = await refuse("member");
+    expect(mine.status).toBe(409);
+    expect(mine.body).toMatchObject({ error: "incident_evidence_hold", youCanOpen: [{ id: d.incident.id, ref: d.incident.ref }] });
+    expect(mine.body!.detail).toContain(`You can open ${d.incident.ref}`);
+    expect((await refuse("other")).body!.youCanOpen).toEqual([]);
+  });
+
   it("the reporter always reads their own report (read-only), also when someone else owns it", async () => {
     const d = await open("member", { severity: "low", ownerUserId: users.owner.id });
     expect(d.incident.ownerUserId).toBe(users.owner.id);

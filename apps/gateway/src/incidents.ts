@@ -54,8 +54,10 @@
  *    becomes overdue.
  *  - VISIBILITY: an admin sees every incident; anyone else sees those they
  *    own, those they reported (D4A-07a), those on a use case they own and
- *    those linked to an agent they steward (D4A-02) — the last three
- *    read-only. A reader sees a linked agent's name or the use case's
+ *    those whose evidence hold covers an agent they steward — linked, or in
+ *    the use case's approved stack, the same predicate the hold uses
+ *    (D4A-02); the last three read-only. The 409 `incident_evidence_hold`
+ *    names the incidents the caller can open (`youCanOpen`). A reader sees a linked agent's name or the use case's
  *    details only when they can see that agent or use case (D4A-06). Writes
  *    are the incident's owner's or an admin's (an action's owner may update
  *    that action). A read of an incident's narrative by anyone but its
@@ -103,6 +105,7 @@ import {
   users,
   type AiIncidentRow,
   type Db,
+  type SQL,
 } from "@regulait/db";
 import {
   ART_73_6_PARAGRAPH,
@@ -365,25 +368,35 @@ interface Access {
 }
 
 /**
- * Is one of this incident's linked agents stewarded by this person (a
- * registry agent's steward, or a builder agent's owner)? They may READ the
- * incident: its evidence hold may freeze their agent, so they see what froze
- * it (D4 review D4A-02).
+ * THE ONE PREDICATE for "the agents this incident's evidence hold covers"
+ * (correlated to the `ai_incidents` row in scope): the agent is LINKED to the
+ * incident, or is in its use case's approved stack (`intended_agent_ids`).
+ * `incidentsHoldingAgent` (the hold) and the steward's read access both use
+ * it, so who is frozen and who may see why cannot drift apart.
+ * `agentIdText` is an SQL expression yielding the agent id as text.
  */
-async function stewardsLinkedAgent(db: Writer, incidentId: string, userId: string): Promise<boolean> {
+function incidentCoversAgent(agentIdText: SQL): SQL {
+  return sql`(EXISTS (SELECT 1 FROM ${aiIncidentLinks} WHERE ${aiIncidentLinks.incidentId} = ${aiIncidents.id}
+      AND ${aiIncidentLinks.objectType} = 'agent' AND ${aiIncidentLinks.objectId} = (${agentIdText})::text)
+    OR EXISTS (SELECT 1 FROM ${aiUseCases} WHERE ${aiUseCases.id} = ${aiIncidents.useCaseId}
+      AND ${aiUseCases.intendedAgentIds} @> jsonb_build_array((${agentIdText})::text)))`;
+}
+
+/**
+ * Does the incident in scope cover an agent this person stewards (a registry
+ * agent's steward, or a builder agent's owner)? They may READ it: its
+ * evidence hold may freeze their agent, so they see why (D4 review D4A-02).
+ */
+function incidentCoversAgentStewardedBy(userId: string): SQL {
+  return sql`(EXISTS (SELECT 1 FROM ${agents} WHERE ${agents.ownerUserId} = ${userId} AND ${incidentCoversAgent(sql`${agents.id}`)})
+    OR EXISTS (SELECT 1 FROM ${builderAgents} WHERE ${builderAgents.ownerUserId} = ${userId} AND ${incidentCoversAgent(sql`${builderAgents.id}`)}))`;
+}
+
+async function stewardsCoveredAgent(db: Writer, incidentId: string, userId: string): Promise<boolean> {
   const [hit] = await db
-    .select({ id: aiIncidentLinks.objectId })
-    .from(aiIncidentLinks)
-    .where(
-      and(
-        eq(aiIncidentLinks.incidentId, incidentId),
-        eq(aiIncidentLinks.objectType, "agent"),
-        or(
-          sql`${aiIncidentLinks.objectId} IN (SELECT ${agents.id}::text FROM ${agents} WHERE ${agents.ownerUserId} = ${userId})`,
-          sql`${aiIncidentLinks.objectId} IN (SELECT ${builderAgents.id}::text FROM ${builderAgents} WHERE ${builderAgents.ownerUserId} = ${userId})`,
-        ),
-      ),
-    )
+    .select({ id: aiIncidents.id })
+    .from(aiIncidents)
+    .where(and(eq(aiIncidents.id, incidentId), incidentCoversAgentStewardedBy(userId)))
     .limit(1);
   return Boolean(hit);
 }
@@ -391,7 +404,8 @@ async function stewardsLinkedAgent(db: Writer, incidentId: string, userId: strin
 /**
  * WHO SEES AND CHANGES AN INCIDENT. Writes: its owner or an admin. Reads, as
  * well: whoever reported it (D4A-07a), the owner of its use case, and the
- * steward of an agent linked to it (D4A-02) — all read-only.
+ * steward of any agent its evidence hold covers — linked, or in the use
+ * case's approved stack (D4A-02) — all read-only.
  */
 async function accessTo(db: Writer, actor: IncidentActor, i: AiIncidentRow): Promise<Access> {
   const useCase = await loadUseCase(db, i.useCaseId);
@@ -401,7 +415,7 @@ async function accessTo(db: Writer, actor: IncidentActor, i: AiIncidentRow): Pro
   const canRead =
     canWrite ||
     (me !== null &&
-      (me === i.createdBy || useCase?.ownerUserId === me || (await stewardsLinkedAgent(db, i.id, me))));
+      (me === i.createdBy || useCase?.ownerUserId === me || (await stewardsCoveredAgent(db, i.id, me))));
   return { canRead, canWrite, useCase };
 }
 
@@ -884,19 +898,10 @@ export async function incidentGateInputs(
 export async function incidentsHoldingAgent(db: Db, agentId: string): Promise<Array<{ id: string; ref: string }>> {
   const org = await loadOrgSettings(db);
   if (!org.incidentEvidenceHold) return [];
-  const cols = { id: aiIncidents.id, ref: aiIncidents.ref, status: aiIncidents.status, serious: aiIncidents.serious };
-  const open = and(ne(aiIncidents.status, "closed"), eq(aiIncidents.serious, true));
-  const byLink = await db
-    .select(cols)
-    .from(aiIncidentLinks)
-    .innerJoin(aiIncidents, eq(aiIncidents.id, aiIncidentLinks.incidentId))
-    .where(and(eq(aiIncidentLinks.objectType, "agent"), eq(aiIncidentLinks.objectId, agentId), open));
-  const byStack = await db
-    .select(cols)
+  const linked = await db
+    .select({ id: aiIncidents.id, ref: aiIncidents.ref, status: aiIncidents.status, serious: aiIncidents.serious })
     .from(aiIncidents)
-    .innerJoin(aiUseCases, eq(aiUseCases.id, aiIncidents.useCaseId))
-    .where(and(open, sql`${aiUseCases.intendedAgentIds} @> ${JSON.stringify([agentId])}::jsonb`));
-  const linked = [...new Map([...byLink, ...byStack].map((i) => [i.id, i])).values()];
+    .where(and(ne(aiIncidents.status, "closed"), eq(aiIncidents.serious, true), incidentCoversAgent(sql`${agentId}`)));
   if (linked.length === 0) return [];
   const clocks = await db
     .select({ incidentId: aiIncidentNotifications.incidentId, clockId: aiIncidentNotifications.clockId, status: aiIncidentNotifications.status })
@@ -942,6 +947,14 @@ export async function incidentEvidenceHoldRefused(
     }
   }
   const refs = holding.map((h) => h.ref).join(", ");
+  // whoever the hold freezes can see why: the refusal names the incidents the
+  // CALLER may open (the steward of a covered agent reads them)
+  const holdingRows = await db.select().from(aiIncidents).where(inArray(aiIncidents.id, holding.map((h) => h.id)));
+  const youCanOpen: Array<{ id: string; ref: string }> = [];
+  for (const row of holdingRows) {
+    if ((await accessTo(db, actor, row)).canRead) youCanOpen.push({ id: row.id, ref: row.ref });
+  }
+  const openable = youCanOpen.length ? ` You can open ${youCanOpen.map((y) => y.ref).join(", ")} to see why.` : "";
   const base = {
     citation: ART_73_6_PARAGRAPH,
     quote: ART_73_6_QUOTE,
@@ -979,8 +992,9 @@ export async function incidentEvidenceHoldRefused(
   if (notAdmin) {
     reply.status(403).send({
       error: "evidence_hold_override_admin_only",
-      detail: "only an admin may override the incident evidence hold, and the override is recorded with its reason",
+      detail: "only an admin may override the incident evidence hold, and the override is recorded with its reason." + openable,
       ...base,
+      youCanOpen,
     });
     return true;
   }
@@ -989,6 +1003,7 @@ export async function incidentEvidenceHoldRefused(
       error: "evidence_hold_override_reason_required",
       detail: `an override states why the change cannot wait (10 to 2000 characters, in the ${EVIDENCE_HOLD_OVERRIDE_HEADER} header)`,
       ...base,
+      youCanOpen,
     });
     return true;
   }
@@ -998,8 +1013,10 @@ export async function incidentEvidenceHoldRefused(
       `This agent is linked to serious incident(s) ${refs}, whose report to the authority has not been sent. ` +
       `${ART_73_6_PARAGRAPH} forbids altering the AI system in a way that may affect the later evaluation of the ` +
       "incident's causes before the authority is informed. Record the report on the incident first, or an admin may " +
-      `override this one change with a reason in the ${EVIDENCE_HOLD_OVERRIDE_HEADER} header (audited).`,
+      `override this one change with a reason in the ${EVIDENCE_HOLD_OVERRIDE_HEADER} header (audited).` +
+      openable,
     ...base,
+    youCanOpen,
     override: { header: EVIDENCE_HOLD_OVERRIDE_HEADER, adminOnly: true, reasonMinLength: 10 },
   });
   return true;
@@ -1173,7 +1190,7 @@ function send(reply: FastifyReply, e: unknown) {
  * Routes (classified in route-classes.ts and openapi-registry.ts, A12 block):
  *   GET   /v1/incidents                                         user: filtered to what the caller may see
  *   POST  /v1/incidents                                         user: anyone may report an incident
- *   GET   /v1/incidents/:incidentId                             user: owner, reporter, use-case owner, linked agent's steward or admin
+ *   GET   /v1/incidents/:incidentId                             user: owner, reporter, use-case owner, covered agent's steward or admin
  *   PATCH /v1/incidents/:incidentId                             user: owner or admin
  *   POST  /v1/incidents/:incidentId/events                      user: owner or admin
  *   POST  /v1/incidents/:incidentId/links                       user: owner or admin
@@ -1197,10 +1214,8 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const me = actor.userId;
       const ownedUseCases = db.select({ id: aiUseCases.id }).from(aiUseCases).where(eq(aiUseCases.ownerUserId, me));
       // the same readers as `accessTo`: owner, reporter (D4A-07a), use-case
-      // owner, and the steward of a linked agent (D4A-02)
-      const stewarded = sql`${aiIncidents.id} IN (SELECT ${aiIncidentLinks.incidentId} FROM ${aiIncidentLinks} WHERE ${aiIncidentLinks.objectType} = 'agent' AND (
-        ${aiIncidentLinks.objectId} IN (SELECT ${agents.id}::text FROM ${agents} WHERE ${agents.ownerUserId} = ${me})
-        OR ${aiIncidentLinks.objectId} IN (SELECT ${builderAgents.id}::text FROM ${builderAgents} WHERE ${builderAgents.ownerUserId} = ${me})))`;
+      // owner, and the steward of an agent the hold covers (D4A-02)
+      const stewarded = incidentCoversAgentStewardedBy(me);
       conds.push(or(eq(aiIncidents.ownerUserId, me), eq(aiIncidents.createdBy, me), inArray(aiIncidents.useCaseId, ownedUseCases), stewarded));
     }
     if (q.status === "active") conds.push(ne(aiIncidents.status, "closed"));
