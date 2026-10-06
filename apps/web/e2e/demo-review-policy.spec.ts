@@ -14,9 +14,9 @@
  *   5. a new round with two reviews: Avery approves accepting a risk, Dana
  *      approves → approved, valid for the policy's 12 months.
  *
- * It runs AFTER demo-intake.spec.ts (file order) on the same database and puts
- * the review policy back exactly as it found it, so the Monday journey — which
- * uses no policy — is never affected by it.
+ * The proposer is a fresh admin fixture: another journey's outstanding draft
+ * saves cannot arrive under this person's identity. The org review policy is
+ * put back exactly as found, and the fixture is deactivated afterward.
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
@@ -26,6 +26,8 @@ const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token"
 const BOOT = { authorization: `Bearer ${BOOT_TOKEN}`, "content-type": "application/json" };
 const RUN = Math.random().toString(36).slice(2, 7);
 const NAME = `Credit-limit assistant (policy run ${RUN})`;
+const ADMIN_EMAIL = `policy-${RUN}@example.test`;
+const ADMIN_NAME = "Ada Admin";
 
 type Json = Record<string, any>;
 const api = async (path: string, init: RequestInit = {}): Promise<Json> => {
@@ -38,7 +40,7 @@ const api = async (path: string, init: RequestInit = {}): Promise<Json> => {
 async function signIn(page: Page, email: string, password: string) {
   const users = (await api("/v1/users")) as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
-  expect(id, `seeded persona ${email} must exist`).toBeTruthy();
+  expect(id, `journey persona ${email} must exist`).toBeTruthy();
   // ADR-0181 (FX2): the seed enrolled the admin's TOTP outside this run; re-provision it
   await reprovisionTotp(BASE, BOOT, email);
   const minted = (await api(`/v1/users/${id}/set-initial-password`, { method: "POST", body: JSON.stringify({ force: true }) })) as { password: string };
@@ -79,34 +81,60 @@ const reviewsOf = async (id: string) =>
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
 let originalPolicy: Json | null = null;
+let adminFixtureId: string | null = null;
 
 test.beforeAll(async () => {
   originalPolicy = await api("/v1/governance/review-policy");
+  const created = await api("/v1/users", {
+    method: "POST",
+    body: JSON.stringify({ email: ADMIN_EMAIL, displayName: ADMIN_NAME, isAdmin: true }),
+  });
+  adminFixtureId = created.id;
 });
 
 test.afterAll(async () => {
-  // the review policy is an org singleton: put back exactly what was there
-  if (!originalPolicy) return;
-  const body = { roles: originalPolicy.roles, tiers: originalPolicy.tiers, riskAcceptorUserIds: originalPolicy.riskAcceptorUserIds };
-  // ADR-0182 A11: previewed first, under the strict decision-regression gate
-  const run = await api("/v1/governance/decision-regression/preview", {
-    method: "POST",
-    body: JSON.stringify({ subject: "review_policy", candidate: body }),
-  });
-  await api("/v1/governance/review-policy", {
-    method: "PUT",
-    body: JSON.stringify({ ...body, regressionRunId: run.id, acceptChangedOutcomes: true, acceptReason: "demo spec: put the policy back as found" }),
-  });
+  try {
+    // the review policy is an org singleton: put back exactly what was there
+    if (!originalPolicy) return;
+    const body = { roles: originalPolicy.roles, tiers: originalPolicy.tiers, riskAcceptorUserIds: originalPolicy.riskAcceptorUserIds };
+    // ADR-0182 A11: previewed first, under the strict decision-regression gate
+    const run = await api("/v1/governance/decision-regression/preview", {
+      method: "POST",
+      body: JSON.stringify({ subject: "review_policy", candidate: body }),
+    });
+    await api("/v1/governance/review-policy", {
+      method: "PUT",
+      body: JSON.stringify({ ...body, regressionRunId: run.id, acceptChangedOutcomes: true, acceptReason: "demo spec: put the policy back as found" }),
+    });
+  } finally {
+    if (adminFixtureId) {
+      await api(`/v1/users/${adminFixtureId}/deactivate`, {
+        method: "POST", body: JSON.stringify({ reason: "review-policy journey fixture finished" }),
+      });
+    }
+  }
 });
 
-test("review policy: two role reviews, a send-back, a prefilled resubmission and a risk-accepting approval", async ({ page, browser }) => {
+test("review policy: two role reviews, a send-back, a prefilled resubmission and a risk-accepting approval", async ({ page, browser }, testInfo) => {
   test.setTimeout(240_000);
   const directory = (await api("/v1/users")) as { users: Array<{ id: string; email: string }> };
   const idOf = (email: string) => directory.users.find((u) => u.email === email)!.id;
   const [averyId, danaId] = [idOf("avery@regulait.local"), idOf("dana@regulait.local")];
 
   // 1. the admin sets the policy on its page
-  await signIn(page, "admin@regulait.local", "E2e-Policy-Admin!");
+  await signIn(page, ADMIN_EMAIL, "E2e-Policy-Admin!");
+  // Same literacy standing as the seeded personas, without relaxing the gate.
+  const literacyResponse = await page.request.get(`${BASE}/v1/me/ai-literacy`);
+  expect(literacyResponse.ok()).toBe(true);
+  const literacy = await literacyResponse.json();
+  for (const document of literacy.documents ?? []) {
+    if (document.state === "current") continue;
+    const acknowledged = await page.request.post(`${BASE}/v1/ai-policies/${document.documentId}/acknowledge`, {
+      headers: { "x-regulait-csrf": "1" },
+      data: { version: document.version, digest: document.contentDigest },
+    });
+    expect(acknowledged.ok()).toBe(true);
+  }
   await page.goto("/ui/admin/governance/review-policy");
   await expect(page.getByRole("heading", { level: 1, name: "Review policy" })).toBeVisible();
   for (const [role, person] of [["Security", "Avery Approver"], ["Privacy", "Dana Developer"]] as const) {
@@ -137,6 +165,11 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
 
   // 2. a high-tier registration through the wizard
   await page.goto("/ui/admin/governance/intake");
+  const ownDraft = await page.request.get(`${BASE}/v1/use-cases/draft?scope=new`);
+  expect(ownDraft.ok()).toBe(true);
+  expect((await ownDraft.json()).draft).toBeNull();
+  await expect(page.getByRole("button", { name: "Resume your draft" })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("x17-owned-intake-fixture.png") });
   await page.getByRole("button", { name: "Fill in an example" }).click();
   await page.getByLabel("Use-case name").fill(NAME);
   await page.getByRole("button", { name: "Continue" }).click();
