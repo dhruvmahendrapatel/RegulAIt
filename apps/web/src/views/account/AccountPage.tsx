@@ -117,8 +117,10 @@ function AiPoliciesCard(props: { hasUser: boolean }) {
       ) : q.isLoading ? (
         <div className={v.faint}>Loading…</div>
       ) : q.error || !d ? (
-        <div className={v.errLine} role="alert">
-          Your AI policies could not be loaded.{" "}
+        // deliberately not role="alert": this card must never compete with the security forms above for the
+        // page's one urgent announcement (a wrong password, a failed MFA step)
+        <div className={v.row}>
+          <span className={v.faint}>Your AI policies could not be loaded right now.</span>
           <Button size="sm" onClick={() => void q.refetch()}>
             Retry
           </Button>
