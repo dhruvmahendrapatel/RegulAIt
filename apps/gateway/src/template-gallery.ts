@@ -40,19 +40,8 @@ import { createFromGallerySchema } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { createWorkflowTemplateValidated } from "./workflows.js";
-import { decisionRegressionCandidate, isIntakeTemplateName, type DecisionRegressionGateReport } from "@regulait/shared";
-import {
-  type ComputedRegression,
-  type DecisionRegressionAcceptance,
-  type GateVerdict,
-  baselineDigestFor,
-  checkDecisionRegressionGate,
-  computeRegression,
-  loadLiveDecisionConfig,
-  parseAcceptance,
-  recordDecisionRegressionActivation,
-  refuseDecisionRegression,
-} from "./decision-regression.js";
+import { isIntakeTemplateName } from "@regulait/shared";
+import { admitIntakeTemplateWrite } from "./decision-regression.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -360,53 +349,20 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
     // ADR-0182 A11: an `ai-use-case-intake` template or variant decides who
     // signs off every new use case, so creating one is an activation the
     // decision-regression gate admits (a preview of this exact body).
-    const actor = req.authCtx.userId ?? null;
-    let gate: DecisionRegressionGateReport | null = null;
-    let admitted: { verdict: Extract<GateVerdict, { ok: true }>; computeNow: () => Promise<ComputedRegression> } | null = null;
-    let candidateDigest = "";
-    let acceptance: DecisionRegressionAcceptance = {};
-    if (isIntakeTemplateName(body.name)) {
-      const acc = parseAcceptance(req.body);
-      if (!acc.ok) return reply.status(422).send({ error: "invalid_regression_acceptance", issues: acc.issues });
-      acceptance = acc.value;
-      const candidate = decisionRegressionCandidate("intake_template", {
-        galleryId,
-        name: body.name,
-        ...(body.approverUserId ? { approverUserId: body.approverUserId } : {}),
-      });
-      if (!candidate.ok) return reply.status(422).send({ error: "invalid_candidate", issues: candidate.issues });
-      candidateDigest = candidate.digest;
-      const live = await loadLiveDecisionConfig(db);
-      const verdict = await checkDecisionRegressionGate(db, {
-        subject: "intake_template",
-        candidateDigest,
-        baselineDigest: baselineDigestFor("intake_template", live),
-        acceptance,
-      });
-      if (!verdict.ok) {
-        const refused = await refuseDecisionRegression(db, verdict, { subject: "intake_template", candidateDigest, actorUserId: actor });
-        return reply.status(refused.status).send(refused.body);
-      }
-      const name = body.name;
-      const digest = candidateDigest;
-      admitted = {
-        verdict,
-        // computed only if warn mode let an unpreviewed write through
-        computeNow: () => computeRegression(db, "intake_template", digest, { template: { name, definition } }, live),
-      };
-    }
+    const gate = isIntakeTemplateName(body.name)
+      ? await admitIntakeTemplateWrite(
+          db,
+          req.body,
+          { galleryId, name: body.name, ...(body.approverUserId ? { approverUserId: body.approverUserId } : {}) },
+          { name: body.name, definition },
+          req.authCtx.userId ?? null,
+        )
+      : null;
+    if (gate && !gate.ok) return reply.status(gate.status).send(gate.body);
 
     const result = await createWorkflowTemplateValidated(db, { name: body.name, definition });
     if (!result.ok) return reply.status(result.status).send(result.body);
-    if (admitted) {
-      gate = await recordDecisionRegressionActivation(db, admitted.verdict, {
-        subject: "intake_template",
-        candidateDigest,
-        acceptance,
-        actorUserId: actor,
-        computeNow: admitted.computeNow,
-      });
-    }
+    const decisionRegression = gate ? await gate.record() : null;
 
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
@@ -427,6 +383,6 @@ export function registerTemplateGalleryRoutes(app: FastifyInstance, db: Db): voi
         `workflow template '${body.name}' created from gallery shape '${galleryId}' — ` +
         `instantiated through the one template-creation path, so full validation applied`,
     });
-    return reply.status(201).send({ ...result.row, galleryId, ...(gate ? { decisionRegression: gate } : {}) });
+    return reply.status(201).send({ ...result.row, galleryId, ...(decisionRegression ? { decisionRegression } : {}) });
   });
 }

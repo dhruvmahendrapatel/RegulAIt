@@ -520,6 +520,53 @@ export async function recordDecisionRegressionActivation(
   };
 }
 
+/**
+ * THE GATE FOR AN INTAKE TEMPLATE WRITE (an `ai-use-case-intake` template or
+ * variant decides who signs off every new use case). Checks the gate for
+ * `candidate` (the body a preview names); on a refusal it is audited and the
+ * 409 is returned; otherwise the caller creates the template and then calls
+ * `record()` to write the activation run and audit row. Used by "create from
+ * gallery" (template-gallery.ts) and offered to `POST /v1/workflows/templates`.
+ */
+export async function admitIntakeTemplateWrite(
+  db: Db,
+  raw: unknown,
+  candidateBody: IntakeTemplateCandidate,
+  template: DecisionRegressionTemplate,
+  actorUserId: string | null,
+): Promise<
+  | { ok: false; status: number; body: Record<string, unknown> }
+  | { ok: true; record: () => Promise<DecisionRegressionGateReport> }
+> {
+  const acc = parseAcceptance(raw);
+  if (!acc.ok) return { ok: false, status: 422, body: { error: "invalid_regression_acceptance", issues: acc.issues } };
+  const candidate = decisionRegressionCandidate("intake_template", candidateBody);
+  if (!candidate.ok) return { ok: false, status: 422, body: { error: "invalid_candidate", issues: candidate.issues } };
+  const live = await loadLiveDecisionConfig(db);
+  const verdict = await checkDecisionRegressionGate(db, {
+    subject: "intake_template",
+    candidateDigest: candidate.digest,
+    baselineDigest: baselineDigestFor("intake_template", live),
+    acceptance: acc.value,
+  });
+  if (!verdict.ok) {
+    const refused = await refuseDecisionRegression(db, verdict, { subject: "intake_template", candidateDigest: candidate.digest, actorUserId });
+    return { ok: false, status: refused.status, body: refused.body };
+  }
+  return {
+    ok: true,
+    record: () =>
+      recordDecisionRegressionActivation(db, verdict, {
+        subject: "intake_template",
+        candidateDigest: candidate.digest,
+        acceptance: acc.value,
+        actorUserId,
+        // computed only if warn mode let an unpreviewed write through
+        computeNow: () => computeRegression(db, "intake_template", candidate.digest, { template }, live),
+      }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Decision records
 // ---------------------------------------------------------------------------
