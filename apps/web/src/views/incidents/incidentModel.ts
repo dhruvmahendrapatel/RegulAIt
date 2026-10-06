@@ -40,7 +40,7 @@ export interface IncidentListRow {
 }
 export interface IncidentListResponse {
   incidents: IncidentListRow[];
-  scope: "all" | "owned" | "none";
+  scope: "all" | "visible" | "none";
   disclaimer: string;
 }
 
