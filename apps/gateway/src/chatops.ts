@@ -426,15 +426,6 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         detail: `connector '${connector.name}' has providerKind '${connector.providerKind ?? "null"}', not '${body.provider}' — ChatOps posts through the existing connector adapter and its existing credential`,
       });
     }
-    // ADR-0121 — THE SIGNING SECRET IS PER-PROVIDER, AND BOTH DIRECTIONS ARE
-    // REFUSED RATHER THAN QUIETLY TOLERATED.
-    //
-    // Missing on slack/teams would register a workspace whose callbacks can
-    // never be verified — a courier that can post and can never be answered.
-    // Supplied on outlook is the more interesting error: it means the operator
-    // believes there is an inbound path to secure. There is not, by decision,
-    // so the refusal names the decision instead of storing the secret and
-    // letting them find out when no reply is ever acted on.
     // ADR-0183 2.6 — AN OUTLOOK WORKSPACE IS REGISTERED ONLY WHEN IT CAN SEND.
     // Strict by default: the recipient must be one mailbox, a mail approval
     // can never be chat-decidable, and the connector must already hold the
@@ -474,6 +465,15 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         throw err;
       }
     }
+    // ADR-0121 — THE SIGNING SECRET IS PER-PROVIDER, AND BOTH DIRECTIONS ARE
+    // REFUSED RATHER THAN QUIETLY TOLERATED.
+    //
+    // Missing on slack/teams would register a workspace whose callbacks can
+    // never be verified — a courier that can post and can never be answered.
+    // Supplied on outlook is the more interesting error: it means the operator
+    // believes there is an inbound path to secure. There is not, by decision,
+    // so the refusal names the decision instead of storing the secret and
+    // letting them find out when no reply is ever acted on.
     if (body.provider === "outlook" && body.signingSecret !== undefined) {
       return reply.status(400).send({
         error: "signing_secret_not_applicable",
