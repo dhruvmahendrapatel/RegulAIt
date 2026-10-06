@@ -23,6 +23,7 @@
  */
 import { z } from "zod";
 import { canonicalJson, sha256Hex } from "./audit-chain.js";
+import { aiPolicyHref } from "./ai-literacy.js";
 
 // ---------------------------------------------------------------------------
 // Org settings: the vocabularies, the strict defaults, the bounds
@@ -701,7 +702,14 @@ export const createAiPolicySchema = z
     key: z.string().trim().min(1).max(100).regex(/^[a-z0-9][a-z0-9-]*$/, "lower-case letters, digits and dashes"),
     kind: z.enum(AI_POLICY_KINDS),
     title: z.string().trim().min(1).max(200),
-    url: z.string().trim().url().max(2048).optional(),
+    /** D4A-04: an `https:` address only (never `javascript:`, `data:` or plain `http:`) */
+    url: z
+      .string()
+      .trim()
+      .url()
+      .max(2048)
+      .refine((u) => aiPolicyHref(u) !== null, { message: "a document link is an https:// address" })
+      .optional(),
     attachmentId: z.string().uuid().optional(),
     audience: aiPolicyAudienceSchema.default({ all: true, teamIds: [], roleIds: [] }),
     /** null = the org's `literacy_default_validity_days` */

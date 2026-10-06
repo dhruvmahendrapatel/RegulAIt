@@ -21,6 +21,7 @@ import {
   decisionRegressionCandidate,
   decisionRuleVersions,
   diffDecisionOutcomes,
+  intakeTemplateDigest,
   isIntakeTemplateName,
   reviewPolicyBodyDigest,
   runDecisionRegression,
@@ -189,6 +190,19 @@ describe("candidate digests", () => {
     const r = decisionRegressionCandidate("review_policy", { roles: "nope" });
     expect(r.ok).toBe(false);
     expect(decisionRegressionCandidate("intake_template", { name: "x" }).ok).toBe(false);
+  });
+
+  it("D4G-12: an intake candidate is digested once resolved; the digest is over the name and the definition only", () => {
+    const parsed = decisionRegressionCandidate("intake_template", { galleryId: "ai-use-case-intake", name: "ai-use-case-intake/x" });
+    expect(parsed).toMatchObject({ ok: true, digest: null });
+    expect(decisionRegressionCandidate("intake_template", { retireTemplateId: "00000000-0000-4000-8000-000000000001" }).ok).toBe(true);
+    expect(decisionRegressionCandidate("intake_template", { retireTemplateId: "nope" }).ok).toBe(false);
+    const def = { stages: [{ id: "signoff", type: "human_approval", approvers: ["requesting_user"] }] };
+    const a = intakeTemplateDigest({ name: "ai-use-case-intake/x", definition: def });
+    expect(intakeTemplateDigest({ name: "ai-use-case-intake/x", definition: JSON.parse(JSON.stringify(def)) })).toBe(a);
+    expect(intakeTemplateDigest({ name: "ai-use-case-intake/y", definition: def })).not.toBe(a);
+    expect(intakeTemplateDigest({ name: "ai-use-case-intake/x", definition: { stages: [{ ...def.stages[0]!, approvers: ["u-1"] }] } })).not.toBe(a);
+    expect(intakeTemplateDigest(null)).not.toBe(a);
   });
 
   it("names the intake template and its variants, and nothing else", () => {

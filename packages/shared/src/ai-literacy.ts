@@ -45,6 +45,22 @@ export const AI_LITERACY_ARTICLE_4_TEXT =
   "measures to support the development of AI literacy of their staff and other persons dealing with AI systems on " +
   "their behalf. It does not require any specific level of AI literacy of any individual.";
 
+/**
+ * D4A-04: the only link an AI policy may carry is an `https:` address. The schema refuses anything else at write
+ * time, and every page renders a stored link through this helper, so a `javascript:` or `data:` value (or a row
+ * written before the rule) is shown as text and never becomes a link a person is asked to open. A one-line scheme
+ * allow-list on the platform `URL` parser; a URL-sanitising library (considered: @braintree/sanitize-url, MIT)
+ * would add a dependency for the same single check.
+ */
+export function aiPolicyHref(url: string | null | undefined): string | null {
+  if (typeof url !== "string" || !/^https:\/\//i.test(url)) return null;
+  try {
+    return new URL(url).protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** the instant an acknowledgement made at `at` expires: whole UTC days, the earliest reasonable reading */

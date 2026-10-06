@@ -15,7 +15,15 @@
  *    digest is the shared one;
  *  - `warn` records and allows; `off` skips and the response says so;
  *  - a reviewer override becomes a case snapshotting the use case's answers;
- *  - decision records are readable by the use case's owner and admins only.
+ *  - decision records are readable by the use case's owner and admins only;
+ *  - DFX3 (D4G-04): retiring the DECIDING intake template is gated (candidate
+ *    `{retireTemplateId}`, resolved to what decides afterwards); retiring one
+ *    that does not decide is not;
+ *  - DFX3 (D4G-07): gate, create and activation record are one transaction (a
+ *    record that cannot be written leaves no template), and two creates
+ *    admitted against one baseline serialise (the second sees it moved);
+ *  - DFX3 (D4G-12): an intake candidate's digest is over the resolved, stored
+ *    definition, so every form that resolves to it shares one digest.
  *
  * Global state (M-068): the review policy row and the gate setting are put
  * back as found; every case and template this file creates is retired.
@@ -47,6 +55,7 @@ import {
 } from "@regulait/db";
 import {
   accountabilityDigest,
+  intakeTemplateDigest,
   DEFAULT_INTAKE_SIGNOFF_APPROVERS,
   EU_AI_ACT_RULESET_VERSION,
   INTAKE_ASSIST_RULES_VERSION,
@@ -57,8 +66,9 @@ import {
 import { buildApp } from "./app.js";
 import { routeAuthClass } from "./route-classes.js";
 import { aiUseCaseIntakeDefinition } from "./template-gallery.js";
+import { activeIntakeTemplate } from "./decision-regression.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
-import { regressionAcceptance, setDecisionRegressionGateForTest } from "./testing/decision-regression.js";
+import { previewedRetire, regressionAcceptance, setDecisionRegressionGateForTest } from "./testing/decision-regression.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -345,7 +355,8 @@ describe("the activation gate (enforce, the strict default)", () => {
     createdTemplateIds.push(ok.json().id);
     expect(ok.json().decisionRegression.outcome).toBe("previewed");
     // retire it at once: the shared database's intake routing is not this file's
-    expect((await inject("POST", `/v1/workflows/templates/${ok.json().id}/retire`, users.admin.auth, { reason: "a11 variant gate check" })).statusCode).toBe(200);
+    // (D4G-04: it is the deciding template now, so its retirement is previewed too)
+    expect((await previewedRetire(app, users.admin.auth, ok.json().id, "a11 variant gate check")).statusCode).toBe(200);
     const plain = await inject("POST", "/v1/workflows/template-gallery/standard-change/create", users.admin.auth, { name: `a11-standard-${RUN}` });
     expect(plain.statusCode, plain.body).toBe(201);
     createdTemplateIds.push(plain.json().id);
@@ -535,5 +546,110 @@ describe("A11 integrator: POST /v1/workflows/templates", () => {
     const plain = await inject("POST", "/v1/workflows/templates", users.admin.auth, { name: `a11-plain-${RUN}`, definition: { ...definition, workflow: "x" } });
     expect(plain.statusCode, plain.body).toBe(201);
     createdTemplateIds.push(plain.json().id);
+  });
+});
+
+describe("DFX3: every write that changes the deciding intake template (D4G-04, D4G-07, D4G-12)", () => {
+  const variant = async (label: string, approverUserId: string) => {
+    const name = `ai-use-case-intake/a11-${label}-${RUN}`;
+    const acc = await regressionAcceptance(app, users.admin.auth, "intake_template", { galleryId: "ai-use-case-intake", name, approverUserId });
+    const r = await inject("POST", "/v1/workflows/template-gallery/ai-use-case-intake/create", users.admin.auth, { name, approverUserId, ...acc });
+    expect(r.statusCode, r.body).toBe(201);
+    createdTemplateIds.push(r.json().id);
+    const [row] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, r.json().id));
+    return { id: row!.id, name, runId: acc.regressionRunId, row: row! };
+  };
+  const retiredAt = async (id: string) => (await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, id)))[0]!.retiredAt;
+
+  it("D4G-12: the preview's digest is the digest of the definition the create stores, whatever form names it", async () => {
+    const v = await variant("digest", users.priv.id);
+    const [run] = await db.select().from(decisionRegressionRuns).where(eq(decisionRegressionRuns.id, v.runId));
+    expect(run!.candidateDigest).toBe(intakeTemplateDigest({ name: v.row.name, definition: v.row.definition as never }));
+    const [activation] = await db
+      .select()
+      .from(decisionRegressionRuns)
+      .where(and(eq(decisionRegressionRuns.trigger, "activation"), eq(decisionRegressionRuns.candidateDigest, run!.candidateDigest)));
+    expect(activation, "the activation cites the same digest").toBeDefined();
+    // the {name, definition} form of the stored definition resolves to the same template: one digest
+    const same = await preview("intake_template", { name: v.row.name, definition: v.row.definition });
+    expect(same.statusCode, same.body).toBe(201);
+    expect(same.json().candidateDigest).toBe(run!.candidateDigest);
+    expect((await previewedRetire(app, users.admin.auth, v.id, "a11 dfx3 digest cleanup")).statusCode).toBe(200);
+  });
+
+  it("D4G-04: retiring the deciding variant is refused without a preview; previewed and accepted, the next variant decides", async () => {
+    const lite = await variant("lite", users.owner.id);
+    const strict = await variant("strict", users.priv.id);
+    expect((await activeIntakeTemplate(db))!.id).toBe(strict.id);
+    const refused = await inject("POST", `/v1/workflows/templates/${strict.id}/retire`, users.admin.auth, { reason: "a11 dfx3 retire gate" });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "decision_regression_not_previewed", reason: "missing", subject: "intake_template" });
+    expect(await retiredAt(strict.id), "a refused retire changes nothing").toBeNull();
+    expect((await activeIntakeTemplate(db))!.id).toBe(strict.id);
+    // the preview of the retirement resolves to what decides afterwards: /lite
+    const p = await preview("intake_template", { retireTemplateId: strict.id });
+    expect(p.statusCode, p.body).toBe(201);
+    expect(p.json().candidateDigest).toBe(intakeTemplateDigest({ name: lite.row.name, definition: lite.row.definition as never }));
+    expect(p.json().changed, "the sign-off moves from one approver to another").toBeGreaterThan(0);
+    const unaccepted = await inject("POST", `/v1/workflows/templates/${strict.id}/retire`, users.admin.auth, { reason: "a11 dfx3 retire gate", regressionRunId: p.json().id });
+    expect(unaccepted.statusCode, unaccepted.body).toBe(409);
+    expect(unaccepted.json().error).toBe("decision_regression_changes_unaccepted");
+    const ok = await inject("POST", `/v1/workflows/templates/${strict.id}/retire`, users.admin.auth, {
+      reason: "a11 dfx3 retire gate",
+      regressionRunId: p.json().id,
+      acceptChangedOutcomes: true,
+      acceptReason: "the lighter variant decides again, on purpose",
+    });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().decisionRegression).toMatchObject({ outcome: "previewed", runId: p.json().id });
+    expect(await retiredAt(strict.id)).not.toBeNull();
+    expect((await activeIntakeTemplate(db))!.id).toBe(lite.id);
+    // a variant that does NOT decide is retired without a preview (nothing changes who signs off)
+    const newer = await variant("newer", users.priv.id);
+    const quiet = await inject("POST", `/v1/workflows/templates/${lite.id}/retire`, users.admin.auth, { reason: "a11 dfx3 not deciding" });
+    expect(quiet.statusCode, quiet.body).toBe(200);
+    expect(quiet.json().decisionRegression).toBeUndefined();
+    expect((await previewedRetire(app, users.admin.auth, newer.id, "a11 dfx3 cleanup")).statusCode).toBe(200);
+  });
+
+  it("D4G-07: a create whose activation record cannot be written leaves no template behind", async () => {
+    const name = `ai-use-case-intake/a11-atomic-${RUN}`;
+    const acc = await regressionAcceptance(app, users.admin.auth, "intake_template", { galleryId: "ai-use-case-intake", name, approverUserId: users.priv.id });
+    const fn = `a11_refuse_activation_${RUN}`;
+    await db.execute(
+      sql.raw(
+        `CREATE FUNCTION "${fn}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ` +
+          `IF NEW.trigger = 'activation' AND NEW.created_by = '${users.admin.id}' THEN RAISE EXCEPTION 'a11 test: activation refused'; END IF; ` +
+          `RETURN NEW; END $$`,
+      ),
+    );
+    await db.execute(sql.raw(`CREATE TRIGGER "${fn}" BEFORE INSERT ON "decision_regression_runs" FOR EACH ROW EXECUTE FUNCTION "${fn}"()`));
+    try {
+      const r = await inject("POST", "/v1/workflows/template-gallery/ai-use-case-intake/create", users.admin.auth, { name, approverUserId: users.priv.id, ...acc });
+      expect(r.statusCode, r.body).toBeGreaterThanOrEqual(500);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER IF EXISTS "${fn}" ON "decision_regression_runs"`));
+      await db.execute(sql.raw(`DROP FUNCTION IF EXISTS "${fn}"()`));
+    }
+    const rows = await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, name));
+    expect(rows, "the template rolled back with its record").toEqual([]);
+  });
+
+  it("D4G-07: two creates admitted against one baseline serialise; the second sees the baseline moved", async () => {
+    const names = [`ai-use-case-intake/a11-race-a-${RUN}`, `ai-use-case-intake/a11-race-b-${RUN}`];
+    const accs: Array<Awaited<ReturnType<typeof regressionAcceptance>>> = [];
+    for (const name of names) {
+      accs.push(await regressionAcceptance(app, users.admin.auth, "intake_template", { galleryId: "ai-use-case-intake", name, approverUserId: users.priv.id }));
+    }
+    const out = await Promise.all(
+      names.map((name, i) =>
+        inject("POST", "/v1/workflows/template-gallery/ai-use-case-intake/create", users.admin.auth, { name, approverUserId: users.priv.id, ...accs[i] }),
+      ),
+    );
+    for (const r of out) if (r.statusCode === 201) createdTemplateIds.push(r.json().id);
+    expect(out.map((r) => r.statusCode).sort()).toEqual([201, 409]);
+    expect(out.find((r) => r.statusCode === 409)!.json().reason).toBe("baseline_moved");
+    const winner = out.find((r) => r.statusCode === 201)!.json().id as string;
+    expect((await previewedRetire(app, users.admin.auth, winner, "a11 dfx3 race cleanup")).statusCode).toBe(200);
   });
 });

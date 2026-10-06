@@ -83,10 +83,9 @@ import {
   startInstanceSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
-  type DecisionRegressionTemplate,
 } from "@regulait/shared";
 // ADR-0182 A11 — intake-named templates pass the decision-regression gate
-import { admitIntakeTemplateWrite } from "./decision-regression.js";
+import { parseAcceptance, writeIntakeTemplateGated } from "./decision-regression.js";
 import { z } from "zod";
 
 const instanceIdParam = z.object({ instanceId: z.string().uuid() });
@@ -2439,24 +2438,24 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
+    if (!isIntakeTemplateName(body.name)) {
+      const result = await createWorkflowTemplateValidated(db, body);
+      if (!result.ok) return reply.status(result.status).send(result.body);
+      return reply.status(201).send(result.row);
+    }
     // ADR-0182 A11: an `ai-use-case-intake` template or variant decides who
     // signs off every new use case; it is admitted by the decision-regression
-    // gate exactly as "create from gallery" is (candidate: {name, definition})
-    const definition = body.definition as unknown as Record<string, unknown>;
-    const gate = isIntakeTemplateName(body.name)
-      ? await admitIntakeTemplateWrite(
-          db,
-          req.body,
-          { name: body.name, definition },
-          { name: body.name, definition: definition as unknown as DecisionRegressionTemplate["definition"] },
-          req.authCtx.userId ?? null,
-        )
-      : null;
-    if (gate && !gate.ok) return reply.status(gate.status).send(gate.body);
-    const result = await createWorkflowTemplateValidated(db, body);
-    if (!result.ok) return reply.status(result.status).send(result.body);
-    const decisionRegression = gate ? await gate.record() : null;
-    return reply.status(201).send({ ...result.row, ...(decisionRegression ? { decisionRegression } : {}) });
+    // gate exactly as "create from gallery" is (candidate: {name, definition}).
+    // D4G-07/12: the gate, the create and its activation record are ONE
+    // transaction, and the stored definition is the one the preview digested.
+    const gated = await writeIntakeTemplateGated<typeof workflowTemplates.$inferSelect>(db, {
+      raw: req.body,
+      candidate: { name: body.name, definition: (body.definition ?? {}) as Record<string, unknown> },
+      actorUserId: req.authCtx.userId ?? null,
+      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
+    });
+    if (!gated.ok) return reply.status(gated.status).send(gated.body);
+    return reply.status(201).send({ ...gated.value, ...(gated.decisionRegression ? { decisionRegression: gated.decisionRegression } : {}) });
   });
 
   app.get("/v1/workflows/templates", async () => ({
@@ -2467,28 +2466,58 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // simply stops starting NEW instances; in-flight instances keep their
   // snapshotted definition and are untouched; assignment rules pointing at it
   // stay visible (and now refuse loudly). The why is required and audited.
+  //
+  // D4G-04: retiring the ACTIVE `ai-use-case-intake` template or variant hands
+  // every new use case's sign-off to the next active variant (or the built-in
+  // shape), so it goes through the decision-regression gate like a create: the
+  // candidate `{retireTemplateId}` resolves to whatever decides afterwards, and
+  // the write carries `regressionRunId` (+ acceptance when outcomes change).
+  // Retiring an intake template that is not the deciding one changes nothing
+  // and is not gated; either way it runs under the intake-template lock.
   app.post("/v1/workflows/templates/:templateId/retire", async (req, reply) => {
     const { templateId } = z.object({ templateId: z.string().uuid() }).parse(req.params);
-    const body = retireTemplateSchema.parse(req.body);
-    const [tpl] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId));
-    if (!tpl) return reply.status(404).send({ error: "unknown_template" });
-    if (tpl.retiredAt) return reply.status(409).send({ error: "already_retired" });
-    const [row] = await db
-      .update(workflowTemplates)
-      .set({ retiredAt: new Date(), retiredReason: body.reason })
-      .where(eq(workflowTemplates.id, templateId))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "workflow_template",
-      objectId: templateId,
-      detail: { phase: "template-retired", name: tpl.name, reason: body.reason },
-      effect: "allow",
-      ruleId: "workflow-template-retired",
-      ruleChain: [],
-      reason: `workflow template '${tpl.name}' retired: ${body.reason}`,
+    const raw = (req.body ?? {}) as Record<string, unknown>;
+    const { regressionRunId: _r, acceptChangedOutcomes: _a, acceptReason: _ar, ...rest } = raw;
+    const body = retireTemplateSchema.parse(rest);
+    const acceptance = parseAcceptance(raw);
+    if (!acceptance.ok) return reply.status(422).send({ error: "invalid_regression_acceptance", issues: acceptance.issues });
+    const retire = async (tx: Db) => {
+      const [tpl] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
+      if (!tpl) return { ok: false as const, status: 404, body: { error: "unknown_template" } };
+      if (tpl.retiredAt) return { ok: false as const, status: 409, body: { error: "already_retired" } };
+      const [row] = await tx
+        .update(workflowTemplates)
+        .set({ retiredAt: new Date(), retiredReason: body.reason })
+        .where(eq(workflowTemplates.id, templateId))
+        .returning();
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "workflow_template",
+        objectId: templateId,
+        detail: { phase: "template-retired", name: tpl.name, reason: body.reason },
+        effect: "allow",
+        ruleId: "workflow-template-retired",
+        ruleChain: [],
+        reason: `workflow template '${tpl.name}' retired: ${body.reason}`,
+      });
+      return { ok: true as const, value: row! };
+    };
+    const [tpl] = await db.select({ name: workflowTemplates.name }).from(workflowTemplates).where(eq(workflowTemplates.id, templateId));
+    if (!tpl || !isIntakeTemplateName(tpl.name)) {
+      const out = await db.transaction((tx) => retire(tx as unknown as Db));
+      if (!out.ok) return reply.status(out.status).send(out.body);
+      return out.value;
+    }
+    const gated = await writeIntakeTemplateGated(db, {
+      raw,
+      candidate: { retireTemplateId: templateId },
+      actorUserId: req.authCtx.userId ?? null,
+      // only the deciding template changes the decider (read under the lock)
+      changesDecider: async (_tx, live) => live.template?.id === templateId,
+      write: (tx) => retire(tx),
     });
-    return row;
+    if (!gated.ok) return reply.status(gated.status).send(gated.body);
+    return { ...gated.value, ...(gated.decisionRegression ? { decisionRegression: gated.decisionRegression } : {}) };
   });
 
   app.post("/v1/workflows/assignment-rules", async (req, reply) => {

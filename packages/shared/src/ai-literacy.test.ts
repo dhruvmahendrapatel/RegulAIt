@@ -3,13 +3,14 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ACCOUNTABILITY_SETTING_COPY, ACCOUNTABILITY_STRICT_DEFAULTS } from "./accountability.js";
+import { ACCOUNTABILITY_SETTING_COPY, ACCOUNTABILITY_STRICT_DEFAULTS, createAiPolicySchema } from "./accountability.js";
 import {
   AI_LITERACY_ARTICLE_4_TEXT,
   acceptedVersions,
   ackExpiresAt,
   aiLiteracyCurrent,
   aiPolicyContentDigest,
+  aiPolicyHref,
   aiTrainingCurrentOf,
   audienceIncludes,
   coveragePct,
@@ -142,5 +143,32 @@ describe("the console mirrors the A14 settings copy (the SPA does not depend on 
     }
     expect(src).toContain(`literacyGateMode: "${ACCOUNTABILITY_STRICT_DEFAULTS.literacyGateMode}"`);
     expect(src).toContain(`literacyDefaultValidityDays: ${ACCOUNTABILITY_STRICT_DEFAULTS.literacyDefaultValidityDays}`);
+  });
+});
+
+describe("D4A-04: an AI policy link is an https address only", () => {
+  const base = { key: "aup", kind: "acceptable_use" as const, title: "AUP" };
+  it("the schema refuses javascript:, data:, http: and other schemes, and keeps https:", () => {
+    for (const url of [
+      "javascript:alert(1)",
+      "JavaScript:fetch('/v1/org/settings')",
+      "data:text/html,<script>alert(1)</script>",
+      "http://intranet.example/aup",
+      "ftp://intranet.example/aup",
+      "vbscript:msgbox(1)",
+    ]) {
+      expect(createAiPolicySchema.safeParse({ ...base, url }).success, url).toBe(false);
+    }
+    expect(createAiPolicySchema.safeParse({ ...base, url: "https://intranet.example/aup" }).success).toBe(true);
+  });
+  it("the render helper returns the link only for https:, so a stored unsafe value is shown as text", () => {
+    expect(aiPolicyHref("https://intranet.example/aup")).toBe("https://intranet.example/aup");
+    expect(aiPolicyHref("javascript:alert(1)")).toBeNull();
+    expect(aiPolicyHref(" javascript:alert(1)")).toBeNull();
+    expect(aiPolicyHref("data:text/html,x")).toBeNull();
+    expect(aiPolicyHref("http://intranet.example/aup")).toBeNull();
+    expect(aiPolicyHref("https://")).toBeNull();
+    expect(aiPolicyHref(null)).toBeNull();
+    expect(aiPolicyHref(undefined)).toBeNull();
   });
 });

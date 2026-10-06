@@ -40,7 +40,7 @@
  * none fits, because regulAIt records acknowledgements and completions and does not deliver training (an xAPI
  * import is a later adapter). Cedar (existing, Apache-2.0) carries the attribute. Dates are native `Date` in UTC.
  */
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   aiPolicyAcknowledgements,
@@ -85,7 +85,14 @@ import {
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
 } from "@regulait/shared";
-import { LITERACY_NOT_REQUIRED, type ExecutionPosture, type LiteracyPosture } from "@regulait/policy-kernel";
+import {
+  LITERACY_BREAK_GLASS_RULE_ID,
+  LITERACY_NOT_REQUIRED,
+  LITERACY_RULE_ID,
+  literacyGate,
+  type ExecutionPosture,
+  type LiteracyPosture,
+} from "@regulait/policy-kernel";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { loadScopeMemberships } from "./entitlements.js";
@@ -101,6 +108,7 @@ export const AI_LITERACY_RULE_IDS = {
   retired: "ai-policy-retired",
   acknowledged: "ai-policy-acknowledged",
   acknowledgeRefused: "ai-policy-acknowledge-refused",
+  recordRefused: "ai-policy-completion-record-refused",
   recorded: "ai-policy-completion-recorded",
   coverageRead: "ai-policy-coverage-read",
   expiryNotice: "ai-literacy-expiry-notice",
@@ -338,6 +346,82 @@ export async function withLiteracyPosture<P extends ExecutionPosture>(
 }
 
 // ---------------------------------------------------------------------------
+// D4A-03: an acknowledgement is a person's own act, made from an interactive session
+// ---------------------------------------------------------------------------
+
+/** the refusal code when an acknowledgement does not come from an interactive session (D4A-03) */
+export const ACKNOWLEDGEMENT_REQUIRES_SESSION = "acknowledgement_requires_session" as const;
+
+/** how a request authenticated, as the acknowledgement audit records it */
+export interface AcknowledgementMethod {
+  /** `session` (a browser session cookie), `api-key`, `virtual-key` or `bootstrap` */
+  via: string;
+  /** the session's server-recorded origin (`password`, `oidc`, `saml`, `api_key` for the login page's
+   * "sign in with an API key", `bootstrap`, `unknown`); for a header credential, the credential kind */
+  sessionOrigin: string;
+}
+
+/**
+ * D4A-03: is this request a PERSON at the product, rather than a credential a script holds? The literacy gate
+ * refuses API-key traffic of a person who is not current, so the same API key must not be able to clear the gate it
+ * is held behind. An acknowledgement (and an admin recording their OWN completion) is therefore accepted only from a
+ * browser session (`via === "session"`) belonging to a person, whatever sign-in created it; never from a header
+ * API key, a virtual key, the bootstrap identity, or a session whose origin the server did not record.
+ */
+export function acknowledgementMethodOf(req: FastifyRequest): AcknowledgementMethod & { interactive: boolean } {
+  const via = req.authCtx?.via ?? "unknown";
+  const sessionOrigin = abacPrincipalFromRequest(req).sessionOrigin ?? "unknown";
+  const interactive =
+    via === "session" && !!req.authCtx?.userId && sessionOrigin !== "bootstrap" && sessionOrigin !== "unknown";
+  return { via, sessionOrigin, interactive };
+}
+
+/**
+ * D4G-09: a person who STARTS an evaluation or red-team run is using AI through regulAIt, so the run start checks
+ * their literacy exactly as a governed call does (`literacyPostureFor`, origin human: gate mode, audience,
+ * break-glass session). The dispatches inside the run keep the evaluation exemption (they are the product measuring
+ * an agent), and so do platform-scheduled runs, which never come through this check. Every outcome other than "not
+ * required" is audited: a refusal (`ai-literacy-not-current`, deny), a warn-mode gap (allow, `detail.mode = warn`)
+ * and a break-glass exemption. Returns the 403 to send, or null to go on.
+ */
+export async function refuseRunStartWithoutLiteracy(
+  db: Db,
+  req: FastifyRequest,
+  run: { kind: "evaluation" | "red-team"; subjectId: string },
+): Promise<{ status: 403; body: { error: string; detail: string } } | null> {
+  const userId = req.authCtx?.userId;
+  if (!userId) return null; // the callers refuse the bootstrap identity themselves
+  const literacy = await literacyPostureFor(db, userId, { origin: "human", principal: abacPrincipalFromRequest(req) });
+  const label = `Starting this ${run.kind} run`;
+  const base = { userId, objectType: "eval_run" as const, objectId: null, ruleChain: [] as string[] };
+  const detail = { phase: "run-start", runKind: run.kind, subjectId: run.subjectId, missing: literacy.missing ?? [] };
+  if (literacy.exemption === "break_glass") {
+    await db.insert(auditLog).values({
+      ...base,
+      effect: "allow",
+      ruleId: LITERACY_BREAK_GLASS_RULE_ID,
+      reason: `${label}: allowed through a break-glass session although the person is not current on: ${(literacy.missing ?? []).join("; ")}`,
+      detail: { ...detail, exemption: "break_glass" },
+    });
+    return null;
+  }
+  if (!literacy.required || literacy.current) return null;
+  const refusal = literacyGate({ mode: "normal", literacy }, label);
+  if (!refusal) {
+    await db.insert(auditLog).values({
+      ...base,
+      effect: "allow",
+      ruleId: LITERACY_RULE_ID,
+      reason: `${label}: allowed under literacy_gate_mode = warn although the person is not current on: ${(literacy.missing ?? []).join("; ")}`,
+      detail: { ...detail, mode: "warn" },
+    });
+    return null;
+  }
+  await db.insert(auditLog).values({ ...base, effect: "deny", ruleId: refusal.ruleId, reason: refusal.reason, detail: { ...detail, mode: "enforce" } });
+  return { status: 403, body: { error: refusal.ruleId, detail: refusal.reason } };
+}
+
+// ---------------------------------------------------------------------------
 // Coverage: the admin report, the monitor and the sweep read the same numbers
 // ---------------------------------------------------------------------------
 
@@ -567,8 +651,9 @@ function refuse(reply: FastifyReply, status: number, error: string, detail: stri
  *   POST /v1/ai-policies                         admin: a new draft (the next version of `key`)
  *   GET  /v1/ai-policies/coverage                admin (audited read: it includes others' evidence references)
  *   POST /v1/ai-policies/:policyId/publish       admin (editorial needs a reason; audited with transitions)
- *   POST /v1/ai-policies/:policyId/retire        admin
- *   POST /v1/ai-policies/:policyId/acknowledge   user: self only
+ *   POST /v1/ai-policies/:policyId/retire        admin (a reason of at least 10 characters; audited, a relaxation
+ *                                                when the version was published)
+ *   POST /v1/ai-policies/:policyId/acknowledge   user: self only, from an interactive session (D4A-03)
  *   POST /v1/ai-policies/:policyId/records       admin (completion from an external training system)
  *   GET  /v1/me/ai-literacy                      user: self only
  */
@@ -751,7 +836,9 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
 
   app.post("/v1/ai-policies/:policyId/retire", async (req, reply) => {
     const { policyId } = params.parse(req.params);
-    const body = z.object({ reason: z.string().trim().min(1).max(2000).optional() }).strict().parse(req.body ?? {});
+    // D4G-11: retiring a PUBLISHED version lifts the requirement for its whole audience (the same effect as turning
+    // the gate off for them), so it needs a reason and is audited as a relaxation; a draft needs one too.
+    const body = z.object({ reason: z.string().trim().min(10).max(2000) }).strict().parse(req.body ?? {});
     const [doc] = await db.select().from(aiPolicyDocuments).where(eq(aiPolicyDocuments.id, policyId));
     if (!doc) return refuse(reply, 404, "not_found", "no such AI policy version");
     if (doc.status === "retired") return reply.send({ document: docView(doc), changed: false });
@@ -772,12 +859,13 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
         ruleChain: [],
         reason:
           `AI policy ${doc.key} v${doc.version} retired from ${doc.status}` +
-          (doc.status === "published" ? "; it no longer applies to anyone" : "") +
-          (body.reason ? `: ${body.reason}` : ""),
+          (doc.status === "published" ? " (RELAXED: it no longer applies to anyone)" : "") +
+          `: ${body.reason}`,
         detail: {
           key: doc.key,
           version: doc.version,
-          ...(body.reason ? { reason: body.reason } : {}),
+          reason: body.reason,
+          ...(doc.status === "published" ? { relaxed: true } : {}),
           transitions: settingTransitions({ status: doc.status }, { status: "retired" }),
         },
       });
@@ -791,6 +879,29 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
     const { policyId } = params.parse(req.params);
     const userId = req.authCtx.userId;
     if (!userId) return refuse(reply, 403, "bootstrap_cannot_acknowledge", "the bootstrap identity is not a person and acknowledges nothing");
+    // D4A-03: only from an interactive session. The gate holds this person's API-key traffic, so that key must not
+    // be able to clear it; refused and audited with the method the request used.
+    const method = acknowledgementMethodOf(req);
+    if (!method.interactive) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "ai_policy_document",
+        objectId: policyId,
+        effect: "deny",
+        ruleId: AI_LITERACY_RULE_IDS.acknowledgeRefused,
+        ruleChain: [],
+        reason:
+          `AI policy acknowledgement refused: it was sent with ${method.via === "session" ? `a session of origin ${method.sessionOrigin}` : `a ${method.via} credential`}, ` +
+          "and a person acknowledges only from an interactive session",
+        detail: { code: ACKNOWLEDGEMENT_REQUIRES_SESSION, via: method.via, sessionOrigin: method.sessionOrigin },
+      });
+      return refuse(
+        reply,
+        403,
+        ACKNOWLEDGEMENT_REQUIRES_SESSION,
+        "an AI policy is acknowledged by the person, signed in to regulAIt (Account > AI policies), not with an API key or a virtual key",
+      );
+    }
     // SELF ONLY. The body names no person; one that tries to is refused (and audited) rather than ignored, so an
     // attempt to acknowledge for somebody else is never mistaken for an acknowledgement of one's own.
     const raw = (req.body ?? {}) as Record<string, unknown>;
@@ -865,13 +976,17 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
         effect: "allow",
         ruleId: AI_LITERACY_RULE_IDS.acknowledged,
         ruleChain: [],
-        reason: `AI policy ${doc.key} v${doc.version} acknowledged by the user themselves; valid until ${expiresAt.toISOString()}`,
+        reason:
+          `AI policy ${doc.key} v${doc.version} acknowledged by the user themselves, signed in (session origin ` +
+          `${method.sessionOrigin}); valid until ${expiresAt.toISOString()}`,
         detail: {
           documentId: doc.id,
           key: doc.key,
           version: doc.version,
           digest: doc.contentDigest,
           method: "acknowledged",
+          via: method.via,
+          sessionOrigin: method.sessionOrigin,
           expiresAt: expiresAt.toISOString(),
           renewed: !!before,
           ...(before
@@ -903,6 +1018,27 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
   app.post("/v1/ai-policies/:policyId/records", async (req, reply) => {
     const { policyId } = params.parse(req.params);
     const body = recordAiPolicyCompletionSchema.parse(req.body);
+    // D4A-03: an admin recording their OWN completion is the gate's subject clearing it, so it follows the
+    // acknowledgement's rule (an interactive session); a completion for someone else is the admin route's purpose.
+    const method = acknowledgementMethodOf(req);
+    if (body.userId === req.authCtx.userId && !method.interactive) {
+      await db.insert(auditLog).values({
+        userId: actorOf(req),
+        objectType: "ai_policy_document",
+        objectId: policyId,
+        effect: "deny",
+        ruleId: AI_LITERACY_RULE_IDS.recordRefused,
+        ruleChain: [],
+        reason: `an admin's own AI policy completion refused: it was sent with a ${method.via} credential, and a person records their own only from an interactive session`,
+        detail: { code: ACKNOWLEDGEMENT_REQUIRES_SESSION, via: method.via, sessionOrigin: method.sessionOrigin, forUserId: body.userId },
+      });
+      return refuse(
+        reply,
+        403,
+        ACKNOWLEDGEMENT_REQUIRES_SESSION,
+        "your own acknowledgement or completion is recorded signed in to regulAIt, not with an API key",
+      );
+    }
     const [doc] = await db.select().from(aiPolicyDocuments).where(eq(aiPolicyDocuments.id, policyId));
     if (!doc) return refuse(reply, 404, "not_found", "no such AI policy version");
     if (doc.status !== "published") {
@@ -966,6 +1102,8 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
           version: doc.version,
           forUserId: body.userId,
           method: body.method,
+          via: method.via,
+          sessionOrigin: method.sessionOrigin,
           evidenceRef: body.evidenceRef,
           completedAt: completedAt.toISOString(),
           expiresAt: expiresAt.toISOString(),

@@ -12,6 +12,12 @@
  *  - warn records the gap and allows; off skips;
  *  - evaluation dispatches and break-glass admins are exempt;
  *  - acknowledging for another user → 403 (audited); a stale version or digest → 409;
+ *  - D4A-03: an acknowledgement (and an admin's own completion record) only from an interactive session: an API
+ *    key or a virtual key → 403 `acknowledgement_requires_session`, audited with the method; the session's
+ *    acknowledgement records `via` and the session origin;
+ *  - D4G-09: a person who is not current cannot START an evaluation or red-team run (403
+ *    `ai-literacy-not-current`, audited); warn records and allows; the dispatches inside stay exempt;
+ *  - D4G-11: retiring a version needs a reason (at least 10 characters), audited as a relaxation when published;
  *  - Cedar v3: a policy requiring `principal.aiTrainingCurrent` denies a person who is not current and allows one
  *    who is; the simulation surface builds the attribute exactly as enforcement does; a v2 policy is unaffected;
  *  - coverage (admin, audited read), the `literacy_coverage_gap` monitor input, the 14-day expiry notice
@@ -66,7 +72,10 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let serverId: string;
 let teamId: string;
-const people = {} as Record<"admin" | "inTeam" | "outside" | "glass", { id: string; auth: { authorization: string } }>;
+const people = {} as Record<
+  "admin" | "inTeam" | "outside" | "glass",
+  { id: string; auth: { authorization: string }; session: Record<string, string> }
+>;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let restoreAdmission: (() => Promise<void>) | undefined;
 let breakGlassBefore: string[] | null = null;
@@ -116,8 +125,9 @@ async function createDoc(over: Record<string, unknown> = {}) {
 }
 const publish = (id: string, body: Record<string, unknown> = {}) =>
   inject("POST", `/v1/ai-policies/${id}/publish`, people.admin.auth, body);
+/** D4A-03: a person acknowledges from an interactive (browser) session, so the helper uses one */
 const acknowledge = (who: keyof typeof people, doc: { id: string; version: number; contentDigest: string }) =>
-  inject("POST", `/v1/ai-policies/${doc.id}/acknowledge`, people[who].auth, {
+  inject("POST", `/v1/ai-policies/${doc.id}/acknowledge`, people[who].session, {
     version: doc.version,
     digest: doc.contentDigest,
   });
@@ -145,7 +155,12 @@ beforeAll(async () => {
     expect(u.statusCode, u.body).toBe(201);
     const id = u.json().id as string;
     const token = (await inject("POST", `/v1/users/${id}/keys`, AUTH, { name: "a14" })).json().token as string;
-    people[k] = { id, auth: { authorization: `Bearer ${token}` } };
+    // a browser session for the same person (the login page's "sign in with an API key")
+    const login = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: { "x-regulait-csrf": "1" }, payload: { apiKey: token } });
+    expect(login.statusCode, login.body).toBe(200);
+    const cookie = login.cookies.find((c) => c.name === "regulait_session")?.value;
+    expect(cookie, "the exchange sets a session cookie").toBeTruthy();
+    people[k] = { id, auth: { authorization: `Bearer ${token}` }, session: { cookie: `regulait_session=${cookie}`, "x-regulait-csrf": "1" } };
   }
   const s = await inject("POST", "/v1/servers", AUTH, { name: `a14-server-${RUN}`, url: "http://127.0.0.1:9" });
   expect(s.statusCode, s.body).toBe(201);
@@ -272,7 +287,7 @@ describe("ADR-0182 A14: the gate on governed calls (enforce, the strict default)
   });
 
   it("acknowledging for another user is refused 403 and audited; a stale digest is refused 409", async () => {
-    const other = await inject("POST", `/v1/ai-policies/${v1.id}/acknowledge`, people.outside.auth, {
+    const other = await inject("POST", `/v1/ai-policies/${v1.id}/acknowledge`, people.outside.session, {
       userId: people.inTeam.id,
       version: v1.version,
       digest: v1.contentDigest,
@@ -285,9 +300,95 @@ describe("ADR-0182 A14: the gate on governed calls (enforce, the strict default)
       .where(and(eq(auditLog.ruleId, "ai-policy-acknowledge-refused"), eq(auditLog.userId, people.outside.id)));
     expect(refused?.effect).toBe("deny");
     expect(await aiLiteracyCurrent(db, people.inTeam.id)).toBe(false);
-    const stale = await inject("POST", `/v1/ai-policies/${v1.id}/acknowledge`, people.inTeam.auth, { version: 1, digest: "0".repeat(64) });
+    const stale = await inject("POST", `/v1/ai-policies/${v1.id}/acknowledge`, people.inTeam.session, { version: 1, digest: "0".repeat(64) });
     expect(stale.statusCode, stale.body).toBe(409);
     expect(stale.json().error).toBe("ai_policy_version_mismatch");
+  });
+
+  it("D4A-03: the person's own API key cannot acknowledge (403 acknowledgement_requires_session, audited); nor can a virtual key", async () => {
+    const before = new Date(Date.now() - 1000);
+    const viaKey = await inject("POST", `/v1/ai-policies/${v1.id}/acknowledge`, people.inTeam.auth, { version: v1.version, digest: v1.contentDigest });
+    expect(viaKey.statusCode, viaKey.body).toBe(403);
+    expect(viaKey.json().error).toBe("acknowledgement_requires_session");
+    const rows = await db
+      .select()
+      .from(aiPolicyAcknowledgements)
+      .where(and(eq(aiPolicyAcknowledgements.userId, people.inTeam.id), eq(aiPolicyAcknowledgements.documentId, v1.id)));
+    expect(rows, "no acknowledgement was stored").toEqual([]);
+    expect(await aiLiteracyCurrent(db, people.inTeam.id)).toBe(false);
+    const [refused] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "ai-policy-acknowledge-refused"), eq(auditLog.userId, people.inTeam.id)))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+    expect(refused!.at.getTime()).toBeGreaterThanOrEqual(before.getTime());
+    expect(refused!.effect).toBe("deny");
+    expect(refused!.detail).toMatchObject({ code: "acknowledgement_requires_session", via: "api-key", sessionOrigin: "api_key" });
+    // a virtual key (a narrowed dispatch credential of the same person) is refused too
+    const vk = await inject("POST", "/v1/virtual-keys", AUTH, { name: `a14-vk-${RUN}`, userId: people.inTeam.id, purpose: "dispatch" });
+    expect(vk.statusCode, vk.body).toBe(201);
+    const vkToken = (vk.json().token ?? vk.json().key) as string;
+    const viaVk = await inject("POST", `/v1/ai-policies/${v1.id}/acknowledge`, { authorization: `Bearer ${vkToken}` }, { version: v1.version, digest: v1.contentDigest });
+    expect(viaVk.statusCode, viaVk.body).toBe(403);
+    expect(await aiLiteracyCurrent(db, people.inTeam.id)).toBe(false);
+  });
+
+  it("D4A-03: an admin's OWN completion record needs a session too; a record for someone else does not", async () => {
+    const own = await inject("POST", `/v1/ai-policies/${v1.id}/records`, people.glass.auth, {
+      userId: people.glass.id,
+      method: "admin_recorded",
+      evidenceRef: "self-recorded with a key",
+    });
+    expect(own.statusCode, own.body).toBe(403);
+    expect(own.json().error).toBe("acknowledgement_requires_session");
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "ai-policy-completion-record-refused"), eq(auditLog.userId, people.glass.id)))
+      .limit(1);
+    expect(row?.detail).toMatchObject({ code: "acknowledgement_requires_session", via: "api-key", forUserId: people.glass.id });
+    expect(await aiLiteracyCurrent(db, people.glass.id)).toBe(false);
+  });
+
+  it("D4G-09: a person who is not current cannot START an evaluation or red-team run (403, audited); a current one passes the check", async () => {
+    const before = new Date(Date.now() - 1000);
+    const missing = "00000000-0000-4000-8000-0000000000aa";
+    const evalRun = await inject("POST", "/v1/evals/runs", people.glass.auth, { datasetId: missing, agentId });
+    expect(evalRun.statusCode, evalRun.body).toBe(403);
+    expect(evalRun.json()).toMatchObject({ error: "ai-literacy-not-current" });
+    expect(evalRun.json().detail).toContain(KEY);
+    const redRun = await inject("POST", "/v1/redteam/runs", people.glass.auth, { libraryId: missing, agentId });
+    expect(redRun.statusCode, redRun.body).toBe(403);
+    expect(redRun.json()).toMatchObject({ error: "ai-literacy-not-current" });
+    // even a run the caller labels "scheduled": it is still a person's request
+    const labelled = await inject("POST", "/v1/redteam/runs", people.glass.auth, { libraryId: missing, agentId, trigger: "scheduled" });
+    expect(labelled.statusCode, labelled.body).toBe(403);
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, people.glass.id), eq(auditLog.ruleId, "ai-literacy-not-current"), sql`${auditLog.detail}->>'phase' = 'run-start'`));
+    const fresh = rows.filter((r) => r.at.getTime() >= before.getTime());
+    expect(fresh.map((r) => (r.detail as { runKind: string }).runKind).sort()).toEqual(["evaluation", "red-team", "red-team"]);
+    expect(fresh.every((r) => r.effect === "deny")).toBe(true);
+    // the outside person (nothing applies to them) passes the literacy check and meets the next one (the dataset)
+    const outside = await inject("POST", "/v1/evals/runs", people.outside.auth, { datasetId: missing, agentId });
+    expect(outside.body).not.toContain("ai-literacy-not-current");
+    // warn: allowed past the check, and the gap is recorded
+    try {
+      await setGate("warn");
+      const warned = await inject("POST", "/v1/evals/runs", people.glass.auth, { datasetId: missing, agentId });
+      expect(warned.body).not.toContain("ai-literacy-not-current");
+      const [w] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.userId, people.glass.id), eq(auditLog.ruleId, "ai-literacy-not-current"), sql`${auditLog.detail}->>'mode' = 'warn'`))
+        .orderBy(desc(auditLog.seq))
+        .limit(1);
+      expect(w?.effect).toBe("allow");
+    } finally {
+      await setGate("enforce");
+    }
   });
 
   it("acknowledging (self) makes the person current and the call ALLOWED; audited", async () => {
@@ -299,7 +400,7 @@ describe("ADR-0182 A14: the gate on governed calls (enforce, the strict default)
       .select()
       .from(auditLog)
       .where(and(eq(auditLog.ruleId, "ai-policy-acknowledged"), eq(auditLog.userId, people.inTeam.id)));
-    expect(row?.detail).toMatchObject({ key: KEY, version: 1, method: "acknowledged" });
+    expect(row?.detail).toMatchObject({ key: KEY, version: 1, method: "acknowledged", via: "session", sessionOrigin: "api_key" });
   });
 
   it("an EXPIRED acknowledgement denies again; an admin-recorded completion with evidence restores it", async () => {
@@ -555,6 +656,10 @@ describe("ADR-0182 A14: coverage, the monitor, the expiry notice, retire", () =>
   it("retiring the published version removes the requirement; audited with the transition", async () => {
     const [pub] = await db.select().from(aiPolicyDocuments).where(and(eq(aiPolicyDocuments.key, KEY), eq(aiPolicyDocuments.status, "published")));
     expect((await decide(people.glass.id)).effect).toBe("deny");
+    // D4G-11: a reason is required, at least 10 characters
+    expect((await inject("POST", `/v1/ai-policies/${pub!.id}/retire`, people.admin.auth, {})).statusCode).toBe(400);
+    expect((await inject("POST", `/v1/ai-policies/${pub!.id}/retire`, people.admin.auth, { reason: "old" })).statusCode).toBe(400);
+    expect((await decide(people.glass.id)).effect, "a refused retire changed nothing").toBe("deny");
     const r = await inject("POST", `/v1/ai-policies/${pub!.id}/retire`, people.admin.auth, { reason: "replaced by the group-wide policy" });
     expect(r.statusCode, r.body).toBe(200);
     expect((await decide(people.glass.id)).effect).toBe("allow");
@@ -564,7 +669,12 @@ describe("ADR-0182 A14: coverage, the monitor, the expiry notice, retire", () =>
       .where(and(eq(auditLog.ruleId, "ai-policy-retired"), eq(auditLog.objectId, pub!.id)))
       .orderBy(desc(auditLog.seq))
       .limit(1);
-    expect(row!.detail).toMatchObject({ transitions: { status: { from: "published", to: "retired" } } });
+    expect(row!.detail).toMatchObject({
+      reason: "replaced by the group-wide policy",
+      relaxed: true,
+      transitions: { status: { from: "published", to: "retired" } },
+    });
+    expect(row!.reason).toContain("RELAXED");
   });
 });
 

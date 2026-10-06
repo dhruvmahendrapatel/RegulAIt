@@ -9,6 +9,9 @@
  *    cancelling creates nothing (the preview cannot be skipped in the UI);
  *  - the create carries the preview's run id and the acceptance;
  *  - a template of any other name is created directly, with no preview;
+ *  - D4G-04: retiring an intake template asks for the reason, then previews
+ *    `{retireTemplateId}` and retires only with the run id and the acceptance;
+ *    retiring any other template needs no preview;
  *  - axe (WCAG 2.x A/AA) in light and dark on the page and the step.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -85,10 +88,18 @@ const gallery = {
 interface Captured {
   previews: unknown[];
   creates: Array<{ url: string; body: Record<string, unknown> }>;
+  retires: Array<{ url: string; body: Record<string, unknown> }>;
 }
 
-async function mockApi(page: Page): Promise<Captured> {
-  const cap: Captured = { previews: [], creates: [] };
+const VARIANT_ID = "78787878-7878-4878-8878-787878787878";
+const PLAIN_ID = "89898989-8989-4989-8989-898989898989";
+const listed = [
+  { id: VARIANT_ID, name: "ai-use-case-intake/governance-owner", definition: intakeDefinition, retiredAt: null, retiredReason: null, createdAt: "2026-10-05T09:00:00Z" },
+  { id: PLAIN_ID, name: "api-change", definition: gallery.entries[0]!.definition, retiredAt: null, retiredReason: null, createdAt: "2026-10-05T09:00:00Z" },
+];
+
+async function mockApi(page: Page, opts: { templates?: unknown[] } = {}): Promise<Captured> {
+  const cap: Captured = { previews: [], creates: [], retires: [] };
   const me = { userId: "u", isAdmin: true, user: { id: "u", email: "ada@example.test", displayName: "Ada Admin" } };
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -108,7 +119,12 @@ async function mockApi(page: Page): Promise<Captured> {
       cap.creates.push({ url: p, body });
       return json(route, { id: "56565656-5656-4656-8656-565656565656", name: body.name, definition: intakeDefinition, galleryId: p.split("/")[4] }, 201);
     }
-    if (p === "/v1/workflows/templates") return json(route, { templates: [] });
+    const retire = /^\/v1\/workflows\/templates\/([^/]+)\/retire$/.exec(p);
+    if (retire && method === "POST") {
+      cap.retires.push({ url: p, body: req.postDataJSON() as Record<string, unknown> });
+      return json(route, { id: retire[1], retiredAt: "2026-10-06T09:30:00Z" });
+    }
+    if (p === "/v1/workflows/templates") return json(route, { templates: opts.templates ?? [] });
     if (p === "/v1/workflows/assignment-rules") return json(route, { rules: [] });
     if (p === "/v1/git/connections") return json(route, { connections: [] });
     if (p === "/v1/compliance/profiles") return json(route, { profiles: [] });
@@ -191,5 +207,44 @@ test.describe("ADR-0182 A11: an intake variant from the gallery is previewed fir
     expect(cap.creates[0]).toEqual({ url: "/v1/workflows/template-gallery/standard-change/create", body: { name: "api-change" } });
     expect(cap.previews).toEqual([]);
     await expect(page.getByRole("dialog", { name: /Preview impact/ })).toHaveCount(0);
+  });
+
+  test("D4G-04: retiring an intake template is previewed first; retiring any other template is not", async ({ page }) => {
+    const cap = await mockApi(page, { templates: listed });
+    await page.goto("/ui/admin/workflow-templates");
+    await expect(page.getByRole("strong").filter({ hasText: "ai-use-case-intake/governance-owner" })).toBeVisible();
+    await page.getByRole("button", { name: "retire" }).first().click();
+    const ask = page.getByRole("dialog", { name: "Retire template “ai-use-case-intake/governance-owner”?" });
+    await ask.getByLabel("Reason").fill("the governance owner moved on");
+    await ask.getByRole("button", { name: "Retire" }).click();
+
+    const step = page.getByRole("dialog", { name: "Preview impact: the intake template" });
+    await expect(step.getByRole("status").filter({ hasText: "1 of 17 golden cases changes" })).toBeVisible();
+    expect(cap.previews).toEqual([{ subject: "intake_template", candidate: { retireTemplateId: VARIANT_ID } }]);
+    expect(cap.retires).toEqual([]);
+    await expect(step.getByRole("button", { name: "Retire template" })).toBeDisabled();
+    await expectAxeClean(page, "intake retire preview impact", '[role="dialog"]');
+    await step.getByRole("checkbox", { name: /I have reviewed these changed outcomes/ }).check();
+    await step.getByLabel("Why these outcomes should change").fill("Sign-off returns to the built-in routing.");
+    await step.getByRole("button", { name: "Retire template" }).click();
+    await expect.poll(() => cap.retires.length).toBe(1);
+    expect(cap.retires[0]).toEqual({
+      url: `/v1/workflows/templates/${VARIANT_ID}/retire`,
+      body: {
+        reason: "the governance owner moved on",
+        regressionRunId: RUN,
+        acceptChangedOutcomes: true,
+        acceptReason: "Sign-off returns to the built-in routing.",
+      },
+    });
+
+    // any other template: the reason alone
+    await page.getByRole("button", { name: "retire" }).nth(1).click();
+    const plain = page.getByRole("dialog", { name: "Retire template “api-change”?" });
+    await plain.getByLabel("Reason").fill("superseded by the standard change");
+    await plain.getByRole("button", { name: "Retire" }).click();
+    await expect.poll(() => cap.retires.length).toBe(2);
+    expect(cap.retires[1]).toEqual({ url: `/v1/workflows/templates/${PLAIN_ID}/retire`, body: { reason: "superseded by the standard change" } });
+    expect(cap.previews).toHaveLength(1);
   });
 });
