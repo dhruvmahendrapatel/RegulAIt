@@ -10,7 +10,7 @@
     "dev": "node --loader ts-node/esm src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run --dir src",
-    "seed": "node dist/seed.js",
+    "seed": "node dist/seed.js --seed-demo",
     "demo:mcp": "node dist/demo-mcp-server.js",
     "demo:setup": "node dist/demo-setup.js",
     "reencrypt": "node dist/reencrypt.js",

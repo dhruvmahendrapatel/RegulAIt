@@ -2,6 +2,8 @@
 # The gateway image's start command (Dockerfile CMD). Migrations run on boot
 # (idempotent). SEED_DEMO=1 loads the demo dataset first — also idempotent;
 # one-time passwords and API keys are printed to the container log ONCE.
+# ADR-0181 FX3: SEED_DEMO defaults to 0 (compose, installer), and the seed
+# refuses a database that has an admin who is not a demo persona.
 #
 # ADR-0174 amendment (Docker demo licence): REGULAIT_DEMO_LICENSE=1 — the ONE
 # opt-in switch, normally a line in the .env next to docker-compose.yml — lets
@@ -11,8 +13,9 @@
 #
 # Anything other than exactly "1" changes NOTHING: neither variable below is
 # set, so the gateway reads its default keyring and no licence is minted —
-# exactly the behaviour before this switch existed. It is honoured only
-# together with SEED_DEMO=1 (the seed is what mints) and never on an installed
+# exactly the behaviour before this switch existed. Honoured, it also runs the
+# demo seed (the seed is what mints; ADR-0181 FX3: SEED_DEMO now defaults to 0,
+# and the switch is the explicit demo signal). Never honoured on an installed
 # byoc / air_gapped deployment (scripts/install.sh also pins it off).
 #
 # Demo prep (ADR-0174 amendment, "the Docker demo is prepared like the native
@@ -37,9 +40,9 @@ cr="$(printf '\r')"
 case "$demo_license" in *"$cr") demo_license="${demo_license%?}" ;; esac
 demo=0
 if [ "$demo_license" = "1" ]; then
-  if [ "${SEED_DEMO:-}" != "1" ]; then
-    echo "REGULAIT_DEMO_LICENSE=1 ignored: the demo licence is minted by the demo seed, and SEED_DEMO is not 1" >&2
-  elif [ -n "${REGULAIT_DEPLOY_MODE:-}" ] && [ "${REGULAIT_DEPLOY_MODE}" != "hosted" ]; then
+  # ADR-0181 FX3: the switch is itself the explicit demo signal, so it seeds
+  # (below) whatever SEED_DEMO says; compose and the installer default SEED_DEMO to 0.
+  if [ -n "${REGULAIT_DEPLOY_MODE:-}" ] && [ "${REGULAIT_DEPLOY_MODE}" != "hosted" ]; then
     echo "REGULAIT_DEMO_LICENSE=1 ignored: REGULAIT_DEPLOY_MODE=${REGULAIT_DEPLOY_MODE} is an installed deployment, and the demo licence is never minted on one" >&2
   else
     demo=1
@@ -62,7 +65,10 @@ if [ "$demo" = "1" ]; then
   echo "demo: MCP server started in the background (pid $!) on 127.0.0.1 and 127.0.0.2, port ${REGULAIT_DEMO_MCP_PORT:-8931}"
 fi
 
-if [ "${SEED_DEMO:-}" = "1" ]; then node apps/gateway/dist/seed.js; fi
+# ADR-0181 FX3: the demo seed runs only on an explicit demo signal (SEED_DEMO=1, or the
+# switch above) and is told so with --seed-demo. It still refuses a database that has
+# an admin of its own (a real install), and writes nothing then; the gateway starts anyway.
+if [ "${SEED_DEMO:-}" = "1" ] || [ "$demo" = "1" ]; then node apps/gateway/dist/seed.js --seed-demo; fi
 
 if [ "$demo" = "1" ]; then
   node apps/gateway/dist/demo-docker-prepared.js

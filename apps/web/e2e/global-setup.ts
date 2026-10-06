@@ -97,7 +97,8 @@ export default async function globalSetup() {
   };
 
   // 2. seed via the real API (prints one-time passwords exactly once)
-  const seedOut = execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js")], {
+  // ADR-0181 FX3: the seed runs only on an explicit demo signal
+  const seedOut = execFileSync("node", [path.join(repoRoot, "apps/gateway/dist/seed.js"), "--seed-demo"], {
     env,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,

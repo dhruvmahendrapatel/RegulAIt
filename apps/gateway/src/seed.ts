@@ -27,6 +27,7 @@ import { dataKeyFormatError } from "./secrets.js";
 import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
 import { ensureDemoModelCards } from "./demo-strict-governance.js";
 import { seedStrictData } from "./seed-strict-data.js";
+import { demoSeedRefusal, demoSeedSignal, realAdminEmails } from "./seed-demo-guard.js"; // ADR-0181 FX3
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -70,12 +71,36 @@ if (DATA_KEY !== undefined && DATA_KEY.trim() !== "") {
 // afterwards must declare it itself (DEMO_SCRIPT §0 exports it).
 process.env.REGULAIT_OFFLINE_CHECKS ??= "1";
 
+// ===== ADR-0181 FX3: the demo seed needs an explicit demo signal ============
+// Checked before a pool exists; the real-admin check below runs before
+// migrations, so a refusal writes nothing. See seed-demo-guard.ts.
+const demoSignal = demoSeedSignal(process.argv.slice(2), process.env);
+{
+  const refusal = demoSeedRefusal(demoSignal, []);
+  if (refusal) {
+    console.error(`\n${refusal}\n`);
+    process.exit(2);
+  }
+}
+// ===== end ADR-0181 FX3 =====================================================
+
 const db = createDb(connectionString);
 // An idle pooled connection killed out from under us (e.g. a scratch database
 // dropped WITH (FORCE) right after seeding finishes) must not crash the
 // process via an unhandled 'error' event — all real query failures still
 // surface through their own awaited promises.
 (db.$client as { on: (ev: string, fn: (err: Error) => void) => void }).on("error", () => {});
+// ===== ADR-0181 FX3: never seed a database a real admin uses ================
+{
+  const refusal = demoSeedRefusal(demoSignal, await realAdminEmails(db));
+  if (refusal) {
+    console.error(`\n${refusal}\n`);
+    await db.$client.end();
+    process.exit(2);
+  }
+  console.log(`demo seed: explicit demo signal ${demoSignal}; no admin outside the demo personas`);
+}
+// ===== end ADR-0181 FX3 =====================================================
 await runMigrations(
   db,
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),

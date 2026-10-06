@@ -6,8 +6,9 @@
  * REGULAIT_DEMO_LICENSE=1, makes the seed mint its ephemeral licence into a
  * named-volume keyring the gateway also reads. Pinned here:
  *
- *  1. the image's start script: only the exact value "1" (with SEED_DEMO=1,
- *     and not on a byoc/air_gapped deployment) sets REGULAIT_EPHEMERAL_LICENSE
+ *  1. the image's start script: only the exact value "1" (not on a
+ *     byoc/air_gapped deployment; ADR-0181 FX3: it seeds by itself, since
+ *     SEED_DEMO now defaults to 0) sets REGULAIT_EPHEMERAL_LICENSE
  *     and REGULAIT_LICENSE_KEYRING; anything else leaves both UNSET, so the
  *     gateway reads its default keyring exactly as before;
  *  2. an empty REGULAIT_LICENSE_KEYRING falls back to the default keyring;
@@ -142,11 +143,24 @@ describe("docker-start.sh: the switch", () => {
     expect(r.calls.at(-1)).toBe(`apps/gateway/dist/main.js ${DEMO_ENV}`);
   });
 
-  it("ignored without SEED_DEMO=1 (nothing would mint)", () => {
-    const r = runStart({ SEED_DEMO: "0", REGULAIT_DEMO_LICENSE: "1" });
-    expect(r.calls).toEqual([`apps/gateway/dist/main.js ${UNSET}`]);
-    expect(r.mcp).toEqual([]);
-    expect(r.stderr).toContain("REGULAIT_DEMO_LICENSE=1 ignored");
+  // ADR-0181 FX3: compose and the installer now default SEED_DEMO to 0, and the switch is
+  // itself the explicit demo signal, so it seeds (and prepares) without SEED_DEMO=1
+  it("ON with SEED_DEMO=0 (the compose default): the switch alone seeds and prepares the demo", () => {
+    const r = runStart({ SEED_DEMO: "0", REGULAIT_DEMO_LICENSE: "1", FAKE_PREPARED_EXIT: "0" });
+    expect(r.calls).toEqual([
+      KEY_STEP,
+      `apps/gateway/dist/seed.js ${DEMO_ENV}`,
+      step("demo-docker-prepared"),
+      `apps/gateway/dist/main.js ${DEMO_ENV}`,
+    ]);
+    expect(r.stderr).not.toContain("REGULAIT_DEMO_LICENSE=1 ignored");
+  });
+
+  it("ADR-0181 FX3: every seed the start script runs carries the explicit --seed-demo signal", () => {
+    const src = readFileSync(startScript, "utf8");
+    const seeds = src.split("\n").filter((l) => l.includes("dist/seed.js") && !l.trimStart().startsWith("#"));
+    expect(seeds.length).toBeGreaterThan(0);
+    for (const l of seeds) expect(l).toContain("dist/seed.js --seed-demo");
   });
 
   it.each(["byoc", "air_gapped"])("ignored on a %s deployment", (mode) => {
@@ -425,7 +439,8 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
   let setResult: Awaited<ReturnType<typeof setDemoPasswords>> | undefined;
 
   function seed(): void {
-    const r = spawnSync(process.execPath, [seedScript], {
+    // ADR-0181 FX3: the seed runs only on an explicit demo signal, as docker-start.sh passes it
+    const r = spawnSync(process.execPath, [seedScript, "--seed-demo"], {
       encoding: "utf8",
       env: {
         ...process.env,
