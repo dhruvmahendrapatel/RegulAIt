@@ -233,7 +233,7 @@ export function eventSentence(e: { kind: string; detail: Record<string, unknown>
     case "containment":
       return `Contained: agent ${String(d.agentId)} halted${d.changed === false ? " (it was already halted)" : ""}`;
     case "action":
-      return d.created ? "Corrective action added" : "Corrective action updated";
+      return d.created ? "Corrective action added" : d.cancelled ? "Corrective action cancelled" : "Corrective action updated";
     case "note":
       if (d.evidenceHoldOverride) return "Evidence hold overridden by an admin";
       if (Array.isArray(d.changed)) return `Changed: ${(d.changed as string[]).join(", ")}`;

@@ -178,6 +178,7 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
   const [rootCause, setRootCause] = useState(props.d.incident.rootCause ?? "");
   const [lessons, setLessons] = useState(props.d.incident.lessonsLearned ?? "");
   const openClocks = props.d.notifications.filter((n) => n.status === "pending" || n.status === "sent_initial");
+  const openActions = props.d.actions.filter((x) => x.status === "open");
   return (
     <Modal
       open={props.open}
@@ -189,7 +190,7 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
           <Button onClick={props.onClose}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={act.busy || !rootCause.trim() || !lessons.trim() || openClocks.length > 0}
+            disabled={act.busy || !rootCause.trim() || !lessons.trim() || openClocks.length > 0 || openActions.length > 0}
             onClick={() =>
               void act
                 .run(() => api.post(`/v1/incidents/${props.d.incident.id}/close`, { rootCause: rootCause.trim(), lessonsLearned: lessons.trim() }), `${props.d.incident.ref} closed`)
@@ -211,6 +212,11 @@ function CloseModal(props: { open: boolean; d: IncidentDetail; onClose: () => vo
           <div className={v.errLine} role="alert">
             {openClocks.length} notification clock(s) are not final: record the complete report, or an admin marks them not required or tolled
             with a reason.
+          </div>
+        )}
+        {openActions.length > 0 && (
+          <div className={v.errLine} role="alert">
+            {openActions.length} corrective action(s) are still open: mark each done with its evidence, or cancel it with a reason.
           </div>
         )}
         <Field label="Root cause">
@@ -563,6 +569,7 @@ function ActionsCard(props: { d: IncidentDetail; refetch: () => void }) {
   const [title, setTitle] = useState("");
   const [due, setDue] = useState("");
   const [finishing, setFinishing] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   return (
     <Card title="Corrective actions">
       <Table
@@ -580,9 +587,14 @@ function ActionsCard(props: { d: IncidentDetail; refetch: () => void }) {
             header: "",
             render: (x) =>
               props.d.permissions.canEdit && x.status === "open" ? (
-                <Button size="sm" onClick={() => setFinishing(x.id)} aria-label={`Mark ${x.title} done`}>
-                  Done…
-                </Button>
+                <span className={v.row} style={{ gap: "var(--s1)" }}>
+                  <Button size="sm" onClick={() => setFinishing(x.id)} aria-label={`Mark ${x.title} done`}>
+                    Done…
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setCancelling(x.id)} aria-label={`Cancel ${x.title}`}>
+                    Cancel…
+                  </Button>
+                </span>
               ) : null,
           },
         ]}
@@ -623,6 +635,19 @@ function ActionsCard(props: { d: IncidentDetail; refetch: () => void }) {
           const id = finishing!;
           setFinishing(null);
           void act.run(() => api.patch(`/v1/incidents/${props.d.incident.id}/actions/${id}`, { status: "done", evidenceRef }), "Action done").then(() => props.refetch());
+        }}
+      />
+      <ReasonModal
+        open={cancelling !== null}
+        title="Cancel the action"
+        minLength={10}
+        confirmLabel="Cancel action"
+        body={<p className={v.faint}>Say why this action is no longer needed. The reason is audited and kept on the incident&apos;s timeline.</p>}
+        onCancel={() => setCancelling(null)}
+        onConfirm={(reason) => {
+          const id = cancelling!;
+          setCancelling(null);
+          void act.run(() => api.patch(`/v1/incidents/${props.d.incident.id}/actions/${id}`, { status: "cancelled", reason }), "Action cancelled").then(() => props.refetch());
         }}
       />
     </Card>

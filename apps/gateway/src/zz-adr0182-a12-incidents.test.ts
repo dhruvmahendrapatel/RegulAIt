@@ -291,6 +291,29 @@ describe("ADR-0182 A12: closing", () => {
   });
 });
 
+describe("ADR-0182 A12: closing needs every corrective action done or cancelled (main-session decision)", () => {
+  it("an open action → 409 naming it; cancelling without a reason → 422; with one → audited, on the timeline, and the close succeeds", async () => {
+    const d = await open("owner", { severity: "medium" });
+    const act = await inject("POST", `/v1/incidents/${d.incident.id}/actions`, users.owner.auth, { title: "rotate the leaked prompt" });
+    const actionId = act.json().action.id as string;
+    const body = { rootCause: "synthetic root cause", lessonsLearned: "synthetic lesson" };
+    const refused = await inject("POST", `/v1/incidents/${d.incident.id}/close`, users.owner.auth, body);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "incident_actions_open", openActions: [actionId] });
+    const url = `/v1/incidents/${d.incident.id}/actions/${actionId}`;
+    const noReason = await inject("PATCH", url, users.owner.auth, { status: "cancelled" });
+    expect(noReason.statusCode, noReason.body).toBe(422);
+    expect(noReason.json().error).toBe("reason_required");
+    expect((await inject("PATCH", url, users.owner.auth, { status: "cancelled", reason: "x", bogus: 1 })).statusCode).toBe(400);
+    const ok = await inject("PATCH", url, users.owner.auth, { status: "cancelled", reason: "superseded by the model rollback" });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await lastAudit("ai-incident-action-updated", d.incident.id))?.reason).toContain("superseded by the model rollback");
+    const notes = await db.select().from(aiIncidentEvents).where(and(eq(aiIncidentEvents.incidentId, d.incident.id), eq(aiIncidentEvents.kind, "action")));
+    expect(notes.some((n) => n.note === "superseded by the model rollback")).toBe(true);
+    expect((await inject("POST", `/v1/incidents/${d.incident.id}/close`, users.owner.auth, body)).statusCode).toBe(200);
+  });
+});
+
 describe("ADR-0182 A12: visibility, audited reads, pre-linking", () => {
   it("the list is scoped: owner and use-case owner see it, another user does not; admin sees all", async () => {
     const uc = await mkUseCase("scope", null, users.owner.id);
@@ -428,6 +451,21 @@ describe("ADR-0182 A12: containment and the Art. 73(6) evidence hold", () => {
     const art = d.notifications.find((n) => n.clockId === "art73-2-general")!;
     expect((await inject("POST", `/v1/incidents/${d.incident.id}/notifications/${art.id}/sent`, users.admin.auth, { stage: "initial", recipient: "authority" })).statusCode).toBe(200);
     expect((await edit(users.admin.auth)).statusCode).toBe(200);
+  });
+
+  it("also covers an agent in the incident's use-case stack, not linked to the incident (main-session decision)", async () => {
+    const agentId = await mkAgent("stack");
+    const uc = await mkUseCase("stack", "high");
+    await db.update(aiUseCases).set({ intendedAgentIds: [agentId] }).where(eq(aiUseCases.id, uc));
+    const d = await open("admin", { useCaseId: uc, serious: true, seriousCriteria: ["health"] });
+    expect(d.links.filter((l) => l.objectType === "agent")).toEqual([]);
+    const edit = (headers: Record<string, string>) => inject("POST", `/v1/agents/${agentId}/system-prompt`, headers, { systemPrompt: `stack edit ${RUN}` });
+    const refused = await edit(users.admin.auth);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "incident_evidence_hold", incidents: [{ id: d.incident.id, ref: d.incident.ref }] });
+    const ok = await edit({ ...users.admin.auth, [EVIDENCE_HOLD_OVERRIDE_HEADER]: "stack agent must change for safety now" });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await lastAudit("ai-incident-evidence-hold-overridden", d.incident.id))?.userId).toBe(users.admin.id);
   });
 
   it("the hold is off when the admin relaxes `incident_evidence_hold`", async () => {

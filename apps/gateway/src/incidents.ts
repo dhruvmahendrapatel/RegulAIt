@@ -19,13 +19,16 @@
  *    reason, audited. Art. 73(5): a clock may record an incomplete initial
  *    report before the complete one.
  *  - Closing needs a root cause, lessons learned (422 without; a DB CHECK
- *    holds it too) and every clock in a terminal state (409).
+ *    holds it too), every clock in a terminal state (409) and every
+ *    corrective action done or cancelled (409); cancelling an action needs a
+ *    reason (422 without), audited and kept on the timeline.
  *  - Containment (admin) halts a linked agent through `haltAgentInTx`, in the
  *    same transaction as the `containment` timeline event. Lifting the halt
  *    stays on the execution-control page.
  *  - THE EVIDENCE HOLD (Art. 73(6), `incident_evidence_hold`, strict default
  *    on): while a serious incident has an Article 73 authority clock pending
- *    (or tolled), a configuration change to an agent linked to it is refused
+ *    (or tolled), a configuration change to an agent linked to it, or in its
+ *    use case's approved stack, is refused
  *    with 409 `incident_evidence_hold`, unless an ADMIN overrides that one
  *    change with a reason (header `x-regulait-evidence-hold-override`), which
  *    is audited and noted on the incident's timeline.
@@ -80,6 +83,7 @@ import {
   ne,
   or,
   redteamRuns,
+  sql,
   useCaseFeedback,
   users,
   type AiIncidentRow,
@@ -721,22 +725,28 @@ export async function incidentGateInputs(
   return { mode, incidents: rows };
 }
 
-/** the incidents whose Art. 73(6) evidence hold binds this agent right now (empty when the setting is off) */
+/**
+ * The incidents whose Art. 73(6) evidence hold binds this agent right now
+ * (empty when the setting is off): those the agent is LINKED to, and those on
+ * a use case whose approved stack (`intended_agent_ids`) includes it
+ * (main-session decision 2026-10-06, secure by default).
+ */
 export async function incidentsHoldingAgent(db: Db, agentId: string): Promise<Array<{ id: string; ref: string }>> {
   const org = await loadOrgSettings(db);
   if (!org.incidentEvidenceHold) return [];
-  const linked = await db
-    .select({ id: aiIncidents.id, ref: aiIncidents.ref, status: aiIncidents.status, serious: aiIncidents.serious })
+  const cols = { id: aiIncidents.id, ref: aiIncidents.ref, status: aiIncidents.status, serious: aiIncidents.serious };
+  const open = and(ne(aiIncidents.status, "closed"), eq(aiIncidents.serious, true));
+  const byLink = await db
+    .select(cols)
     .from(aiIncidentLinks)
     .innerJoin(aiIncidents, eq(aiIncidents.id, aiIncidentLinks.incidentId))
-    .where(
-      and(
-        eq(aiIncidentLinks.objectType, "agent"),
-        eq(aiIncidentLinks.objectId, agentId),
-        ne(aiIncidents.status, "closed"),
-        eq(aiIncidents.serious, true),
-      ),
-    );
+    .where(and(eq(aiIncidentLinks.objectType, "agent"), eq(aiIncidentLinks.objectId, agentId), open));
+  const byStack = await db
+    .select(cols)
+    .from(aiIncidents)
+    .innerJoin(aiUseCases, eq(aiUseCases.id, aiIncidents.useCaseId))
+    .where(and(open, sql`${aiUseCases.intendedAgentIds} @> ${JSON.stringify([agentId])}::jsonb`));
+  const linked = [...new Map([...byLink, ...byStack].map((i) => [i.id, i])).values()];
   if (linked.length === 0) return [];
   const clocks = await db
     .select({ incidentId: aiIncidentNotifications.incidentId, clockId: aiIncidentNotifications.clockId, status: aiIncidentNotifications.status })
@@ -1002,6 +1012,8 @@ const listQuery = z
     limit: z.coerce.number().int().min(1).max(500).default(200),
   })
   .strict();
+/** the action PATCH body: the shared schema plus the reason a cancellation needs (main-session decision 2026-10-06) */
+const updateActionBody = updateIncidentActionSchema.extend({ reason: z.string().trim().min(10).max(2000).optional() });
 const exportQuery = z.object({ format: z.enum(["bundle", "csv"]).default("bundle") }).strict();
 
 function send(reply: FastifyReply, e: unknown) {
@@ -1347,7 +1359,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
 
   app.patch("/v1/incidents/:incidentId/actions/:actionId", async (req, reply) => {
     const { incidentId, actionId } = actionParam.parse(req.params);
-    const body = updateIncidentActionSchema.parse(req.body ?? {});
+    const body = updateActionBody.parse(req.body ?? {});
     const actor = actorOf(req);
     try {
       const incident = await loadIncident(db, incidentId);
@@ -1375,6 +1387,10 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
         throw new IncidentError(422, "unknown_user", "the named owner is not a user of this deployment");
       }
       const status = body.status ?? action.status;
+      const cancelling = status === "cancelled" && action.status !== "cancelled";
+      if (cancelling && !body.reason) {
+        throw new IncidentError(422, "reason_required", "cancelling a corrective action needs a reason of 10 to 2000 characters; it is audited and kept on the timeline");
+      }
       const set = {
         title: body.title ?? action.title,
         ownerUserId: body.ownerUserId !== undefined ? body.ownerUserId : action.ownerUserId,
@@ -1391,12 +1407,21 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const updated = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         const [row] = await tx.update(aiIncidentActions).set(set).where(eq(aiIncidentActions.id, action.id)).returning();
-        await addEvent(tx, incident.id, "action", actor.userId, { actionId: action.id, transitions, evidenceRefSet: body.evidenceRef !== undefined });
+        await addEvent(
+          tx,
+          incident.id,
+          "action",
+          actor.userId,
+          { actionId: action.id, transitions, evidenceRefSet: body.evidenceRef !== undefined, ...(cancelling ? { cancelled: true } : {}) },
+          cancelling ? body.reason : undefined,
+        );
         await audit(tx, {
           userId: actor.userId,
           objectId: incident.id,
           ruleId: INCIDENT_RULE_IDS.actionUpdated,
-          reason: `incident ${incident.ref}: corrective action ${action.id} updated${set.status !== action.status ? ` (${action.status} -> ${set.status})` : ""}`,
+          reason:
+            `incident ${incident.ref}: corrective action ${action.id} updated${set.status !== action.status ? ` (${action.status} -> ${set.status})` : ""}` +
+            (cancelling ? `: ${body.reason}` : ""),
           detail: { actionId: action.id, transitions },
         });
         return row!;
@@ -1552,7 +1577,11 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
         .select({ id: aiIncidentNotifications.id, clockId: aiIncidentNotifications.clockId, status: aiIncidentNotifications.status })
         .from(aiIncidentNotifications)
         .where(eq(aiIncidentNotifications.incidentId, incident.id));
-      const blockers = incidentCloseBlockers({ status: incident.status, ...parsed.data, notifications: clocks });
+      const actionRows = await db
+        .select({ id: aiIncidentActions.id, status: aiIncidentActions.status })
+        .from(aiIncidentActions)
+        .where(eq(aiIncidentActions.incidentId, incident.id));
+      const blockers = incidentCloseBlockers({ status: incident.status, ...parsed.data, notifications: clocks, actions: actionRows });
       if (blockers.openClocks.length > 0) {
         await audit(db, {
           userId: actor.userId,
@@ -1568,6 +1597,21 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
             "every notification clock must be final before the incident closes: record the complete report, or an " +
             "admin marks it not required or tolled with a reason",
           openClocks: blockers.openClocks,
+        });
+      }
+      if (blockers.openActions.length > 0) {
+        await audit(db, {
+          userId: actor.userId,
+          objectId: incident.id,
+          ruleId: INCIDENT_RULE_IDS.closeRefused,
+          effect: "deny",
+          reason: `incident ${incident.ref}: close refused — corrective action(s) still open: ${blockers.openActions.join(", ")}`,
+          detail: { openActions: blockers.openActions },
+        });
+        return reply.status(409).send({
+          error: "incident_actions_open",
+          detail: "every corrective action must be done (with its evidence) or cancelled (with a reason) before the incident closes",
+          openActions: blockers.openActions,
         });
       }
       const now = new Date();

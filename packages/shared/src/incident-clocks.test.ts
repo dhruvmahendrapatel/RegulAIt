@@ -211,6 +211,13 @@ describe("ADR-0182 A12 the register's pure rules", () => {
       }).openClocks,
     ).toEqual(["art73-2-general"]);
   });
+  it("closing needs every corrective action done or cancelled", () => {
+    const base = { status: "resolved" as const, rootCause: "x", lessonsLearned: "y", notifications: [] };
+    expect(
+      incidentCloseBlockers({ ...base, actions: [{ id: "a", status: "open" }, { id: "b", status: "done" }, { id: "c", status: "cancelled" }] }).openActions,
+    ).toEqual(["a"]);
+    expect(incidentCloseBlockers(base).openActions).toEqual([]);
+  });
   it("the evidence hold binds an open serious incident until an authority report is sent or set aside", () => {
     const open = { status: "open" as const, serious: true };
     expect(evidenceHoldBinds(open, [{ clockId: "art73-2-general", status: "pending" }])).toBe(true);

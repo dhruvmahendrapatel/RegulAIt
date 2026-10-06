@@ -74,14 +74,24 @@ export interface IncidentCloseFacts {
   rootCause: string | null | undefined;
   lessonsLearned: string | null | undefined;
   notifications: ReadonlyArray<{ id: string; clockId: string; status: string }>;
+  /** corrective actions: closing needs each `done` or `cancelled` (main-session decision 2026-10-06) */
+  actions?: ReadonlyArray<{ id: string; status: string }>;
 }
 
-/** what stands in the way of closing: missing texts, and every clock not in a terminal state */
-export function incidentCloseBlockers(f: IncidentCloseFacts): { missing: Array<"rootCause" | "lessonsLearned">; openClocks: string[] } {
+/** what stands in the way of closing: missing texts, every clock not in a terminal state, every open action */
+export function incidentCloseBlockers(f: IncidentCloseFacts): {
+  missing: Array<"rootCause" | "lessonsLearned">;
+  openClocks: string[];
+  openActions: string[];
+} {
   const missing: Array<"rootCause" | "lessonsLearned"> = [];
   if (!f.rootCause || f.rootCause.trim() === "") missing.push("rootCause");
   if (!f.lessonsLearned || f.lessonsLearned.trim() === "") missing.push("lessonsLearned");
-  return { missing, openClocks: f.notifications.filter((n) => !isTerminalNotificationStatus(n.status)).map((n) => n.clockId) };
+  return {
+    missing,
+    openClocks: f.notifications.filter((n) => !isTerminalNotificationStatus(n.status)).map((n) => n.clockId),
+    openActions: (f.actions ?? []).filter((a) => a.status !== "done" && a.status !== "cancelled").map((a) => a.id),
+  };
 }
 
 /** an Art. 3(49) / Art. 73(3) criterion is listed (anything but `phi_breach`) */
