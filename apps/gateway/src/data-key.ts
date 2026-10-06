@@ -262,6 +262,11 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0173 batch 2b: the Standard Webhooks signing secret of each outbound
   // webhook subscription — receivers verify our deliveries with it.
   { table: "webhook_subscriptions", column: "secret_ciphertext", what: "outbound webhook signing secrets" },
+  // ADR-0182 (D4) A13 (migration 0162): what a person wrote in a problem
+  // report or appeal, and how to reach them — personal data, enveloped under
+  // the data key, purged by the retention sweep.
+  { table: "use_case_feedback", column: "body_ciphertext", what: "feedback and appeal bodies" },
+  { table: "use_case_feedback", column: "contact_ciphertext", what: "feedback contact details" },
 ];
 
 export interface CiphertextProbe {

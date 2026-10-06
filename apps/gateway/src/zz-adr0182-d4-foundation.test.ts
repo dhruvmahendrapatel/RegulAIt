@@ -59,6 +59,7 @@ import { runGovernanceMonitor } from "./governance-monitor.js";
 import { routeAuthClass } from "./route-classes.js";
 import { SCHEDULER_JOB_NAMES, schedulerJobDefinitions } from "./scheduler-jobs.js";
 import { haltAgentInTx } from "./execution-control.js";
+import { encryptSecret } from "./secrets.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -366,10 +367,10 @@ describe("ADR-0182 migration 0162: the rules the database holds", () => {
     const due = { ackDueAt: new Date(now.getTime() + 72 * 3_600_000), resolveDueAt: new Date(now.getTime() + 30 * 86_400_000) };
     await expectRefused(
       db.insert(useCaseFeedback).values({
-        useCaseId: uc, kind: "problem", channel: "in_app", bodyCiphertext: "v1:synthetic", status: "overturned", resolvedAt: now, ...due,
+        useCaseId: uc, kind: "problem", channel: "in_app", bodyCiphertext: encryptSecret("a".repeat(64), "synthetic feedback body"), status: "overturned", resolvedAt: now, ...due,
       }), /use_case_feedback_appeal_outcome_check/);
     await db.insert(useCaseFeedback).values({
-      useCaseId: uc, kind: "appeal", channel: "in_app", bodyCiphertext: "v1:synthetic", status: "overturned", resolvedAt: now, ...due,
+      useCaseId: uc, kind: "appeal", channel: "in_app", bodyCiphertext: encryptSecret("a".repeat(64), "synthetic feedback body"), status: "overturned", resolvedAt: now, ...due,
     });
   });
 
