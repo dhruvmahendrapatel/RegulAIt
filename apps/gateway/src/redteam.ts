@@ -143,6 +143,7 @@ import {
   type SequenceProbeOutcome,
 } from "./redteam-agentic.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
+import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -1478,6 +1479,10 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
     const body = startRedTeamRunSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_run_redteam" });
+    // D4G-09: the person starting the run is checked against the literacy gate here; the dispatches inside the
+    // run keep the evaluation exemption, and platform-scheduled runs never pass through this route
+    const literacyRefusal = await refuseRunStartWithoutLiteracy(db, req, { kind: "red-team", subjectId: body.agentId });
+    if (literacyRefusal) return reply.status(literacyRefusal.status).send(literacyRefusal.body);
     if (body.projectId) {
       const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });

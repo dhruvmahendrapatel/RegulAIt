@@ -171,9 +171,16 @@ function rowsOf(res: unknown): Array<Record<string, unknown>> {
  */
 export async function findCiphertextRegistryDrift(db: Db): Promise<string[]> {
   // `\_` = a literal underscore under LIKE's default backslash escape
+  // D4 DFX2: plus the registry entries whose column is not `*_ciphertext`
+  // (named explicitly — they must still exist)
+  const named = CIPHERTEXT_COLUMNS.filter((c) => !c.column.endsWith("_ciphertext"));
   const res = await db.execute(sql`
     SELECT table_name, column_name FROM information_schema.columns
-    WHERE table_schema = 'public' AND column_name LIKE ${"%\\_ciphertext"}
+    WHERE table_schema = 'public' AND (column_name LIKE ${"%\\_ciphertext"}${
+      named.length
+        ? sql` OR (table_name, column_name) IN (${sql.join(named.map((c) => sql`(${c.table}, ${c.column})`), sql`, `)})`
+        : sql``
+    })
   `);
   const inDb = new Set(rowsOf(res).map((r) => `${r.table_name}.${r.column_name}`));
   const declared = new Set(CIPHERTEXT_COLUMNS.map((c) => `${c.table}.${c.column}`));

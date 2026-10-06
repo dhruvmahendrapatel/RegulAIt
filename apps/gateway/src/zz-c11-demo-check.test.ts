@@ -15,13 +15,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, createDb, isNull, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
+import { aiPolicyAcknowledgements, aiPolicyDocuments, and, createDb, eq, isNull, users, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
 
 const like = (col: unknown, pattern: string) => sql`${col} like ${pattern}`;
 import { DEMO_INTAKE_FIXTURES } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runDemoCheck, type DemoCheck } from "./demo-check-lib.js";
-import { seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { runDemoGate } from "./demo-gate-lib.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -79,6 +79,9 @@ afterAll(async () => {
     .update(workflowTemplates)
     .set({ retiredAt: new Date(), retiredReason: "zz-c11 cleanup" })
     .where(and(like(workflowTemplates.name, "ai-use-case-intake/governance-owner%"), isNull(workflowTemplates.retiredAt)));
+  // ADR-0182 A14 (M-068): the seeder publishes an acceptable-use document for EVERYONE; under the strict
+  // literacy gate it would refuse every later file's governed calls, so it goes (its acknowledgements cascade)
+  await db.delete(aiPolicyDocuments).where(eq(aiPolicyDocuments.key, DEMO_AUP_KEY));
   app.server.closeAllConnections();
   await app.close();
 });
@@ -89,7 +92,7 @@ describe("demo:check over the real dataset", () => {
     for (const b of [
       "0 Personas", "1 Shadow AI", "1 Intake assistant", "2 Register", "2 Use-case 360", "2 Risks",
       "3 Trust dashboard", "3 Dependency graph", "3 Monitor", "3 Regulatory", "2 Approval gate", "2 Deploy gate",
-      "3 Evidence",
+      "3 Evidence", "3 Accountability",
     ]) {
       expect(beats.has(b), `missing beat ${b}`).toBe(true);
     }
@@ -121,6 +124,29 @@ describe("demo:check over the real dataset", () => {
     // here would be over-scoped by definition, flagged by the monitor pass it reports
     expect(rows.filter((r) => r.name === "demo-check" && r.is_admin)).toEqual([]);
   });
+
+  it("3 Accountability is PASS on the seeded story, and FAILs naming the persona when an acknowledgement is missing", async () => {
+    const beat = checks.find((c) => c.beat === "3 Accountability")!;
+    expect(beat.level, beat.detail).toBe("PASS");
+    expect(beat.detail).toMatch(/closed, \d+ clock\(s\) terminal/);
+    expect(beat.detail).toContain("current for the three personas");
+    expect(beat.detail).toContain("decision record present");
+    // make the story false: Avery's acknowledgement of the demo acceptable-use document goes
+    const [doc] = await db.select().from(aiPolicyDocuments).where(and(eq(aiPolicyDocuments.key, DEMO_AUP_KEY), eq(aiPolicyDocuments.status, "published")));
+    const [avery] = await db.select().from(users).where(eq(users.email, "avery@regulait.local"));
+    const removed = await db
+      .delete(aiPolicyAcknowledgements)
+      .where(and(eq(aiPolicyAcknowledgements.documentId, doc!.id), eq(aiPolicyAcknowledgements.userId, avery!.id)))
+      .returning();
+    expect(removed).toHaveLength(1);
+    try {
+      const again = (await runDemoCheck(app, { bootstrapToken: BOOT, fixtures: null })).find((c) => c.beat === "3 Accountability")!;
+      expect(again.level).toBe("FAIL");
+      expect(again.detail).toContain("not current for avery@regulait.local");
+    } finally {
+      await db.insert(aiPolicyAcknowledgements).values(removed[0]!);
+    }
+  }, 120_000);
 
   it("3 Evidence FAILs — with the fix — when the export-signing key is missing (the 3E button would 409)", async () => {
     expect(checks.find((c) => c.beat === "3 Evidence")!.level).toBe("PASS");

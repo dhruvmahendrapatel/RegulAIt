@@ -1,12 +1,18 @@
 /**
  * ADR-0159 — REMEDIATION PROPOSALS for governance-monitor alerts ("Respond").
  *
- * For each alert the planner proposes what would clear it. Two kinds are
+ * For each alert the planner proposes what would clear it. Three kinds are
  * EXECUTABLE — they change governed state, so they run only after a human
  * other than the proposer approves them on the one approvals queue:
  *
  *   link_control         link a pack control to a risk (ADR-0147)
  *   assign_agent_owner   make an accountable human the owner of an agent (ADR-0089)
+ *   halt_agent           halt an agent (ADR-0124) — ADR-0182 S5 (PF-03): offered
+ *                        only for a KRI breach whose KRI SUGGESTS a halt
+ *                        (`on_breach = propose_halt`). Owner decision 4: a
+ *                        suggestion only. Nothing files it but a person's
+ *                        click, and nothing halts until a DIFFERENT person
+ *                        approves it.
  *
  * Every other kind is GUIDANCE: the steps a person takes (assess a vendor,
  * obtain a model-card sign-off, review a halt). The platform does not pretend
@@ -20,7 +26,7 @@
 import { CATEGORY_SUGGESTED_CONTROLS } from "./intake-assist.js";
 import type { AiRiskCategory } from "./risks.js";
 
-export const EXECUTABLE_REMEDIATION_KINDS = ["link_control", "assign_agent_owner"] as const;
+export const EXECUTABLE_REMEDIATION_KINDS = ["link_control", "assign_agent_owner", "halt_agent"] as const;
 export const GUIDANCE_REMEDIATION_KINDS = [
   "mitigate_source_risk",
   "review_halted_agent",
@@ -360,6 +366,27 @@ export function proposeRemediations(ctx: RemediationContext): RemediationCandida
           params: { credentialIds: credentialIds.join(","), ...(typeof d.flag === "string" ? { flag: d.flag } : {}), ...(typeof d.type === "string" ? { type: d.type } : {}) },
           steps,
           href: manageAt,
+        },
+      ];
+    }
+    case "kri_threshold_breached": {
+      // ADR-0182 S5 (PF-03): the KRI's SUGGESTION, carried on the episode by
+      // the monitor (`suggestedHaltFor`). Without it, no candidate: a KRI
+      // that only alerts asks a person to look, not to halt anything.
+      const s0 = alert.detail.suggestedAction as { kind?: unknown; agentId?: unknown } | undefined;
+      if (!s0 || s0.kind !== "halt_agent" || typeof s0.agentId !== "string" || !s0.agentId) return [];
+      const agentKey = `agent:${s0.agentId}`;
+      return [
+        {
+          kind: "halt_agent",
+          executable: true,
+          title: `Propose halting ${label(agentKey) === agentKey ? "the agent" : label(agentKey)}`,
+          rationale:
+            "This KRI is set to suggest a halt of its agent when it breaches. Proposing files ONE halt request on the " +
+            "approvals queue with you as its proposer; the agent keeps running until a different person approves it, " +
+            "and nothing is halted automatically.",
+          params: { agentId: s0.agentId },
+          steps: [],
         },
       ];
     }

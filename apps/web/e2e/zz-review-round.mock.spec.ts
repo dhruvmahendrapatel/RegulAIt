@@ -199,6 +199,8 @@ async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<Stat
     if (p === "/auth/me") return json(route, { userId: me.id, isAdmin: me.isAdmin, via: "session", user: { id: me.id, email: `${me.id}@example.test`, displayName: me.displayName }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, { userId: me.id, isAdmin: me.isAdmin, user: { id: me.id, email: `${me.id}@example.test`, displayName: me.displayName } });
     if (p === "/v1/governance/review-policy" && method === "GET") return json(route, state.policy);
+    // ADR-0182 A11: saving is a "Preview impact" step first
+    if (p === "/v1/governance/decision-regression/preview" && method === "POST") return json(route, PREVIEW_RUN, 201);
     if (p === "/v1/governance/review-policy" && method === "PUT") {
       const body = route.request().postDataJSON();
       state.puts.push(body);
@@ -254,6 +256,55 @@ async function setTheme(page: Page, theme: "light" | "dark") {
 }
 
 /** axe in both themes over the page (or one region), and (with G2_SHOTS_DIR) a shot of each */
+/** ADR-0182 A11: the preview the review-policy save step shows (one changed case) */
+const OUTCOME = {
+  tier: "high",
+  reasons: ["h-annex3-profiling (Art. 6(3), final subparagraph)"],
+  frameworks: ["eu-ai-act", "nist-ai-rmf"],
+  requiredRoles: ["privacy", "security", "model-risk"],
+  requiredTests: ["owasp:llm:01 maxAsr<=0% within 30d"],
+  suggestedControls: [],
+  approverRouting: "review roles: privacy, security, model-risk",
+};
+const PREVIEW_RUN = {
+  id: "11111111-1111-4111-8111-111111111111",
+  trigger: "preview",
+  subject: "review_policy",
+  candidateDigest: "a".repeat(64),
+  baselineDigest: "b".repeat(64),
+  cases: 17,
+  changed: 1,
+  entries: [
+    {
+      caseId: "high-credit-scoring",
+      label: "High: consumer credit scoring with profiling",
+      source: "shipped",
+      changed: ["requiredRoles", "approverRouting"],
+      before: OUTCOME,
+      after: { ...OUTCOME, requiredRoles: ["privacy", "security", "model-risk", "legal"], approverRouting: "review roles: privacy, security, model-risk, legal" },
+      reasonsDiff: [{ value: OUTCOME.reasons[0], added: false, removed: false }],
+    },
+  ],
+  createdAt: "2026-10-03T15:00:00Z",
+  createdByName: "Riley Reviewer",
+  expiresAt: "2026-10-03T16:00:00Z",
+};
+const ACCEPT_REASON = "Legal now reviews every high-tier use case.";
+
+/** the "Preview impact" step: accept the changed outcome and save */
+async function previewAndSave(page: Page, opts: { check?: boolean } = {}) {
+  // the policy form's button (the required-tests card below has its own)
+  await page.getByRole("button", { name: "Preview impact" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Preview impact: the review policy" });
+  await expect(dialog.getByRole("status").filter({ hasText: "1 of 17 golden cases changes" })).toBeVisible();
+  await expect(dialog.getByRole("listitem", { name: "Changed case: High: consumer credit scoring with profiling" })).toContainText("Required review roles");
+  await expect(dialog.getByRole("button", { name: "Save policy" })).toBeDisabled();
+  await dialog.getByRole("checkbox", { name: /I have reviewed these changed outcomes/ }).check();
+  await dialog.getByLabel("Why these outcomes should change").fill(ACCEPT_REASON);
+  if (opts.check) await checkScreen(page, "review policy preview impact", "review-policy-preview", '[role="dialog"]');
+  await dialog.getByRole("button", { name: "Save policy" }).click();
+}
+
 async function checkScreen(page: Page, label: string, shot?: string, include?: string) {
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
@@ -315,7 +366,7 @@ test.describe("review policy settings", () => {
     await page.getByLabel("Limited tier: approval valid for (months)").fill("9");
     await page.getByLabel("Minimal tier: approval valid for (months)").fill("24");
     await page.getByRole("combobox", { name: "Add a person to risk acceptors" }).selectOption({ label: "Mo Risk" });
-    await page.getByRole("button", { name: "Save policy" }).click();
+    await previewAndSave(page, { check: true });
     await expect.poll(() => state.puts.length).toBe(1);
     expect(state.puts[0]).toEqual({
       roles: [
@@ -330,6 +381,10 @@ test.describe("review policy settings", () => {
         high: { roleIds: ["privacy", "security", "model-risk", "legal"], validityMonths: 6 },
       },
       riskAcceptorUserIds: ["riley", "mo"],
+      // ADR-0182 A11: the preview's run, and the accepted change
+      regressionRunId: PREVIEW_RUN.id,
+      acceptChangedOutcomes: true,
+      acceptReason: ACCEPT_REASON,
     });
     await expect(page.getByText("Last changed 3 Oct 2026 by Riley Reviewer.")).toBeVisible();
   });
@@ -342,7 +397,7 @@ test.describe("review policy settings", () => {
     await page.getByLabel("Role name").nth(4).fill("Privacy!");
     await page.getByRole("group", { name: "Required reviews for the high tier" }).getByRole("checkbox", { name: "Privacy!" }).check();
     await page.getByLabel("High tier: approval valid for (months)").fill("40");
-    await page.getByRole("button", { name: "Save policy" }).click();
+    await page.getByRole("button", { name: "Preview impact" }).first().click();
     await expect(page.getByText("Fix the highlighted fields, then save.")).toBeVisible();
     await expect(page.getByText("Name the role.")).toBeVisible();
     await expect(page.getByText("Another role already has this name.")).toBeVisible();
@@ -357,7 +412,7 @@ test.describe("review policy settings", () => {
     await page.getByRole("button", { name: "Remove role Privacy!" }).click();
     await page.getByLabel("High tier: approval valid for (months)").fill("6");
     state.putReply = { status: 422, body: { error: "role_without_members", detail: "role security has no members" } };
-    await page.getByRole("button", { name: "Save policy" }).click();
+    await previewAndSave(page);
     await expect(page.getByRole("alert").filter({ hasText: "The policy was not saved" })).toContainText("role security has no members");
     expect(state.puts).toHaveLength(1);
   });

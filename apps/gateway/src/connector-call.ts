@@ -77,6 +77,7 @@ import {
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { consumeBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
 import { loadOrgSettings } from "./org-settings.js";
 import type { RetiredApproval } from "./governed-evaluate.js";
@@ -369,6 +370,7 @@ export async function executeGovernedConnectorCall(
     // ADR-0173 batch 2b: the dial WITH its approver, and — only while it holds
     // writes — this write's consent binding (nothing is read otherwise).
     const dial = await loadExecutionDial(db);
+    const connectorLiteracy = await literacySlot(db, userId); // ADR-0182 A14
     binding =
       dial.mode === "require_approval" && body.operation === "write"
         ? await connectorWriteBinding(db, {
@@ -384,7 +386,7 @@ export async function executeGovernedConnectorCall(
       userId,
       // ADR-0124 — the kill switch on the connector path. A connector has no
       // per-subject halt of its own; the dial governs it.
-      execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId },
+      execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId, ...connectorLiteracy },
       // this path CAN queue a write (ADR-0173 batch 2b)
       writeApprovalQueue: { approvedApprovalId: binding?.approvedApprovalId ?? null },
       connectorId,

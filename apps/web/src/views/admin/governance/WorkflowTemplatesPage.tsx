@@ -27,7 +27,51 @@ import {
   Table,
   Textarea,
 } from "../../../ui/kit";
-import { ReasonModal, optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
+import { ReasonModal, optionEls, useAction, useAdminInvalidate, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
+import { useToast } from "../../../ui/toast";
+// ADR-0182 A11: an `ai-use-case-intake` template or variant decides who signs
+// off every new use case, so creating one goes through the "Preview impact"
+// step (the gateway's decision-regression gate refuses an unpreviewed write)
+import { PreviewImpactModal, type RegressionAcceptance } from "./DecisionRegressionPage";
+
+/** the intake template or one of its variants (ADR-0165) */
+const isIntakeName = (name: string) => name === "ai-use-case-intake" || name.startsWith("ai-use-case-intake/");
+
+/** an intake-template write waiting on its preview: the candidate the gateway
+ * digests, and the request that creates it once previewed */
+interface PendingIntakeWrite {
+  candidate: Record<string, unknown>;
+  create: (acceptance: RegressionAcceptance) => Promise<unknown>;
+  done: string;
+  /** the save button (default "Create template") */
+  saveLabel?: string;
+}
+
+/** the Preview impact step for an intake-template write, shared by the
+ * gallery and the author card */
+function useIntakePreview() {
+  const { toast } = useToast();
+  const invalidate = useAdminInvalidate();
+  const [pending, setPending] = useState<PendingIntakeWrite | null>(null);
+  const modal = (
+    <PreviewImpactModal
+      open={pending !== null}
+      subject="intake_template"
+      candidate={pending?.candidate ?? {}}
+      what="the intake template"
+      saveLabel={pending?.saveLabel ?? "Create template"}
+      onCancel={() => setPending(null)}
+      onSave={async (acceptance) => {
+        if (!pending) return;
+        await pending.create(acceptance);
+        toast(pending.done, "success");
+        setPending(null);
+        invalidate();
+      }}
+    />
+  );
+  return { start: setPending, modal };
+}
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -60,6 +104,9 @@ export default function WorkflowTemplatesPage() {
   const profiles = useComplianceProfiles();
 
   const [retire, setRetire] = useState<WorkflowTemplate | null>(null);
+  // D4G-04: retiring an intake template can hand sign-off to another variant
+  // (or the built-in shape), so it goes through the same Preview impact step
+  const retireIntake = useIntakePreview();
   const tplName = useMemo(
     () => new Map((templates.data?.templates ?? []).map((t) => [t.id, t.name])),
     [templates.data],
@@ -182,6 +229,15 @@ export default function WorkflowTemplatesPage() {
         onConfirm={(reason) => {
           const t = retire;
           setRetire(null);
+          if (t && isIntakeName(t.name)) {
+            retireIntake.start({
+              candidate: { retireTemplateId: t.id },
+              saveLabel: "Retire template",
+              create: (acceptance) => api.post(`/v1/workflows/templates/${t.id}/retire`, { reason, ...acceptance }),
+              done: "Template retired — sign-off moves as previewed; in-flight instances are unaffected",
+            });
+            return;
+          }
           if (t)
             void act.run(
               () => api.post(`/v1/workflows/templates/${t.id}/retire`, { reason }),
@@ -189,6 +245,7 @@ export default function WorkflowTemplatesPage() {
             );
         }}
       />
+      {retireIntake.modal}
     </>
   );
 }
@@ -231,6 +288,7 @@ function DeleteRuleButton(props: { rule: AssignmentRule }) {
  */
 function GalleryCard() {
   const act = useAction();
+  const intake = useIntakePreview();
   const users = useUsers();
   const gallery = useQuery({
     queryKey: ["admin", "wf-template-gallery"],
@@ -308,16 +366,24 @@ function GalleryCard() {
                     size="sm"
                     variant="primary"
                     disabled={act.busy || !(names[entry.galleryId] ?? "").trim()}
-                    onClick={() =>
-                      void act.run(
-                        () =>
-                          api.post(`/v1/workflows/template-gallery/${entry.galleryId}/create`, {
-                            name: (names[entry.galleryId] ?? "").trim(),
-                            ...(approverUserId ? { approverUserId } : {}),
-                          }),
-                        "Template created from the gallery — validated like any authored template",
-                      )
-                    }
+                    onClick={() => {
+                      const body = {
+                        name: (names[entry.galleryId] ?? "").trim(),
+                        ...(approverUserId ? { approverUserId } : {}),
+                      };
+                      const url = `/v1/workflows/template-gallery/${entry.galleryId}/create`;
+                      const done = "Template created from the gallery — validated like any authored template";
+                      // an intake variant is created only from its preview step
+                      if (isIntakeName(body.name)) {
+                        intake.start({
+                          candidate: { galleryId: entry.galleryId, ...body },
+                          create: (acceptance) => api.post(url, { ...body, ...acceptance }),
+                          done,
+                        });
+                        return;
+                      }
+                      void act.run(() => api.post(url, body), done);
+                    }}
                   >
                     Create
                   </Button>
@@ -346,6 +412,7 @@ function GalleryCard() {
           )}
         </>
       )}
+      {intake.modal}
     </Card>
   );
 }
@@ -354,6 +421,7 @@ function GalleryCard() {
 
 function AuthorCard(props: { connections: GitConnection[] }) {
   const act = useAction();
+  const intake = useIntakePreview();
   const connName = props.connections[0]?.name ?? "demo-git";
   const starters = useMemo(() => {
     const planStages = [
@@ -410,8 +478,17 @@ function AuthorCard(props: { connections: GitConnection[] }) {
             } catch (ex) {
               throw new Error(`definition JSON does not parse — ${(ex as Error).message}`);
             }
+            // an intake template is created only from its preview step
+            if (isIntakeName(name)) {
+              intake.start({
+                candidate: { name, definition },
+                create: (acceptance) => api.post("/v1/workflows/templates", { name, definition, ...acceptance }),
+                done: "Template created",
+              });
+              return null;
+            }
             await api.post("/v1/workflows/templates", { name, definition });
-          }, "Template created");
+          }, isIntakeName(name) ? null : "Template created");
         }}
       >
         <div className={a.formRow}>
@@ -459,6 +536,7 @@ function AuthorCard(props: { connections: GitConnection[] }) {
           )}
         </div>
       </form>
+      {intake.modal}
     </Card>
   );
 }

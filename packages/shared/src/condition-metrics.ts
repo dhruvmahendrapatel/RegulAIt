@@ -93,6 +93,9 @@ export const METRIC_PARAMS_SCHEMAS: Readonly<Record<AssuranceMetricId, z.ZodType
   pack_control_evidenced: z
     .object({ framework: z.string().trim().min(1).max(120), controlRef: z.string().trim().min(1).max(120) })
     .strict(),
+  // ADR-0182 (D4) A13
+  user_report_rate: z.object({}).strict(),
+  appeal_overturn_rate: z.object({}).strict(),
 };
 
 export type MetricParamsCheck =
@@ -215,6 +218,25 @@ export const CONDITION_METRIC_HELP: Readonly<Record<AssuranceMetricId, Condition
     sample: "one piece of collected evidence",
     params: "Required: the pack's framework and the control reference.",
     example: "equal to 1 over 30 days, at least 1 piece of evidence",
+  },
+  // ADR-0182 (D4) A13 — measured from the feedback register once A13 lands
+  user_report_rate: {
+    label: ASSURANCE_METRICS.user_report_rate.label,
+    unit: "per 1k",
+    measures:
+      "Problem reports people filed about the use case, per 1,000 of its finished traces, over the window. A report " +
+      "is what someone said went wrong, not a verified fault.",
+    sample: "one finished trace",
+    params: null,
+    example: "below 2 per 1k over 30 days, at least 1000 traces",
+  },
+  appeal_overturn_rate: {
+    label: ASSURANCE_METRICS.appeal_overturn_rate.label,
+    unit: "%",
+    measures: "The share of the use case's resolved appeals that were overturned, over the window.",
+    sample: "one resolved appeal",
+    params: null,
+    example: "below 10 % over 90 days, at least 10 appeals",
   },
 };
 

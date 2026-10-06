@@ -169,7 +169,7 @@ When the whole stack runs under `docker compose` (no pnpm on the box), one switc
      DEPLOYMENT"; only its public key is written, to the same volume;
    - **demo:setup → demo:intake → demo:traffic → demo:check** — packs installed and activated,
      use cases, hardening, governed traffic and alerts, then the dry run. The log ends the prep
-     with `18 pass, 0 warn, 0 fail` and `demo prep: complete in …s`;
+     with `19 pass, 0 warn, 0 fail` and `demo prep: complete in …s`;
    - the **gateway**, with `REGULAIT_OFFLINE_CHECKS=1` and the export key set (as §1 step 5).
 
    `--wait` returns once the gateway answers its health check, i.e. after the prep (about
@@ -206,7 +206,7 @@ without `SEED_DEMO=1` (which now defaults to `0`), every seed runs with `--seed-
 seed refuses a database that has a real admin (anyone outside its own personas).
 
 Verified on 2026-10-05 in real containers (Linux, Docker 29, compose 5.1) with a CRLF `.env`: a
-fresh stack prepared itself (18 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
+fresh stack prepared itself (19 pass, 0 warn, 0 fail; eu-ai-act and nist-ai-rmf active; the AI
 intake linked its EU AI Act controls; a signed audit bundle verified offline against the logged
 fingerprint; Dana's `read_file` through the demo MCP was allowed, `search_code` denied and
 `write_file` queued for Avery); `restart gateway` and `down` / `up` skipped the prep with the alert

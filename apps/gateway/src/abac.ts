@@ -68,6 +68,7 @@ import {
 import type { AbacDecision } from "@regulait/policy-kernel";
 import { projectClassifications } from "./projects.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
+import { aiTrainingCurrentFor } from "./ai-literacy.js";
 import {
   loadPolicySimulationSettings,
   versionHasBlastRadiusPreview,
@@ -208,7 +209,7 @@ function priceTierOf(pricePerCallUsd: number | null | undefined): string {
  * and for the simulation surface, which must build it EXACTLY as enforcement
  * does or a preview would be a different question than the real one. */
 export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise<AbacRequest> {
-  const [userRow, assignments, memberships, serverRow, toolRow, projectRow, derived] =
+  const [userRow, assignments, memberships, serverRow, toolRow, projectRow, derived, aiTrainingCurrent] =
     await Promise.all([
       db
         .select({ id: users.id, isAdmin: users.isAdmin })
@@ -239,6 +240,9 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
             .where(eq(projects.id, ctx.projectId))
         : Promise.resolve([]),
       deriveAbacDeployContext(db, ctx.projectId),
+      // schema v3 (ADR-0182 A14): from the stored AI policies and acknowledgements, here and only here, so the
+      // simulation surface (which calls this same function) builds it exactly as enforcement does
+      aiTrainingCurrentFor(db, ctx.userId),
     ]);
 
   const classifications = ctx.projectId ? await projectClassifications(db, ctx.projectId) : [];
@@ -268,6 +272,7 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
       isAdmin: userRow[0]?.isAdmin ?? false,
       sessionOrigin: ctx.principal?.sessionOrigin ?? "unknown",
       mfaCompleted: ctx.principal?.mfaCompleted ?? false,
+      aiTrainingCurrent,
     },
     resource,
     context: {
@@ -335,6 +340,8 @@ export function runAbacPolicyTests(
         isAdmin: c.principal.isAdmin ?? false,
         sessionOrigin: c.principal.sessionOrigin ?? "unknown",
         mfaCompleted: c.principal.mfaCompleted ?? false,
+        // schema v3 (ADR-0182 A14): a stored case may name it; absent = false, the strict answer
+        aiTrainingCurrent: c.principal.aiTrainingCurrent ?? false,
       },
       resource: {
         id: `${c.resource.serverId ?? "server"}/${c.resource.toolName}`,
@@ -395,6 +402,8 @@ const testCaseSchema: z.ZodType<AbacPolicyTestCase> = z.object({
     isAdmin: z.boolean().optional(),
     sessionOrigin: z.string().optional(),
     mfaCompleted: z.boolean().optional(),
+    /** schema v3 (ADR-0182 A14) */
+    aiTrainingCurrent: z.boolean().optional(),
   }),
   resource: z.object({
     serverId: z.string().nullish(),

@@ -16,6 +16,8 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 // ADR-0117: the international category tuple is consumed by
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
+// ADR-0182 (D4): the accountability settings are spread into updateOrgSettingsSchema below.
+import { accountabilityOrgSettingsFields } from "./accountability.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -2349,6 +2351,12 @@ export const updateOrgSettingsSchema = z
      * never rewrites an approval that already exists — expiry is stamped at
      * queue time, exactly as ADR-0098 stamps a key's at issuance. */
     approvalTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
+    /** ADR-0182 (ADR-0175 batch D4) — the accountability settings. Each one
+     * defaults STRICT (migration 0162 wrote the strict value onto the existing
+     * row); a write that relaxes one is audited like every other key here, as
+     * `detail.transitions`, and the audit row also names it under
+     * `detail.relaxed`. See `ACCOUNTABILITY_SETTING_COPY` for what each gives up. */
+    ...accountabilityOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -4461,6 +4469,12 @@ export {
   DEPLOY_GATE_REASON_INFO,
   type DeployGateAssuranceSummary,
 } from "./deploy-gate.js";
+// ADR-0182 A12 — the incident gate reason codes and the gate's incident input/summary
+export {
+  INCIDENT_GATE_REASON_CODES,
+  type DeployGateIncidentInput,
+  type DeployGateIncidentSummary,
+} from "./deploy-gate.js";
 export {
   DEFAULT_REQUIRED_MAX_ASR_PCT,
   DEFAULT_REQUIRED_MIN_SCORE,
@@ -4490,3 +4504,22 @@ export * from "./identity-defaults.js";
 
 // ADR-0181 (strict defaults, SB1): the guardrail no-row fallback mode (warn, never off).
 export { GUARDRAIL_FALLBACK_MODE } from "./guardrails.js";
+
+// ===== ADR-0182 (ADR-0175 batch D4) — accountability records ================
+// P0's shared contract (vocabularies, strict settings, request bodies, types),
+// then one `export *` per slice-owned module, so no slice edits this barrel:
+// A11 decision-regression, A12 incident-clocks + incidents, A13 feedback,
+// A14 ai-literacy, S5 alert-ownership + isaca-pack.
+export * from "./accountability.js";
+export * from "./decision-regression.js";
+export * from "./incident-clocks.js";
+export * from "./incidents.js";
+export * from "./feedback.js";
+export * from "./ai-literacy.js";
+export * from "./alert-ownership.js";
+export * from "./isaca-pack.js";
+export {
+  ACCOUNTABILITY_MONITOR_RULE_IDS,
+  suggestedHaltFor,
+  type AccountabilityMonitorRuleId,
+} from "./governance-monitor.js";

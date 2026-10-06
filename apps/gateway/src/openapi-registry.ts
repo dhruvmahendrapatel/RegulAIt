@@ -897,6 +897,57 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/risk-tolerances": "internal",
   "GET /v1/risks/:riskId/acceptances": "internal",
   "POST /v1/risks/:riskId/acceptances": "internal",
+
+  // ===== ADR-0182 (D4) — accountability records. Internal: console and
+  // governance surfaces whose shapes are still moving. Append-only per slice.
+  // --- P0
+  "PUT /v1/use-cases/:useCaseId/eu-ai-act-role": "internal",
+  // --- A11
+  "POST /v1/governance/decision-regression/preview": "internal",
+  "GET /v1/governance/decision-regression/runs": "internal",
+  "GET /v1/governance/decision-regression/runs/:runId": "internal",
+  "GET /v1/governance/decision-regression/cases": "internal",
+  "POST /v1/governance/decision-regression/cases": "internal",
+  "DELETE /v1/governance/decision-regression/cases/:caseId": "internal",
+  "GET /v1/use-cases/:useCaseId/decision-records": "internal",
+  // --- A12
+  "GET /v1/incidents": "internal",
+  "POST /v1/incidents": "internal",
+  "GET /v1/incidents/:incidentId": "internal",
+  "PATCH /v1/incidents/:incidentId": "internal",
+  "POST /v1/incidents/:incidentId/events": "internal",
+  "POST /v1/incidents/:incidentId/links": "internal",
+  "POST /v1/incidents/:incidentId/actions": "internal",
+  "PATCH /v1/incidents/:incidentId/actions/:actionId": "internal",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/sent": "internal",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/not-required": "internal",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/toll": "internal",
+  "POST /v1/incidents/:incidentId/close": "internal",
+  "POST /v1/incidents/:incidentId/contain": "internal",
+  "GET /v1/incidents/:incidentId/export": "internal",
+  // --- A13
+  "POST /v1/use-cases/:useCaseId/feedback": "internal",
+  "GET /v1/feedback": "internal",
+  "GET /v1/feedback/:feedbackId": "internal",
+  "PATCH /v1/feedback/:feedbackId": "internal",
+  "POST /v1/feedback/:feedbackId/open-incident": "internal",
+  "POST /v1/use-cases/:useCaseId/feedback-links": "internal",
+  "GET /v1/use-cases/:useCaseId/feedback-links": "internal",
+  "DELETE /v1/use-cases/:useCaseId/feedback-links/:linkId": "internal",
+  "POST /v1/feedback/l/:token": "internal",
+  "GET /v1/feedback/l/:token": "internal",
+  // --- A14
+  "GET /v1/ai-policies": "internal",
+  "POST /v1/ai-policies": "internal",
+  "GET /v1/ai-policies/coverage": "internal",
+  "POST /v1/ai-policies/:policyId/publish": "internal",
+  "POST /v1/ai-policies/:policyId/retire": "internal",
+  "POST /v1/ai-policies/:policyId/acknowledge": "internal",
+  "POST /v1/ai-policies/:policyId/records": "internal",
+  "GET /v1/me/ai-literacy": "internal",
+  // --- S5
+  "PUT /v1/governance/alerts/:alertId/owner": "internal",
+  "POST /v1/governance/alerts/:alertId/ticket": "internal",
 };
 
 /**
@@ -1676,4 +1727,54 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/risk-tolerances": "risks",
   "GET /v1/risks/:riskId/acceptances": "risks",
   "POST /v1/risks/:riskId/acceptances": "risks",
+
+  // ===== ADR-0182 (D4) — accountability records. Append-only per slice.
+  // --- P0
+  "PUT /v1/use-cases/:useCaseId/eu-ai-act-role": "use-cases",
+  // --- A11
+  "POST /v1/governance/decision-regression/preview": "use-cases",
+  "GET /v1/governance/decision-regression/runs": "use-cases",
+  "GET /v1/governance/decision-regression/runs/:runId": "use-cases",
+  "GET /v1/governance/decision-regression/cases": "use-cases",
+  "POST /v1/governance/decision-regression/cases": "use-cases",
+  "DELETE /v1/governance/decision-regression/cases/:caseId": "use-cases",
+  "GET /v1/use-cases/:useCaseId/decision-records": "use-cases",
+  // --- A12
+  "GET /v1/incidents": "incidents",
+  "POST /v1/incidents": "incidents",
+  "GET /v1/incidents/:incidentId": "incidents",
+  "PATCH /v1/incidents/:incidentId": "incidents",
+  "POST /v1/incidents/:incidentId/events": "incidents",
+  "POST /v1/incidents/:incidentId/links": "incidents",
+  "POST /v1/incidents/:incidentId/actions": "incidents",
+  "PATCH /v1/incidents/:incidentId/actions/:actionId": "incidents",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/sent": "incidents",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/not-required": "incidents",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/toll": "incidents",
+  "POST /v1/incidents/:incidentId/close": "incidents",
+  "POST /v1/incidents/:incidentId/contain": "incidents",
+  "GET /v1/incidents/:incidentId/export": "incidents",
+  // --- A13
+  "POST /v1/use-cases/:useCaseId/feedback": "feedback",
+  "GET /v1/feedback": "feedback",
+  "GET /v1/feedback/:feedbackId": "feedback",
+  "PATCH /v1/feedback/:feedbackId": "feedback",
+  "POST /v1/feedback/:feedbackId/open-incident": "feedback",
+  "POST /v1/use-cases/:useCaseId/feedback-links": "feedback",
+  "GET /v1/use-cases/:useCaseId/feedback-links": "feedback",
+  "DELETE /v1/use-cases/:useCaseId/feedback-links/:linkId": "feedback",
+  "POST /v1/feedback/l/:token": "feedback",
+  "GET /v1/feedback/l/:token": "feedback",
+  // --- A14
+  "GET /v1/ai-policies": "ai-literacy",
+  "POST /v1/ai-policies": "ai-literacy",
+  "GET /v1/ai-policies/coverage": "ai-literacy",
+  "POST /v1/ai-policies/:policyId/publish": "ai-literacy",
+  "POST /v1/ai-policies/:policyId/retire": "ai-literacy",
+  "POST /v1/ai-policies/:policyId/acknowledge": "ai-literacy",
+  "POST /v1/ai-policies/:policyId/records": "ai-literacy",
+  "GET /v1/me/ai-literacy": "ai-literacy",
+  // --- S5
+  "PUT /v1/governance/alerts/:alertId/owner": "reports",
+  "POST /v1/governance/alerts/:alertId/ticket": "reports",
 };

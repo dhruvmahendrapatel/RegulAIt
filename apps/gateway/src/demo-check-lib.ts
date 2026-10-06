@@ -22,6 +22,7 @@
 import type { FastifyInstance } from "fastify";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import type { DemoIntakeFixtures } from "@regulait/shared";
+import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
 export interface DemoCheck {
@@ -256,6 +257,38 @@ async function runDemoCheckRun(
   // --- approvals queue (the gate beat) ------------------------------------------------------------
   const inbox = await call("GET", "/v1/approvals?status=pending", auth);
   add("2 Approval gate", inbox.status === 200 ? "PASS" : "FAIL", `approvals queue reachable (${inbox.status})`);
+
+  // --- 3 Accountability (ADR-0182 D4): the records the story points at must be TRUE -------------
+  // a closed incident whose every clock is terminal; the acceptable-use document current for the
+  // three personas; a decision record for the decided showcase use case. Any part false = FAIL.
+  {
+    const problems: string[] = [];
+    const facts: string[] = [];
+    const incidents: Json[] = (await call("GET", "/v1/incidents?status=closed", auth)).body.incidents ?? [];
+    const inc = incidents.find((i) => i.title === DEMO_INCIDENT_TITLE);
+    if (!inc) problems.push("no closed demo incident");
+    else if (!(inc.clocks?.total > 0) || inc.clocks.open !== 0) {
+      problems.push(`incident ${inc.ref}: ${inc.clocks?.open ?? "?"} of ${inc.clocks?.total ?? 0} clock(s) not terminal`);
+    } else facts.push(`incident ${inc.ref} closed, ${inc.clocks.total} clock(s) terminal`);
+    const coverage: Json[] = (await call("GET", "/v1/ai-policies/coverage", auth)).body.documents ?? [];
+    const aup = coverage.find((d) => d.key === DEMO_AUP_KEY);
+    if (!aup) problems.push("no published acceptable-use document");
+    else {
+      const notCurrent = ["admin@regulait.local", "dana@regulait.local", "avery@regulait.local"].filter(
+        (email) => (aup.people ?? []).find((p: Json) => p.email === email)?.state !== "current",
+      );
+      if (notCurrent.length) problems.push(`acceptable-use v${aup.version} not current for ${notCurrent.join(", ")}`);
+      else facts.push(`acceptable-use v${aup.version} current for the three personas`);
+    }
+    if (!showcase) problems.push("no decided use case to show a decision record for");
+    else {
+      const recs: Json[] = (await call("GET", `/v1/use-cases/${showcase.id}/decision-records`, auth)).body.records ?? [];
+      if (!recs.some((r) => r.outcome === "approved")) problems.push(`"${showcase.name}" has no approval decision record`);
+      else facts.push(`"${showcase.name}" decision record present`);
+    }
+    if (problems.length) add("3 Accountability", "FAIL", problems.join("; "), "re-run `demo:intake` on this database (it seeds the D4 records)");
+    else add("3 Accountability", "PASS", facts.join("; "));
+  }
 
   // --- 3 Evidence (ADR-0116): the closing beat downloads a SIGNED bundle, which needs the
   // deployment's export key — without it the button answers 409 in front of the audience

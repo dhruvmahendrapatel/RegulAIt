@@ -135,10 +135,18 @@ describe("ADR-0181 SC — a fresh org reads every admission/monitor default STRI
     writeFileSync(journalPath, JSON.stringify(journal));
     upgrade = createDb(urlFor(UPGRADE_DB));
     await runMigrations(upgrade, tmpMigrations);
-    await loadOrgSettings(upgrade);
+    // At 0158 the table lacks every column a LATER migration adds (0162's D4
+    // settings, …), so this stage reads and writes only the six columns under
+    // test — a whole-row select through today's schema would name columns that
+    // do not exist yet.
+    const scColumns = Object.fromEntries(
+      Object.keys(SC_STRICT_DEFAULTS).map((k) => [k, orgSettings[k as keyof typeof SC_STRICT_DEFAULTS]]),
+    ) as Record<keyof typeof SC_STRICT_DEFAULTS, (typeof orgSettings)[keyof typeof SC_STRICT_DEFAULTS]>;
+    const readSc = async () =>
+      (await upgrade.select(scColumns).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID)))[0] as Record<string, unknown>;
     await upgrade.update(orgSettings).set({ ...SC_LAX_POSTURE }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     await upgrade.insert(spendMonitorPolicies).values({ projectId: null, enabled: false });
-    expect(pick(await loadOrgSettings(upgrade))).toEqual(SC_LAX_POSTURE);
+    expect(pick(await readSc())).toEqual(SC_LAX_POSTURE);
 
     await runMigrations(upgrade, migrationsFolder);
     expect(pick(await loadOrgSettings(upgrade))).toEqual(SC_STRICT_DEFAULTS);

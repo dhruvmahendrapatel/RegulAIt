@@ -21,6 +21,10 @@ import type { AgentStewardship } from "../integrations/agentStewardshipModel";
 import { EnergyEstimatePanel } from "../cost/EnergyEstimate";
 import { RunGraph } from "../../../ui/runGraph/RunGraph";
 import { useSession } from "../../../session/SessionContext";
+// ADR-0182 (ADR-0175 batch D4): one tab per slice, each the slice's own file
+import { DecisionRecordTab } from "./DecisionRecordTab";
+import { IncidentsTab } from "./IncidentsTab";
+import { FeedbackTab } from "./FeedbackTab";
 import {
   EVIDENCE_LABEL,
   MEASUREMENT_STATE_LABEL,
@@ -69,6 +73,10 @@ const TABS = [
   ...["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) })),
   // ADR-0173 batch 2b: the use case's path from registration to its decision, as a graph
   { id: "path", label: "Decision path" },
+  // ADR-0182 (D4): A11 the decision records, A12 incidents, A13 feedback and appeals
+  { id: "decisions", label: "Decision records" },
+  { id: "incidents", label: "Incidents" },
+  { id: "feedback", label: "Feedback" },
 ];
 
 export default function UseCaseOverviewPage() {
@@ -172,6 +180,10 @@ export default function UseCaseOverviewPage() {
                 <RunGraph source={{ kind: "use_case", useCaseId: id }} label={`Decision path of ${data.useCase.name}`} refreshKey={status} />
               </Card>
             ) : null}
+            {/* ADR-0182 (D4): each tab is its slice's own component file */}
+            {tab === "decisions" ? <DecisionRecordTab useCaseId={id} /> : null}
+            {tab === "incidents" ? <IncidentsTab useCaseId={id} /> : null}
+            {tab === "feedback" ? <FeedbackTab useCaseId={id} /> : null}
           </div>
         </>
       ) : null}

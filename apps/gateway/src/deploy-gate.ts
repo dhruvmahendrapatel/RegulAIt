@@ -26,6 +26,12 @@
  * six assurance rules are NOT re-read as `open_high_alert`: the live checks
  * above cover the same facts, and the mode — not the alert — decides whether
  * they hold the release (otherwise `off` could never turn them off).
+ *
+ * ADR-0182 A12 — THE INCIDENT REGISTER. `incident_gate_mode` (strict default
+ * `enforce`) governs one more check: an open or contained serious, high or
+ * critical AI incident on the use case holds the gate (`open_serious_incident`
+ * / `open_high_incident`); `warn` reports it; `off` skips it and the response
+ * says `incidentGate: skipped (mode off)`.
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -63,6 +69,7 @@ import { evaluateUseCaseConditions } from "./condition-metrics.js";
 import { requiredTestStatus } from "./required-tests.js";
 import { autonomyFloorFor } from "./autonomy.js";
 import { residualPosition } from "./risk-tolerance.js";
+import { incidentGateInputs } from "./incidents.js";
 
 export const DEPLOY_GATE_RULE_IDS = { allowed: "deploy-gate-allowed", denied: "deploy-gate-denied" } as const;
 
@@ -247,6 +254,10 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       assurance.residualRisks = await attempt("residual_risk", () => residualPosition(db, uc.id, now));
     }
 
+    // ADR-0182 A12 — the use case's AI incidents that are not closed, and the
+    // org's `incident_gate_mode` (strict default `enforce`)
+    const incidentGate = await incidentGateInputs(db, uc.id, org);
+
     const result = evaluateDeployGate({
       useCase: {
         id: uc.id,
@@ -262,6 +273,8 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       now,
       assuranceMode,
       ...assurance,
+      incidentMode: incidentGate.mode,
+      incidents: incidentGate.incidents,
     });
 
     await db.insert(auditLog).values({
@@ -280,6 +293,8 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
         approvedUntil: uc.approvedUntil ? uc.approvedUntil.toISOString() : null,
         // ADR-0180: the mode the checks ran under, and any check that could not run
         assurance: result.assurance ?? null,
+        // ADR-0182 A12: the mode the incident check ran under
+        incidentGate: result.incidentGate ?? null,
         ...(assuranceErrors.length ? { assuranceErrors } : {}),
       },
       effect: result.decision === "allow" ? "allow" : "deny",
@@ -307,13 +322,17 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       // ADR-0180: how the continuous-assurance checks were applied, e.g.
       // { mode: "off", status: "skipped", label: "skipped (mode off)" }
       assurance: result.assurance,
+      // ADR-0182 A12: how open incidents were applied, e.g.
+      // { mode: "off", status: "skipped", label: "skipped (mode off)" }
+      incidentGate: result.incidentGate,
       environment: b.environment ?? null,
       ref: b.ref ?? null,
       evaluatedAt: now.toISOString(),
       note:
         "The pipeline enforces `decision`; a warning does not fail the gate. Dispatch enforcement (MRM incl. " +
         "staleness recertification, halts, entitlements) is unchanged and still applies at runtime. " +
-        `Continuous-assurance checks: ${result.assurance?.label ?? "not evaluated"}.`,
+        `Continuous-assurance checks: ${result.assurance?.label ?? "not evaluated"}. ` +
+        `Open AI incidents: ${result.incidentGate?.label ?? "not evaluated"}.`,
     };
   });
 }

@@ -55,6 +55,7 @@
  * person.
  */
 import { recordRiskAcceptance } from "./risk-tolerance.js";
+import { writeUseCaseDecisionRecord } from "./decision-regression.js";
 import type { FastifyInstance } from "fastify";
 import {
   agents,
@@ -413,48 +414,65 @@ export async function syncUseCaseForInstance(
     const months = policyValidityMonths(policy, fresh?.tier ?? null) ?? approvalLifetimeMonths(fresh?.tier ?? null);
     lifetime = { approvedAt, approvedUntil: addMonthsUtc(approvedAt, months), months, tier: fresh?.tier ?? null };
   }
-  // compare-and-swap on the status this sync read: two syncs racing for the
-  // same move (an artifact submission and its idempotent replay, ADR-0179)
-  // move the use case, and audit the move, once
-  const moved = await db
-    .update(aiUseCases)
-    .set({
-      status: next,
-      updatedAt: new Date(),
-      // a decision closes a recertification review (ADR-0168 amendment)
-      ...(decided ? { decidedAt: new Date(), recertification: false } : {}),
-      ...(lifetime ? { approvedAt: lifetime.approvedAt, approvedUntil: lifetime.approvedUntil } : {}),
-    })
-    .where(and(eq(aiUseCases.id, useCase.id), eq(aiUseCases.status, useCase.status)))
-    .returning({ id: aiUseCases.id });
-  if (moved.length === 0) return;
-  await db.insert(auditLog).values({
-    userId: actorUserId ?? useCase.ownerUserId,
-    objectType: "ai_use_case",
-    objectId: useCase.id,
-    detail: {
-      phase: "lifecycle",
-      from: useCase.status,
-      to: next,
-      workflowInstanceId: instanceId,
-      instanceStatus: instance.status,
-      ...(useCase.recertification ? { recertification: true } : {}),
-      ...(lifetime
-        ? {
-            approvedAt: lifetime.approvedAt.toISOString(),
-            approvedUntil: lifetime.approvedUntil.toISOString(),
-            lifetimeMonths: lifetime.months,
-            lifetimeTier: lifetime.tier,
-          }
-        : {}),
-    },
-    effect: next === "rejected" ? "deny" : "allow",
-    ruleId: `use-case-${next}`,
-    ruleChain: [],
-    reason: decided
-      ? `AI use case '${useCase.name}' ${next.replace(/_/g, " ")} by the intake workflow's final decision`
-      : `AI use case '${useCase.name}' moved to ${next.replace(/_/g, " ")} — intake workflow is ` +
-        (instance.status === "blocked_on_approval" ? "awaiting sign-off" : instance.status.replace(/_/g, " ")),
+  // ADR-0182 A11: the status move, its audit row and — for a terminal
+  // decision — its decision record commit together (a savepoint inside the
+  // decide path's transaction; a transaction of its own from the workflow
+  // routes). The record is not best-effort: no record, no decision.
+  const decidedAt = new Date();
+  await db.transaction(async (tx) => {
+    // compare-and-swap on the status this sync read: two syncs racing for the
+    // same move (an artifact submission and its idempotent replay, ADR-0179)
+    // move the use case, and audit the move, once
+    const moved = await tx
+      .update(aiUseCases)
+      .set({
+        status: next,
+        updatedAt: new Date(),
+        // a decision closes a recertification review (ADR-0168 amendment)
+        ...(decided ? { decidedAt, recertification: false } : {}),
+        ...(lifetime ? { approvedAt: lifetime.approvedAt, approvedUntil: lifetime.approvedUntil } : {}),
+      })
+      .where(and(eq(aiUseCases.id, useCase.id), eq(aiUseCases.status, useCase.status)))
+      .returning({ id: aiUseCases.id });
+    if (moved.length === 0) return;
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? useCase.ownerUserId,
+      objectType: "ai_use_case",
+      objectId: useCase.id,
+      detail: {
+        phase: "lifecycle",
+        from: useCase.status,
+        to: next,
+        workflowInstanceId: instanceId,
+        instanceStatus: instance.status,
+        ...(useCase.recertification ? { recertification: true } : {}),
+        ...(lifetime
+          ? {
+              approvedAt: lifetime.approvedAt.toISOString(),
+              approvedUntil: lifetime.approvedUntil.toISOString(),
+              lifetimeMonths: lifetime.months,
+              lifetimeTier: lifetime.tier,
+            }
+          : {}),
+      },
+      effect: next === "rejected" ? "deny" : "allow",
+      ruleId: `use-case-${next}`,
+      ruleChain: [],
+      reason: decided
+        ? `AI use case '${useCase.name}' ${next.replace(/_/g, " ")} by the intake workflow's final decision`
+        : `AI use case '${useCase.name}' moved to ${next.replace(/_/g, " ")} — intake workflow is ` +
+          (instance.status === "blocked_on_approval" ? "awaiting sign-off" : instance.status.replace(/_/g, " ")),
+    });
+    if (decided) {
+      await writeUseCaseDecisionRecord(tx, {
+        useCase,
+        outcome: next as "approved" | "rejected",
+        decidedAt,
+        decidedBy: actorUserId,
+        // an aborted intake was decided by no approval
+        ...(instance.status === "aborted" ? { approvalId: null } : {}),
+      });
+    }
   });
 }
 
@@ -519,6 +537,15 @@ export async function markUseCaseReturned(
     ruleId: "use-case-returned-for-info",
     ruleChain: [],
     reason: `AI use case '${uc.name}' sent back for information — a new questionnaire version re-requests sign-off: ${reason}`,
+  });
+  // ADR-0182 A11: a return is a terminal decision of its review round; its
+  // record commits (or rolls back) with the decide path's transaction
+  await writeUseCaseDecisionRecord(db, {
+    useCase: uc,
+    outcome: "needs_info",
+    decidedAt: new Date(),
+    decidedBy: actorUserId,
+    approvalId,
   });
 }
 
@@ -1002,8 +1029,9 @@ function approvalExpired(row: AiUseCaseRow, now: Date): boolean {
  * approvals to a governance owner by creating a variant from the gallery shape
  * with a concrete approver; template names are unique even once retired, so
  * without variants the built-in shape — minted on the first use case — could
- * never be superseded. Only when none exists is the built-in shape minted,
- * through the ONE template-creation path (ADR-0077 discipline).
+ * never be superseded. Only when none is active is the built-in shape minted,
+ * through the ONE template-creation path (ADR-0077 discipline) — under a dated
+ * `ai-use-case-intake/built-in-…` name when the built-in name is retired.
  */
 async function resolveIntakeTemplate(
   db: Db,
@@ -1020,8 +1048,15 @@ async function resolveIntakeTemplate(
     .orderBy(desc(workflowTemplates.createdAt));
   const active = rows.find((t) => t.retiredAt === null);
   if (active) return { ok: true, templateId: active.id };
+  // No active intake template: the built-in shape decides (D4G-04's retire preview resolves to exactly this, so
+  // it was previewed when the last active one was retired). Template names are unique even once retired, so when
+  // the built-in name is already taken by a retired row the shape is minted as a dated built-in variant rather than
+  // failing as a bare unique-violation conflict (ADR-0182 integration).
+  const name = rows.some((t) => t.name === AI_USE_CASE_INTAKE_TEMPLATE_NAME)
+    ? `${AI_USE_CASE_INTAKE_TEMPLATE_NAME}/built-in-${new Date().toISOString().replace(/[-:.]/g, "").toLowerCase()}`
+    : AI_USE_CASE_INTAKE_TEMPLATE_NAME;
   const created = await createWorkflowTemplateValidated(db, {
-    name: AI_USE_CASE_INTAKE_TEMPLATE_NAME,
+    name,
     definition: aiUseCaseIntakeDefinition(),
   });
   if (!created.ok) return created;

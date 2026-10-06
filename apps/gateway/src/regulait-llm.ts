@@ -100,6 +100,7 @@ import {
   type TrainingJobRow,
 } from "@regulait/db";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
   detectPII,
@@ -284,11 +285,12 @@ async function agentDecider(db: Db, userId: string) {
     ceilingTier = ceiling?.tier ?? null;
   }
   const llmExecutionMode = await loadExecutionMode(db);
+  const llmLiteracy = await literacySlot(db, userId); // ADR-0182 A14
   return (agent: typeof agents.$inferSelect, mode: string): AgentDecision =>
     evaluateAgent({
       userId,
       // ADR-0124 — RegulAIt-LLM is a dispatch path like any other.
-      execution: postureOf(llmExecutionMode, agentHaltOf(agent)),
+      execution: { ...postureOf(llmExecutionMode, agentHaltOf(agent)), ...llmLiteracy },
       agent: {
         id: agent.id,
         name: agent.name,

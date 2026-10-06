@@ -50,6 +50,11 @@ export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension
   "soc-2:CC7.4-incident-response": "security",
   "soc-2:CC9.2-vendor-risk": "compliance",
   "soc-2:CC1.4-competence": "compliance",
+  // ISACA AI agents checklist (ADR-0182 S5) — attestation-only items
+  "isaca-ai-agents:item-03-agent-identity-least-privilege": "security",
+  "isaca-ai-agents:item-05-sandbox-segmentation": "security",
+  "isaca-ai-agents:item-08-memory-isolation-retention": "privacy",
+  "isaca-ai-agents:item-12-pinning-sbom-signing": "security",
 };
 
 export interface ControlForDimension {

@@ -36,6 +36,20 @@ const ENTRY_MODULES = [
   "dependency-graph",
   "scheduler-jobs",
   "app",
+  // ADR-0182 (D4): each slice's module and P0's, loaded first. The monitor and
+  // the scheduler import the slice modules, so a slice that later imports the
+  // monitor (or anything on its cycle) at load time is caught here.
+  "decision-regression",
+  "incidents",
+  "feedback",
+  "ai-literacy",
+  "alert-ownership",
+  "eu-ai-act-role",
+  "execution-control",
+  // the D4 security review's evidence hold at every agent-config write (DFX2), and the module that brought it onto
+  // inventory's import chain
+  "agent-evidence-hold",
+  "config-versions",
 ];
 
 function loadAlone(mod: string): string | null {

@@ -18,10 +18,34 @@
  * is the route, the method, the status, the client IP and the credential KIND
  * (bootstrap / api-key / virtual-key / session / none) — enough to see a
  * spray, never enough to replay one.
+ *
+ * D4 DFX2 (D4A-05) — A CREDENTIAL IN THE URL. The public feedback link
+ * (`/v1/feedback/l/:token`, an `rglf_` token of 256 bits) authenticates by its
+ * path, so the path is a bearer credential. Every line the logger writes goes
+ * through `redactLogText` at pino's `streamWrite` hook — the serialized line,
+ * whatever logged it (the refusal hook, the error handler's `url`, a message
+ * string, a child logger's bindings) — and the refusal line's own `path`
+ * field is redacted too. Considered pino `redact` (paths only, cannot match a
+ * value inside a string) — it stays for the headers; the hook covers values.
  */
 import type { FastifyRequest, FastifyServerOptions } from "fastify";
 
 export const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
+
+/** URL segments that ARE credentials, and what replaces them in a log line */
+const URL_CREDENTIALS: ReadonlyArray<readonly [RegExp, string]> = [
+  // the public feedback link: whatever follows /feedback/l/ (a real token, or a near-miss of one)
+  [/(\/feedback\/l\/)[^/?#\s"'\\]+/g, "$1[redacted]"],
+  // the token itself, wherever it appears (a message, a query string, an error)
+  [/\brglf_[0-9A-Za-z]+/g, "rglf_[redacted]"],
+];
+
+/** a log line (or field) with every URL credential replaced */
+export function redactLogText(s: string): string {
+  let out = s;
+  for (const [re, by] of URL_CREDENTIALS) out = out.replace(re, by);
+  return out;
+}
 
 /** the paths pino masks, in its own redact syntax */
 export const LOG_REDACT_PATHS = [
@@ -46,6 +70,8 @@ export function resolveGatewayLogger(env: NodeJS.ProcessEnv = process.env): Fast
   return {
     level,
     redact: { paths: [...LOG_REDACT_PATHS], censor: "[redacted]" },
+    // D4 DFX2 (D4A-05): the whole serialized line, every level and status
+    hooks: { streamWrite: redactLogText },
     // Fastify's default request serializer already omits the body; the
     // headers are the only place a credential would appear, and they are
     // redacted above.
@@ -77,7 +103,7 @@ export function requestLogFields(req: FastifyRequest, status: number): Record<st
     status,
     method: req.method,
     route: req.routeOptions?.url ?? null,
-    path: req.url.split("?")[0],
+    path: redactLogText(req.url.split("?")[0] ?? ""),
     ip: req.ip ?? null,
     credential: credentialKind(req),
   };

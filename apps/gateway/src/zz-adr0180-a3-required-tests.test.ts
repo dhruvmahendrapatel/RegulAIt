@@ -53,6 +53,7 @@ import { buildApp } from "./app.js";
 import { agentConfigHash } from "./evals.js";
 import { requiredTestStatus, requiredTestsMonitorInput } from "./required-tests.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { previewedPut, setDecisionRegressionGateForTest } from "./testing/decision-regression.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -263,7 +264,8 @@ describe("ADR-0180 A3 the required-tests policy routes", () => {
   it("an admin relaxes a tier; the change is audited with the old and new value, then restored", async () => {
     const next = { limited: { classes: [], freshnessDays: 60 } };
     try {
-      const r = await inject("PUT", PATH, users.admin.auth, next);
+      // ADR-0182 A11: under the strict gate the body is previewed first
+      const r = await previewedPut(app, PATH, users.admin.auth, "required_tests", next);
       expect(r.statusCode, r.body).toBe(200);
       expect(r.json().effective.limited).toMatchObject({ source: "policy", classes: [], freshnessDays: 60 });
       expect(r.json().effective.high.source).toBe("default");
@@ -276,7 +278,7 @@ describe("ADR-0180 A3 the required-tests policy routes", () => {
       expect(a!.detail).toMatchObject({ setting: "requiredTests", from: {}, to: next, relaxedTiers: ["limited"] });
       expect(a!.reason).toContain("RELAXED for limited");
     } finally {
-      expect((await inject("PUT", PATH, users.admin.auth, {})).statusCode).toBe(200);
+      expect((await previewedPut(app, PATH, users.admin.auth, "required_tests", {})).statusCode).toBe(200);
     }
   });
 
@@ -284,6 +286,10 @@ describe("ADR-0180 A3 the required-tests policy routes", () => {
   it("concurrent PUTs each audit the value they actually replaced (row locked, write and audit atomic)", async () => {
     const since = new Date(Date.now() - 1000);
     const bodies = [31, 32, 33, 34, 35, 36].map((d) => ({ limited: { classes: [{ testClass: "owasp:llm:01" }], freshnessDays: d } }));
+    // ADR-0182 A11: under `enforce` concurrent writers are serialised by the
+    // gate itself (each preview's baseline moves under the next writer), so
+    // this row-lock test relaxes it to `warn` through the audited route
+    const restoreGate = await setDecisionRegressionGateForTest(app, users.admin.auth, "warn");
     try {
       const res = await Promise.all(bodies.map((b) => inject("PUT", PATH, users.admin.auth, b)));
       for (const r of res) expect(r.statusCode, r.body).toBe(200);
@@ -302,7 +308,8 @@ describe("ADR-0180 A3 the required-tests policy routes", () => {
       const [row] = await db.select({ requiredTests: governanceReviewPolicy.requiredTests }).from(governanceReviewPolicy);
       expect(tos.has(JSON.stringify(row!.requiredTests))).toBe(true);
     } finally {
-      expect((await inject("PUT", PATH, users.admin.auth, {})).statusCode).toBe(200);
+      await restoreGate();
+      expect((await previewedPut(app, PATH, users.admin.auth, "required_tests", {})).statusCode).toBe(200);
     }
   });
 });

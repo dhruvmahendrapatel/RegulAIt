@@ -46,6 +46,7 @@ import {
   type SeriesResponse,
 } from "./monitoringModel";
 
+type OnBreach = "alert" | "propose_halt";
 const STATE_TONE: Record<KriState, Tone> = { breached: "danger", ok: "ok", insufficient: "neutral", disabled: "neutral" };
 // recharts lives in its own chunk, loaded with the first chart (the run graph's pattern)
 const SeriesLineChart = lazy(() => import("./SeriesLineChart"));
@@ -129,6 +130,14 @@ function KriTile(props: { kri: Kri; onEdit: () => void }) {
 function KriEditor(props: { kri: Kri | null; onClose: () => void }) {
   const [f, setF] = useState<KriForm>(() => (props.kri ? kriFormFrom(props.kri) : EMPTY_KRI_FORM));
   const set = <K extends keyof KriForm>(key: K, value: KriForm[K]) => setF((x) => ({ ...x, [key]: value }));
+  // ADR-0182 S5 (PF-03): what a breach does. `propose_halt` is an agent KRI's
+  // option only (the gateway answers 422 otherwise); it SUGGESTS a halt on
+  // the alert and never files or halts anything on its own.
+  const [onBreach, setOnBreach] = useState<OnBreach>(() => (props.kri as (Kri & { onBreach?: OnBreach }) | null)?.onBreach ?? "alert");
+  const effectiveOnBreach: OnBreach = f.scope === "agent" ? onBreach : "alert";
+  const storedOnBreach = (props.kri as (Kri & { onBreach?: OnBreach }) | null)?.onBreach ?? "alert";
+  // sent for an agent KRI, or to clear a stored suggestion when the scope moves
+  const onBreachField = f.scope === "agent" || storedOnBreach !== "alert" ? { onBreach: effectiveOnBreach } : {};
   const agents = useAgents();
   const projects = useProjects();
   const act = useAction();
@@ -136,7 +145,10 @@ function KriEditor(props: { kri: Kri | null; onClose: () => void }) {
   const save = () =>
     act
       .run(
-        () => (props.kri ? api.patch(`/v1/kris/${props.kri.id}`, kriPayload(f)) : api.post("/v1/kris", { ...kriPayload(f) })),
+        () =>
+          props.kri
+            ? api.patch(`/v1/kris/${props.kri.id}`, { ...kriPayload(f), ...onBreachField })
+            : api.post("/v1/kris", { ...kriPayload(f), ...onBreachField }),
         props.kri ? "KRI saved" : "KRI created",
       )
       .then((ok) => ok && props.onClose());
@@ -199,6 +211,16 @@ function KriEditor(props: { kri: Kri | null; onClose: () => void }) {
               <option value="high">High</option>
             </Select>
           </Field>
+          <Field label="When it breaches">
+            <Select
+              value={effectiveOnBreach}
+              disabled={f.scope !== "agent"}
+              onChange={(e) => setOnBreach(e.target.value as OnBreach)}
+            >
+              <option value="alert">Raise an alert</option>
+              <option value="propose_halt">Raise an alert that suggests halting the agent</option>
+            </Select>
+          </Field>
           {f.metric === "feedback_score" && (
             <Field label="Annotation score name (optional)">
               <Input value={f.scoreName} onChange={(e) => set("scoreName", e.target.value)} maxLength={128} />
@@ -208,6 +230,13 @@ function KriEditor(props: { kri: Kri | null; onClose: () => void }) {
         <p className={v.faint}>
           Below the minimum sample count the KRI neither raises nor clears an alert, so one slow call or a quiet weekend
           never decides anything.
+        </p>
+        <p className={v.faint} data-testid="kri-on-breach-note">
+          {f.scope !== "agent"
+            ? "Only a KRI on one agent can suggest a halt: there is one agent to halt."
+            : effectiveOnBreach === "propose_halt"
+              ? "A breach raises an alert carrying a suggested halt. Nothing is filed and nothing stops on its own: a person may propose the halt from the alert, and a different person must approve it."
+              : "A breach raises an alert only."}
         </p>
         {problem && (
           <p className={v.errLine} role="alert">

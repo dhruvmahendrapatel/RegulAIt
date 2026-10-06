@@ -49,6 +49,7 @@ import {
 } from "@regulait/db";
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { previewedPut } from "./testing/decision-regression.js";
 import { runUseCaseRecertificationSweep } from "./review-policy.js";
 import { useCaseDispatchGate } from "./use-case-gate.js";
 
@@ -179,7 +180,8 @@ beforeAll(async () => {
     const token = (await post(`/v1/users/${id}/keys`, AUTH, { name: "g170" })).json().token as string;
     users[k] = { id, name, auth: { authorization: `Bearer ${token}` } };
   }
-  const r = await app.inject({ method: "PUT", url: "/v1/governance/review-policy", headers: users.admin.auth, payload: policy() });
+  // ADR-0182 A11: previewed first, under the strict decision-regression gate
+  const r = await previewedPut(app, "/v1/governance/review-policy", users.admin.auth, "review_policy", policy());
   expect(r.statusCode, r.body).toBe(200);
 }, 120_000);
 

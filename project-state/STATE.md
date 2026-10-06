@@ -1,5 +1,5 @@
 ---
-phase: adr0181-strict-defaults-security-review-fixes-integrated-on-strict-int-pr-next
+phase: adr0182-d4-accountability-records-integrated-on-d4-int-pr-next
 last_updated: 2026-10-06
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,25 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-06 - D4 accountability records (ADR-0182) built by six agents and integrated on `d4-int`.**
+- P0 (migration **0162**) built the foundation. A11 (decision records and the decision-regression gate), A12 (the AI
+  incident register with EU AI Act and HIPAA clocks and the Art. 73(6) evidence hold), A13 (feedback and appeal;
+  public links shipped off), A14 (AI literacy, acceptable-use acknowledgements, the literacy gate on every governed
+  path, Cedar v3) and S5 (alert owner/SLA/work item, the suggest-only halt, ISACA/NIST/EU pack versions; migration
+  **0167**) were then merged with `--no-ff`. Every new setting is strict, and each relaxation is audited with
+  `detail.transitions`.
+- Migrations 0163–0166 are retired unused. The security review was fixed in three groups (DFX1 incidents, migration
+  **0168**; DFX2 evidence-hold coverage and feedback; DFX3 literacy and decision regression), with every finding fixed
+  (see the ADR-0182 "Security review fixes" section). The next migration is **0169**, and the next ADR is **0183**.
+- Integrating the fix groups turned up three things: an import-cycle TDZ (agent-evidence-hold now loads incidents.ts
+  lazily), an open-incident fixture cleanup, and the "all intake templates retired" re-mint, which now mints under a
+  fresh name. Gate: the full gateway suite (319 files, 4521 passed), and `demo:prepare` gives 19 pass.
+- The demo seeds the D4 story through the real routes: a feedback report that became a closed incident with every
+  clock terminal, plus one acceptable-use document with a completion recorded for Ada, Dana and Avery by the demo tooling
+  (`admin_recorded`; the evidence says it was not acknowledged in person). The literacy gate stays
+  `enforce`. `demo:check` has a new **3 Accountability** beat; `demo:prepare` gives 19 pass, 0 warn, 0 fail.
+- Next: the batch PR from `d4-int` to `main`.
 
 **2026-10-06 - ADR-0181 security review fixed and integrated on `strict-int` (PR #127).**
 - Three fix agents (`strict-fx1`, `strict-fx3`, `strict-fx2`) merged in that order. Migrations **0160** (SAML JIT
@@ -4554,6 +4573,13 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **ADR-0182 follow-ups (2026-10-06):**
+  - A STIX 2.1 incident export (PF-14); an xAPI completion import for training documents.
+  - Incident clocks for further regimes, once verified from primary text.
+  - Tailored web messages for `ai-literacy-not-current` refusals outside the acknowledgement interstitial.
+  - Shard the mocked Playwright suite: it runs about 18 minutes on one worker, and CI's demo-journey cap is now 30.
+  - DFX2 encrypts legacy plaintext feedback resolution notes in an `onReady` hook. A data-key re-encryption run before a
+    new build's first start would log them as failures. This is moot today, because no live database holds D4 data.
 - **ADR-0181 follow-ups (2026-10-06):**
   - Replace the hand-written TOTP with the `otpauth` library (MIT), per open source first (ADR-0176).
   - ~~SAML JIT provisioning should require allowed email domains, as OIDC JIT now does.~~ **Done** (FX2, migration 0160).

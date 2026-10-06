@@ -71,7 +71,8 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
     id: "workspace",
     name: "Workspace",
     landing: "/ui",
-    entries: ["Chat", "Runs", "Workflows", "Inbox", "Projects", "Shared context", "Spend & savings"],
+    // ADR-0182 (D4): AI incidents and feedback & appeals are workspace destinations
+    entries: ["Chat", "Runs", "Workflows", "Inbox", "Projects", "Shared context", "Spend & savings", "AI incidents", "Feedback & appeals"],
   },
   {
     id: "ai-governance",
@@ -86,6 +87,9 @@ const SUITE_MANIFEST: Array<{ id: string; name: string; landing: string; entries
       "Vendors",
       "Risks",
       "Shadow-AI discovery",
+      // ADR-0182 (D4)
+      "Decision regression",
+      "AI literacy",
     ],
   },
   {

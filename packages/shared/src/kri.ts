@@ -33,6 +33,7 @@
  * spend is unknown, so it is "no data" (value null) rather than an invented 0.
  */
 import { z } from "zod";
+import { KRI_ON_BREACH } from "./accountability.js";
 
 export const KRI_METRICS = {
   trace_volume: { label: "Trace volume", unit: "traces", samples: "traces started in the window" },
@@ -70,7 +71,12 @@ const kriFields = {
   severity: z.enum(KRI_SEVERITIES),
   scoreName: z.string().trim().min(1).max(128).nullable(),
   enabled: z.boolean(),
+  /** ADR-0182 S5 (PF-03): `propose_halt` makes a breach SUGGEST a halt of the
+   * KRI's agent (agent scope only — `kriOnBreachProblem` in alert-ownership.ts,
+   * and a DB CHECK) */
+  onBreach: z.enum(KRI_ON_BREACH),
 };
+
 
 function refineKri(
   k: { scope?: KriScope | undefined; scopeId?: string | null | undefined; metric?: KriMetric | undefined; scoreName?: string | null | undefined },
@@ -100,6 +106,7 @@ export const kriCreateSchema = z
     severity: kriFields.severity.default("medium"),
     scoreName: kriFields.scoreName.default(null),
     enabled: kriFields.enabled.default(true),
+    onBreach: kriFields.onBreach.default("alert"),
   })
   .strict()
   .superRefine(refineKri);
@@ -119,6 +126,7 @@ export const kriUpdateSchema = z
     severity: kriFields.severity,
     scoreName: kriFields.scoreName,
     enabled: kriFields.enabled,
+    onBreach: kriFields.onBreach,
   })
   .partial()
   .strict()

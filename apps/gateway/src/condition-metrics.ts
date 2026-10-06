@@ -16,6 +16,10 @@
  *   error_rate              traces, through the KRI measurement (kri.ts),
  *                           widened to the use case's project PLUS agent set
  *   pack_control_evidenced  evaluatePack over the use case's project
+ *   user_report_rate        use_case_feedback problem reports per 1k finished
+ *                           traces (ADR-0182 A13)
+ *   appeal_overturn_rate    use_case_feedback appeals decided upheld or
+ *                           overturned (ADR-0182 A13)
  *
  * THE RULES (each pinned by zz-adr0180-a2-conditions.test.ts, red-proven):
  *   - too few samples is `insufficient` and no data is `not_run` — never `pass`
@@ -77,6 +81,7 @@ import {
   traces,
   usageEvents,
   useCaseConditions,
+  useCaseFeedback,
   users,
   type AiUseCaseRow,
   type Db,
@@ -96,8 +101,10 @@ import {
   decideApprovalSchema,
   describeMetricCondition,
   measuredConditionInputSchema,
+  appealOverturnRate,
   measurementStateFor,
   nextConsecutiveBreaches,
+  userReportRatePer1k,
   validateMetricParams,
   waiveConditionSchema,
   type AssuranceMonitorRuleId,
@@ -433,6 +440,85 @@ async function measurePackControl(db: Db, spec: MetricSpec, scope: AssuranceScop
   return finish(spec, a ? (a.status === "satisfied" ? 1 : 0) : null, samples, [{ type: "compliance_pack_control", id: control.id }]);
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0182 (D4) A13 — the two feedback metrics. OWNER: A13.
+//
+// Feedback is filed against a USE CASE, and a measurement scope is a project
+// plus an agent set (`useCaseScope`), so the feedback counted is that of every
+// use case sharing the scope: in the scope's project, or naming one of its
+// agents. That is the same population the trace denominator is read over.
+// ---------------------------------------------------------------------------
+
+/** the ids of the use cases a scope covers (its project, or naming one of its agents) */
+async function feedbackUseCaseIds(db: Db, scope: AssuranceScope): Promise<string[]> {
+  const parts: SQL[] = [];
+  if (scope.projectId) parts.push(sql`${aiUseCases.projectId} = ${scope.projectId}::uuid`);
+  if (scope.agentIds.length > 0) {
+    parts.push(
+      sql`exists (select 1 from jsonb_array_elements_text(${aiUseCases.intendedAgentIds}) as a(id) where a.id in (${sql.join(
+        scope.agentIds.map((a) => sql`${a}`),
+        sql`, `,
+      )}))`,
+    );
+  }
+  if (parts.length === 0) return [];
+  const rows = await db
+    .select({ id: aiUseCases.id })
+    .from(aiUseCases)
+    .where(parts.length === 1 ? parts[0]! : sql`(${sql.join(parts, sql` or `)})`);
+  return rows.map((r) => r.id);
+}
+
+/** `user_report_rate`: problem reports per 1,000 finished traces in scope, over the window */
+async function measureUserReportRate(db: Db, spec: MetricSpec, scope: AssuranceScope, since: Date, now: Date) {
+  const traceCount = (await measureTraceMetricForScope(db, "error_rate", scope, since, now, 0)).samples;
+  const ucIds = await feedbackUseCaseIds(db, scope);
+  const where = and(
+    ucIds.length > 0 ? inArray(useCaseFeedback.useCaseId, ucIds) : sql`false`,
+    eq(useCaseFeedback.kind, "problem"),
+    gte(useCaseFeedback.createdAt, since),
+    lte(useCaseFeedback.createdAt, now),
+  );
+  const [agg] = await db.select({ n: sql<number>`count(*)::int` }).from(useCaseFeedback).where(where);
+  const ids = await db
+    .select({ id: useCaseFeedback.id })
+    .from(useCaseFeedback)
+    .where(where)
+    .orderBy(desc(useCaseFeedback.createdAt))
+    .limit(EVIDENCE_LIMIT);
+  // the traces are the samples: no finished trace is no measurement, never a rate of 0
+  return finish(spec, userReportRatePer1k(Number(agg?.n ?? 0), traceCount), traceCount, ref("use_case_feedback", ids.map((r) => r.id)));
+}
+
+/** `appeal_overturn_rate`: the share of appeals decided in the window whose decision was overturned */
+async function measureAppealOverturnRate(db: Db, spec: MetricSpec, scope: AssuranceScope, since: Date, now: Date) {
+  const ucIds = await feedbackUseCaseIds(db, scope);
+  const where = and(
+    ucIds.length > 0 ? inArray(useCaseFeedback.useCaseId, ucIds) : sql`false`,
+    eq(useCaseFeedback.kind, "appeal"),
+    inArray(useCaseFeedback.status, ["upheld", "overturned"]),
+    gte(useCaseFeedback.resolvedAt, since),
+    lte(useCaseFeedback.resolvedAt, now),
+  );
+  const [agg] = await db
+    .select({
+      upheld: sql<number>`(count(*) filter (where ${useCaseFeedback.status} = 'upheld'))::int`,
+      overturned: sql<number>`(count(*) filter (where ${useCaseFeedback.status} = 'overturned'))::int`,
+    })
+    .from(useCaseFeedback)
+    .where(where);
+  const upheld = Number(agg?.upheld ?? 0);
+  const overturned = Number(agg?.overturned ?? 0);
+  const ids = await db
+    .select({ id: useCaseFeedback.id })
+    .from(useCaseFeedback)
+    .where(where)
+    .orderBy(desc(useCaseFeedback.resolvedAt))
+    .limit(EVIDENCE_LIMIT);
+  // only upheld and overturned decide an appeal; they are the samples
+  return finish(spec, appealOverturnRate(upheld, overturned), upheld + overturned, ref("use_case_feedback", ids.map((r) => r.id)));
+}
+
 /**
  * Measure one metric over a use case's scope (its project plus its agent
  * set). Reused by A3, A8 and A10. Never throws for "no data": nothing in
@@ -463,6 +549,11 @@ export const measureAssuranceMetric: MeasureAssuranceMetricFn<Db> = async (db, s
       return measureErrorRate(db, spec, scope, since, now);
     case "pack_control_evidenced":
       return measurePackControl(db, spec, scope, since, now, params);
+    // ADR-0182 (D4) A13 — measured from the feedback register (feedback.ts)
+    case "user_report_rate":
+      return measureUserReportRate(db, spec, scope, since, now);
+    case "appeal_overturn_rate":
+      return measureAppealOverturnRate(db, spec, scope, since, now);
   }
 };
 

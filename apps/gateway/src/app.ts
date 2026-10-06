@@ -444,6 +444,13 @@ import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from 
 import { registerRequiredTestRoutes } from "./required-tests.js";
 import { registerAutonomyRoutes } from "./autonomy.js";
 import { registerRiskToleranceRoutes } from "./risk-tolerance.js";
+// ADR-0182 (D4) — accountability records: P0's EU AI Act role and each slice's routes
+import { registerEuAiActRoleRoutes } from "./eu-ai-act-role.js";
+import { registerDecisionRegressionRoutes } from "./decision-regression.js";
+import { registerIncidentRoutes } from "./incidents.js";
+import { registerFeedbackRoutes } from "./feedback.js";
+import { registerAiLiteracyRoutes } from "./ai-literacy.js";
+import { registerAlertOwnershipRoutes } from "./alert-ownership.js";
 import { builderStepsAwaitingApproval, resumeBuilderAfterApproval } from "./builder-runtime.js";
 import { drainBackgroundWork, scheduleBackgroundWork } from "./background-work.js";
 import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
@@ -4695,6 +4702,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRequiredTestRoutes(app, db);
   registerAutonomyRoutes(app, db);
   registerRiskToleranceRoutes(app, db);
+
+  // ADR-0182 (ADR-0175 batch D4) — accountability records. One registration
+  // per slice module; each slice fills in its own file. P0: the use case's EU
+  // AI Act role (owner or admin; narrowing is an admin's audited relaxation).
+  // A11 decision regression, A12 incidents, A13 feedback and appeal (with the
+  // two public signed-link routes), A14 AI literacy, S5 alert owner and
+  // ticket (stubs answer 501 until their slice lands).
+  registerEuAiActRoleRoutes(app, db);
+  registerDecisionRegressionRoutes(app, db);
+  registerIncidentRoutes(app, db, { dataKey: opts.dataKey });
+  registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
+  registerAiLiteracyRoutes(app, db);
+  registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

@@ -1236,7 +1236,9 @@
                                 "eval_pass_rate",
                                 "spend_usd",
                                 "error_rate",
-                                "pack_control_evidenced"
+                                "pack_control_evidenced",
+                                "user_report_rate",
+                                "appeal_overturn_rate"
                               ]
                             },
                             "params": {

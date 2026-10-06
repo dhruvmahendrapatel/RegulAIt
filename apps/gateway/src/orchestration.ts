@@ -24,6 +24,7 @@ import {
   type TraceStatus,
 } from "@regulait/db";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
@@ -1476,7 +1477,7 @@ async function evaluateNodeOwner(
     // user's entitlements. It inherits the halt for the same reason it
     // inherits every other ceiling: a delegated run must never be able to do
     // what a direct caller cannot.
-    execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
+    execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...(await literacySlot(db, userId)) },
     agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
     mode,
     agentGrants: grants,
@@ -1889,6 +1890,7 @@ export async function planRun(
       ceilingTier = agentById.get(policy.ceilingAgentId)?.tier ?? null;
     }
     const ownerExecutionMode = await loadExecutionMode(db);
+    const ownerLiteracy = await literacySlot(db, userId); // ADR-0182 A14
     // ADR-0173 §3: a plan-time envelope must refuse what dispatch would refuse
     const ownerModelPolicy = await loadModelPolicy(db);
     const evalOwner = (
@@ -1902,7 +1904,7 @@ export async function planRun(
         evaluateAgent({
           userId,
           // ADR-0124 — same rule as every other worker dispatch.
-          execution: postureOf(ownerExecutionMode, agentHaltOf(agent)),
+          execution: { ...postureOf(ownerExecutionMode, agentHaltOf(agent)), ...ownerLiteracy },
           agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
           mode,
           agentGrants: grants,

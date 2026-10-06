@@ -13,6 +13,7 @@ import {
   pmConnections,
   pmLinks,
   pmSyncEvents,
+  sql,
   users,
   workflowInstances,
   type Db,
@@ -30,7 +31,7 @@ import {
   type PmProvider,
   type NormalizedInboundEvent,
 } from "@regulait/pm-provider";
-import { runExternalWrite } from "./external-effects.js";
+import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import type { RunState, TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import {
@@ -1350,5 +1351,145 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }),
     );
     return { links: live };
+  });
+}
+
+// ===========================================================================
+// ADR-0182 (ADR-0175 batch D4) S5 — ONE PM WORK ITEM PER GOVERNANCE ALERT
+// EPISODE (PathForward PF-14). Called by `alert-ownership.ts` (the admin's
+// `POST /v1/governance/alerts/:alertId/ticket`, and `alert_ticket_mode =
+// auto_high` for a new high episode). Lives here because the provider, the
+// egress guard and the link table are this module's.
+//
+// IDEMPOTENT PER EPISODE, across connections: the link is
+// `pm_links.object_type = 'governance_alert'` (the column has no DB CHECK),
+// and a transaction-scoped advisory lock on the episode serialises two
+// concurrent requests, so the second finds the first's link and files nothing.
+// No audit row is written inside the locked transaction before the provider
+// call (the egress guard audits on its own connection).
+// ===========================================================================
+
+/** `pm_links.object_type` for a governance alert episode. The column has no
+ * DB CHECK; schema.ts's TS enum does not list it yet (integrator line). */
+export const GOVERNANCE_ALERT_PM_OBJECT = "governance_alert" as unknown as (typeof pmLinks.$inferInsert)["objectType"];
+
+export type AlertTicketOutcome =
+  | { outcome: "created" | "existing"; connectionId: string; connectionName: string; externalId: string; externalUrl: string }
+  | { outcome: "refused"; status: number; error: string; detail: string };
+
+/** the episode's work item, if one was filed (oldest wins) */
+export async function governanceAlertTicket(db: Db, alertId: string) {
+  const [link] = await db
+    .select({
+      connectionId: pmLinks.connectionId,
+      connectionName: pmConnections.name,
+      provider: pmConnections.provider,
+      externalId: pmLinks.externalId,
+      externalUrl: pmLinks.externalUrl,
+      createdAt: pmLinks.createdAt,
+    })
+    .from(pmLinks)
+    .innerJoin(pmConnections, eq(pmConnections.id, pmLinks.connectionId))
+    .where(and(eq(pmLinks.objectType, GOVERNANCE_ALERT_PM_OBJECT), eq(pmLinks.objectId, alertId)))
+    .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id))
+    .limit(1);
+  return link ?? null;
+}
+
+/** the work items of many episodes in one query (oldest per episode wins) */
+export async function governanceAlertTickets(db: Db, alertIds: readonly string[]) {
+  const out = new Map<string, NonNullable<Awaited<ReturnType<typeof governanceAlertTicket>>>>();
+  if (alertIds.length === 0) return out;
+  const rows = await db
+    .select({
+      alertId: pmLinks.objectId,
+      connectionId: pmLinks.connectionId,
+      connectionName: pmConnections.name,
+      provider: pmConnections.provider,
+      externalId: pmLinks.externalId,
+      externalUrl: pmLinks.externalUrl,
+      createdAt: pmLinks.createdAt,
+    })
+    .from(pmLinks)
+    .innerJoin(pmConnections, eq(pmConnections.id, pmLinks.connectionId))
+    .where(and(eq(pmLinks.objectType, GOVERNANCE_ALERT_PM_OBJECT), inArray(pmLinks.objectId, [...alertIds])))
+    .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id));
+  for (const { alertId, ...link } of rows) if (!out.has(alertId)) out.set(alertId, link);
+  return out;
+}
+
+export async function fileGovernanceAlertTicket(
+  db: Db,
+  dataKey: string,
+  input: {
+    alertId: string;
+    connectionId: string;
+    actorUserId: string | null;
+    trigger: "manual" | "auto_high";
+    text: { title: string; description: string };
+  },
+): Promise<AlertTicketOutcome> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`pm_link:governance_alert:${input.alertId}`}))`);
+    const existing = await governanceAlertTicket(tx as unknown as Db, input.alertId);
+    if (existing) {
+      return {
+        outcome: "existing" as const,
+        connectionId: existing.connectionId,
+        connectionName: existing.connectionName,
+        externalId: existing.externalId,
+        externalUrl: existing.externalUrl,
+      };
+    }
+    const [conn] = await tx.select().from(pmConnections).where(eq(pmConnections.id, input.connectionId));
+    if (!conn) return { outcome: "refused" as const, status: 404, error: "unknown_connection", detail: "no PM connection has that id" };
+    let provider;
+    try {
+      provider = await providerFor(db, conn, dataKey, {
+        userId: input.actorUserId,
+        detail: { op: "governance_alert_ticket", alertId: input.alertId, trigger: input.trigger },
+      });
+    } catch (err) {
+      if (err instanceof ConnectionEgressBlockedError || err instanceof CompiledDefaultEgressBlockedError) {
+        return { outcome: "refused" as const, status: 403, error: "egress_blocked", detail: err.decision.reason };
+      }
+      if (err instanceof PmProviderError) {
+        return { outcome: "refused" as const, status: 422, error: "unsupported_pm_provider", detail: err.message };
+      }
+      throw err;
+    }
+    const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
+    let ref: { id: string; url: string };
+    try {
+      ref = await provider.createWorkItem(conn.project, mapping.task.workItemType, resolveTaskFields(mapping, input.text));
+    } catch (err) {
+      if (err instanceof ExternalEffectBlockedError) {
+        return { outcome: "refused" as const, status: 409, error: "external_writes_paused", detail: err.message };
+      }
+      if (err instanceof PmProviderError) {
+        return { outcome: "refused" as const, status: 502, error: "pm_provider_failed", detail: err.message };
+      }
+      throw err;
+    }
+    await tx.insert(pmLinks).values({
+      connectionId: conn.id,
+      objectType: GOVERNANCE_ALERT_PM_OBJECT,
+      objectId: input.alertId,
+      nodeId: null,
+      externalId: ref.id,
+      externalUrl: ref.url,
+      lastSyncedAt: new Date(),
+    });
+    await tx.insert(auditLog).values({
+      userId: input.actorUserId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "pm_work_item",
+      objectId: input.alertId,
+      detail: { externalId: ref.id, connection: conn.name, phase: "create", subject: "governance_alert", trigger: input.trigger },
+      effect: "allow",
+      ruleId: "pm-work-item-created",
+      ruleChain: [],
+      reason: `governance alert ${input.alertId} linked to ${conn.provider} work item '${ref.id}' (${input.trigger === "manual" ? "filed by a person" : "filed automatically: alert_ticket_mode = auto_high"})`,
+    });
+    return { outcome: "created" as const, connectionId: conn.id, connectionName: conn.name, externalId: ref.id, externalUrl: ref.url };
   });
 }

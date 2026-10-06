@@ -5,7 +5,7 @@ import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Select, SeverityBadge, Tabs, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -19,13 +19,35 @@ interface GovernanceAlert {
   status: AlertStatus;
   subject: { key: string; type: string; id: string | null; label: string; context: { key: string; id: string; label: string } | null };
   title: string;
-  detail: { sourceNodeKey?: string; sourceRiskId?: string; path?: string[]; pathLabels?: string[] };
+  detail: {
+    sourceNodeKey?: string;
+    sourceRiskId?: string;
+    path?: string[];
+    pathLabels?: string[];
+    /** ADR-0182 S5 (PF-03): a KRI set to suggest a halt; nothing was filed */
+    suggestedAction?: { kind: "halt_agent"; agentId: string };
+  };
   firstDetectedAt: string;
   lastDetectedAt: string;
   acknowledgedAt: string | null;
   acknowledgedBy: string | null;
   ackNote: string | null;
   resolvedAt: string | null;
+  /** ADR-0182 S5 (PF-14): owner, SLA and ticket (absent on an older gateway) */
+  owner?: { id: string; name: string | null; source: "derived" | "assigned" | null } | null;
+  dueAt?: string | null;
+  slaBreachedAt?: string | null;
+  sla?: SlaState;
+  ticket?: AlertTicket | null;
+}
+type SlaState = "none" | "on_track" | "due_soon" | "breached" | "met";
+interface AlertTicket { connectionId: string; connectionName: string; externalId: string; externalUrl: string }
+interface OwnershipView {
+  owner: GovernanceAlert["owner"];
+  dueAt: string | null;
+  slaBreachedAt: string | null;
+  sla: SlaState;
+  ticket: AlertTicket | null;
 }
 interface AlertsResponse {
   alerts: GovernanceAlert[];
@@ -137,9 +159,9 @@ export default function GovernanceAlertsPage() {
               <div className={s.alertList}>
                 {alerts.data?.alerts.map((alert) => (
                   <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} onClick={() => setSelectedId(alert.id)}>
-                    <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{alert.status}</span>}</span>
+                    <span className={s.alertRowHead}><SeverityBadge severity={alert.severity} />{alert.status === "open" ? null : <span className={v.faint}>{alert.status}</span>}<SlaChip alert={alert} /></span>
                     <strong>{alert.title}</strong>
-                    <span className={v.faint}>{alert.ruleLabel} · seen {ago(alert.lastDetectedAt)}</span>
+                    <span className={v.faint}>{alert.ruleLabel} · seen {ago(alert.lastDetectedAt)}{alert.owner !== undefined ? ` · ${alert.owner ? `owner ${alert.owner.name ?? "a user"}` : "unowned"}` : ""}</span>
                   </button>
                 ))}
               </div>
@@ -150,6 +172,7 @@ export default function GovernanceAlertsPage() {
                     <div className={v.row}><SeverityBadge severity={selected.severity} />{selected.status === "open" ? null : <span className={v.dim}>{selected.status}</span>}<span className={v.faint}>{selected.ruleLabel}</span></div>
                     <p>{selected.title}</p>
                     <SubjectLinks alert={selected} />
+                    <OwnershipPanel alert={selected} onChanged={refresh} />
                     <div className={v.row}>
                       <Button size="sm" variant="ghost" disabled={action.busy} onClick={() => void action.run(async () => {
                         const posted = await api.post<{ posted: true; connection: string; channel: string }>(`/v1/governance/alerts/${selected.id}/post`);
@@ -163,6 +186,8 @@ export default function GovernanceAlertsPage() {
                       <div><strong>Inherited-risk path</strong><ol className={s.pathList}>{(selected.detail.pathLabels ?? selected.detail.path ?? []).map((part) => <li key={part}>{part}</li>)}</ol></div>
                     ) : null}
                     {selected.detail.sourceRiskId ? <Link to={`/admin/risks?riskId=${selected.detail.sourceRiskId}`}>Open source risk</Link> : null}
+                    {/* ADR-0182 A12: report an incident from this alert (the form arrives pre-linked to it) */}
+                    <div><Link to={`/incidents?new=1&detectionSource=monitor_alert&sourceRef=${selected.id}`}>Open incident</Link></div>
                     {selected.ackNote ? <p className={v.dim}>Acknowledgement note: {selected.ackNote}</p> : null}
                     {selected.status === "open" ? (
                       <div className={v.stack}>
@@ -177,6 +202,13 @@ export default function GovernanceAlertsPage() {
                         }, "Alert acknowledged")}>Acknowledge</Button></div>
                       </div>
                     ) : null}
+                    {selected.detail.suggestedAction?.kind === "halt_agent" && selected.status !== "resolved" ? (
+                      <p className={s.statusLine} role="note" data-testid="suggested-halt">
+                        This KRI is set to suggest halting its agent when it breaches. Nothing has been filed and the agent is
+                        still running: Propose halt below puts one halt request on the approvals queue with you as its
+                        proposer, and a different person must approve it before anything stops.
+                      </p>
+                    ) : null}
                     <RemediationPanel alertId={selected.id} />
                   </div>
                 </Card>
@@ -185,8 +217,235 @@ export default function GovernanceAlertsPage() {
             </div>
           )}
         </QueryGate>
+        <AlertSettingsCard />
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0182 S5 (PF-14) — owner, SLA and ticket
+// ---------------------------------------------------------------------------
+
+const SLA_CHIP: Record<Exclude<SlaState, "none">, { tone: Tone; label: string }> = {
+  on_track: { tone: "info", label: "SLA on track" },
+  due_soon: { tone: "warn", label: "SLA due soon" },
+  breached: { tone: "danger", label: "SLA breached" },
+  met: { tone: "ok", label: "SLA met" },
+};
+
+function SlaChip({ alert }: { alert: Pick<GovernanceAlert, "sla" | "dueAt"> }) {
+  if (!alert.sla || alert.sla === "none") return null;
+  const chip = SLA_CHIP[alert.sla];
+  return <Badge tone={chip.tone} title={alert.dueAt ? `Due ${new Date(alert.dueAt).toUTCString()}` : undefined}>{chip.label}</Badge>;
+}
+
+/** a work item's link only when it is a web address; anything else is shown as text */
+function safeHref(url: string): string | null {
+  return /^https?:\/\//i.test(url) ? url : null;
+}
+
+function OwnershipPanel({ alert, onChanged }: { alert: GovernanceAlert; onChanged: () => Promise<void> }) {
+  const users = useUsers();
+  const action = useAction();
+  const [ownerId, setOwnerId] = useState("");
+  const [connectionId, setConnectionId] = useState("");
+  const connections = useQuery({
+    queryKey: ["pm", "connections"],
+    queryFn: () => api.get<{ connections: Array<{ id: string; name: string; provider: string }> }>("/v1/pm/connections"),
+  });
+  if (alert.owner === undefined) return null; // an older gateway: nothing to show
+  const resolved = alert.status === "resolved";
+  const active = (users.data?.users ?? []).filter((u) => !(u as { disabledAt?: string | null }).disabledAt);
+  const href = alert.ticket ? safeHref(alert.ticket.externalUrl) : null;
+  return (
+    <div className={v.stack} data-testid="alert-ownership">
+      <div className={v.sectionTitle} style={{ marginTop: 0 }}>Owner and SLA</div>
+      <div className={v.row}>
+        <span>
+          Owner: {alert.owner ? <strong>{alert.owner.name ?? alert.owner.id}</strong> : <Badge tone="warn">unowned</Badge>}
+          {alert.owner?.source ? <span className={v.faint}> · {alert.owner.source === "derived" ? "derived from the subject" : "assigned"}</span> : null}
+        </span>
+        <SlaChip alert={alert} />
+        <span className={v.faint}>
+          {alert.dueAt ? `Due ${new Date(alert.dueAt).toUTCString()}` : "No due time yet"}
+          {alert.slaBreachedAt ? ` · breached ${ago(alert.slaBreachedAt)}, escalated to the admins` : ""}
+        </span>
+      </div>
+      <p className={v.faint}>
+        An alert is due until its condition clears; acknowledging records who is responding and does not stop the clock. regulAIt never resolves or acknowledges an alert because its time ran out.
+      </p>
+      {!resolved ? (
+        <div className={v.row}>
+          <Field label="Assign to">
+            <Select value={ownerId} onChange={(event) => setOwnerId(event.target.value)}>
+              <option value="">Choose a person</option>
+              {active.map((u) => <option key={u.id} value={u.id}>{u.displayName || u.email}</option>)}
+            </Select>
+          </Field>
+          <Button size="sm" disabled={action.busy || !ownerId} onClick={() => void action.run(async () => {
+            await api.put<OwnershipView>(`/v1/governance/alerts/${alert.id}/owner`, { userId: ownerId });
+            setOwnerId("");
+            await onChanged();
+          }, "Owner assigned")}>Assign</Button>
+        </div>
+      ) : null}
+      <div className={v.sectionTitle}>Work item</div>
+      {alert.ticket ? (
+        <p data-testid="alert-ticket">
+          Filed as {href ? <a href={href} target="_blank" rel="noreferrer noopener">{alert.ticket.externalId}</a> : <code>{alert.ticket.externalId}</code>} on {alert.ticket.connectionName}. One work item per alert: filing again returns this one.
+        </p>
+      ) : resolved ? (
+        <p className={v.faint}>No work item was filed for this alert.</p>
+      ) : (connections.data?.connections ?? []).length === 0 ? (
+        <p className={v.faint}>No PM connection is configured. Add one under integrations to file a work item.</p>
+      ) : (
+        <div className={v.row}>
+          <Field label="PM connection">
+            <Select value={connectionId} onChange={(event) => setConnectionId(event.target.value)}>
+              <option value="">Choose a connection</option>
+              {(connections.data?.connections ?? []).map((c) => <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>)}
+            </Select>
+          </Field>
+          <Button size="sm" disabled={action.busy || !connectionId} onClick={() => void action.run(async () => {
+            await api.post(`/v1/governance/alerts/${alert.id}/ticket`, { connectionId });
+            await onChanged();
+          }, "Work item filed")}>File work item</Button>
+          <span className={v.hint}>Sends the rule, the severity, the alert&apos;s title and a link to the PM tool; a person the alert is about is named only by user id.</span>
+        </div>
+      )}
+      {action.error ? <p className={v.errLine} role="alert">{action.error}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * The two alert settings (admin; the page is admin-only). MIRRORS
+ * `ACCOUNTABILITY_STRICT_DEFAULTS`, `_SETTING_COPY` and `_SETTING_LIMITS` in
+ * packages/shared/src/accountability.ts — the SPA does not import the shared
+ * package, and the gateway refuses anything outside the bounds, so drift
+ * fails loudly. Every change goes through the audited PUT /v1/org/settings.
+ */
+const ALERT_SLA_STRICT = { high: 24, medium: 72, low: 168 } as const;
+const ALERT_SLA_MAX = 720;
+const SLA_COPY = {
+  strict: "24 hours for high, 72 for medium, 168 for low; a breached episode is escalated to the admins.",
+  relaxed: "Longer times (each up to 720 hours) let an alert stay unhandled longer before it is escalated.",
+};
+const TICKET_COPY = {
+  strict: "Manual: a work item is filed in the PM tool only when a person asks for one.",
+  relaxed:
+    "Automatic for high alerts files a work item in the chosen third-party PM tool for every new high episode, with the " +
+    "alert's title in the work item description; people appear as 'a user (id …)'.",
+};
+type Sev = keyof typeof ALERT_SLA_STRICT;
+const SEVERITIES: Sev[] = ["high", "medium", "low"];
+
+function AlertSettingsCard() {
+  const action = useAction();
+  const settings = useQuery({
+    queryKey: ["org", "settings"],
+    queryFn: () =>
+      api.get<{ settings: { alertSlaHours?: Record<Sev, number>; alertTicketMode?: "manual" | "auto_high"; alertTicketConnectionId?: string | null } }>(
+        "/v1/org/settings",
+      ),
+  });
+  const connections = useQuery({
+    queryKey: ["pm", "connections"],
+    queryFn: () => api.get<{ connections: Array<{ id: string; name: string; provider: string }> }>("/v1/pm/connections"),
+  });
+  const [pickedConnection, setPickedConnection] = useState<string | null>(null);
+  const current = settings.data?.settings;
+  const [draft, setDraft] = useState<Partial<Record<Sev, string>>>({});
+  if (!current?.alertSlaHours || !current.alertTicketMode) return null;
+  const hours = current.alertSlaHours;
+  const value = (sev: Sev) => draft[sev] ?? String(hours[sev]);
+  const next = Object.fromEntries(SEVERITIES.map((sev) => [sev, Number(value(sev))])) as Record<Sev, number>;
+  const valid = SEVERITIES.every((sev) => Number.isInteger(next[sev]) && next[sev] >= 1 && next[sev] <= ALERT_SLA_MAX);
+  const changed = SEVERITIES.some((sev) => next[sev] !== hours[sev]);
+  const slaRelaxed = SEVERITIES.some((sev) => hours[sev] > ALERT_SLA_STRICT[sev]);
+  const ticketRelaxed = current.alertTicketMode !== "manual";
+  // the ONE connection automatic tickets go to: never chosen for the admin
+  const savedConnection = current.alertTicketConnectionId ?? null;
+  const connection = pickedConnection ?? savedConnection ?? "";
+  const stopped = current.alertTicketMode === "auto_high" && !savedConnection;
+  return (
+    <Card title="Alert SLA and tickets — settings">
+      <div className={v.stack} data-testid="alert-settings">
+        <div className={v.row}>
+          <strong>Alert SLA (hours per severity)</strong>
+          {slaRelaxed ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
+        </div>
+        <p className={v.faint}>Strict default: {SLA_COPY.strict} {slaRelaxed ? SLA_COPY.relaxed : null}</p>
+        <div className={v.row}>
+          {SEVERITIES.map((sev) => (
+            <Field key={sev} label={`${sev[0]!.toUpperCase()}${sev.slice(1)} (hours)`}>
+              <Input type="number" min={1} max={ALERT_SLA_MAX} value={value(sev)} style={{ width: 110 }}
+                onChange={(event) => setDraft((d) => ({ ...d, [sev]: event.target.value }))} />
+            </Field>
+          ))}
+          <Button size="sm" disabled={action.busy || !valid || !changed} onClick={() => void action.run(async () => {
+            await api.put("/v1/org/settings", { alertSlaHours: next });
+            setDraft({});
+            await settings.refetch();
+          }, "Alert SLA saved (audited)")}>Save SLA</Button>
+          <Button size="sm" variant="ghost" disabled={action.busy || SEVERITIES.every((sev) => hours[sev] === ALERT_SLA_STRICT[sev])} onClick={() => void action.run(async () => {
+            await api.put("/v1/org/settings", { alertSlaHours: { ...ALERT_SLA_STRICT } });
+            setDraft({});
+            await settings.refetch();
+          }, "Alert SLA back to the strict default")}>Restore strict</Button>
+        </div>
+        {!valid ? <p className={v.errLine} role="alert">Each SLA is a whole number of hours from 1 to {ALERT_SLA_MAX}.</p> : null}
+        <div className={v.row}>
+          <strong>Alert tickets</strong>
+          {ticketRelaxed ? <Badge tone="warn">relaxed</Badge> : <Badge tone="ok">strict default</Badge>}
+        </div>
+        <p className={v.faint}>Strict default: {TICKET_COPY.strict} {ticketRelaxed ? TICKET_COPY.relaxed : null}</p>
+        {stopped ? (
+          <p className={v.errLine} role="alert">
+            Automatic tickets have stopped: the PM connection named for them no longer exists. regulAIt does not switch to another
+            connection; name one below or set filing back to manual.
+          </p>
+        ) : null}
+        <div className={v.row}>
+          <Field label="PM connection for automatic tickets">
+            <Select value={connection} onChange={(event) => {
+              const id = event.target.value || null;
+              setPickedConnection(id ?? "");
+              if (current.alertTicketMode === "auto_high" && id) {
+                void action.run(async () => {
+                  await api.put("/v1/org/settings", { alertTicketConnectionId: id });
+                  setPickedConnection(null);
+                  await settings.refetch();
+                }, "Automatic tickets now go to the chosen connection (audited)");
+              }
+            }}>
+              <option value="">None named</option>
+              {(connections.data?.connections ?? []).map((c) => <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>)}
+            </Select>
+          </Field>
+          <Field label="Filing">
+            <Select value={current.alertTicketMode} onChange={(event) => {
+              const mode = event.target.value as "manual" | "auto_high";
+              if (mode === "auto_high" && !connection) {
+                action.setError("Choose the PM connection automatic tickets go to first; regulAIt never picks one for you.");
+                return;
+              }
+              void action.run(async () => {
+                await api.put("/v1/org/settings", mode === "auto_high" ? { alertTicketMode: mode, alertTicketConnectionId: connection } : { alertTicketMode: mode });
+                setPickedConnection(null);
+                await settings.refetch();
+              }, mode === "manual" ? "Alert tickets: manual (strict default)" : "Alert tickets: automatic for high alerts (relaxed, audited)");
+            }}>
+              <option value="manual">Manual — a person files each one (strict default)</option>
+              <option value="auto_high">Automatic for every new high alert (relaxed)</option>
+            </Select>
+          </Field>
+        </div>
+        <p className={v.faint}>Every change is recorded in the audit log with its previous value.</p>
+        {action.error ? <p className={v.errLine} role="alert">{action.error}</p> : null}
+      </div>
+    </Card>
   );
 }
 
@@ -240,7 +499,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                           await remediation.refetch();
                         }, "Remediation proposed for independent approval")}
                       >
-                        Propose…
+                        {candidate.kind === "halt_agent" ? "Propose halt" : "Propose…"}
                       </Button>
                       {approvers.length === 0 ? <span className={v.hint}>Another user is required; proposers cannot approve their own remediation.</span> : null}
                     </div>

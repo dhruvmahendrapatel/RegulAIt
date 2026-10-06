@@ -319,6 +319,12 @@ export async function adjudicateInducedCall(
     {},
     null,
     input.projectId ?? null,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    // ADR-0182 A14: an evaluation dispatch is exempt from the literacy gate
+    { origin: "evaluation" },
   );
   const held = decision.effect !== "allow";
   return {

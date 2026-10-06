@@ -37,6 +37,8 @@ import { refuseSodMint } from "./sod.js";
 import { refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js";
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
@@ -176,6 +178,7 @@ import type { ArtifactModelProvider } from "@regulait/training-provider";
 import { egressRefusal } from "./egress-guard.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
+import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
@@ -668,12 +671,14 @@ export async function executeGovernedDispatch(
     // served-binding check every attempt takes when the caller names its
     // feature — and a refusal there is recorded as a DENIED hop.)
     const hopExecutionMode = await loadExecutionMode(db);
+    // ADR-0182 A14 — the hop runs for the same person: same literacy slot (an eval or red-team dispatch is exempt)
+    const hopLiteracy = await literacySlot(db, args.userId, { origin: args.evaluationSubject === true || args.modelFeature?.feature === "evals" ? "evaluation" : "human" });
     const decision = evaluateAgent({
       userId: args.userId,
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
       // stop traffic being routed INTO it by somebody else's fallback chain.
-      execution: postureOf(hopExecutionMode, agentHaltOf(hopAgent)),
+      execution: { ...postureOf(hopExecutionMode, agentHaltOf(hopAgent)), ...hopLiteracy },
       agent: {
         id: hopAgent.id,
         name: hopAgent.name,
@@ -2794,6 +2799,8 @@ export function registerAgentConnectorRoutes(
       .from(agents)
       .where(eq(agents.id, agentId));
     if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    // D4 DFX2: the drift baseline is how the incident's model behaviour is evaluated
+    if (await agentEvidenceHoldRefused(db, req, reply, agentId, "expected served model")) return reply;
     const [row] = await db
       .update(agents)
       .set({ expectedServedModel: body.expectedServedModel })
@@ -2848,6 +2855,7 @@ export function registerAgentConnectorRoutes(
       });
     }
     const patch = updateAgentConfigSchema.parse(req.body ?? {});
+    if (await agentEvidenceHoldRefused(db, req, reply, agentId, "model and prices")) return reply;
     const res = await applyRuleEdit(db, {
       artifactType: "agent_config",
       artifactId: agentId,
@@ -2884,6 +2892,7 @@ export function registerAgentConnectorRoutes(
     const body = setAgentSystemPromptSchema.parse(req.body);
     const [existing] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    if (await agentEvidenceHoldRefused(db, req, reply, agentId, "system prompt")) return reply;
     const created = await newVersion(db, {
       artifactType: "agent_system_prompt",
       artifactId: agentId,
@@ -3225,6 +3234,7 @@ export function registerAgentConnectorRoutes(
     const body = setAgentFallbacksSchema.parse(req.body);
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    if (await agentEvidenceHoldRefused(db, req, reply, agentId, "fallback endpoints")) return reply;
 
     if (body.fallbackAgentIds.includes(agentId)) {
       return reply.status(422).send({
@@ -3816,10 +3826,12 @@ export function registerAgentConnectorRoutes(
     // ADR-0173 §3 — the org's model allow-list for the "chat" feature, applied
     // to the kernel's allow below and to every routing candidate.
     const invokeModelPolicy = await loadModelPolicy(db);
+    // ADR-0182 A14 — the literacy slot, once per request (the routing roster below reuses it)
+    const invokeLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) });
     const kernelDecision = evaluateAgent({
       userId,
       // ADR-0124 — the kill switch on the native dispatch path.
-      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
+      execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...invokeLiteracy },
       // the display name rides along so denial prose says "premium-mock
       // (c8d62183…)" instead of a bare UUID (the id stays in the trace)
       agent: {
@@ -4070,7 +4082,7 @@ export function registerAgentConnectorRoutes(
           withModelPolicy(
             evaluateAgent({
               userId,
-              execution: postureOf(routingExecutionMode, agentHaltOf(a)),
+              execution: { ...postureOf(routingExecutionMode, agentHaltOf(a)), ...invokeLiteracy },
               agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
               mode: body.mode,
               agentGrants: grants,

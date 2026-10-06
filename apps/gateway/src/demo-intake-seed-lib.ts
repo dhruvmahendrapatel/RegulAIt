@@ -142,12 +142,29 @@ async function seedDemoIntakeRun(
     else {
       // names stay unique after retirement — take a fresh one if this name was used before
       const name = templates.some((t) => t.name === VARIANT) ? `${VARIANT}-${Date.now()}` : VARIANT;
-      const r = await call(
+      // ADR-0182 A11: an intake variant decides every new sign-off, so the
+      // strict decision-regression gate admits it only after a preview of this
+      // exact body; the changed routing is accepted with a reason (audited)
+      const variant = { name, approverUserId: avery.id };
+      const preview = await call(
         "POST",
-        "/v1/workflows/template-gallery/ai-use-case-intake/create",
-        { name, approverUserId: avery.id },
+        "/v1/governance/decision-regression/preview",
+        { subject: "intake_template", candidate: { galleryId: "ai-use-case-intake", ...variant } },
         ada.auth,
       );
+      const r = ok(preview.status)
+        ? await call(
+            "POST",
+            "/v1/workflows/template-gallery/ai-use-case-intake/create",
+            {
+              ...variant,
+              regressionRunId: preview.body.id,
+              acceptChangedOutcomes: true,
+              acceptReason: "demo: every new use-case sign-off goes to the governance approver",
+            },
+            ada.auth,
+          )
+        : preview;
       if (ok(r.status)) report.created.push("use-case sign-off routed to Avery");
       else fail("use-case sign-off routing", r);
     }
@@ -342,6 +359,9 @@ async function seedDemoIntakeRun(
   // --- required AI tests (ADR-0180 A3): real red-team runs for the agents the story ships ---
   await seedRequiredTestRuns(call, ada, agentId, fixtures, report);
 
+  // --- accountability records (ADR-0182 D4): one feedback item that became a closed incident ---
+  await seedDemoAccountability(call, { ada, dana, avery }, useCaseId, report);
+
   // --- shadow AI evidence (imported, never claimed as discovered) --------------------------
   if (fixtures.shadowAi.length > 0) {
     // the matcher holds no provider names — with an empty signature catalogue
@@ -368,7 +388,205 @@ async function seedDemoIntakeRun(
     } else fail("shadow-AI import", r);
   }
 
+  // --- AI literacy (ADR-0182 A14): one published acceptable-use document, acknowledged by the personas.
+  // LAST, because the strict literacy gate refuses a governed call from anyone not current once it is published.
+  await seedDemoAcceptableUse(call, { ada, dana, avery }, BOOT, report);
+
   return report;
+}
+
+/** the demo's acceptable-use document (its key; a test that runs the seeder deletes it afterwards, M-068) */
+export const DEMO_AUP_KEY = "demo-acceptable-use";
+
+/** the evidence reference the seeder's completion records carry (they say what made them) */
+export const DEMO_AUP_EVIDENCE =
+  "regulAIt demo dataset (demo:intake): recorded by the demo tooling for a synthetic persona, not acknowledged in person";
+
+/**
+ * ADR-0182 A14: publish one acceptable-use document (a synthetic link, applying
+ * to everyone) and make the three personas current on exactly its published
+ * version, through the real routes. The literacy gate stays at its strict
+ * default (`enforce`): demo:traffic runs as Dana and Ada, who are current after
+ * this. Idempotent: a published version is reused, and a persona already
+ * current is skipped.
+ *
+ * D4A-03: a person acknowledges only from an interactive session, never with
+ * an API key, and the seeder holds only API keys (each persona's one-time
+ * password must be changed by that person at first sign-in, so the seeder
+ * cannot sign in as them either). It therefore does NOT pretend they
+ * acknowledged: the deployment operator (the bootstrap identity) records an
+ * `admin_recorded` completion for each, with an evidence reference that says
+ * the demo tooling made it. Account and coverage show "recorded by an admin".
+ */
+async function seedDemoAcceptableUse(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  operator: Headers,
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const fail = (what: string, r: { status: number; body: Json }): void => {
+    report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+  };
+  const docs: Json[] = (await call("GET", "/v1/ai-policies", undefined, who.ada.auth)).body.documents ?? [];
+  let doc = docs.find((d) => d.key === DEMO_AUP_KEY && d.status === "published");
+  if (doc) report.skipped.push("acceptable-use document");
+  else {
+    let draft = docs.find((d) => d.key === DEMO_AUP_KEY && d.status === "draft");
+    if (!draft) {
+      const created = await call("POST", "/v1/ai-policies", {
+        key: DEMO_AUP_KEY,
+        kind: "acceptable_use",
+        title: "Acme Bank AI acceptable-use policy",
+        url: "https://policies.example.com/acme-bank/ai-acceptable-use",
+        audience: { all: true, teamIds: [], roleIds: [] },
+      }, who.ada.auth);
+      if (!ok(created.status)) return fail("acceptable-use document", created);
+      draft = created.body.document as Json;
+    }
+    const published = await call("POST", `/v1/ai-policies/${draft!.id}/publish`, {}, who.ada.auth);
+    if (!ok(published.status)) return fail("acceptable-use publish", published);
+    doc = (published.body.document as Json | undefined) ?? { ...draft, status: "published" };
+    report.created.push("acceptable-use document (published, applies to everyone)");
+  }
+  for (const [name, p] of [["Ada", who.ada], ["Dana", who.dana], ["Avery", who.avery]] as const) {
+    const me = await call("GET", "/v1/me/ai-literacy", undefined, p.auth);
+    const mine = ((me.body.documents ?? []) as Json[]).find((d) => d.documentId === doc!.id);
+    if (mine?.state === "current") {
+      report.skipped.push(`acceptable-use current (${name})`);
+      continue;
+    }
+    const rec = await call(
+      "POST",
+      `/v1/ai-policies/${doc!.id}/records`,
+      { userId: p.id, method: "admin_recorded", evidenceRef: DEMO_AUP_EVIDENCE },
+      operator,
+    );
+    if (ok(rec.status)) report.created.push(`acceptable-use completion recorded by the demo tooling (${name})`);
+    else fail(`acceptable-use completion (${name})`, rec);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0182 (D4) — the accountability records the demo shows
+// ---------------------------------------------------------------------------
+
+/** the closed demo incident (idempotency key: this title on the use case below) */
+export const DEMO_INCIDENT_TITLE = "Sentiment scores under-rated complaints written in a second language";
+/** the high-tier, approved use case the story's incident and feedback belong to */
+const DEMO_ACCOUNTABILITY_USE_CASE = "uc-2";
+
+/**
+ * One end-user problem report on the Customer Sentiment Analyzer, acknowledged
+ * by its owner, who opens an incident from it (A13 → A12, pre-linked). The
+ * incident is marked serious (fundamental rights), so the platform starts the
+ * EU AI Act clocks itself; each clock reaches a terminal state through the real
+ * routes (reports recorded to clearly synthetic recipients), the corrective
+ * action is done with its evidence, and the owner closes the incident with a
+ * root cause and lessons learned. The feedback item is then resolved with a
+ * note. Every step is a real, audited API call; nothing is inserted directly.
+ * Idempotent: an incident with this title on this use case means it is done.
+ */
+async function seedDemoAccountability(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  useCaseId: Map<string, string>,
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const fail = (what: string, r: { status: number; body: Json }): void => {
+    report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+  };
+  const uc = useCaseId.get(DEMO_ACCOUNTABILITY_USE_CASE);
+  if (!uc) {
+    report.notes.push(`accountability records: use case '${DEMO_ACCOUNTABILITY_USE_CASE}' not seeded`);
+    return;
+  }
+  const existing: Json[] = (await call("GET", `/v1/incidents?useCaseId=${uc}`, undefined, who.ada.auth)).body.incidents ?? [];
+  if (existing.some((i) => i.title === DEMO_INCIDENT_TITLE)) {
+    report.skipped.push("demo incident and feedback");
+    return;
+  }
+  const { dana } = who;
+
+  // 1. an end user (Avery) reports a problem; it routes to the use case's owner (Dana)
+  const fb = await call("POST", `/v1/use-cases/${uc}/feedback`, {
+    kind: "problem",
+    body:
+      "Synthetic demo report: complaints I wrote in Spanish were scored as neutral although they were clearly " +
+      "negative, so none of them was escalated to a person.",
+  }, who.avery.auth);
+  if (!ok(fb.status)) return fail("demo feedback", fb);
+  const feedbackId = fb.body.id as string;
+  report.created.push("feedback: a problem report on the Customer Sentiment Analyzer");
+  const ack = await call("PATCH", `/v1/feedback/${feedbackId}`, { status: "acknowledged" }, dana.auth);
+  if (!ok(ack.status)) return fail("demo feedback acknowledge", ack);
+
+  // 2. the owner opens an incident from it (user_report, linked to the item)
+  const opened = await call("POST", `/v1/feedback/${feedbackId}/open-incident`, { title: DEMO_INCIDENT_TITLE, severity: "high" }, dana.auth);
+  if (!ok(opened.status)) return fail("demo incident from feedback", opened);
+  const incidentId = opened.body.incidentId as string;
+  const inc = `/v1/incidents/${incidentId}`;
+
+  // 3. it is serious (fundamental rights): the platform starts the EU AI Act clocks
+  const serious = await call("PATCH", inc, {
+    serious: true,
+    seriousCriteria: ["fundamental_rights"],
+    summary:
+      "Complaints written in a second language were scored neutral, so they skipped human escalation. Treated as a " +
+      "possible infringement of non-discrimination obligations (synthetic demo record).",
+  }, dana.auth);
+  if (!ok(serious.status)) return fail("demo incident serious", serious);
+  const detail = await call("GET", inc, undefined, dana.auth);
+  const clocks: Json[] = detail.body.notifications ?? [];
+  if (clocks.length === 0) report.notes.push("demo incident: no notification clocks started (check incident_clock_regimes)");
+
+  // 4. every clock reaches a terminal state: reports recorded to synthetic recipients
+  for (const c of clocks) {
+    const authority = String(c.clockId).startsWith("art73");
+    const recipient = authority
+      ? "Market surveillance authority (synthetic demo recipient)"
+      : "The system's provider (synthetic demo recipient)";
+    const url = `${inc}/notifications/${c.id}/sent`;
+    if (authority) {
+      const first = await call("POST", url, { stage: "initial", recipient, reference: "DEMO-SYNTHETIC-INITIAL" }, dana.auth);
+      if (!ok(first.status) && first.body.error !== "initial_report_not_allowed") {
+        fail(`demo incident clock ${c.clockId} initial`, first);
+        continue;
+      }
+    }
+    const done = await call("POST", url, { stage: "complete", recipient, reference: "DEMO-SYNTHETIC-COMPLETE" }, dana.auth);
+    if (!ok(done.status)) fail(`demo incident clock ${c.clockId}`, done);
+  }
+
+  // 5. the corrective action, done with its evidence
+  const act = await call("POST", `${inc}/actions`, {
+    title: "Add second-language complaints to the golden cases and re-validate the scoring threshold",
+    ownerUserId: dana.id,
+  }, dana.auth);
+  if (!ok(act.status)) return fail("demo incident action", act);
+  const actDone = await call("PATCH", `${inc}/actions/${act.body.action.id}`, {
+    status: "done",
+    evidenceRef: "Re-validation report VR-DEMO-001 (synthetic)",
+  }, dana.auth);
+  if (!ok(actDone.status)) return fail("demo incident action done", actDone);
+
+  // 6. closed with a root cause and lessons learned — by an admin (Ada): closing a
+  //    serious or high incident releases the use case's deploy gate, so the
+  //    owner may mark it resolved but only an admin closes it (D4 review D4A-01)
+  const closed = await call("POST", `${inc}/close`, {
+    rootCause: "The sentiment threshold was validated on single-language samples only.",
+    lessonsLearned: "Validation sets cover every language customers write in; a regression case guards it.",
+  }, who.ada.auth);
+  if (!ok(closed.status)) return fail("demo incident close", closed);
+  report.created.push("incident: closed, every clock in a terminal state");
+
+  // 7. the reporter's item is resolved with a note
+  const resolved = await call("PATCH", `/v1/feedback/${feedbackId}`, {
+    status: "no_change",
+    resolutionNote: "Confirmed and fixed under the linked incident; the scoring threshold was re-validated.",
+  }, dana.auth);
+  if (!ok(resolved.status)) fail("demo feedback resolve", resolved);
 }
 
 // ---------------------------------------------------------------------------

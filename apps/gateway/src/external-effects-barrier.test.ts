@@ -47,10 +47,12 @@ import { EXTERNAL_WRITE_OPERATIONS, type ExternalWriteOperation } from "./extern
 
 const probe = vi.hoisted(() => {
   const counts = new Map<string, number>();
+  const entries = new Map<string, number>(); // calls that went through the GATED runExternalWrite below
   let armed: { operation: string; reached: () => void; released: Promise<void> } | null = null;
   const bump = (op: string) => counts.set(op, (counts.get(op) ?? 0) + 1);
   return {
     count: (op: string) => counts.get(op) ?? 0,
+    entries: (op: string) => entries.get(op) ?? 0,
     /** pause the NEXT runExternalWrite for `operation` at entry */
     arm(operation: string) {
       let reached!: () => void;
@@ -64,6 +66,7 @@ const probe = vi.hoisted(() => {
       armed = null;
     },
     async pause(operation: string) {
+      entries.set(operation, (entries.get(operation) ?? 0) + 1);
       if (armed && armed.operation === operation) {
         const gate = armed;
         armed = null;
@@ -206,6 +209,7 @@ async function setMode(mode: FlippedMode | "normal") {
  */
 async function refusedAtBarrier(operation: ExternalWriteOperation, mode: FlippedMode, drive: () => Promise<Injected>): Promise<Injected> {
   const before = probe.count(operation);
+  const enteredBefore = probe.entries(operation);
   const gate = probe.arm(operation);
   const inflight = drive();
   const outcome = await Promise.race([
@@ -215,6 +219,19 @@ async function refusedAtBarrier(operation: ExternalWriteOperation, mode: Flipped
   if (outcome !== "reached") {
     probe.disarm();
     const res = await inflight;
+    if (probe.count(operation) > before && probe.entries(operation) === enteredBefore) {
+      // The provider WAS called, but never through the gated wrapper: the calling module is bound to the REAL
+      // external-effects.js. Vitest serves the original module to every import made while a mock factory is still
+      // evaluating (its importOriginal), so any static import chain from external-effects.ts that reaches a caller
+      // (workflows.ts, pm.ts, infra.ts) silently unmocks the barrier for that caller. It happened once: D4's
+      // external-effects → execution-posture → org-settings → rule-writes → config-versions → agent-evidence-hold →
+      // incidents → use-cases → workflows → orchestration → pm, broken by a lazy import in agent-evidence-hold.ts.
+      throw new Error(
+        `${operation}: the provider was called but the gated runExternalWrite never ran — the caller bound the real ` +
+          `external-effects.js, not this file's mock. Look for a static import path from external-effects.ts to the ` +
+          `caller and make one edge on it lazy. (${res.statusCode} ${res.body.slice(0, 120)})`,
+      );
+    }
     throw new Error(`${operation}: the drive finished (${res.statusCode} ${res.body.slice(0, 200)}) without reaching the barrier`);
   }
   // the route has done ALL its preparation under 'normal' and is one re-read

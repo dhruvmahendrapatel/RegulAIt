@@ -64,7 +64,7 @@ playwright.demo-real.config.ts` (export the gateway's own `REGULAIT_BOOTSTRAP_TO
 terminal; the spec falls back to `e2e-bootstrap-token` only when it is unset).
 
 1. `pnpm --filter @regulait/gateway demo:prepare` — seed → demo:setup → demo:intake →
-   demo:traffic → demo:check in ~25 s. It must end **18 pass, 0 warn, 0 fail** (a FAIL on
+   demo:traffic → demo:check in ~25 s. It must end **19 pass, 0 warn, 0 fail** (a FAIL on
    "3 Evidence" means the export key variables are not set in this terminal). The seed step
    prints each persona's **one-time password** — copy them.
 2. `HOST=127.0.0.1 PORT=3105 pnpm --filter @regulait/gateway start` (PowerShell: `$env:HOST =
@@ -353,6 +353,21 @@ back afterwards; a live run leaves it set — recreate the database before the n
 - **Optional (bash):** `scripts/verify-export-bundle.sh <downloaded file> --fingerprint <the value
   demo:export-key printed>` — verifies offline, with no call to the platform.
 - **Say:** "Everything you saw is in one hash-chained audit trail, exportable for an auditor."
+
+### 3F (optional, if time). Accountability records — Ada (ADR-0182)
+- **URL:** `/ui/incidents`, then the closed incident; `/ui/feedback`; the use case's **Decision records** tab.
+- **Screen:** a customer's problem report on the Customer Sentiment Analyzer became incident INC-00001. Marking it
+  serious started the EU AI Act clocks (Art. 26(5) and Art. 73(2), each labelled "confirm with counsel"), and both
+  show their reports recorded (the recipients are synthetic). The corrective action is done with its evidence, and
+  the incident is closed with a root cause and lessons learned. The decision record shows which policy versions
+  produced the sign-off. On the AI literacy page, the acceptable-use policy shows as current for the three personas.
+  Their completions were recorded by the demo tooling (`admin_recorded`), and the evidence says they were not
+  acknowledged in person.
+- **Say:** "When something goes wrong, the record shows who was told, by when, and what changed. The clocks are
+  reminders computed from when we became aware, not legal advice. A person acknowledges the acceptable-use
+  policy themselves, from a signed-in session; regulAIt refuses a governed call from anyone whose acknowledgement or
+  recorded completion isn't current."
+- `demo:check` beat **3 Accountability** proves these records exist before you present.
 
 ---
 
