@@ -36,7 +36,20 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([]);
+const DELIBERATELY_API_ONLY = new Map([
+  // TEMPORARY (ADR-0182 D4 P0, M-053): registered as 501 stubs before their
+  // screens exist. Deleting each entry is part of the owning slice's
+  // acceptance: A11 builds DecisionRegressionPage's retire-case control, A13
+  // builds FeedbackTab's revoke-link control.
+  [
+    "/v1/governance/decision-regression/cases/:x",
+    "TEMPORARY — D4 P0 stub; A11 adds the retire-case control on DecisionRegressionPage and deletes this entry",
+  ],
+  [
+    "/v1/use-cases/:x/feedback-links/:x",
+    "TEMPORARY — D4 P0 stub; A13 adds the revoke-link control on FeedbackTab and deletes this entry",
+  ],
+]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {

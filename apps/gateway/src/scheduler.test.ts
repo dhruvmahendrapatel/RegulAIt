@@ -758,6 +758,16 @@ describe("every sweep is registered", () => {
         // end-to-end in zz-adr0181-fx3-strict-fixes.test.ts.
         GUARDRAIL_WINDOW_EXPIRY_JOB_NAME,
         // ===== end ADR-0181 FX3 =====
+        // ===== ADR-0182 (D4) =====
+        // Each defined and run by its slice's module; P0 shipped them
+        // processing nothing (zz-adr0182-d4-foundation.test.ts), and each
+        // slice's own test drives its sweep end to end.
+        SCHEDULER_JOB_NAMES.incidentClockSweep,
+        SCHEDULER_JOB_NAMES.feedbackSlaSweep,
+        SCHEDULER_JOB_NAMES.feedbackRetentionSweep,
+        SCHEDULER_JOB_NAMES.literacyExpirySweep,
+        SCHEDULER_JOB_NAMES.alertSlaSweep,
+        // ===== end ADR-0182 =====
       ].sort(),
     );
     for (const def of registry.values()) {

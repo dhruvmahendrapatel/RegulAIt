@@ -93,6 +93,12 @@ export const SCHEDULER_JOB_NAMES = {
   idempotencyKeySweep: "idempotency-key-sweep",
   // ADR-0180 A2: measured conditions of approval
   conditionEvaluation: "condition-evaluation-sweep",
+  // ADR-0182 (D4): each defined and run by its slice's module (block at the end)
+  incidentClockSweep: "incident-clock-sweep",
+  feedbackSlaSweep: "feedback-sla-sweep",
+  feedbackRetentionSweep: "feedback-retention-sweep",
+  literacyExpirySweep: "literacy-expiry-sweep",
+  alertSlaSweep: "alert-sla-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -672,6 +678,7 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
     },
     ...adr0180A10Jobs(opts),
     ...adr0181Fx3Jobs(), // ADR-0181 FX3: block at the end of this file
+    ...adr0182Jobs(opts), // ADR-0182 (D4): block at the end of this file
   ];
 }
 
@@ -743,3 +750,22 @@ function adr0181Fx3Jobs(): SchedulerJobDefinition[] {
   return [guardrailWindowExpiryJobDefinition()];
 }
 // ===== end ADR-0181 FX3 block ================================================
+// ===== ADR-0182 (ADR-0175 batch D4) — P0 BLOCK ================================
+// Each D4 job is DEFINED in its slice's own module (name, description, run),
+// so a slice fills in its sweep without touching this file. P0 shipped them
+// processing nothing. `schedulerJobDefinitions` spreads `adr0182Jobs`, and a
+// test pins that each definition carries the name listed in SCHEDULER_JOB_NAMES.
+import { incidentJobDefinitions } from "./incidents.js";
+import { feedbackJobDefinitions } from "./feedback.js";
+import { literacyJobDefinitions } from "./ai-literacy.js";
+import { alertSlaJobDefinitions } from "./alert-ownership.js";
+
+function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
+  return [
+    ...incidentJobDefinitions(), // A12: incident-clock-sweep
+    ...feedbackJobDefinitions({ dataKey: opts.dataKey }), // A13: feedback-sla-sweep, feedback-retention-sweep
+    ...literacyJobDefinitions(), // A14: literacy-expiry-sweep
+    ...alertSlaJobDefinitions(), // S5: alert-sla-sweep
+  ];
+}
+// ===== end ADR-0182 block ====================================================

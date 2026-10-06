@@ -44,6 +44,9 @@ import {
   type SQL,
 } from "@regulait/db";
 import {
+  ACCOUNTABILITY_SETTING_KEYS,
+  accountabilitySettingRelaxed,
+  type AccountabilitySettingKey,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
   revocationKindParamSchema,
@@ -652,6 +655,15 @@ async function signInModeRefusal(
   return null;
 }
 
+/** ADR-0182 (D4): which of the changed keys are accountability settings now
+ * set looser than their strict default (`ACCOUNTABILITY_SETTING_COPY` says
+ * what each one gives up) */
+export function relaxedAccountabilityKeys(changed: Record<string, unknown>): AccountabilitySettingKey[] {
+  return ACCOUNTABILITY_SETTING_KEYS.filter(
+    (k) => k in changed && accountabilitySettingRelaxed(k, changed[k] as never),
+  );
+}
+
 export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
@@ -803,6 +815,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // ADR-0181: every relaxation of a strict default is audited old -> new,
       // from the same redacted view as `after` (no credential material).
       const lockedRedacted = redactSettings(locked) as unknown as Record<string, unknown>;
+      // ADR-0182 (D4): the accountability settings this write leaves RELAXED
+      // from their strict default, named in the detail and the reason
+      const relaxed = relaxedAccountabilityKeys(changed);
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.
@@ -815,6 +830,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
           via: req.authCtx.via,
           changed,
           transitions: settingTransitions(lockedRedacted, changed, ["tracingOtlpHeaders"]),
+          ...(relaxed.length > 0 ? { relaxed } : {}),
           after: redactSettings(after),
           approvalTtlPosture: approvalTtlPosture(after),
         },
@@ -822,9 +838,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         ruleId: "org-settings-updated",
         ruleChain: [],
         reason:
-          Object.keys(changed).length > 0
+          (Object.keys(changed).length > 0
             ? `org settings updated: ${Object.keys(changed).join(", ")}`
-            : "org settings written with no effective change",
+            : "org settings written with no effective change") +
+          (relaxed.length > 0 ? ` — RELAXED from the strict default: ${relaxed.join(", ")}` : ""),
       });
       return { after };
     });

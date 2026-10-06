@@ -90,6 +90,15 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // the server id exists — a 404 there would enumerate the registry.
   PROTECTED_RESOURCE_METADATA_PATH,
   PROTECTED_RESOURCE_METADATA_MCP_PATH,
+  // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
+  // People outside the organisation, who hold no RegulAIt credential, report a
+  // problem or appeal a decision through a link a use-case owner minted. The
+  // route authenticates IN-ROUTE on the opaque token (only its SHA-256 is
+  // stored, per link revocable, at most 30 days and `max_uses`), answers 404
+  // while `feedback_signed_links_enabled` is off (the shipped default), is
+  // rate-limited per token and address, and GET returns only the use case's
+  // public name. Listed in NON_ADMIN_ROUTES too, so it is `public`.
+  "/v1/feedback/l/:token",
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -605,6 +614,70 @@ export const NON_ADMIN_ROUTES = new Set([
   // POST /v1/risks/:riskId/accept.
   "GET /v1/risks/:riskId/acceptances",
   "POST /v1/risks/:riskId/acceptances",
+
+  // ===== ADR-0182 (ADR-0175 batch D4) — accountability records ==============
+  // Each slice's block below is APPEND-ONLY for that slice. Every route a
+  // slice lists here is admitted for ANY signed-in user by this gate, so its
+  // handler states and checks the narrower rule (owner / admin / self).
+  //
+  // --- P0: the use case's EU AI Act role --------------------------------------
+  // The use case's owner or an admin, in-handler; narrowing the role away from
+  // `both` is an admin's relaxation (refused 403 for the owner, audited).
+  "PUT /v1/use-cases/:useCaseId/eu-ai-act-role",
+  //
+  // --- A11: decision regression -----------------------------------------------
+  // The use case's decision records read like the use case: owner or admin,
+  // in-handler. DELIBERATELY ABSENT, so ADMIN-ONLY: everything under
+  // /v1/governance/decision-regression (preview, runs, cases) — org policy.
+  "GET /v1/use-cases/:useCaseId/decision-records",
+  //
+  // --- A12: the AI incident register ------------------------------------------
+  // Anyone may report an incident; the list is filtered to what the caller may
+  // see (owner, linked use-case owner, admin), and each write checks owner or
+  // admin in-handler. DELIBERATELY ABSENT, so ADMIN-ONLY: setting a clock
+  // aside (not-required, toll), containment (it halts an agent) and the signed
+  // export.
+  "GET /v1/incidents",
+  "POST /v1/incidents",
+  "GET /v1/incidents/:incidentId",
+  "PATCH /v1/incidents/:incidentId",
+  "POST /v1/incidents/:incidentId/events",
+  "POST /v1/incidents/:incidentId/links",
+  "POST /v1/incidents/:incidentId/actions",
+  "PATCH /v1/incidents/:incidentId/actions/:actionId",
+  "POST /v1/incidents/:incidentId/notifications/:notificationId/sent",
+  "POST /v1/incidents/:incidentId/close",
+  //
+  // --- A13: end-user feedback and appeal --------------------------------------
+  // Any signed-in user may submit; the queue, a body read (audited), a status
+  // change, opening an incident and the signed links are the use case's owner
+  // or an admin, in-handler. The two signed-link routes are PUBLIC (also in
+  // AUTH_EXEMPT_ROUTES above).
+  "POST /v1/use-cases/:useCaseId/feedback",
+  "GET /v1/feedback",
+  "GET /v1/feedback/:feedbackId",
+  "PATCH /v1/feedback/:feedbackId",
+  "POST /v1/feedback/:feedbackId/open-incident",
+  "POST /v1/use-cases/:useCaseId/feedback-links",
+  "GET /v1/use-cases/:useCaseId/feedback-links",
+  "DELETE /v1/use-cases/:useCaseId/feedback-links/:linkId",
+  "POST /v1/feedback/l/:token",
+  "GET /v1/feedback/l/:token",
+  //
+  // --- A14: AI literacy and acceptable use ------------------------------------
+  // A person lists what applies to them, acknowledges for THEMSELVES only (the
+  // handler refuses anyone else, 403), and reads their own status.
+  // DELIBERATELY ABSENT, so ADMIN-ONLY: creating, publishing and retiring a
+  // document, recording a completion for someone, and the coverage report.
+  "GET /v1/ai-policies",
+  "POST /v1/ai-policies/:policyId/acknowledge",
+  "GET /v1/me/ai-literacy",
+  //
+  // --- S5: alert owner, SLA and ticket ----------------------------------------
+  // Re-assigning an episode is an admin's OR its current owner's act, checked
+  // in-handler. DELIBERATELY ABSENT, so ADMIN-ONLY: filing a PM ticket for an
+  // episode (it sends alert data to a third-party tool).
+  "PUT /v1/governance/alerts/:alertId/owner",
 ]);
 
 /**

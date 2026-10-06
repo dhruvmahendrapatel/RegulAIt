@@ -49,10 +49,12 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  ACCOUNTABILITY_MONITOR_RULE_IDS,
   ASSURANCE_MONITOR_RULE_IDS,
   MONITOR_RULES,
   MONITOR_RULE_IDS,
   effectiveRiskRating,
+  type AccountabilityMonitorRuleId,
   type AssuranceMonitorRuleId,
   type MonitorAssuranceInput,
   evaluateMonitorRules,
@@ -81,6 +83,12 @@ import { conditionMetricsMonitorInput } from "./condition-metrics.js";
 import { requiredTestsMonitorInput } from "./required-tests.js";
 import { autonomyMonitorInput } from "./autonomy.js";
 import { residualRiskMonitorInput } from "./risk-tolerance.js";
+// ADR-0182 (D4) — each slice's monitor loader, from that slice's module, and
+// S5's alert-ownership hooks (owner and due time at raise; tickets after a pass)
+import { incidentMonitorInput } from "./incidents.js";
+import { feedbackMonitorInput } from "./feedback.js";
+import { literacyMonitorInput } from "./ai-literacy.js";
+import { afterAlertsRaised, alertOwnershipAtRaise } from "./alert-ownership.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -120,8 +128,17 @@ export interface MonitorOptionalInputs {
   requiredTests: AssuranceLoader;
   autonomy: AssuranceLoader;
   residualRisks: AssuranceLoader;
+  /** ADR-0182 (D4) — the accountability rules, one loader per slice (each in
+   * that slice's module; P0 shipped them reporting nothing) */
+  incidents: AccountabilityLoader;
+  feedback: AccountabilityLoader;
+  literacy: AccountabilityLoader;
 }
 type AssuranceLoader = (db: Db, now: Date) => Promise<Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>>;
+type AccountabilityLoader = (
+  db: Db,
+  now: Date,
+) => Promise<Partial<Record<AccountabilityMonitorRuleId, MonitorAssuranceInput>>>;
 /** the rules each optional input feeds: a failed load leaves ALL of them
  * unevaluated for the pass */
 const OPTIONAL_INPUT_RULES: Record<keyof MonitorOptionalInputs, readonly MonitorRuleId[]> = {
@@ -133,8 +150,12 @@ const OPTIONAL_INPUT_RULES: Record<keyof MonitorOptionalInputs, readonly Monitor
   requiredTests: ["required_test_stale"],
   autonomy: ["autonomy_declared_below_observed", "autonomy_floor_unmet"],
   residualRisks: ["residual_above_tolerance", "risk_acceptance_expired"],
+  incidents: ["incident_notification_due", "incident_action_overdue"],
+  feedback: ["feedback_sla_breached"],
+  literacy: ["literacy_coverage_gap"],
 };
 const ASSURANCE_INPUTS = ["conditionMetrics", "requiredTests", "autonomy", "residualRisks"] as const;
+const ACCOUNTABILITY_INPUTS = ["incidents", "feedback", "literacy"] as const;
 
 export async function runGovernanceMonitor(
   db: Db,
@@ -165,6 +186,9 @@ export async function runGovernanceMonitor(
     requiredTests: requiredTestsMonitorInput,
     autonomy: autonomyMonitorInput,
     residualRisks: residualRiskMonitorInput,
+    incidents: incidentMonitorInput,
+    feedback: feedbackMonitorInput,
+    literacy: literacyMonitorInput,
     ...opts.optionalInputs,
   };
   const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
@@ -303,6 +327,13 @@ export async function runGovernanceMonitor(
   for (const [ruleId, a] of Object.entries(assurance)) {
     for (const k of a?.heldSubjectKeys ?? []) heldSubjects.add(`${ruleId}|${k}`);
   }
+  // ADR-0182 — the accountability rules, the same way
+  const accountability: Partial<Record<AccountabilityMonitorRuleId, MonitorAssuranceInput>> = {};
+  for (const input of ACCOUNTABILITY_INPUTS) Object.assign(accountability, (await optional(input)) ?? {});
+  const unreportedAccountabilityRules = ACCOUNTABILITY_MONITOR_RULE_IDS.filter((r) => accountability[r] === undefined);
+  for (const [ruleId, a] of Object.entries(accountability)) {
+    for (const k of a?.heldSubjectKeys ?? []) heldSubjects.add(`${ruleId}|${k}`);
+  }
 
   const findings = evaluateMonitorRules({
     useCases,
@@ -319,8 +350,13 @@ export async function runGovernanceMonitor(
     credentials: await optional("credentials"),
     kris: kriInput,
     assurance,
+    accountability,
   });
-  const notEvaluated = new Set<string>([...failedInputs.map((f) => f.ruleId), ...unreportedAssuranceRules]);
+  const notEvaluated = new Set<string>([
+    ...failedInputs.map((f) => f.ruleId),
+    ...unreportedAssuranceRules,
+    ...unreportedAccountabilityRules,
+  ]);
   for (const f of failedInputs) {
     await db.insert(auditLog).values({
       userId: actor,
@@ -344,6 +380,8 @@ export async function runGovernanceMonitor(
 
   const raisedIds: string[] = [];
   for (const f of plan.raise) {
+    // ADR-0182 S5 (PF-14): the episode's owner and due time, decided at raise
+    const ownership = await alertOwnershipAtRaise(db, f, now);
     // ON CONFLICT: a concurrent pass (scheduler + manual evaluate) may have
     // opened the same episode a moment ago — the partial unique index is the
     // dedupe, so the loser simply does nothing
@@ -357,6 +395,9 @@ export async function runGovernanceMonitor(
         detail: f.detail,
         firstDetectedAt: now,
         lastDetectedAt: now,
+        ownerUserId: ownership.ownerUserId,
+        ownerSource: ownership.ownerSource,
+        dueAt: ownership.dueAt,
       })
       .onConflictDoNothing()
       .returning({ id: governanceAlerts.id });
@@ -431,6 +472,16 @@ export async function runGovernanceMonitor(
     notified = await notifyGovernanceAlerts(db, raisedIds, opts.actorUserId ?? null);
   } catch {
     /* audited inside the courier where it can be; never fatal here */
+  }
+  // ADR-0182 S5 (PF-14): tickets for newly raised episodes where the org asked
+  // for them (`alert_ticket_mode`; `manual`, the strict default, files none).
+  // Best effort, like the chat courier: never fatal to the pass.
+  if (raisedIds.length > 0) {
+    try {
+      await afterAlertsRaised(db, raisedIds, opts.actorUserId ?? null);
+    } catch {
+      /* the hook audits its own failures */
+    }
   }
 
   return {
