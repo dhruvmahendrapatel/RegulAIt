@@ -49,6 +49,7 @@ import {
 } from "./ai-literacy.js";
 import { routeAuthClass } from "./route-classes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -69,6 +70,10 @@ const people = {} as Record<"admin" | "inTeam" | "outside" | "glass", { id: stri
 let restoreIdentity: (() => Promise<void>) | undefined;
 let restoreAdmission: (() => Promise<void>) | undefined;
 let breakGlassBefore: string[] | null = null;
+let localSignInBefore: "enabled" | "break_glass_only" = "enabled";
+let restoreGates: (() => Promise<void>) | undefined;
+let agentId: string;
+let connectorId: string;
 const abacPolicyIds: string[] = [];
 
 type Method = "GET" | "POST" | "PUT";
@@ -76,7 +81,11 @@ const inject = (method: Method, url: string, headers: Record<string, string>, pa
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
 /** the enforcement path, exactly as the MCP proxy calls it (decision only) */
-const decide = (userId: string, opts?: { origin?: "human" | "evaluation" | "platform" }) =>
+const decide = (
+  userId: string,
+  opts?: { origin?: "human" | "evaluation" | "platform" },
+  principal?: { sessionOrigin: string; mfaCompleted: boolean },
+) =>
   governedEvaluate(
     db,
     userId,
@@ -85,7 +94,7 @@ const decide = (userId: string, opts?: { origin?: "human" | "evaluation" | "plat
     undefined,
     null,
     null,
-    undefined,
+    principal,
     undefined,
     undefined,
     undefined,
@@ -122,8 +131,14 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreAdmission = await relaxStrictAdmissionForTest(db);
-  const [org] = await db.select({ ids: orgSettings.breakGlassUserIds }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const [org] = await db
+    .select({ ids: orgSettings.breakGlassUserIds, localSignIn: orgSettings.localSignIn })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  localSignInBefore = (org?.localSignIn ?? "enabled") as typeof localSignInBefore;
   breakGlassBefore = org?.ids ?? null;
+  // the model-dispatch and connector paths are exercised for their literacy refusal, not MRM or attribution
+  restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   for (const [k, isAdmin] of [["admin", true], ["inTeam", false], ["outside", false], ["glass", true]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, { email: `a14-${k}-${RUN}@example.com`, displayName: `a14 ${k} ${RUN}`, isAdmin });
@@ -148,6 +163,16 @@ beforeAll(async () => {
     const m = await inject("POST", `/v1/teams/${teamId}/members`, AUTH, { userId: people[who].id });
     expect(m.statusCode, m.body).toBe(201);
   }
+  const a = await inject("POST", "/v1/agents", AUTH, { name: `a14-agent-${RUN}`, provider: "mock", model: "mock-fast", tier: 1 });
+  expect(a.statusCode, a.body).toBe(201);
+  agentId = a.json().id;
+  const c = await inject("POST", "/v1/connectors", AUTH, { name: `a14-connector-${RUN}`, kind: "issue-tracker", providerKind: "mock" });
+  expect(c.statusCode, c.body).toBe(201);
+  connectorId = c.json().id;
+  for (const who of ["inTeam", "glass"] as const) {
+    expect((await inject("POST", "/v1/grants/agents", AUTH, { userId: people[who].id, agentId })).statusCode).toBe(201);
+    expect((await inject("POST", "/v1/grants/connectors", AUTH, { userId: people[who].id, connectorId, mode: "readwrite" })).statusCode).toBe(201);
+  }
 }, 120_000);
 
 afterAll(async () => {
@@ -155,6 +180,8 @@ afterAll(async () => {
   await db.delete(aiPolicyDocuments).where(sql`${aiPolicyDocuments.key} like ${`a14-%-${RUN}`}`);
   for (const id of abacPolicyIds) await db.delete(abacPolicies).where(eq(abacPolicies.id, id));
   await db.update(orgSettings).set({ literacyGateMode: "enforce", breakGlassUserIds: breakGlassBefore }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  await db.update(orgSettings).set({ localSignIn: localSignInBefore }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  await restoreGates?.();
   await restoreAdmission?.();
   await restoreIdentity?.();
   app.server.closeAllConnections();
@@ -368,18 +395,74 @@ describe("ADR-0182 A14: the gate on governed calls (enforce, the strict default)
     expect((await decide(people.glass.id)).ruleId).toBe("ai-literacy-not-current");
   });
 
-  it("a designated break-glass admin is exempt", async () => {
+  it("break-glass: being LISTED exempts nothing; only a break-glass SESSION is exempt, and the exemption is audited", async () => {
+    const API_KEY = { sessionOrigin: "api_key", mfaCompleted: false };
+    const PASSWORD = { sessionOrigin: "password", mfaCompleted: true };
     try {
       await db
         .update(orgSettings)
-        .set({ breakGlassUserIds: [...(breakGlassBefore ?? []), people.glass.id] })
+        .set({ breakGlassUserIds: [...(breakGlassBefore ?? []), people.glass.id], localSignIn: "break_glass_only" })
         .where(eq(orgSettings.id, ORG_SETTINGS_ID));
-      expect((await decide(people.glass.id)).effect).toBe("allow");
-      expect((await inject("GET", "/v1/me/ai-literacy", people.glass.auth)).json().exempt).toBe("break_glass");
+      // listed, SSO enforced, but an API key (or no request at all, e.g. a worker): a standing status, not exempt
+      expect((await decide(people.glass.id, undefined, API_KEY)).ruleId).toBe("ai-literacy-not-current");
+      expect((await decide(people.glass.id)).ruleId).toBe("ai-literacy-not-current");
+      // the same listed admin, in a break-glass session (password sign-in admitted under break_glass_only): allowed
+      const exempt = await decide(people.glass.id, undefined, PASSWORD);
+      expect(exempt.effect).toBe("allow");
+      expect(exempt.ruleChain[0]).toEqual({ rule: "ai-literacy-break-glass-exempt", outcome: "allow" });
+      // and AUDITED: the governed tool call's decision row carries the exemption on its trace
+      try {
+        await executeGovernedToolCall(db, "a".repeat(64), { userId: people.glass.id, serverId, toolName: TOOL, arguments: {}, principal: PASSWORD });
+      } catch {
+        /* the upstream is a dead port: the decision row is written before any connection is made */
+      }
+      const [row] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.userId, people.glass.id), eq(auditLog.toolName, TOOL)))
+        .orderBy(desc(auditLog.seq))
+        .limit(1);
+      expect(row!.effect).toBe("allow");
+      expect((row!.ruleChain as unknown[])[0]).toEqual({ rule: "ai-literacy-break-glass-exempt", outcome: "allow" });
     } finally {
-      await db.update(orgSettings).set({ breakGlassUserIds: breakGlassBefore }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      await db
+        .update(orgSettings)
+        .set({ breakGlassUserIds: breakGlassBefore, localSignIn: localSignInBefore })
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID));
     }
-    expect((await decide(people.glass.id)).effect).toBe("deny");
+    // a password session is NOT break-glass while SSO is not enforced
+    expect((await decide(people.glass.id, undefined, PASSWORD)).ruleId).toBe("ai-literacy-not-current");
+    expect((await inject("GET", "/v1/me/ai-literacy", people.glass.auth)).json().exempt).toBeNull();
+  });
+
+  it("MODEL DISPATCH: a person who is not current is refused at invoke (audited); a current one is not", async () => {
+    const denied = await inject("POST", `/v1/agents/${agentId}/invoke`, people.glass.auth, { mode: "chat", input: "hello", dispatch: false });
+    expect(denied.statusCode, denied.body).not.toBe(200);
+    expect(denied.body).toContain("ai-literacy-not-current");
+    expect(denied.body).toContain(KEY);
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, people.glass.id), eq(auditLog.ruleId, "ai-literacy-not-current"), eq(auditLog.objectId, agentId)))
+      .limit(1);
+    expect(row, "the refused dispatch has its audit row").toBeDefined();
+    const allowed = await inject("POST", `/v1/agents/${agentId}/invoke`, people.inTeam.auth, { mode: "chat", input: "hello", dispatch: false });
+    expect(allowed.body).not.toContain("ai-literacy-not-current");
+    expect(allowed.statusCode, allowed.body).toBe(200);
+  });
+
+  it("CONNECTOR CALL: a person who is not current is refused (audited); a current one is not", async () => {
+    const denied = await inject("POST", `/v1/connectors/${connectorId}/invoke`, people.glass.auth, { operation: "read", object: "ISSUE-1" });
+    expect(denied.statusCode, denied.body).not.toBe(200);
+    expect(denied.body).toContain("ai-literacy-not-current");
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, people.glass.id), eq(auditLog.ruleId, "ai-literacy-not-current"), eq(auditLog.objectId, connectorId)))
+      .limit(1);
+    expect(row, "the refused connector call has its audit row").toBeDefined();
+    const allowed = await inject("POST", `/v1/connectors/${connectorId}/invoke`, people.inTeam.auth, { operation: "read", object: "ISSUE-1" });
+    expect(allowed.body).not.toContain("ai-literacy-not-current");
   });
 });
 

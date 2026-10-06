@@ -78,4 +78,30 @@ describe("ADR-0182 A14: the literacy gate in the kernel", () => {
     expect(conn.effect).toBe("deny");
     expect(conn.ruleId).toBe(LITERACY_RULE_ID);
   });
+
+  it("a break-glass exemption allows and is TRACED on every path (so the caller's audit row records it)", () => {
+    const exempt: LiteracyPosture = { required: false, current: true, exemption: "break_glass" };
+    const base = tool({ mode: "normal" });
+    const d = tool({ mode: "normal", literacy: exempt });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toEqual([{ rule: "ai-literacy-break-glass-exempt", outcome: "allow" }, ...base.ruleChain]);
+    const conn = evaluateConnector({
+      userId: "u1",
+      connectorId: "c1",
+      operation: "read",
+      connectorGrants: [{ id: "g1", userId: "u1", connectorId: "c1", mode: "read", allowedObjects: null }],
+      execution: { mode: "normal", literacy: exempt },
+    });
+    expect(conn.effect).toBe("allow");
+    expect(conn.ruleChain[0]).toEqual({ rule: "ai-literacy-break-glass-exempt", outcome: "allow" });
+    const warned = evaluateConnector({
+      userId: "u1",
+      connectorId: "c1",
+      operation: "read",
+      connectorGrants: [{ id: "g1", userId: "u1", connectorId: "c1", mode: "read", allowedObjects: null }],
+      execution: { mode: "normal", literacy: { ...notCurrent, mode: "warn" } },
+    });
+    expect(warned.effect).toBe("allow");
+    expect(warned.ruleChain[0]).toEqual({ rule: "ai-literacy-not-current", outcome: "no-match" });
+  });
 });

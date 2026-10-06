@@ -28,6 +28,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { evaluateAgent, visibleTools, type AgentDecision, type ToolRef } from "@regulait/policy-kernel";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
@@ -330,6 +331,7 @@ export function registerDecomposeRoutes(
       ceilingTier = registry.find((a) => a.id === policy.ceilingAgentId)?.tier ?? null;
     }
     const decomposeExecutionMode = await loadExecutionMode(db);
+    const decomposeLiteracy = await literacySlot(db, userId); // ADR-0182 A14
     // ADR-0173 §3 — the lead and the worker roster obey the org's model
     // allow-list for orchestration, through the shared helper
     const decomposeModelPolicy = await loadModelPolicy(db);
@@ -339,7 +341,7 @@ export function registerDecomposeRoutes(
           userId,
           // ADR-0124 — decomposition dispatches a lead agent to draft the graph,
           // so it is execution and is gated.
-          execution: postureOf(decomposeExecutionMode, agentHaltOf(a)),
+          execution: { ...postureOf(decomposeExecutionMode, agentHaltOf(a)), ...decomposeLiteracy },
           agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
           mode,
           agentGrants: grants,

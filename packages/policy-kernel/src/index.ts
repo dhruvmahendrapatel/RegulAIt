@@ -110,6 +110,9 @@ export interface LiteracyPosture {
   readonly missing?: readonly string[];
   /** `warn` records and allows; `enforce` refuses (A14) */
   readonly mode?: "warn" | "enforce";
+  /** ADR-0182 A14 — set when the person WOULD be refused but the request came through a break-glass session
+   * (`required` is then false). Recorded on the decision's trace so the exemption is audited, never silent. */
+  readonly exemption?: "break_glass";
 }
 
 /** the default literacy posture: nothing is required, so nothing changes */
@@ -152,10 +155,23 @@ export function literacyGate(
   };
 }
 
-/** ADR-0182 A14 — `warn` mode: an allowed or refused decision still records the gap on its trace */
-function literacyWarned(execution: ExecutionPosture): boolean {
+/** ADR-0182 A14 — the rule a break-glass exemption is traced under */
+export const LITERACY_BREAK_GLASS_RULE_ID = "ai-literacy-break-glass-exempt";
+
+/**
+ * ADR-0182 A14 — what the literacy slot adds to a decision's TRACE (never to its effect): under `warn`, the gap
+ * (`ai-literacy-not-current`, outcome `no-match`: the rule looked and did not refuse); under a break-glass
+ * exemption, the exemption (`ai-literacy-break-glass-exempt`, outcome `allow`). Prepended, because the literacy
+ * check runs first. The caller's audit row stores the trace, so both are audited.
+ */
+function literacyTrace(execution: ExecutionPosture):
+  | { rule: "ai-literacy-not-current"; outcome: "no-match" }
+  | { rule: "ai-literacy-break-glass-exempt"; outcome: "allow" }
+  | null {
   const l = literacyOf(execution);
-  return l.required && !l.current && l.mode === "warn";
+  if (l.exemption === "break_glass") return { rule: LITERACY_BREAK_GLASS_RULE_ID, outcome: "allow" };
+  if (l.required && !l.current && l.mode === "warn") return { rule: LITERACY_RULE_ID, outcome: "no-match" };
+  return null;
 }
 
 /** the stable rule ids an operator alerts on — one per reason, never shared */
@@ -609,6 +625,8 @@ export type RuleName =
   | "execution-require-approval"
   /** ADR-0182 A14 — the person behind the call is not current on an applicable AI policy or training */
   | "ai-literacy-not-current"
+  /** ADR-0182 A14 — not current, but the request came through a break-glass session (traced, never refused) */
+  | "ai-literacy-break-glass-exempt"
   | "tool-allow-list"
   | "role-tool-allow-list"
   | "server-read-only-all"
@@ -776,10 +794,9 @@ export function executionApprovalHold(
  */
 export function evaluate(input: EvaluationInput): Decision {
   const decision = evaluateTool(input);
-  // ADR-0182 A14 — `warn`: the call is decided exactly as without the gate, and its trace records the gap
-  // first (outcome `no-match`: the rule looked and did not refuse), so the audit row carries it.
-  if (!literacyWarned(input.execution)) return decision;
-  return { ...decision, ruleChain: [{ rule: LITERACY_RULE_ID, outcome: "no-match" }, ...decision.ruleChain] };
+  // ADR-0182 A14 — `warn` or a break-glass exemption: decided exactly as without the gate, traced first
+  const t = literacyTrace(input.execution);
+  return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
 }
 
 function evaluateTool(input: EvaluationInput): Decision {
@@ -1324,6 +1341,8 @@ export type AgentRuleName =
   | "execution-require-approval"
   /** ADR-0182 A14 — the person behind the call is not current on an applicable AI policy or training */
   | "ai-literacy-not-current"
+  /** ADR-0182 A14 — not current, but the request came through a break-glass session (traced, never refused) */
+  | "ai-literacy-break-glass-exempt"
   | "agent-registry-enabled"
   | "agent-allow-list"
   | "role-agent-allow-list"
@@ -1356,6 +1375,13 @@ export interface AgentDecision {
  * allow. Deny-by-default: no grant, no access, regardless of the registry.
  */
 export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
+  const decision = evaluateAgentInner(input);
+  // ADR-0182 A14 — the same literacy trace as the tool path
+  const t = literacyTrace(input.execution);
+  return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
+}
+
+function evaluateAgentInner(input: EvaluateAgentInput): AgentDecision {
   const { userId, agent, mode } = input;
   const agentRef = refLabel(agent.id, agent.name);
   const chain: AgentRuleTrace[] = [];
@@ -1581,6 +1607,8 @@ export type ConnectorRuleName =
   | "execution-require-approval"
   /** ADR-0182 A14 — the person behind the call is not current on an applicable AI policy or training */
   | "ai-literacy-not-current"
+  /** ADR-0182 A14 — not current, but the request came through a break-glass session (traced, never refused) */
+  | "ai-literacy-break-glass-exempt"
   | "connector-allow-list"
   | "role-connector-allow-list"
   | "connector-revoked"
@@ -1611,6 +1639,13 @@ export interface ConnectorDecision {
  * (fail closed when scoped and no object is named) → allow.
  */
 export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecision {
+  const decision = evaluateConnectorInner(input);
+  // ADR-0182 A14 — the same literacy trace as the tool path
+  const t = literacyTrace(input.execution);
+  return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
+}
+
+function evaluateConnectorInner(input: EvaluateConnectorInput): ConnectorDecision {
   // ADR-0124 — the connector path's own copy of the same first question. The
   // read/write classification is already on the wire here (`operation`), so a
   // read-only deployment keeps serving reads through connectors too.

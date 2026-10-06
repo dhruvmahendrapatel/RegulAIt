@@ -24,7 +24,10 @@
  *               reason names the documents). Agents and automations a person runs or owns are evaluated AS that
  *               person, so they inherit that person's status (owner decision 3). Exempt: platform sweeps and
  *               evaluation dispatches (`origin`), the bootstrap identity (it has no user and cannot call tools; a
- *               `bootstrap` session origin is exempt too), and designated break-glass admins. With no applicable
+ *               `bootstrap` session origin is exempt too), and a break-glass SESSION (a listed admin's password
+ *               sign-in while SSO is enforced; being listed alone exempts nothing), which is traced on the decision
+ *               and so audited. Wired into every governed path: MCP tools (`governedEvaluate`), model dispatch,
+ *               connector calls (`literacySlot` / `withLiteracyPosture`). With no applicable
  *               published document nothing changes, so a fresh install works exactly as before.
  *   ABAC        `aiTrainingCurrentFor` is the Cedar v3 principal attribute, built by `assembleAbacRequest` (the one
  *               place enforcement and simulation build the bag).
@@ -84,7 +87,7 @@ import {
 } from "@regulait/shared";
 import { LITERACY_NOT_REQUIRED, type ExecutionPosture, type LiteracyPosture } from "@regulait/policy-kernel";
 import type { SchedulerJobDefinition } from "./scheduler.js";
-import type { AbacPrincipalContext } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { loadScopeMemberships } from "./entitlements.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { settingTransitions } from "./setting-transitions.js";
@@ -244,8 +247,22 @@ export async function aiTrainingCurrentFor(db: Db, userId: string, now: Date = n
   return aiTrainingCurrentOf(await loadLiteracyStatus(db, userId, now));
 }
 
-/** a designated break-glass admin (ADR-0174): listed, still an admin, still active */
-async function isBreakGlassAdmin(db: Db, org: OrgSettingsRow, userId: string): Promise<boolean> {
+/**
+ * Is THIS REQUEST a break-glass session (ADR-0174)? Being listed in `break_glass_user_ids` is a standing status
+ * and exempts nothing by itself (main-session decision, ADR-0180 secure by default). A break-glass session is the
+ * password sign-in the organisation admits, while SSO is enforced (`local_sign_in = break_glass_only`), only
+ * because the person is on that list: the session's server-recorded origin is `password` (ADR-0028; a header API
+ * key reports `api_key`, an OIDC/SAML session its own origin), the mode is engaged, and the person is still a
+ * listed, active admin. The origin comes from the resolved session row (`abacPrincipalFromRequest`), never from
+ * anything the client sends; a call with no request behind it (a worker, a scheduled run) is never break-glass.
+ */
+async function isBreakGlassSession(
+  db: Db,
+  org: OrgSettingsRow,
+  userId: string,
+  principal: AbacPrincipalContext | undefined,
+): Promise<boolean> {
+  if (principal?.sessionOrigin !== "password" || org.localSignIn !== "break_glass_only") return false;
   if (!(org.breakGlassUserIds ?? []).includes(userId)) return false;
   const [u] = await db
     .select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt })
@@ -280,11 +297,29 @@ export async function literacyPostureFor(
   const org = await loadOrgSettings(db);
   const mode = org.literacyGateMode as AccountabilityGateMode;
   if (mode === "off") return LITERACY_NOT_REQUIRED;
-  // break-glass exists to get an operator in during an emergency; it is never held behind an acknowledgement
-  if (await isBreakGlassAdmin(db, org, userId)) return LITERACY_NOT_REQUIRED;
   const status = await loadLiteracyStatus(db, userId, opts.now ?? new Date(), org);
   if (!status.required) return LITERACY_NOT_REQUIRED;
+  // A break-glass SESSION gets an operator in during an emergency and is never held behind an acknowledgement.
+  // Checked only when the person would otherwise be held, and then RECORDED: the kernel traces the exemption on
+  // the decision (`ai-literacy-break-glass-exempt`), which the caller's audit row stores.
+  if (!status.current && (await isBreakGlassSession(db, org, userId, opts.principal))) {
+    return { required: false, current: true, missing: literacyMissing(status), exemption: "break_glass" };
+  }
   return { required: true, current: status.current, missing: literacyMissing(status), mode };
+}
+
+/**
+ * The literacy slot as a spread (`{ ...postureOf(mode, halt), ...slot }`), for the call sites that build an
+ * `ExecutionPosture` inline — often inside a synchronous per-candidate closure, so the slot is resolved ONCE per
+ * request, before the closure. `{}` when nothing applies, so the posture is byte-identical to before.
+ */
+export async function literacySlot(
+  db: Db,
+  userId: string,
+  opts: { origin?: GovernedCallOrigin | undefined; principal?: AbacPrincipalContext | undefined } = {},
+): Promise<{ literacy?: LiteracyPosture }> {
+  const literacy = await literacyPostureFor(db, userId, opts);
+  return literacy.required || literacy.exemption ? { literacy } : {};
 }
 
 /**
@@ -299,8 +334,7 @@ export async function withLiteracyPosture<P extends ExecutionPosture>(
   userId: string,
   opts: { origin?: GovernedCallOrigin | undefined; principal?: AbacPrincipalContext | undefined } = {},
 ): Promise<P> {
-  const literacy = await literacyPostureFor(db, userId, opts);
-  return literacy.required ? { ...posture, literacy } : posture;
+  return { ...posture, ...(await literacySlot(db, userId, opts)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -990,7 +1024,7 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
       return { required: false, current: true, documents: [], gateMode, exempt: "bootstrap", noticeDays: LITERACY_EXPIRY_NOTICE_DAYS };
     }
     const status = await loadLiteracyStatus(db, userId, new Date(), org);
-    const exempt = (await isBreakGlassAdmin(db, org, userId)) ? "break_glass" : null;
+    const exempt = (await isBreakGlassSession(db, org, userId, abacPrincipalFromRequest(req))) ? "break_glass" : null;
     return { ...status, gateMode, exempt, noticeDays: LITERACY_EXPIRY_NOTICE_DAYS };
   });
 }
