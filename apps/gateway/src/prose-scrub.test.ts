@@ -40,6 +40,10 @@
  * singleton.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -252,6 +256,7 @@ async function revokeWithReason(agentName: string, reason: string) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
   ({ id: ownerId, auth: ownerAuth } = await mkUser("ps-owner@example.com"));
   ({ id: approverId, auth: approverAuth } = await mkUser("ps-approver@example.com"));
@@ -259,6 +264,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await app.close();
   await db.$client.end();
 });

@@ -1,4 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { generateKeyPairSync, randomBytes, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -182,6 +186,7 @@ beforeAll(async () => {
 
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
@@ -205,6 +210,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await db.delete(licenseVerifications);
   await db.delete(licenses);
   if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));

@@ -1,4 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -91,6 +95,7 @@ async function recordCalls(userId: string, n: number, spacingMs: number): Promis
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
 
   const s = await app.inject({
@@ -153,6 +158,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   await app.close();
 });
 

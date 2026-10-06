@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -196,6 +200,7 @@ async function simulateAs(
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT });
 
   const lead = await makeUser("ps-alpha-lead@example.com");
@@ -282,6 +287,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStrictAdmission?.();
   // the ABAC policy set is GLOBAL: nothing this file authored may survive
   await db.delete(abacPolicies);
   // and the friction dial is a singleton every later activation would read:

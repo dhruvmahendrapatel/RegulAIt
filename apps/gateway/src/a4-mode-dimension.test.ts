@@ -1,4 +1,8 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
+// unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
+let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
@@ -80,6 +84,7 @@ async function decideGate(instanceId: string, stageId: string, decision: "approv
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT });
   const ana = await makeUser("a4-ana@example.com");
   anaId = ana.id;
@@ -417,4 +422,8 @@ describe("(b) MAX-only per-mode audit retention", () => {
       expect(back.modeOverrides).toEqual([]);
     }
   });
+});
+
+afterAll(async () => {
+  await restoreStrictAdmission?.();
 });
