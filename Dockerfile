@@ -1,5 +1,14 @@
-# RegulAIt gateway — dev-grade image (single stage, workspace layout kept so
-# the gateway finds packages/db/migrations relative to its dist output).
+# RegulAIt gateway — dev-grade image (two stages, workspace layout kept so
+# the gateway finds packages/db/migrations and apps/web/dist relative to its
+# dist output).
+#
+# ADR-0184: the `build` stage installs everything and builds; the `runtime`
+# stage receives the built tree with PRODUCTION dependencies of the gateway
+# only. Build tools (esbuild, vite, vitest, typescript, drizzle-kit, …) never
+# reach the image: on PR #131 the first CI Trivy scan found 22 HIGH/CRITICAL Go
+# standard-library CVEs compiled into the esbuild binary that the old
+# single-stage image carried in node_modules. security.yml fails the build if
+# a build tool reappears in the runtime image.
 #
 # Build stage note (ADR-0026): `pnpm -r build` includes @regulait/web, so the
 # image carries apps/web/dist and the gateway serves the React SPA at /ui, which
@@ -17,8 +26,7 @@
 # perl-base (fixed in 5.36.0-7+deb12u4, not yet in the image); the trixie image
 # of the same Node 22 line carried none. Digest of node:22-trixie-slim as
 # published 2026-10-06T05:38Z (linux/amd64 + arm64 index).
-FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa
-LABEL org.regulait.build-stage="workspace-build+runtime"
+FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS build
 
 RUN corepack enable
 WORKDIR /app
@@ -40,16 +48,28 @@ COPY apps ./apps
 # Set on the build RUN only. The runtime CMD keeps Node's default, because a
 # serving process that needs 3 GB of heap is a leak to investigate, not a
 # limit to raise.
+#
+# After the build, every node_modules is dropped and reinstalled from the same
+# store, offline, with `--prod` for the gateway and the workspace packages it
+# depends on (`@regulait/gateway...`). The lockfile is not rewritten
+# (--frozen-lockfile), and apps/web keeps only its built dist.
 RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
- && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
+ && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build \
+ && rm -rf node_modules apps/*/node_modules packages/*/node_modules \
+ && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..."
+
+FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS runtime
+LABEL org.regulait.build-stage="runtime (production dependencies only)"
 
 # ADR-0184: the runtime runs only `node` and `sh` (docker-start.sh), never a
 # package manager. The base image ships npm with its own bundled dependencies,
 # which carried fixable HIGH advisories (brace-expansion, picomatch, pacote,
-# sigstore, ip-address) on 2026-10-06, and corepack leaves the pnpm it fetched
-# in its cache. Removing both after the build removes that code from the image
-# instead of allow-listing it; corepack itself stays (it has no dependencies).
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.cache/node/corepack
+# sigstore, ip-address) on 2026-10-06. Removing it removes that code from the
+# image instead of allow-listing it; corepack stays (it has no dependencies),
+# and the pnpm it fetched exists only in the build stage.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+WORKDIR /app
+COPY --from=build /app /app
 
 ENV PORT=3000
 EXPOSE 3000
