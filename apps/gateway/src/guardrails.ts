@@ -436,7 +436,7 @@ export function runGuardrails(
 /** ADR-0181 FX3: the override write accepts an optional guardrail WINDOW: a
  * time-boxed override, tagged `assurance-window`, that expires on the server
  * after at most ASSURANCE_WINDOW_MAX_MINUTES. The org default never takes one. */
-const putOverrideSchema = putGuardrailConfigSchema.extend({
+export const putOverrideSchema = putGuardrailConfigSchema.extend({
   assuranceWindow: z
     .object({ ttlMinutes: z.number().int().min(1).max(ASSURANCE_WINDOW_MAX_MINUTES) })
     .strict()
