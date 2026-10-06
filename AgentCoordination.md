@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X16 diagnostic fix passes 47 real journeys; original CI response inaccessible | X17 own intake fixture, then X14 and X15 | — | 10-06 23:31 | X16 original CI trace/log download HTTP 403 |
+| Codex | X16 diagnostic draft PR #137; blocked on original CI response | X17 order-independent review-policy fixture | — | 10-06 23:32 | X16 original CI trace/log download HTTP 403 |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -222,7 +222,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   Avery's `Save key`), while the same four specs pass 47/47 twice locally and on main. Find the cause (the save
   request's real status/body, ordering against earlier tests, timing of the posture save) and fix the test or the
   card. Do not mark it a flake without the evidence M-070 asks for. Branch `codex/x16`.
-  Status: BLOCKED (original CI key-save response/trace download hosts return HTTP 403; diagnostic fix ready for review)
+  Status: BLOCKED (original CI key-save response/trace download hosts return HTTP 403; diagnostic fix 18170e78 in draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/137 ready for review)
+  Evidence: `pnpm -r build`, `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build` PASS. Original four-spec real-gateway Playwright command in codexInputs.md passes 47/47; screenshots x16-fixed-shots/phase2-32-key-custody-admin-dark.png and phase2-33-key-custody-developer.png; full traces x16-fixed-browser. Original failing-revision reruns and limitation recorded explicitly.
 - **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
   test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
   it is the same root cause; say so on the X13 row. Branch `codex/x17`.
