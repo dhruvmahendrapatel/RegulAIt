@@ -1078,6 +1078,11 @@ describe("demo:set-passwords", () => {
           failedLoginCount: row.failedLoginCount,
           lastFailedLoginAt: row.lastFailedLoginAt,
           lockedUntil: row.lockedUntil,
+          // ADR-0181 FX2: set-passwords clears a demo admin's authenticator; put it back as found, or a
+          // later seeder run (zz-c6, zz-c11) meets "a password but no TOTP" and refuses the persona
+          totpEnabled: row.totpEnabled,
+          totpSecretCiphertext: row.totpSecretCiphertext,
+          totpLastUsedStep: row.totpLastUsedStep,
         })
         .where(eq(users.id, row.id));
     }
