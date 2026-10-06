@@ -20,7 +20,7 @@
  * deleted; every id is this run's own.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, aiIncidents, aiUseCases, and, auditLog, configVersions, desc, eq, inArray } from "@regulait/db";
+import { agents, aiIncidents, aiUseCases, and, auditLog, configVersions, desc, eq, inArray, ne } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { EVIDENCE_HOLD_OVERRIDE_HEADER } from "./incidents.js";
@@ -86,7 +86,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restore?.();
-  if (created.incidents.length) await k.db.delete(aiIncidents).where(inArray(aiIncidents.id, created.incidents));
+  // migration 0168 (DFX1): an incident that is not closed is never deleted, so the fixtures are closed first
+  // (a test-only shortcut past the API's close rules), then deleted (their events and clocks cascade)
+  if (created.incidents.length) {
+    await k.db
+      .update(aiIncidents)
+      .set({ status: "closed", closedAt: new Date(), rootCause: "dfx2 fixture cleanup", lessonsLearned: "dfx2 fixture cleanup" })
+      .where(and(inArray(aiIncidents.id, created.incidents), ne(aiIncidents.status, "closed")));
+    await k.db.delete(aiIncidents).where(inArray(aiIncidents.id, created.incidents));
+  }
   if (created.useCases.length) await k.db.delete(aiUseCases).where(inArray(aiUseCases.id, created.useCases));
   await k.close();
 });
