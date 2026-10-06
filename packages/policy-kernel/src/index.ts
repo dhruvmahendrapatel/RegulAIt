@@ -87,6 +87,37 @@ export interface ExecutionPosture {
   /** set when THIS agent or tool is individually halted. Independent of
    * `mode`: a halted tool is refused even while the deployment is `normal`. */
   readonly subjectHalt?: SubjectHalt | null;
+  /**
+   * ADR-0182 (D4) A14 — THE AI LITERACY SLOT. Whether the human behind this
+   * call must be current on an applicable published AI policy or training,
+   * and whether they are. Absent means `LITERACY_NOT_REQUIRED`, so every call
+   * site that builds a posture without it keeps today's decision exactly.
+   *
+   * P0 adds the slot only; nothing in the kernel reads it yet. A14 fills it in
+   * `governed-evaluate.ts` and adds the refusal (`ai-literacy-not-current`).
+   */
+  readonly literacy?: LiteracyPosture;
+}
+
+/** ADR-0182 A14 — a person's literacy standing for one governed call */
+export interface LiteracyPosture {
+  /** true when at least one published, applicable document exists for them
+   * AND the org's literacy gate is not off */
+  readonly required: boolean;
+  /** every applicable document acknowledged at its current version, unexpired */
+  readonly current: boolean;
+  /** what is missing, for the refusal prose (document titles or keys) */
+  readonly missing?: readonly string[];
+  /** `warn` records and allows; `enforce` refuses (A14) */
+  readonly mode?: "warn" | "enforce";
+}
+
+/** the default literacy posture: nothing is required, so nothing changes */
+export const LITERACY_NOT_REQUIRED: LiteracyPosture = Object.freeze({ required: false, current: true });
+
+/** the literacy posture of an execution posture, defaulted (ADR-0182 P0) */
+export function literacyOf(execution: ExecutionPosture): LiteracyPosture {
+  return execution.literacy ?? LITERACY_NOT_REQUIRED;
 }
 
 /** the stable rule ids an operator alerts on — one per reason, never shared */

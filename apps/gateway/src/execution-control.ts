@@ -91,6 +91,64 @@ const setModeSchema = z
 
 const haltSchema = z.object({ reason: reasonSchema }).strict();
 
+/** who is halting an agent, for the audit row */
+export interface HaltActor {
+  /** null = the deployment itself (no user identity) */
+  userId: string | null;
+  /** how the actor authenticated (`req.authCtx.via`), when a person did it */
+  via?: string | undefined;
+  /** extra audit detail, e.g. the incident or proposal the halt came from */
+  detail?: Record<string, unknown>;
+}
+
+export type HaltAgentResult = { agentId: string; halted: true; changed: boolean; note: string };
+
+/**
+ * ADR-0124's agent halt, INSIDE the caller's transaction (ADR-0182 P0: a pure
+ * extraction, so incident containment (A12) and an approved halt proposal (S5)
+ * halt through the one implementation the route uses).
+ *
+ * Locks the agent row, writes nothing when it is already halted (idempotent,
+ * principle 5), else sets `halted_at` / `halted_reason` / `halted_by_user_id`
+ * and writes the `execution-agent-halted` audit row. Returns null for an
+ * unknown agent. Unhalting stays on the execution-control route only.
+ */
+export async function haltAgentInTx(
+  tx: Db,
+  agentId: string,
+  reason: string,
+  actor: HaltActor,
+): Promise<HaltAgentResult | null> {
+  const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+  if (!before) return null;
+  if (before.haltedAt) {
+    return {
+      agentId, halted: true, changed: false,
+      note: `already halted since ${before.haltedAt.toISOString()}: ${before.haltedReason}`,
+    };
+  }
+  const now = new Date();
+  await tx.update(agents)
+    .set({ haltedAt: now, haltedReason: reason, haltedByUserId: actor.userId })
+    .where(eq(agents.id, agentId));
+  await tx.insert(auditLog).values({
+    userId: actor.userId ?? "00000000-0000-0000-0000-000000000000",
+    objectType: "agent",
+    objectId: agentId,
+    detail: { via: actor.via, ...actor.detail },
+    effect: "deny",
+    ruleId: EXECUTION_CONTROL_RULE_IDS.agentHalted,
+    ruleChain: [],
+    reason: `agent '${before.name}' HALTED: ${reason}`,
+  });
+  return {
+    agentId, halted: true, changed: true,
+    note: `every dispatch to '${before.name}' is now refused, and it can no longer be selected as a ` +
+      "routing or fallback target. This is separate from `enabled`: lifting the halt will not " +
+      "put a deliberately-disabled agent back into service.",
+  };
+}
+
 export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   const audit = async (
     writer: Pick<Db, "insert">,
@@ -270,32 +328,9 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/agents/:agentId/halt", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     const body = haltSchema.parse(req.body);
-    const result = await db.transaction(async (tx) => {
-      const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
-      if (!before) return null;
-      if (before.haltedAt) {
-        return {
-          agentId, halted: true, changed: false,
-          note: `already halted since ${before.haltedAt.toISOString()}: ${before.haltedReason}`,
-        };
-      }
-      const now = new Date();
-      await tx.update(agents)
-        .set({ haltedAt: now, haltedReason: body.reason, haltedByUserId: req.authCtx.userId ?? null })
-        .where(eq(agents.id, agentId));
-      await audit(
-        tx, req.authCtx.userId ?? null, "agent", agentId,
-        EXECUTION_CONTROL_RULE_IDS.agentHalted, "deny",
-        `agent '${before.name}' HALTED: ${body.reason}`,
-        { via: req.authCtx.via },
-      );
-      return {
-        agentId, halted: true, changed: true,
-        note: `every dispatch to '${before.name}' is now refused, and it can no longer be selected as a ` +
-          "routing or fallback target. This is separate from `enabled`: lifting the halt will not " +
-          "put a deliberately-disabled agent back into service.",
-      };
-    });
+    const result = await db.transaction((tx) =>
+      haltAgentInTx(tx as unknown as Db, agentId, body.reason, { userId: req.authCtx.userId ?? null, via: req.authCtx.via }),
+    );
     return result ?? reply.status(404).send({ error: "unknown_agent" });
   });
 
