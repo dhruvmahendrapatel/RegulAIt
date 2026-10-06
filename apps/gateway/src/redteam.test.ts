@@ -29,6 +29,7 @@ import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * ADR-0057 — CONTINUOUS RED-TEAMING, proved by attack.
@@ -126,9 +127,14 @@ async function runRedTeam(
   return app.inject({ method: "POST", url: "/v1/redteam/runs", headers: auth, payload });
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the shipped guardrails block injection and jailbreak probes before they reach
+  // the agent, and the PII floor withholds leaky outputs. This file pins the red-team
+  // mechanism against the agent itself, so it starts from the pre-strict posture.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
@@ -191,6 +197,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await setSystemPrompt(subjectAgentId, null);
   await restoreSb2Gates();
 });

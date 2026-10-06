@@ -204,7 +204,13 @@ export async function prepareConversationContext(
         org?.summarizerSelection === "fixed_agent" ? "fixed_summarizer_unavailable" : "no_compaction_agent",
       );
     } else {
-      const transcript = toCompact.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+      // ADR-0181: each turn is labelled `[role]`, never `role:` at a line
+      // start. The summarizer call takes the same input guardrail as any
+      // dispatch, and a line reading `assistant: …` IS the forged-role-turn
+      // shape the prompt-injection detector blocks by default — so the old
+      // format made the platform's own transcript refuse itself, and every
+      // compaction failed closed.
+      const transcript = toCompact.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
       const input = summary
         ? `Prior summary:\n${summary}\n\nNewer turns:\n${transcript}`
         : transcript;

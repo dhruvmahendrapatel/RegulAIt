@@ -1308,22 +1308,17 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
         ([k, v]) => (before as Record<string, unknown>)[k] !== v,
       ),
     );
+    // ADR-0181: every relaxation is audited old -> new
+    const previous = Object.fromEntries(
+      Object.keys(changed).map((k) => [k, (before as Record<string, unknown>)[k] ?? null]),
+    );
     await db.insert(auditLog).values({
       // bootstrap has no user identity; the nil uuid marks a non-user actor,
       // as elsewhere in the codebase, and `via` records which it was.
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "interception_settings",
       objectId: null,
-      // ADR-0181: old -> new, so a relaxed attribution or custody switch is
-      // legible from the audit row alone
-      detail: {
-        via: req.authCtx.via,
-        changed,
-        previous: Object.fromEntries(
-          Object.keys(changed).map((k) => [k, (before as Record<string, unknown>)[k] ?? null]),
-        ),
-        after,
-      },
+      detail: { via: req.authCtx.via, changed, previous, before: previous, after },
       effect: "allow",
       ruleId: "interception-settings-updated",
       ruleChain: [],

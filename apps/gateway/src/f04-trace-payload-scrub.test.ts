@@ -69,6 +69,7 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -189,10 +190,15 @@ function markerIn(s: string | null | undefined): string | null {
   return (s ?? "").match(/\[redacted:[^\]]+\]/)?.[0] ?? null;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
+  // ADR-0181: trace content capture ships OFF. This file pins the scrub of CAPTURED
+  // previews, so it opts in explicitly, with the org PII floor (block by default) off
+  // so the over-scrub guard's ordinary tool arguments reach the upstream.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { tracingCaptureContent: true, defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
   upstream = await startUpstream();
@@ -239,6 +245,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreStrictAdmission?.();
+  await restoreSb1Posture?.();
   app.server.closeAllConnections();
   await restoreSb2Gates();
   await app.close();

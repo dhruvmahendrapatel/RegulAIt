@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, egressAllowHosts, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -47,9 +48,13 @@ let userAuth: { authorization: string };
 /** every request the fake endpoint saw, so we can assert on the wire */
 const hits: Array<{ url: string; auth: string | null; host: string | null; body: unknown }> = [];
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the custom-provider capability ships OFF. This file pins the capability
+  // itself (and toggles the master switch), so it switches it on explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { customModelProvidersEnabled: true }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
   // ADR-0052 §4: registering a custom model provider is tier-gated on
@@ -116,6 +121,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await removeLicenseFixture(db);
   srv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));

@@ -38,6 +38,7 @@ import {
   threadLink,
 } from "./builder-channels.js";
 import type { TurnOutcome } from "./builder-runtime.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -202,9 +203,13 @@ async function bind(agent: string, provider: "slack" | "teams", connectionId: st
   return r.json().id as string;
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("bld-chan");
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  // ADR-0181: the org PII floor ships at block, and a block-mode reply is withheld from
+  // chat. This file pins the channel round trip, so the floor is set off explicitly.
+  restoreSb1Posture = await relaxDataPostureForTest(k.db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   admin = await k.person("admin", { admin: true });
   owner = await k.person("owner");
   colleague = await k.person("colleague");
@@ -279,6 +284,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   await drainChannelWork(k.db);
   if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
   if (connectorIds.length) {

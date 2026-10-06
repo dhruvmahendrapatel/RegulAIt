@@ -1078,16 +1078,23 @@
       "version": "7",
       "when": 1785091000000,
       "tag": "0156_strict_identity_defaults",
-        "breakpoints": true
-      },
-      {
+      "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1785092000000,
+      "tag": "0157_strict_guardrails_data_runtime",
+      "breakpoints": true
+    },
+    {
       "idx": 158,
       "version": "7",
       "when": 1785093000000,
       "tag": "0158_strict_governance_gates",
-        "breakpoints": true
-      },
-      {
+      "breakpoints": true
+    },
+    {
       "idx": 159,
       "version": "7",
       "when": 1785094000000,

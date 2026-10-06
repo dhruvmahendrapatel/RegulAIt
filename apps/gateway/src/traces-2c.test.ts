@@ -41,6 +41,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { recordTraceScore } from "./trace-scores.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -133,6 +134,7 @@ let anaRich: string;
 let borisRich: string;
 let anaPlain: string;
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
@@ -141,6 +143,9 @@ beforeAll(async () => {
   await app.ready();
   const [prior] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   priorOrg = prior ? { ...prior } : null;
+  // ADR-0181: trace content capture ships OFF. This file pins exported content
+  // attributes, so it opts in before any trace is written; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { tracingCaptureContent: true }, interception: false, guardrails: false });
   ana = await makeUser("t2c-ana");
   boris = await makeUser("t2c-boris");
   admin = await makeUser("t2c-admin", true);
@@ -150,6 +155,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   if (priorOrg) {
     await db
       .update(orgSettings)

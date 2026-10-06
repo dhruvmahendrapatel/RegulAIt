@@ -239,11 +239,11 @@ function PostureForm(props: { cur: InterceptionSettings }) {
           <Field label="Stream on PII-block project">
             <Select value={f.streamingOnBlockMode} onChange={(e) => set("streamingOnBlockMode", e.target.value as InterceptionSettings["streamingOnBlockMode"])}>
               <option value="suppress">suppress (buffer + disclose)</option>
-              <option value="reject">reject (400 the stream request)</option>
+              <option value="reject">reject (400 the stream request — default)</option>
             </Select>
           </Field>
           <Field label="Strict field rejection">
-            {boolSel("strictFieldRejection", ["off — accept & disclose", "on — unsupported fields 400"])}
+            {boolSel("strictFieldRejection", ["off — accept & disclose", "on — unsupported fields 400 (default)"])}
           </Field>
         </div>
         <div className={v.row}>

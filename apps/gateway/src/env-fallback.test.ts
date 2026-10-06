@@ -10,6 +10,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { platformEnvKey } from "./agents-connectors.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -93,10 +94,14 @@ async function invokeAnthropic(auth: { authorization: string }) {
   });
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   clearEnv();
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the env-key fallback ships OFF. This file pins the fallback itself, so it
+  // switches it on explicitly (the off case is pinned in org-settings.test.ts).
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { envKeyFallbackEnabled: true }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
 
@@ -166,6 +171,7 @@ beforeAll(async () => {
 beforeEach(clearEnv);
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   // leave the shared DB and the process env exactly as they were found
   await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));

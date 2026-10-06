@@ -22,6 +22,7 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -6538,6 +6539,21 @@ describe("streaming dispatch (SSE): same gates, same ledger, delivered as deltas
   let sabaId: string;
   let sabaAuth: { authorization: string };
   let streamAgentId: string;
+
+  // ADR-0181: the strict PII floor and the prompt-injection output layer are
+  // both 'block' by default, which never streams live. This block pins LIVE
+  // delta streaming, so it sets the lax posture explicitly and restores it.
+  let restorePosture: () => Promise<void>;
+  beforeAll(async () => {
+    restorePosture = await relaxDataPostureForTest(db, {
+      org: { defaultPiiMode: "none" },
+      interception: false,
+      guardrails: { promptInjectionMode: "warn" },
+    });
+  });
+  afterAll(async () => {
+    await restorePosture();
+  });
 
   const parseEvents = (body: string) =>
     body.split("\n\n").filter(Boolean).map((chunk) => {

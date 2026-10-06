@@ -15,6 +15,7 @@ import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * Multi-turn conversations end to end: create → dispatch twice with history →
@@ -86,9 +87,14 @@ async function makeUser(email: string, displayName: string, isAdmin = false) {
   return { id: user.json().id as string, auth: { authorization: `Bearer ${key.json().token}` } };
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly, and the injection and jailbreak
+  // layers to warn (a block-mode output layer never streams live); restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // the gateway resolves "mock" to the module-shared instance, so the test
@@ -619,4 +625,5 @@ describe("S21 — listing conversations filtered by project", () => {
 
 afterAll(async () => {
   await restoreSb2Gates();
+  await restoreSb1Posture?.();
 });

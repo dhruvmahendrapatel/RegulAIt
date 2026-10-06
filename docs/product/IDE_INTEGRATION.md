@@ -363,6 +363,12 @@ whether an output is safe, governed, priced or attributed. Today it contains exa
   meaningfully asked for. Rejecting it protected nothing and blocked the interception this feature
   exists to enable. It nudges sampling; it cannot make an ungoverned action possible.
 
+**Off by default since ADR-0181 (strict defaults).** `strictFieldRejection` ships ON, so a fresh
+install answers `temperature` with a 400 naming the field, like any rejected field. An IDE client
+that sends it on every request needs an admin to turn the middle tier on: Client Access → **Strict
+field rejection: off** (`PUT /v1/interception/settings {"strictFieldRejection": false}`, audited
+old → new). Until then, only clients that omit `temperature` get through.
+
 `tool_choice`, `response_format` and `thinking` could never join that tier — they change what the
 model is *able to do*, not merely how it samples. Since 2026-07-31 (ADR-0020 §5 amendment) they are
 **supported** instead, each with a real end-to-end mapping into every provider adapter that can
@@ -428,11 +434,24 @@ the accept-and-ignore tier is a one-line change — the disclosure machinery alr
 `content_block_delta` / `content_block_stop` / `message_delta` / `message_stop` for the Anthropic
 shape, `chat.completion.chunk` frames terminated by `data: [DONE]` for the OpenAI shape.
 
-**A project whose compliance cascade sets PII mode `block` does not stream.** The output PII check
-can only run once the full text exists, so streaming it would flash raw model output before the
-check could withhold it. Instead the same governed dispatch runs fully buffered and returns ordinary
-JSON, disclosed via `regulait.streamingSuppressed` and the `x-regulait-streaming-suppressed`
-header. This is ADR-0019's rule, applied unchanged.
+**A call whose PII mode is `block` does not stream.** The output PII check can only run once the
+full text exists, so streaming it would flash raw model output before the check could withhold it.
+That covers a project whose compliance cascade sets `block` AND, since ADR-0181, every other call:
+the org PII floor (`defaultPiiMode`) ships as `block`, and it applies to unclassified projects and
+unattributed calls alike.
+
+What such a call gets is the admin's `streamingOnBlockMode` choice in Client Access:
+
+- **`reject` (the default since ADR-0181):** a 400 `streaming_rejected_on_block_project`, before
+  anything is dispatched — retry without `stream: true`. A client that cannot turn streaming off
+  cannot use the gateway until an admin changes one of the two settings below.
+- **`suppress`:** the same governed dispatch runs fully buffered and returns ordinary JSON,
+  disclosed via `regulait.streamingSuppressed` and the `x-regulait-streaming-suppressed` header
+  (ADR-0019's rule).
+
+To let IDE clients stream, an admin either sets `suppress` (they then receive buffered JSON) or
+relaxes the PII floor for the traffic in question (Organization → PII + env-key fallback). Both are
+audited old → new.
 
 ---
 

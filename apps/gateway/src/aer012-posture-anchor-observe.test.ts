@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { GetObjectLockConfigurationCommand } from "@aws-sdk/client-s3";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { snapshotOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { S3ObjectLockSink, type S3SendClient } from "./audit-chain.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the preset is measured from a relaxed (pre-hardening) posture; the strict defaults are restored after
@@ -90,10 +91,15 @@ async function restoreShippedDefaults(app: ReturnType<typeof buildApp>) {
   expect(m.statusCode).toBe(200);
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { useCaseGateMode: "off", dispatchAttributionRequired: false, mrmEnforced: false });
+  // ADR-0181: this file hardens FROM a fixed lax starting posture, which its
+  // helper writes; the strict values SB1 owns are recorded here and put back
+  // LAST in afterAll, so the shared database is handed on as it was found.
+  restoreSb1Posture = await snapshotOrgSettingsForTest(db, ["defaultPiiMode", "semanticCachePolicy"]);
   for (const { mode } of MODES) {
     const fake = fakeFor(mode);
     const sink = fake ? new S3ObjectLockSink(S3_CONFIG, fake) : null;
@@ -103,6 +109,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreSb2Gates();
+  await restoreSb1Posture?.();
   for (const { app } of apps.values()) await app.close();
 });
 

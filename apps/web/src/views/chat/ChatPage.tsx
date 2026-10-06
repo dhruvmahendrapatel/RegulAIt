@@ -431,7 +431,7 @@ export default function ChatPage() {
             if (j.dispatch.pii) d.pii = j.dispatch.pii;
             if (j.streamingSuppressed) {
               d.note =
-                "Streaming is disabled for this project: its compliance classification sets PII mode to block, so output is checked in full before any of it is sent.";
+                "Streaming is disabled here: an output control (the PII mode or a guardrail) is in block mode, so output is checked in full before any of it is sent.";
             }
           } else {
             d.error = j?.error ?? `HTTP ${res.status}`;

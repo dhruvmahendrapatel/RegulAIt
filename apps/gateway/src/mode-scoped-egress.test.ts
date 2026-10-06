@@ -55,6 +55,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { COMPILED_DEFAULT_RULE_ID } from "./compiled-egress.js";
 import { DEPLOY_MODE_ENV, type DeployMode } from "./deploy-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -224,9 +225,13 @@ async function runGitStage(): Promise<string> {
   return ctx.lastError ?? "";
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the org PII floor ships at block. This file pins behaviour unrelated to
+  // PII handling, so it sets the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, keyCustodyEnforced: false });
 
@@ -437,6 +442,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   // RESTORE EVERY PIECE OF SHARED STATE THIS FILE TOUCHED. fileParallelism is
   // off, but the process and the org singleton outlive this file.
   globalThis.fetch = realFetch;

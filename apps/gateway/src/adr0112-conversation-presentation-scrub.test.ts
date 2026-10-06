@@ -41,6 +41,7 @@ import { createDb, runMigrations, sql, type Db } from "@regulait/db";
 import { scrubAuditText } from "@regulait/shared";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { PRESENTATION_SCRUB, scrubPresentedPayload } from "./conversation-presentation.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -145,9 +146,13 @@ function textTurns(wire: { messages?: ReadonlyArray<{ role: string; content: unk
   );
 }
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: this file pins how a conversation PRESENTS scrubbed content, not the inline
+  // controls: the org PII floor is set off and the injection/jailbreak layers to warn.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: { promptInjectionMode: "warn", jailbreakMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
@@ -505,4 +510,5 @@ describe("ADR-0112 §4 — the over-scrub guard", () => {
 
 afterAll(async () => {
   await restoreSb2Gates();
+  await restoreSb1Posture?.();
 });

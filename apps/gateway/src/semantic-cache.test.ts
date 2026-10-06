@@ -14,6 +14,7 @@ import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
  * PILLAR 6 §8/§10 — semantic caching, end to end: a REAL per-(user,agent)
@@ -112,9 +113,13 @@ const cacheRows = async (userId: string) =>
 let agentId: string;
 let otherAgentId: string;
 
+let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181: the semantic cache ships OFF and the org PII floor at block. This file pins
+  // the opt-in cache itself, so it sets opt_in and the floor off explicitly; restored in afterAll.
+  restoreSb1Posture = await relaxDataPostureForTest(db, { org: { semanticCachePolicy: "opt_in", defaultPiiMode: "none" }, interception: false, guardrails: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   agentId = await makeAgent("sc-agent");
@@ -122,6 +127,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreSb1Posture?.();
   app.server.closeAllConnections();
   await restoreSb2Gates();
   await app.close();

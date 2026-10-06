@@ -2885,11 +2885,13 @@ export const complianceProfiles = pgTable("compliance_profiles", {
   tag: text("tag").notNull().unique(),
   /** workflow templates this framework forces into every governed change */
   requiredTemplateIds: jsonb("required_template_ids").$type<string[]>(),
+  // ADR-0181: strict by default — read_only (was read_write)
   mcpDefaultMode: text("mcp_default_mode", { enum: ["read_only", "read_write"] })
     .notNull()
-    .default("read_write"),
+    .default("read_only"),
   auditRetentionDays: integer("audit_retention_days"),
-  piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("log"),
+  // ADR-0181: strict by default — block (was log)
+  piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("block"),
   /** §8.3 -> §8.2 tie: the backup retention + patch cadence this framework
    * forces onto any infra resource carrying its tag (pillar 3). Null = the
    * framework declares no infra floor of its own. */
@@ -3378,13 +3380,16 @@ export const interceptionSettings = pgTable(
     // disclosure; 'reject' refuses the call with a 400 so a client that
     // REQUIRES streaming learns immediately rather than getting a shape it
     // did not ask for.
+    // ADR-0181: the shipped default is now 'reject' (strict); an admin may
+    // choose 'suppress' through PUT /v1/interception/settings (audited).
     streamingOnBlockMode: text("streaming_on_block_mode", { enum: STREAMING_ON_BLOCK_MODES })
       .notNull()
-      .default("suppress"),
+      .default("reject"),
     // ADR-0021: when true, the COMPAT_IGNORED_FIELDS accept-and-disclose tier
     // is disabled — an unsupported-but-ignorable field (temperature) is a 400
     // again, restoring the strict pre-#47 posture for orgs that want it.
-    strictFieldRejection: boolean("strict_field_rejection").notNull().default(false),
+    // ADR-0181: on by default (strict); an admin may relax it, audited.
+    strictFieldRejection: boolean("strict_field_rejection").notNull().default(true),
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3522,13 +3527,13 @@ export const orgSettings = pgTable(
      * today's caller-opt-in; always = cache every eligible dispatch. */
     semanticCachePolicy: text("semantic_cache_policy", { enum: SEMANTIC_CACHE_POLICIES })
       .notNull()
-      .default("opt_in"),
+      .default("off"), // ADR-0181: off by default (was opt_in)
     semanticCacheTtlSeconds: integer("semantic_cache_ttl_seconds").notNull().default(3600),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
       .notNull()
-      .default("fail_open"),
+      .default("fail_closed"), // ADR-0181: fail closed by default (was fail_open)
     summarizerSelection: text("summarizer_selection", { enum: SUMMARIZER_SELECTIONS })
       .notNull()
       .default("cheapest"),
@@ -3539,8 +3544,9 @@ export const orgSettings = pgTable(
 
     // --- governance / compliance behavioural defaults ----------------------
     /** effective piiMode for a project whose classifications resolve to none.
-     * 'none' (default) = today's no-enforcement. */
-    defaultPiiMode: text("default_pii_mode", { enum: ORG_PII_MODES }).notNull().default("none"),
+     * ADR-0181: 'block' by default (was 'none'); 'none' = no enforcement, an
+     * audited admin relaxation. */
+    defaultPiiMode: text("default_pii_mode", { enum: ORG_PII_MODES }).notNull().default("block"),
     /** ADR-0117 (migration 0110) — WHICH international national-identifier
      * jurisdictions `detectPII` runs, on top of its four always-on base
      * detectors. Ships EMPTY and the migration's DEFAULT is EMPTY, so an
@@ -3551,10 +3557,11 @@ export const orgSettings = pgTable(
       .$type<string[]>()
       .notNull()
       .default([]),
-    /** platform-key-via-environment fallback (ANTHROPIC_API_KEY etc.). ON =
-     * today; a regulated org can force every credential through the encrypted
-     * store. envFallbackProviders narrows WHICH providers may fall back. */
-    envKeyFallbackEnabled: boolean("env_key_fallback_enabled").notNull().default(true),
+    /** platform-key-via-environment fallback (ANTHROPIC_API_KEY etc.).
+     * ADR-0181: OFF by default — every credential goes through the encrypted
+     * store; an admin may turn the fallback on (audited).
+     * envFallbackProviders narrows WHICH providers may fall back. */
+    envKeyFallbackEnabled: boolean("env_key_fallback_enabled").notNull().default(false),
     envFallbackProviders: jsonb("env_fallback_providers")
       .$type<string[]>()
       .notNull()
@@ -3689,7 +3696,8 @@ export const orgSettings = pgTable(
      * empty egress allow-list, enabled=false until a connection test passes,
      * and the ordinary per-user agent grant), so an org that wants it gone
      * entirely flips this and an org that never registers one is unaffected. */
-    customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(true),
+    // ADR-0181: OFF by default (was true); an admin enables it, audited.
+    customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(false),
     /** ADR-0043 (migration 0049): the org default for MCP servers whose
      * allowPrivateRanges is null. FALSE (default since ADR-0181, migration
      * 0159) = strict: every server needs an explicit per-server
@@ -3929,7 +3937,8 @@ export const orgSettings = pgTable(
      * `customModelProvidersEnabled` precedent: a capability an org may not want
      * at all should be refusable in ONE place, honestly, rather than by
      * removing every grant one at a time and hoping none was missed. */
-    llmTrainingEnabled: boolean("llm_training_enabled").notNull().default(true),
+    // ADR-0181: OFF by default (was true); an admin enables it, audited.
+    llmTrainingEnabled: boolean("llm_training_enabled").notNull().default(false),
     /** where the ONE Approvals Queue takes over. A job whose ESTIMATED cost is
      * at or above this does not start — it queues as an ordinary approval
      * (objectType 'training_job') and starts only once a named human approves.
@@ -3948,7 +3957,9 @@ export const orgSettings = pgTable(
     tracingEnabled: boolean("tracing_enabled").notNull().default(true),
     /** May only ever NARROW. Off keeps the tree, the timings, the costs and
      * every deny reason, and stops storing prompts/outputs at all. */
-    tracingCaptureContent: boolean("tracing_capture_content").notNull().default(true),
+    // ADR-0181: OFF by default (was true) — no prompt or output is stored
+    // until an admin opts in, audited.
+    tracingCaptureContent: boolean("tracing_capture_content").notNull().default(false),
     /** the truncation ceiling on a stored preview — the same 4000 default
      * `eval_results.output_text` uses (ADR-0044), not a new posture */
     tracingPreviewMaxChars: integer("tracing_preview_max_chars").notNull().default(4000),
@@ -4410,12 +4421,14 @@ export const guardrailConfigs = pgTable(
     scopeId: uuid("scope_id"),
     // The four ADR-0042 layers. PII is absent on purpose: it stays governed by
     // the §8.3 cascade's own piiMode, byte-for-byte as ADR-0019 left it.
+    // ADR-0181: block for prompt injection and jailbreak, warn for the others
+    // (was log for all four). Must equal GUARDRAIL_DEFAULT_MODES in shared.
     promptInjectionMode: text("prompt_injection_mode", { enum: GUARDRAIL_MODES })
       .notNull()
-      .default("log"),
-    jailbreakMode: text("jailbreak_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
-    toxicityMode: text("toxicity_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
-    semanticDlpMode: text("semantic_dlp_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+      .default("block"),
+    jailbreakMode: text("jailbreak_mode", { enum: GUARDRAIL_MODES }).notNull().default("block"),
+    toxicityMode: text("toxicity_mode", { enum: GUARDRAIL_MODES }).notNull().default("warn"),
+    semanticDlpMode: text("semantic_dlp_mode", { enum: GUARDRAIL_MODES }).notNull().default("warn"),
     /** the org's own vocabulary per detector; additive across scopes */
     customTerms: jsonb("custom_terms").$type<GuardrailTermMap>().notNull().default({}),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),

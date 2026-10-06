@@ -83,6 +83,28 @@ terminal; the spec falls back to `e2e-bootstrap-token` only when it is unset).
 
 Everything runs on the keyless **mock** provider. No live model, no external network.
 
+**Strict defaults (ADR-0181) and what the seed configures.** The demo database starts from the
+strict shipped defaults: the PII floor blocks, guardrails block prompt injection and jailbreak and
+warn on the rest, provider keys in the environment are not read at dispatch, and trace content is
+not stored. The seed changes exactly two things, both through the audited admin routes, and prints
+both:
+
+- **Provider key.** If `GOOGLE_API_KEY` is set in the terminal that runs `demo:prepare`, the seed
+  imports it ONCE into the encrypted key store (`provider key: imported GOOGLE_API_KEY …`); the value
+  is never printed, logged or written to a file, and a stored Google key is never overwritten.
+  Unset, the line says so and the demo runs on the mock agents exactly as before.
+- **Trace content capture: ON** (`RELAXED for the demo: …`). Continuous trace evaluation re-runs
+  the detectors over stored response previews; with capture off there is nothing to evaluate.
+  Credentials are still scrubbed at write time. The change is an `org-settings-updated` audit row
+  (before `false`, after `true`).
+
+`demo:intake` also opens a **time-boxed guardrail window** for its required-test red-team run: the
+two agents under test get prompt-injection and jailbreak at `warn` while the suite runs, so the
+probes reach the agent (a probe the platform held is not evidence, ADR-0180), and the overrides
+are removed when it ends. All of it is in the `demo:intake` output (`note RELAXED for the
+assurance run only …`) and in `/admin → Audit` (`guardrail-config-updated`,
+`guardrail-config-deleted`).
+
 **The left navigation rail auto-hides (ADR-0169).** It rests as a slim icon strip; hovering it
 (or tabbing into it) opens it — on hover it opens over the page, on keyboard focus the page makes
 room. **Pin navigation** at the bottom of the rail keeps it open, remembered per browser — pin it
@@ -231,7 +253,9 @@ back afterwards; a live run leaves it set — recreate the database before the n
   (one probe of every attack class the strict defaults map to, three trials per probe; a
   single-trial run, or one the platform blocked, is not evidence) against premium-mock (and
   balanced-mock) through the real red-team route, so those requirements
-  are met and add no line. On a database prepared more than 30 days earlier, the gate truthfully adds
+  are met and add no line. The strict guardrail default would hold the injection and jailbreak
+  probes before they reach the agent, so the run happens inside an audited, time-boxed guardrail
+  window (see Setup) and the agents are measured themselves. On a database prepared more than 30 days earlier, the gate truthfully adds
   **BLOCK required_test_stale**; re-run `demo:intake` to refresh the evidence. Its one HIGH residual
   risk (*Fraud model falsely blocks transactions …*) carries a seeded, time-boxed acceptance (Ada,
   partial mitigation, two compensating controls, six months), so `residual_above_tolerance` does not
@@ -275,7 +299,9 @@ back afterwards; a live run leaves it set — recreate the database before the n
     **Register as use case** link that opens intake prefilled. It only observes; nothing is blocked;
   - *"… inherits a HIGH rating from Acme Internal AI Platform"* — with the propagation path;
   - *"balanced-mock returned flagged content in 1 of N evaluated responses (semantic DLP)"* —
-    continuous trace evaluation caught a credential the inline guardrail let through;
+    continuous trace evaluation caught a credential the inline guardrail let through (semantic DLP
+    is at `warn` by default: it flagged the call and let it proceed; an admin who wants it refused
+    sets it to `block`);
   - *"N calls for Internal IT Knowledge Base Bot (to balanced-mock) were served by
     fast-mock, which is outside its approved stack"* — the cost optimizer moved approved traffic
     to an agent the approval never covered;
