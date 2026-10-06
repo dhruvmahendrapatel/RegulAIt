@@ -321,6 +321,10 @@ describe("PF-14 the ticket: one PM work item per episode", () => {
     expect(r.statusCode, r.body).toBe(201);
     connectionId = r.json().id as string;
     made.conns.push(connectionId);
+    // auto_high files on the OLDEST connection; the shared database holds other
+    // suites' connections (encrypted under their own data keys), so this one is
+    // made the oldest for the duration of the file
+    await db.update(pmConnections).set({ createdAt: new Date("2000-01-01T00:00:00Z") }).where(eq(pmConnections.id, connectionId));
   });
   const links = (alertId: string) => db.select().from(pmLinks).where(and(eq(pmLinks.objectType, "governance_alert" as never), eq(pmLinks.objectId, alertId)));
 

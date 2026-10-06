@@ -1396,6 +1396,28 @@ export async function governanceAlertTicket(db: Db, alertId: string) {
   return link ?? null;
 }
 
+/** the work items of many episodes in one query (oldest per episode wins) */
+export async function governanceAlertTickets(db: Db, alertIds: readonly string[]) {
+  const out = new Map<string, NonNullable<Awaited<ReturnType<typeof governanceAlertTicket>>>>();
+  if (alertIds.length === 0) return out;
+  const rows = await db
+    .select({
+      alertId: pmLinks.objectId,
+      connectionId: pmLinks.connectionId,
+      connectionName: pmConnections.name,
+      provider: pmConnections.provider,
+      externalId: pmLinks.externalId,
+      externalUrl: pmLinks.externalUrl,
+      createdAt: pmLinks.createdAt,
+    })
+    .from(pmLinks)
+    .innerJoin(pmConnections, eq(pmConnections.id, pmLinks.connectionId))
+    .where(and(eq(pmLinks.objectType, GOVERNANCE_ALERT_PM_OBJECT), inArray(pmLinks.objectId, [...alertIds])))
+    .orderBy(asc(pmLinks.createdAt), asc(pmLinks.id));
+  for (const { alertId, ...link } of rows) if (!out.has(alertId)) out.set(alertId, link);
+  return out;
+}
+
 export async function fileGovernanceAlertTicket(
   db: Db,
   dataKey: string,

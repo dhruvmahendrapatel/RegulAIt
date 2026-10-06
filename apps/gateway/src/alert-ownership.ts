@@ -76,7 +76,7 @@ import {
 } from "@regulait/shared";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { fileGovernanceAlertTicket, governanceAlertTicket } from "./pm.js";
+import { fileGovernanceAlertTicket, governanceAlertTicket, governanceAlertTickets } from "./pm.js";
 
 export const ALERT_SLA_SWEEP_JOB_NAME = "alert-sla-sweep";
 
@@ -269,7 +269,7 @@ async function fileTicket(
       { trigger, connectionId: out.connectionId, externalId: out.externalId });
   } else if (out.outcome === "refused") {
     await audit(db, actorUserId, a.id, ALERT_OWNERSHIP_RULE_IDS.ticketFailed,
-      `governance alert ${a.id}: work item NOT filed — ${out.error}`, { trigger, connectionId, error: out.error, status: out.status }, "deny");
+      `governance alert ${a.id}: work item NOT filed — ${out.error}`, { trigger, connectionId, error: out.error, status: out.status, why: out.detail.slice(0, 500) }, "deny");
   }
   return out;
 }
@@ -451,8 +451,9 @@ export async function alertOwnershipViews(db: Db, alerts: readonly AlertRow[], n
       names.set(u.id, u.name || u.email || null);
     }
   }
+  const tickets = await governanceAlertTickets(db, alerts.map((a) => a.id));
   for (const a of alerts) {
-    const ticket = await governanceAlertTicket(db, a.id);
+    const ticket = tickets.get(a.id);
     out.set(a.id, {
       owner: a.ownerUserId ? { id: a.ownerUserId, name: names.get(a.ownerUserId) ?? null, source: a.ownerSource } : null,
       dueAt: a.dueAt?.toISOString() ?? null,
