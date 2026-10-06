@@ -56,7 +56,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   agents,
   and,
@@ -110,6 +110,7 @@ import {
   type ResolvedVersion,
 } from "@regulait/shared";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-02): Art. 73(6) evidence hold
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -1185,6 +1186,22 @@ export async function loadComplianceProfileCanaryDivergence(
 // ---------------------------------------------------------------------------
 
 export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void {
+  /** D4 DFX2 (D4G-02) — the Art. 73(6) evidence hold on every write that
+   * changes what an AGENT serves or is measured against: activating a new
+   * version, activating or rolling back to another, starting, re-pointing or
+   * abandoning a canary, promoting one. Rule artifacts are not agents and are
+   * not held. Same 409 and audited admin override as the agents routes
+   * (`agent-evidence-hold.ts` -> `incidentEvidenceHoldRefused`). */
+  const agentHoldRefused = (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    artifactType: ConfigArtifactType,
+    artifactId: string,
+    verb: string,
+  ): Promise<boolean> =>
+    artifactType === "agent_system_prompt" || artifactType === "agent_config"
+      ? agentEvidenceHoldRefused(db, req, reply, artifactId, `${verb} of ${artifactType} (config versions)`)
+      : Promise.resolve(false);
   /** Batch B7c — the manual door for the observation-retention sweep, exactly
    * as every ADR-0064 sweep keeps one (POST /v1/mrm/expiry-sweep etc.). Calls
    * the SAME function the scheduler job calls. Static segment, so it can never
@@ -1282,6 +1299,8 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       const rejection = validateRuleVersionBody(artifactType, body.body);
       if (rejection) return reply.status(422).send({ error: rejection.error, detail: rejection.reason });
     }
+    // a draft (activate: false) changes nothing that serves; activating it does
+    if (body.activate && (await agentHoldRefused(req, reply, artifactType, artifactId, "create and activate a version"))) return reply;
     const res = await newVersion(db, {
       artifactType,
       artifactId,
@@ -1300,6 +1319,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     if (!versions.some((v) => v.version === body.version)) {
       return reply.status(404).send({ error: "unknown_version" });
     }
+    if (await agentHoldRefused(req, reply, artifactType, artifactId, `activate version ${body.version}`)) return reply;
     const res = await activateVersion(db, {
       artifactType,
       artifactId,
@@ -1341,6 +1361,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         detail: "this artifact has never had a previous active version to roll back to",
       });
     }
+    if (await agentHoldRefused(req, reply, artifactType, artifactId, `roll back to version ${lastMove.fromVersion}`)) return reply;
     const res = await activateVersion(db, {
       artifactType,
       artifactId,
@@ -1370,6 +1391,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     }
     const current = versions.find((v) => v.status === "canary") ?? null;
     const adjust = current?.id === target.id;
+    if (await agentHoldRefused(req, reply, artifactType, artifactId, `canary of version ${target.version} at ${body.pct}%`)) return reply;
     const [row] = await db.transaction(async (tx) => {
       if (current && current.id !== target.id) {
         await tx
@@ -1426,6 +1448,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     const versions = await loadVersions(db, artifactType, artifactId);
     const canary = versions.find((v) => v.status === "canary");
     if (!canary) return reply.status(409).send({ error: "no_canary" });
+    if (await agentHoldRefused(req, reply, artifactType, artifactId, `abandon the canary (version ${canary.version})`)) return reply;
     await db
       .update(configVersions)
       .set({ status: "rolled_back", canaryPct: null })
@@ -1464,6 +1487,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     const versions = await loadVersions(db, artifactType, artifactId);
     const canary = versions.find((v) => v.status === "canary");
     if (!canary) return reply.status(409).send({ error: "no_canary", detail: "there is no canary to promote" });
+    if (await agentHoldRefused(req, reply, artifactType, artifactId, `promote the canary (version ${canary.version})`)) return reply;
 
     let evidence = null;
     if (body.evalRunId) {

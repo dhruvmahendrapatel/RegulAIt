@@ -80,6 +80,7 @@ import {
   type SkillAdmissionState,
 } from "@regulait/shared";
 import { minReleaseAgeDays, quarantineDetail, recordSighting, skillReleaseStatus } from "./release-age.js";
+import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -502,6 +503,13 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
           `must be edited by its owner.`,
       });
     }
+    // D4 DFX2 (D4G-05): admitting releases the copies pinned at this body into
+    // their agents' prompts — a change to each of those agents
+    const releases = await db
+      .select({ agentId: builderAgentSkills.agentId })
+      .from(builderAgentSkills)
+      .where(and(eq(builderAgentSkills.skillId, id), eq(builderAgentSkills.snapshotDigest, s.contentDigest), eq(builderAgentSkills.snapshotAdmissionState, "held")));
+    if (await agentEvidenceHoldRefused(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`)) return reply;
     const [row] = await db
       .update(builderSkills)
       .set({
@@ -558,6 +566,12 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
     if (!s || s.archivedAt) return reply.status(404).send({ error: "unknown_skill" });
     if (!s.requestedVisibility) return reply.status(409).send({ error: "no_pending_request" });
     const approve = body.decision === "approve";
+    // D4 DFX2 (D4G-05): a widening that applies changes which runs carry the
+    // skill on every agent that pinned it
+    if (approve) {
+      const pinnedBy = await db.select({ agentId: builderAgentSkills.agentId }).from(builderAgentSkills).where(eq(builderAgentSkills.skillId, id));
+      if (await agentEvidenceHoldRefused(db, req, reply, pinnedBy.map((r) => r.agentId), `visibility of skill ${id} (pinned by this agent)`)) return reply;
+    }
     await db
       .update(builderSkills)
       .set({

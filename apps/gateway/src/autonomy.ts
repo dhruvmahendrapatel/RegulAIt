@@ -94,6 +94,7 @@ import {
   type MonitorAssuranceSubject,
 } from "@regulait/shared";
 import { canEditAgent, loadVisibleAgent, type Viewer } from "./builder-access.js";
+import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
 import { connectorOperations } from "./builder-tools.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { loadCardsForSubject } from "./mrm.js";
@@ -552,6 +553,9 @@ export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
       return reply.status(400).send({ error: "invalid_autonomy_declaration", detail: parsed.error.issues.map((i) => i.message).join("; ") });
     }
     const body = parsed.data;
+    // D4 DFX2 (D4G-05): the declared autonomy class is part of the agent's
+    // configuration under investigation (it decides its oversight floors)
+    if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "declared autonomy class")) return reply;
     const now = new Date();
     const declaring = body.class !== null;
     // the declaration and its audit row commit together or not at all
