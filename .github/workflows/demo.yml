@@ -4,12 +4,11 @@ name: Demo journey
 # database: `demo:prepare` on an empty Postgres → the gateway → the seeded-DB
 # Playwright journey (register from shadow AI → independent approval → alert →
 # remediation approved by a second person → graph → regulatory → signed audit
-# export); the mocked UI suite runs beside it, sharded (`demo-mock`).
+# export). The mocked UI suite runs in ci.yml's `spa-mock` on pull requests,
+# and here (`demo-mock`, sharded) only on a manual dispatch — see that job.
 #
 # BUDGET (see ci.yml's header): demo-journey is ~6 billed minutes (install +
-# build dominate); the mocked suite adds one job per shard (~2 min of install
-# and browser download each, plus its share of the tests) and a ~1-minute
-# coverage job. A `pull_request` path filter matches the PR's WHOLE diff, so on a
+# build dominate). A `pull_request` path filter matches the PR's WHOLE diff, so on a
 # long-lived PR it would fire on every push — hourly board check-ins included.
 # The `changes` job (one billed minute) therefore diffs THIS push against the
 # previous head and the journey runs only when demo code changed in it; it
@@ -169,14 +168,22 @@ jobs:
             ${{ runner.temp }}/gateway.log
           retention-days: 7
 
-  # The mocked UI suite (ADR-0183 2.4): every *.mock.spec.ts, sharded across
-  # parallel jobs on fresh runners, then one job proving every listed spec ran
-  # in exactly one shard. It needs no database or gateway (Vite plus route
-  # mocks), so it does not wait for demo-journey. Layout and proof are shared
-  # with ci.yml in mock-ui-shards.yml.
+  # The mocked UI suite (ADR-0183 2.4), sharded, shared with ci.yml in
+  # mock-ui-shards.yml — but here ONLY on a manual dispatch.
+  #
+  # DE-DUPLICATED 2026-10-06. ci.yml's `spa-mock` runs the identical suite on
+  # every pull_request except one whose every file is a doc (`**/*.md`,
+  # docs/**, project-state/**, .gitignore, LICENSE). Every pull_request that
+  # fires this workflow touches apps/web, gateway demo code, packages/shared
+  # or packages/db, so it fires ci.yml too — unless the change is only .md
+  # files under those paths, and no mocked spec reads a repository .md file
+  # (checked: none in apps/web/e2e or apps/web/src). Running it here as well
+  # bought nothing for ~10–12 billed minutes a run. The one real gap is
+  # `workflow_dispatch`: dispatching this workflow does not run ci.yml, so a
+  # manual "check the demo now" still runs the mocked suite here.
   demo-mock:
     needs: changes
-    if: needs.changes.outputs.demo == 'true'
+    if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.demo == 'true'
     concurrency:
       group: demo-mock-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true

@@ -119,46 +119,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      # CI-01 — the ADR-0060 "proof by attack" tests need a REAL Object-Lock
-      # bucket. They are `describe.skipIf(!s3TestReachable)`, and with no
-      # object store here they had skipped on every CI run since they were
-      # written: the tamper-resistance claim shipped green on nine tests that
-      # never ran. The same dev credentials as docker-compose.yml.
-      #
-      # WHY THIS IMAGE (2026-10-06, ADR-0183 §3): SeaweedFS (Apache-2.0)
-      # replaces the frozen `bitnamilegacy/minio` build, which MinIO's removal
-      # of its community images (September 2026) had left unmaintained. The
-      # switch was conditional on proof and the proof came first: the ADR-0060
-      # suite passed 9/9 against SeaweedFS 4.48 run locally both as `mini` (what
-      # this service runs) and as compose's `server` command, with COMPLIANCE
-      # refusing a versioned delete, a retention shortening and a GOVERNANCE
-      # downgrade even with BypassGovernanceRetention set (PENDING.md, "Dev/CI
-      # object store after MinIO").
-      #
-      # The official image, pinned by DIGEST (multi-arch index of tag 4.48).
-      # Its default CMD is `mini -dir=/data` (master + volume + filer + S3 in
-      # one process), which is what a GitHub service needs — a service cannot
-      # pass a command. `mini` sizes its volumes from free disk, so a runner's
-      # disk cannot run it out of volume slots. AWS_ACCESS_KEY_ID/SECRET become
-      # its admin S3 identity; any other signature is refused (403).
-      # S3 listens on 8333 in the container; it is published on 9000 so the
-      # endpoint below is unchanged.
-      # Same image and digest as docker-compose.yml — keep them together.
-      objectstore:
-        image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
-        env:
-          AWS_ACCESS_KEY_ID: regulait
-          AWS_SECRET_ACCESS_KEY: regulait-dev-minio
-        ports:
-          - 9000:8333
-        # A SIGNED ListBuckets (curl's built-in SigV4; curl ships in the
-        # image): healthy means the S3 API answers, its filer is up and the
-        # credential works, not merely that a port is open.
-        options: >-
-          --health-cmd "curl -fsS -o /dev/null --aws-sigv4 aws:amz:us-east-1:s3 --user regulait:regulait-dev-minio http://127.0.0.1:8333/"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
 
     env:
       DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_test
@@ -186,6 +146,31 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # CI-01 — the ADR-0060 "proof by attack" tests need a REAL Object-Lock
+      # bucket. They are `describe.skipIf(!s3TestReachable)`, and with no
+      # object store here they had skipped on every CI run since they were
+      # written: the tamper-resistance claim shipped green on nine tests that
+      # never ran.
+      #
+      # SeaweedFS (Apache-2.0, ADR-0183 §3) replaced the frozen
+      # `bitnamilegacy/minio` build after the ADR-0060 suite passed 9/9 against
+      # it locally (PENDING.md, "Dev/CI object store after MinIO").
+      #
+      # Started FROM docker-compose.yml, not as a `services:` entry: a service
+      # cannot pass a command, so it would run the image's default `mini` and
+      # none of the compose service's settings — the loopback-only filer, the
+      # per-boot signing key that closes the S3 gRPC identity API, one volume
+      # per bucket and the explicit slot count. This way CI tests exactly the
+      # store a `docker compose up` gets, and its bucket-init job too. The only
+      # CI addition is publishing S3 on the runner's loopback (compose
+      # publishes no port), so the endpoint below stays localhost:9000.
+      - name: Object store — the compose `objectstore` service, plus its bucket init
+        run: |
+          printf 'services:\n  objectstore:\n    ports: ["127.0.0.1:9000:9000"]\n' > "$RUNNER_TEMP/ci-objectstore.yml"
+          docker compose -f docker-compose.yml -f "$RUNNER_TEMP/ci-objectstore.yml" up -d --wait objectstore \
+            || { docker compose logs objectstore; exit 1; }
+          docker compose run --rm objectstore-init
 
       # `pnpm -r build` also typechecks + bundles the React SPA (apps/web),
       # which is the ONLY UI since ADR-0033 deleted the two single-file

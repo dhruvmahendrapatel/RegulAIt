@@ -83,47 +83,60 @@ services:
   objectstore:
     # The official image, pinned by DIGEST (the multi-arch index of tag 4.48,
     # 2026-09-28), so a re-pushed tag cannot change what a fresh clone runs.
-    # Same image and digest as .github/workflows/ci.yml — keep them together.
-    # Override with REGULAIT_OBJECTSTORE_IMAGE for another SeaweedFS build.
+    # CI starts THIS service (ci.yml, build-and-test), so CI tests exactly what
+    # a `docker compose up` runs. Override with REGULAIT_OBJECTSTORE_IMAGE for
+    # another SeaweedFS build that has the same /entrypoint.sh.
     image: ${REGULAIT_OBJECTSTORE_IMAGE:-chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d}
     # `server` runs master + volume + filer + S3 gateway in one process. The
-    # image's entrypoint prepends `-dir=/data -volume.max=0
-    # -master.volumeSizeLimitMB=1024`; later flags win.
+    # image's entrypoint prepends `-dir=/data -master.volumeSizeLimitMB=1024`
+    # (and `-volume.max=0` unless one is given); later flags win.
     #
-    # ONLY THE S3 API IS ON THE NETWORK, and that is a security setting, not
-    # tidiness. Measured 2026-10-06: SeaweedFS's filer HTTP API is
+    # ONLY THE S3 API IS OPEN TO THE NETWORK, and that is a security setting,
+    # not tidiness. Measured 2026-10-06: SeaweedFS's filer HTTP API is
     # unauthenticated by default, and a plain `DELETE /buckets/<b>/<key>.versions`
     # against it removed a COMPLIANCE-locked object version that the S3 API had
     # just refused to delete. So master, volume and filer (HTTP and gRPC) bind
     # to loopback inside this container (`-ip.bind=127.0.0.1`) and only the S3
-    # listener binds the compose network (`-s3.ip.bind=0.0.0.0`). Everything
-    # else on the network can reach Object Lock only through the S3 API, which
-    # enforces it.
+    # listener binds the compose network (`-s3.ip.bind=0.0.0.0`).
     #
-    # Honest limit: the S3 listener's companion gRPC port (S3 port + 10000)
-    # binds with it and carries SeaweedFS's IAM cache service, unauthenticated
-    # unless gRPC mTLS is configured. A container on this network could add an
-    # identity there. That does not reach the anchors: an Admin identity is
-    # refused a versioned delete, a retention shortening and a downgrade to
-    # GOVERNANCE on a COMPLIANCE object (measured), exactly as the gateway's own
-    # credential is.
+    # THE S3 gRPC PORT (S3 port + 10000) cannot be bound separately: SeaweedFS
+    # 4.48 opens it on the S3 bind address (weed/command/s3.go, the gRPC
+    # listener takes s3opt.bindIp), and nothing outside this container needs
+    # it — it carries the filer-to-S3 IAM cache pushes and lifecycle deletes,
+    # both internal. Measured: from a non-loopback address, its PutIdentity
+    # created an Admin identity that then listed every bucket. So the
+    # filer signing key below is set: with it, every RPC on that service
+    # (PutIdentity, RemoveIdentity, PutPolicy, LifecycleDelete, ...) demands a
+    # JWT signed by it (s3api_server_grpc.go checkAdminAuth), and the same
+    # PutIdentity is refused "missing authorization metadata". The key is
+    # random per container start and never leaves the process: no file, no
+    # .env value, nothing to publish or leak; the components that sign with it
+    # all run in this one process.
     #
-    # The Iceberg and Lance listeners are switched off (nothing here uses
-    # them), telemetry is off (air-gapped installs must not phone home), and
-    # 64 MB volumes keep a small disk from running out of volume slots — each
-    # bucket is its own collection, and at the image's 1024 MB default a box
-    # with a few GB free refuses writes with "No writable volumes".
+    # VOLUME SLOTS: each bucket is its own collection and claims volumes from a
+    # slot count fixed at start-up. With the image defaults (7 volumes per new
+    # collection, slots = free disk / volume size) a store gaining buckets on a
+    # laptop disk stops accepting writes; measured with 64 MB volumes and ~7 GB
+    # free, bucket 19 of 50 failed and so did the anchor bucket after it. One
+    # volume per collection (WEED_MASTER_VOLUME_GROWTH_COPY_1 below), 64 MB
+    # volumes and an explicit 200 slots: 50 buckets plus the anchor bucket
+    # wrote fine, using under 1 MB of disk (volumes are sparse; the volume
+    # server still stops writing at 1% free disk).
+    #
+    # The Iceberg and Lance listeners are off (nothing here uses them) and
+    # telemetry is off (air-gapped installs must not phone home).
+    entrypoint: ["/bin/sh", "-c"]
+    # One-item list holding the script, as for objectstore-init below; `$$`
+    # is compose's escape for a literal `$`.
     command:
-      - server
-      - -ip=127.0.0.1
-      - -ip.bind=127.0.0.1
-      - -s3
-      - -s3.ip.bind=0.0.0.0
-      - -s3.port=9000
-      - -s3.port.iceberg=0
-      - -s3.port.lance=0
-      - -master.volumeSizeLimitMB=64
-      - -master.telemetry=false
+      - |
+        WEED_JWT_FILER_SIGNING_KEY="$$(LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 64)"
+        [ "$${#WEED_JWT_FILER_SIGNING_KEY}" -eq 64 ] || { echo "could not generate the filer signing key" >&2; exit 1; }
+        export WEED_JWT_FILER_SIGNING_KEY
+        exec /entrypoint.sh server \
+          -ip=127.0.0.1 -ip.bind=127.0.0.1 \
+          -s3 -s3.ip.bind=0.0.0.0 -s3.port=9000 -s3.port.iceberg=0 -s3.port.lance=0 \
+          -master.volumeSizeLimitMB=64 -volume.max=200 -master.telemetry=false
     environment:
       # DEV-GRADE CREDENTIALS, exactly like REGULAIT_DATA_KEY above. They are
       # here so `docker compose up --build` needs no setup; they are not a
@@ -140,6 +153,8 @@ services:
       # reads.
       AWS_ACCESS_KEY_ID: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
       AWS_SECRET_ACCESS_KEY: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-minio}
+      # one volume per new collection (bucket) instead of seven; see above
+      WEED_MASTER_VOLUME_GROWTH_COPY_1: "1"
     healthcheck:
       # A SIGNED ListBuckets with the service's own credential, not a bare
       # health URL: healthy means the S3 API answers, the filer behind it is
