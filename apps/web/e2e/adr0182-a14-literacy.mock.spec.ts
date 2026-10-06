@@ -66,7 +66,7 @@ const coverage = {
   ],
 };
 
-function myLiteracy(current: boolean) {
+function myLiteracy(current: boolean, url = "https://policies.example.test/aup") {
   return {
     required: true,
     current,
@@ -85,7 +85,7 @@ function myLiteracy(current: boolean) {
         expiresAt: current ? iso(365) : iso(265),
         method: "acknowledged",
         acknowledgedVersion: current ? 2 : 1,
-        url: "https://policies.example.test/aup",
+        url,
         attachmentId: null,
         contentDigest: DIGEST2,
         validityDays: 365,
@@ -103,7 +103,7 @@ interface Captured {
   acks: Array<{ id: string; body: unknown }>;
 }
 
-async function mockApi(page: Page, opts: { admin: boolean }): Promise<Captured> {
+async function mockApi(page: Page, opts: { admin: boolean; docUrl?: string }): Promise<Captured> {
   const cap: Captured = { publishes: [], records: [], settingsPuts: [], acks: [] };
   let acknowledged = false;
   const me = opts.admin
@@ -117,9 +117,16 @@ async function mockApi(page: Page, opts: { admin: boolean }): Promise<Captured> 
     if (p === "/auth/me") return json(route, { ...me, via: "session", mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/auth/sessions") return json(route, { sessions: [] });
     if (p === "/v1/me") return json(route, me);
-    if (p === "/v1/me/ai-literacy") return json(route, opts.admin ? { required: false, current: true, documents: [], gateMode: "enforce", exempt: null, noticeDays: 14 } : myLiteracy(acknowledged));
+    if (p === "/v1/me/ai-literacy") return json(route, opts.admin ? { required: false, current: true, documents: [], gateMode: "enforce", exempt: null, noticeDays: 14 } : myLiteracy(acknowledged, opts.docUrl));
     if (p === "/v1/ai-policies" && method === "GET")
-      return json(route, { scope: "all", documents: [doc(DOC_V3, 3, "draft", { title: "Acceptable use of AI (typo fixed)" }), doc(DOC_V2, 2, "published"), doc(DOC_V1, 1, "retired")] });
+      return json(route, {
+        scope: "all",
+        documents: [
+          doc(DOC_V3, 3, "draft", { title: "Acceptable use of AI (typo fixed)" }),
+          doc(DOC_V2, 2, "published", opts.docUrl ? { url: opts.docUrl } : {}),
+          doc(DOC_V1, 1, "retired"),
+        ],
+      });
     if (p === "/v1/ai-policies/coverage") return json(route, coverage);
     const pub = /^\/v1\/ai-policies\/([^/]+)\/publish$/.exec(p);
     if (pub && method === "POST") {
@@ -257,5 +264,35 @@ test.describe("ADR-0182 A14: AI literacy", () => {
     await expect(card).toContainText("to acknowledge");
     // scoped to this slice's section: the rest of the Account page is not A14's
     await expectAxeClean(page, "account AI policies section", '[data-testid="account-ai-policies"]');
+  });
+
+  test("D4A-04: a stored link that is not an https address is shown as text, never as a link", async ({ page }) => {
+    const UNSAFE = "javascript:alert(document.cookie)";
+    await mockApi(page, { admin: false, docUrl: UNSAFE });
+    await page.goto("/ui/account?section=ai-policies");
+    const card = page.locator('[data-testid="account-ai-policies"]');
+    await expect(card).toContainText("Acceptable use of AI");
+    await expect(card.getByTestId("policy-link-unsafe")).toContainText("Link not shown");
+    await expect(page.locator(`a[href^="javascript:"]`)).toHaveCount(0);
+    await expect(card.getByRole("link", { name: /Open “Acceptable use of AI”/ })).toHaveCount(0);
+  });
+
+  test("D4A-04: the admin list shows no link for an unsafe stored address; retiring asks for a 10-character reason", async ({ page }) => {
+    await mockApi(page, { admin: true, docUrl: "data:text/html,<script>alert(1)</script>" });
+    await page.goto("/ui/admin/governance/literacy");
+    await expect(page.getByTestId("policy-link-unsafe").first()).toContainText("link not shown");
+    await expect(page.locator(`a[href^="data:"]`)).toHaveCount(0);
+    // D4G-11: retiring the published version needs a reason of at least 10 characters before anything is sent
+    let retires = 0;
+    await page.route("**/v1/ai-policies/*/retire", (route) => {
+      retires += 1;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ document: {}, changed: true }) });
+    });
+    await page.getByRole("button", { name: "Retire" }).nth(1).click();
+    const dialog = page.getByRole("dialog", { name: /Retire “Acceptable use of AI” version 2/ });
+    await dialog.getByLabel("Reason").fill("old");
+    await dialog.getByRole("button", { name: "Retire" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("at least 10 characters");
+    expect(retires).toBe(0);
   });
 });

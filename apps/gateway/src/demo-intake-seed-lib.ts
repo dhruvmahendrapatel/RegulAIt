@@ -390,7 +390,7 @@ async function seedDemoIntakeRun(
 
   // --- AI literacy (ADR-0182 A14): one published acceptable-use document, acknowledged by the personas.
   // LAST, because the strict literacy gate refuses a governed call from anyone not current once it is published.
-  await seedDemoAcceptableUse(call, { ada, dana, avery }, report);
+  await seedDemoAcceptableUse(call, { ada, dana, avery }, BOOT, report);
 
   return report;
 }
@@ -398,17 +398,30 @@ async function seedDemoIntakeRun(
 /** the demo's acceptable-use document (its key; a test that runs the seeder deletes it afterwards, M-068) */
 export const DEMO_AUP_KEY = "demo-acceptable-use";
 
+/** the evidence reference the seeder's completion records carry (they say what made them) */
+export const DEMO_AUP_EVIDENCE =
+  "regulAIt demo dataset (demo:intake): recorded by the demo tooling for a synthetic persona, not acknowledged in person";
+
 /**
  * ADR-0182 A14: publish one acceptable-use document (a synthetic link, applying
- * to everyone) and have the three personas acknowledge exactly its published
- * version and digest, each for themselves, through the real routes. The
- * literacy gate stays at its strict default (`enforce`): demo:traffic runs as
- * Dana and Ada, who are current after this. Idempotent: a published version is
- * reused, and a persona already current is skipped.
+ * to everyone) and make the three personas current on exactly its published
+ * version, through the real routes. The literacy gate stays at its strict
+ * default (`enforce`): demo:traffic runs as Dana and Ada, who are current after
+ * this. Idempotent: a published version is reused, and a persona already
+ * current is skipped.
+ *
+ * D4A-03: a person acknowledges only from an interactive session, never with
+ * an API key, and the seeder holds only API keys (each persona's one-time
+ * password must be changed by that person at first sign-in, so the seeder
+ * cannot sign in as them either). It therefore does NOT pretend they
+ * acknowledged: the deployment operator (the bootstrap identity) records an
+ * `admin_recorded` completion for each, with an evidence reference that says
+ * the demo tooling made it. Account and coverage show "recorded by an admin".
  */
 async function seedDemoAcceptableUse(
   call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
   who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  operator: Headers,
   report: DemoSeedReport,
 ): Promise<void> {
   const ok = (s: number) => s >= 200 && s < 300;
@@ -440,12 +453,17 @@ async function seedDemoAcceptableUse(
     const me = await call("GET", "/v1/me/ai-literacy", undefined, p.auth);
     const mine = ((me.body.documents ?? []) as Json[]).find((d) => d.documentId === doc!.id);
     if (mine?.state === "current") {
-      report.skipped.push(`acceptable-use acknowledgement (${name})`);
+      report.skipped.push(`acceptable-use current (${name})`);
       continue;
     }
-    const ack = await call("POST", `/v1/ai-policies/${doc!.id}/acknowledge`, { version: doc!.version, digest: doc!.contentDigest }, p.auth);
-    if (ok(ack.status)) report.created.push(`acceptable-use acknowledgement (${name})`);
-    else fail(`acceptable-use acknowledgement (${name})`, ack);
+    const rec = await call(
+      "POST",
+      `/v1/ai-policies/${doc!.id}/records`,
+      { userId: p.id, method: "admin_recorded", evidenceRef: DEMO_AUP_EVIDENCE },
+      operator,
+    );
+    if (ok(rec.status)) report.created.push(`acceptable-use completion recorded by the demo tooling (${name})`);
+    else fail(`acceptable-use completion (${name})`, rec);
   }
 }
 

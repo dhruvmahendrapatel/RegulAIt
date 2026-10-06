@@ -11,10 +11,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
+import { aiPolicyAcknowledgements, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
 import type { DemoIntakeFixtures, IntakeAssistRequest } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { DEMO_AUP_EVIDENCE, DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
@@ -159,6 +159,18 @@ describe("seedDemoIntake", () => {
     expect(first.created).toContain("shadow-AI import (1 rows)");
     // positive control: the catalogue is installed, so a provider host MATCHES
     expect(first.notes.some((n) => n.includes("matched 0 rows"))).toBe(false);
+
+    // D4A-03: the seeder holds only API keys, and a person acknowledges only from an interactive session, so the
+    // personas are made current by completions the demo tooling RECORDS (and says so), never by an acknowledgement
+    // presented as theirs
+    const aupAcks = await db
+      .select({ method: aiPolicyAcknowledgements.method, evidenceRef: aiPolicyAcknowledgements.evidenceRef, recordedBy: aiPolicyAcknowledgements.recordedBy })
+      .from(aiPolicyAcknowledgements)
+      .innerJoin(aiPolicyDocuments, eq(aiPolicyDocuments.id, aiPolicyAcknowledgements.documentId))
+      .where(eq(aiPolicyDocuments.key, DEMO_AUP_KEY));
+    expect(aupAcks.length).toBeGreaterThanOrEqual(3);
+    expect(aupAcks.every((a) => a.method === "admin_recorded" && a.evidenceRef === DEMO_AUP_EVIDENCE && a.recordedBy === null)).toBe(true);
+    expect(first.failed.filter((f) => f.includes("acceptable-use"))).toEqual([]);
 
     // IDEMPOTENT: nothing new on a second run (the shadow import is evidence
     // and is re-imported by design — deduplication is the importer's job)

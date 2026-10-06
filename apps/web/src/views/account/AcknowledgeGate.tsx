@@ -79,6 +79,20 @@ export const STATE_TEXT: Record<LiteracyState, { label: string; tone: Tone }> = 
   superseded: { label: "new version to acknowledge", tone: "warn" },
 };
 
+/**
+ * D4A-04: a policy link is opened only when it is an `https:` address (mirrors `aiPolicyHref` in @regulait/shared,
+ * which the gateway's schema enforces on write). Anything else — `javascript:`, `data:`, plain `http:` — is shown as
+ * text, never as a link a person is asked to open.
+ */
+export function policyHref(url: string | null | undefined): string | null {
+  if (typeof url !== "string" || !/^https:\/\//i.test(url)) return null;
+  try {
+    return new URL(url).protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 export const KIND_TEXT: Record<string, string> = {
   acceptable_use: "Acceptable-use policy",
   training: "Training",
@@ -144,10 +158,14 @@ export function LiteracyDocumentList(props: { data: MyLiteracy }) {
                 {d.expiresAt ? ` · ${d.state === "expired" ? "expired" : "valid until"} ${fmtAt(d.expiresAt)}` : ""}
                 {d.method && d.method !== "acknowledged" ? " · completion recorded by an admin" : ""}
               </div>
-              {d.url ? (
-                <a href={d.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "underline" }}>
+              {policyHref(d.url) ? (
+                <a href={policyHref(d.url)!} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "underline" }}>
                   Open “{d.title}” (opens in a new tab)
                 </a>
+              ) : d.url ? (
+                <span className={v.faint} data-testid="policy-link-unsafe">
+                  Link not shown (not an https address): <span className={v.mono}>{d.url}</span>
+                </span>
               ) : (
                 <span className={v.faint}>Attached document {d.attachmentId}</span>
               )}

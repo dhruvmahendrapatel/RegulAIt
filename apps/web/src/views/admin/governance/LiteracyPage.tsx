@@ -16,7 +16,7 @@ import { fmtAt } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Meter, Modal, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, ReasonModal, useAction, useRoles, useTeams } from "../adminKit";
-import { KIND_TEXT, STATE_TEXT, type LiteracyState } from "../../account/AcknowledgeGate";
+import { KIND_TEXT, STATE_TEXT, policyHref, type LiteracyState } from "../../account/AcknowledgeGate";
 import v from "../../views.module.css";
 
 interface AiPolicyDoc {
@@ -179,13 +179,15 @@ function DocumentsCard() {
                   </div>
                   <div className={v.faint}>
                     <span className={v.mono}>{d.key}</span> · version {d.version}
-                    {d.url ? (
+                    {policyHref(d.url) ? (
                       <>
                         {" · "}
-                        <a href={d.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "underline" }}>
+                        <a href={policyHref(d.url)!} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "underline" }}>
                           open
                         </a>
                       </>
+                    ) : d.url ? (
+                      <span data-testid="policy-link-unsafe"> · link not shown (not an https address)</span>
                     ) : null}
                   </div>
                 </div>
@@ -287,6 +289,8 @@ function DocumentsCard() {
         }
         confirmLabel="Retire"
         danger
+        minLength={10}
+        placeholder="why is this version retiring? (required, at least 10 characters, audited)"
         onCancel={() => setRetiring(null)}
         onConfirm={(reason) => {
           const d = retiring!;
@@ -322,7 +326,7 @@ function CreateModal(props: {
   const submit = () => {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(key)) return setErr("The key is lower-case letters, digits and dashes.");
     if (!title.trim()) return setErr("Give the document a title.");
-    if (!/^https?:\/\//.test(url.trim())) return setErr("Link to the document (an http or https address).");
+    if (!policyHref(url.trim())) return setErr("Link to the document with an https:// address.");
     if (!everyone && teamIds.length + roleIds.length === 0) return setErr("Choose at least one team or role, or apply it to everyone.");
     const days = validity.trim() ? Number(validity) : undefined;
     if (days !== undefined && (!Number.isInteger(days) || days < 30 || days > 730)) return setErr("Validity is 30 to 730 days, or leave it empty for the org default.");
