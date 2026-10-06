@@ -29,6 +29,23 @@ import { packRatios, pctText } from "./packRatios";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+/**
+ * Human labels for the shipped frameworks (ADR-0182 S5 adds the ISACA AI
+ * agents checklist). A pack is data, so an unknown framework — a customer's
+ * own control set — shows its id alone.
+ */
+const FRAMEWORK_LABELS: Record<string, string> = {
+  "eu-ai-act": "EU AI Act (Regulation (EU) 2024/1689)",
+  "nist-ai-rmf": "NIST AI RMF 1.0",
+  "iso-42001": "ISO/IEC 42001",
+  "iso-27001": "ISO/IEC 27001",
+  hipaa: "HIPAA (45 CFR Parts 160 and 164)",
+  "pci-dss": "PCI DSS",
+  finra: "FINRA",
+  "soc-2": "SOC 2",
+  "isaca-ai-agents": "ISACA — securing AI agents (2026 checklist)",
+};
+
 interface Pack {
   id: string;
   framework: string;
@@ -332,7 +349,16 @@ export default function CompliancePacksPage() {
               rows={packs.data?.packs ?? []}
               rowKey={(p) => p.id}
               columns={[
-                { key: "framework", header: "Framework", render: (p) => <code>{p.framework}</code> },
+                {
+                  key: "framework",
+                  header: "Framework",
+                  render: (p) => (
+                    <span>
+                      <code>{p.framework}</code>
+                      {FRAMEWORK_LABELS[p.framework] ? <span className={v.faint}> {FRAMEWORK_LABELS[p.framework]}</span> : null}
+                    </span>
+                  ),
+                },
                 { key: "version", header: "Version", render: (p) => `v${p.version}` },
                 { key: "title", header: "Title", render: (p) => <span className={v.dim}>{p.title}</span> },
                 { key: "controls", header: "Controls", render: (p) => p.controlCount },
