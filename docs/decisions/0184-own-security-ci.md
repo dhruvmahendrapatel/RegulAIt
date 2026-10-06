@@ -189,6 +189,12 @@ Run locally with the pinned tool binaries on planted fixtures in a scratch direc
   regexes found no difference). The failing attempt's gateway log is in that run's `demo-journey-failure` artifact,
   which this environment cannot download, so the root cause is not established; it is recorded here, not called a
   flake (M-070).
+- One of four local runs of the real journey on the final tree (11b5334) failed differently: `demo-review-policy.spec.ts:142`
+  found the intake wizard showing "You have a saved draft of “Credit-limit-increase assistant”" (the first spec's
+  registration), so "Fill in an example" did not fill the purpose and "Continue" stayed disabled. The wizard deletes its
+  server-side draft only "once every save has landed" after a submit (`IntakeWizardPage.tsx`), so on a loaded machine
+  the first spec can navigate on before that delete lands. The other three runs passed. This is a spec-order race in
+  the web app and its specs, not in this batch's code; it is reported to the batch that owns those files.
 
 ## Consequences
 
