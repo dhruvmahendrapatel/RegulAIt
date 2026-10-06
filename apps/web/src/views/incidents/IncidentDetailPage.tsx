@@ -377,11 +377,15 @@ function SentModal(props: { clock: IncidentClock | null; stage: "initial" | "com
           <Field label="Reference (optional)" help="The authority's case number, a ticket or a letter reference.">
             <Input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={500} />
           </Field>
-          <Field label="Sent at (local time; empty = now)" help={`Not before the clock started (${utc(c.clockStart)}) and not in the future.`}>
+          <Field label="Sent at (local time; empty = now)">
             <Input type="datetime-local" value={sentAt} onChange={(e) => setSentAt(e.target.value)} />
           </Field>
+          <p className={v.faint}>
+            Not before the clock started ({utc(c.clockStart)}) and not in the future. More than an hour back, say why: the record keeps both times
+            and your reason.
+          </p>
           {backdated && (
-            <Field label="Why is this recorded late? (at least 10 characters, audited)" help="More than an hour back: the record keeps both times and your reason.">
+            <Field label="Why is this recorded late? (at least 10 characters, audited)">
               <Textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={2000} />
             </Field>
           )}
