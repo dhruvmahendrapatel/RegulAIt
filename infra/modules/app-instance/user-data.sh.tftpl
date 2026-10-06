@@ -43,6 +43,11 @@ services:
     environment:
       REGULAIT_DATA_KEY: $${DATA_KEY}
       REGULAIT_BOOTSTRAP_TOKEN: $${BOOT_TOKEN}
+      # ADR-0181: the gateway's HSTS default is one year. This box serves an
+      # sslip.io name derived from an EC2 public IP that changes on stop/start,
+      # and a browser cannot be told to forget a pin before max-age runs out,
+      # so the dev box keeps the bounded one-day value (ADR-0029 amendment).
+      REGULAIT_HSTS: max-age=86400
     restart: unless-stopped
   db:
     restart: unless-stopped

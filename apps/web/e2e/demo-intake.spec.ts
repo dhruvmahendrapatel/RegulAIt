@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { passTotp } from "./totp-sign-in";
+import { passTotp, reprovisionTotp } from "./totp-sign-in";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,8 @@ async function freshUser(page: Page, email: string, password: string) {
   const users = await (await fetch(`${state.baseUrl}/v1/users`, { headers })).json() as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
   expect(id, `seeded persona ${email} must exist`).toBeTruthy();
+  // ADR-0181 (FX2): the seed enrolled the admin's TOTP outside this run; re-provision it
+  await reprovisionTotp(state.baseUrl, headers, email);
   const minted = await (await fetch(`${state.baseUrl}/v1/users/${id}/set-initial-password`, { method: "POST", headers, body: JSON.stringify({ force: true }) })).json() as { password: string };
   await page.goto("/ui");
   await page.getByLabel("Email").fill(email);

@@ -10,6 +10,7 @@
  * not toggled here (shared database) — the pure tests cover that branch.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agents, aiUseCases, and, auditLog, createDb, eq, governanceAlerts, runMigrations, type Db } from "@regulait/db";
@@ -37,9 +38,14 @@ let reviewUc = "";
 const call = (url: string, headers: Record<string, string>, payload: unknown) =>
   app.inject({ method: "POST", url, headers, payload: payload as object });
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   for (const [k, isAdmin] of [["admin", true], ["owner", false], ["stranger", false]] as const) {
@@ -63,6 +69,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   app.server.closeAllConnections();
   await restoreSb2Gates();
   await app.close();

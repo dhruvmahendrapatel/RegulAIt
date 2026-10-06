@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
@@ -92,9 +93,14 @@ async function makeTemplate(name: string, changeType: string, stages: unknown[])
   expect(rule.statusCode).toBe(201);
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
   const pia = await makeUser("wr-pia@example.com");
   piaAuth = pia.auth;
@@ -187,6 +193,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   delete workflowTestHooks.duringStageEval;
   delete workflowTestHooks.beforeStageCommit;
   await app.close();

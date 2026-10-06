@@ -23,6 +23,7 @@
  * sweep is always narrowed to this file's own use cases.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -164,9 +165,14 @@ function plusMonths(iso: string, months: number): string {
   return d.toISOString();
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
   [originalPolicy = null] = await db.select().from(governanceReviewPolicy);
   const who: Array<[Who, boolean]> = [
@@ -184,6 +190,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // the review policy is an org singleton: put back exactly what was there
   await db.delete(governanceReviewPolicy);
   if (originalPolicy) await db.insert(governanceReviewPolicy).values(originalPolicy);

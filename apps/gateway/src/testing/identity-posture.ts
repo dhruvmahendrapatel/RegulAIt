@@ -7,6 +7,9 @@
  *    cookie session enrols, exactly as a person would: enroll, then activate
  *    with a code computed from the returned secret by the gateway's own TOTP
  *    code. Nothing is relaxed.
+ *    `enrolAdminTotpForTest` does the same for a password-less user the suite
+ *    reaches through an API key (ADR-0181 FX2: an admin's key answers to the
+ *    MFA requirement): a one-time password, a sign-in, enrol, activate.
  * 2. `relaxIdentityForTest` — a suite that pins pre-0181 behaviour (a key with
  *    no expiry, a delegation window, a two-class password) sets the lax value
  *    it needs, explicitly, and gets back a `restore()` that puts the strict
@@ -17,6 +20,7 @@ import { eq, orgSettings, ORG_SETTINGS_ID, type Db, type OrgSettingsRow } from "
 import { STRICT_IDENTITY_DEFAULTS } from "@regulait/shared";
 import { loadOrgSettings } from "../org-settings.js";
 import { totpCode, totpStep } from "../totp.js";
+import { enrolAdminTotp } from "../demo-identity.js";
 
 type Inject = (opts: {
   method: "POST";
@@ -85,4 +89,17 @@ export async function relaxIdentityForTest(
   return async () => {
     await db.update(orgSettings).set(restore).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   };
+}
+
+/** ADR-0181 (FX2): give a PASSWORD-LESS user TOTP through the real routes
+ * (one-time password -> sign-in -> enrol -> activate), so that an API key for
+ * them works under mfaRequired; returns the secret. The app needs a data key. */
+export async function enrolAdminTotpForTest(
+  app: Parameters<typeof enrolAdminTotp>[0],
+  bootstrapToken: string,
+  userId: string,
+): Promise<string> {
+  const r = await enrolAdminTotp(app, bootstrapToken, userId);
+  if (r.status !== "enrolled") throw new Error(`enrolAdminTotpForTest(${userId}): ${r.status === "refused" ? r.reason : "already enrolled"}`);
+  return r.secret;
 }

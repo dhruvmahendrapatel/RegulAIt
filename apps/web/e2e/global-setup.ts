@@ -10,7 +10,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, createWriteStream } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resetTotpStore } from "./totp-sign-in";
+import { recordTotpSecret, resetTotpStore } from "./totp-sign-in";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -115,6 +115,17 @@ export default async function globalSetup() {
     dana: password("dana", "dana@regulait.local"),
     avery: password("avery", "avery@regulait.local"),
   };
+  // ADR-0181 (FX2): an admin's API key answers to the MFA requirement, so the
+  // seed enrols Ada's TOTP before minting her key and prints the authenticator
+  // URI ONCE, beside her one-time password — taken from there exactly as a
+  // presenter would add it to an authenticator app, and kept in the run's
+  // git-ignored secret store (cleared above) for the TOTP challenge.
+  {
+    const uri = /admin TOTP \(shown ONCE[^)]*\): (otpauth:\/\/totp\/\S+)/.exec(seedOut)?.[1];
+    const secret = uri ? new URL(uri).searchParams.get("secret") : null;
+    if (!secret) throw new Error("could not capture the admin's TOTP enrolment from the seed output");
+    recordTotpSecret("admin@regulait.local", secret);
+  }
 
   // 3. boot the gateway (dist) — logs to a file for post-mortems
   const logDir = process.env.E2E_LOG_DIR ?? here;

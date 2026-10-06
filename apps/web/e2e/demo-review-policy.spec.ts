@@ -19,7 +19,7 @@
  * uses no policy — is never affected by it.
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { passTotp } from "./totp-sign-in";
+import { passTotp, reprovisionTotp } from "./totp-sign-in";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
@@ -39,6 +39,8 @@ async function signIn(page: Page, email: string, password: string) {
   const users = (await api("/v1/users")) as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
   expect(id, `seeded persona ${email} must exist`).toBeTruthy();
+  // ADR-0181 (FX2): the seed enrolled the admin's TOTP outside this run; re-provision it
+  await reprovisionTotp(BASE, BOOT, email);
   const minted = (await api(`/v1/users/${id}/set-initial-password`, { method: "POST", body: JSON.stringify({ force: true }) })) as { password: string };
   await page.goto("/ui");
   await page.getByLabel("Email").fill(email);

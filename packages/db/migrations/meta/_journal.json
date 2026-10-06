@@ -1100,6 +1100,13 @@
       "when": 1785094000000,
       "tag": "0159_strict_admission_infra",
       "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1785095000000,
+      "tag": "0160_strict_identity_followups",
+      "breakpoints": true
     }
   ]
 }

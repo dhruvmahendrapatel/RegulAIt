@@ -18,6 +18,7 @@
  * episode this file raises is deleted, before the file ends.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -53,9 +54,14 @@ const users = {} as Record<"admin" | "member", { id: string; auth: { authorizati
 const inject = (method: "GET" | "PUT" | "POST", url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   for (const [k, isAdmin] of [["admin", true], ["member", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, {
@@ -71,6 +77,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   // M-068: leave the org at its strict default whatever happened above
   await db.execute(sql`UPDATE org_settings SET assurance_gate_mode = 'enforce'`);
   app.server.closeAllConnections();

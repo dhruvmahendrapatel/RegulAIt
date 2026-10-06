@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,9 +36,14 @@ async function post(url: string, payload: unknown) {
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   // ADR-0181: the org PII floor ships at block and would refuse these payloads before
   // the redaction under test runs, so the floor is set off explicitly; and it pins the
   // scrubbed CAPTURED previews, so content capture (off by default) is switched on.
@@ -66,6 +72,7 @@ beforeAll(async () => {
 beforeEach(() => { calls = []; response = { text: RAW }; upstreamStatus = 200; onCall = undefined; location = undefined; });
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await restoreSb1Posture?.();
   if (previousAllow) await db.update(egressAllowHosts).set(previousAllow).where(eq(egressAllowHosts.id, previousAllow.id));
   else await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));

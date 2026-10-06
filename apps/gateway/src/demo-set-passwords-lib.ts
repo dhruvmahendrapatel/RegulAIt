@@ -20,10 +20,18 @@
  *    and revokes the personas' live sessions (a password change does);
  *  - it writes one audit row per persona that names WHAT happened and from
  *    which source — never the password, never its hash;
- *  - it never prints the password.
+ *  - it never prints the password;
+ *  - ADR-0181 (FX2): it re-provisions an ADMIN persona's authenticator. The
+ *    demo seed enrols the admin's TOTP itself (an admin's API key answers to
+ *    the MFA requirement, and the prep tooling acts as her through keys), and
+ *    that secret was shown once on the seed's console. Setting the presenter's
+ *    own password therefore clears the seed's enrolment too — audited, like
+ *    the admin "clear MFA" route — and the admin enrols her own authenticator
+ *    at her first browser sign-in, before anything else opens. MFA stays
+ *    required throughout; nothing is relaxed.
  */
 import { readFileSync } from "node:fs";
-import { and, authSessions, auditLog, eq, inArray, isNull, users, type Db } from "@regulait/db";
+import { and, authMfaPending, authSessions, auditLog, eq, inArray, isNull, users, type Db } from "@regulait/db";
 import { checkPasswordPolicy, hashPassword } from "./auth.js";
 import { networkFacingSignal } from "./dev-secrets.js";
 import { resolveLicense } from "./licensing.js";
@@ -117,7 +125,14 @@ export async function setDemoPasswords(db: Db, env: NodeJS.ProcessEnv): Promise<
 
   // ---- the personas ---------------------------------------------------------
   const found = await db
-    .select({ id: users.id, email: users.email, disabledAt: users.disabledAt, mustChangePassword: users.mustChangePassword })
+    .select({
+      id: users.id,
+      email: users.email,
+      disabledAt: users.disabledAt,
+      mustChangePassword: users.mustChangePassword,
+      isAdmin: users.isAdmin,
+      totpEnabled: users.totpEnabled,
+    })
     .from(users)
     .where(inArray(users.email, [...DEMO_PERSONA_EMAILS]));
   if (found.length === 0) {
@@ -169,6 +184,26 @@ export async function setDemoPasswords(db: Db, env: NodeJS.ProcessEnv): Promise<
       reason: `demo:set-passwords set the password of demo persona '${email}' from the ${pw.source === "env" ? DEMO_PASSWORD_ENV : DEMO_PASSWORD_FILE_ENV} ${pw.source === "env" ? "environment variable" : "secret file"} (one-time flag cleared, sessions revoked)`,
     });
     lines.push(`  ${email.padEnd(24)} password set (one-time flag cleared, live sessions revoked)`);
+    // ADR-0181 (FX2): the seed-enrolled authenticator of an admin persona is
+    // re-provisioned — she enrols her own at her first sign-in (see above)
+    if (u.isAdmin && u.totpEnabled) {
+      await db
+        .update(users)
+        .set({ totpEnabled: false, totpSecretCiphertext: null, totpLastUsedStep: null })
+        .where(eq(users.id, u.id));
+      await db.delete(authMfaPending).where(eq(authMfaPending.userId, u.id));
+      await db.insert(auditLog).values({
+        userId: NIL_UUID,
+        objectType: "user",
+        objectId: u.id,
+        detail: { phase: "mfa-cleared", email, via: "demo:set-passwords", demoLicensed },
+        effect: "allow",
+        ruleId: "mfa-cleared-by-admin",
+        ruleChain: [],
+        reason: `demo:set-passwords re-provisioned the authenticator of demo admin '${email}': the seed's TOTP enrolment is cleared and she enrols her own at her first sign-in (MFA stays required)`,
+      });
+      lines.push(`  ${"".padEnd(24)} authenticator re-provisioned: enrols TOTP at first sign-in (MFA required for admins)`);
+    }
   }
   return {
     ok: true,

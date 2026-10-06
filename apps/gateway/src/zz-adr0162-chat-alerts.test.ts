@@ -12,6 +12,7 @@
  */
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -52,9 +53,14 @@ const call = (method: "GET" | "POST" | "PATCH", url: string, headers: Record<str
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
 const postsAbout = (needle: string) => posted.filter((p) => JSON.stringify(p).includes(needle));
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   upstream = http.createServer((req, res) => {
     let body = "";
@@ -110,6 +116,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await db.delete(chatopsConnections).where(eq(chatopsConnections.id, connectionId));
   if (addedAllow) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   app.server.closeAllConnections();

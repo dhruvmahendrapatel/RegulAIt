@@ -578,6 +578,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
       "mcp_registry_entries.conflict_reason",
+      "migration_audit_outbox.reason",
       "risk_acceptances.compensating_controls",
       "trace_retention_holds.release_reason",
       "usage_events.stop_reason",

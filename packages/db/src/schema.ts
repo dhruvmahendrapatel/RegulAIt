@@ -182,7 +182,10 @@ export const authSessions = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     /** idle wall — slides forward on every authenticated use */
     idleExpiresAt: timestamp("idle_expires_at", { withTimezone: true }).notNull(),
-    /** snapshot of org sessionIdleMinutes at creation (what the slide adds) */
+    /** snapshot of org sessionIdleMinutes at creation (what the slide adds).
+     * ADR-0181 (FX2): each use applies the SHORTER of this and the org's
+     * current value (and stores it), so a tightened idle window binds every
+     * live session on its next request — no grandfathering. */
     idleMinutes: integer("idle_minutes").notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     ip: text("ip"),
@@ -325,7 +328,10 @@ export const samlProviders = pgTable("saml_providers", {
   enabled: boolean("enabled").notNull().default(true),
   /** NULL = any domain; else the asserted email's domain must be listed. The
    * MANDATORY backstop — an IdP email attribute is only as trustworthy as the
-   * IdP's own verification, so an empty list is a conscious admin choice. */
+   * IdP's own verification, so an empty list is a conscious admin choice.
+   * ADR-0181 (FX2, migration 0160): REQUIRED (non-empty) whenever
+   * jit_provisioning is on — CHECK saml_providers_jit_domains_ck, and a named
+   * 422 at the API, exactly as for OIDC. */
   allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
   /** role granted to JIT-provisioned users (never admin); NULL = no role */
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
@@ -375,7 +381,14 @@ export const samlProviders = pgTable("saml_providers", {
   mfaAuthnContexts: jsonb("mfa_authn_contexts").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  // ADR-0181 (FX2, migration 0160): the SAML twin of
+  // oidc_providers_jit_domains_ck — JIT needs a non-empty domain allow-list.
+  check(
+    "saml_providers_jit_domains_ck",
+    sql`NOT ${t.jitProvisioning} OR (CASE WHEN jsonb_typeof(${t.allowedEmailDomains}) = 'array' THEN jsonb_array_length(${t.allowedEmailDomains}) > 0 ELSE false END)`,
+  ),
+]);
 
 /** the twin of oidcLoginStates: one row per SP-initiated AuthnRequest. The
  * request id is what the IdP echoes back as InResponseTo, so this row IS the
@@ -10445,3 +10458,26 @@ export const riskAcceptances = pgTable(
   ],
 );
 export type RiskAcceptanceRow = typeof riskAcceptances.$inferSelect;
+
+// --- ADR-0181 FX2 (migration 0160): audit rows written by a migration --------
+/**
+ * A migration that changes existing records (no grandfathering) must leave an
+ * audit trail, but SQL cannot write a CHAINED audit row: the hash chain is
+ * computed at `createDb` (packages/db/src/audit-chain.ts), and a raw INSERT
+ * would land as an un-chained row that verification counts as pre-genesis
+ * legacy. So a migration writes its audit rows HERE, in the same transaction
+ * as the change, and `runMigrations` drains them into `audit_log` through the
+ * chained path straight after (packages/db/src/migrate.ts). A row lives here
+ * only between a migration and the drain that follows it.
+ */
+export const migrationAuditOutbox = pgTable("migration_audit_outbox", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** the migration tag that wrote the row, e.g. `0160_strict_identity_followups` */
+  migration: text("migration").notNull(),
+  objectType: text("object_type").notNull(),
+  objectId: uuid("object_id"),
+  ruleId: text("rule_id").notNull(),
+  reason: text("reason").notNull(),
+  detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

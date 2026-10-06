@@ -91,7 +91,9 @@ const fixtures = (): DemoIntakeFixtures => ({
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  app = buildApp(db, { bootstrapToken: BOOT });
+  // ADR-0181 (FX2): a data key, so the seeder can enrol the admin persona in
+  // TOTP before minting her key (an admin key answers to mfaRequired)
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   const a = await app.inject({
     method: "POST", url: "/v1/agents", headers: { authorization: `Bearer ${BOOT}` },

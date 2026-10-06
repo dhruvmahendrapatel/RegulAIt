@@ -36,6 +36,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import net from "node:net";
 import path from "node:path";
 import { readFileSync } from "node:fs";
@@ -170,16 +171,22 @@ async function lastAudit(ruleId: string) {
   return row;
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   admin = createDb(DATABASE_URL);
   await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`));
   await admin.execute(sql.raw(`CREATE DATABASE ${SCRATCH_DB}`));
   db = createDb(scratchUrl);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   port = await freePort();
 }, 60_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await closeAll([
     async () => {
       await dropScratchDatabase(admin, SCRATCH_DB);

@@ -31,6 +31,7 @@
  * posture) are deltas (M-008). No singleton is touched (M-012).
  */
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentGrants, and, count, createDb, eq, roleAgentGrants, runMigrations, type Db } from "@regulait/db";
@@ -137,9 +138,14 @@ const patLifecycle = (value: string) => ({ kind: "agent", pattern: { dimension: 
 const patProvider = (value: string) => ({ kind: "agent", pattern: { dimension: "provider", value } });
 const patMode = (value: string) => ({ kind: "connector", pattern: { dimension: "mode", value } });
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a1".repeat(32) });
 
   adminAuth = (await makeUser("sodx-admin@example.com", { admin: true })).auth;
@@ -175,6 +181,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   await app.close();
   await db.$client.end();
 });

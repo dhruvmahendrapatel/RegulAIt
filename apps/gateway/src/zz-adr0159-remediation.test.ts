@@ -9,6 +9,7 @@
  * this file creates (M-008) — the database is shared.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agents, aiRiskControls, aiRisks, aiUseCases, and, compliancePacks, createDb, eq, runMigrations, type Db } from "@regulait/db";
@@ -45,9 +46,14 @@ const alertFor = async (ruleId: string, keyPart: string) => {
   );
 };
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   await admin(proposer, "proposer");
   await admin(approver, "approver");
@@ -77,6 +83,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   app.server.closeAllConnections();
   await app.close();
 });

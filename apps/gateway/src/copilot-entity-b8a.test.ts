@@ -35,6 +35,7 @@
  * org-wide admin counts are floors, never equalities (M-008).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -126,9 +127,14 @@ const decisions = (body: { evidence: { counts: Array<{ key: string; value: numbe
 const approvalCount = (body: { evidence: { counts: Array<{ key: string; value: number }> } }) =>
   body.evidence.counts.find((c) => c.key === "approvals")!.value;
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
+  // drives admins through keys and is not about MFA, so it relaxes the dial
+  // explicitly and hands the shared database back strict in afterAll (M-068).
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   await app.ready();
 
@@ -274,6 +280,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreAdminKeyMfa?.();
   const mine = [adminId, ucOwnerId, vendorOwnerId, outsiderId].filter(Boolean);
   await db.delete(copilotQueries).where(inArray(copilotQueries.userId, mine));
   await db.delete(approvals).where(inArray(approvals.userId, mine));
