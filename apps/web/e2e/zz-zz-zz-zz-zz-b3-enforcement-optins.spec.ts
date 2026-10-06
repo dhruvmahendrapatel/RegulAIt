@@ -111,7 +111,7 @@ test("the staleness-recertification controls render ON (ADR-0181) with threshold
   await expect(page.getByRole("heading", { name: "Model risk", exact: true })).toBeVisible();
   await expect(page.getByLabel("Staleness forces recertification")).toHaveValue("on");
   await expect(
-    page.getByLabel("Drift threshold (ledger changes since certification)"),
+    page.getByLabel("Drift threshold (regressions and changes since certification)"),
   ).toHaveValue("1");
   await expect(page.getByText(/deepens that gate, it creates none of its own/)).toBeVisible();
 });
