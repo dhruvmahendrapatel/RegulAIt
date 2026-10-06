@@ -1,5 +1,5 @@
 {
-  "$comment": "SAST (CodeQL) baseline, triaged 2026-10-06 for ADR-0184. One entry per (rule, file). Each needs a reason and expires at most 90 days after review; see docs/ops/SECURITY_CI.md.",
+  "$comment": "SAST (CodeQL) baseline, triaged 2026-10-06 for ADR-0184: false positives only (every real finding was fixed). One entry per (rule, file). Each needs a reason and expires at most 90 days after review; see docs/ops/SECURITY_CI.md.",
   "entries": [
     {
       "id": "js/bad-tag-filter",
@@ -70,62 +70,6 @@
       "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
       "reviewedOn": "2026-10-06",
       "expires": "2027-01-04"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/git-provider/src/azure-devops.ts",
-      "reason": "Real but admin-only. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is the git connection's baseUrl, set by an administrator and short in practice. Fix: trim trailing slashes by scan, as 885a122 did in api-client.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/git-provider/src/bitbucket.ts",
-      "reason": "Real but admin-only. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is the git connection's baseUrl, set by an administrator and short in practice. Fix: trim trailing slashes by scan, as 885a122 did in api-client.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/git-provider/src/gitlab.ts",
-      "reason": "Real but admin-only. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is the git connection's baseUrl, set by an administrator and short in practice. Fix: trim trailing slashes by scan, as 885a122 did in api-client.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/shared/src/mcp-discovery.ts",
-      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a path parsed from an uploaded discovery log line (admin-supplied content, request body capped at 1 MiB, so a crafted line can hold the event loop for minutes). Fix in the next batch: trim trailing slashes by scan.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/shared/src/access-recommendations.ts",
-      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/shared/src/copilot.ts",
-      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/shared/src/evals.ts",
-      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
-    },
-    {
-      "id": "js/polynomial-redos",
-      "path": "packages/shared/src/groundedness.ts",
-      "reason": "Real. Real quadratic regex (measured: 50,000 characters take about 2 s), but bounded: the input is a model reply being parsed for a fenced JSON block or the first {...} block, so its length is capped by the provider's max output tokens (tens of KB), and a prompt-injected reply could cost seconds of event loop. Fix in the next batch: a linear-time fence/brace extractor in one shared helper.",
-      "reviewedOn": "2026-10-06",
-      "expires": "2026-11-05"
     }
   ]
 }

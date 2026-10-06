@@ -91,17 +91,21 @@ CodeQL has no expiring baseline. None fails on an expired or stale exception.
 
 ### 4. SAST baseline triage (2026-10-06)
 
-CodeQL 2.27.1 found 27 results at security-severity ≥ 7.0 on `main` @ 3db120a (Actions: none, including `security.yml`). After the fix below, 25 remain, in 18 (rule, file) entries, and the gate passes on this branch's tree.
-- **Fixed in this batch:** `js/polynomial-redos` in `packages/optimizer-kernel` `preprocessReference`. The reference text
-  is user-supplied and the trailing-trim regex was quadratic: 400,000 tabs after a fence held the event loop for 172 s.
-  A backward scan replaces it (1ad61c5, with a timing test that fails with the regex restored).
+CodeQL 2.27.1 found 27 results at security-severity ≥ 7.0 on `main` @ 3db120a (Actions: none, including `security.yml`). ADR-0180 rule applied: every real finding is fixed in this batch, and only false positives are baselined. After the fixes, CodeQL finds 15 results, in 10 (rule, file) entries, all false positives, and the gate passes with no stale entry.
+- **Fixed in this batch** (every `js/polynomial-redos`, each with a timing test on a pathological input that fails
+  with the old regex restored, and an equivalence test against the old regex on generated and representative inputs):
+  - `packages/optimizer-kernel` `preprocessReference`: user-supplied reference text; 400,000 tabs after a fence held
+    the event loop for 172 s (1ad61c5).
+  - the fenced-JSON and first-brace extraction from model replies in `access-recommendations`, `copilot`, `evals` and
+    `groundedness`: 400,000 characters took about 21.6 s per parser. Replaced by `fencedBlockBody` and
+    `firstBraceBlock` in `packages/shared/src/linear-scan.ts`.
+  - the trailing-slash trim of a path from an uploaded discovery log (`mcp-discovery`, 149 s on 400,000 slashes) and
+    of the git providers' base URLs (Azure DevOps, Bitbucket, GitLab; 140.6 s for the three on 400,000 slashes), by a
+    backward scan (`trimTrailingSlashes`).
 - **False positives, allow-listed for 90 days:** the CSP inline-script hasher reading our own build output; a
   specificity tie-breaker mistaken for a sanitizer; the pending-MFA cookie and `hashToken` (already triaged on PR #117:
   opaque 192–256-bit server tokens); `constantTimeEqual`'s pre-hash; the SPA file server's contained path; URL-substring
   checks inside test mocks.
-- **Real but bounded, allow-listed for 30 days** (expires 2026-11-05): quadratic `/\/+$/` trims on admin-set git
-  provider base URLs and on paths from uploaded discovery logs, and fenced-JSON/first-brace extraction from model
-  replies in four judge parsers. Each is a short linear-scan fix; the expiry makes the next batch do it.
 
 ### 5. Not covered
 
@@ -128,14 +132,15 @@ Run locally with the pinned tool binaries on planted fixtures in a scratch direc
 | Image signed with a developer key, verify expecting `signed` | `no matching attestations …`, refused, exit 1 |
 | Unsigned image at the verify step, on every PR (CI) | the `image` job passes only if verify printed `no signatures found` |
 | Keyless sign and verify on `main` (CI) | first proven on the first push to `main` after merge; not runnable here (no OIDC, no Docker daemon) |
+| ReDoS fixes, old regexes restored in the 8 files | timing tests fail: each judge parser about 21.6 s, `findMcpEndpoints` 149 s, the three git adapters 140.6 s (`expected 140595.87 to be less than 1000`); restored, all pass |
 | Gate unit tests, rule reverted | expiry check disabled: 3 tests fail; unlisted-finding check disabled: 7 tests fail |
 
 ## Consequences
 
 - Every PR now pays for four extra jobs. The repository is public, so standard runners do not draw on the minutes
   budget `ci.yml` describes.
-- The SAST baseline has entries that expire on 2026-11-05. On that day the gate (and `ci.yml`'s script tests) fail until
-  the four ReDoS fixes land or the entries are re-argued. That is intended.
+- The SAST baseline's false-positive entries expire on 2027-01-04. On that day the gate (and `ci.yml`'s script tests)
+  fail until each is re-argued. That is intended.
 - A PR can still edit its own allow-list. The warning makes it visible; a CODEOWNERS rule on `.gitleaks.toml`,
   `security/` and `.github/workflows/` would make it a required review (owner decision).
 - Follow-ups for the integrator: SHA-pin the actions in `ci.yml`, `demo.yml`, `integrations.yml` and
