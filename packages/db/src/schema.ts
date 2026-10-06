@@ -16,6 +16,35 @@ import {
   RISK_TOLERANCE_SCOPE_KINDS,
   TOLERANCE_BANDS,
   type RequiredTestPolicy,
+  // ADR-0182 (migration 0162): the accountability vocabularies, in lockstep
+  // with the migration's CHECKs by being the same constants
+  ACCOUNTABILITY_GATE_MODES,
+  AI_POLICY_ACK_METHODS,
+  AI_POLICY_KINDS,
+  AI_POLICY_STATUSES,
+  ALERT_OWNER_SOURCES,
+  ALERT_TICKET_MODES,
+  DECISION_REGRESSION_CASE_SOURCES,
+  DECISION_REGRESSION_SUBJECTS,
+  DECISION_REGRESSION_TRIGGERS,
+  EU_AI_ACT_ROLES,
+  FEEDBACK_CHANNELS,
+  FEEDBACK_KINDS,
+  FEEDBACK_STATUSES,
+  INCIDENT_ACTION_STATUSES,
+  INCIDENT_CLOCK_REGIMES,
+  INCIDENT_DETECTION_SOURCES,
+  INCIDENT_EVENT_KINDS,
+  INCIDENT_LINK_OBJECT_TYPES,
+  INCIDENT_NOTIFICATION_STATUSES,
+  INCIDENT_SEVERITIES,
+  INCIDENT_STATUSES,
+  KRI_ON_BREACH,
+  USE_CASE_DECISIONS,
+  type AiPolicyAudience,
+  type AlertSlaHours,
+  type IncidentClockRegime,
+  type SeriousIncidentCriterion,
 } from "@regulait/shared";
 import {
   bigint,
@@ -1288,6 +1317,17 @@ export const auditLog = pgTable(
         // item). Plain text column — no DDL.
         "annotation_queue",
         "annotation_item",
+        // ADR-0182 (ADR-0175 batch D4): accountability records. A decision
+        // regression run or case (A11), an AI incident (A12, objectId = the
+        // incident; its events, links, actions and clocks audit under it), a
+        // feedback item or signed feedback link (A13), and an AI policy
+        // document or acknowledgement (A14). Plain text column — no DDL.
+        "decision_regression",
+        "ai_incident",
+        "use_case_feedback",
+        "feedback_link",
+        "ai_policy_document",
+        "ai_policy_acknowledgement",
       ],
     })
       .notNull()
@@ -3996,6 +4036,44 @@ export const orgSettings = pgTable(
     tracingOtlpHeadersSetAt: timestamp("tracing_otlp_headers_set_at", { withTimezone: true }),
     tracingOtlpServiceName: text("tracing_otlp_service_name").notNull().default("regulait-gateway"),
 
+    // --- ADR-0182 (ADR-0175 batch D4, migration 0162): accountability -------
+    // Every column defaults STRICT (`ACCOUNTABILITY_STRICT_DEFAULTS`), and the
+    // migration wrote the strict values onto the existing row. An admin relaxes
+    // one through the audited PUT /v1/org/settings (`detail.transitions`).
+    /** A11: a review-policy / required-tests / intake-template change needs a
+     * fresh matching regression run (`enforce`); `warn` records and allows;
+     * `off` skips and says so */
+    decisionRegressionGate: text("decision_regression_gate", { enum: ACCOUNTABILITY_GATE_MODES })
+      .notNull()
+      .default("enforce"),
+    /** A11: how old (minutes) a regression run may be and still admit its change */
+    decisionRegressionMaxAgeMinutes: integer("decision_regression_max_age_minutes").notNull().default(60),
+    /** A12: an open high/critical or serious incident holds the linked use case's deploy gate */
+    incidentGateMode: text("incident_gate_mode", { enum: ACCOUNTABILITY_GATE_MODES }).notNull().default("enforce"),
+    /** A12: Art. 73(6) — refuse a linked agent's config change before the authority is notified */
+    incidentEvidenceHold: boolean("incident_evidence_hold").notNull().default(true),
+    /** A12: which regimes' notification clocks are created */
+    incidentClockRegimes: jsonb("incident_clock_regimes")
+      .$type<IncidentClockRegime[]>()
+      .notNull()
+      .default([...INCIDENT_CLOCK_REGIMES]),
+    /** A13: public signed feedback links — built, shipped OFF (owner decision 7) */
+    feedbackSignedLinksEnabled: boolean("feedback_signed_links_enabled").notNull().default(false),
+    feedbackAckSlaHours: integer("feedback_ack_sla_hours").notNull().default(72),
+    feedbackResolveSlaDays: integer("feedback_resolve_sla_days").notNull().default(30),
+    /** A13: after this many days a feedback body and contact are deleted (the resolution record stays) */
+    feedbackRetentionDays: integer("feedback_retention_days").notNull().default(365),
+    /** A14: a human-originated governed call by a person not current on an applicable published document is refused */
+    literacyGateMode: text("literacy_gate_mode", { enum: ACCOUNTABILITY_GATE_MODES }).notNull().default("enforce"),
+    literacyDefaultValidityDays: integer("literacy_default_validity_days").notNull().default(365),
+    /** S5 (PF-14): hours from an alert episode's creation to its due time, per severity */
+    alertSlaHours: jsonb("alert_sla_hours")
+      .$type<AlertSlaHours>()
+      .notNull()
+      .default({ high: 24, medium: 72, low: 168 }),
+    /** S5 (PF-14): `manual` files a PM work item only when a person asks */
+    alertTicketMode: text("alert_ticket_mode", { enum: ALERT_TICKET_MODES }).notNull().default("manual"),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4043,6 +4121,29 @@ export const orgSettings = pgTable(
       "org_settings_api_key_ttl_ordering_check",
       sql`${t.apiKeyDefaultTtlDays} IS NULL OR ${t.apiKeyMaxTtlDays} IS NULL OR ${t.apiKeyDefaultTtlDays} <= ${t.apiKeyMaxTtlDays}`,
     ),
+    // ADR-0182 (migration 0162) — the D4 settings' bounds
+    check("org_settings_decision_regression_gate_check", sql`${t.decisionRegressionGate} IN ('off', 'warn', 'enforce')`),
+    check(
+      "org_settings_decision_regression_max_age_check",
+      sql`${t.decisionRegressionMaxAgeMinutes} BETWEEN 1 AND 1440`,
+    ),
+    check("org_settings_incident_gate_mode_check", sql`${t.incidentGateMode} IN ('off', 'warn', 'enforce')`),
+    check(
+      "org_settings_incident_clock_regimes_check",
+      sql`jsonb_typeof(${t.incidentClockRegimes}) = 'array' AND ${t.incidentClockRegimes} <@ '["eu-ai-act", "hipaa"]'::jsonb`,
+    ),
+    check(
+      "org_settings_feedback_sla_check",
+      sql`${t.feedbackAckSlaHours} BETWEEN 1 AND 168 AND ${t.feedbackResolveSlaDays} BETWEEN 1 AND 90`,
+    ),
+    check("org_settings_feedback_retention_check", sql`${t.feedbackRetentionDays} BETWEEN 30 AND 2555`),
+    check("org_settings_literacy_gate_mode_check", sql`${t.literacyGateMode} IN ('off', 'warn', 'enforce')`),
+    check("org_settings_literacy_validity_check", sql`${t.literacyDefaultValidityDays} BETWEEN 30 AND 730`),
+    check(
+      "org_settings_alert_sla_hours_check",
+      sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
+    ),
+    check("org_settings_alert_ticket_mode_check", sql`${t.alertTicketMode} IN ('manual', 'auto_high')`),
   ],
 );
 
@@ -8356,11 +8457,17 @@ export const aiUseCases = pgTable(
     screeningUnsure: jsonb("screening_unsure").$type<string[]>().notNull().default([]),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
+    /** ADR-0182 (migration 0162, owner decision 2): the organisation's EU AI
+     * Act role for this system. `both` (the strict default) starts every
+     * applicable incident clock; narrowing it is an admin's audited relaxation
+     * (PUT /v1/use-cases/:useCaseId/eu-ai-act-role). */
+    euAiActRole: text("eu_ai_act_role", { enum: EU_AI_ACT_ROLES }).notNull().default("both"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     check("ai_use_cases_name_check", sql`length(btrim(${t.name})) > 0`),
+    check("ai_use_cases_eu_ai_act_role_check", sql`${t.euAiActRole} IN ('provider', 'deployer', 'both')`),
     check(
       "ai_use_cases_approval_lifetime_check",
       sql`(${t.approvedAt} IS NULL) = (${t.approvedUntil} IS NULL)`,
@@ -8521,7 +8628,7 @@ export const useCaseConditions = pgTable(
     ),
     check(
       "use_case_conditions_metric_check",
-      sql`${t.metric} IS NULL OR ${t.metric} IN ('trace_eval_flag_rate', 'guardrail_hits', 'guardrail_mode', 'redteam_asr', 'eval_mean_score', 'eval_pass_rate', 'spend_usd', 'error_rate', 'pack_control_evidenced')`,
+      sql`${t.metric} IS NULL OR ${t.metric} IN ('trace_eval_flag_rate', 'guardrail_hits', 'guardrail_mode', 'redteam_asr', 'eval_mean_score', 'eval_pass_rate', 'spend_usd', 'error_rate', 'pack_control_evidenced', 'user_report_rate', 'appeal_overturn_rate')`,
     ),
     check(
       "use_case_conditions_measured_check",
@@ -8583,9 +8690,13 @@ export const governanceReviewPolicy = pgTable(
      * PUT, which rebuilds `tiers`, cannot drop it; written only by the
      * required-tests route. An absent tier = the strict default in code. */
     requiredTests: jsonb("required_tests").$type<RequiredTestPolicy>().notNull().default({}),
+    /** ADR-0182 A11 (migration 0162): bumped by every policy or required-tests
+     * write, each of which appends `governance_review_policy_versions` */
+    version: integer("version").notNull().default(1),
   },
   (t) => [
     check("governance_review_policy_singleton_check", sql`${t.id} = 'default'`),
+    check("governance_review_policy_version_check", sql`${t.version} >= 1`),
     check("governance_review_policy_required_tests_check", sql`jsonb_typeof(${t.requiredTests}) = 'object'`),
   ],
 );
@@ -8845,8 +8956,19 @@ export const governanceAlerts = pgTable(
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     ackNote: text("ack_note"),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    /** ADR-0182 S5 (PF-14, migration 0162): the accountable person, how they
+     * came to own it (derived at episode creation, or assigned), when it is
+     * due under `alert_sla_hours`, and when the SLA sweep marked it breached */
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    ownerSource: text("owner_source", { enum: ALERT_OWNER_SOURCES }),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    slaBreachedAt: timestamp("sla_breached_at", { withTimezone: true }),
   },
   (t) => [
+    check("governance_alerts_owner_source_check", sql`${t.ownerSource} IS NULL OR ${t.ownerSource} IN ('derived', 'assigned')`),
+    index("governance_alerts_sla_due_idx")
+      .on(t.dueAt)
+      .where(sql`${t.slaBreachedAt} IS NULL AND ${t.status} <> 'resolved'`),
     uniqueIndex("governance_alerts_active_uq")
       .on(t.ruleId, t.subjectKey)
       .where(sql`${t.status} <> 'resolved'`),
@@ -8857,7 +8979,9 @@ export const governanceAlerts = pgTable(
 // ---------------------------------------------------------------------------
 // ADR-0159 (migration 0125) — executable remediation proposals for monitor
 // alerts, each bound to one approvals row and executed by the decide path.
-export const REMEDIATION_PROPOSAL_KINDS = ["link_control", "assign_agent_owner"] as const;
+/** ADR-0182 S5 (migration 0162): `halt_agent` — a halt a PERSON proposes from a
+ * KRI breach's suggestion; it runs only on another person's approval */
+export const REMEDIATION_PROPOSAL_KINDS = ["link_control", "assign_agent_owner", "halt_agent"] as const;
 export const REMEDIATION_PROPOSAL_STATUSES = ["pending_approval", "applied", "denied", "failed"] as const;
 export const remediationProposals = pgTable(
   "remediation_proposals",
@@ -10185,11 +10309,17 @@ export const kris = pgTable(
     /** feedback_score only: the annotation score name to average (null = every annotation score) */
     scoreName: text("score_name"),
     enabled: boolean("enabled").notNull().default(true),
+    /** ADR-0182 S5 (PF-03, migration 0162): `propose_halt` (agent scope only)
+     * makes a breach episode carry a SUGGESTED halt. Owner decision 4: a
+     * suggestion only — nothing is filed or halted automatically. */
+    onBreach: text("on_breach", { enum: KRI_ON_BREACH }).notNull().default("alert"),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("kris_on_breach_check", sql`${t.onBreach} IN ('alert', 'propose_halt')`),
+    check("kris_on_breach_scope_check", sql`${t.onBreach} <> 'propose_halt' OR ${t.scope} = 'agent'`),
     check(
       "kris_metric_ck",
       sql`${t.metric} IN ('trace_volume', 'error_rate', 'latency_p50', 'latency_p99', 'cost_usd', 'feedback_score')`,
@@ -10495,3 +10625,481 @@ export const migrationAuditOutbox = pgTable("migration_audit_outbox", {
   detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ===========================================================================
+// ADR-0182 (ADR-0175 batch D4, migration 0162) — ACCOUNTABILITY RECORDS
+// ===========================================================================
+//
+// The vocabularies are the shared constants in packages/shared/src/accountability.ts
+// (the migration's CHECKs hold the same lists). Three tables are APPEND-ONLY
+// at the database: `regulait_refuse_mutation()` refuses a direct UPDATE or
+// DELETE on review-policy versions, decision records and incident events, and
+// a direct DELETE on incident notification clocks; only a referential action
+// of a parent's deletion passes (see the migration header).
+
+/** A11: every review-policy configuration that was ever live, append-only.
+ * `digest` = `accountabilityDigest(body)` (ADR-0060 canonical JSON, SHA-256). */
+export const governanceReviewPolicyVersions = pgTable(
+  "governance_review_policy_versions",
+  {
+    version: integer("version").primaryKey(),
+    body: jsonb("body").$type<Record<string, unknown>>().notNull(),
+    digest: text("digest").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("governance_review_policy_versions_version_check", sql`${t.version} >= 1`),
+    check("governance_review_policy_versions_digest_check", sql`${t.digest} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type GovernanceReviewPolicyVersionRow = typeof governanceReviewPolicyVersions.$inferSelect;
+
+/** A11: one row per terminal sign-off decision, written in the decision's own
+ * transaction, citing every version that produced it. Append-only. */
+export const useCaseDecisionRecords = pgTable(
+  "use_case_decision_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    outcome: text("outcome", { enum: USE_CASE_DECISIONS }).notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull(),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    reviewPolicyVersion: integer("review_policy_version"),
+    requiredTestsDigest: text("required_tests_digest"),
+    intakeTemplateId: uuid("intake_template_id").references(() => workflowTemplates.id, { onDelete: "set null" }),
+    intakeTemplateName: text("intake_template_name"),
+    intakeDefinitionDigest: text("intake_definition_digest"),
+    euAiActRulesetVersion: integer("eu_ai_act_ruleset_version"),
+    /** text on purpose: the suggestion rules' version is whatever A11 names it */
+    intakeAssistVersion: text("intake_assist_version"),
+    answersDigest: text("answers_digest"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_decision_records_outcome_check", sql`${t.outcome} IN ('approved', 'rejected', 'needs_info')`),
+    index("use_case_decision_records_use_case_idx").on(t.useCaseId, t.decidedAt),
+  ],
+);
+export type UseCaseDecisionRecordRow = typeof useCaseDecisionRecords.$inferSelect;
+
+/** A11: the golden set's cases that live in the database (reviewer overrides) */
+export const decisionRegressionCases = pgTable(
+  "decision_regression_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    source: text("source", { enum: DECISION_REGRESSION_CASE_SOURCES }).notNull(),
+    label: text("label").notNull(),
+    answers: jsonb("answers").$type<Record<string, unknown>>().notNull(),
+    expected: jsonb("expected").$type<Record<string, unknown>>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    fromUseCaseId: uuid("from_use_case_id").references(() => aiUseCases.id, { onDelete: "set null" }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("decision_regression_cases_source_check", sql`${t.source} IN ('shipped', 'override')`),
+    check("decision_regression_cases_label_check", sql`length(btrim(${t.label})) BETWEEN 1 AND 200`),
+  ],
+);
+export type DecisionRegressionCaseRow = typeof decisionRegressionCases.$inferSelect;
+
+/** A11: every regression run (CI, preview, activation) and its diff */
+export const decisionRegressionRuns = pgTable(
+  "decision_regression_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trigger: text("trigger", { enum: DECISION_REGRESSION_TRIGGERS }).notNull(),
+    subject: text("subject", { enum: DECISION_REGRESSION_SUBJECTS }).notNull(),
+    candidateDigest: text("candidate_digest").notNull(),
+    baselineDigest: text("baseline_digest"),
+    cases: integer("cases").notNull(),
+    changed: integer("changed").notNull(),
+    diff: jsonb("diff").$type<unknown[]>().notNull().default([]),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("decision_regression_runs_trigger_check", sql`${t.trigger} IN ('ci', 'preview', 'activation')`),
+    check(
+      "decision_regression_runs_subject_check",
+      sql`${t.subject} IN ('review_policy', 'required_tests', 'intake_template')`,
+    ),
+    check(
+      "decision_regression_runs_counts_check",
+      sql`${t.cases} >= 0 AND ${t.changed} >= 0 AND ${t.changed} <= ${t.cases}`,
+    ),
+    index("decision_regression_runs_digest_idx").on(t.candidateDigest, t.createdAt),
+  ],
+);
+export type DecisionRegressionRunRow = typeof decisionRegressionRuns.$inferSelect;
+
+/** A12: the AI incident register. `ref` defaults from `ai_incident_ref_seq`
+ * (INC-00001…). Closing needs a root cause and lessons learned (DB CHECK). */
+export const aiIncidents = pgTable(
+  "ai_incidents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ref: text("ref")
+      .notNull()
+      .default(sql`('INC-' || lpad(nextval('ai_incident_ref_seq')::text, 5, '0'))`),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    severity: text("severity", { enum: INCIDENT_SEVERITIES }).notNull(),
+    status: text("status", { enum: INCIDENT_STATUSES }).notNull().default("open"),
+    detectionSource: text("detection_source", { enum: INCIDENT_DETECTION_SOURCES }).notNull(),
+    sourceRef: text("source_ref"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    /** when the organisation became aware — the notification clocks start here */
+    awareAt: timestamp("aware_at", { withTimezone: true }).notNull(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "set null" }),
+    serious: boolean("serious").notNull().default(false),
+    seriousCriteria: jsonb("serious_criteria").$type<SeriousIncidentCriterion[]>().notNull().default([]),
+    /** HIPAA: how many individuals' PHI (only with the `phi_breach` criterion) */
+    phiIndividuals: integer("phi_individuals"),
+    rootCause: text("root_cause"),
+    lessonsLearned: text("lessons_learned"),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closedBy: uuid("closed_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("ai_incidents_ref_uq").on(t.ref),
+    check("ai_incidents_title_check", sql`length(btrim(${t.title})) BETWEEN 1 AND 200`),
+    check("ai_incidents_severity_check", sql`${t.severity} IN ('low', 'medium', 'high', 'critical')`),
+    check("ai_incidents_status_check", sql`${t.status} IN ('open', 'contained', 'resolved', 'closed')`),
+    check(
+      "ai_incidents_detection_source_check",
+      sql`${t.detectionSource} IN ('monitor_alert', 'trace_evaluation', 'user_report', 'red_team', 'manual', 'external')`,
+    ),
+    check(
+      "ai_incidents_serious_criteria_check",
+      sql`jsonb_typeof(${t.seriousCriteria}) = 'array' AND ${t.seriousCriteria} <@ '["death", "health", "critical_infrastructure", "fundamental_rights", "property_environment", "widespread_infringement", "phi_breach"]'::jsonb`,
+    ),
+    check(
+      "ai_incidents_phi_individuals_check",
+      sql`${t.phiIndividuals} IS NULL OR (${t.phiIndividuals} >= 0 AND ${t.seriousCriteria} ? 'phi_breach')`,
+    ),
+    check(
+      "ai_incidents_closed_check",
+      sql`(${t.status} = 'closed') = (${t.closedAt} IS NOT NULL) AND (${t.status} <> 'closed' OR (length(btrim(COALESCE(${t.rootCause}, ''))) > 0 AND length(btrim(COALESCE(${t.lessonsLearned}, ''))) > 0))`,
+    ),
+    index("ai_incidents_status_idx").on(t.status, t.severity),
+    index("ai_incidents_use_case_idx").on(t.useCaseId).where(sql`${t.useCaseId} IS NOT NULL`),
+    index("ai_incidents_owner_idx").on(t.ownerUserId).where(sql`${t.ownerUserId} IS NOT NULL`),
+  ],
+);
+export type AiIncidentRow = typeof aiIncidents.$inferSelect;
+
+/** A12: the incident timeline. APPEND-ONLY (trigger). */
+export const aiIncidentEvents = pgTable(
+  "ai_incident_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => aiIncidents.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: INCIDENT_EVENT_KINDS }).notNull(),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    note: text("note"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+  },
+  (t) => [
+    check(
+      "ai_incident_events_kind_check",
+      sql`${t.kind} IN ('note', 'status', 'containment', 'notification', 'link', 'action')`,
+    ),
+    index("ai_incident_events_incident_idx").on(t.incidentId, t.at),
+  ],
+);
+export type AiIncidentEventRow = typeof aiIncidentEvents.$inferSelect;
+
+/** A12: what an incident is linked to. `object_id` is text: a model link names
+ * a model identifier, not always a row id. */
+export const aiIncidentLinks = pgTable(
+  "ai_incident_links",
+  {
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => aiIncidents.id, { onDelete: "cascade" }),
+    objectType: text("object_type", { enum: INCIDENT_LINK_OBJECT_TYPES }).notNull(),
+    objectId: text("object_id").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "ai_incident_links_pk", columns: [t.incidentId, t.objectType, t.objectId] }),
+    check(
+      "ai_incident_links_object_type_check",
+      sql`${t.objectType} IN ('agent', 'model', 'vendor', 'risk', 'condition', 'eval_run', 'redteam_run', 'governance_alert', 'feedback', 'pm_link')`,
+    ),
+    check("ai_incident_links_object_id_check", sql`length(btrim(${t.objectId})) BETWEEN 1 AND 200`),
+    index("ai_incident_links_object_idx").on(t.objectType, t.objectId),
+  ],
+);
+export type AiIncidentLinkRow = typeof aiIncidentLinks.$inferSelect;
+
+/** A12: corrective actions */
+export const aiIncidentActions = pgTable(
+  "ai_incident_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => aiIncidents.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    status: text("status", { enum: INCIDENT_ACTION_STATUSES }).notNull().default("open"),
+    doneAt: timestamp("done_at", { withTimezone: true }),
+    evidenceRef: text("evidence_ref"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_incident_actions_title_check", sql`length(btrim(${t.title})) BETWEEN 1 AND 500`),
+    check("ai_incident_actions_status_check", sql`${t.status} IN ('open', 'done', 'cancelled')`),
+    check("ai_incident_actions_done_check", sql`(${t.status} = 'done') = (${t.doneAt} IS NOT NULL)`),
+    index("ai_incident_actions_incident_idx").on(t.incidentId),
+    index("ai_incident_actions_due_idx").on(t.dueAt).where(sql`${t.status} = 'open'`),
+  ],
+);
+export type AiIncidentActionRow = typeof aiIncidentActions.$inferSelect;
+
+/** A12: one regulatory notification clock per (incident, clock). NEVER
+ * deleted (trigger): an admin sets one aside as `not_required` or `tolled`,
+ * with a reason (DB CHECK). */
+export const aiIncidentNotifications = pgTable(
+  "ai_incident_notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    incidentId: uuid("incident_id")
+      .notNull()
+      .references(() => aiIncidents.id, { onDelete: "cascade" }),
+    regime: text("regime", { enum: INCIDENT_CLOCK_REGIMES }).notNull(),
+    clockId: text("clock_id").notNull(),
+    recipient: text("recipient"),
+    clockStart: timestamp("clock_start", { withTimezone: true }).notNull(),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    status: text("status", { enum: INCIDENT_NOTIFICATION_STATUSES }).notNull().default("pending"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    sentBy: uuid("sent_by").references(() => users.id, { onDelete: "set null" }),
+    reference: text("reference"),
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("ai_incident_notifications_clock_uq").on(t.incidentId, t.clockId),
+    check("ai_incident_notifications_regime_check", sql`${t.regime} IN ('eu-ai-act', 'hipaa')`),
+    check(
+      "ai_incident_notifications_status_check",
+      sql`${t.status} IN ('pending', 'sent_initial', 'sent_complete', 'not_required', 'tolled')`,
+    ),
+    check(
+      "ai_incident_notifications_reason_check",
+      sql`${t.status} NOT IN ('not_required', 'tolled') OR length(btrim(COALESCE(${t.reason}, ''))) > 0`,
+    ),
+    check(
+      "ai_incident_notifications_sent_check",
+      sql`${t.status} NOT IN ('sent_initial', 'sent_complete') OR ${t.sentAt} IS NOT NULL`,
+    ),
+    check("ai_incident_notifications_due_check", sql`${t.dueAt} >= ${t.clockStart}`),
+    index("ai_incident_notifications_due_idx")
+      .on(t.dueAt)
+      .where(sql`${t.status} IN ('pending', 'sent_initial')`),
+  ],
+);
+export type AiIncidentNotificationRow = typeof aiIncidentNotifications.$inferSelect;
+
+/** A13: a public signed feedback link. Only the token's SHA-256 is stored
+ * (`token-hash.ts`); it lives at most 30 days (DB CHECK) and `max_uses` uses. */
+export const useCaseFeedbackLinks = pgTable(
+  "use_case_feedback_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    maxUses: integer("max_uses").notNull(),
+    uses: integer("uses").notNull().default(0),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("use_case_feedback_links_token_hash_uq").on(t.tokenHash),
+    check("use_case_feedback_links_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "use_case_feedback_links_ttl_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} - ${t.createdAt} <= interval '30 days'`,
+    ),
+    check(
+      "use_case_feedback_links_uses_check",
+      sql`${t.maxUses} BETWEEN 1 AND 10000 AND ${t.uses} >= 0 AND ${t.uses} <= ${t.maxUses}`,
+    ),
+    index("use_case_feedback_links_use_case_idx").on(t.useCaseId),
+  ],
+);
+export type UseCaseFeedbackLinkRow = typeof useCaseFeedbackLinks.$inferSelect;
+
+/** A13: a problem report or appeal. Body and contact are REGULAIT_DATA_KEY
+ * envelopes; the retention sweep purges both and keeps the resolution record. */
+export const useCaseFeedback = pgTable(
+  "use_case_feedback",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    useCaseId: uuid("use_case_id")
+      .notNull()
+      .references(() => aiUseCases.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: FEEDBACK_KINDS }).notNull(),
+    channel: text("channel", { enum: FEEDBACK_CHANNELS }).notNull(),
+    linkId: uuid("link_id").references(() => useCaseFeedbackLinks.id, { onDelete: "set null" }),
+    submitterUserId: uuid("submitter_user_id").references(() => users.id, { onDelete: "set null" }),
+    bodyCiphertext: text("body_ciphertext"),
+    contactCiphertext: text("contact_ciphertext"),
+    bodyPurgedAt: timestamp("body_purged_at", { withTimezone: true }),
+    traceId: uuid("trace_id"),
+    spanId: uuid("span_id"),
+    status: text("status", { enum: FEEDBACK_STATUSES }).notNull().default("received"),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    ackDueAt: timestamp("ack_due_at", { withTimezone: true }).notNull(),
+    resolveDueAt: timestamp("resolve_due_at", { withTimezone: true }).notNull(),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: uuid("resolved_by").references(() => users.id, { onDelete: "set null" }),
+    resolutionNote: text("resolution_note"),
+    incidentId: uuid("incident_id").references(() => aiIncidents.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("use_case_feedback_kind_check", sql`${t.kind} IN ('problem', 'appeal')`),
+    check("use_case_feedback_channel_check", sql`${t.channel} IN ('in_app', 'signed_link')`),
+    check(
+      "use_case_feedback_status_check",
+      sql`${t.status} IN ('received', 'acknowledged', 'in_review', 'upheld', 'overturned', 'no_change', 'rejected')`,
+    ),
+    check(
+      "use_case_feedback_appeal_outcome_check",
+      sql`${t.kind} = 'appeal' OR ${t.status} NOT IN ('upheld', 'overturned')`,
+    ),
+    check(
+      "use_case_feedback_resolved_check",
+      sql`${t.status} NOT IN ('upheld', 'overturned', 'no_change', 'rejected') OR ${t.resolvedAt} IS NOT NULL`,
+    ),
+    check(
+      "use_case_feedback_body_check",
+      sql`(${t.bodyCiphertext} IS NULL) = (${t.bodyPurgedAt} IS NOT NULL) AND (${t.bodyPurgedAt} IS NULL OR ${t.contactCiphertext} IS NULL)`,
+    ),
+    check("use_case_feedback_due_check", sql`${t.resolveDueAt} >= ${t.ackDueAt}`),
+    index("use_case_feedback_use_case_idx").on(t.useCaseId, t.createdAt),
+    index("use_case_feedback_owner_idx").on(t.ownerUserId, t.status),
+    index("use_case_feedback_open_due_idx").on(t.resolveDueAt).where(sql`${t.resolvedAt} IS NULL`),
+    index("use_case_feedback_retention_idx").on(t.createdAt).where(sql`${t.bodyPurgedAt} IS NULL`),
+  ],
+);
+export type UseCaseFeedbackRow = typeof useCaseFeedback.$inferSelect;
+
+/** A14: a versioned AI policy or training, one row per (key, version); at most
+ * one published version per key */
+export const aiPolicyDocuments = pgTable(
+  "ai_policy_documents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    key: text("key").notNull(),
+    kind: text("kind", { enum: AI_POLICY_KINDS }).notNull(),
+    version: integer("version").notNull(),
+    title: text("title").notNull(),
+    url: text("url"),
+    attachmentId: uuid("attachment_id"),
+    contentDigest: text("content_digest").notNull(),
+    audience: jsonb("audience")
+      .$type<AiPolicyAudience>()
+      .notNull()
+      .default({ all: true, teamIds: [], roleIds: [] }),
+    /** null = the org's `literacy_default_validity_days` */
+    validityDays: integer("validity_days"),
+    status: text("status", { enum: AI_POLICY_STATUSES }).notNull().default("draft"),
+    /** an editorial version keeps acknowledgements of the previous one */
+    editorial: boolean("editorial").notNull().default(false),
+    editorialReason: text("editorial_reason"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredBy: uuid("retired_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("ai_policy_documents_key_version_uq").on(t.key, t.version),
+    uniqueIndex("ai_policy_documents_published_uq").on(t.key).where(sql`${t.status} = 'published'`),
+    check("ai_policy_documents_key_check", sql`${t.key} ~ '^[a-z0-9][a-z0-9-]{0,99}$'`),
+    check("ai_policy_documents_kind_check", sql`${t.kind} IN ('acceptable_use', 'training')`),
+    check("ai_policy_documents_version_check", sql`${t.version} >= 1`),
+    check("ai_policy_documents_title_check", sql`length(btrim(${t.title})) BETWEEN 1 AND 200`),
+    check("ai_policy_documents_source_check", sql`${t.url} IS NOT NULL OR ${t.attachmentId} IS NOT NULL`),
+    check("ai_policy_documents_digest_check", sql`${t.contentDigest} ~ '^[0-9a-f]{64}$'`),
+    check("ai_policy_documents_audience_check", sql`jsonb_typeof(${t.audience}) = 'object'`),
+    check(
+      "ai_policy_documents_validity_check",
+      sql`${t.validityDays} IS NULL OR ${t.validityDays} BETWEEN 30 AND 730`,
+    ),
+    check("ai_policy_documents_status_check", sql`${t.status} IN ('draft', 'published', 'retired')`),
+    check("ai_policy_documents_published_check", sql`${t.status} <> 'published' OR ${t.publishedAt} IS NOT NULL`),
+    check("ai_policy_documents_retired_check", sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL)`),
+    check(
+      "ai_policy_documents_editorial_check",
+      sql`NOT ${t.editorial} OR (${t.version} > 1 AND length(btrim(COALESCE(${t.editorialReason}, ''))) > 0)`,
+    ),
+  ],
+);
+export type AiPolicyDocumentRow = typeof aiPolicyDocuments.$inferSelect;
+
+/** A14: a person's acknowledgement (or a recorded completion) of one document
+ * version, with the digest they saw and when it expires */
+export const aiPolicyAcknowledgements = pgTable(
+  "ai_policy_acknowledgements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => aiPolicyDocuments.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    digest: text("digest").notNull(),
+    method: text("method", { enum: AI_POLICY_ACK_METHODS }).notNull(),
+    recordedBy: uuid("recorded_by").references(() => users.id, { onDelete: "set null" }),
+    evidenceRef: text("evidence_ref"),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique("ai_policy_acknowledgements_user_document_uq").on(t.userId, t.documentId),
+    check(
+      "ai_policy_acknowledgements_method_check",
+      sql`${t.method} IN ('acknowledged', 'training_completed', 'admin_recorded')`,
+    ),
+    check("ai_policy_acknowledgements_digest_check", sql`${t.digest} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "ai_policy_acknowledgements_evidence_check",
+      sql`${t.method} = 'acknowledged' OR length(btrim(COALESCE(${t.evidenceRef}, ''))) > 0`,
+    ),
+    check("ai_policy_acknowledgements_expiry_check", sql`${t.expiresAt} > ${t.acknowledgedAt}`),
+    index("ai_policy_acknowledgements_document_idx").on(t.documentId),
+    index("ai_policy_acknowledgements_expiry_idx").on(t.expiresAt),
+  ],
+);
+export type AiPolicyAcknowledgementRow = typeof aiPolicyAcknowledgements.$inferSelect;

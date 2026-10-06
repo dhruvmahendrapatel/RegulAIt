@@ -18,6 +18,7 @@
 import type { PropagatedRating, RiskBand } from "./dependency-graph.js";
 import type { TrustDimension } from "./risks.js";
 import { KRI_METRICS, evaluateKri, formatKriValue, type KriComparator, type KriMetric, type KriState } from "./kri.js";
+import type { KriOnBreach, SuggestedHaltAction } from "./accountability.js";
 
 /** guardrail detector ids as words for alert titles (`semantic_dlp` → `semantic DLP`) */
 const DETECTOR_LABELS: Record<string, string> = {
@@ -183,6 +184,34 @@ export const MONITOR_RULES = {
     description:
       "A time-boxed residual-risk acceptance (ADR-0180 A10) passed its expiry. The risk is reopened and needs a " +
       "new decision.",
+  },
+  // --- ADR-0182 (ADR-0175 batch D4): accountability records ----------------
+  incident_notification_due: {
+    label: "Incident notification due",
+    severity: "high",
+    description:
+      "A notification clock on an AI incident (ADR-0182 A12) falls due within 24 hours or is overdue, and the " +
+      "notification is not recorded as sent, not required or tolled. The clock is a reminder computed from the " +
+      "recorded awareness time and the cited text, not legal advice.",
+  },
+  incident_action_overdue: {
+    label: "Incident action overdue",
+    severity: "medium",
+    description: "A corrective action on an AI incident (ADR-0182 A12) is still open past its due date.",
+  },
+  feedback_sla_breached: {
+    label: "Feedback past its response time",
+    severity: "medium",
+    description:
+      "A problem report or an appeal on a use case (ADR-0182 A13) was not acknowledged, or not resolved, within " +
+      "the org's response times. The use case's owner and the admins are alerted.",
+  },
+  literacy_coverage_gap: {
+    label: "AI policy acknowledgement coverage below 100%",
+    severity: "low",
+    description:
+      "Some of the people a published AI policy or training applies to have not acknowledged its current version, " +
+      "or their acknowledgement expired (ADR-0182 A14). Observe only.",
   },
 } as const satisfies Record<string, { label: string; severity: MonitorSeverity; description: string }>;
 export type MonitorRuleId = keyof typeof MONITOR_RULES;
@@ -390,7 +419,22 @@ export interface MonitorInput {
   /** ADR-0180 — the continuous-assurance rules, each fed by its item owner's
    * loader; an absent rule key = that rule not evaluated */
   assurance?: Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>;
+  /** ADR-0182 (D4) — the accountability rules, each fed by its slice's
+   * loader (same shape as `assurance`); an absent rule key = not evaluated */
+  accountability?: Partial<Record<AccountabilityMonitorRuleId, MonitorAssuranceInput>>;
 }
+
+/** ADR-0182 (ADR-0175 batch D4) — the four accountability rules. Their
+ * evaluation is owned by the slices (A12 incidents, A13 feedback, A14
+ * literacy); the monitor turns each reported breach into a finding and
+ * reconciles it like any other. */
+export const ACCOUNTABILITY_MONITOR_RULE_IDS = [
+  "incident_notification_due",
+  "incident_action_overdue",
+  "feedback_sla_breached",
+  "literacy_coverage_gap",
+] as const satisfies readonly MonitorRuleId[];
+export type AccountabilityMonitorRuleId = (typeof ACCOUNTABILITY_MONITOR_RULE_IDS)[number];
 
 /** ADR-0180 — the six continuous-assurance rules. Their evaluation is owned by
  * the D3 items (the gateway loaders compute the breaches from the ledgers);
@@ -440,6 +484,22 @@ export interface MonitorKriInput {
   enabled: boolean;
   value: number | null;
   samples: number;
+  /** ADR-0182 S5 (PF-03): `propose_halt` on an agent-scoped KRI makes the
+   * breach episode carry a SUGGESTED halt. Absent = `alert`. Owner decision 4:
+   * a suggestion only — nothing is filed and nothing halts on its own. */
+  onBreach?: KriOnBreach;
+}
+
+/**
+ * ADR-0182 S5 (PF-03) — the halt a breached KRI SUGGESTS, or null. Only an
+ * agent-scoped KRI set to `propose_halt` suggests one (the DB refuses
+ * `propose_halt` on any other scope). The suggestion rides on the episode's
+ * detail; a person may file it as a proposal, which the normal approvals
+ * queue decides (the proposer cannot approve it).
+ */
+export function suggestedHaltFor(k: Pick<MonitorKriInput, "scope" | "scopeId" | "onBreach">): SuggestedHaltAction | null {
+  if (k.onBreach !== "propose_halt" || k.scope !== "agent" || !k.scopeId) return null;
+  return { kind: "halt_agent", agentId: k.scopeId };
 }
 
 /** the subject key of a KRI's episode */
@@ -728,6 +788,8 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
         value: k.value,
         samples: k.samples,
         minSamples: k.minSamples,
+        // ADR-0182 S5 (PF-03): a suggestion for a person, never an action taken
+        ...(suggestedHaltFor(k) ? { suggestedAction: suggestedHaltFor(k) } : {}),
       },
     });
   }
@@ -736,6 +798,13 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   // what breached; each breach is one finding under its rule.
   for (const ruleId of ASSURANCE_MONITOR_RULE_IDS) {
     for (const b of input.assurance?.[ruleId]?.breaches ?? []) {
+      out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
+    }
+  }
+  // ADR-0182 — the accountability rules, the same way: each slice's loader
+  // decides what breached.
+  for (const ruleId of ACCOUNTABILITY_MONITOR_RULE_IDS) {
+    for (const b of input.accountability?.[ruleId]?.breaches ?? []) {
       out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
     }
   }

@@ -138,6 +138,20 @@ export const ASSURANCE_METRICS = {
     samples: "the control's evidence",
     ledger: "compliance pack evidence",
   },
+  // ADR-0182 (D4) A13 — measured from the feedback register. Until A13 lands
+  // the gateway measures both as `not_run` (never a pass).
+  user_report_rate: {
+    label: "User problem reports per 1,000 traces",
+    unit: "per 1k",
+    samples: "finished traces",
+    ledger: "use_case_feedback (problem reports) over traces",
+  },
+  appeal_overturn_rate: {
+    label: "Appeal overturn rate",
+    unit: "%",
+    samples: "resolved appeals",
+    ledger: "use_case_feedback (appeals upheld or overturned)",
+  },
 } as const;
 export type AssuranceMetricId = keyof typeof ASSURANCE_METRICS;
 export const ASSURANCE_METRIC_IDS = Object.keys(ASSURANCE_METRICS) as [AssuranceMetricId, ...AssuranceMetricId[]];

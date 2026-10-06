@@ -1,0 +1,9 @@
+/**
+ * ADR-0182 (ADR-0175 batch D4) — DECISION REGRESSION: the golden set runner and the result diff (pure half). OWNER: A11 (D4).
+ *
+ * FOUNDATION STUB (P0). This file is A11's; it exists now so the package
+ * barrel (`index.ts`, a P0 file) already re-exports it with
+ * `export * from`, and A11 never has to edit the barrel. The shared
+ * vocabularies and request bodies A11 builds on are in `accountability.ts`.
+ */
+export {};

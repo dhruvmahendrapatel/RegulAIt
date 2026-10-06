@@ -463,6 +463,11 @@ export const measureAssuranceMetric: MeasureAssuranceMetricFn<Db> = async (db, s
       return measureErrorRate(db, spec, scope, since, now);
     case "pack_control_evidenced":
       return measurePackControl(db, spec, scope, since, now, params);
+    // ADR-0182 (D4) A13 — FOUNDATION STUB (P0): measured from the feedback
+    // register once A13 lands; until then nothing is measured, never a pass.
+    case "user_report_rate":
+    case "appeal_overturn_rate":
+      return { ...NOT_RUN_MEASUREMENT, evidence: [] };
   }
 };
 

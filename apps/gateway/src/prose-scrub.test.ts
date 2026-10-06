@@ -568,6 +568,24 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
+    // ADR-0182 (D4, migration 0162): every new free-text column of the
+    // accountability records (feedback bodies are ciphertext, not prose)
+    "decision_regression_cases.label",
+    "ai_incidents.title",
+    "ai_incidents.summary",
+    "ai_incidents.source_ref",
+    "ai_incidents.root_cause",
+    "ai_incidents.lessons_learned",
+    "ai_incident_events.note",
+    "ai_incident_actions.title",
+    "ai_incident_actions.evidence_ref",
+    "ai_incident_notifications.recipient",
+    "ai_incident_notifications.reference",
+    "ai_incident_notifications.reason",
+    "use_case_feedback.resolution_note",
+    "ai_policy_documents.title",
+    "ai_policy_documents.editorial_reason",
+    "ai_policy_acknowledgements.evidence_ref",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {

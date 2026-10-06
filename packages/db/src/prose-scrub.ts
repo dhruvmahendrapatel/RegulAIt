@@ -207,6 +207,21 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
   [s.builderAgents, ["autonomyNote"]],
   [s.remediationProposals, ["rationale"]],
+  // ADR-0182 (ADR-0175 batch D4, migration 0162) — accountability records.
+  // Every new free-text column is registered, titles included: an incident
+  // written under pressure, a reviewer's override label, an evidence reference
+  // pasted from a ticketing system and a resolution note are exactly where a
+  // credential gets pasted, and redacting one from a title loses nothing a
+  // reader needs. Feedback bodies and contact details are NOT here: they are
+  // REGULAIT_DATA_KEY envelopes (A13), never plaintext.
+  [s.decisionRegressionCases, ["label"]],
+  [s.aiIncidents, ["title", "summary", "sourceRef", "rootCause", "lessonsLearned"]],
+  [s.aiIncidentEvents, ["note"]],
+  [s.aiIncidentActions, ["title", "evidenceRef"]],
+  [s.aiIncidentNotifications, ["recipient", "reference", "reason"]],
+  [s.useCaseFeedback, ["resolutionNote"]],
+  [s.aiPolicyDocuments, ["title", "editorialReason"]],
+  [s.aiPolicyAcknowledgements, ["evidenceRef"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
   //
