@@ -150,7 +150,10 @@ export const ACCOUNTABILITY_SETTING_COPY: Readonly<
   feedbackRetentionDays: {
     label: "Feedback body retention (days)",
     strict: "365 days: the text and contact details are deleted after a year; the resolution record is kept.",
-    relaxed: "A longer retention (up to 2555 days) keeps what people wrote, and how to reach them, for longer.",
+    relaxed:
+      "A longer retention (up to 2555 days) keeps what people wrote, and how to reach them, for longer; a shorter one " +
+      "(down to 30 days) deletes complaints and appeals sooner, before a late investigation can read them. An item " +
+      "linked to an incident that is not closed is never deleted.",
   },
   literacyGateMode: {
     label: "AI literacy gate",
@@ -208,10 +211,14 @@ export function accountabilitySettingRelaxed<K extends AccountabilitySettingKey>
       const v = value as AlertSlaHours;
       return ALERT_SLA_SEVERITIES.some((s) => v[s] > ALERT_SLA_DEFAULTS[s]);
     }
+    // D4 DFX2 (D4G-03): retention relaxes BOTH ways — longer keeps personal
+    // data longer, shorter deletes what people wrote (complaint evidence)
+    // sooner. Either change is audited as a relaxation.
+    case "feedbackRetentionDays":
+      return value !== strict;
     case "decisionRegressionMaxAgeMinutes":
     case "feedbackAckSlaHours":
     case "feedbackResolveSlaDays":
-    case "feedbackRetentionDays":
     case "literacyDefaultValidityDays":
       return (value as number) > (strict as number);
     default:
