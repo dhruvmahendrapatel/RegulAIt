@@ -14,6 +14,10 @@ Red proofs: palette and refused exit-save cases fail with the old guard/callback
 
 Scope: browser tests use synthetic mocked gateway responses. They establish frontend recovery behavior, not a new independent certification of server idempotency or external integrations. Claude must review the change before marking the task VERIFIED. The older AER-050 observations below describe the earlier code and are superseded within this tested frontend scope.
 
+### X13 main integration — 2026-10-07
+
+Main `2ba28faf` merged at `f05bfea3` without rebase; task branch board now matches main and status lives in #142 (`codex/board`). Fresh validation: web units **326/326**, `pnpm --filter @regulait/web exec tsc --noEmit`, and `pnpm --filter @regulait/web build` PASS. System Chromium mock `intake-drafts.mock.spec.ts` + `intake-a11y.mock.spec.ts` **37/37 PASS**, including both axe themes; selected `zz-review-round.mock.spec.ts` resubmission cases **4/4 PASS** with `--grep 'failed questionnaire post|edits are kept as a draft|refused resubmission exit|Cancel and Back wait'`. Both use `--config playwright.demo-mock.config.ts --trace on`; exact command prefix `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test`. Logs/traces: `/workspace/.regulait-onboarding/x13-main-browser{,.log}`, `x13-main-resubmit{,.log}`, plus `x13-main-units.log` and `x13-main-build.log`. Main's refusal-guidance API changes were retained alongside X13's request cancellation support. This resolves the merge/CI-start blocker; review and new CI completion remain pending.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.
