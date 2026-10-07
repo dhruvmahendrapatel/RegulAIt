@@ -13,12 +13,13 @@ Artifact `spa-journeys-failure`, id 11449489421, SHA256
 `34b548e64012ba4517104aef3eac0558afe2f6e5724b1fd782eef5f79faa9228` is retained at
 `/workspace/.regulait-onboarding/x16-original-artifact.zip`.
 
-**Cause supported by the original trace, not classified as a flake:** the posture PUT returned 200 with
+**Cause supported by the 2e2c29d trace, not classified as a flake:** the posture PUT returned 200 with
 `keyCustodyEnforced: true`. Avery's account key was filled at trace time 42330.091 ms, but the literacy GET
 (start 42269.549 ms, duration 93.135 ms) finished around the Save key click (42359.996 ms). Its body was
 `required: false, current: true, documents: []`. The subsequent DOM snapshot (`after@call@1401`) contains
-**A key is required.** There is **no developer credential POST at all** in the captured network. The missing
+**A key is required.** There is **no developer credential POST at all in this 2e2c29d trace**; this is not a claim about every failed run. The missing
 custody copy was therefore not a failed backend custody refusal: the form lost its input before submission.
+Claude's 2026-10-07 review reports a different ordering on `f676ca3`: a credential POST reached the gateway and returned **409 key_custody_enforced** about 1.4 seconds after Avery's sign-in; the later literacy remount erased the received notice. Both input-before-submit loss and notice-after-response loss share the same remount mechanism. That second CI observation is attributed to Claude's gateway-log review; only the original 2e2c29d artifact was independently inspected here.
 Only sanitized status/posture/error information is reproduced here; no credential bodies are published.
 
 `AcknowledgeGate` returned its page in fragment slot 0 before the async literacy response, then in slot 2
@@ -105,6 +106,10 @@ Passing controls and evidence:
 Retained local artifacts (outside checkout): `/workspace/.regulait-onboarding/x15-baseline-tests.log`, `x15-probes-0016.log`, `x15-literacy-map.txt`, `x15-web-build.log`, and executable probe `x15-probes.mjs` (SHA256 `d629875722134fb5da2f6ed78e21cdb4233aa824f5e8eb71dd74e7fc4fa7f185`). Reproduce with `source /workspace/.regulait-onboarding/activate.sh` and `DATABASE_URL=<fresh-local-db> node /workspace/.regulait-onboarding/x15-probes.mjs`; requires the checked-out source's completed workspace build. Earlier probe iterations failed on harness response shapes / strict egress fixture admission, were corrected, and are not counted as completed runs. The reproduction ordering and controls above are included so the gateway owner can retain regression tests in their own scope.
 
 Other assignment handoffs: X12 [PR #134](https://github.com/dhruvmahendrapatel/RegulAIt/pull/134), X13 [#136](https://github.com/dhruvmahendrapatel/RegulAIt/pull/136), X14 [#139](https://github.com/dhruvmahendrapatel/RegulAIt/pull/139), X16 [#137](https://github.com/dhruvmahendrapatel/RegulAIt/pull/137), X17 [#138](https://github.com/dhruvmahendrapatel/RegulAIt/pull/138), with full task evidence in each PR's `codexInputs.md`. X14 and X16 both touch `AcknowledgeGate`: retain X14 focus behavior and X16 keyed child identity when combining. X17's UUID follow-up security workflow [37550242884](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37550242884) completed successfully, including CodeQL; no scanner suppression or gateway change. X18 remains blocked on Claude's unpublished §4 Batch-3 contracts.
+
+### X16 review follow-up — 2026-10-07
+
+Merged main `2ba28faf` with a merge commit (no rebase); task branch now preserves main's board unchanged. Added a second delayed-literacy regression that first observes the actual mocked 409 custody notice, then releases literacy and requires the notice to persist. With main's unkeyed gate restored temporarily, **1/1 failed** at the post-release notice assertion; fixed full literacy suite **7/7 PASS**. The earlier no-POST trace describes only `2e2c29d`; the reported `f676ca3` ordering includes a 409 POST and notice loss, as corrected above. Command: `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/adr0182-a14-literacy.mock.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-after409-green`; red control adds `--grep 'notice after a 409'` and uses `x16-after409-red`. Logs, full traces and both before-save/after-409 screenshots retained there. Web tsc/build PASS after merging main. No production code beyond the existing keyed-fragment fix was needed for the second ordering.
 
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
