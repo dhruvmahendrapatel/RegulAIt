@@ -208,7 +208,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 /** the request itself, with the response headers (an idempotent replay is told apart by one) */
-async function send<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<{ body: T; headers: Headers }> {
+async function send<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>, signal?: AbortSignal): Promise<{ body: T; headers: Headers }> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -220,6 +220,7 @@ async function send<T>(method: string, path: string, body?: unknown, extraHeader
         ...(extraHeaders ?? {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(signal ? { signal } : {}),
     });
   } catch (cause) {
     // the browser's "Failed to fetch" is not a reason anyone can act on
@@ -258,8 +259,8 @@ export const api = {
   /** POST with extra request headers (e.g. `Idempotency-Key`), answering the body and the response headers */
   postWithHeaders: <T>(path: string, body: unknown, headers: Record<string, string>) => send<T>("POST", path, body, headers),
   /** PUT with extra request headers (e.g. the intake draft's owner precondition, ADR-0179) */
-  putWithHeaders: async <T>(path: string, body: unknown, headers: Record<string, string>) =>
-    (await send<T>("PUT", path, body, headers)).body,
+  putWithHeaders: async <T>(path: string, body: unknown, headers: Record<string, string>, signal?: AbortSignal) =>
+    (await send<T>("PUT", path, body, headers, signal)).body,
 };
 
 /**

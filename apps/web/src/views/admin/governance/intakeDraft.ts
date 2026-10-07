@@ -56,7 +56,15 @@ export type DraftSaveOutcome =
 export const durableForSubmit = (outcome: DraftSaveOutcome): boolean =>
   outcome.kind === "saved" || (outcome.kind === "not-kept" && (outcome.reason === "off" || outcome.reason === "offer"));
 
+/** A fully saved draft can be left after the session owner changes without
+ * writing or deleting anything. Unsaved work still requires an explicit discard.
+ * This exception is for navigation only; durableForSubmit still refuses it. */
+export const durableForLeave = (outcome: DraftSaveOutcome, unsaved: boolean): boolean =>
+  outcome.kind === "saved" || (!unsaved && outcome.kind === "not-kept" && outcome.reason === "owner-changed");
+
 const SAVE_DELAY_MS = 1000;
+/** A stalled save must release the queue and offer a retry, without sending a keyed create. */
+const SAVE_TIMEOUT_MS = 15_000;
 /** a keepalive request body may be at most 64 KiB; a larger exit save goes as an ordinary request */
 const KEEPALIVE_MAX_BYTES = 60_000;
 export const draftPath = (scope: string) => `/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`;
@@ -170,6 +178,7 @@ export function useIntakeDraft<S>(opts: {
           draftPath(scope),
           { state: JSON.parse(body) as unknown },
           draftOwnerHeaders(owner.current),
+          AbortSignal.timeout(SAVE_TIMEOUT_MS),
         );
         saved.current = body;
         if (!stopped.current) {
@@ -276,7 +285,14 @@ export function useIntakeDraft<S>(opts: {
     return serialized !== saved.current;
   })();
 
-  return { status, unsaved, flush: save, resume, startFresh, discard };
+  /** Leave without another save; an earlier server draft remains available. */
+  const abandon = useCallback(() => {
+    stopped.current = true;
+    clearTimer();
+    setStatus({ kind: "done" });
+  }, []);
+
+  return { status, unsaved, flush: save, resume, startFresh, discard, abandon };
 }
 
 /** "Draft saved 14:05" — the time in the viewer's own clock */

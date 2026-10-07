@@ -55,7 +55,7 @@ import {
   questionId,
 } from "./intakeFields";
 import { IntakeResubmit } from "./IntakeResubmit";
-import { durableForSubmit, savedAtText, useIntakeDraft, type DraftSaveOutcome, type DraftStatus } from "./intakeDraft";
+import { durableForLeave, durableForSubmit, savedAtText, useIntakeDraft, type DraftSaveOutcome, type DraftStatus } from "./intakeDraft";
 import { useLeaveGuard } from "./LeaveGuard";
 import {
   BOOLEAN_QUESTIONS,
@@ -256,7 +256,10 @@ function RegisterUseCase() {
     ) : (
       <p>Your answers are not saved anywhere else and will be lost if you leave now.</p>
     ),
-    beforeLeave: () => (draftKept(draft.status) ? draft.flush() : undefined),
+    beforeLeave: async () =>
+      draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
+      durableForLeave(await draft.flush(), draft.unsaved),
+    onDiscard: !submitting && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
   });
 
   // ---- the stack and the assistant ------------------------------------------
