@@ -435,8 +435,10 @@ export async function governedEvaluate(
   // or below on which "I could not find the active version" ends in an allow.
   if (unresolvable.length > 0) {
     const first = unresolvable[0]!;
-    // ADR-0185 G5: a served decision is counted; a dry-run replay is not
-    if (!simulate) recordDecision({ surface: "mcp_tool", effect: "deny" });
+    // ADR-0185 G5: a served decision is counted; a dry-run replay is not.
+    // G3: a protocol method is counted once, as `mcp_protocol`, by its caller
+    // (mcp-protocol.ts), which also decides the refusals made before this runs.
+    if (!simulate && tool.surface !== "protocol") recordDecision({ surface: "mcp_tool", effect: "deny" });
     return {
       decision: {
         effect: "deny",
@@ -938,8 +940,9 @@ export async function governedEvaluate(
     }
   }
 
-  // ADR-0185 G5: a served decision is counted; a dry-run replay is not
-  if (!simulate) recordDecision({ surface: "mcp_tool", effect: decision.effect });
+  // ADR-0185 G5: a served decision is counted; a dry-run replay is not (G3:
+  // a protocol method is counted by mcp-protocol.ts, see above)
+  if (!simulate && tool.surface !== "protocol") recordDecision({ surface: "mcp_tool", effect: decision.effect });
   return {
     decision,
     approvedApprovalId,

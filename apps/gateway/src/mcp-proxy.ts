@@ -90,6 +90,14 @@ import {
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
 import { loadEntitlements } from "./entitlements.js";
+// ADR-0185 G3 — the non-tool MCP methods
+import {
+  executeGovernedProtocolCall,
+  installProtocolSurface,
+  isReservedToolName,
+  protocolCapabilities,
+  protocolOutcomeResult,
+} from "./mcp-protocol.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   assertProjectAttribution,
@@ -539,6 +547,9 @@ async function executeGovernedToolCallInner(
   traceInput: { value?: Record<string, unknown> },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
+  // ADR-0185 G3: `mcp:` names are protocol grants, never tools — a tool so
+  // named (which admission refuses to store) must not ride a protocol grant
+  if (isReservedToolName(toolName)) return { kind: "unknown_tool" };
   const projectId = args.projectId ?? null;
   const [preparationGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
   const piiMode: PiiMode | null = await projectPiiMode(db, projectId);
@@ -882,134 +893,19 @@ async function executeGovernedToolCallInner(
     }
 
     if (decision.effect === "require_approval") {
-      // ADR-0105 — THE VISIBLE DISPOSITION, and it happens BEFORE the re-queue.
-      //
-      // If this call is here because a consent it was holding went stale or
-      // lapsed, that row is retired NOW, with an audit fact naming why, and the
-      // fresh entry raised below carries the CURRENT digests. Retire-then-
-      // requeue in that order is what makes the pair legible to an approver:
-      // the dead signature is marked dead, and the row asking to be signed is
-      // the one bound to today's policy.
-      //
-      // Sited in this branch, not above the deny/compliance/budget gates: a
-      // call refused for some OTHER reason has said nothing about whether the
-      // stored consent is still good, and retiring on the way past would be
-      // acting on a question nobody asked. A genuinely stale row is retired the
-      // next time it is actually reached for.
-      const superseded = retiredApprovals.length
-        ? await supersedeStaleConsent(db, retiredApprovals, {
-            userId,
-            serverId,
-            toolName,
-            projectId,
-          })
-        : [];
-
-      // ADR-0105 — THE TTL DIAL, read at QUEUE time. NULL is a real value and
-      // is NOT defaulted away: it is the operator's recorded choice that this
-      // org's approvals never expire, which knowingly reopens the gap. The
-      // shipped column default is 72 hours (see migration 0107), so an org that
-      // has never touched the dial gets expiry.
-      const { approvalTtlHours } = await loadOrgSettings(db);
-
-      // Reuse an existing pending entry rather than piling up duplicates.
-      //
-      // ADR-0104 — THE DEDUP MUST KEY ON THE PAYLOAD TOO, under action scope.
-      // The old dedup keyed on user/server/tool/pending only. Under a consent
-      // that is bound to the arguments, that is the SAME HOLE IN A NEW PLACE: a
-      // second call with a completely different payload would collapse into the
-      // first call's pending row, the approver would read the first payload,
-      // sign it, and the second payload would ride along on that signature.
-      // Under 'tool' scope the digest is deliberately NOT in the key — one
-      // pending entry standing for a tool regardless of arguments is exactly
-      // what that escape hatch means, and the row's preview shows whichever
-      // payload first raised it.
-      const [pending] = await db
-        .select({ id: approvals.id })
-        .from(approvals)
-        .where(
-          and(
-            eq(approvals.userId, userId),
-            eq(approvals.serverId, serverId),
-            eq(approvals.toolName, toolName),
-            eq(approvals.status, "pending"),
-            eq(approvals.contextDigest, contextDigest),
-            eq(approvals.argumentsPreviewKind, preparedPii ? "mcp_redacted_v1" : "arguments_v1"),
-            eq(approvals.approvalScope, approvalScope),
-            ...(approvalScope === "action"
-              ? [eq(approvals.argumentsDigest, argumentsDigest)]
-              : []),
-          ),
-        )
-        .orderBy(asc(approvals.requestedAt))
-        .limit(1);
-      const approvalId =
-        pending?.id ??
-        (
-          await db
-            .insert(approvals)
-            .values({
-              userId,
-              serverId,
-              toolName,
-              /**
-               * ADR-0124 — `approvals.rule_id` is a UUID referring to an
-               * `approval_rules` row. An ORDINARY require_approval carries one.
-               * The execution dial's `require_approval` mode does not: its rule
-               * id is symbolic (`execution-require-approval`), because no rule
-               * row demanded it — the deployment's posture did. Writing the
-               * symbolic id here raised 22P02 and failed the queue outright,
-               * which is the same mistake M-039 recorded: a column's type is a
-               * claim about every producer. NULL is the honest value, and the
-               * audit row beside this carries the symbolic id, so nothing is
-               * lost.
-               */
-              ruleId: UUID_RE.test(decision.ruleId) ? decision.ruleId : null,
-              approverUserId: decision.approverUserId!,
-              // ADR-0104: the fingerprint the consent will be BOUND to, and
-              // beside it the SCRUBBED payload the approver actually reads.
-              // Redaction forces action scope and supplies a preview of the
-              // effective snapshot; consent also binds the original digest.
-              argumentsDigest,
-              argumentsPreview: preparedPii?.argumentsPreview ?? approvalArgumentsPreview(args.arguments),
-              argumentsPreviewKind: preparedPii ? "mcp_redacted_v1" : "arguments_v1",
-              approvalScope,
-              projectId,
-              // ADR-0105: the POLICY identity this consent is being asked for,
-              // and the clock it dies on. Both stamped HERE, at queue time —
-              // the digest so the signature is bound to the policy the
-              // approver is signing under, the expiry so a later dial change
-              // can never extend a consent that already exists (the same
-              // stamp-at-issuance discipline ADR-0098 holds for API keys).
-              contextDigest,
-              ...(approvalTtlHours != null
-                ? { expiresAt: new Date(Date.now() + approvalTtlHours * 3_600_000) }
-                : {}),
-            })
-            .returning({ id: approvals.id })
-        )[0]!.id;
-      // A retirement that actually moved a row is reported as the distinct
-      // outcome it is: "your approval lapsed / the policy moved, here is the
-      // replacement" is a different thing to tell a caller than "you need an
-      // approval". A context change outranks an expiry when both happened —
-      // the policy fact is the more consequential one.
-      if (superseded.length > 0) {
-        const anyContext = retiredApprovals.some(
-          (r) => superseded.includes(r.id) && r.reason === "context_changed",
-        );
-        return anyContext
-          ? {
-              kind: "approval_context_stale",
-              supersededApprovalIds: superseded,
-              requeuedApprovalId: approvalId,
-            }
-          : {
-              kind: "approval_expired",
-              supersededApprovalIds: superseded,
-              requeuedApprovalId: approvalId,
-            };
-      }
-      return { kind: "approval_required", approvalId, decision };
+      return queueGovernedApproval(db, {
+        userId,
+        serverId,
+        toolName,
+        projectId,
+        decision,
+        retiredApprovals,
+        contextDigest,
+        approvalScope,
+        argumentsDigest,
+        argumentsPreview: preparedPii?.argumentsPreview ?? approvalArgumentsPreview(args.arguments),
+        argumentsPreviewKind: preparedPii ? "mcp_redacted_v1" : "arguments_v1",
+      });
     }
 
     // §8.4 PII ENFORCEMENT (pillar 3), MCP path — the third governed entry
@@ -1115,67 +1011,18 @@ async function executeGovernedToolCallInner(
     }
 
     if (approvedApprovalId) {
-      // Atomically consume the approval; losing the race means another call
-      // already spent it, so this call must go back through the queue.
-      //
-      // A shared lock on the policy epoch orders this consume against policy
-      // writes. Their database triggers update the same row. If any write
-      // committed after evaluation began, this call must evaluate again.
-      //
-      //   * `arguments_digest` is asserted ONLY under action scope. Under the
-      //     ADR-0104 `tool` escape hatch a different payload's digest — or a
-      //     legacy NULL — is exactly what the row is allowed to carry, so
-      //     asserting it there would quietly delete the escape hatch.
-      //   * `context_digest` must equal this call's. Legacy NULL rows re-queue.
-      //   * `expires_at` must be absent or in the future, evaluated by the
-      //     DATABASE's clock (`now()`), not this process's — the row is being
-      //     changed there and the freshness question has to be answered there
-      //     too.
-      const consumed = await consumeBoundApproval(db, {
-        approvalId: approvedApprovalId,
+      const refused = await consumeApprovalOrRetire(db, {
+        approvedApprovalId,
         policyEpoch,
         approvalScope,
         argumentsDigest,
         contextDigest,
+        userId,
+        serverId,
+        toolName,
+        projectId,
       });
-      if (!consumed) {
-        // ADR-0105 — CLASSIFY, do not return one opaque failure. Re-read the
-        // row and say which of the three actually happened: somebody else spent
-        // it, it lapsed, or the policy moved underneath it. The first is a
-        // benign race; the other two are refusals that owe a visible
-        // disposition, so the row is superseded here too. No replacement is
-        // queued on this path — raising one needs a fresh evaluation under the
-        // policy that has just changed, which is precisely what the caller's
-        // retry does.
-        const [row] = await db
-          .select()
-          .from(approvals)
-          .where(eq(approvals.id, approvedApprovalId));
-        if (row && row.status === "approved") {
-          const reason: RetiredApproval["reason"] =
-            row.expiresAt != null && row.expiresAt.getTime() <= Date.now()
-              ? "expired"
-              : "context_changed";
-          const superseded = await supersedeStaleConsent(db, [{ id: row.id, reason }], {
-            userId,
-            serverId,
-            toolName,
-            projectId,
-          });
-          return reason === "expired"
-            ? {
-                kind: "approval_expired",
-                supersededApprovalIds: superseded,
-                requeuedApprovalId: null,
-              }
-            : {
-                kind: "approval_context_stale",
-                supersededApprovalIds: superseded,
-                requeuedApprovalId: null,
-              };
-        }
-        return { kind: "approval_consumed_race", approvalId: approvedApprovalId };
-      }
+      if (refused) return refused;
     }
 
     // An upstream FAILURE throws out of here before any metering — a failed
@@ -1383,6 +1230,259 @@ async function executeGovernedToolCallInner(
   }
 }
 
+/**
+ * ADR-0185 G3 — THE QUEUEING HALF of a `require_approval`, shared by the tool
+ * path and the protocol path (`mcp-protocol.ts`) so both queue, dedupe, stamp
+ * and retire consents through ONE implementation (moved here unchanged from
+ * `executeGovernedToolCallInner`). `toolName` is the tool, or a protocol
+ * method's grant name (`mcp:resources`, ...).
+ */
+export async function queueGovernedApproval(
+  db: Db,
+  q: {
+    userId: string;
+    serverId: string;
+    toolName: string;
+    projectId: string | null;
+    decision: Decision;
+    retiredApprovals: readonly RetiredApproval[];
+    contextDigest: string;
+    approvalScope: "action" | "tool";
+    argumentsDigest: string;
+    argumentsPreview: (typeof approvals.$inferInsert)["argumentsPreview"];
+    argumentsPreviewKind: "arguments_v1" | "mcp_redacted_v1";
+  },
+): Promise<Extract<GovernedToolCallOutcome, { kind: "approval_required" | "approval_expired" | "approval_context_stale" }>> {
+  const {
+    userId,
+    serverId,
+    toolName,
+    projectId,
+    decision,
+    retiredApprovals,
+    contextDigest,
+    approvalScope,
+    argumentsDigest,
+    argumentsPreview,
+    argumentsPreviewKind,
+  } = q;
+  // ADR-0105 — THE VISIBLE DISPOSITION, and it happens BEFORE the re-queue.
+  //
+  // If this call is here because a consent it was holding went stale or
+  // lapsed, that row is retired NOW, with an audit fact naming why, and the
+  // fresh entry raised below carries the CURRENT digests. Retire-then-
+  // requeue in that order is what makes the pair legible to an approver:
+  // the dead signature is marked dead, and the row asking to be signed is
+  // the one bound to today's policy.
+  //
+  // Sited in this branch, not above the deny/compliance/budget gates: a
+  // call refused for some OTHER reason has said nothing about whether the
+  // stored consent is still good, and retiring on the way past would be
+  // acting on a question nobody asked. A genuinely stale row is retired the
+  // next time it is actually reached for.
+  const superseded = retiredApprovals.length
+    ? await supersedeStaleConsent(db, retiredApprovals, {
+        userId,
+        serverId,
+        toolName,
+        projectId,
+      })
+    : [];
+
+  // ADR-0105 — THE TTL DIAL, read at QUEUE time. NULL is a real value and
+  // is NOT defaulted away: it is the operator's recorded choice that this
+  // org's approvals never expire, which knowingly reopens the gap. The
+  // shipped column default is 72 hours (see migration 0107), so an org that
+  // has never touched the dial gets expiry.
+  const { approvalTtlHours } = await loadOrgSettings(db);
+
+  // Reuse an existing pending entry rather than piling up duplicates.
+  //
+  // ADR-0104 — THE DEDUP MUST KEY ON THE PAYLOAD TOO, under action scope.
+  // The old dedup keyed on user/server/tool/pending only. Under a consent
+  // that is bound to the arguments, that is the SAME HOLE IN A NEW PLACE: a
+  // second call with a completely different payload would collapse into the
+  // first call's pending row, the approver would read the first payload,
+  // sign it, and the second payload would ride along on that signature.
+  // Under 'tool' scope the digest is deliberately NOT in the key — one
+  // pending entry standing for a tool regardless of arguments is exactly
+  // what that escape hatch means, and the row's preview shows whichever
+  // payload first raised it.
+  const [pending] = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.userId, userId),
+        eq(approvals.serverId, serverId),
+        eq(approvals.toolName, toolName),
+        eq(approvals.status, "pending"),
+        eq(approvals.contextDigest, contextDigest),
+        eq(approvals.argumentsPreviewKind, argumentsPreviewKind),
+        eq(approvals.approvalScope, approvalScope),
+        ...(approvalScope === "action"
+          ? [eq(approvals.argumentsDigest, argumentsDigest)]
+          : []),
+      ),
+    )
+    .orderBy(asc(approvals.requestedAt))
+    .limit(1);
+  const approvalId =
+    pending?.id ??
+    (
+      await db
+        .insert(approvals)
+        .values({
+          userId,
+          serverId,
+          toolName,
+          /**
+           * ADR-0124 — `approvals.rule_id` is a UUID referring to an
+           * `approval_rules` row. An ORDINARY require_approval carries one.
+           * The execution dial's `require_approval` mode does not: its rule
+           * id is symbolic (`execution-require-approval`), because no rule
+           * row demanded it — the deployment's posture did. Writing the
+           * symbolic id here raised 22P02 and failed the queue outright,
+           * which is the same mistake M-039 recorded: a column's type is a
+           * claim about every producer. NULL is the honest value, and the
+           * audit row beside this carries the symbolic id, so nothing is
+           * lost.
+           */
+          ruleId: UUID_RE.test(decision.ruleId) ? decision.ruleId : null,
+          approverUserId: decision.approverUserId!,
+          // ADR-0104: the fingerprint the consent will be BOUND to, and
+          // beside it the SCRUBBED payload the approver actually reads.
+          // Redaction forces action scope and supplies a preview of the
+          // effective snapshot; consent also binds the original digest.
+          argumentsDigest,
+          argumentsPreview: argumentsPreview,
+          argumentsPreviewKind: argumentsPreviewKind,
+          approvalScope,
+          projectId,
+          // ADR-0105: the POLICY identity this consent is being asked for,
+          // and the clock it dies on. Both stamped HERE, at queue time —
+          // the digest so the signature is bound to the policy the
+          // approver is signing under, the expiry so a later dial change
+          // can never extend a consent that already exists (the same
+          // stamp-at-issuance discipline ADR-0098 holds for API keys).
+          contextDigest,
+          ...(approvalTtlHours != null
+            ? { expiresAt: new Date(Date.now() + approvalTtlHours * 3_600_000) }
+            : {}),
+        })
+        .returning({ id: approvals.id })
+    )[0]!.id;
+  // A retirement that actually moved a row is reported as the distinct
+  // outcome it is: "your approval lapsed / the policy moved, here is the
+  // replacement" is a different thing to tell a caller than "you need an
+  // approval". A context change outranks an expiry when both happened —
+  // the policy fact is the more consequential one.
+  if (superseded.length > 0) {
+    const anyContext = retiredApprovals.some(
+      (r) => superseded.includes(r.id) && r.reason === "context_changed",
+    );
+    return anyContext
+      ? {
+          kind: "approval_context_stale",
+          supersededApprovalIds: superseded,
+          requeuedApprovalId: approvalId,
+        }
+      : {
+          kind: "approval_expired",
+          supersededApprovalIds: superseded,
+          requeuedApprovalId: approvalId,
+        };
+  }
+  return { kind: "approval_required", approvalId, decision };
+}
+
+/**
+ * ADR-0185 G3 — THE CONSUMING HALF: spend the approved consent atomically, or
+ * say which of the three things happened instead (moved here unchanged from
+ * `executeGovernedToolCallInner`). Null = consumed, run the call.
+ */
+export async function consumeApprovalOrRetire(
+  db: Db,
+  c: {
+    approvedApprovalId: string;
+    policyEpoch: number;
+    approvalScope: "action" | "tool";
+    argumentsDigest: string;
+    contextDigest: string;
+    userId: string;
+    serverId: string;
+    toolName: string;
+    projectId: string | null;
+  },
+): Promise<Extract<
+  GovernedToolCallOutcome,
+  { kind: "approval_expired" | "approval_context_stale" | "approval_consumed_race" }
+> | null> {
+  const { approvedApprovalId, policyEpoch, approvalScope, argumentsDigest, contextDigest, userId, serverId, toolName, projectId } = c;
+  // Atomically consume the approval; losing the race means another call
+  // already spent it, so this call must go back through the queue.
+  //
+  // A shared lock on the policy epoch orders this consume against policy
+  // writes. Their database triggers update the same row. If any write
+  // committed after evaluation began, this call must evaluate again.
+  //
+  //   * `arguments_digest` is asserted ONLY under action scope. Under the
+  //     ADR-0104 `tool` escape hatch a different payload's digest — or a
+  //     legacy NULL — is exactly what the row is allowed to carry, so
+  //     asserting it there would quietly delete the escape hatch.
+  //   * `context_digest` must equal this call's. Legacy NULL rows re-queue.
+  //   * `expires_at` must be absent or in the future, evaluated by the
+  //     DATABASE's clock (`now()`), not this process's — the row is being
+  //     changed there and the freshness question has to be answered there
+  //     too.
+  const consumed = await consumeBoundApproval(db, {
+    approvalId: approvedApprovalId,
+    policyEpoch,
+    approvalScope,
+    argumentsDigest,
+    contextDigest,
+  });
+  if (!consumed) {
+    // ADR-0105 — CLASSIFY, do not return one opaque failure. Re-read the
+    // row and say which of the three actually happened: somebody else spent
+    // it, it lapsed, or the policy moved underneath it. The first is a
+    // benign race; the other two are refusals that owe a visible
+    // disposition, so the row is superseded here too. No replacement is
+    // queued on this path — raising one needs a fresh evaluation under the
+    // policy that has just changed, which is precisely what the caller's
+    // retry does.
+    const [row] = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.id, approvedApprovalId));
+    if (row && row.status === "approved") {
+      const reason: RetiredApproval["reason"] =
+        row.expiresAt != null && row.expiresAt.getTime() <= Date.now()
+          ? "expired"
+          : "context_changed";
+      const superseded = await supersedeStaleConsent(db, [{ id: row.id, reason }], {
+        userId,
+        serverId,
+        toolName,
+        projectId,
+      });
+      return reason === "expired"
+        ? {
+            kind: "approval_expired",
+            supersededApprovalIds: superseded,
+            requeuedApprovalId: null,
+          }
+        : {
+            kind: "approval_context_stale",
+            supersededApprovalIds: superseded,
+            requeuedApprovalId: null,
+          };
+    }
+    return { kind: "approval_consumed_race", approvalId: approvedApprovalId };
+  }
+  return null;
+}
+
 /** Discover the upstream tool manifest and sync it into the registry (§6: auto-discovered tool inventory).
  *
  * EXPORTED for ADR-0100: the scheduled admission re-scan drives THIS function
@@ -1490,11 +1590,14 @@ export async function resolveNodeToolContext(
       }
       await recordUpstreamSuccess(db, serverRow);
       const entitlements = await loadEntitlements(db, userId, serverId);
-      const refs: ToolRef[] = upstreamTools.map((t) => ({
-        serverId,
-        name: t.name,
-        kind: toolKind(t),
-      }));
+      const refs: ToolRef[] = upstreamTools
+        // ADR-0185 G3: a reserved `mcp:` name is never offered as a tool
+        .filter((t) => !isReservedToolName(t.name))
+        .map((t) => ({
+          serverId,
+          name: t.name,
+          kind: toolKind(t),
+        }));
       const visible = new Set(visibleTools(userId, serverId, refs, entitlements).map((t) => t.name));
       for (const t of upstreamTools) {
         // first declared server wins for a shared tool name
@@ -1743,10 +1846,55 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // A handshake cannot establish recovery. Each handler records success
     // only after its list or call operation actually finishes.
 
+    // ADR-0185 G3: `tools` always; resources / prompts / completions / logging
+    // only when the org has enabled a method under them (none by default)
+    const orgForProtocol = await loadOrgSettings(db);
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
-      { capabilities: { tools: {} } },
+      { capabilities: protocolCapabilities(orgForProtocol.mcpProtocolMethods ?? []) },
     );
+    // ADR-0185 G3: every non-tool request is decided by the protocol primitive
+    // (refused, disabled, or governed exactly like a tool call)
+    const protocolSurface = installProtocolSurface(proxy, {
+      db,
+      userId,
+      serverId,
+      projectId,
+      call: async (method, params, extra) => {
+        const protocolTrace = await beginTrace(db, {
+          kind: "tool",
+          name: `mcp ${method.slice(0, 120)}`,
+          userId,
+          projectId,
+          sessionId: `mcp:${serverId}`,
+          rootRefId: serverId,
+        });
+        const outcome = await executeGovernedProtocolCall(db, {
+          userId,
+          serverId,
+          method,
+          params,
+          projectId,
+          principal: abacPrincipalFromRequest(req),
+          trace: protocolTrace,
+          relay: extra.relay,
+          progressToken: extra.progressToken,
+        }).catch(async (err: unknown) => {
+          // the same named policy refusal a tools/call raises post-hijack
+          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+            await finishTrace(db, protocolTrace, "denied");
+            throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+          }
+          throw err;
+        });
+        await finishTrace(
+          db,
+          protocolTrace,
+          outcome.kind === "allowed" ? "ok" : outcome.kind === "method_not_found" || outcome.kind === "invalid_params" ? "error" : "denied",
+        );
+        return protocolOutcomeResult(outcome, method, mcpErrorForGovernanceOutcome);
+      },
+    });
 
     proxy.setRequestHandler(ListToolsRequestSchema, async () => {
       // ADR-0097 DRIFT: the connect-time gate passed, but the manifest is
@@ -1766,11 +1914,14 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       });
       await recordUpstreamSuccess(db, serverRow);
       const entitlements = await loadEntitlements(db, userId, serverId);
-      const refs: ToolRef[] = upstreamTools.map((t) => ({
-        serverId,
-        name: t.name,
-        kind: toolKind(t),
-      }));
+      const refs: ToolRef[] = upstreamTools
+        // ADR-0185 G3: a reserved `mcp:` name is never offered as a tool
+        .filter((t) => !isReservedToolName(t.name))
+        .map((t) => ({
+          serverId,
+          name: t.name,
+          kind: toolKind(t),
+        }));
       const visible = new Set(
         visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
       );
@@ -1867,82 +2018,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       switch (outcome.kind) {
         case "unknown_tool":
           throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
-        case "denied":
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Denied by policy: ${outcome.decision.reason}`,
-          );
-        // §8.4 input block: denied pre-call, nothing executed, nothing billed.
-        // The message names CATEGORIES only, never the matched content.
-        case "pii_blocked":
-          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
-        // ADR-0042 input block: same shape, same honesty — a real MCP error,
-        // never a fabricated empty success, and CATEGORIES only in the message.
-        case "guardrail_blocked":
-          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
-        // ADR-0103 pillar-5 block: the attributed project's budget is
-        // exhausted, so nothing ran, nothing was consumed and nothing billed.
-        // The message names the same error the model path returns (409
-        // project_budget_exceeded) so an operator reading either surface sees
-        // one condition, not two.
-        case "budget_blocked":
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Denied by policy: ${outcome.error}` + (outcome.detail ? ` — ${outcome.detail}` : ""),
-          );
-        case "approval_required": {
-          // name the approver by display name when the kernel carried one — the
-          // approval id keeps the full UUID (a caller retries with it)
-          const decision = outcome.decision;
-          const approverLabel = decision.approverName
-            ? `'${decision.approverName}' (${decision.approverUserId!.slice(0, 8)}…)`
-            : `'${decision.approverUserId}'`;
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Approval required: approval '${outcome.approvalId}' is pending sign-off by ` +
-              `approver ${approverLabel}. Retry after approval.`,
-          );
-        }
-        case "approval_consumed_race":
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Approval '${outcome.approvalId}' was already consumed — retry to request a new approval.`,
-          );
-        // ADR-0105: the two consent-freshness refusals. Both name the retired
-        // row AND the replacement, so a caller reading the error knows the old
-        // signature is dead and which row now needs signing — never a bare
-        // "denied" that leaves them retrying into the same wall.
-        case "approval_expired":
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Approval ${outcome.supersededApprovalIds.map((id) => `'${id}'`).join(", ")} expired ` +
-              `before it was used and has been superseded.` +
-              (outcome.requeuedApprovalId
-                ? ` Approval '${outcome.requeuedApprovalId}' has been raised in its place and is ` +
-                  `pending sign-off. Retry after approval.`
-                : ` Retry to raise a fresh approval.`),
-          );
-        case "approval_context_stale":
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Approval ${outcome.supersededApprovalIds.map((id) => `'${id}'`).join(", ")} was granted ` +
-              `under a policy context that has since changed and has been superseded.` +
-              (outcome.requeuedApprovalId
-                ? ` Approval '${outcome.requeuedApprovalId}' has been raised under the current policy ` +
-                  `and is pending sign-off. Retry after approval.`
-                : ` Retry to raise a fresh approval.`),
-          );
-        // Tool admission happens after governance, inside the MCP handler.
-        // The response is already hijacked, so expose the retry window in the
-        // MCP error; manifest admission can still return a pre-hijack HTTP 503.
-        case "upstream_circuit_open":
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Upstream unavailable: ${outcome.reason}. Retry after ` +
-              `${Math.ceil(outcome.retryAfterMs / 1000)}s.`,
-          );
         case "allowed":
           return outcome.content as Record<string, unknown>;
+        default:
+          throw mcpErrorForGovernanceOutcome(outcome);
       }
     });
 
@@ -1955,7 +2034,98 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     });
     await proxy.connect(transport);
     await transport.handleRequest(req.raw, reply.raw, req.body);
+    // ADR-0185 G3: notification handlers run on the microtask queue after the
+    // transport dispatched them; one audit row for this request's drops
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await protocolSurface.flush();
   });
+}
+
+/**
+ * A governance outcome (shared by the tool and protocol paths) as the MCP
+ * error the proxy answers with. Moved out of the `tools/call` handler
+ * unchanged, so `mcp-protocol.ts` names every refusal exactly as a tool call
+ * does (ADR-0185 G3).
+ */
+export function mcpErrorForGovernanceOutcome(
+  outcome: Exclude<GovernedToolCallOutcome, { kind: "allowed" | "unknown_tool" }>,
+): McpError {
+  switch (outcome.kind) {
+    case "denied":
+      return new McpError(
+        ErrorCode.InvalidRequest,
+        `Denied by policy: ${outcome.decision.reason}`,
+      );
+    // §8.4 input block: denied pre-call, nothing executed, nothing billed.
+    // The message names CATEGORIES only, never the matched content.
+    case "pii_blocked":
+      return new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
+    // ADR-0042 input block: same shape, same honesty — a real MCP error,
+    // never a fabricated empty success, and CATEGORIES only in the message.
+    case "guardrail_blocked":
+      return new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
+    // ADR-0103 pillar-5 block: the attributed project's budget is
+    // exhausted, so nothing ran, nothing was consumed and nothing billed.
+    // The message names the same error the model path returns (409
+    // project_budget_exceeded) so an operator reading either surface sees
+    // one condition, not two.
+    case "budget_blocked":
+      return new McpError(
+        ErrorCode.InvalidRequest,
+        `Denied by policy: ${outcome.error}` + (outcome.detail ? ` — ${outcome.detail}` : ""),
+      );
+    case "approval_required": {
+      // name the approver by display name when the kernel carried one — the
+      // approval id keeps the full UUID (a caller retries with it)
+      const decision = outcome.decision;
+      const approverLabel = decision.approverName
+        ? `'${decision.approverName}' (${decision.approverUserId!.slice(0, 8)}…)`
+        : `'${decision.approverUserId}'`;
+      return new McpError(
+        ErrorCode.InvalidRequest,
+        `Approval required: approval '${outcome.approvalId}' is pending sign-off by ` +
+          `approver ${approverLabel}. Retry after approval.`,
+      );
+    }
+    case "approval_consumed_race":
+      return new McpError(
+        ErrorCode.InvalidRequest,
+        `Approval '${outcome.approvalId}' was already consumed — retry to request a new approval.`,
+      );
+    // ADR-0105: the two consent-freshness refusals. Both name the retired
+    // row AND the replacement, so a caller reading the error knows the old
+    // signature is dead and which row now needs signing — never a bare
+    // "denied" that leaves them retrying into the same wall.
+    case "approval_expired":
+      return new McpError(
+        ErrorCode.InvalidRequest,
+        `Approval ${outcome.supersededApprovalIds.map((id) => `'${id}'`).join(", ")} expired ` +
+          `before it was used and has been superseded.` +
+          (outcome.requeuedApprovalId
+            ? ` Approval '${outcome.requeuedApprovalId}' has been raised in its place and is ` +
+              `pending sign-off. Retry after approval.`
+            : ` Retry to raise a fresh approval.`),
+      );
+    case "approval_context_stale":
+      return new McpError(
+        ErrorCode.InvalidRequest,
+        `Approval ${outcome.supersededApprovalIds.map((id) => `'${id}'`).join(", ")} was granted ` +
+          `under a policy context that has since changed and has been superseded.` +
+          (outcome.requeuedApprovalId
+            ? ` Approval '${outcome.requeuedApprovalId}' has been raised under the current policy ` +
+              `and is pending sign-off. Retry after approval.`
+            : ` Retry to raise a fresh approval.`),
+      );
+    // Tool admission happens after governance, inside the MCP handler.
+    // The response is already hijacked, so expose the retry window in the
+    // MCP error; manifest admission can still return a pre-hijack HTTP 503.
+    case "upstream_circuit_open":
+      return new McpError(
+        ErrorCode.InternalError,
+        `Upstream unavailable: ${outcome.reason}. Retry after ` +
+          `${Math.ceil(outcome.retryAfterMs / 1000)}s.`,
+      );
+  }
 }
 
 /** AER-039 — the upstream a call was bound to, safe for the audit ledger */

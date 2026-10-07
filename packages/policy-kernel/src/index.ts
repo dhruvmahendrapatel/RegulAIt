@@ -482,6 +482,27 @@ export interface ToolRef {
   serverId: string;
   name: string;
   kind: ToolKind;
+  /**
+   * ADR-0185 G3 — WHICH MCP SURFACE the call is on. Absent = `"tool"`: a
+   * `tools/call` against a manifest tool, byte-identical to every pre-G3
+   * caller. `"protocol"` = a non-tool MCP method (resources, prompts,
+   * completion, logging) decided against its reserved grant name
+   * (`mcp:resources`, `mcp:prompts`, `mcp:completion`, `mcp:logging`).
+   *
+   * The one thing it changes: a READ-ONLY-ALL server grant (direct or
+   * role-derived) never covers a protocol ref. Those grants were issued as
+   * "every read TOOL on this server"; letting them silently start reading the
+   * server's resources and prompts the day an org enables a method would
+   * widen every existing grant without anyone signing for it. A protocol
+   * method needs its own grant, by name.
+   */
+  surface?: "tool" | "protocol";
+}
+
+/** ADR-0185 G3: may a read-only-all server grant cover this ref? Never for a
+ * protocol method (see `ToolRef.surface`). */
+function readOnlyAllCovers(tool: ToolRef): boolean {
+  return tool.kind === "read" && (tool.surface ?? "tool") === "tool";
 }
 
 /**
@@ -888,7 +909,7 @@ function evaluateTool(input: EvaluationInput): Decision {
     const serverGrant = input.serverGrants.find(
       (g) => g.userId === userId && g.serverId === serverId && g.readOnlyAll,
     );
-    if (serverGrant && tool.kind === "read") {
+    if (serverGrant && readOnlyAllCovers(tool)) {
       chain.push({ rule: "server-read-only-all", outcome: "allow", grantId: serverGrant.id });
       grantId = serverGrant.id;
       grantReason = `read-only tool '${tool.name}' allowed by user's read-all grant on server ${serverRef}`;
@@ -898,7 +919,7 @@ function evaluateTool(input: EvaluationInput): Decision {
       const roleServerGrant = (input.roleServerGrants ?? []).find(
         (g) => g.serverId === serverId && g.readOnlyAll,
       );
-      if (roleServerGrant && tool.kind === "read") {
+      if (roleServerGrant && readOnlyAllCovers(tool)) {
         const revocation = revocationFor(tool.name);
         if (revocation) {
           chain.push({
