@@ -106,6 +106,8 @@ import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 // (sod.ts imports buildAgentHolderIndex from HERE; the cycle is
 // function-level only and both sides resolve at call time).
 import { sodInventorySection } from "./sod.js";
+// ADR-0185 I9: the memory-store inventory (memory-retention.ts imports incidents.ts lazily, so no cycle)
+import { memoryStoreInventory } from "./memory-retention.js";
 
 const agentIdParam = z.object({ agentId: z.string().uuid() });
 
@@ -395,6 +397,15 @@ export async function buildAgentHolderIndex(db: Db): Promise<AgentHolderIndex> {
 // ---------------------------------------------------------------------------
 
 export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
+  /**
+   * ADR-0185 I9 — THE MEMORY-STORE INVENTORY: where the gateway keeps what
+   * people asked and what agents answered, how much, how old, and what deletes
+   * it. COUNTS ONLY — never a row's content. `retention.enforcedBy` is null
+   * for a store no sweep deletes yet (reported honestly, not as "0 days").
+   * Admin-only via the default gate.
+   */
+  app.get("/v1/inventory/memory-stores", async () => memoryStoreInventory(db));
+
   /**
    * THE STANDING INVENTORY — one row per registered agent, every column an
    * aggregation over an existing ledger. Admin-only via the default gate: the

@@ -99,6 +99,9 @@ export const SCHEDULER_JOB_NAMES = {
   feedbackRetentionSweep: "feedback-retention-sweep",
   literacyExpirySweep: "literacy-expiry-sweep",
   alertSlaSweep: "alert-sla-sweep",
+  // ADR-0185 I3: defined and run by memory-retention.ts (block at the end)
+  semanticCachePurgeSweep: "semantic-cache-purge-sweep",
+  conversationRetentionSweep: "conversation-retention-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -759,6 +762,7 @@ import { incidentJobDefinitions } from "./incidents.js";
 import { feedbackJobDefinitions } from "./feedback.js";
 import { literacyJobDefinitions } from "./ai-literacy.js";
 import { alertSlaJobDefinitions } from "./alert-ownership.js";
+import { memoryRetentionJobDefinitions } from "./memory-retention.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -766,6 +770,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...feedbackJobDefinitions({ dataKey: opts.dataKey }), // A13: feedback-sla-sweep, feedback-retention-sweep
     ...literacyJobDefinitions(), // A14: literacy-expiry-sweep
     ...alertSlaJobDefinitions(), // S5: alert-sla-sweep
+    ...memoryRetentionJobDefinitions(), // ADR-0185 I3: semantic-cache-purge-sweep, conversation-retention-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================
