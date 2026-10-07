@@ -131,6 +131,7 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
   });
   it("audits only export metadata, bounds requests and refuses non-admin/anonymous access", async () => {
     await bundle();
+    expect((await get("/v1/receipts/export", boot)).statusCode).toBe(200);
     const [event] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "decision-receipt-exported")).orderBy(desc(auditLog.seq)).limit(1);
     expect(event!.detail).toEqual({ fromSeq: 1, toSeq: 3, rows: 3 });
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(0);

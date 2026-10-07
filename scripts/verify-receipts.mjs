@@ -16,7 +16,10 @@ try {
   if (!isReceiptBundle(bundle)) throw new Error("Malformed receipt bundle");
   // An operator may replace untrusted bundle keys with an independently pinned
   // key list. Missing keys then remain unverifiable instead of trusting the bundle.
-  if (paths[1]) bundle.keys = read(paths[1]).keys;
+  if (paths[1]) {
+    bundle.keys = read(paths[1]).keys;
+    if (!isReceiptBundle(bundle)) throw new Error("Malformed pinned public keys");
+  }
   const result = verifyReceiptBundle(bundle);
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
   process.exit(result.results.some((r) => r.status === "invalid") ? 1 : result.results.length === 0 || result.results.some((r) => r.status === "unverifiable") ? 2 : 0);

@@ -122,7 +122,7 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     const from = integer(q.fromSeq, 1), to = integer(q.toSeq, last?.receiptSeq ?? 0);
     if (from === null || to === null || to < from || to - from + 1 > EXPORT_LIMIT) return reply.status(400).send({ error: "invalid_receipt_export_range", detail: "Choose a nonempty range of at most 5000 receipts." });
     const rows = await db.select().from(decisionReceipts).where(and(gte(decisionReceipts.receiptSeq, from), lte(decisionReceipts.receiptSeq, to))).orderBy(asc(decisionReceipts.receiptSeq)).limit(EXPORT_LIMIT);
-    await db.insert(auditLog).values({ userId: req.authCtx.userId ?? "system", objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: "decision-receipt-exported", ruleChain: [], reason: "Decision receipt bundle exported", detail: { fromSeq: from, toSeq: to, rows: rows.length } });
+    await db.insert(auditLog).values({ userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000", objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: "decision-receipt-exported", ruleChain: [], reason: "Decision receipt bundle exported", detail: { fromSeq: from, toSeq: to, rows: rows.length } });
     return { receipts: rows.map(envelope), keys: await publicKeys(db), verifier: RECEIPT_PAYLOAD_VERSION };
   });
   app.post("/v1/receipts/verify", { bodyLimit: 5 * 1024 * 1024 }, async (req, reply) => {
