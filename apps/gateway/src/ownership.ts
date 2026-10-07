@@ -21,11 +21,12 @@
  * `connector:<id>` in its subject) is owned by that owner; an orphaned owner
  * owns nothing, so the SLA sweep escalates it (alert-ownership.ts).
  */
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { and, auditLog, connectors, eq, inArray, isNull, mcpServers, users, type Db } from "@regulait/db";
 import { setOwnerSchema, type OwnershipState } from "@regulait/shared";
 import { ownershipFlagFor } from "./inventory.js";
+import { stepUpRefusal } from "./step-up.js";
 
 export type OwnedKind = "mcp_server" | "connector";
 
@@ -107,10 +108,19 @@ const tableFor = (kind: OwnedKind) => (kind === "mcp_server" ? mcpServers : conn
  */
 export async function changeOwner(
   db: Db,
-  args: { kind: OwnedKind; id: string; ownerUserId: string | null; actorUserId: string | null | undefined },
+  args: {
+    kind: OwnedKind;
+    id: string;
+    ownerUserId: string | null;
+    actorUserId: string | null | undefined;
+    /** ADR-0186 A: asked after the target is validated and before anything is
+     * written, only when the owner really changes (the `owner_change`
+     * step-up); a non-null answer is the refusal, and nothing is written */
+    gate?: (change: { from: string | null; to: string | null }) => Promise<{ status: number; body: Record<string, unknown> } | null>;
+  },
 ): Promise<
   | { ok: true; body: { id: string; ownerUserId: string | null; ownership: OwnershipState } }
-  | { ok: false; status: 404 | 422; body: { error: string; detail?: string } }
+  | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const table = tableFor(args.kind);
   const label = args.kind === "mcp_server" ? "MCP server" : "connector";
@@ -132,6 +142,10 @@ export async function changeOwner(
       reason: `${label} '${before.name}': owner change refused (${target.body.error})`,
     });
     return target;
+  }
+  if (args.gate && before.ownerUserId !== target.ownerUserId) {
+    const refused = await args.gate({ from: before.ownerUserId, to: target.ownerUserId });
+    if (refused) return { ok: false, ...refused };
   }
   const fromOwnership = await ownershipOf(db, before.ownerUserId);
   // each table named statically, so rule-write-guard.test.ts can see the writers
@@ -169,16 +183,28 @@ export async function changeOwner(
   return { ok: true, body: { id: after!.id, ownerUserId: after!.ownerUserId, ownership: toOwnership } };
 }
 
+/** ADR-0186 A: the `owner_change` step-up, bound to the object and the new owner */
+export function ownerChangeGate(db: Db, req: FastifyRequest, objectType: OwnedKind | "agent", objectId: string) {
+  return (change: { from: string | null; to: string | null }) =>
+    stepUpRefusal(db, req, { kind: "owner_change", facts: { objectType, objectId, ownerUserId: change.to } });
+}
+
 /**
  * Routes (admin-only via the default gate — neither is in NON_ADMIN_ROUTES):
  *   PUT /v1/servers/:serverId/owner         {"ownerUserId": "<uuid>" | null}
  *   PUT /v1/connectors/:connectorId/owner   {"ownerUserId": "<uuid>" | null}
  */
 export function registerOwnershipRoutes(app: FastifyInstance, db: Db): void {
-  const route = (kind: OwnedKind, param: "serverId" | "connectorId") => async (req: { params: unknown; body: unknown; authCtx: { userId?: string | null } }, reply: FastifyReply) => {
+  const route = (kind: OwnedKind, param: "serverId" | "connectorId") => async (req: FastifyRequest, reply: FastifyReply) => {
     const id = z.object({ [param]: z.string().uuid() }).parse(req.params)[param] as string;
     const body = setOwnerSchema.parse(req.body);
-    const out = await changeOwner(db, { kind, id, ownerUserId: body.ownerUserId, actorUserId: req.authCtx.userId ?? null });
+    const out = await changeOwner(db, {
+      kind,
+      id,
+      ownerUserId: body.ownerUserId,
+      actorUserId: req.authCtx.userId ?? null,
+      gate: ownerChangeGate(db, req, kind, id),
+    });
     if (!out.ok) return reply.status(out.status).send(out.body);
     return out.body;
   };

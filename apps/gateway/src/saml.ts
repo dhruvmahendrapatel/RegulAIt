@@ -56,6 +56,8 @@ import {
   samlAssertionIds,
   samlLoginStates,
   samlProviders,
+  sql,
+  ssoReauthRequests,
   users,
   type Db,
 } from "@regulait/db";
@@ -82,6 +84,15 @@ import {
   ssoBrowserBinding,
 } from "./auth.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
+import {
+  claimSsoReauthByState,
+  finishSsoReauth,
+  isSsoReauthState,
+  STEP_UP_CEREMONY_SECONDS,
+  stepUpResultPage,
+  type SsoReauthStart,
+  type SsoReauthStartArgs,
+} from "./step-up.js";
 
 /** ADR-0181 (FX2, review finding 12): the audited cause, and the holder-facing
  * wording, of a sign-in refused because the IdP did not sign the SAML Response
@@ -96,6 +107,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 import { settingTransitions } from "./setting-transitions.js";
 import {
+  anchorLinkedUser,
   dropProviderLinks,
   LINK_PROOF_MINUTES,
   normalizeClaimEmail,
@@ -202,6 +214,9 @@ function samlFor(
   forcedRequestId?: string,
   /** ADR-0181 (FX2): a DIAGNOSTIC instance only — never used to sign anyone in */
   diagnostic?: { ignoreResponseSignature: true },
+  /** ADR-0186 A: a fresh login for a STEP-UP — ForceAuthn, solicited only,
+   * correlated against its `sso_reauth_requests` row (never a sign-in's) */
+  reauth?: { cache: ReturnType<typeof reauthStateCache> },
 ): SAML {
   const privateKey = provider.spPrivateKeyCiphertext && opts.dataKey
     ? decryptSecret(opts.dataKey, provider.spPrivateKeyCiphertext)
@@ -223,12 +238,15 @@ function samlFor(
     // no outstanding request; `ifPresent` still validates a solicited login
     // fully but permits the unsolicited shape the admin opted into.
     // (a diagnostic instance never touches the single-use correlation row)
-    validateInResponseTo: diagnostic
-      ? ValidateInResponseTo.never
-      : provider.allowIdpInitiated
-        ? ValidateInResponseTo.ifPresent
-        : ValidateInResponseTo.always,
-    cacheProvider: loginStateCache(db, provider.id),
+    validateInResponseTo: reauth
+      ? ValidateInResponseTo.always
+      : diagnostic
+        ? ValidateInResponseTo.never
+        : provider.allowIdpInitiated
+          ? ValidateInResponseTo.ifPresent
+          : ValidateInResponseTo.always,
+    cacheProvider: reauth ? reauth.cache : loginStateCache(db, provider.id),
+    ...(reauth ? { forceAuthn: true } : {}),
     ...(forcedRequestId ? { generateUniqueId: () => forcedRequestId } : {}),
     // optional SP-side signing material (write-only at rest)
     ...(privateKey ? { privateKey } : {}),
@@ -271,6 +289,79 @@ function loginStateCache(db: Db, providerId: string) {
       await db.delete(samlLoginStates).where(eq(samlLoginStates.requestId, key));
       return key;
     },
+  };
+}
+
+/**
+ * ADR-0186 A — the correlation of a fresh login made for a STEP-UP: the
+ * AuthnRequest id is the request row's `nonce`, and nothing else correlates.
+ * Single use is the row's own (`claimSsoReauthByState` claimed it before the
+ * library runs), so removal is a no-op here.
+ */
+function reauthStateCache(row: { nonce: string; requestedAt: Date }) {
+  return {
+    async saveAsync(_key: string, value: string) {
+      return { value, createdAt: Date.now() };
+    },
+    async getAsync(key: string): Promise<string | null> {
+      return key === row.nonce ? row.requestedAt.toISOString() : null;
+    },
+    async removeAsync(key: string | null): Promise<string | null> {
+      return key;
+    },
+  };
+}
+
+/**
+ * ADR-0186 A — START a fresh SAML login for a step-up (called by
+ * `POST /v1/auth/step-up/options` for a user whose linked identity is at this
+ * provider): an AuthnRequest with `ForceAuthn="true"`, its id and relay state
+ * written to `sso_reauth_requests`, bound to this browser by the same cookie
+ * as a sign-in (only over TLS, as for a sign-in).
+ */
+export async function beginSamlReauth(
+  db: Db,
+  dataKey: string | undefined,
+  req: FastifyRequest,
+  args: SsoReauthStartArgs,
+): Promise<SsoReauthStart> {
+  const [provider] = await db
+    .select()
+    .from(samlProviders)
+    .where(and(eq(samlProviders.id, args.providerId), eq(samlProviders.enabled, true)));
+  if (!provider) throw new Error("the linked SAML provider is not enabled");
+  const requestId = "_" + randomBytes(20).toString("hex");
+  const relayState = randomBytes(24).toString("base64url");
+  const base = baseUrlFor(req);
+  const acsUrl = acsUrlFor(base, provider.id);
+  const [row] = await db
+    .insert(ssoReauthRequests)
+    .values({
+      stepUpId: args.stepUpId,
+      userId: args.userId,
+      sessionId: args.sessionId,
+      providerKind: "saml",
+      samlProviderId: provider.id,
+      state: relayState,
+      nonce: requestId,
+      redirectUri: acsUrl,
+      actionDigest: args.actionDigest,
+      expiresAt: sql`now() + make_interval(secs => ${STEP_UP_CEREMONY_SECONDS})`,
+    })
+    .returning();
+  const saml = samlFor(db, provider, acsUrl, spEntityId(base), { dataKey }, requestId, undefined, {
+    cache: reauthStateCache(row!),
+  });
+  const url = await saml.getAuthorizeUrlAsync(relayState, undefined, {});
+  return {
+    redirectUrl: url,
+    setCookie: requestIsSecure(req)
+      ? ssoBindingCookie(SAML_BINDING_COOKIE, ssoBrowserBinding(dataKey, relayState), {
+          path: "/auth/saml",
+          secure: true,
+          crossSite: true,
+        })
+      : null,
   };
 }
 
@@ -565,6 +656,100 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
     return reply.redirect(url, 302);
   });
 
+  /**
+   * ADR-0186 A — the return leg of a fresh SAML login made for a STEP-UP. No
+   * session is minted. The request is claimed once; the browser binding (over
+   * TLS), the signature, audience, timestamps and InResponseTo (against the
+   * request's own AuthnRequest id), the issuer and Recipient pins and the
+   * assertion-ID replay guard are a sign-in's. Then the asserted identity
+   * must be LINKED to the user who asked (403 `sso_reauth_identity_mismatch`)
+   * and `AuthnInstant` must be after the request (409 `sso_reauth_stale`).
+   */
+  const completeSamlReauth = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    provider: typeof samlProviders.$inferSelect,
+    relayState: string,
+    samlResponse: string,
+    acsUrl: string,
+    entityId: string,
+  ) => {
+    const row = await claimSsoReauthByState(db, "saml", relayState, provider.id);
+    if (!row) return stepUpResultPage(req, reply, 409, "sso_reauth_stale", null);
+    const refuse = async (status: number, error: string, ruleId: string, reason: string, detail: Record<string, unknown>) => {
+      await auditAuth(db, null, row.userId, ruleId, "deny", reason,
+        { phase: "saml-reauth-acs", provider: provider.name, stepUpId: row.stepUpId, ...detail });
+      return reply.status(status).send({ error });
+    };
+    if (requestIsSecure(req)) {
+      const presentedBinding = readCookie(req.headers.cookie, SAML_BINDING_COOKIE);
+      if (!ssoBindingMatches(presentedBinding, ssoBrowserBinding(opts.dataKey, relayState))) {
+        return refuse(401, "login_not_bound_to_this_browser", "saml-reauth-browser-mismatch",
+          "SAML step-up refused: the fresh login was started in a different browser — request consumed, no grant",
+          { bindingCookiePresent: presentedBinding !== null });
+      }
+    }
+    let profile: Profile;
+    try {
+      const saml = samlFor(db, provider, acsUrl, entityId, opts, undefined, undefined, { cache: reauthStateCache(row) });
+      const result = await saml.validatePostResponseAsync({ SAMLResponse: samlResponse, RelayState: relayState });
+      if (!result.profile) throw new Error("no profile in SAML response");
+      profile = result.profile;
+    } catch (err) {
+      return refuse(401, "saml_validation_failed", "saml-reauth-failed",
+        `SAML step-up assertion validation failed for provider '${provider.name}'`,
+        { error: err instanceof Error ? err.message : String(err) });
+    }
+    if (profile.inResponseTo !== row.nonce) {
+      return refuse(403, "idp_initiated_not_allowed", "saml-reauth-failed",
+        "SAML step-up refused: the assertion does not answer this step-up's AuthnRequest", {});
+    }
+    const assertion = verifiedAssertion(profile);
+    const issuer = assertionIssuer(assertion) ?? profile.issuer ?? null;
+    if (issuer !== provider.entityId) {
+      return refuse(403, "saml_issuer_mismatch", "saml-reauth-failed",
+        `SAML step-up refused: assertion issuer '${issuer ?? "(none)"}' is not the provider's pinned entity id`, { issuer });
+    }
+    const recipients = assertionRecipients(assertion);
+    if (recipients.length === 0 || !recipients.includes(acsUrl)) {
+      return refuse(403, "saml_recipient_mismatch", "saml-reauth-failed",
+        "SAML step-up refused: no SubjectConfirmationData Recipient matches this ACS URL", { recipients });
+    }
+    const { id: assertionId, notOnOrAfter } = assertionIdentity(assertion);
+    if (!assertionId) {
+      return refuse(403, "saml_assertion_id_missing", "saml-reauth-failed",
+        "SAML step-up refused: the assertion carries no ID, so replay cannot be prevented", {});
+    }
+    const skewMs = samlClockSkewMinutes() * 60_000;
+    const inserted = await db
+      .insert(samlAssertionIds)
+      .values({
+        providerId: provider.id,
+        assertionId,
+        expiresAt: notOnOrAfter ? new Date(notOnOrAfter.getTime() + skewMs) : new Date(Date.now() + SAML_STATE_MINUTES * 60_000),
+      })
+      .onConflictDoNothing()
+      .returning({ id: samlAssertionIds.id });
+    if (inserted.length === 0) {
+      return refuse(403, "saml_assertion_replayed", "saml-reauth-failed",
+        `SAML step-up refused: assertion '${assertionId}' has already been presented`, { assertionId });
+    }
+    const { raw: rawEmail } = resolveSamlEmailRaw(profile, provider.emailAttribute);
+    const email = rawEmail === null ? null : (normalizeClaimEmail(rawEmail)?.email ?? null);
+    const anchor = email
+      ? samlAnchor({ kind: "saml", id: provider.id, name: provider.name }, provider.entityId, profile.nameID, profile.nameIDFormat, email)
+      : null;
+    const rawInstant = assertion?.AuthnStatement?.[0]?.$?.AuthnInstant;
+    const authnInstant = typeof rawInstant === "string" && !Number.isNaN(Date.parse(rawInstant)) ? new Date(rawInstant) : null;
+    const verdict = await finishSsoReauth(db, row, {
+      linkedUserId: anchor ? await anchorLinkedUser(db, anchor) : null,
+      authTime: authnInstant,
+      providerName: provider.name,
+    });
+    if (!verdict.ok) return stepUpResultPage(req, reply, verdict.status, verdict.error, row.stepUpId);
+    return stepUpResultPage(req, reply, 200, "ok", row.stepUpId);
+  };
+
   // ---- POST /auth/saml/:providerId/acs -----------------------------------
   // The Assertion Consumer Service. Encapsulated scope: the IdP POSTs a
   // form-urlencoded body (that is what the SAML HTTP-POST binding IS), and the
@@ -640,6 +825,12 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           targetUserId ? "user" : "saml_provider");
         return reply.status(status).send(holderDetail ? { error, detail: holderDetail } : { error });
       };
+
+      // ADR-0186 A: a fresh login started for a STEP-UP is correlated by its
+      // own table and completed by its own handler; a sign-in never reaches it
+      if (body.data.RelayState && (await isSsoReauthState(db, "saml", body.data.RelayState))) {
+        return completeSamlReauth(req, reply, provider, body.data.RelayState, body.data.SAMLResponse, acsUrl, entityId);
+      }
 
       // Read the correlation row BEFORE validation: the library's
       // cacheProvider consumes (deletes) it as part of enforcing

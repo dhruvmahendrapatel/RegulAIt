@@ -26,6 +26,7 @@ import {
   roles,
   samlProviders,
   sql,
+  ssoReauthRequests,
   users,
   type Db,
   type IpPolicy,
@@ -52,6 +53,15 @@ import {
   oidcJitDomainsMissing,
 } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
+import {
+  claimSsoReauthByState,
+  finishSsoReauth,
+  isSsoReauthState,
+  STEP_UP_CEREMONY_SECONDS,
+  stepUpResultPage,
+  type SsoReauthStart,
+  type SsoReauthStartArgs,
+} from "./step-up.js";
 import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -1031,6 +1041,110 @@ export async function beginSamlTotpStepUp(
   return { token, maxAgeSeconds: MFA_PENDING_MINUTES * 60 };
 }
 
+/** ADR-0043: one issuer-URL egress decision against the SAME default-deny
+ * `egress_allow_hosts` table every other guarded surface uses. An OIDC
+ * issuer is configured once, by an admin, at setup — one allow entry is a
+ * one-time act, not per-call friction — so the ordinary allow-list posture
+ * applies (NOT the MCP private-ranges-open default). */
+async function oidcIssuerDecision(db: Db, issuerUrl: string) {
+  const allowList = await loadEgressAllowList(db);
+  const decision = await checkEgress(issuerUrl, { allowList });
+  return { decision, allowList };
+}
+
+/** discovery against the provider's issuer — now THROUGH the egress guard
+ * (ADR-0043). The issuer is re-validated on every discovery (a write-time
+ * verdict is not a fact about the future, and rows written before this
+ * guard existed are in the live database right now), and the discovery +
+ * token + JWKS fetches all ride `createGuardedFetch`, so they inherit the
+ * ADR-0034 pinned transport and redirect refusal. `allowInsecureRequests`
+ * for an http:// issuer is no longer free: checkEgress only passes plaintext
+ * http when the issuer host's allow entry set allowPlaintextHttp, so the
+ * insecure opt-in is a per-host admin decision, not a side effect of typing
+ * 'http://'. A refusal throws OidcEgressBlockedError with nothing leaving
+ * the box, audited. */
+export async function oidcDiscoveryFor(db: Db, dataKey: string | undefined, provider: typeof oidcProviders.$inferSelect) {
+  if (!dataKey) throw new Error("REGULAIT_DATA_KEY required for OIDC");
+  const { decision, allowList } = await oidcIssuerDecision(db, provider.issuerUrl);
+  if (!decision.ok) {
+    await auditAuth(db, null, provider.id, "oidc-egress-blocked", "deny",
+      `OIDC discovery refused for provider '${provider.name}': ${decision.reason}`,
+      { phase: "oidc-discovery", provider: provider.name, issuerUrl: provider.issuerUrl, code: decision.code },
+      "oidc_provider");
+    throw new OidcEgressBlockedError(decision);
+  }
+  const secret = decryptSecret(dataKey, provider.clientSecretCiphertext);
+  return oidc.discovery(new URL(provider.issuerUrl), provider.clientId, secret, undefined, {
+    // the guarded fetch is assigned onto the resolved Configuration too, so
+    // the token-endpoint and JWKS requests of the login flow are guarded —
+    // not just the discovery document fetch
+    [oidc.customFetch]: createGuardedFetch({ allowList }),
+    // only reachable for http:// when the host's allow entry opted in —
+    // checkEgress refused plaintext without allowPlaintextHttp above
+    ...(decision.protocol === "http:" ? { execute: [oidc.allowInsecureRequests] } : {}),
+  });
+}
+
+/**
+ * ADR-0186 A — START a fresh OIDC login for a step-up (called by
+ * `POST /v1/auth/step-up/options` for a user whose linked identity is at this
+ * provider). The SAME guarded discovery, redirect URI, PKCE, state and nonce
+ * as a sign-in, plus `prompt=login` and `max_age=0` so the provider must
+ * authenticate the person again now. The state is written to
+ * `sso_reauth_requests` (never `oidc_login_states`), so the callback can tell
+ * a step-up from a sign-in, and is bound to this browser by the same HMAC
+ * cookie as a sign-in.
+ */
+export async function beginOidcReauth(
+  db: Db,
+  dataKey: string | undefined,
+  req: FastifyRequest,
+  args: SsoReauthStartArgs,
+): Promise<SsoReauthStart> {
+  const [provider] = await db
+    .select()
+    .from(oidcProviders)
+    .where(and(eq(oidcProviders.id, args.providerId), eq(oidcProviders.enabled, true)));
+  if (!provider) throw new Error("the linked OIDC provider is not enabled");
+  const config = await oidcDiscoveryFor(db, dataKey, provider);
+  const codeVerifier = oidc.randomPKCECodeVerifier();
+  const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
+  const state = oidc.randomState();
+  const nonce = oidc.randomNonce();
+  const redirectUri = `${deploymentBaseUrl(req)}/auth/oidc/callback`;
+  await db.insert(ssoReauthRequests).values({
+    stepUpId: args.stepUpId,
+    userId: args.userId,
+    sessionId: args.sessionId,
+    providerKind: "oidc",
+    oidcProviderId: provider.id,
+    state,
+    nonce,
+    codeVerifier,
+    redirectUri,
+    actionDigest: args.actionDigest,
+    expiresAt: sql`now() + make_interval(secs => ${STEP_UP_CEREMONY_SECONDS})`,
+  });
+  const authUrl = oidc.buildAuthorizationUrl(config, {
+    redirect_uri: redirectUri,
+    scope: "openid email profile",
+    state,
+    nonce,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    prompt: "login",
+    max_age: "0",
+  });
+  return {
+    redirectUrl: authUrl.href,
+    setCookie: ssoBindingCookie(OIDC_BINDING_COOKIE, ssoBrowserBinding(dataKey, state), {
+      path: "/auth/oidc",
+      secure: requestIsSecure(req),
+      crossSite: false,
+    }),
+  };
+}
+
 export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRouteOptions = {}) {
   const setSession = async (
     reply: FastifyReply,
@@ -1729,49 +1843,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // client_secret_ciphertext deliberately absent: secrets are WRITE-ONLY
   });
 
-  /** ADR-0043: one issuer-URL egress decision against the SAME default-deny
-   * `egress_allow_hosts` table every other guarded surface uses. An OIDC
-   * issuer is configured once, by an admin, at setup — one allow entry is a
-   * one-time act, not per-call friction — so the ordinary allow-list posture
-   * applies (NOT the MCP private-ranges-open default). */
-  const oidcIssuerDecision = async (issuerUrl: string) => {
-    const allowList = await loadEgressAllowList(db);
-    const decision = await checkEgress(issuerUrl, { allowList });
-    return { decision, allowList };
-  };
-
-  /** discovery against the provider's issuer — now THROUGH the egress guard
-   * (ADR-0043). The issuer is re-validated on every discovery (a write-time
-   * verdict is not a fact about the future, and rows written before this
-   * guard existed are in the live database right now), and the discovery +
-   * token + JWKS fetches all ride `createGuardedFetch`, so they inherit the
-   * ADR-0034 pinned transport and redirect refusal. `allowInsecureRequests`
-   * for an http:// issuer is no longer free: checkEgress only passes plaintext
-   * http when the issuer host's allow entry set allowPlaintextHttp, so the
-   * insecure opt-in is a per-host admin decision, not a side effect of typing
-   * 'http://'. A refusal throws OidcEgressBlockedError with nothing leaving
-   * the box, audited. */
-  const oidcConfigFor = async (provider: typeof oidcProviders.$inferSelect) => {
-    if (!opts.dataKey) throw new Error("REGULAIT_DATA_KEY required for OIDC");
-    const { decision, allowList } = await oidcIssuerDecision(provider.issuerUrl);
-    if (!decision.ok) {
-      await auditAuth(db, null, provider.id, "oidc-egress-blocked", "deny",
-        `OIDC discovery refused for provider '${provider.name}': ${decision.reason}`,
-        { phase: "oidc-discovery", provider: provider.name, issuerUrl: provider.issuerUrl, code: decision.code },
-        "oidc_provider");
-      throw new OidcEgressBlockedError(decision);
-    }
-    const secret = decryptSecret(opts.dataKey, provider.clientSecretCiphertext);
-    return oidc.discovery(new URL(provider.issuerUrl), provider.clientId, secret, undefined, {
-      // the guarded fetch is assigned onto the resolved Configuration too, so
-      // the token-endpoint and JWKS requests of the login flow are guarded —
-      // not just the discovery document fetch
-      [oidc.customFetch]: createGuardedFetch({ allowList }),
-      // only reachable for http:// when the host's allow entry opted in —
-      // checkEgress refused plaintext without allowPlaintextHttp above
-      ...(decision.protocol === "http:" ? { execute: [oidc.allowInsecureRequests] } : {}),
-    });
-  };
+  /** ADR-0043 discovery through the egress guard — the module-level
+   * `oidcDiscoveryFor` (moved out unchanged so the ADR-0186 fresh-login
+   * step-up uses the very same guarded discovery) */
+  const oidcConfigFor = (provider: typeof oidcProviders.$inferSelect) => oidcDiscoveryFor(db, opts.dataKey, provider);
 
   // REGULAIT_PUBLIC_URL when set, else the request's scheme and Host
   const baseUrlFor = (req: FastifyRequest): string => deploymentBaseUrl(req);
@@ -1941,6 +2016,78 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     return beginOidcLogin(req, reply, providerId, returnTo, rawIdp);
   });
 
+  /**
+   * ADR-0186 A — the return leg of a fresh OIDC login made for a STEP-UP. No
+   * session is minted and none is read (the callback is a cross-site
+   * navigation). The state is claimed once; the browser binding, PKCE, nonce
+   * and token validation are a sign-in's; then the identity the provider
+   * returned must be LINKED to the user who asked (403
+   * `sso_reauth_identity_mismatch`), and its `auth_time` must be after the
+   * request (409 `sso_reauth_stale`). The grant is collected by the session
+   * that started the step-up (`GET /v1/auth/step-up/:stepUpId`).
+   */
+  const completeOidcReauth = async (req: FastifyRequest, reply: FastifyReply, state: string) => {
+    const row = await claimSsoReauthByState(db, "oidc", state);
+    if (!row) return stepUpResultPage(req, reply, 409, "sso_reauth_stale", null);
+    const presentedBinding = readCookie(req.headers.cookie, OIDC_BINDING_COOKIE);
+    if (!ssoBindingMatches(presentedBinding, ssoBrowserBinding(opts.dataKey, state))) {
+      await auditAuth(db, null, row.userId, "oidc-reauth-browser-mismatch", "deny",
+        "OIDC step-up callback refused: the fresh login was started in a different browser — request consumed, no grant",
+        { phase: "oidc-reauth-callback", providerId: row.oidcProviderId, stepUpId: row.stepUpId, bindingCookiePresent: presentedBinding !== null });
+      return reply.status(401).send({
+        error: "login_not_bound_to_this_browser",
+        detail: "this sign-in was started in a different browser session — start again from RegulAIt",
+      });
+    }
+    const [provider] = await db
+      .select()
+      .from(oidcProviders)
+      .where(and(eq(oidcProviders.id, row.oidcProviderId!), eq(oidcProviders.enabled, true)));
+    if (!provider) return stepUpResultPage(req, reply, 409, "sso_reauth_stale", row.stepUpId);
+    let config: oidc.Configuration;
+    try {
+      config = await oidcConfigFor(provider);
+    } catch (err) {
+      if (err instanceof OidcEgressBlockedError) {
+        return reply.status(403).send({ error: "egress_blocked", code: err.decision.code, detail: err.decision.reason });
+      }
+      throw err;
+    }
+    const currentUrl = new URL(row.redirectUri);
+    currentUrl.search = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    let claims: oidc.IDToken;
+    try {
+      const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
+        pkceCodeVerifier: row.codeVerifier!,
+        expectedState: state,
+        expectedNonce: row.nonce,
+        idTokenExpected: true,
+      });
+      const c = tokens.claims();
+      if (!c) throw new Error("no id_token claims");
+      claims = c;
+    } catch (err) {
+      await auditAuth(db, null, row.userId, "oidc-reauth-failed", "deny",
+        `OIDC step-up token exchange/validation failed for provider '${provider.name}'`,
+        { phase: "oidc-reauth-callback", provider: provider.name, stepUpId: row.stepUpId, error: err instanceof Error ? err.message : String(err) });
+      return reply.status(401).send({ error: "oidc_validation_failed" });
+    }
+    const anchor: FederatedAnchor = {
+      ref: { kind: "oidc", id: provider.id, name: provider.name },
+      issuer: typeof claims.iss === "string" ? claims.iss : provider.issuerUrl,
+      subjectFormat: "",
+      subject: String(claims.sub),
+    };
+    const authTime = typeof claims.auth_time === "number" && Number.isFinite(claims.auth_time) ? new Date(claims.auth_time * 1000) : null;
+    const verdict = await finishSsoReauth(db, row, {
+      linkedUserId: await anchorLinkedUser(db, anchor),
+      authTime,
+      providerName: provider.name,
+    });
+    if (!verdict.ok) return stepUpResultPage(req, reply, verdict.status, verdict.error, row.stepUpId);
+    return stepUpResultPage(req, reply, 200, "ok", row.stepUpId);
+  };
+
   // step 2: the IdP redirects back — validate state, PKCE and nonce, map the
   // VERIFIED email claim, mint the SAME session cookie password login mints.
   app.get("/auth/oidc/callback", async (req, reply) => {
@@ -1955,7 +2102,12 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .where(and(eq(oidcLoginStates.state, state), gt(oidcLoginStates.expiresAt, now)))
       .returning();
     const login = claimed[0];
-    if (!login) return reply.status(401).send({ error: "invalid_or_expired_state" });
+    if (!login) {
+      // ADR-0186 A: a fresh login started for a STEP-UP lives in its own table
+      // and is completed by its own handler; a sign-in state never reaches it
+      if (await isSsoReauthState(db, "oidc", state)) return completeOidcReauth(req, reply, state);
+      return reply.status(401).send({ error: "invalid_or_expired_state" });
+    }
     // ADR-0167 (AUTHZ-04): the row is claimed either way (single-use holds),
     // but it completes a login only in the browser that opened it. Refused
     // BEFORE the token exchange, so a planted callback costs the IdP nothing.
@@ -2477,7 +2629,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // stored, audited. (Discovery re-checks every login; this is the earliest
     // honest failure.)
     {
-      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      const { decision } = await oidcIssuerDecision(db, body.issuerUrl);
       if (!decision.ok) {
         await auditAuth(db, req.authCtx.userId, null, "oidc-egress-blocked", "deny",
           `OIDC provider '${body.name}' registration refused: issuer ${decision.reason}`,
@@ -2542,7 +2694,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     // ADR-0043: moving the issuer re-runs the write-time egress check
     if (body.issuerUrl !== undefined) {
-      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      const { decision } = await oidcIssuerDecision(db, body.issuerUrl);
       if (!decision.ok) {
         await auditAuth(db, req.authCtx.userId, providerId, "oidc-egress-blocked", "deny",
           `OIDC provider '${existing.name}' issuer change refused: ${decision.reason}`,

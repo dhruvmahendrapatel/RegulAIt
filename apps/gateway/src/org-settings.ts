@@ -74,7 +74,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { settingsRelaxStepUpRefusal } from "./step-up.js";
+import { breakGlassChange, breakGlassStepUpRefusal, settingsRelaxStepUpRefusal } from "./step-up.js";
 
 export type { OrgSettingsRow };
 
@@ -816,11 +816,24 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         ),
       );
       const relaxedKeys = relaxedSettingKeys(differs);
+      // ADR-0186 A: changing the break-glass key holders or the local sign-in
+      // mode needs its own `break_glass` step-up. Looked at first WITHOUT
+      // spending it and spent last, so a write that needs both step-ups never
+      // burns one grant on the other's refusal.
+      const breakGlass = breakGlassChange(differs);
+      if (breakGlass) {
+        const refusal = await breakGlassStepUpRefusal(db, req, breakGlass, { spend: false });
+        if (refusal) return reply.status(refusal.status).send(refusal.body);
+      }
       if (relaxedKeys.length > 0) {
         const refusal = await settingsRelaxStepUpRefusal(db, req, {
           relaxedKeys,
           values: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
         });
+        if (refusal) return reply.status(refusal.status).send(refusal.body);
+      }
+      if (breakGlass) {
+        const refusal = await breakGlassStepUpRefusal(db, req, breakGlass, { spend: true });
         if (refusal) return reply.status(refusal.status).send(refusal.body);
       }
     }

@@ -182,7 +182,7 @@ import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
-import { changeOwner, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { changeOwner, ownerChangeGate, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
 import {
@@ -1961,7 +1961,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // change as PUT …/owner (422 unknown_owner / owner_inactive). It runs after
     // every refusal above, so a refused PATCH changes no owner either.
     if (body.ownerUserId !== undefined) {
-      const owned = await changeOwner(db, { kind: "mcp_server", id: serverId, ownerUserId: body.ownerUserId, actorUserId: req.authCtx.userId });
+      const owned = await changeOwner(db, {
+        kind: "mcp_server",
+        id: serverId,
+        ownerUserId: body.ownerUserId,
+        actorUserId: req.authCtx.userId,
+        gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
+      });
       if (!owned.ok) return reply.status(owned.status).send(owned.body);
       before.ownerUserId = owned.body.ownerUserId;
     }
@@ -4912,7 +4918,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // R: receipts. S: anchor timestamps. V: detection content. All admin-only
   // unless listed in NON_ADMIN_ROUTES.
   registerPasskeyRoutes(app, db);
-  registerStepUpRoutes(app, db);
+  registerStepUpRoutes(app, db, { dataKey: opts.dataKey });
   registerApprovalSigningRoutes(app, db);
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);

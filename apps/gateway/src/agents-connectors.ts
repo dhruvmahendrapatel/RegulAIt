@@ -147,7 +147,7 @@ import {
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
-import { resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -3399,6 +3399,13 @@ export function registerAgentConnectorRoutes(
         });
       }
       ownerEmail = owner.email;
+    }
+    // ADR-0186 A: changing who is accountable needs an `owner_change` step-up,
+    // bound to this agent and the new owner (after every refusal above, so a
+    // refused request spends no grant)
+    if (agent.ownerUserId !== body.ownerUserId) {
+      const refused = await ownerChangeGate(db, req, "agent", agentId)({ from: agent.ownerUserId, to: body.ownerUserId });
+      if (refused) return reply.status(refused.status).send(refused.body);
     }
     // ADR-0168 item 6: the successor stepping up leaves the successor slot
     // empty (the DB CHECK keeps steward and successor two different people)
