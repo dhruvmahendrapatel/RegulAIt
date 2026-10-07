@@ -614,6 +614,17 @@ describe("G4 stdio: governed exactly like HTTP", () => {
     const deny = await lastDeny(r.json().id);
     expect(deny?.ruleId).toBe("mcp-stdio-digest-mismatch");
     expect((deny?.detail as { pinnedDigest: string }).pinnedDigest).toBe(r.json().stdioCommandDigest);
+    // the proxy route's pre-hijack 403 names the transport refusal's own code
+    // (attribution is a separate gate this assertion is not about)
+    const restoreAttribution = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
+    const viaRoute = await inject(
+      "POST",
+      `/mcp/${r.json().id}`,
+      { ...users.member.auth, accept: "application/json, text/event-stream", "content-type": "application/json" },
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+    ).finally(restoreAttribution);
+    expect(viaRoute.statusCode, viaRoute.body).toBe(403);
+    expect(viaRoute.json().error).toBe("mcp_stdio_digest_mismatch");
     expect(starts(swapMarker).length, "the swapped binary never ran").toBe(1);
     // our refusal never charges the breaker
     const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, r.json().id));

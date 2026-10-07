@@ -1756,8 +1756,11 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     /** The two refusals that are OURS, as the route's plain pre-hijack 403. */
     const ownRefusal = (err: unknown) => {
       if (err instanceof McpEgressBlockedError) {
+        // ADR-0185 G4: `egress_blocked` for a destination refusal, the
+        // transport refusal's own contract code otherwise (e.g.
+        // `mcp_stdio_digest_mismatch`, `mcp_transport_disabled`)
         return reply.status(403).send({
-          error: "egress_blocked",
+          error: err.error,
           code: err.decision.code,
           detail: err.decision.reason,
         });
