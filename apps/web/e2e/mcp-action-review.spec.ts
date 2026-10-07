@@ -73,7 +73,11 @@ async function signIn(page: Page) {
 
 test.beforeAll(async () => {
   savedMinReleaseAgeDays = (await api("/v1/org/settings")).settings.minReleaseAgeDays as number;
-  await putSettings({ minReleaseAgeDays: 0 });
+  // ADR-0186 B: tool-call approvals are passkey-signed by default, and this
+  // stack has no public URL (so no passkey relying party). This journey is about
+  // the review dialog, not signing: signing is relaxed through the same audited
+  // route for the spec's lifetime and restored afterwards (M-068).
+  await putSettings({ minReleaseAgeDays: 0, approvalSignatureMode: "off" });
   approverId = (await api("/v1/users")).users.find((user: { email: string }) => user.email === "admin@regulait.local").id;
   callerId = (await api("/v1/users", { email: `${prefix}@example.test`, displayName: "Review test caller" })).id;
   upstream = http.createServer((req, res) => {
@@ -101,6 +105,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   if (savedMinReleaseAgeDays !== null) await putSettings({ minReleaseAgeDays: savedMinReleaseAgeDays });
+  await putSettings({ approvalSignatureMode: "passkey" });
   upstream?.closeAllConnections();
   if (upstream) await new Promise<void>((resolve) => upstream.close(() => resolve()));
   await db.$client.end();

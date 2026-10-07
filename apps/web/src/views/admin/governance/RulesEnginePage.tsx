@@ -36,6 +36,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { APPROVAL_QUORUM_CHOICES, approvalRuleBody } from "./approvalRuleForm";
 
 interface Subject {
   scope: "user" | "role" | "team" | "fleet";
@@ -328,6 +329,17 @@ export default function RulesEnginePage() {
         </Card>
 
         <Card title="Approval rules — pause the call for a named approver">
+          {/* ADR-0186 A: dual control. The pool is the named approver plus the
+              active members of the approver role, never the caller; a delegator
+              and their delegate count once. A pool that can never reach the
+              quorum is refused by the gateway (quorum_unsatisfiable), verbatim. */}
+          <p className={v.faint} data-testid="approval-rule-quorum-note">
+            <strong>Approvers needed</strong> is how many <em>different</em> people must approve a matching call. They
+            come from the named approver plus the active members of the <strong>approver role</strong> — never the
+            person making the call, and a delegator and their delegate count once. A rule whose pool can never reach
+            its number is refused. Calls on a project with an in-app-only data classification always need at least the
+            organisation&apos;s sensitive-data number (two by default).
+          </p>
           <RuleForm
             users={uOpts}
             roles={rOpts}
@@ -335,19 +347,41 @@ export default function RulesEnginePage() {
             servers={sOpts}
             submitLabel="Add approval rule"
             extra={(s, extraState, setExtra) => (
-              <Field label="Approver">
-                <Select
-                  required
-                  value={extraState.approverUserId ?? ""}
-                  onChange={(e) => setExtra({ approverUserId: e.target.value })}
-                >
-                  {optionEls(uOpts, "— select —")}
-                </Select>
-              </Field>
+              <>
+                <Field label="Approver">
+                  <Select
+                    required
+                    value={extraState.approverUserId ?? ""}
+                    onChange={(e) => setExtra({ approverUserId: e.target.value })}
+                  >
+                    {optionEls(uOpts, "— select —")}
+                  </Select>
+                </Field>
+                <Field label="Approvers needed">
+                  <Select
+                    aria-label="Approvers needed"
+                    value={extraState.quorum ?? "1"}
+                    onChange={(e) => setExtra({ quorum: e.target.value })}
+                  >
+                    {APPROVAL_QUORUM_CHOICES.map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n === 1 ? "1 — one approver" : `${n} different approvers`}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Approver role (optional)">
+                  <Select
+                    aria-label="Approver role"
+                    value={extraState.approverRoleId ?? ""}
+                    onChange={(e) => setExtra({ approverRoleId: e.target.value })}
+                  >
+                    {optionEls(rOpts, "— none: the named approver only —")}
+                  </Select>
+                </Field>
+              </>
             )}
-            onSubmit={(s, extra) =>
-              api.post("/v1/rules/approvals", { ...subjectBody(s), approverUserId: extra.approverUserId })
-            }
+            onSubmit={(s, extra) => api.post("/v1/rules/approvals", approvalRuleBody(subjectBody(s), extra))}
           />
           <Table<ApprovalRule>
             columns={[
@@ -356,6 +390,12 @@ export default function RulesEnginePage() {
                 key: "approver",
                 header: "Approver",
                 render: (r) => names.userName.get(r.approverUserId) ?? r.approverUserId,
+              },
+              {
+                key: "quorum",
+                header: "Approvers needed",
+                render: (r) =>
+                  `${r.quorum ?? 1}${r.approverRoleId ? ` · from role ${names.roleName.get(r.approverRoleId) ?? r.approverRoleId}` : ""}`,
               },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
               modeColumn<ApprovalRule>("approvals"),

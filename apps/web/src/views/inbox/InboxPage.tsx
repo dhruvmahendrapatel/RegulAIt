@@ -30,6 +30,8 @@ import { McpActionReview } from "../approvals/McpActionReview";
 import { inspectApprovalAction, isBoundAction } from "../approvals/approvalReview";
 import { ReviewPanel } from "../approvals/ReviewPanel";
 import { intakeUseCaseName, isIntakeSignoff } from "../approvals/reviewDecision";
+import { QuorumProgress } from "../approvals/QuorumProgress";
+import { decideApproval, isToolCallApproval, signatureModeOf, signedDecisionErrorText } from "../approvals/signedDecision";
 import { shortDate } from "../admin/governance/useCaseLifecycle";
 import v from "../views.module.css";
 
@@ -113,6 +115,26 @@ export default function InboxPage() {
     const named = me === a.approverUserId;
     const delegated = Boolean(a.delegatedFrom);
     setRowErrors((e) => ({ ...e, [a.id]: "" }));
+    // ADR-0186: a tool-call approval is signed over the exact call (or stepped
+    // up), may need several approvers, and has no admin override
+    if (isToolCallApproval(a)) {
+      setDeciding(a.id);
+      try {
+        const out = await decideApproval<{ status?: string; approvals?: number; quorum?: number }>(a, decision, reason || undefined);
+        toast(
+          out?.status === "pending"
+            ? `Recorded — ${out.approvals ?? 1} of ${out.quorum ?? 2} approvals, waiting for another approver`
+            : decision === "approved" ? "Approved" : "Denied",
+          "success",
+        );
+        void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      } catch (e) {
+        setRowErrors((er) => ({ ...er, [a.id]: signedDecisionErrorText(e) }));
+      } finally {
+        setDeciding(null);
+      }
+      return;
+    }
     if (!named && !delegated && auth?.isAdmin && !reason) {
       setRowErrors((e) => ({
         ...e,
@@ -180,13 +202,23 @@ export default function InboxPage() {
             pending.map((a) => {
               const named = me === a.approverUserId;
               const delegated = Boolean(a.delegatedFrom);
-              const canDecide = named || delegated || Boolean(auth?.isAdmin);
+              const toolCall = isToolCallApproval(a);
+              // a tool-call row reaches this inbox only for its approver pool; the
+              // caller never decides it, and nobody decides it twice
+              const canDecide = toolCall
+                ? a.userId !== me && !a.myDecision
+                : named || delegated || Boolean(auth?.isAdmin);
               const target = approvalTarget(a);
               const inst = a.instanceId ? instances[a.instanceId] : undefined;
               const intake = isIntakeSignoff(a);
               const controls = (blockedReason: string | null) => <div className={v.row} style={{ flexWrap: "wrap" }}>
+                {toolCall && signatureModeOf(a) === "passkey" && (
+                  <span className={v.faint} title="Your browser asks for your passkey: the signature covers this exact call">
+                    signs with your passkey
+                  </span>
+                )}
                 <Input style={{ maxWidth: 260 }}
-                  placeholder={named || delegated ? "reason (optional)" : "reason (required - admin override)"}
+                  placeholder={named || delegated || toolCall ? "reason (optional)" : "reason (required - admin override)"}
                   aria-label="Decision reason" value={reasons[a.id] ?? ""}
                   onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
                 <Button size="sm" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
@@ -211,7 +243,7 @@ export default function InboxPage() {
                         </>
                       )}
                     </span>
-                    {a.selfReview && (
+                    {!toolCall && a.selfReview && (
                       <Badge tone="warn" title="Deciding this would approve your own request — whether you are the named approver or received it through a delegation, a recorded reason is required">
                         self-review
                       </Badge>
@@ -221,7 +253,7 @@ export default function InboxPage() {
                         for {a.delegatedFrom}
                       </Badge>
                     )}
-                    {!named && !delegated && auth?.isAdmin && (
+                    {!toolCall && !named && !delegated && auth?.isAdmin && (
                       <Badge tone="warn" title="You are not the named approver — a reason is required">
                         override
                       </Badge>
@@ -237,6 +269,7 @@ export default function InboxPage() {
                       {!canDecide && <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>}
                     </div>
                   ) : <>
+                  {toolCall && <QuorumProgress approval={a} />}
                   {inst && <MergeGateEvidence inst={inst} />}
                   {a.contextConflict && <ConflictPreview conflict={a.contextConflict} />}
                   {canDecide ? (
@@ -244,7 +277,13 @@ export default function InboxPage() {
                   ) : (
                     <>
                       {isBoundAction(a) && <McpActionReview approval={a} />}
-                      <span className={v.faint}>awaiting {a.approverName ?? "the named approver"}</span>
+                      <span className={v.faint}>
+                        {toolCall && a.myDecision
+                          ? `you ${a.myDecision} this — waiting for another approver`
+                          : toolCall && a.userId === me
+                            ? "your own call — someone else in the approver pool decides it"
+                            : `awaiting ${a.approverName ?? "the named approver"}`}
+                      </span>
                     </>
                   )}
                   </>}

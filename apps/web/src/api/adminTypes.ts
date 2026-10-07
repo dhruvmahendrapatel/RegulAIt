@@ -463,6 +463,10 @@ export interface RuleBase {
 
 export interface ApprovalRule extends RuleBase {
   approverUserId: string;
+  /** ADR-0186 A: distinct approvers a call matching this rule needs (1–5) */
+  quorum?: number;
+  /** ADR-0186 A: the role whose active members join the named approver in the eligible pool */
+  approverRoleId?: string | null;
 }
 export interface DataScopeRule extends RuleBase {
   argPath: string;

@@ -28,10 +28,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
   passwords: { admin: string; dana: string; avery: string };
+  baseUrl: string;
 };
 const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
 const DANA_PASSWORD = "E2e-Rewrite-2026!";
 const CSRF = { "x-regulait-csrf": "1" };
+/** an org-settings write as the deployment's bootstrap credential (it needs no step-up) */
+async function bootSettings(payload: Record<string, unknown>) {
+  const res = await fetch(`${state.baseUrl}/v1/org/settings`, {
+    method: "PUT",
+    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  expect(res.ok, `PUT /v1/org/settings: ${res.status} ${await res.text()}`).toBe(true);
+}
 const RUN = Date.now().toString(36);
 const REPO = `bt-repo-${RUN}`;
 const WAREHOUSE = `bt-wh-${RUN}`;
@@ -145,6 +155,13 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     expect(g.status(), await g.text()).toBeLessThan(300);
   }
   await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId });
+  // ADR-0186 B: tool-call approvals are passkey-signed by default, and this
+  // stack has no public URL (no passkey relying party), so the admin's decide
+  // below would fail closed. Signing is not what this journey tests: it is
+  // relaxed through the audited settings route (bootstrap credential) for the
+  // spec's lifetime and restored in afterAll (M-068). Signing itself is proved
+  // in the gateway suite and adr0186-ab-signed-approvals.mock.spec.ts.
+  await bootSettings({ approvalSignatureMode: "off" });
   // owner rule: every builder agent bills to a project Dana belongs to
   const project = await post("/v1/projects", { name: `Builder tools e2e ${RUN}` });
   projectId = project.id as string;
@@ -159,6 +176,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 });
 
 test.afterAll(async () => {
+  await bootSettings({ approvalSignatureMode: "passkey" });
   await admin?.close();
   await dana?.close();
   if (mcp?.pid) mcp.kill("SIGTERM");

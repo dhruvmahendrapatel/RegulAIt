@@ -450,6 +450,26 @@ export interface Approval {
     conflicting: ConflictSide;
     current: ConflictSide | null;
   };
+  /** ADR-0186 A: distinct approvers this approval needs (snapshotted when queued) */
+  quorum?: number;
+  /** ADR-0186 B: how each decision must be proven — a passkey signature over the call (strict), a step-up, or nothing */
+  signatureMode?: "passkey" | "step_up" | "off";
+  /** ADR-0186 A (tool-call approvals): distinct approving principals so far */
+  approvalsCount?: number;
+  /** ADR-0186 A (tool-call approvals): the caller's own recorded decision, if any */
+  myDecision?: "approved" | "denied" | null;
+  /** ADR-0186 A (tool-call approvals): one entry per deciding principal */
+  decisions?: ApprovalPrincipalDecision[];
+}
+
+export interface ApprovalPrincipalDecision {
+  principalUserId: string | null;
+  principalName?: string | null;
+  deciderUserId: string | null;
+  deciderName?: string | null;
+  decision: "approved" | "denied";
+  method: "passkey" | "totp" | "sso" | "none";
+  at: string;
 }
 
 export interface ApprovalBoundTarget {
