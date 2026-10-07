@@ -40,6 +40,8 @@ import {
   isNull,
   lte,
   or,
+  orgSettings,
+  ORG_SETTINGS_ID,
   sql,
   type Db,
   type GuardrailConfigRow,
@@ -62,6 +64,7 @@ import {
   type GuardrailModes,
   type GuardrailPhase,
   type GuardrailTerms,
+  type VendoredDetectionPack,
 } from "@regulait/shared";
 import { complianceProfilesForTags, projectClassifications } from "./projects.js";
 import { settingTransitions } from "./setting-transitions.js";
@@ -137,6 +140,9 @@ export interface GuardrailPolicy {
   /** an OUTPUT-phase detector is at 'block'. This is the flag that decides
    * whether a stream may be delivered live (see the streaming note below). */
   blocksOutput: boolean;
+  /** ADR-0186 V: `org_settings.vendored_detection_packs` (undefined = all on,
+   * the strict default — e.g. before the singleton row exists) */
+  vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
 }
 
 /** The org-default row, or undefined when an admin has never touched the
@@ -249,7 +255,7 @@ export async function resolveGuardrailPolicy(
       ? "connector"
       : null;
 
-  const [orgRow, overrideRow] = await Promise.all([
+  const [orgRow, overrideRow, packsRow] = await Promise.all([
     loadOrgGuardrailConfig(db),
     scope && scopeId
       ? db
@@ -266,6 +272,12 @@ export async function resolveGuardrailPolicy(
           )
           .then((r) => r[0])
       : Promise.resolve(undefined),
+    // ADR-0186 V: which vendored detection packs are in force (one pk read)
+    db
+      .select({ packs: orgSettings.vendoredDetectionPacks })
+      .from(orgSettings)
+      .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+      .then((r) => r[0]),
   ]);
 
   const orgModes: Partial<GuardrailModes> = orgRow ? rowModes(orgRow) : { ...GUARDRAIL_DEFAULT_MODES };
@@ -314,6 +326,7 @@ export async function resolveGuardrailPolicy(
     active: GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off"),
     blocksInput: atBlock("input"),
     blocksOutput: atBlock("output"),
+    vendoredPacks: packsRow?.packs,
   };
 }
 
@@ -426,6 +439,7 @@ export function runGuardrails(
     modes: policy.modes,
     terms: policy.terms,
     exclude: ["pii"],
+    vendoredPacks: policy.vendoredPacks,
   });
 }
 

@@ -51,6 +51,8 @@ import {
   type AccountabilitySettingKey,
   type Batch3SettingKey,
   relaxedBatch3Keys,
+  type Batch4SettingKey,
+  relaxedBatch4Keys,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
   revocationKindParamSchema,
@@ -72,6 +74,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { settingsRelaxStepUpRefusal } from "./step-up.js";
 
 export type { OrgSettingsRow };
 
@@ -659,6 +662,15 @@ async function signInModeRefusal(
   return null;
 }
 
+/** ADR-0182 / ADR-0185 / ADR-0186: every changed key now looser than its
+ * strict default — named in the audit row's `detail.relaxed`, and the facts
+ * the `settings_relax` step-up is bound to */
+export function relaxedSettingKeys(
+  changed: Record<string, unknown>,
+): Array<AccountabilitySettingKey | Batch3SettingKey | Batch4SettingKey> {
+  return [...relaxedAccountabilityKeys(changed), ...relaxedBatch3Keys(changed), ...relaxedBatch4Keys(changed)];
+}
+
 /** ADR-0182 (D4): which of the changed keys are accountability settings now
  * set looser than their strict default (`ACCOUNTABILITY_SETTING_COPY` says
  * what each one gives up) */
@@ -791,6 +803,27 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // ADR-0167 (SEC-06): the collector headers are enveloped before they touch
     // the row; without a data key they are refused rather than stored in the
     // clear, exactly as a connector credential is.
+    // ADR-0186 A — THE settings_relax STEP-UP HOOK. Every key this write moves to
+    // a value looser than its strict default (and different from what is
+    // stored) is named, with its new value, and slice A's
+    // `settingsRelaxStepUpRefusal` decides whether the request carries a
+    // step-up bound to exactly that relaxation. The foundation's hook admits
+    // every write.
+    {
+      const differs = Object.fromEntries(
+        Object.entries(body).filter(
+          ([k, v]) => JSON.stringify((before as Record<string, unknown>)[k]) !== JSON.stringify(v),
+        ),
+      );
+      const relaxedKeys = relaxedSettingKeys(differs);
+      if (relaxedKeys.length > 0) {
+        const refusal = await settingsRelaxStepUpRefusal(db, req, {
+          relaxedKeys,
+          values: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
+        });
+        if (refusal) return reply.status(refusal.status).send(refusal.body);
+      }
+    }
     const otlpWrite = otlpHeadersForWrite(body.tracingOtlpHeaders, opts.dataKey);
     if (!otlpWrite.ok) {
       return reply.status(503).send({
@@ -835,11 +868,8 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       const lockedRedacted = redactSettings(locked) as unknown as Record<string, unknown>;
       // ADR-0182 (D4): the accountability settings this write leaves RELAXED
       // from their strict default, named in the detail and the reason;
-      // ADR-0185 (batch 3): the retention and MCP settings the same way
-      const relaxed: Array<AccountabilitySettingKey | Batch3SettingKey> = [
-        ...relaxedAccountabilityKeys(changed),
-        ...relaxedBatch3Keys(changed),
-      ];
+      // ADR-0185 (batch 3) and ADR-0186 (batch 4) settings the same way
+      const relaxed = relaxedSettingKeys(changed);
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.
