@@ -100,8 +100,8 @@ export const BATCH3_SETTING_LIMITS = {
 /** THE STRICT DEFAULTS. The column defaults of migration 0169 (and the 3600 s
  * cache TTL that predates it) are these values; a fresh org reads exactly this. */
 export const BATCH3_STRICT_DEFAULTS = Object.freeze({
-  semanticCacheTtlSeconds: 3600,
-  conversationRetentionDays: 30,
+  semanticCacheTtlSeconds: 3600 as number,
+  conversationRetentionDays: 30 as number,
   mcpProtocolMethods: [] as McpProtocolMethod[],
   mcpUpstreamTransports: ["streamable_http"] as McpUpstreamTransport[],
 });
