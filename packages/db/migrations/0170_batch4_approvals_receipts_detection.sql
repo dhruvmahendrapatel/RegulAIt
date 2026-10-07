@@ -68,8 +68,8 @@ CREATE TABLE "webauthn_credentials" (
   "revoked_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "revoke_reason" text,
   CONSTRAINT "webauthn_credentials_credential_id_uq" UNIQUE ("credential_id"),
-  CONSTRAINT "webauthn_credentials_credential_id_check" CHECK ("credential_id" ~ '^[A-Za-z0-9_-]{16,1366}$'),
-  CONSTRAINT "webauthn_credentials_public_key_check" CHECK ("public_key" ~ '^[A-Za-z0-9_-]{16,4096}$'),
+  CONSTRAINT "webauthn_credentials_credential_id_check" CHECK ("credential_id" ~ '^[A-Za-z0-9_-]+$' AND length("credential_id") BETWEEN 16 AND 1366),
+  CONSTRAINT "webauthn_credentials_public_key_check" CHECK ("public_key" ~ '^[A-Za-z0-9_-]+$' AND length("public_key") BETWEEN 16 AND 4096),
   CONSTRAINT "webauthn_credentials_counter_check" CHECK ("counter" >= 0),
   CONSTRAINT "webauthn_credentials_transports_check" CHECK (
     jsonb_typeof("transports") = 'array'
