@@ -112,6 +112,8 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
   let port: number;
   /** every request the fake endpoint saw — proof the connection test is real */
   const hits: Array<{ url: string; auth: string | null }> = [];
+  let originalCapability: boolean | undefined;
+  let seededHosts: Array<{ id: string; host: string; allowPrivateRanges: boolean; allowPlaintextHttp: boolean; note: string | null }> = [];
 
   test.beforeAll(async ({ browser }) => {
     // A real local OpenAI-compatible endpoint: the shape Ollama / vLLM /
@@ -149,10 +151,44 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     page = await browser.newPage();
     track = trackConsole(page);
     await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
+    const settings = await page.request.get(`${state.baseUrl}/v1/org/settings`);
+    expect(settings.ok()).toBe(true);
+    originalCapability = (await settings.json()).settings.customModelProvidersEnabled;
+    expect(typeof originalCapability).toBe("boolean");
+    const enabled = await page.request.put(`${state.baseUrl}/v1/org/settings`, { headers: { "x-regulait-csrf": "1" }, data: { customModelProvidersEnabled: true } });
+    expect(enabled.ok()).toBe(true);
+    // This fixture opt-in enables the feature under test; the existing final
+    // switch-off case still proves refusal, and teardown restores the baseline.
+    // ADR-0181 now seeds a compiled Gemini destination. This isolated journey
+    // tests the empty-allow-list posture: borrow only demo-labelled seed rows,
+    // through the real authenticated API, and restore them even on failure.
+    const response = await page.request.get(`${state.baseUrl}/v1/egress-allow-hosts`);
+    expect(response.ok()).toBe(true);
+    seededHosts = (await response.json()).hosts.filter((host: { note?: string }) => host.note?.startsWith("demo:"));
+    for (const host of seededHosts) {
+      const deleted = await page.request.delete(`${state.baseUrl}/v1/egress-allow-hosts/${host.id}`, { headers: { "x-regulait-csrf": "1" } });
+      expect(deleted.ok()).toBe(true);
+    }
+
   });
 
   test.afterAll(async () => {
-    await page.close();
+    try {
+      for (const host of seededHosts) {
+        const restored = await page.request.post(`${state.baseUrl}/v1/egress-allow-hosts`, { headers: { "x-regulait-csrf": "1" }, data: {
+          host: host.host, allowPrivateRanges: host.allowPrivateRanges, allowPlaintextHttp: host.allowPlaintextHttp,
+          ...(host.note ? { note: host.note } : {}),
+        } });
+        expect(restored.ok()).toBe(true);
+      }
+    } finally {
+      try {
+        if (originalCapability !== undefined) {
+          const restored = await page.request.put(`${state.baseUrl}/v1/org/settings`, { headers: { "x-regulait-csrf": "1" }, data: { customModelProvidersEnabled: originalCapability } });
+          expect(restored.ok()).toBe(true);
+        }
+      } finally { await page.close(); }
+    }
     srv.closeAllConnections();
     await new Promise<void>((r) => srv.close(() => r()));
   });
