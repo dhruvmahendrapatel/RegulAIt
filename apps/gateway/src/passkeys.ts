@@ -159,7 +159,7 @@ async function revokePasskey(
  * answers false; true = this session may create a registration ceremony.
  */
 async function mayEnrol(db: Db, req: FastifyRequest, reply: FastifyReply, userId: string, sessionId: string): Promise<boolean> {
-  const { methods, passkeyCount } = await stepUpMethodsFor(db, userId);
+  const { methods, passkeyCount } = await stepUpMethodsFor(db, userId, req);
   const policy = await loadStepUpPolicy(db);
   // a passkey already exists, or another way to step up does: gated by a passkey_manage step-up
   if (stepUpApplies(policy, "passkey_manage") && (passkeyCount > 0 || methods.length > 0)) {

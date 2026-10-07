@@ -285,20 +285,36 @@ export async function activePasskeys(db: Db, userId: string) {
 }
 
 /**
+ * B4S-07: a fresh SSO sign-in is offered as a step-up only on a SECURE request
+ * — https to the gateway, or https at a trusted proxy (`req.protocol` is
+ * Fastify's trust-gated answer, the same one `requestIsSecure` in auth.ts
+ * gives; not imported from there, which imports this module). Over plain http
+ * the browser-binding cookie the callback checks cannot be `Secure` and the
+ * identity provider's redirect would carry the state in the clear, so the
+ * method is neither listed nor started.
+ */
+export function ssoStepUpUsable(req: FastifyRequest | null | undefined): boolean {
+  return req?.protocol === "https";
+}
+
+/**
  * The step-up methods this user can use now, strongest first: passkey (an
  * unrevoked passkey AND a configured relying party), totp (enrolled), sso (a
- * linked identity at an enabled provider).
+ * linked identity at an enabled provider, and — given the request — only when
+ * that request is secure, `ssoStepUpUsable`).
  */
 export async function stepUpMethodsFor(
   db: Db,
   userId: string,
+  req?: FastifyRequest,
 ): Promise<{ methods: StepUpMethod[]; sso: SsoTarget | null; passkeyCount: number }> {
   const methods: StepUpMethod[] = [];
   const passkeys = await activePasskeys(db, userId);
   if (passkeys.length > 0 && relyingParty()) methods.push("passkey");
   const [u] = await db.select({ totpEnabled: users.totpEnabled }).from(users).where(eq(users.id, userId));
   if (u?.totpEnabled) methods.push("totp");
-  const sso = await ssoTargetFor(db, userId);
+  const linked = await ssoTargetFor(db, userId);
+  const sso = linked && (req === undefined || ssoStepUpUsable(req)) ? linked : null;
   if (sso) methods.push("sso");
   return { methods, sso, passkeyCount: passkeys.length };
 }
@@ -329,6 +345,10 @@ function presentedTokens(req: FastifyRequest): string[] {
     .filter((t) => t.startsWith(STEP_UP_TOKEN_PREFIX) && t.length <= 128)
     .slice(0, MAX_PRESENTED_GRANTS);
 }
+
+/** why a person whose only way to step up is single sign-on cannot use it on this request (B4S-07) */
+const SSO_NEEDS_HTTPS_NOTE =
+  " (your single sign-on can confirm it's you only when RegulAIt is reached over https, which this request was not)";
 
 const STEP_UP_REQUIRED_DETAIL =
   "this action needs you to confirm it's you: get a step-up for it (POST /v1/auth/step-up/options with the `action` " +
@@ -410,7 +430,7 @@ export async function checkStepUp(
         "(used, expired, made in another session, or made for a different action)",
     });
   }
-  const { methods } = await stepUpMethodsFor(db, caller.userId);
+  const { methods } = await stepUpMethodsFor(db, caller.userId, req);
   if (methods.length === 0) {
     return {
       ok: false,
@@ -421,7 +441,8 @@ export async function checkStepUp(
         methods: [],
         detail:
           "this action needs you to confirm it's you, and your account has no way to: enrol an authenticator app " +
-          "or a passkey on your Account page first",
+          "or a passkey on your Account page first" +
+          ((await ssoTargetFor(db, caller.userId)) ? SSO_NEEDS_HTTPS_NOTE : ""),
       },
     };
   }
@@ -899,15 +920,18 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
       return reply.status(413).send({ error: "step_up_action_too_large", detail: "the action facts are larger than any action has" });
     }
     const digest = stepUpActionDigest(kind, facts);
-    const { methods, sso } = await stepUpMethodsFor(db, caller.userId);
+    const { methods, sso } = await stepUpMethodsFor(db, caller.userId, req);
     if (methods.length === 0) {
       return reply.status(422).send({
         error: "step_up_unavailable",
         actionKind: kind,
         methods: [],
-        detail: "your account has no way to confirm it's you yet: enrol an authenticator app or a passkey on your Account page",
+        detail:
+          "your account has no way to confirm it's you yet: enrol an authenticator app or a passkey on your Account page" +
+          ((await ssoTargetFor(db, caller.userId)) ? SSO_NEEDS_HTTPS_NOTE : ""),
       });
     }
+
     // hygiene: this user's own finished ceremonies (never another purpose's rows)
     await db
       .delete(webauthnChallenges)
@@ -944,7 +968,9 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
       })
       .returning();
     let ssoStart: SsoReauthStart | null = null;
-    if (sso) {
+    // B4S-07: a fresh SSO sign-in is never STARTED on an insecure request
+    // (stepUpMethodsFor already left it out; checked again where it starts)
+    if (sso && ssoStepUpUsable(req)) {
       try {
         const args: SsoReauthStartArgs = {
           providerId: sso.providerId,

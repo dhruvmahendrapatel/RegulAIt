@@ -80,6 +80,9 @@ const DATA_KEY = "a".repeat(64);
 const PUBLIC_URL = "http://localhost";
 const ORIGIN = "http://localhost";
 const CSRF = { "x-regulait-csrf": "1" };
+/** B4S-07: a fresh SSO step-up is offered only on a secure request — this suite's
+ * SSO ceremonies arrive as https through this trusted proxy address */
+const PROXY = "10.20.30.41";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -131,6 +134,7 @@ const as = (s: Session, method: Method, url: string, payload?: unknown, headers:
   app.inject({
     method,
     url,
+    ...(headers["x-forwarded-proto"] === "https" ? { remoteAddress: PROXY } : {}),
     headers: { ...CSRF, ...headers },
     cookies: { regulait_session: s.token },
     ...(payload !== undefined ? { payload: payload as object } : {}),
@@ -330,7 +334,7 @@ beforeAll(async () => {
   // this suite is about step-up, not the org MFA dial (restored below, M-068)
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(STRICT_STEP_UP);
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, trustProxy: [PROXY] });
   people.admin = await mkUser("admin", true);
   people.member = await mkUser("member", false);
   people.plain = await mkUser("plain", false);
@@ -744,6 +748,8 @@ describe("TOTP step-up and step_up_unavailable", () => {
 });
 
 describe("fresh SSO login for a step-up", () => {
+  /** B4S-07: the ceremony starts on https at the trusted proxy (plain http is proved in zz-b4s-round2) */
+  const HTTPS = { "x-forwarded-proto": "https" };
   let oidcProviderId: string;
   let samlProviderId: string;
   beforeAll(async () => {
@@ -779,7 +785,7 @@ describe("fresh SSO login for a step-up", () => {
 
   const oidcStart = async (s: Session) => {
     const action = { kind: "owner_change", body: { objectType: "mcp_server", objectId: randomUUID(), ownerUserId: null } };
-    const o = await as(s, "POST", "/v1/auth/step-up/options", { action });
+    const o = await as(s, "POST", "/v1/auth/step-up/options", { action }, HTTPS);
     expect(o.statusCode, o.body).toBe(200);
     expect(o.json().methods).toEqual(["sso"]);
     const url = new URL(o.json().sso.redirectUrl);
@@ -860,7 +866,7 @@ describe("fresh SSO login for a step-up", () => {
   it("SAML: ForceAuthn=true; AuthnInstant after the request gives a grant; before → 409 stale", async () => {
     const s = await mkSession(people.samlUser.id);
     const start = async () => {
-      const o = await as(s, "POST", "/v1/auth/step-up/options", { action: { kind: "owner_change", body: { x: RUN } } });
+      const o = await as(s, "POST", "/v1/auth/step-up/options", { action: { kind: "owner_change", body: { x: RUN } } }, HTTPS);
       expect(o.statusCode, o.body).toBe(200);
       expect(o.json().methods).toEqual(["sso"]);
       const url = new URL(o.json().sso.redirectUrl);
