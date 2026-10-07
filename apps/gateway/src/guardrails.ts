@@ -27,6 +27,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { requireRelaxStepUp } from "./step-up.js";
 import {
   agents,
   and,
@@ -49,6 +50,7 @@ import {
 import {
   GUARDRAIL_DETECTOR_IDS,
   GUARDRAIL_DEFAULT_MODES,
+  GUARDRAIL_MODES,
   GUARDRAIL_FALLBACK_MODE,
   composeGuardrailModes,
   composeGuardrailTerms,
@@ -625,6 +627,15 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     const body = putGuardrailConfigSchema.parse(req.body);
     const actor = req.authCtx.userId ?? null;
     const before = previousModes(await loadOrgGuardrailConfig(db));
+    // ADR-0186 A: an org default mode below its shipped default (off < log < warn < block) is a
+    // relaxation: a settings_relax step-up, bound to each lowered detector and its new mode
+    const relaxed: Record<string, unknown> = {};
+    for (const [d, mode] of Object.entries(body.modes ?? {})) {
+      const id = d as keyof typeof GUARDRAIL_DEFAULT_MODES;
+      if (!mode || mode === before[id] || !(id in GUARDRAIL_DEFAULT_MODES)) continue;
+      if (GUARDRAIL_MODES.indexOf(mode) < GUARDRAIL_MODES.indexOf(GUARDRAIL_DEFAULT_MODES[id])) relaxed[`guardrails.${d}`] = mode;
+    }
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
     const row = await upsert("org", null, body, actor);
     await audit(
       actor,

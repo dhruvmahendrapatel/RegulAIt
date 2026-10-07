@@ -35,6 +35,7 @@ import {
 import { QueryGate, optionEls, useAction, useAgents, useConnectors, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 type Mode = "off" | "log" | "warn" | "block";
 const MODES: Mode[] = ["off", "log", "warn", "block"];
@@ -184,10 +185,10 @@ export default function GuardrailsPage() {
                   if (termsDraft !== null) {
                     customTerms = JSON.parse(termsDraft) as Record<string, string[]>;
                   }
-                  await api.put("/v1/guardrails/config", {
+                  await withStepUp((h) => stepUpApi.put("/v1/guardrails/config", {
                     modes: orgModes,
                     ...(customTerms ? { customTerms } : {}),
-                  });
+                  }, h));
                   setOrgDraft(null);
                   setTermsDraft(null);
                   await config.refetch();

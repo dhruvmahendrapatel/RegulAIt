@@ -95,7 +95,7 @@ describe("the header-carrying request helper", () => {
 });
 
 describe("every step-up-protected write in the app goes through withStepUp (ADR-0186 A)", () => {
-  it("no screen writes org settings except through putOrgSettings; no screen calls an owner change or the hold override unwrapped", async () => {
+  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped", async () => {
     const { readdirSync, readFileSync, statSync } = await import("node:fs");
     const path = await import("node:path");
     const root = path.resolve(__dirname, "..");
@@ -114,6 +114,11 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       const src = readFileSync(f, "utf8");
       // the shared client's settings PUT would be refused for any relaxation, and nothing would resend it
       if (/api\.put(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/org\/settings["'`]/.test(src)) offenders.push(`${f}: PUT /v1/org/settings`);
+      // the dedicated setting routes that also need a settings_relax step-up for a relaxation
+      const dedicated = src.match(
+        /(?<![A-Za-z])api\.(?:put|post)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:org\/settings\/assurance-gate-mode|mrm\/enforcement|interception\/settings|policy-simulations\/settings|guardrails\/config)["'`]/g,
+      );
+      for (const m of dedicated ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

@@ -61,6 +61,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 import {
   configVersions,
   abacPolicies,
@@ -1622,9 +1623,17 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
     };
   });
 
-  app.put("/v1/policy-simulations/settings", async (req) => {
+  app.put("/v1/policy-simulations/settings", async (req, reply) => {
     const body = policySimulationSettingsSchema.parse(req.body ?? {});
     const before = await loadPolicySimulationSettings(db);
+    // ADR-0186 A: activating without a preview is a relaxation (strict: preview required)
+    const relaxed = relaxedAgainst(
+      { requirePreviewBeforeActivate: body.requirePreviewBeforeActivate },
+      before as unknown as Record<string, unknown>,
+      { requirePreviewBeforeActivate: true },
+      "policySimulation.",
+    );
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
     const [row] = await db
       .update(policySimulationSettings)
       .set({

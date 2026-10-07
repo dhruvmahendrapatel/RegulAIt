@@ -14,7 +14,7 @@ import { Button, Card, ConfirmModal, Field, Input, Select, Textarea } from "../.
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
-import { putOrgSettings } from "../../../stepup/stepUp";
+import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
 
@@ -611,9 +611,9 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           onSubmit={() =>
             void assuranceGate.act.run(
               () =>
-                api.put("/v1/org/settings/assurance-gate-mode", {
+                withStepUp((h) => stepUpApi.put("/v1/org/settings/assurance-gate-mode", {
                   mode: assuranceGate.f.assuranceGateMode as "off" | "warn" | "enforce",
-                }),
+                }, h)),
               "Assurance gate saved (audited)",
             )
           }

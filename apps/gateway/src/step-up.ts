@@ -498,6 +498,44 @@ export async function settingsRelaxStepUpRefusal(
   return out.ok ? null : { status: out.status, body: out.body };
 }
 
+/**
+ * `settings_relax` for a setting written by its OWN route (not `PUT
+ * /v1/org/settings`): a relaxation never skips the step-up because it has a
+ * dedicated endpoint. `relaxed` names each setting this write moves to a value
+ * looser than its strict default (and different from what is stored) with its
+ * new value — the same `{values}` facts the settings writer binds, keys
+ * namespaced where the setting lives outside `org_settings`. Empty → nothing
+ * is relaxed and nothing is asked (tightening needs no step-up). Sends the
+ * refusal itself.
+ */
+export async function requireRelaxStepUp(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  relaxed: Readonly<Record<string, unknown>>,
+): Promise<boolean> {
+  if (Object.keys(relaxed).length === 0) return true;
+  const out = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ...relaxed } } });
+  return out.ok;
+}
+
+/** the keys of `next` that differ from `current` and are looser than `strict` (equality-defined strictness) */
+export function relaxedAgainst(
+  next: Readonly<Record<string, unknown>>,
+  current: Readonly<Record<string, unknown>>,
+  strict: Readonly<Record<string, unknown>>,
+  namespace = "",
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(next)) {
+    if (v === undefined || !(k in strict)) continue;
+    if (JSON.stringify(v) === JSON.stringify(current[k])) continue;
+    if (JSON.stringify(v) === JSON.stringify(strict[k])) continue;
+    out[namespace + k] = v;
+  }
+  return out;
+}
+
 /** the break-glass fields of an org-settings write that change what is stored, or null */
 export function breakGlassChange(differs: Record<string, unknown>): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};

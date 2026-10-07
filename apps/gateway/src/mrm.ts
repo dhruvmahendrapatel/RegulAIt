@@ -38,6 +38,10 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
+
+/** ADR-0181 strict values of the MRM toggles (the column defaults) */
+const MRM_STRICT = { mrmEnforced: true, mrmStalenessRecertEnabled: true, mrmStalenessRecertThreshold: 1 } as const;
 import {
   agents,
   and,
@@ -1106,6 +1110,21 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       })
       .parse(req.body);
     const org = await loadOrgSettings(db);
+    // ADR-0186 A: turning enforcement or staleness re-certification off, or a
+    // higher staleness threshold, is a relaxation: a settings_relax step-up
+    const relaxed = relaxedAgainst(
+      {
+        mrmEnforced: body.enforced,
+        mrmStalenessRecertEnabled: body.stalenessRecertEnabled,
+        mrmStalenessRecertThreshold:
+          body.stalenessRecertThreshold !== undefined && body.stalenessRecertThreshold > MRM_STRICT.mrmStalenessRecertThreshold
+            ? body.stalenessRecertThreshold
+            : undefined,
+      },
+      org as unknown as Record<string, unknown>,
+      MRM_STRICT,
+    );
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
     const patch = {
       mrmEnforced: body.enforced,
       ...(body.warnDays !== undefined ? { mrmExpiryWarnDays: body.warnDays } : {}),
