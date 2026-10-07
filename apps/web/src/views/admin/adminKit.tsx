@@ -91,6 +91,24 @@ export const adminKeys = {
 
 export const useUsers = () =>
   useQuery({ queryKey: adminKeys.users, queryFn: () => api.get<{ users: AdminUser[] }>("/v1/users") });
+/**
+ * GET /v1/users is bounded (REL-10): it takes `limit` only — no cursor, no
+ * search, no by-id read. Mirrors LIST_MAX_LIMIT in
+ * apps/gateway/src/list-limit.ts. A picker that must show people beyond the
+ * default page asks for the maximum and says when even that was truncated:
+ * a person missing from a truncated page is "not loaded", never "inactive".
+ */
+export const USERS_LIST_MAX = 5_000;
+export interface UserPickerPage { users: AdminUser[]; complete: boolean }
+export const userPickerPage = (users: AdminUser[], limit = USERS_LIST_MAX): UserPickerPage => ({
+  users,
+  complete: users.length < limit,
+});
+export const useUserPicker = () =>
+  useQuery({
+    queryKey: [...adminKeys.users, "picker", USERS_LIST_MAX],
+    queryFn: async () => userPickerPage((await api.get<{ users: AdminUser[] }>(`/v1/users?limit=${USERS_LIST_MAX}`)).users),
+  });
 export const useRoles = () =>
   useQuery({ queryKey: adminKeys.roles, queryFn: () => api.get<{ roles: Role[] }>("/v1/roles") });
 export const useTeams = () =>

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { MCP_PROTOCOL_GRANT_NAMES, MCP_PROTOCOL_METHODS, MCP_UPSTREAM_TRANSPORTS } from "./Batch3Mcp";
+import { MCP_PROTOCOL_GRANT_NAMES, MCP_PROTOCOL_METHODS, MCP_UPSTREAM_TRANSPORTS, coverageChanges } from "./Batch3Mcp";
 import { ApiError, errMessage } from "../../../api/client";
 
 describe("Batch 3 browser contract", () => {
@@ -28,5 +28,15 @@ describe("Batch 3 browser contract", () => {
       expect(error.payload.code).toBe(code);
     }
     expect(errMessage(422, { error: "owner_inactive" })).toContain("Choose an active person");
+  });
+  it("sends only the MCP coverage list that was changed (PUT /v1/org/settings is partial)", () => {
+    const loaded = { mcpProtocolMethods: ["resources/list"], mcpUpstreamTransports: ["streamable_http"] };
+    expect(coverageChanges(loaded, ["resources/list", "prompts/list"], ["streamable_http"]))
+      .toEqual({ body: { mcpProtocolMethods: ["resources/list", "prompts/list"] }, adds: true });
+    expect(coverageChanges(loaded, ["resources/list"], []))
+      .toEqual({ body: { mcpUpstreamTransports: [] }, adds: false });
+    // order is not a change: the stored lists are sets
+    expect(coverageChanges({ mcpProtocolMethods: ["a", "b"], mcpUpstreamTransports: [] }, ["b", "a"], []))
+      .toEqual({ body: {}, adds: false });
   });
 });

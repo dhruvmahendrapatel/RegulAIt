@@ -52,21 +52,40 @@ export default function RetentionPage() {
   </>;
 }
 
+type RetentionBody = Partial<{ semanticCacheTtlSeconds: number; conversationRetentionDays: number }>;
+/**
+ * PUT /v1/org/settings is a partial update, so the form sends only the fields
+ * this admin edited: re-sending an untouched field from the loaded snapshot
+ * would silently revert another admin's concurrent change to it.
+ */
+export function retentionChanges(settings: Record<string, unknown>, ttl: string, days: string): { error: string } | { body: RetentionBody; extends: boolean } {
+  const ttlEdited = ttl !== String(settings.semanticCacheTtlSeconds ?? "");
+  const daysEdited = days !== String(settings.conversationRetentionDays ?? "");
+  if ((ttlEdited && (!/^\d+$/.test(ttl) || Number(ttl) < 1 || Number(ttl) > 2592000)) || (daysEdited && (!/^\d+$/.test(days) || Number(days) < 1 || Number(days) > 2555))) {
+    return { error: "Enter whole numbers: cache lifetime 1–2,592,000 seconds; conversation retention 1–2,555 days." };
+  }
+  const body: RetentionBody = {
+    ...(ttlEdited ? { semanticCacheTtlSeconds: Number(ttl) } : {}),
+    ...(daysEdited ? { conversationRetentionDays: Number(days) } : {}),
+  };
+  const extends_ = (body.semanticCacheTtlSeconds ?? 0) > Number(settings.semanticCacheTtlSeconds) || (body.conversationRetentionDays ?? 0) > Number(settings.conversationRetentionDays);
+  return { body, extends: extends_ };
+}
+
 function RetentionSettings({ settings }: { settings: Record<string, unknown> }) {
   const act = useAction();
   const [ttl, setTtl] = useState(String(settings.semanticCacheTtlSeconds ?? ""));
   const [days, setDays] = useState(String(settings.conversationRetentionDays ?? ""));
-  const [pending, setPending] = useState<{ semanticCacheTtlSeconds: number; conversationRetentionDays: number } | null>(null);
+  const [pending, setPending] = useState<RetentionBody | null>(null);
   const unavailable = typeof settings.semanticCacheTtlSeconds !== "number" || typeof settings.conversationRetentionDays !== "number";
-  const save = (body: NonNullable<typeof pending>) => act.run(() => api.put("/v1/org/settings", body), "Retention settings saved");
+  const save = (body: RetentionBody) => act.run(() => api.put("/v1/org/settings", body), "Retention settings saved");
   return <form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
-    if (!/^\d+$/.test(ttl) || !/^\d+$/.test(days) || Number(ttl) < 1 || Number(ttl) > 2592000 || Number(days) < 1 || Number(days) > 2555) {
-      act.setError("Enter whole numbers: cache lifetime 1–2,592,000 seconds; conversation retention 1–2,555 days."); return;
-    }
-    const body = { semanticCacheTtlSeconds: Number(ttl), conversationRetentionDays: Number(days) };
-    if (body.semanticCacheTtlSeconds > Number(settings.semanticCacheTtlSeconds) || body.conversationRetentionDays > Number(settings.conversationRetentionDays)) setPending(body);
-    else void save(body);
+    const change = retentionChanges(settings, ttl, days);
+    if ("error" in change) { act.setError(change.error); return; }
+    if (Object.keys(change.body).length === 0) { act.setError("No retention setting changed."); return; }
+    if (change.extends) setPending(change.body);
+    else void save(change.body);
   }}>
     {unavailable && <p role="alert">This gateway has not reported its retention settings. Refresh before changing them.</p>}
     <Field label="Semantic cache lifetime (seconds)"><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={act.busy || unavailable} /></Field>
@@ -75,7 +94,7 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
     <p>The strict default is 30 days since the last activity. More than 30 days relaxes that limit and is audited. Incident evidence holds still apply.</p>
     <Button type="submit" variant="primary" disabled={act.busy || unavailable}>Save retention settings</Button>
     {act.error && <p role="alert">{act.error}</p>}
-    <ConfirmModal open={pending !== null} title="Extend memory retention?" body={<p>Cache lifetime: {pending?.semanticCacheTtlSeconds} seconds. Conversation retention: {pending?.conversationRetentionDays} days. This retains information longer and the gateway audits the change.</p>}
+    <ConfirmModal open={pending !== null} title="Extend memory retention?" body={<p>{pending?.semanticCacheTtlSeconds !== undefined && <>Cache lifetime: {pending.semanticCacheTtlSeconds} seconds. </>}{pending?.conversationRetentionDays !== undefined && <>Conversation retention: {pending.conversationRetentionDays} days. </>}This retains information longer and the gateway audits the change.</p>}
       confirmLabel="Save audited change" onCancel={() => setPending(null)} onConfirm={() => { const body = pending; setPending(null); if (body) void save(body); }} />
   </form>;
 }

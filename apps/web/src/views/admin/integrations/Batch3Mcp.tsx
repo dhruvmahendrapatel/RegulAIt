@@ -3,7 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
-import { optionEls, QueryGate, serverOpts, useAction, useUsers, userOpts } from "../adminKit";
+import { optionEls, QueryGate, serverOpts, useAction, useUserPicker, userOpts } from "../adminKit";
+import { UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
 
 // Browser-only mirrors of shared/batch3.ts; batch3 contract tests pin these.
@@ -27,19 +28,36 @@ export function McpCoverage({ servers }: { servers: McpServer[] }) {
   </>;
 }
 
+type CoverageBody = Partial<{ mcpProtocolMethods: string[]; mcpUpstreamTransports: string[] }>;
+/**
+ * PUT /v1/org/settings is a partial update: send only the lists this admin
+ * changed, so saving one cannot revert another admin's concurrent change to
+ * the other. `adds` is true when a sent list enables something new.
+ */
+export function coverageChanges(settings: Record<string, unknown>, methods: string[], transports: string[]): { body: CoverageBody; adds: boolean } {
+  const before = (key: string) => (Array.isArray(settings[key]) ? settings[key] : []) as string[];
+  const changed = (key: string, next: string[]) => next.length !== before(key).length || next.some((value) => !before(key).includes(value));
+  const body: CoverageBody = {
+    ...(changed("mcpProtocolMethods", methods) ? { mcpProtocolMethods: methods } : {}),
+    ...(changed("mcpUpstreamTransports", transports) ? { mcpUpstreamTransports: transports } : {}),
+  };
+  const adds = (body.mcpProtocolMethods ?? []).some((value) => !before("mcpProtocolMethods").includes(value)) || (body.mcpUpstreamTransports ?? []).some((value) => !before("mcpUpstreamTransports").includes(value));
+  return { body, adds };
+}
+
 function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const act = useAction();
   const [methods, setMethods] = useState<string[]>(Array.isArray(settings.mcpProtocolMethods) ? settings.mcpProtocolMethods : []);
   const [transports, setTransports] = useState<string[]>(Array.isArray(settings.mcpUpstreamTransports) ? settings.mcpUpstreamTransports : []);
-  const [pending, setPending] = useState<{ mcpProtocolMethods: string[]; mcpUpstreamTransports: string[] } | null>(null);
+  const [pending, setPending] = useState<CoverageBody | null>(null);
   const unavailable = !Array.isArray(settings.mcpProtocolMethods) || !Array.isArray(settings.mcpUpstreamTransports);
-  const save = (body: NonNullable<typeof pending>) => act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved");
+  const save = (body: CoverageBody) => act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved");
   const toggle = (values: string[], value: string, checked: boolean) => checked ? [...values, value] : values.filter((item) => item !== value);
   return <form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
-    const body = { mcpProtocolMethods: methods, mcpUpstreamTransports: transports };
-    const adds = methods.some((value) => !(settings.mcpProtocolMethods as string[]).includes(value)) || transports.some((value) => !(settings.mcpUpstreamTransports as string[]).includes(value));
-    if (adds) setPending(body); else void save(body);
+    const change = coverageChanges(settings, methods, transports);
+    if (Object.keys(change.body).length === 0) { act.setError("No MCP coverage setting changed."); return; }
+    if (change.adds) setPending(change.body); else void save(change.body);
   }}>
     {unavailable && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
     <fieldset disabled={act.busy || unavailable}><legend>Enabled protocol methods</legend>
@@ -52,18 +70,19 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
     <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. Stdio also requires operator-configured executable directories, a pinned command digest and admission approval.</p>
     <Button type="submit" disabled={act.busy || unavailable}>Save MCP coverage</Button>
     {act.error && <p role="alert">{act.error}</p>}
-    <ConfirmModal open={pending !== null} title="Enable more MCP coverage?" body={<p>Enabled methods: {pending?.mcpProtocolMethods.join(", ") || "none"}. Transports: {pending?.mcpUpstreamTransports.join(", ") || "none"}. The gateway audits this relaxation; user grants and admission checks still apply.</p>}
+    <ConfirmModal open={pending !== null} title="Enable more MCP coverage?" body={<p>{pending?.mcpProtocolMethods && <>Enabled methods: {pending.mcpProtocolMethods.join(", ") || "none"}. </>}{pending?.mcpUpstreamTransports && <>Transports: {pending.mcpUpstreamTransports.join(", ") || "none"}. </>}The gateway audits this relaxation; user grants and admission checks still apply.</p>}
       confirmLabel="Save audited change" onCancel={() => setPending(null)} onConfirm={() => { const body = pending; setPending(null); if (body) void save(body); }} />
   </form>;
 }
 
 function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
-  const users = useUsers(); const act = useAction();
+  const users = useUserPicker(); const act = useAction();
   const [userId, setUserId] = useState(""); const [serverId, setServerId] = useState(""); const [grant, setGrant] = useState<string>(MCP_PROTOCOL_GRANT_NAMES[0]);
   return <Card title="Per-user protocol grants"><form className={v.stack} onSubmit={(event) => {
     event.preventDefault(); void act.run(() => api.post("/v1/grants/tools", { userId, serverId, toolName: grant }), "Protocol grant added");
   }}>
-    <Field label="Protocol user"><Select required value={userId} onChange={(event) => setUserId(event.target.value)}>{optionEls(userOpts(users.data?.users?.filter((user) => !user.disabledAt)), "— select —")}</Select></Field>
+    <Field label="Protocol user"><Select required value={userId} onChange={(event) => setUserId(event.target.value)}>{optionEls(userOpts(users.data?.users.filter((user) => !user.disabledAt)), "— select —")}</Select></Field>
+    {users.data && !users.data.complete && <UserListTruncated count={users.data.users.length} />}
     <Field label="Protocol server"><Select required value={serverId} onChange={(event) => setServerId(event.target.value)}>{optionEls(serverOpts(servers), "— select —")}</Select></Field>
     <Field label="Protocol grant"><Select value={grant} onChange={(event) => setGrant(event.target.value)}>{MCP_PROTOCOL_GRANT_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}</Select></Field>
     <p>Granting protocol access relaxes this person's default deny and is audited. The corresponding method must also be enabled above. Read-only server access does not include these grants; logging is a write operation.</p>

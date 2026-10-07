@@ -513,6 +513,19 @@ export default function ChatOpsPage() {
   );
 }
 
+/**
+ * Mirrors `OUTLOOK_RECIPIENT_ALLOW_LIST_MAX` and the canonical form in
+ * `outlookRecipientAllowListProblem` (packages/shared/src/batch3.ts): trimmed,
+ * lower-cased, de-duplicated — the SPA depends on no workspace package, and
+ * ChatOpsPage.test.ts runs both against the same inputs. Blank lines are not
+ * entries. The limit and the confirmation count the canonical list, the one
+ * the gateway stores.
+ */
+export const OUTLOOK_RECIPIENT_ALLOW_LIST_MAX = 50;
+export function canonicalOutlookRecipients(text: string): string[] {
+  return [...new Set(text.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean))];
+}
+
 function OutlookRecipients({ connection, onSaved }: { connection: Connection; onSaved: () => void }) {
   const act = useAction();
   const [text, setText] = useState((connection.outlookRecipientAllowList ?? []).join("\n"));
@@ -522,10 +535,10 @@ function OutlookRecipients({ connection, onSaved }: { connection: Connection; on
   };
   return <Card title={`Outlook recipients: ${connection.name}`}><form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
-    const recipients = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    if (recipients.length > 50) { act.setError("Allow at most 50 additional recipient mailboxes."); return; }
-    const old = (connection.outlookRecipientAllowList ?? []).map((mailbox) => mailbox.toLowerCase());
-    if (recipients.some((mailbox) => !old.includes(mailbox.toLowerCase()))) setPending(recipients);
+    const recipients = canonicalOutlookRecipients(text);
+    if (recipients.length > OUTLOOK_RECIPIENT_ALLOW_LIST_MAX) { act.setError(`Allow at most ${OUTLOOK_RECIPIENT_ALLOW_LIST_MAX} additional recipient mailboxes.`); return; }
+    const old = canonicalOutlookRecipients((connection.outlookRecipientAllowList ?? []).join("\n"));
+    if (recipients.some((mailbox) => !old.includes(mailbox))) setPending(recipients);
     else void save(recipients);
   }}>
     <Field label={`Additional recipients for ${connection.name}`}><Textarea value={text} onChange={(event) => setText(event.target.value)} disabled={act.busy} rows={4} /></Field>

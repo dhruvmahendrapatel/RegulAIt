@@ -9,6 +9,8 @@ import {
   CHATOPS_OUTBOUND_PROVIDERS,
   CHATOPS_PROVIDERS,
   CHATOPS_SEND_ONLY_PROVIDERS,
+  OUTLOOK_RECIPIENT_ALLOW_LIST_MAX,
+  canonicalOutlookRecipients,
   chatOpsConnectionBody,
   chatOpsProviderLabel,
   chatOpsProviderRegistrable,
@@ -109,5 +111,38 @@ describe("ChatOpsPage — ADR-0183 2.6: the outlook app registration", () => {
     expect(outlookCredentialToken({ tenantId: "", clientId: "", clientSecret: "", senderMailbox: "" })).toEqual({ token: null });
     const partial = outlookCredentialToken({ ...four, clientSecret: "" });
     expect("error" in partial && partial.error).toMatch(/all four/);
+  });
+});
+
+describe("ChatOpsPage — Outlook recipients are counted in their canonical form (PR #181 review)", () => {
+  // 51 non-blank lines that canonicalise to 50 distinct mailboxes: the gateway
+  // accepts this list, so the page must not refuse it before sending.
+  const fiftyOneLines = [
+    ...Array.from({ length: 50 }, (_, i) => `  Person${i}@Example.test `),
+    "person0@example.test",
+    "",
+  ].join("\n");
+
+  it("trims, lower-cases and de-duplicates before the limit is applied", () => {
+    const canonical = canonicalOutlookRecipients(fiftyOneLines);
+    expect(canonical).toHaveLength(OUTLOOK_RECIPIENT_ALLOW_LIST_MAX);
+    expect(canonical[0]).toBe("person0@example.test");
+    expect(canonicalOutlookRecipients("A@x.test\r\n a@x.test\n\nb@x.test")).toEqual(["a@x.test", "b@x.test"]);
+  });
+
+  it("matches the gateway's shared canonicaliser on the same inputs", async () => {
+    // runtime-only import: the SPA does not depend on @regulait/shared
+    const sharedPath = new URL("../../../../../../packages/shared/src/batch3.ts", import.meta.url).pathname;
+    const shared = (await import(/* @vite-ignore */ sharedPath)) as {
+      OUTLOOK_RECIPIENT_ALLOW_LIST_MAX: number;
+      outlookRecipientAllowListProblem: (provider: string, list: readonly string[]) => { ok: boolean; value?: string[] };
+    };
+    expect(OUTLOOK_RECIPIENT_ALLOW_LIST_MAX).toBe(shared.OUTLOOK_RECIPIENT_ALLOW_LIST_MAX);
+    for (const text of [fiftyOneLines, "A@x.test\r\n a@x.test\n\nb@x.test", " Cab@Example.test "]) {
+      const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
+      const verdict = shared.outlookRecipientAllowListProblem("outlook", lines);
+      expect(verdict.ok, text).toBe(true);
+      expect(canonicalOutlookRecipients(text)).toEqual(verdict.value);
+    }
   });
 });
