@@ -1,7 +1,7 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   ConnectorProviderError,
   ConnectorRateLimitError,
@@ -15,6 +15,10 @@ import {
   TeamsConnectorProvider,
   OUTLOOK_DEFAULT_GRAPH_BASE_URL,
   OutlookConnectorProvider,
+  OUTLOOK_TOKEN_REFRESH_MARGIN_MS,
+  clearOutlookTokenCache,
+  graphErrorDetail,
+  OUTLOOK_ERROR_DETAIL_MAX,
   parseOutlookCredential,
   WebhookConnectorProvider,
   buildSnowflakeJwt,
@@ -1444,6 +1448,9 @@ const OUTLOOK_CRED = JSON.stringify({
 });
 
 describe("outlook adapter (fake upstream: Entra login + Microsoft Graph)", () => {
+  // the token cache is process-wide; each test starts from an empty one
+  beforeEach(() => clearOutlookTokenCache());
+
   it("the registry resolves kind=outlook, refuses it with no credential, and NAMES its compiled destination", () => {
     expect(resolveConnectorProvider({ kind: "outlook", token: OUTLOOK_CRED }).kind).toBe("outlook");
     expect(() => resolveConnectorProvider({ kind: "outlook" })).toThrow(/credential/);
@@ -1576,6 +1583,96 @@ describe("outlook adapter (fake upstream: Entra login + Microsoft Graph)", () =>
   });
 });
 
+describe("outlook token cache (ADR-0121 amendment, ADR-0183 2.6)", () => {
+  beforeEach(() => clearOutlookTokenCache());
+
+  /** a fake Entra + Graph that numbers each minted token and lets a test refuse one at Graph */
+  function cachingUpstream(opts: { expiresIn?: number | null; refuse?: Set<string> } = {}) {
+    let minted = 0;
+    return (req: CapturedRequest, res: ServerResponse) => {
+      if (req.url.includes("/oauth2/v2.0/token")) {
+        minted += 1;
+        const body: Record<string, unknown> = { token_type: "Bearer", access_token: `tok-${minted}` };
+        if (opts.expiresIn !== null) body.expires_in = opts.expiresIn ?? 3600;
+        reply(res, 200, body);
+        return;
+      }
+      const auth = String(req.headers.authorization ?? "");
+      if (opts.refuse?.has(auth.replace("Bearer ", ""))) {
+        reply(res, 401, { error: { code: "InvalidAuthenticationToken" } });
+        return;
+      }
+      reply(res, 202, {});
+    };
+  }
+  const tokenCalls = (up: { requests: CapturedRequest[] }) => up.requests.filter((r) => r.url.includes("/oauth2/v2.0/token")).length;
+  const sends = (up: { requests: CapturedRequest[] }) =>
+    up.requests.filter((r) => r.url.includes("/sendMail")).map((r) => String(r.headers.authorization));
+  const credFor = (url: string, over: Record<string, string> = {}) =>
+    parseOutlookCredential(JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: url, ...over }));
+  const send = (o: OutlookConnectorProvider) => o.invoke({ operation: "write", object: "ana@acme.com", payload: { subject: "s" } });
+
+  it("reuses one token across sends, and mints afresh inside the refresh margin", async () => {
+    await withUpstream(cachingUpstream(), async (up) => {
+      let clock = 1_000_000;
+      const make = () => new OutlookConnectorProvider({ credential: credFor(up.url), baseUrl: up.url, now: () => clock });
+      await send(make());
+      await send(make()); // a NEW adapter instance, as the gateway builds per post
+      expect(tokenCalls(up)).toBe(1);
+      expect(sends(up)).toEqual(["Bearer tok-1", "Bearer tok-1"]);
+      // just outside the margin: still cached
+      clock += 3600_000 - OUTLOOK_TOKEN_REFRESH_MARGIN_MS - 1;
+      await send(make());
+      expect(tokenCalls(up)).toBe(1);
+      // inside the margin: refreshed
+      clock += 2;
+      await send(make());
+      expect(tokenCalls(up)).toBe(2);
+      expect(sends(up).at(-1)).toBe("Bearer tok-2");
+    });
+  });
+
+  it("a cached token Graph refuses (401) is evicted and the send retried ONCE with a fresh token", async () => {
+    const refuse = new Set(["tok-1"]);
+    await withUpstream(cachingUpstream({ refuse }), async (up) => {
+      const make = () => new OutlookConnectorProvider({ credential: credFor(up.url), baseUrl: up.url });
+      // tok-1 minted fresh and refused: reported, and not kept for reuse
+      await expect(send(make())).rejects.toThrow(/sendMail failed/);
+      expect(sends(up)).toEqual(["Bearer tok-1"]);
+      refuse.clear();
+      await send(make()); // tok-2 minted (tok-1 was evicted), cached
+      refuse.add("tok-2"); // revoked at Graph while still cached
+      const res = await send(make());
+      expect(res.status).toBe(202);
+      expect(sends(up)).toEqual(["Bearer tok-1", "Bearer tok-2", "Bearer tok-2", "Bearer tok-3"]);
+      expect(tokenCalls(up)).toBe(3);
+    });
+  });
+
+  it("a fresh token Graph refuses is reported, not retried", async () => {
+    await withUpstream(cachingUpstream({ refuse: new Set(["tok-1"]) }), async (up) => {
+      const o = new OutlookConnectorProvider({ credential: credFor(up.url), baseUrl: up.url });
+      await expect(send(o)).rejects.toThrow(/sendMail failed/);
+      expect(sends(up)).toHaveLength(1);
+      expect(tokenCalls(up)).toBe(1);
+    });
+  });
+
+  it("a rotated client secret misses the cache; a response without expires_in is not cached", async () => {
+    await withUpstream(cachingUpstream(), async (up) => {
+      await send(new OutlookConnectorProvider({ credential: credFor(up.url), baseUrl: up.url }));
+      await send(new OutlookConnectorProvider({ credential: credFor(up.url, { appPassword: "rotated-pw" }), baseUrl: up.url }));
+      expect(tokenCalls(up)).toBe(2);
+    });
+    await withUpstream(cachingUpstream({ expiresIn: null }), async (up) => {
+      const make = () => new OutlookConnectorProvider({ credential: credFor(up.url), baseUrl: up.url });
+      await send(make());
+      await send(make());
+      expect(tokenCalls(up)).toBe(2);
+    });
+  });
+});
+
 // ADR-0173 batch 2b review — the product's own chat controls are not a
 // connector write's to use (the gateway refuses on this before the kernel)
 describe("reservedChatControl", () => {
@@ -1615,5 +1712,27 @@ describe("reservedChatControl", () => {
     let deep: unknown = { text: "x" };
     for (let i = 0; i < 40; i++) deep = { nested: deep };
     expect(reservedChatControl("slack", "write", deep)?.code).toBe("reserved_chat_control");
+  });
+});
+
+describe("outlook Graph error detail (ADR-0183 batch 2 review L2)", () => {
+  it("names Graph's code and message, capped, with secrets, bearer tokens and JWTs scrubbed", () => {
+    const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl";
+    const body = JSON.stringify({
+      error: { code: "ErrorAccessDenied", message: `nope s3cr3t-value Bearer abc.def ${jwt} client_secret=zzz\n` + "x".repeat(2000) },
+    });
+    const d = graphErrorDetail(body, 403, ["s3cr3t-value"]);
+    expect(d).toMatch(/^HTTP 403 ErrorAccessDenied: nope/);
+    expect(d).not.toContain("s3cr3t-value");
+    expect(d).not.toContain("abc.def");
+    expect(d).not.toContain(jwt);
+    expect(d).not.toContain("zzz");
+    expect(d).not.toMatch(/\n/);
+    expect(d.length).toBeLessThanOrEqual(OUTLOOK_ERROR_DETAIL_MAX + 1);
+  });
+  it("a non-JSON body is capped and scrubbed too", () => {
+    const d = graphErrorDetail("<html>" + "y".repeat(5000), 500, []);
+    expect(d.startsWith("HTTP 500: <html>")).toBe(true);
+    expect(d.length).toBeLessThanOrEqual(OUTLOOK_ERROR_DETAIL_MAX + 1);
   });
 });

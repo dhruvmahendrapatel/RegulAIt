@@ -33,7 +33,7 @@
 #     and idempotency is checkable with `diff`.
 #
 #  3. AIR-GAPPED MEANS NO OUTBOUND, INCLUDING AT BUILD TIME. `docker compose
-#     up --build` pulls node:22-slim and runs `pnpm install` against the npm
+#     up --build` pulls node:22-trixie-slim and runs `pnpm install` against the npm
 #     registry; that is internet, so the air-gapped path never builds. It
 #     requires pre-seeded images (`scripts/build-image-bundle.sh` on a
 #     connected host, `--image-bundle` here) and refuses Let's Encrypt, whose
@@ -619,7 +619,7 @@ if [ "$MODE" = "air_gapped" ]; then
       --image-bundle /path/to/regulait-images-$VERSION.tar
 
   (\`docker compose up --build\` is not an option here: the build pulls
-   node:22-slim and runs \`pnpm install\` against the npm registry. That is
+   node:22-trixie-slim and runs \`pnpm install\` against the npm registry. That is
    internet, and this mode does not have any.)"
     if [ "${IMAGES_INCOMPLETE:-0}" = "0" ]; then ok "all required images present locally"; fi
   fi

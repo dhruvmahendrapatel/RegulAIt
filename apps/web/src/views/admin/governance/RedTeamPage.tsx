@@ -25,6 +25,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import a from "../admin.module.css";
@@ -384,6 +385,7 @@ export default function RedTeamPage() {
           ) : null}
 
           <Card title="Run a suite">
+            <RefusalNotice guidance={act.guidance} />
             <form
               className={a.formRow}
               onSubmit={(e) => {

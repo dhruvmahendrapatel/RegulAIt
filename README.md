@@ -281,8 +281,9 @@ non-deterministic on an all-green run, closed by
 
 ### Tamper-evident audit anchoring (no cloud account needed)
 
-The compose stack brings up **MinIO with a real S3 Object Lock bucket in
-COMPLIANCE mode**, created automatically before the gateway starts. Nothing to
+The compose stack brings up **SeaweedFS with a real S3 Object Lock bucket in
+COMPLIANCE mode** (the `objectstore` service), created automatically before the
+gateway starts. Nothing to
 configure — `docker compose up --build` gets it. The audit hash chain's head is
 anchored there, and for the retention period no principal can delete or alter a
 written anchor, so a full-recompute forgery diverges from a head nobody can
@@ -365,6 +366,7 @@ file, and a downgrade.
 | `REGULAIT_OUTBOUND_TIMEOUT_MS` | `60000` | The deadline a guarded outbound fetch gets when its caller supplied none (OTLP export, OIDC discovery/token, connectors). MCP, scorer and model calls carry their own deadlines, which always win. |
 | `REGULAIT_WORKFLOW_CLAIM_TTL_MS` | `900000` | How long a workflow stage's execution claim may go unreleased (a process killed mid-stage) before `/advance` may re-take it. The re-take is audited as `workflow-stage-claim-expired`. |
 | `REGULAIT_OFFLINE_CHECKS` | *unset* (refused) | Set to exactly `1` to declare an offline/demo box on which a workflow template's `offlineAutoPass` may pass a named check nobody reported (labelled and audited). Unset, or on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set, unreported checks stay pending (ADR-0167 amendment, AER-047). Never set it where real CI should gate a change. |
+| `REGULAIT_PUBLIC_URL` | *unset* (no mail courier) | The https origin this deployment is reached at, optionally with a base path (`http` only for localhost/loopback; no credentials, query or fragment). The ONLY origin links in outbound mail use — never a request's Host header. While unset, registering or posting to an Outlook ChatOps workspace is refused (422 `public_url_required`); a set-but-invalid value refuses the boot. Reported by `GET /v1/org/posture` and `GET /v1/setup/status` (ADR-0121 amendment). |
 | `REGULAIT_RATE_LIMIT_MAX` / `REGULAIT_RATE_LIMIT_WINDOW_MS` | `1200` / `60000` | The general per-client-IP bucket. |
 | `REGULAIT_AUTH_RATE_LIMIT_MAX` / `REGULAIT_AUTH_RATE_LIMIT_WINDOW_MS` | `10` / `300000` | The stricter bucket on `/auth/login`, `/auth/mfa/verify` and `/auth/login-with-key`. |
 | `REGULAIT_API_KEY_RATE_LIMIT_MAX` | `6000` | Per-API-key allowance, so a busy service account is neither throttled by nor able to exhaust its neighbours'. |

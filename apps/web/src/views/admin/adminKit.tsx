@@ -8,6 +8,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
+import { guidanceOf, type RefusalGuidance } from "../../api/refusals";
 import type {
   AdminAgent,
   AdminProject,
@@ -283,9 +284,12 @@ export function useAction() {
   const invalidate = useAdminInvalidate();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ADR-0183 2.3: a refusal the person resolves themselves, for an inline RefusalNotice
+  const [guidance, setGuidance] = useState<RefusalGuidance | null>(null);
   const run = async (fn: () => Promise<unknown>, okMsg?: string | null): Promise<boolean> => {
     setBusy(true);
     setError(null);
+    setGuidance(null);
     try {
       const out = await fn();
       // An action that RETURNS a sentence ("3 evaluated · 1 newly breached")
@@ -299,13 +303,14 @@ export function useAction() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
+      setGuidance(guidanceOf(e));
       toast(msg, "error");
       return false;
     } finally {
       setBusy(false);
     }
   };
-  return { busy, error, setError, run };
+  return { busy, error, setError, guidance, run };
 }
 
 // ---- one async action at a time, KEEPING the refusal's structure ----------
