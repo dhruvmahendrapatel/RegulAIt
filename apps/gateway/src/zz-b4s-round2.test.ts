@@ -5,6 +5,11 @@
  *  - B4S-07: a fresh SSO sign-in is a step-up method only on a SECURE request
  *    (https, or https at a trusted proxy). Over plain http it is neither listed
  *    in a refusal nor started by /options.
+ *  - B4S-04: every strict org setting is covered by ONE strictness registry
+ *    (`ORG_SETTING_STRICTNESS`): the registry is walked against the writable
+ *    schema and the strict-default constants, and relaxing an identity default,
+ *    the approval TTL or an API-key lifetime through PUT /v1/org/settings needs
+ *    a settings_relax step-up (tightening needs none).
  *
  * Runs on its OWN scratch database (prefix `b4s2_`), dropped in afterAll
  * (M-068), so the global state it needs (which admins have a step-up method,
@@ -18,8 +23,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import {
+  auditLog,
   authSessions,
   createDb,
+  desc,
   eq,
   federatedIdentities,
   mcpServers,
@@ -29,7 +36,17 @@ import {
   ssoReauthRequests,
   type Db,
 } from "@regulait/db";
+import {
+  ACCOUNTABILITY_STRICT_DEFAULTS,
+  BATCH3_STRICT_DEFAULTS,
+  BATCH4_STRICT_DEFAULTS,
+  STEP_UP_HEADER,
+  STRICT_IDENTITY_DEFAULTS,
+  updateOrgSettingsSchema,
+} from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { ORG_SETTING_STRICTNESS } from "./org-setting-strictness.js";
+import { relaxedSettingKeys } from "./org-settings.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -106,6 +123,41 @@ async function mkPerson(label: string, isAdmin: boolean): Promise<Person> {
   expect(key.statusCode, key.body).toBe(201);
   return { id, email, key: { authorization: `Bearer ${key.json().token}` }, token: await mkSession(id), auth: new SoftAuthenticator({ origin: ORIGIN }) };
 }
+
+/** enrol a soft passkey on `p`'s (fresh) session */
+async function enrolPasskey(p: Person): Promise<void> {
+  const opt = await as(p, "POST", "/v1/auth/passkeys/registration-options", {});
+  expect(opt.statusCode, opt.body).toBe(200);
+  const reg = await as(p, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: p.auth.register(opt.json().options), label: "b4s2" });
+  expect(reg.statusCode, reg.body).toBe(201);
+}
+
+/** a passkey step-up for exactly `action` (what a 403 handed back) */
+async function grantFor(p: Person, action: { kind: string; body: Record<string, unknown> }): Promise<string> {
+  const o = await as(p, "POST", "/v1/auth/step-up/options", { action });
+  expect(o.statusCode, o.body).toBe(200);
+  const v = await as(p, "POST", "/v1/auth/step-up/verify", {
+    stepUpId: o.json().stepUpId,
+    method: "passkey",
+    response: p.auth.authenticate(o.json().passkey.options),
+  });
+  expect(v.statusCode, v.body).toBe(200);
+  return v.json().stepUpToken as string;
+}
+
+/** refused without a grant with exactly `body` as the relaxed values, then admitted with a grant for it */
+async function needsRelaxStepUp(p: Person, method: Method, url: string, payload: unknown, values: Record<string, unknown>) {
+  const refused = await as(p, method, url, payload);
+  expect(refused.statusCode, refused.body).toBe(403);
+  expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+  expect(refused.json().action.body.values).toEqual(values);
+  const ok = await as(p, method, url, payload, { [STEP_UP_HEADER]: await grantFor(p, refused.json().action) });
+  expect(ok.statusCode, ok.body).toBe(200);
+  return ok;
+}
+
+const lastAudit = async (ruleId: string) =>
+  (await db.select().from(auditLog).where(eq(auditLog.ruleId, ruleId)).orderBy(desc(auditLog.seq)).limit(1))[0] ?? null;
 
 async function mkServer(label: string): Promise<string> {
   const [row] = await db
@@ -223,5 +275,106 @@ describe("B4S-07: a fresh SSO sign-in is a step-up method only over https", () =
     });
     expect(o.statusCode, o.body).toBe(422);
     expect(o.json().error).toBe("step_up_unavailable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B4S-04 — every strict org setting is covered by one registry
+// ---------------------------------------------------------------------------
+
+describe("B4S-04: relaxing ANY strict org setting needs a settings_relax step-up", () => {
+  const writable = Object.keys(
+    (updateOrgSettingsSchema as unknown as { _def: { schema: { shape: Record<string, unknown> } } })._def.schema.shape,
+  ).filter((k) => k !== "confirmIpLockout");
+  const registry = ORG_SETTING_STRICTNESS as Record<string, { kind: string; strict?: unknown; relaxed?: (v: unknown) => boolean; reason?: string }>;
+  /** strict defaults that are NOT org settings (they live on another route, which guards them itself) */
+  const ELSEWHERE: Record<string, string> = { samlWantAuthnResponseSigned: "per SAML provider (POST/PATCH /v1/auth/saml-providers)" };
+
+  it("the registry names every writable key, and nothing else (a new key without an entry fails here)", () => {
+    expect(writable.length).toBeGreaterThan(100);
+    expect(writable.filter((k) => !(k in registry))).toEqual([]);
+    expect(Object.keys(registry).filter((k) => !writable.includes(k))).toEqual([]);
+    for (const [k, e] of Object.entries(registry)) {
+      if (e.kind === "exempt") expect(e.reason!.length, `${k}: an exemption says why`).toBeGreaterThan(20);
+      else expect(e.relaxed!(e.strict), `${k}: its strict default is not a relaxation`).toBe(false);
+    }
+  });
+
+  it("every key of every strict-defaults constant (and the approval TTL) is a RULE whose strict value is that default", () => {
+    const constants: Record<string, unknown> = {
+      ...STRICT_IDENTITY_DEFAULTS,
+      ...ACCOUNTABILITY_STRICT_DEFAULTS,
+      ...BATCH3_STRICT_DEFAULTS,
+      ...BATCH4_STRICT_DEFAULTS,
+      approvalTtlHours: 72,
+    };
+    for (const [k, strict] of Object.entries(constants)) {
+      if (k in ELSEWHERE) {
+        expect(writable, k).not.toContain(k);
+        continue;
+      }
+      expect(registry[k]?.kind, `${k} has a relax rule`).toBe("rule");
+      expect(registry[k]!.strict, k).toEqual(strict);
+    }
+  });
+
+  it("the identity defaults, the approval TTL and the API-key lifetimes are relaxations; tightening is not", () => {
+    expect(
+      relaxedSettingKeys({
+        mfaRequired: "off",
+        sessionIdleMinutes: 60,
+        passwordRequireClasses: 2,
+        approvalDelegationEnabled: true,
+        approvalTtlHours: null,
+        apiKeyDefaultTtlDays: 120,
+        apiKeyMaxTtlDays: null,
+      }).sort(),
+    ).toEqual(
+      ["apiKeyDefaultTtlDays", "apiKeyMaxTtlDays", "approvalDelegationEnabled", "approvalTtlHours", "mfaRequired", "passwordRequireClasses", "sessionIdleMinutes"],
+    );
+    expect(
+      relaxedSettingKeys({
+        mfaRequired: "all",
+        sessionIdleMinutes: 15,
+        passwordRequireClasses: 4,
+        approvalDelegationEnabled: false,
+        approvalTtlHours: 24,
+        apiKeyDefaultTtlDays: 30,
+        apiKeyMaxTtlDays: 90,
+      }),
+    ).toEqual([]);
+  });
+
+  describe("through PUT /v1/org/settings", () => {
+    let admin: Person;
+    beforeAll(async () => {
+      admin = await mkPerson("settings-admin", true);
+      await enrolPasskey(admin);
+    });
+
+    it.each([
+      ["sessionIdleMinutes", 90],
+      ["approvalTtlHours", null],
+      ["apiKeyMaxTtlDays", null],
+      ["apiKeyDefaultTtlDays", 180],
+      ["approvalDelegationEnabled", true],
+      ["passwordRequireClasses", 2],
+    ] as const)("relaxing %s is refused without a grant, admitted with one, audited as relaxed", async (key, value) => {
+      await needsRelaxStepUp(admin, "PUT", "/v1/org/settings", { [key]: value }, { [key]: value });
+      const audited = await lastAudit("org-settings-updated");
+      expect((audited!.detail as { relaxed?: string[] }).relaxed).toEqual([key]);
+    });
+
+    it("tightening them back needs no step-up", async () => {
+      const r = await as(admin, "PUT", "/v1/org/settings", {
+        sessionIdleMinutes: STRICT_IDENTITY_DEFAULTS.sessionIdleMinutes,
+        approvalTtlHours: 72,
+        apiKeyMaxTtlDays: STRICT_IDENTITY_DEFAULTS.apiKeyMaxTtlDays,
+        apiKeyDefaultTtlDays: STRICT_IDENTITY_DEFAULTS.apiKeyDefaultTtlDays,
+        approvalDelegationEnabled: false,
+        passwordRequireClasses: 4,
+      });
+      expect(r.statusCode, r.body).toBe(200);
+    });
   });
 });

@@ -44,15 +44,12 @@ import {
   type OrgSettingsRow,
   type SQL,
 } from "@regulait/db";
+import { relaxedOrgSettingKeys, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
   ACCOUNTABILITY_SETTING_KEYS,
   accountabilitySettingRelaxed,
   alertTicketSettingsProblem,
   type AccountabilitySettingKey,
-  type Batch3SettingKey,
-  relaxedBatch3Keys,
-  type Batch4SettingKey,
-  relaxedBatch4Keys,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
   revocationKindParamSchema,
@@ -664,11 +661,12 @@ async function signInModeRefusal(
 
 /** ADR-0182 / ADR-0185 / ADR-0186: every changed key now looser than its
  * strict default — named in the audit row's `detail.relaxed`, and the facts
- * the `settings_relax` step-up is bound to */
-export function relaxedSettingKeys(
-  changed: Record<string, unknown>,
-): Array<AccountabilitySettingKey | Batch3SettingKey | Batch4SettingKey> {
-  return [...relaxedAccountabilityKeys(changed), ...relaxedBatch3Keys(changed), ...relaxedBatch4Keys(changed)];
+ * the `settings_relax` step-up is bound to. B4S-04: derived from the ONE
+ * registry over every writable key (`ORG_SETTING_STRICTNESS`), so the identity
+ * defaults, the approval TTL, the API-key lifetimes and every other strict
+ * default are covered, not only the three batch registries. */
+export function relaxedSettingKeys(changed: Record<string, unknown>): WritableOrgSettingKey[] {
+  return relaxedOrgSettingKeys(changed);
 }
 
 /** ADR-0182 (D4): which of the changed keys are accountability settings now
