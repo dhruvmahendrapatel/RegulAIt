@@ -222,6 +222,10 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   Avery's `Save key`), while the same four specs pass 47/47 twice locally and on main. Find the cause (the save
   request's real status/body, ordering against earlier tests, timing of the posture save) and fix the test or the
   card. Do not mark it a flake without the evidence M-070 asks for. Branch `codex/x16`.
+  Evidence so far (Claude, 10-07 00:15): failed on 2e2c29d, d7ac80a, f676ca3; passed on 5cc9797. Gateway log shows the
+  409 `key_custody_enforced` arriving ~1.4 s after Avery's sign-in, so the server side is right; the CI page snapshot is
+  the ADMIN page, not `dev`. PR #133 (now on main) makes the test print `dev`'s `main` text on failure and the job print
+  error-context plus the gateway tail, so the next red run carries the evidence.
   Status: TODO
 - **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
   test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
