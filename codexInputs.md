@@ -572,3 +572,12 @@ Implemented the ADR-0186 receipt seam: bounded, advisory-locked, audit-ordered s
 Validation: 7/7 shared verifier tests, 6/6 real PostgreSQL signing/API/CLI cases, 5/5 browser cases and 336/336 web unit tests passed. Gateway and web TypeScript/build passed. The gateway suite creates/drops its own dedicated database when driven with DATABASE_URL; an explicit RECEIPT_TEST_DATABASE_URL is caller-owned. All keys and data are synthetic. The initial DB fixtures needed a real UUID actor and required ruleChain; the initial browser selector assumed a heading rather than the existing Card title. Those failed fixture runs are excluded from product evidence.
 
 Local evidence, not committed: /workspace/.regulait-onboarding/x21-{verifier-final,gateway-auto-db,gateway-final-tests,browser-final,gateway-final-build,web-final-build,web-unit-final}.log. Full inherited gateway foundation tests still assert receipt routes are 501/not_built; Claude has been asked to adapt receipt-only assertions at integration. The full suite is not claimed green on this implementation.
+
+### X21 latest follow-up validation — 2026-10-07
+
+The `3de6d0ac` bootstrap-export UUID and independently pinned-key validation
+follow-up is now rerun in the isolated slice checkout: actual PostgreSQL/API/CLI
+**6/6 PASS**, shared verifier **7/7 PASS**, shared build PASS
+(`x21-latest-{gateway,verifier,shared-build}.log`). No synthetic actor strings
+reach the UUID audit column on bootstrap export. Earlier 5/5 browser, 336 units
+and both builds remain recorded above. No full unrelated gateway-suite claim.
