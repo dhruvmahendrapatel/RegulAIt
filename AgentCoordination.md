@@ -570,7 +570,7 @@ Kinds: `semantic_cache`, `conversations`, `builder_agent_memory`, `project_conte
 Response rows add `transport`, `stdio: {command, args}`, `stdioCommandDigest`, `ownerUserId`, `admissionState`.
 Refusals: 422 `mcp_transport_disabled`, 422 `mcp_stdio_unavailable` (host has no allowed directories), 400
 `mcp_stdio_command_refused` with `code` ∈ `not_absolute | outside_allowed_dirs | not_executable | world_writable |
-invalid_argv`, 409 `mcp_transport_immutable` (PATCH). The args editor must be a list of separate strings, never one
+group_writable | writable_parent | invalid_argv` (`group_writable` and `writable_parent` added by B3S-06), 409 `mcp_transport_immutable` (PATCH). The args editor must be a list of separate strings, never one
 shell line.
 
 **Per-user protocol grants** — existing `POST /v1/grants/tools {userId, serverId, toolName}` with `toolName` ∈

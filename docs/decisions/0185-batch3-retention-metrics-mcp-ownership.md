@@ -111,3 +111,44 @@ The HTTP contracts the web UI builds against are in `AgentCoordination.md` §4.8
 Step 1 (serial): a foundation commit — migration, journal, `schema.ts`, shared zod and constants, and no-op seams for
 metrics and upstream destination checks. Step 2 (parallel, disjoint files): A — I3, I9, Outlook; B — G3; C — G4;
 D — G5. Step 3: integrate on `b3-int`, full gateway suite, `demo:prepare`, a security review of G3 and G4, one PR.
+
+## Amendment (2026-10-07, build)
+
+Recorded at integration on `b3-int` (merges of `b3-a`, `b3-b`, `b3-c`, `b3-d` and the X15-H01 fix).
+
+**G3 gate order changed.** The Decision lists three gates in the order *org enables the method → upstream advertises
+it → kernel decision*. As built, "the upstream advertises it" is checked **after** the allow: knowing what an upstream
+advertises needs its `initialize` answer, i.e. a connection, and the rule "the upstream connects only after an allow"
+wins. So the order is: org enables the method (else "Denied by policy", audited `mcp-method-disabled`) → kernel
+decision on the protocol `ToolRef` → admission, egress and breaker → connect → upstream advertises the capability
+(else -32601). Nothing reaches the upstream before an allow; a method the upstream does not advertise costs one
+handshake after an allow, never before.
+
+**`/metrics` counting unit (G5 × G4).** Each upstream connect attempt is observed once, inside `guardedMcpConnect`
+(the only function that opens an upstream session). Each call sequence — `tools/call`, the `tools/list` manifest sync,
+a governed protocol request, the health probe's `tools/list` — is observed once through `withUpstreamRetry`'s
+`observe` option. `connectUpstream` passes no `observe`, so no connect is counted twice
+(`zz-adr0185-int-upstream-observe.test.ts` proves counter delta = requests the upstream received).
+
+**Known gaps (accepted for this batch, each fails closed):**
+- `resources/list` is refused (fails closed) for a user under a data-scope rule on `uri`: a listing cannot be decided
+  per URI before it is fetched, so it is not served rather than served unfiltered.
+- PII `redact` mode **refuses** protocol arguments that contain PII instead of redacting them (the consent and digest
+  machinery for redacted arguments exists for tools only).
+- `POST /v1/evaluate` and decision replay answer `unknown_tool` for the protocol grant names (`mcp:resources`, …):
+  they resolve tools from the stored manifest, which never holds protocol grants.
+
+**Residuals:**
+- Admission mode `off` runs no manifest scan, so the reserved `mcp:` tool-name finding is not raised; the proxy still
+  never lists or runs an upstream tool named `mcp:*` under a protocol grant, whatever the admission mode (verified by
+  the G3 test with admission `off`).
+- stdio digest TOCTOU: the command's sha256 is checked at connect and the binary is spawned just after, so a binary
+  swapped in that window would run. Closing it needs process isolation (spawn from a verified, immutable copy) —
+  PF-06, batch 6.
+- The proxy route's pre-hijack 403 now carries the refusal's own contract code (`error: err.error`, e.g.
+  `mcp_stdio_digest_mismatch`); a destination refusal is still `egress_blocked`.
+- stdio argv is stored in the audit log and shown to admins, so it must carry no secret; nothing enforces that
+  (documented in INSTALL.md). Credential binding for stdio children is PF-06, batch 6. (B3S-06)
+- Only the stdio entry file is digest-pinned: the interpreter named on a script's `#!` line and the modules it
+  loads are not. Pinning them needs process isolation (spawn from a verified, immutable copy): PF-06, batch 6.
+  (B3S-06)

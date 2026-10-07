@@ -74,6 +74,15 @@ export async function lockEvidenceHoldsExclusive(tx: Db): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(${EVIDENCE_HOLD_LOCK_KEY}::bigint)`);
 }
 
+/**
+ * take the hold lock SHARED as the FIRST statement of a transaction whose writes a hold must be ordered against
+ * (a protected agent write, a retention DELETE): it waits for any in-flight hold creation to commit, so the
+ * statements after it see that hold (each READ COMMITTED statement takes its snapshot when it starts)
+ */
+export async function lockEvidenceHoldsShared(tx: Db): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock_shared(${EVIDENCE_HOLD_LOCK_KEY}::bigint)`);
+}
+
 /** what `withAgentEvidenceHold` returns when the hold refused the change (the reply is sent) */
 export const EVIDENCE_HOLD_REFUSED: unique symbol = Symbol("evidence-hold-refused");
 
@@ -179,7 +188,7 @@ export async function withAgentEvidenceHold<T>(
   const out = await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
     if (opts.widensHolds) await lockEvidenceHoldsExclusive(tx);
-    else await tx.execute(sql`select pg_advisory_xact_lock_shared(${EVIDENCE_HOLD_LOCK_KEY}::bigint)`);
+    else await lockEvidenceHoldsShared(tx);
     if (await agentEvidenceHoldRefused(tx, req, deferred, agentIds, change, { includeSelf: opts.includeSelf ?? true })) {
       return EVIDENCE_HOLD_REFUSED;
     }

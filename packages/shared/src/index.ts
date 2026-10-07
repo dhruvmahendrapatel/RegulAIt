@@ -18,6 +18,9 @@ import { APPROVAL_SCOPES } from "./approval-binding.js";
 import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 // ADR-0182 (D4): the accountability settings are spread into updateOrgSettingsSchema below.
 import { accountabilityOrgSettingsFields } from "./accountability.js";
+// ADR-0185 (batch 3): the retention / MCP settings are spread into updateOrgSettingsSchema, and the
+// transport and stdio vocabularies shape the server create/update bodies below.
+import { batch3OrgSettingsFields, MCP_UPSTREAM_TRANSPORTS, mcpStdioSpecSchema } from "./batch3.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -741,23 +744,53 @@ export const deleteTeamSchema = z
   .object({ force: z.boolean().optional(), reason: z.string().min(1).max(2000).optional() })
   .strict();
 
-export const createServerSchema = z.object({
-  name: z.string().min(1),
-  url: z.string().url(),
-  /** ADR-0043: may this server's URL resolve into ordinary private LAN space?
-   * null/absent = inherit the org default (mcpPrivateRangesDefault). IMDS /
-   * link-local and the other unconditional ranges are never opened by this. */
-  allowPrivateRanges: z.boolean().nullable().optional(),
-});
+/** ADR-0185 I9: the owner named at registration; absent = the registering
+ * admin, null = deliberately unowned (flagged `unowned`). */
+const serverOwnerField = z.string().uuid().nullable().optional();
+
+/**
+ * POST /v1/servers. Two shapes (ADR-0185 G4):
+ *  - a URL upstream (today's body, unchanged): `transport` absent =
+ *    `streamable_http`, or `sse`; never a `stdio` block;
+ *  - a stdio upstream: `transport: "stdio"` with `stdio: {command, args}` and
+ *    no `url` (the row stores the `stdio:<name>` sentinel).
+ */
+export const createServerSchema = z.union([
+  z.object({
+    name: z.string().min(1),
+    url: z.string().url(),
+    /** ADR-0043: may this server's URL resolve into ordinary private LAN space?
+     * null/absent = inherit the org default (mcpPrivateRangesDefault). IMDS /
+     * link-local and the other unconditional ranges are never opened by this. */
+    allowPrivateRanges: z.boolean().nullable().optional(),
+    transport: z.enum(["streamable_http", "sse"]).optional(),
+    stdio: z.never().optional(),
+    ownerUserId: serverOwnerField,
+  }),
+  z
+    .object({
+      name: z.string().min(1),
+      transport: z.literal("stdio"),
+      stdio: mcpStdioSpecSchema,
+      ownerUserId: serverOwnerField,
+    })
+    .strict(),
+]);
+export type CreateServerInput = z.infer<typeof createServerSchema>;
 
 /** ADR-0043: PATCH /v1/servers/:serverId — re-runs the egress guard whenever
  * the destination or the private-range posture changes (null restores
- * inheritance of the org default). */
+ * inheritance of the org default). ADR-0185: `transport` may only restate the
+ * current one (a change is 409 `mcp_transport_immutable`); `stdio` applies to a
+ * stdio server only; `ownerUserId` re-assigns the owner. */
 export const updateServerSchema = z
   .object({
     name: z.string().min(1).optional(),
     url: z.string().url().optional(),
     allowPrivateRanges: z.boolean().nullable().optional(),
+    transport: z.enum(MCP_UPSTREAM_TRANSPORTS).optional(),
+    stdio: mcpStdioSpecSchema.optional(),
+    ownerUserId: serverOwnerField,
   })
   .strict();
 
@@ -2151,7 +2184,7 @@ export const updateOrgSettingsSchema = z
     minPreprocessTokens: z.number().int().min(1).max(1_000_000).optional(),
     // semantic cache
     semanticCachePolicy: semanticCachePolicySchema.optional(),
-    semanticCacheTtlSeconds: z.number().int().min(1).max(30 * 24 * 3600).optional(),
+    // semanticCacheTtlSeconds: in batch3OrgSettingsFields (ADR-0185, same 1 s – 30 day bounds)
     // compaction behaviour
     compactionFailureMode: compactionFailureModeSchema.optional(),
     summarizerSelection: summarizerSelectionSchema.optional(),
@@ -2357,6 +2390,8 @@ export const updateOrgSettingsSchema = z
      * `detail.transitions`, and the audit row also names it under
      * `detail.relaxed`. See `ACCOUNTABILITY_SETTING_COPY` for what each gives up. */
     ...accountabilityOrgSettingsFields,
+    // ADR-0185 (batch 3): memory retention, MCP protocol methods and upstream transports
+    ...batch3OrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -4522,6 +4557,9 @@ export * from "./feedback.js";
 export * from "./ai-literacy.js";
 export * from "./alert-ownership.js";
 export * from "./isaca-pack.js";
+
+// ===== ADR-0185 (batch 3) — retention, MCP protocol/transports, owners, Outlook allow-list =====
+export * from "./batch3.js";
 export {
   ACCOUNTABILITY_MONITOR_RULE_IDS,
   suggestedHaltFor,

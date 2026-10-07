@@ -56,6 +56,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/app",
   "/",
   "/health",
+  // ADR-0185 G5 — mounted only when REGULAIT_METRICS_ON_MAIN_LISTENER is on
+  // (otherwise no route exists: 404). The scraper holds no RegulAIt
+  // credential; the route authenticates IN-ROUTE on REGULAIT_METRICS_TOKEN
+  // (Bearer, constant-time) before it answers anything.
+  "/metrics",
   "/auth/login",
   "/auth/mfa/verify",
   "/auth/login-with-key",
@@ -488,6 +493,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /app",
   "GET /",
   "GET /health",
+  // ADR-0185 G5 — see AUTH_EXEMPT_ROUTES: the metrics token is the credential
+  "GET /metrics",
   // ADR-0026: the SPA shell, same static-page reasoning as /app above
   ...WEB_UI_ROUTES.map((r) => `GET ${r}`),
   // ADR-0025: the auth surface — login endpoints are pre-identity, the

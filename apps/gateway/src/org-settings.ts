@@ -49,6 +49,8 @@ import {
   accountabilitySettingRelaxed,
   alertTicketSettingsProblem,
   type AccountabilitySettingKey,
+  type Batch3SettingKey,
+  relaxedBatch3Keys,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
   revocationKindParamSchema,
@@ -832,8 +834,12 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // from the same redacted view as `after` (no credential material).
       const lockedRedacted = redactSettings(locked) as unknown as Record<string, unknown>;
       // ADR-0182 (D4): the accountability settings this write leaves RELAXED
-      // from their strict default, named in the detail and the reason
-      const relaxed = relaxedAccountabilityKeys(changed);
+      // from their strict default, named in the detail and the reason;
+      // ADR-0185 (batch 3): the retention and MCP settings the same way
+      const relaxed: Array<AccountabilitySettingKey | Batch3SettingKey> = [
+        ...relaxedAccountabilityKeys(changed),
+        ...relaxedBatch3Keys(changed),
+      ];
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.

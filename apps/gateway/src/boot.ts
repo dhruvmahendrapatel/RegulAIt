@@ -17,6 +17,11 @@
  *                             is listening. `startGateway` closes the app on
  *                             its way out, so a refused boot leaves no socket,
  *                             no pool and no half-open server.
+ *   3b. metrics listener    — ADR-0185 G5, only if REGULAIT_METRICS_LISTEN is
+ *                             set (the settings were checked FIRST, before an
+ *                             app existed). Bound before the main listener so
+ *                             a port it cannot take refuses the boot with no
+ *                             public socket left behind.
  *   4. listen               — the deployment is now in service
  *   5. start the scheduler  — ADR-0064, and ONLY if REGULAIT_SCHEDULER=on.
  *                             AFTER listening on purpose: a sweep must never be
@@ -47,6 +52,7 @@ import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigest
 import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
+import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
 
 /** ADR-0035: how often the chain head is captured when anchoring is on. */
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
@@ -70,6 +76,8 @@ export interface StartedGateway {
    * which is the DEFAULT. Returned rather than hidden so a caller can stop it
    * deterministically; the app's own onClose hook already does. */
   scheduler: Scheduler | null;
+  /** ADR-0185 G5: the separate metrics listener's bound address, or null */
+  metricsAddress: string | null;
 }
 
 /**
@@ -86,6 +94,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // the boot FIRST — before an app, a migration or a socket exists — because
   // it is the only origin outbound mail may link to. Unset is fine.
   resolvePublicUrl(env);
+  // ADR-0185 G5: a metrics setting that asks for /metrics without a usable
+  // bearer token (or with an unparseable address) refuses the boot here, for
+  // the same reason — nothing exists yet to leave behind.
+  const metricsConfig = resolveMetricsConfig(env);
 
   // ADR-0167 (CFG-02): the SERVING process logs. Resolved here, not inside
   // buildApp, so the ~100 test files that construct apps stay silent; forced
@@ -195,6 +207,21 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     if (anchorTimer) clearInterval(anchorTimer);
     if (rateLimitPruneTimer) clearInterval(rateLimitPruneTimer);
   });
+
+  // ADR-0185 G5 — the separate metrics listener. Its close hook is registered
+  // before listen for the reason the scheduler's is (FST_ERR_INSTANCE_ALREADY_LISTENING).
+  let metricsListener: Awaited<ReturnType<typeof startMetricsListener>> | null = null;
+  app.addHook("onClose", async () => {
+    if (metricsListener) await metricsListener.close();
+  });
+  if (metricsConfig.listen) {
+    try {
+      metricsListener = await startMetricsListener(metricsConfig);
+    } catch (err) {
+      await app.close().catch(() => {});
+      throw err;
+    }
+  }
 
   const address = await app.listen({ port, host });
 
@@ -357,9 +384,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // box. An operator who believes their MRM expiry sweep is running and has not
   // set the variable must be able to see that from the boot log rather than
   // from a stale registry screen three months later.
+  // ADR-0185 G5: whether /metrics is served, where, and that it needs a token
+  log(`  metrics:   ${describeMetricsPosture(metricsConfig, metricsListener?.address ?? null)}`);
   log(`  scheduler: ${schedulerConfig.reason}${schedulerConfig.enabled ? `, ${registry.size} job(s)` : ""}`);
 
-  return { app, address, dataKey, scheduler };
+  return { app, address, dataKey, scheduler, metricsAddress: metricsListener?.address ?? null };
 }
 
 /**
