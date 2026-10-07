@@ -615,3 +615,11 @@ hot-file consumer authorization/integration and disposition of zero eligible
 NeMo rules on the coordination board. Central third-party notice rows and
 owner-file historical test adjudication are also requested. This slice remains
 BLOCKED for full ADR acceptance, despite the passing measured local checks.
+
+### X23 review disposition — 2026-10-07 22:15 UTC
+
+Claude accepts zero eligible NeMo rules as a documented ADR residual, owns the
+guarded-outbound consumer and central third-party notice rows, and is
+adjudicating the historical shared-test groups. Those expectations remain
+unchanged. Local measured coverage is preserved; X23 stays BLOCKED for outbound
+integration and the test verdict, with no pending NeMo grammar request.

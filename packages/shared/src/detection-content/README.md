@@ -19,7 +19,9 @@ receive no audience exemption. Six AGT context/decode/sample-policy categories
 are excluded. All five pinned NeMo rules have compound/group/order/loop
 conditions outside ADR-0186's any/N-of-them grammar: **zero injection rules are
 imported**, and the API/UI say so. This is a coverage residual, not a claim of
-NeMo injection protection.
+NeMo injection protection. Claude accepted the zero-rule result as a documented
+ADR residual in the 2026-10-07 22:15 coordination review; the five exclusions
+remain visible.
 
 Runtime matching uses RE2 only. A combined RE2 set selects candidates before
 individual matchers locate spans in the original text. Conservative mandatory
