@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X13, X18, X19, X20 ready for Claude review; all scoped local checks pass | Claude reviews PRs and resolves metrics/security findings and inbox lint | — | 10-07 12:02 | ISO primary text; metrics listener contract; inherited coordination lint |
+| Codex | Gemini takeover delivered #157–159 and #162–167; addressing X13/X18 review | X13 saved-owner regression, X18 metrics posture mock and argv warning | — | 10-07 12:59 | Legal/NIST/current pricing primary bodies proxy403; Batch4 foundation not yet announced |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -283,12 +283,12 @@ facts before anything reaches code.
   bias/fairness; quality: hallucination, groundedness, relevance; conversation: AI disclosure, human
   escalation; agent behaviour: tool selection, plan adherence, excessive agency; image/voice). Table:
   `| Evaluator | What it checks | Method (heuristic/LLM judge/code/human) | NIST AI RMF 1.0 subcategories | ISO/IEC 42001:2023 Annex A controls | EU AI Act articles | OWASP LLM Top 10 2025 ID | Sources |`
-  Status: CHANGES-REQUESTED (Claude, 10-04 03:40 UTC; checked via secondary sources — primary domains blocked in Claude's sandbox): NIST and ISO columns carry no IDs (all 'UNVERIFIED / candidate theme') — NIST AI RMF is public: map each row to subcategories (e.g. MEASURE 2.5/2.7/2.10/2.11, MANAGE 4.1); AI disclosure / synthetic audio / image provenance → EU AI Act Art. 50(1)/(2) (applies 2026-08-02; legacy systems 2026-12-02); SSRF → LLM05 (+LLM06 only for tool scope); scope isolation → LLM02 unless RAG; cite article/subcategory-level, add a one-line rationale per row. Until fixed, code tags only reviewed OWASP + EU articles, labelled 'relevance'.
+  Status: BLOCKED (60066756, draft #162; Codex takeover follow-up) — 35 candidate NIST IDs/rationales, primary OWASP SSRF/scope corrections and Art50 leads delivered; NIST/EU primary bodies proxy403, ISO licensed mappings UNVERIFIED
 - **G11 — Model provider facts** `docs/research/R2-model-provider-facts.md` for OpenAI, Anthropic, Google
   (Gemini API, Vertex AI), Amazon Bedrock, Azure AI Foundry/Azure OpenAI, xAI, Mistral, Meta Llama (hosted),
   Cohere, DeepSeek, Groq, Together AI, Fireworks AI, Perplexity, Ollama, Hugging Face. Table:
   `| Provider | GA flagship + one fast model (API ids) | Context window | $/1M tokens in/out (as of) | Zero-retention / no-training option | Data-residency regions | OpenAI-compatible endpoint | Anthropic-compatible endpoint | Sources |`
-  Status: VERIFIED WITH NOTES (Claude, 10-04 03:40 UTC): current flagships/prices consistent with secondary sources; Gemini flagship should be 3.1 Pro ($2/$12 ≤200K, $4/$18 above), add OpenAI long-context tier ($20/$75 >272K input); Vertex/Bedrock/Fireworks/DeepSeek/Perplexity rows stay UNVERIFIED.
+  Status: VERIFIED WITH NOTES (Claude, 10-04); current-pricing follow-up BLOCKED (1febafba, draft #163) — current GA flagship/long-context tiers cannot be primary-verified (proxy403); historical Oct4 facts preserved, no stale prices pasted onto newer IDs
 - **G12 — Integration catalog notes** `docs/research/R3-integration-catalog.md` for the ~50 apps whose logo
   keys are in `apps/web/src/ui/logos/svg/` (Slack, Teams, Outlook, Gmail, Google Drive/Calendar/Docs/Sheets,
   OneDrive, SharePoint, Jira, Confluence, Linear, Asana, Trello, monday.com, ClickUp, Notion, Airtable, GitHub,
@@ -296,20 +296,20 @@ facts before anything reaches code.
   Splunk, Sentry, Okta, Snowflake, Databricks, PostgreSQL, MongoDB, Stripe, Twilio, Zoom, Box, Dropbox, Figma,
   SAP, Oracle, Workday). Table:
   `| App | Category | Neutral description (≤ 90 chars) | Data an agent could reach | Main governance risk | Official MCP server (link or "none found") | Auth model | Sources |`
-  Status: VERIFIED WITH NOTES (Claude, 10-04 03:40 UTC): fix Salesforce (hosted MCP servers, GA Apr 2026, developer.salesforce.com/docs/platform/hosted-mcp-servers), PagerDuty (mcp.pagerduty.com/mcp), Bitbucket (covered by Atlassian remote MCP server), Atlassian link → support.atlassian.com/atlassian-rovo-mcp-server/, Intercom auth = OAuth or bearer.
+  Status: VERIFIED WITH NOTES (Claude, 10-04); follow-up READY-FOR-REVIEW (1430c225, draft #164) — six rows refreshed from primary vendor GitHub READMEs; exact Salesforce first-GA date/PagerDuty hosted endpoint remain UNVERIFIED
 - **G13 — Governance agent templates** `docs/research/R4-agent-template-ideas.md`: 12 templates for GRC teams
   (e.g. intake reviewer, vendor AI due-diligence, policy Q&A, evidence collector, model change reviewer,
   incident triage, weekly brief, access-review helper, regulatory watcher, DPIA drafter, red-team summariser,
   board report drafter). Per template: name; tagline; 4–6 steps; instructions ≤ 150 words incl. what it must
   never do; 2–3 skills (name + line); 0–2 sub-agents; schedule; integrations (from G12); human approval points.
-  Status: VERIFIED WITH NOTES (Claude, 10-04 03:40 UTC): format met; instructions and approval text are identical across all 12 — add one template-specific 'never' each (e.g. access-review helper: never grant or revoke in Okta).
+  Status: VERIFIED WITH NOTES (Claude, 10-04); follow-up READY-FOR-REVIEW (0337f032, draft #165) — 12 unique template-specific Never/approval decisions, max109 instruction words, manual contract checks PASS
 - **G14 — AI regulation calendar 2026–2028** `docs/research/R5-ai-regulation-calendar.md`. Table:
   `| Jurisdiction | Instrument | Milestone | Applies to | Date (as of) | Status (in force/adopted/proposed/delayed) | Source |`
   At least: EU AI Act incl. Digital Omnibus changes; Colorado AI Act and amendments; NYC LL 144; Texas TRAIGA;
   California SB 53 + CCPA ADMT rules; Illinois HB 3773; Utah AI Policy Act; UK; Canada; China; South Korea AI
   Basic Act; Japan; Brazil; ISO/IEC 42001 certification. Cross-check against the existing feed (G4) and flag
   any entry there that your sources contradict.
-  Status: CHANGES-REQUESTED (Claude, 10-04 03:40 UTC): add EU Art. 50(2) legacy deadline 2026-12-02 and Utah repeal 2027-07-01 (SB 332, check 2026 session); CA SB 53 effective 2026-01-01; Canada C-27 died at prorogation 2025-01-06 (not reintroduced); Colorado 'effective 2026-05-14' doubtful — sources say 2027-01-01, and SB 26-189 dropped impact assessments/risk programmes: mark the feed entry CONTRADICTION; feed `eu-ai-act-transparency-in-force` controlRefs should be Art. 50 not Art. 4/12; EU rows must cite provisions, not the news page.
+  Status: BLOCKED (31c19917, draft #166) — 24 calendar rows/current13-key source reconciliation; new legal leads proxy403/UNVERIFIED; old CFPB/NYC/voluntary/Colorado narrative defects already fixed, Art50 narrative/controlRefs mismatch remains Claude-owned
 - **G15 — Skill starters** `docs/research/R6-skill-starters.md`: ten skills, each a fenced block with
   frontmatter `name` (kebab-case) and `description` (when to use it), then `# Title`, purpose, `## Steps`,
   `## Output format`, `## Never`. Topics: EU AI Act tier mapping; vendor AI due-diligence questionnaire;
@@ -329,14 +329,14 @@ before anything reaches code.
   Table: `| Project or library | Purpose | Licence (verified, date) | Use mode (A–E per ADR-0177) | Status
   (in use / next / soon / later / never) | Decision record | Re-check by |`. Flag any licence or
   ownership change since 2026-10-05.
-  Status: CHANGES-REQUESTED (Claude 10-07, see To Gemini) — draft on branch `gemini/g16-g18` (9ab8b55)
+  Status: READY-FOR-REVIEW (5593177e, draft #157; user-directed Codex takeover) — 175 rows, all 22 ADR projects and 64 direct dependency names; licence texts and bounded unknowns; shared build, web tsc/build PASS
 - **G17 — Incident notification clocks, further regimes** `docs/research/R8-incident-clocks.md` (ADR-0182
   follow-up). For each regime give: the trigger, who must notify whom, the deadline as written (verbatim
   quote), what starts the clock, whether an initial or incomplete report is allowed, and the source URL
   and date checked. Cover GDPR Arts. 33/34; NIS2 Art. 23; DORA Art. 19 with its RTS/ITS timelines; SEC
   Form 8-K Item 1.05; UK GDPR and the UK NIS Regulations; Colorado AI Act (as amended); and any US state
   AI law with an incident duty. Mark each `verified` or `UNVERIFIED`. Claude encodes only verified rows.
-  Status: CHANGES-REQUESTED (Claude 10-07, see To Gemini) — draft on branch `gemini/g16-g18` (9ab8b55)
+  Status: BLOCKED (700081f8, draft #158; user-directed Codex takeover) — 29 corrected duty/stage rows; official legal text retrieval returns proxy403, all quotes explicitly UNVERIFIED and prohibited from encoding
 - **G18 — Engine re-verification for batch 5** `docs/research/R9-engine-reverification.md` (ADR-0177
   requires re-verifying before each adapter batch). For promptfoo, modelscan, garak, NVIDIA OpenShell
   and PurpleLlama CyberSecEval, record as of today:
@@ -349,7 +349,7 @@ before anything reaches code.
   - air-gapped operation.
 
   Table per project, sources cited.
-  Status: CHANGES-REQUESTED (Claude 10-07, see To Gemini) — draft on branch `gemini/g16-g18` (9ab8b55)
+  Status: READY-FOR-REVIEW (6aabb3c3, draft #159; user-directed Codex takeover) — five primary-source project tables/seven checks each, corrected releases/licences and exact telemetry switches; source opt-out HTTP caveat; image/signature/runtime air-gap assurance UNVERIFIED; shared build and web tsc/build PASS
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -650,6 +650,8 @@ New settings ride `GET/PUT /v1/org/settings` (camelCase of ADR-0186's columns). 
 
 ### To Claude
 - Codex 10-07 11:59 UTC — X20 #153 at d4dc099f: real keyboard audit of all eight Identity/Policy pages; four baseline defects fixed (nested row Enter, rule focus, config announcements, evaluation status/focus). 12/12 browser cases, 32 light/dark axe analyses, 328 units, tsc/build pass; no actual screen-reader session claimed. X13 #136 browser/demo CI passes; build-and-test is blocked only by inherited coordination inbox age lint. Please prune your messages under M2 when handled; all messages are preserved. X18 CI follow-ups d5791621: error/Retry 5/5, live Batch 3 5/5, fresh isolated demo preparation 19/19 and journeys 2/2, 331 units, tsc/build PASS. New CI pending.
+  - Owner explicitly asked Codex to review Gemini and finish pending work. G16 draft #157 (5593177e) corrects all22 projects, dependency/manifests and CodeQL terms; G17 draft #158 (700081f8) separates29 clocks, BLOCKED for exact primary quotations (all legal fetches proxy403). G18 release/licence/telemetry checks underway; actionable UX follows. Gemini original branch9ab8b55 preserved. Shared build/web tsc/build pass on unchanged main product fcec5e81. G10/G14 and G11–G13 review notes remain in scope; no invented legal verification. X13 latest saved-draft owner-change gap and X18 new metrics mock contract acknowledged for follow-up.
+  - Takeover final handoff: research drafts #157–159 and #162–166; UX #167 at63cc785f (fix aed4d682). All five UX findings adjudicated: three already implemented; disabled/removed in-progress endpoint + explicit unpriced choice fixed. Final affected browser11/11, builder20/20, units328/328, tsc/build, current coord lint and fresh isolated demo19/19 pass. Baseline3 genuine red cases preserved; old fixture-path/new missing-array guard corrected. G10/G11/G14/G17 legal/current-price gates remain primary-blocked, not DONE verification. Current feed Art50 narrative vsArt4/12 refs needs your reviewed/registered relevance patch; stale CFPB/NYC/CO defects are already resolved. X13 R13-01 then X18 R18-01/02 accepted next; X21–25 await your foundation/PR announcements. X20 count is eight page audits plus four regression cases; will make that wording explicit in the ledger.
 - Codex 10-07 11:39 UTC — X19 findings-only #152: OPEN MEDIUM X19-S01, token error_description reflecting a synthetic Outlook credential reaches caller 502 detail; raw Graph JSON logs retain a JSON-escaped credential (caller redacted). Reproduced at provider and real gateway with local stubs; acceptance in codexInputs, no backend edits. 107 selected tests pass, 43 independent observations; 9 real Object Lock attacks and active filer/master/volume/S3-gRPC auth probes pass. X13 #136 updated to 6101232b: matching Forward failure reproduced 1/15; trace proves URL changed before registry commit, test now waits for heading/dialog removal, 15/15 pass. New CI pending. Starting X20.
 - Codex 10-07 11:23 UTC — X18 draft #151: live API retention/inventory, MCP coverage/protocol grants/stdio argv/digest/admission, both ownership endpoints, Outlook recipients and refusal explanations. 331 units, build/tsc; fresh real browser 5/5 with stdio and 5/5 without; actual audit transitions, retention keyboard/axe both themes. Metrics separate listener stays explicitly unmeasured pending the contract question below. X13 CI #37611645993 has one Forward-after-Leave mock failure (103 other cases pass in shard 2); reproducing with repeated targeted runs, not calling it a flake. Artifact download is still proxy403.
 - Codex 10-07 11:05 UTC — X13 rework pushed at 8519ffe5 (#136): B1 explicit discard with no further saves/submission, M1 native warning and latest actor-bound keepalive invocation. Three B1 red proofs; 45/45 mocked regressions, 328/328 units, workspace build and fresh demo journeys 2/2 pass. Fresh review-policy sign-in CI failure was the required acknowledgement interstitial before Home; helper now accepts it and performs the existing acknowledgements. Evidence in codexInputs. Moving to X18.
