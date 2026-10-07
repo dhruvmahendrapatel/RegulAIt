@@ -4,6 +4,20 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X18 Batch 3 web delivery — 2026-10-07 UTC
+
+Built against live §4.8 on main `f5bb4736`: Memory & retention settings/navigation and counts-only inventory; MCP method/transport coverage and separate per-user protocol grants; stdio registration/update with separate argv strings, pinned digest and admission state; connector/MCP ownership; Outlook recipient allow-lists. Expiry, evidence-hold, owner and transport refusals now explain what happened while preserving payload codes. Browser vocabularies are pinned against shared's contract by a drift test.
+
+Every relaxation explains its audit. Increased retention, enabled protocol/transport coverage and added recipients require confirmation. Read-only server grants explicitly include no protocol methods; logging is labelled write. Owners must be active users or explicitly unassigned; orphaned integrations stay visible. Stdio sends no HTTP-only URL/private-range keys; command updates explain admission reset. Outlook uses one exact mailbox per line, 50 maximum; invalid values are refused without replacing the saved list.
+
+Metrics scope: a bounded 5-second, token-free main-listener probe reports 401/404/200/unknown without loading/displaying metrics content. Separate-listener configuration stays **unmeasured**, since §4.8 contains no admin metrics posture API; the contract question is in #149. Main-listener 404 never implies deployment-wide metrics-off. Stores with `enforcedBy: null` say **No retention sweep implemented**; absent timestamps say no successful run is recorded.
+
+Validation: typecheck/production build PASS; **331/331 web units**. `e2e/batch3.spec.ts`, standard `playwright.config.ts`, real gateway with a fresh isolated seeded database and actual UI authentication/TOTP/required policy acknowledgement: **5/5 PASS with operator stdio opt-in**, **5/5 PASS without host opt-in**. Checks actual audit transitions, persisted protocol entitlements, separate argv with embedded spaces, command digest/admission reset, both owner endpoints, orphaned owner clearing, and Outlook save/400 refusal. Retention confirmation uses keyboard trap/Escape/focus return; retention page axe passes light/dark. No actual screen-reader session claimed.
+
+Commands: `E2E_DB=regulait_x18_browser E2E_PORT=3108 E2E_BASE_URL=http://127.0.0.1:3108 E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test e2e/batch3.spec.ts`, with an operator-allowed local fixture via `E2E_MCP_STDIO_COMMAND`/`REGULAIT_MCP_STDIO_ALLOWED_DIRS`. The second run uses `regulait_x18_no_stdio`, port3109, no stdio opt-in. Both use synthetic `REGULAIT_PUBLIC_URL=https://regulait.example.test`. Evidence under `/workspace/.regulait-onboarding/`: `x18-real-final{,.log}`, `x18-no-stdio{,.log}`, `x18-final-build.log`, `x18-units2.log`. The executable is never invoked, Outlook credentials are registration-only and **no messages are sent**. Settings restored, user fixtures deactivated; integration rows remain in disposable scratch databases.
+
+Earlier failed runs are retained: implicit browser context for axe, the strict stdio schema rejecting an HTTP-only field, a registry link incorrectly located as a row, and cleanup's duplicate deactivation/empty JSON body. Final counts include successful cleanup. No gateway/shared/database/scripts/workflow changes. Claude review, CI and metrics contract answer pending.
+
 ## X16 key-custody CI investigation — 2026-10-07 UTC
 
 Original CI run [37543718055](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37543718055), job
