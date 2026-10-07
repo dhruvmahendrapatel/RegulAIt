@@ -92,6 +92,7 @@ import {
   asc,
   auditLog,
   builderAgents,
+  conversations,
   desc,
   eq,
   governanceAlerts,
@@ -377,7 +378,7 @@ interface Access {
  * it, so who is frozen and who may see why cannot drift apart.
  * `agentIdText` is an SQL expression yielding the agent id as text.
  */
-function incidentCoversAgent(agentIdText: SQL): SQL {
+export function incidentCoversAgent(agentIdText: SQL): SQL {
   return sql`(EXISTS (SELECT 1 FROM ${aiIncidentLinks} WHERE ${aiIncidentLinks.incidentId} = ${aiIncidents.id}
       AND ${aiIncidentLinks.objectType} = 'agent' AND ${aiIncidentLinks.objectId} = (${agentIdText})::text)
     OR EXISTS (SELECT 1 FROM ${aiUseCases} WHERE ${aiUseCases.id} = ${aiIncidents.useCaseId}
@@ -523,6 +524,17 @@ async function linkTargetVisible(db: Writer, actor: IncidentActor, objectType: I
         .innerJoin(aiUseCases, eq(aiUseCases.id, useCaseFeedback.useCaseId))
         .where(eq(useCaseFeedback.id, objectId));
       return Boolean(f) && (actor.isAdmin || (me !== null && f!.ownerUserId === me));
+    }
+    // ADR-0185 I3 (migration 0169): a conversation link holds it from the
+    // retention sweep, so it must name a real conversation, and a non-admin
+    // may hold only their own (conversations are strictly own-scoped)
+    case "conversation": {
+      if (!isUuid) return false;
+      const [c] = await db
+        .select({ id: conversations.id, userId: conversations.userId })
+        .from(conversations)
+        .where(eq(conversations.id, objectId));
+      return Boolean(c) && (actor.isAdmin || (me !== null && c!.userId === me));
     }
     default:
       return true;

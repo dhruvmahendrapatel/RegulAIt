@@ -50,11 +50,13 @@ import {
   and,
   asc,
   auditLog,
+  connectors,
   eq,
   governanceAlerts,
   inArray,
   isNull,
   lte,
+  mcpServers,
   ne,
   pmConnections,
   sql,
@@ -148,32 +150,71 @@ async function slaHours(db: Db): Promise<AlertSlaHours> {
 // owner derivation
 // ---------------------------------------------------------------------------
 
-/** the active owner recorded on one candidate record, or null */
-async function ownerOf(db: Db, c: AlertOwnerCandidate): Promise<string | null> {
-  const active = async (id: string | null | undefined) => {
-    if (!id) return null;
-    const [u] = await db.select({ id: users.id }).from(users).where(and(eq(users.id, id), isNull(users.disabledAt)));
-    return u?.id ?? null;
-  };
+/** the owner(s) RECORDED on one candidate record, in the order they are tried
+ * (an agent's steward, then their named successor), whether active or not */
+async function recordedOwners(db: Db, c: AlertOwnerCandidate): Promise<Array<string | null | undefined>> {
   switch (c.kind) {
     case "use_case": {
       const [r] = await db.select({ o: aiUseCases.ownerUserId }).from(aiUseCases).where(eq(aiUseCases.id, c.id));
-      return active(r?.o);
+      return [r?.o];
     }
     case "agent": {
       // the steward; their named successor when the steward has left
       const [r] = await db.select({ o: agents.ownerUserId, s: agents.successorUserId }).from(agents).where(eq(agents.id, c.id));
-      return (await active(r?.o)) ?? (await active(r?.s));
+      return [r?.o, r?.s];
     }
     case "risk": {
       const [r] = await db.select({ o: aiRisks.ownerUserId }).from(aiRisks).where(eq(aiRisks.id, c.id));
-      return active(r?.o);
+      return [r?.o];
     }
     case "vendor": {
       const [r] = await db.select({ o: aiVendors.ownerUserId }).from(aiVendors).where(eq(aiVendors.id, c.id));
-      return active(r?.o);
+      return [r?.o];
+    }
+    // ADR-0185 I9
+    case "mcp_server": {
+      const [r] = await db.select({ o: mcpServers.ownerUserId }).from(mcpServers).where(eq(mcpServers.id, c.id));
+      return [r?.o];
+    }
+    case "connector": {
+      const [r] = await db.select({ o: connectors.ownerUserId }).from(connectors).where(eq(connectors.id, c.id));
+      return [r?.o];
     }
   }
+}
+
+async function activeUser(db: Db, id: string | null | undefined): Promise<string | null> {
+  if (!id) return null;
+  const [u] = await db.select({ id: users.id }).from(users).where(and(eq(users.id, id), isNull(users.disabledAt)));
+  return u?.id ?? null;
+}
+
+/** the active owner recorded on one candidate record, or null */
+async function ownerOf(db: Db, c: AlertOwnerCandidate): Promise<string | null> {
+  for (const id of await recordedOwners(db, c)) {
+    const active = await activeUser(db, id);
+    if (active) return active;
+  }
+  return null;
+}
+
+/**
+ * ADR-0185 I9 — is the subject ORPHANED: no active owner, but a record names
+ * an owner whose account is deactivated? The sweep's unowned escalation says
+ * so (`reason: "orphaned"`), so the admins know someone left rather than that
+ * nobody was ever named.
+ */
+export async function alertSubjectOrphaned(
+  db: Db,
+  subjectKey: string,
+  detail: Record<string, unknown> | null | undefined,
+): Promise<boolean> {
+  for (const c of alertOwnerCandidates(subjectKey, detail)) {
+    for (const id of await recordedOwners(db, c)) {
+      if (id && !(await activeUser(db, id))) return true;
+    }
+  }
+  return false;
 }
 
 /** the accountable person for a subject, and which record named them */
@@ -451,9 +492,13 @@ export async function runAlertSlaSweep(db: Db, now: Date, actorUserId: string | 
     );
   for (const a of unowned) {
     out.escalatedUnowned += 1;
+    // ADR-0185 I9: an owner who left (deactivated) owns nothing — said so
+    const orphaned = await alertSubjectOrphaned(db, a.subjectKey, a.detail as Record<string, unknown> | null);
     await audit(db, actorUserId, a.id, ALERT_OWNERSHIP_RULE_IDS.escalated,
-      `governance alert ${a.id} escalated to the admins: no owner on record for its subject`,
-      { reason: "unowned", recipients: admins });
+      orphaned
+        ? `governance alert ${a.id} escalated to the admins: the owner on record for its subject is deactivated`
+        : `governance alert ${a.id} escalated to the admins: no owner on record for its subject`,
+      { reason: orphaned ? "orphaned" : "unowned", recipients: admins });
     await post(a, "unowned");
   }
   return out;

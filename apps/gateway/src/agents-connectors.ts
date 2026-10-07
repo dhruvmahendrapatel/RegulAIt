@@ -147,6 +147,7 @@ import {
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
+import { resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -215,6 +216,8 @@ import {
   traceForRoot,
   type TraceContext,
 } from "./tracing.js";
+// ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
+import { recordDecision } from "./metrics.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -3861,6 +3864,7 @@ export function registerAgentConnectorRoutes(
       ceilingTier,
     });
     const decision = withModelPolicy(kernelDecision, invokeModelPolicy, CHAT_FEATURE, agent);
+    recordDecision({ surface: "agent", effect: decision.effect });
 
     // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
     // The candidate set starts as exactly the agents evaluateAgent would allow
@@ -4902,11 +4906,13 @@ export function registerAgentConnectorRoutes(
       });
       if (refusal) return reply.status(400).send(refusal);
     }
-    const [row] = await db.insert(connectors).values(body).returning();
+    const owner = await resolveRegistrationOwner(db, { actorUserId: req.authCtx.userId, requested: (req.body as { ownerUserId?: unknown } | null)?.ownerUserId });
+    if (!owner.ok) return reply.status(owner.status).send(owner.body);
+    const [row] = await db.insert(connectors).values({ ...body, ownerUserId: owner.ownerUserId }).returning();
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/connectors", async () => ({ connectors: await db.select().from(connectors) }));
+  app.get("/v1/connectors", async () => ({ connectors: await withOwnership(db, await db.select().from(connectors)) }));
 
   // --- connector credentials (admin-only via the global gate) ---
   // One platform credential per connector, encrypted at rest, never returned —

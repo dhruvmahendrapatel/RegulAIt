@@ -429,6 +429,8 @@ export const INCIDENT_LINK_OBJECT_TYPES = [
   "governance_alert",
   "feedback",
   "pm_link",
+  // ADR-0185 I3 (migration 0169): a conversation held as evidence; the retention sweep never purges it
+  "conversation",
 ] as const;
 export type IncidentLinkObjectType = (typeof INCIDENT_LINK_OBJECT_TYPES)[number];
 export const INCIDENT_ACTION_STATUSES = ["open", "done", "cancelled"] as const;

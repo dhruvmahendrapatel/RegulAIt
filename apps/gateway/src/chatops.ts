@@ -111,6 +111,8 @@ import {
   type ApprovalCard,
   verifyChatSignature,
   type ChatOpsProvider,
+  outlookRecipientAllowListField,
+  outlookRecipientAllowListProblem,
 } from "@regulait/shared";
 import {
   acceptInboundMessage,
@@ -220,6 +222,8 @@ export const CHATOPS_RULE_IDS = {
   slackRefusedTeam: "chatops-slack-refused-team",
   /** ADR-0183 batch 2 review (L1) — mail goes to the registered mailbox only */
   postRefusedRecipient: "chatops-post-refused-unregistered-recipient",
+  /** ADR-0185 — an admin changed an outlook workspace's recipient allow-list */
+  outlookRecipientsChanged: "chatops-outlook-recipients-changed",
 } as const;
 
 /** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
@@ -411,6 +415,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         botOpenidMetadataUrl: r.botOpenidMetadataUrl,
         botEndpoint: r.botAppId ? `/v1/chatops/${encodeURIComponent(r.name)}/bot` : null,
         slackTeamId: r.slackTeamId,
+        // ADR-0185 — the exact further recipients of an outlook workspace
+        outlookRecipientAllowList: r.outlookRecipientAllowList,
       })),
       posture:
         "The chat surface is a COURIER. Every decision goes through the same decide function the portal calls, " +
@@ -754,20 +760,26 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     // REGISTERED mailbox only. A per-post `channel` override naming any other
     // address would let whoever posts make the organisation's own mailbox send
     // an approval summary anywhere, including off-domain. Refused and audited.
-    // (An admin-set allow-list of further recipients needs its own column and
-    // is a follow-up; until then the registered recipient is the whole list.)
-    if (kind === "outlook" && channel.trim().toLowerCase() !== conn.defaultChannel.trim().toLowerCase()) {
-      await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedRecipient, "deny",
-        `outlook workspace '${conn.name}': mail to an unregistered recipient refused ('${label}')`,
-        { registered: conn.defaultChannel, requested: channel, label });
-      return {
-        ok: false,
-        status: 403,
-        body: {
-          error: "recipient_not_registered",
-          detail: "an outlook workspace sends mail to its registered mailbox only; register a workspace for another recipient",
-        },
-      };
+    // ADR-0185: plus the exact mailboxes an admin put on the connection's
+    // recipient allow-list (default empty; changes audited). Exact match
+    // only, never a domain.
+    if (kind === "outlook") {
+      const wanted = channel.trim().toLowerCase();
+      const allowed = [conn.defaultChannel.trim().toLowerCase(), ...(conn.outlookRecipientAllowList ?? [])];
+      if (!allowed.includes(wanted)) {
+        await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedRecipient, "deny",
+          `outlook workspace '${conn.name}': mail to an unregistered recipient refused ('${label}')`,
+          { registered: conn.defaultChannel, allowListSize: (conn.outlookRecipientAllowList ?? []).length, requested: channel, label });
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: "recipient_not_registered",
+            detail:
+              "an outlook workspace sends mail to its registered mailbox and the recipients an admin allow-listed on it only",
+          },
+        };
+      }
     }
     if (kind === "outlook") {
       const pub = mailPublicUrl();
@@ -1056,7 +1068,13 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   app.patch("/v1/chatops/connections/:connectionId", async (req, reply) => {
     const { connectionId } = z.object({ connectionId: z.string().uuid() }).parse(req.params);
     const body = z
-      .object({ notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(), ...botFields, slackTeamId: slackTeamIdField })
+      .object({
+        notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
+        ...botFields,
+        slackTeamId: slackTeamIdField,
+        // ADR-0185 — further exact recipient mailboxes for an outlook workspace
+        outlookRecipientAllowList: outlookRecipientAllowListField.optional(),
+      })
       .strict()
       .refine((b) => Object.keys(b).length > 0, { message: "nothing to change" })
       .parse(req.body);
@@ -1064,6 +1082,14 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (!before) return reply.status(404).send({ error: "not_found" });
     if (body.slackTeamId && before.provider !== "slack") {
       return reply.status(400).send({ error: "slack_team_slack_only", detail: "a Slack team id applies to a slack workspace only" });
+    }
+    let recipients: string[] | undefined;
+    if (body.outlookRecipientAllowList !== undefined) {
+      const problem = outlookRecipientAllowListProblem(before.provider, body.outlookRecipientAllowList);
+      if (!problem.ok) {
+        return reply.status(400).send({ error: problem.error, detail: problem.detail, ...(problem.invalid ? { invalid: problem.invalid } : {}) });
+      }
+      recipients = problem.value;
     }
     const botChange = body.botAppId !== undefined || body.botTenantId !== undefined || body.botOpenidMetadataUrl !== undefined;
     const bot = {
@@ -1088,9 +1114,19 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         ...(body.notifyAlertMinSeverity !== undefined ? { notifyAlertMinSeverity: body.notifyAlertMinSeverity } : {}),
         ...(botChange ? bot : {}),
         ...(body.slackTeamId !== undefined ? { slackTeamId: body.slackTeamId } : {}),
+        ...(recipients !== undefined ? { outlookRecipientAllowList: recipients } : {}),
       })
       .where(eq(chatopsConnections.id, connectionId))
       .returning();
+    if (recipients !== undefined) {
+      const from = before.outlookRecipientAllowList ?? [];
+      const added = recipients.filter((m) => !from.includes(m));
+      const removed = from.filter((m) => !recipients!.includes(m));
+      await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.outlookRecipientsChanged, "allow",
+        `outlook workspace '${before.name}': recipient allow-list ${from.length} → ${recipients.length} mailbox(es)` +
+          ` (+${added.length}, -${removed.length}); the registered mailbox is always a recipient`,
+        { transitions: { outlookRecipientAllowList: { from, to: recipients } }, added, removed, relaxed: added.length > 0 });
+    }
     if (body.slackTeamId !== undefined) {
       await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.slackTeamChanged, "allow",
         `Slack workspace pin on '${before.name}': ${before.slackTeamId ?? "any team"} → ${body.slackTeamId ?? "any team"}`,
@@ -1117,6 +1153,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       botTenantId: after!.botTenantId,
       botOpenidMetadataUrl: after!.botOpenidMetadataUrl,
       slackTeamId: after!.slackTeamId,
+      outlookRecipientAllowList: after!.outlookRecipientAllowList,
     };
   });
 
