@@ -74,6 +74,7 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
 
 export function StdioArguments({ args, onChange, disabled }: { args: string[]; onChange: (args: string[]) => void; disabled?: boolean }) {
   return <fieldset disabled={disabled}><legend>Command arguments</legend>
+    <p>Arguments are audited and visible to admins. Never put passwords, API keys or other secrets in them.</p>
     <p>Each argument is one separate string. Spaces stay inside that argument; no shell command line is evaluated.</p>
     {args.map((value, index) => <div key={index} className={v.row}>
       <Field label={`Argument ${index + 1}`}><Input value={value} onChange={(event) => onChange(args.map((item, position) => position === index ? event.target.value : item))} /></Field>

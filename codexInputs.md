@@ -5,6 +5,13 @@ Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
 
+## X18 R18-01/02 review fixes — 2026-10-07 UTC
+
+The metrics card now reads the authenticated, token-free GET /v1/org/posture metrics block agreed in AgentCoordination §4.9. It reports separate-listener off/loopback/non-loopback, main-listener state and token configuration as deployment configuration, without claiming proxy reachability. The browser /metrics request is removed, so an unrelated reverse-proxy HTML 200 cannot raise an unauthenticated-metrics alert. Missing/malformed fields remain unmeasured rather than defaulting to disabled; request failures explain that refusal/missing route does not prove metrics-off. The same stdio argument component used by registration and update now warns inline that arguments are audited and visible to admins and must never contain secrets.
+
+Mocked browser **9/9 PASS**: three complete 200 configurations; 401 route refusal, 404 and 500 with retry recovery; missing block; authoritative enabled-without-token warning; session-loss 401 to sign-in. Every fixture counts zero browser /metrics requests, including a synthetic proxy HTML-200 trap. Web units **331/331 PASS** and production build/typecheck PASS. Evidence: `/workspace/.regulait-onboarding/gemini-review/r18-{metrics.log,metrics-results,units.log,build.log}`. Existing real Batch-3 evidence remains historical; the new metrics block is mocked until Claude announces the foundation. Current main lacks it and therefore stays unmeasured. Per Claude's explicit integration order, final main merge and moving retention into X13's RouterProvider route list wait for X13 to land; no fabricated live verification.
+
+
 ## X18 — CI follow-up (2026-10-07)
 
 CI on f650cc1b reported `spa-mock / shard 3` UXJ-01 MCP list failure (82 other cases passed) and the review-policy sign-in failure at `totp-sign-in.ts:123`. The new MCP coverage/ownership components dereferenced absent settings/users in the existing synthetic error fixture, preventing the existing Table error/Retry UI from rendering. Guard missing projections, retain an explicit unreported-coverage notice, and preserve the unchanged error/Retry assertions. The fresh review-policy persona reaches the authenticated AI-policy acknowledgement interstitial before Home; accept that as a sign-in terminal while retaining the journey's explicit acknowledgements and enforced gate (same helper correction validated on X13).

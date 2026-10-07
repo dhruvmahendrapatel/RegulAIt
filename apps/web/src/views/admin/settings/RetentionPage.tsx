@@ -80,28 +80,37 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
   </form>;
 }
 
+interface MetricsPosture {
+  separateListener: "off" | "loopback" | "non_loopback";
+  mainListener: boolean;
+  tokenConfigured: boolean;
+}
+
+function isMetricsPosture(value: unknown): value is MetricsPosture {
+  if (!value || typeof value !== "object") return false;
+  const metrics = value as Partial<MetricsPosture>;
+  return ["off", "loopback", "non_loopback"].includes(metrics.separateListener ?? "") &&
+    typeof metrics.mainListener === "boolean" && typeof metrics.tokenConfigured === "boolean";
+}
+
 function MetricsPostureCard() {
-  const probe = useQuery({ queryKey: ["admin", "metrics-main-listener"], retry: false,
-    queryFn: async () => {
-      try {
-        const response = await fetch("/metrics", { credentials: "omit", redirect: "error", cache: "no-store", signal: AbortSignal.timeout(5000) });
-        const status = response.status;
-        await response.body?.cancel();
-        return status;
-      } catch {
-        throw new Error("Could not measure the main metrics listener. Check connectivity and retry.");
-      }
-    },
+  const posture = useQuery({ queryKey: ["admin", "org-posture"], retry: false,
+    queryFn: () => api.get<{ metrics?: unknown }>("/v1/org/posture"),
   });
+  const metrics = posture.data?.metrics;
+  const measured = isMetricsPosture(metrics);
   return <Card title="Metrics posture">
-    <p>Metrics are disabled by default. Enabling collection is an operator deployment setting; a bearer token protects the enabled metrics endpoint.</p>
-    <QueryGate loading={probe.isLoading} error={probe.error} onRetry={() => void probe.refetch()}>
-      {probe.data === 404 ? <p>Main listener: no metrics endpoint served (404).</p>
-        : probe.data === 401 ? <p>Main listener: refused this request without a bearer token (401).</p>
-        : probe.data === 200 ? <p role="alert">Main listener: metrics were accessible without a bearer token. Ask the deployment operator to check authentication.</p>
-        : probe.data !== undefined ? <p>Main listener: unmeasured; the probe returned HTTP {probe.data}.</p> : null}
+    <p>Metrics are disabled by default. This gateway reports its deployment configuration; reachability and authentication through a proxy still need operator verification.</p>
+    <QueryGate loading={posture.isLoading} error={posture.error} onRetry={() => void posture.refetch()}>
+      {posture.data && (measured ? <>
+        <p>Separate metrics listener: {metrics.separateListener === "off" ? "off" : metrics.separateListener === "loopback" ? "loopback only" : "non-loopback"}.</p>
+        <p>Main listener: {metrics.mainListener ? "metrics enabled" : "no metrics endpoint served"}.</p>
+        <p>Bearer token configured: {metrics.tokenConfigured ? "yes" : "no"}.</p>
+        {(metrics.separateListener !== "off" || metrics.mainListener) && !metrics.tokenConfigured &&
+          <p role="alert">The gateway reports an enabled metrics listener without a configured bearer token. Ask the deployment operator to check protection.</p>}
+      </> : <p>Separate metrics listener: unmeasured. This gateway has not reported a complete metrics configuration. Ask the deployment operator to verify the listener and token protection.</p>)}
     </QueryGate>
-    <p>Separate metrics listener: unmeasured. This gateway does not expose its configuration to the portal; a main-listener 404 does not prove metrics are disabled elsewhere. Ask the deployment operator to verify the listener and its token protection.</p>
-    <Button onClick={() => void probe.refetch()} disabled={probe.isFetching}>Refresh metrics posture</Button>
+    {posture.error && <p>Metrics configuration is unmeasured because the posture request failed. A refusal or missing route does not mean metrics are disabled.</p>}
+    <Button onClick={() => void posture.refetch()} disabled={posture.isFetching}>Refresh metrics posture</Button>
   </Card>;
 }
