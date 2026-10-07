@@ -95,7 +95,7 @@ describe("the header-carrying request helper", () => {
 });
 
 describe("every step-up-protected write in the app goes through withStepUp (ADR-0186 A)", () => {
-  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped; no screen edits an approval rule or removes a rule unwrapped; no screen changes agent stewardship or pads an approver pool unwrapped", async () => {
+  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped; no screen edits an approval rule or removes a rule unwrapped; no screen changes agent stewardship or pads an approver pool unwrapped; no screen lifts or narrows a revocation unwrapped", async () => {
     const { readdirSync, readFileSync, statSync } = await import("node:fs");
     const path = await import("node:path");
     const root = path.resolve(__dirname, "..");
@@ -145,6 +145,11 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
         /(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:users\/\$\{[^}]+\}\/(?:roles|admin|set-initial-password|mfa\/clear)["'`]|delegations["'`]|approvals\/(?:assignment-rules|sla-policies)["'`]|group-role-mappings["'`])/g,
       );
       for (const m of poolWrites ?? []) offenders.push(`${f}: ${m}`);
+      // B4S-05: lifting a revocation (delete) or narrowing it to read_only gives an entitlement back
+      const revocationWrites = src.match(
+        /(?<![A-Za-z])api\.(?:del|patch)(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:revocations\/|users\/\$\{[^}]+\}\/revocations\/)/g,
+      );
+      for (const m of revocationWrites ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

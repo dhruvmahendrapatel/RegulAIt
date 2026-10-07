@@ -314,8 +314,41 @@ export async function assertApprovalRuleLooseningStepUp(
   const values: Record<string, unknown> = args.after
     ? { quorum: args.after.quorum ?? 1, approverRoleId: args.after.approverRoleId ?? null, approverUserId: args.after.approverUserId }
     : { deleted: true };
-  const facts = { ruleId: args.ruleId, values };
-  if (args.stepUp) return args.stepUp(facts);
+  return requireRuleStepUp(
+    db,
+    { ruleId: args.ruleId, values },
+    args.stepUp,
+    "this change loosens dual control on an approval rule (a lower quorum, a wider approver pool, or removing the " +
+      "rule) and needs a step-up, which this write path cannot ask for: make the change as an admin in RegulAIt",
+  );
+}
+
+/**
+ * B4S-05: removing a rate limit or a data-scope rule removes a restriction —
+ * the same `settings_relax` step-up as removing an approval rule, bound to
+ * `{ruleId, values: {deleted: true}}`.
+ */
+export async function assertRuleRemovalStepUp(
+  db: Q,
+  args: { ruleId: string; stepUp?: ApprovalRuleStepUp | null },
+): Promise<void> {
+  return requireRuleStepUp(
+    db,
+    { ruleId: args.ruleId, values: { deleted: true } },
+    args.stepUp,
+    "removing a governance rule removes the restriction it enforces and needs a step-up, which this write path " +
+      "cannot ask for: make the change as an admin in RegulAIt",
+  );
+}
+
+/** the step-up a rule write that loosens a protection carries: the route's (`stepUp`), or a fail-closed refusal */
+async function requireRuleStepUp(
+  db: Q,
+  facts: { ruleId: string; values: Record<string, unknown> },
+  stepUp: ApprovalRuleStepUp | null | undefined,
+  detail: string,
+): Promise<void> {
+  if (stepUp) return stepUp(facts);
   // no request in hand: decide from the stored policy (the strict default when the singleton does not exist yet)
   const [org] = await db
     .select({ mode: orgSettings.stepUpMode, actions: orgSettings.stepUpActions })
@@ -328,8 +361,6 @@ export async function assertApprovalRuleLooseningStepUp(
     actionKind: "settings_relax",
     methods: [],
     action: { kind: "settings_relax", body: facts },
-    detail:
-      "this change loosens dual control on an approval rule (a lower quorum, a wider approver pool, or removing the " +
-      "rule) and needs a step-up, which this write path cannot ask for: make the change as an admin in RegulAIt",
+    detail,
   });
 }

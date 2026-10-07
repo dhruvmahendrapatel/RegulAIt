@@ -516,6 +516,22 @@ export function ownerChangeStepUpArgs(objectType: string, objectId: string, owne
 }
 
 /**
+ * B4S-05: lifting a revocation (deleting it) or narrowing one from `full` to
+ * `read_only` gives an entitlement back — a `settings_relax` step-up bound to
+ * which revocation, of which kind, for whom, and (for a scope change) to what.
+ */
+export function revocationLiftStepUp(
+  kind: "mcp" | "agent" | "connector",
+  revocationId: string,
+  userId?: string,
+): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { values: { revocationLifted: { kind, revocationId, ...(userId ? { userId } : {}) } } } };
+}
+export function revocationScopeStepUp(kind: "mcp" | "connectors", revocationId: string, scope: string): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { values: { revocationScope: { kind, revocationId, scope } } } };
+}
+
+/**
  * The same check for a writer that has no reply in hand (it returns the
  * refusal for its caller to send): null = proceed, the grant (if one was
  * needed) spent.

@@ -10,6 +10,9 @@
  *    schema and the strict-default constants, and relaxing an identity default,
  *    the approval TTL or an API-key lifetime through PUT /v1/org/settings needs
  *    a settings_relax step-up (tightening needs none).
+ *  - B4S-05: deleting ANY governance rule (rate limit, data scope — approval
+ *    rules already were) and lifting a revocation (MCP, agent, connector) or
+ *    narrowing one to read_only needs a settings_relax step-up.
  *
  * Runs on its OWN scratch database (prefix `b4s2_`), dropped in afterAll
  * (M-068), so the global state it needs (which admins have a step-up method,
@@ -23,13 +26,20 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import {
+  agentRevocations,
+  agents,
   auditLog,
   authSessions,
+  connectorRevocations,
+  connectors,
   createDb,
   desc,
   eq,
   federatedIdentities,
   mcpServers,
+  rateLimits,
+  dataScopeRules,
+  revocations,
   runMigrations,
   samlProviders,
   sql,
@@ -376,5 +386,95 @@ describe("B4S-04: relaxing ANY strict org setting needs a settings_relax step-up
       });
       expect(r.statusCode, r.body).toBe(200);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B4S-05 — removing a rule or lifting a revocation needs a step-up
+// ---------------------------------------------------------------------------
+
+describe("B4S-05: deleting a governance rule or lifting a revocation is a relaxation", () => {
+  let admin: Person;
+  let subject: Person;
+  let server: string;
+  beforeAll(async () => {
+    admin = await mkPerson("rules-admin", true);
+    await enrolPasskey(admin);
+    subject = await mkPerson("rules-subject", false);
+    server = await mkServer("rules");
+  });
+
+  /** an API key never steps up: refused with no methods, nothing changed */
+  async function keyRefused(method: Method, url: string, payload?: unknown) {
+    const r = await app.inject({ method, url, headers: admin.key, ...(payload !== undefined ? { payload: payload as object } : {}) });
+    expect(r.statusCode, r.body).toBe(403);
+    expect(r.json()).toMatchObject({ error: "step_up_required", methods: [] });
+  }
+
+  it.each(["rate-limits", "data-scopes"] as const)("DELETE /v1/rules/%s/:id needs a step-up bound to the rule; the rule stays until then", async (kind) => {
+    const body =
+      kind === "rate-limits"
+        ? { scope: "user", userId: subject.id, serverId: server, maxCalls: 5, windowSeconds: 60 }
+        : { scope: "user", userId: subject.id, serverId: server, argPath: "repo", allowedValues: ["a"] };
+    const created = await as(admin, "POST", `/v1/rules/${kind}`, body);
+    expect(created.statusCode, created.body).toBe(201);
+    const id = created.json().id as string;
+    const table = kind === "rate-limits" ? rateLimits : dataScopeRules;
+    await keyRefused("DELETE", `/v1/rules/${kind}/${id}`);
+    const refused = await as(admin, "DELETE", `/v1/rules/${kind}/${id}`);
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { ruleId: id, values: { deleted: true } } });
+    expect(await db.select().from(table).where(eq(table.id, id))).toHaveLength(1);
+    const ok = await as(admin, "DELETE", `/v1/rules/${kind}/${id}`, undefined, { [STEP_UP_HEADER]: await grantFor(admin, refused.json().action) });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await db.select().from(table).where(eq(table.id, id))).toHaveLength(0);
+  });
+
+  it("an unknown rule is still 404 (no step-up asked for nothing)", async () => {
+    const r = await as(admin, "DELETE", `/v1/rules/rate-limits/${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`);
+    expect(r.statusCode, r.body).toBe(404);
+  });
+
+  it("lifting an MCP revocation needs a step-up bound to it", async () => {
+    const [rev] = await db.insert(revocations).values({ userId: subject.id, serverId: server, toolName: null }).returning({ id: revocations.id });
+    await keyRefused("DELETE", `/v1/revocations/${rev!.id}`);
+    const refused = await as(admin, "DELETE", `/v1/revocations/${rev!.id}`);
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().action.body).toEqual({ values: { revocationLifted: { kind: "mcp", revocationId: rev!.id } } });
+    expect(await db.select().from(revocations).where(eq(revocations.id, rev!.id))).toHaveLength(1);
+    const ok = await as(admin, "DELETE", `/v1/revocations/${rev!.id}`, undefined, { [STEP_UP_HEADER]: await grantFor(admin, refused.json().action) });
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it("lifting an agent or a connector revocation needs a step-up bound to it and to the user", async () => {
+    const [agent] = await db.insert(agents).values({ name: `b4s2-agent-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+    const [conn] = await db.insert(connectors).values({ name: `b4s2-conn-${RUN}`, kind: "crm" }).returning({ id: connectors.id });
+    const [ar] = await db.insert(agentRevocations).values({ userId: subject.id, agentId: agent!.id }).returning({ id: agentRevocations.id });
+    const [cr] = await db.insert(connectorRevocations).values({ userId: subject.id, connectorId: conn!.id }).returning({ id: connectorRevocations.id });
+    for (const [kind, id, path] of [
+      ["agent", ar!.id, `/v1/users/${subject.id}/revocations/agents/${ar!.id}`],
+      ["connector", cr!.id, `/v1/users/${subject.id}/revocations/connectors/${cr!.id}`],
+    ] as const) {
+      await keyRefused("DELETE", path);
+      const refused = await as(admin, "DELETE", path);
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action.body).toEqual({ values: { revocationLifted: { kind, revocationId: id, userId: subject.id } } });
+      const ok = await as(admin, "DELETE", path, undefined, { [STEP_UP_HEADER]: await grantFor(admin, refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+    }
+    expect(await db.select().from(agentRevocations).where(eq(agentRevocations.id, ar!.id))).toHaveLength(0);
+  });
+
+  it("narrowing a revocation from full to read_only needs a step-up; restoring full needs none", async () => {
+    const [rev] = await db.insert(revocations).values({ userId: subject.id, serverId: server, toolName: null }).returning({ id: revocations.id });
+    const url = `/v1/revocations/mcp/${rev!.id}/scope`;
+    await keyRefused("PATCH", url, { scope: "read_only" });
+    const refused = await as(admin, "PATCH", url, { scope: "read_only" });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().action.body).toEqual({ values: { revocationScope: { kind: "mcp", revocationId: rev!.id, scope: "read_only" } } });
+    const ok = await as(admin, "PATCH", url, { scope: "read_only" }, { [STEP_UP_HEADER]: await grantFor(admin, refused.json().action) });
+    expect(ok.statusCode, ok.body).toBe(200);
+    const back = await as(admin, "PATCH", url, { scope: "full" });
+    expect(back.statusCode, back.body).toBe(200);
   });
 });

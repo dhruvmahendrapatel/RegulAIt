@@ -9,7 +9,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { withStepUp } from "../../../stepup/stepUp";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { RefusalGuidance } from "../../../api/refusals";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import UserPasskeysPanel from "./UserPasskeysPanel";
@@ -568,8 +568,11 @@ function RevocationScopeCell(props: {
         onChange={(e) => {
           const next = e.target.value as RevocationScope;
           void act.run(
+            // B4S-05: narrowing a revocation to read_only gives reads back (a settings_relax step-up)
             () =>
-              api.patch(`/v1/revocations/${props.kind}/${props.revocationId}/scope`, { scope: next }),
+              withStepUp((h) =>
+                stepUpApi.patch(`/v1/revocations/${props.kind}/${props.revocationId}/scope`, { scope: next }, h),
+              ),
             next === "read_only"
               ? "Narrowed to read_only — writes stay denied, reads are allowed again"
               : "Restored to full — every tool/operation denied",
@@ -685,7 +688,10 @@ function OverridesPanel(props: { userId: string }) {
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => void act.run(() => api.del(`/v1/revocations/${r.id}`), "Revocation lifted")}
+                onClick={() =>
+                  // B4S-05: lifting a revocation gives an entitlement back (a settings_relax step-up)
+                  void act.run(() => withStepUp((h) => api.delWithHeaders(`/v1/revocations/${r.id}`, h)), "Revocation lifted")
+                }
               >
                 lift
               </Button>
@@ -745,7 +751,7 @@ function OverridesPanel(props: { userId: string }) {
                     variant="ghost"
                     onClick={() =>
                       void act.run(
-                        () => api.del(`/v1/users/${props.userId}/revocations/agents/${r.id}`),
+                        () => withStepUp((h) => api.delWithHeaders(`/v1/users/${props.userId}/revocations/agents/${r.id}`, h)),
                         "Agent revocation lifted",
                       )
                     }
@@ -814,7 +820,7 @@ function OverridesPanel(props: { userId: string }) {
                     variant="ghost"
                     onClick={() =>
                       void act.run(
-                        () => api.del(`/v1/users/${props.userId}/revocations/connectors/${r.id}`),
+                        () => withStepUp((h) => api.delWithHeaders(`/v1/users/${props.userId}/revocations/connectors/${r.id}`, h)),
                         "Connector revocation lifted",
                       )
                     }

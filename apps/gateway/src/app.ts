@@ -433,7 +433,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, registerStepUpRoutes, requireStepUp } from "./step-up.js";
+import { approvalRuleStepUp, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, isApproverRole } from "./approval-pool.js";
 import {
   decisionView,
@@ -2473,6 +2473,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/revocations/:revocationId", async (req, reply) => {
     const { revocationId } = z.object({ revocationId: z.string().uuid() }).parse(req.params);
+    const [existing] = await db.select({ id: revocations.id }).from(revocations).where(eq(revocations.id, revocationId));
+    if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: lifting a revocation gives an entitlement back — settings_relax
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("mcp", revocationId))).ok) return reply;
     const deleted = await db
       .delete(revocations)
       .where(eq(revocations.id, revocationId))
@@ -2526,6 +2530,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/users/:userId/revocations/agents/:revocationId", async (req, reply) => {
     const { userId, revocationId } = revocationIdParams.parse(req.params);
+    const [existing] = await db
+      .select({ id: agentRevocations.id })
+      .from(agentRevocations)
+      .where(and(eq(agentRevocations.id, revocationId), eq(agentRevocations.userId, userId)));
+    if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: lifting a revocation gives an entitlement back — settings_relax
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("agent", revocationId, userId))).ok) return reply;
     const deleted = await db
       .delete(agentRevocations)
       .where(and(eq(agentRevocations.id, revocationId), eq(agentRevocations.userId, userId)))
@@ -2567,6 +2578,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/users/:userId/revocations/connectors/:revocationId", async (req, reply) => {
     const { userId, revocationId } = revocationIdParams.parse(req.params);
+    const [existing] = await db
+      .select({ id: connectorRevocations.id })
+      .from(connectorRevocations)
+      .where(and(eq(connectorRevocations.id, revocationId), eq(connectorRevocations.userId, userId)));
+    if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: lifting a revocation gives an entitlement back — settings_relax
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("connector", revocationId, userId))).ok) return reply;
     const deleted = await db
       .delete(connectorRevocations)
       .where(
@@ -3080,7 +3098,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       artifactId: ruleId,
       actorUserId: req.authCtx.userId ?? null,
       routeLabel: `DELETE /v1/rules/${kind}/:ruleId`,
-      // ADR-0180: removing an approval rule removes its approval requirement
+      // ADR-0180 / B4S-05: removing any governance rule removes a restriction
+      // (an approval requirement, a rate limit, a data scope): settings_relax
       stepUp: approvalRuleStepUp(db, req),
     });
     if (!res.ok) return reply.status(res.status).send({ error: res.error, detail: res.detail });

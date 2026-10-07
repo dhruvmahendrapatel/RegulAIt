@@ -71,7 +71,14 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { breakGlassChange, breakGlassStepUpRefusal, settingsRelaxStepUpRefusal, stepUpRefusal } from "./step-up.js";
+import {
+  breakGlassChange,
+  breakGlassStepUpRefusal,
+  requireStepUp,
+  revocationScopeStepUp,
+  settingsRelaxStepUpRefusal,
+  stepUpRefusal,
+} from "./step-up.js";
 
 export type { OrgSettingsRow };
 
@@ -1000,6 +1007,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     const table = REVOCATION_TABLES[kind];
     const [before] = await db.select().from(table).where(eq(table.id, revocationId));
     if (!before) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: narrowing a total revocation to read_only gives reads back — settings_relax
+    if (before.scope === "full" && body.scope === "read_only") {
+      if (!(await requireStepUp(db, req, reply, revocationScopeStepUp(kind, revocationId, body.scope))).ok) return reply;
+    }
     const [row] = await db
       .update(table)
       .set({ scope: body.scope })

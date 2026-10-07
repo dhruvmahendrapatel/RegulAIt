@@ -116,6 +116,7 @@ const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 import {
   approvalRuleShape,
   assertApprovalRuleLooseningStepUp,
+  assertRuleRemovalStepUp,
   assertApprovalRuleWritable,
   type ApprovalRuleStepUp,
 } from "./approval-pool.js";
@@ -758,7 +759,8 @@ export async function deleteRuleArtifact(
     actorUserId: string | null;
     /** names the route in the ledger and the audit row */
     routeLabel: string;
-    /** ADR-0180: removing an approval rule removes its approval requirement — the route's settings_relax step-up */
+    /** ADR-0180 / B4S-05: removing any governance rule (an approval rule's requirement, a rate limit, a data
+     * scope) removes a restriction — the route's settings_relax step-up */
     stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleDeleteSuccess | RuleDeleteRefusal> {
@@ -791,6 +793,9 @@ export async function deleteRuleArtifact(
         after: null,
         stepUp: args.stepUp,
       });
+    } else {
+      // B4S-05: removing a rate limit or a data-scope rule removes a restriction
+      await assertRuleRemovalStepUp(tx, { ruleId: args.artifactId, stepUp: args.stepUp });
     }
     const pointers = versions.filter((v) => v.status === "active" || v.status === "canary");
     for (const v of pointers) {
