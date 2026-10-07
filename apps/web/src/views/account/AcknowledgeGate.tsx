@@ -13,7 +13,7 @@
  * unchanged. Copy follows Article 4 as amended by Regulation (EU) 2026/1744 ("support the development of AI
  * literacy"); it never claims to guarantee any level of literacy.
  */
-import { useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
@@ -219,7 +219,10 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
   const q = useMyLiteracy(enabled);
   const [, rerender] = useState(0);
   const data = enabled ? (q.data ?? null) : null;
-  if (!data || data.exempt || data.gateMode === "off") return <>{props.children}</>;
+  // Preserve the page's identity when the async posture adds banner slots.
+  // Without a key, moving children from slot 0 to slot 2 remounts live forms.
+  const content = <Fragment key="page">{props.children}</Fragment>;
+  if (!data || data.exempt || data.gateMode === "off") return <>{content}</>;
 
   const pending = data.required && !data.current;
   const soon = data.documents.filter((d) => d.state === "current" && d.expiresSoon);
@@ -279,7 +282,7 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
           <Link to="/account?section=ai-policies" style={{ textDecoration: "underline" }}>Acknowledge again</Link>
         </div>
       )}
-      {props.children}
+      {content}
     </>
   );
 }
