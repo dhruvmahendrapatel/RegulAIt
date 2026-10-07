@@ -121,11 +121,20 @@ export function IntakeResubmit(props: { useCaseId: string }) {
   const record = `/admin/governance/use-cases/${props.useCaseId}`;
   const d = detail.data;
   const allowed = Boolean(d?.resubmission?.allowed) && d?.useCase.status === "needs_info";
+  // This local baseline belongs to the mounted editing session, not to the
+  // query cache. Session refresh clears that cache; temporarily missing data
+  // must not unmount the form and silently erase its unsaved work.
+  const opened = useRef<{ useCaseId: string; detail: Detail } | null>(null);
+  if (opened.current?.useCaseId !== props.useCaseId) opened.current = null;
+  if (!opened.current && d && allowed) opened.current = { useCaseId: props.useCaseId, detail: d };
+  if (opened.current) {
+    return <ResubmitForm useCaseId={props.useCaseId} detail={opened.current.detail} record={record}
+      recordReady={allowed && !detail.error} refreshing={detail.isFetching} onRefresh={() => void detail.refetch()} />;
+  }
+
   return (
     <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
-      {d && allowed ? (
-        <ResubmitForm useCaseId={props.useCaseId} detail={d} record={record} />
-      ) : d ? (
+      {d ? (
         <>
           <PageHeader title="Update and resubmit" sub="Only a use case sent back for information can be resubmitted." />
           <Card>
@@ -140,7 +149,7 @@ export function IntakeResubmit(props: { useCaseId: string }) {
   );
 }
 
-function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string }) {
+function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string; recordReady: boolean; refreshing: boolean; onRefresh: () => void }) {
   const { detail: d } = props;
   const resubmission = d.resubmission!;
   const navigate = useNavigate();
@@ -271,6 +280,10 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       setOwnerRefused(true);
       return;
     }
+    if (!props.recordReady) {
+      setError("The current account cannot resubmit until the use-case record is available. Your edits stay on this page.");
+      return;
+    }
     setOwnerRefused(false);
     setBusy(true);
     setError(null);
@@ -309,7 +322,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     step < REVIEW ? (
       <Button variant="primary" disabled={!canContinue} onClick={() => goTo(step + 1)}>Continue</Button>
     ) : (
-      <Button variant="primary" disabled={busy || !answers} onClick={() => void submit()}>{busy ? "Resubmitting…" : "Resubmit for review"}</Button>
+      <Button variant="primary" disabled={busy || !answers || !props.recordReady} onClick={() => void submit()}>{busy ? "Resubmitting…" : "Resubmit for review"}</Button>
     );
 
   return (
@@ -353,6 +366,11 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
           ))}
         </ol>
         <ResubmitDraftLine status={draft.status} dirty={dirty} unsaved={draft.unsaved} />
+        {!props.recordReady && <div role="status">
+          <p>The current account's access to this use case needs checking. Your edits are kept here; resubmission is paused until the record is available.</p>
+          <Button disabled={props.refreshing} onClick={props.onRefresh}>Refresh use-case record</Button>
+        </div>}
+
 
         {step === DESCRIBE && (
           <Card title={<StageHeading headingRef={stageHeading}>Describe the use case</StageHeading>}>
