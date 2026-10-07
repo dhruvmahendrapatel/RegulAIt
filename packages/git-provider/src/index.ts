@@ -19,6 +19,7 @@ import {
   type PullRequestDetails,
   type PullRequestRef,
 } from "./types.js";
+import { scrubSecrets } from "@regulait/shared";
 import { GitLabProvider } from "./gitlab.js";
 import { BitbucketProvider } from "./bitbucket.js";
 import { AzureDevOpsProvider } from "./azure-devops.js";
@@ -97,7 +98,8 @@ export class GitHubProvider implements GitProvider {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (res.status >= 400) {
-      throw new GitProviderError(`github ${method} ${path} failed: ${await res.text()}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the token the request carried
+      throw new GitProviderError(`github ${method} ${path} failed: ${scrubSecrets(await res.text(), [this.token])}`, res.status);
     }
     return res.json();
   }

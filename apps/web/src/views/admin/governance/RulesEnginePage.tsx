@@ -508,12 +508,13 @@ function RuleForm(props: {
       style={{ marginBottom: "var(--s2)" }}
       onSubmit={(e) => {
         e.preventDefault();
+        if (act.busy) return;
         void act.run(() => props.onSubmit(s, extra), "Rule added");
       }}
     >
       <SubjectFields s={s} set={set} users={props.users} roles={props.roles} teams={props.teams} servers={props.servers} />
       {props.extra(s, extra, setExtra)}
-      <Button type="submit" size="sm" variant="primary" disabled={act.busy}>
+      <Button type="submit" size="sm" variant="primary" aria-disabled={act.busy}>
         {props.submitLabel}
       </Button>
       {act.error && (

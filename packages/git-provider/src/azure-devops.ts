@@ -43,6 +43,7 @@ import {
   type PullRequestRef,
   type PullRequestState,
 } from "./types.js";
+import { scrubSecrets } from "@regulait/shared";
 import { trimTrailingSlashes } from "./url.js";
 
 export interface AzureDevOpsAdapterOptions {
@@ -97,6 +98,8 @@ export class AzureDevOpsProvider implements GitProvider {
   readonly kind = "azure_devops" as const;
   private readonly base: string;
   private readonly auth: string;
+  /** X19-S01: every form of the PAT the request carries, for the error scrub */
+  private readonly secrets: string[];
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: AzureDevOpsAdapterOptions) {
@@ -106,7 +109,9 @@ export class AzureDevOpsProvider implements GitProvider {
       );
     }
     this.base = trimTrailingSlashes(opts.baseUrl);
-    this.auth = `Basic ${Buffer.from(`:${opts.token}`).toString("base64")}`;
+    const encoded = Buffer.from(`:${opts.token}`).toString("base64");
+    this.auth = `Basic ${encoded}`;
+    this.secrets = [opts.token, encoded];
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
 
@@ -143,7 +148,7 @@ export class AzureDevOpsProvider implements GitProvider {
     const text = await res.text();
     if (res.status >= 400) {
       throw new GitProviderError(
-        `azure_devops ${method} ${path} failed (${res.status}): ${text}${hintFor(res.status)}`,
+        `azure_devops ${method} ${path} failed (${res.status}): ${scrubSecrets(text, this.secrets)}${hintFor(res.status)}`,
         res.status,
       );
     }

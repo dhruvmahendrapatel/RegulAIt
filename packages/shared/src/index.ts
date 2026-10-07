@@ -538,6 +538,8 @@ export {
 // local paths, exfiltration-shaped directives, hidden/bidi Unicode).
 // ADR-0176 — the one constant-time comparison (on node:crypto).
 export { constantTimeEqual } from "./constant-time.js";
+// X19-S01 — the one scrub of known credentials from upstream error material.
+export { scrubSecrets, secretRepresentations } from "./scrub-secrets.js";
 
 export {
   MCP_ADMISSION_SEVERITIES,

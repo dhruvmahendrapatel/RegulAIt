@@ -1,7 +1,7 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ConnectorProviderError,
   ConnectorRateLimitError,
@@ -1734,5 +1734,240 @@ describe("outlook Graph error detail (ADR-0183 batch 2 review L2)", () => {
     const d = graphErrorDetail("<html>" + "y".repeat(5000), 500, []);
     expect(d.startsWith("HTTP 500: <html>")).toBe(true);
     expect(d.length).toBeLessThanOrEqual(OUTLOOK_ERROR_DETAIL_MAX + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// X19-S01 — a reflected credential never escapes the scrub, in ANY encoding.
+// Synthetic secrets only: each carries `"`, `\`, `+`, `/`, `=` and a space, so
+// its raw, JSON-escaped, URL-encoded and form-encoded forms all differ.
+// ---------------------------------------------------------------------------
+
+const SYN_SECRET = 'syn"th\\etic+secret/=value x';
+const SYN_TOKEN = 'tok"en\\with+special/=chars y';
+
+/** every way the secret could be read back out of a string we emit */
+function leakedForms(text: string, secret: string): string[] {
+  const forms = new Set([
+    secret,
+    JSON.stringify(secret).slice(1, -1),
+    encodeURIComponent(secret),
+    encodeURIComponent(secret).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+    new URLSearchParams([["k", secret]]).toString().slice(2),
+  ]);
+  return [...forms].filter((f) => text.includes(f));
+}
+function expectNoSecret(text: string, secret: string) {
+  expect(leakedForms(text, secret), text).toEqual([]);
+  // nor a recognisable fragment of it (a cap that cut it in half, say)
+  expect(text).not.toMatch(/etic|ith\+spec|with%2Bspec/i);
+}
+/** every string inside a JSON value, keys included */
+function jsonStrings(v: unknown): string[] {
+  if (typeof v === "string") return [v];
+  if (Array.isArray(v)) return v.flatMap(jsonStrings);
+  if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => [k, ...jsonStrings(x)]);
+  return [];
+}
+async function providerError(p: Promise<unknown>): Promise<ConnectorProviderError> {
+  try {
+    await p;
+  } catch (err) {
+    expect(err).toBeInstanceOf(ConnectorProviderError);
+    return err as ConnectorProviderError;
+  }
+  throw new Error("expected a ConnectorProviderError");
+}
+
+describe("X19-S01: outlook — a reflected client secret or token is scrubbed in the detail AND the log", () => {
+  beforeEach(() => clearOutlookTokenCache());
+  afterEach(() => vi.restoreAllMocks());
+
+  const outlookFor = (url: string) =>
+    new OutlookConnectorProvider({
+      credential: parseOutlookCredential(
+        JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), appPassword: SYN_SECRET, loginBaseUrl: url }),
+      ),
+      baseUrl: url,
+    });
+  const send = (o: OutlookConnectorProvider) =>
+    o.invoke({ operation: "write", object: "ana@acme.com", payload: { subject: "s" } });
+
+  it("(a) a token endpoint whose error_description reflects the decoded client secret", async () => {
+    await withUpstream(
+      (req, res) => {
+        const submitted = new URLSearchParams(req.body).get("client_secret") ?? "";
+        reply(res, 401, {
+          error: "invalid_client",
+          error_description: `AADSTS7000215: Invalid client secret provided: ${submitted}`,
+        });
+      },
+      async (up) => {
+        const err = await providerError(send(outlookFor(up.url)));
+        // the upstream status and its safe error code survive
+        expect(err.status).toBe(401);
+        expect(err.message).toContain("HTTP 401: invalid_client");
+        expect(err.message).toContain("AADSTS7000215");
+        expectNoSecret(err.message, SYN_SECRET);
+        // positive control: the secret really was on that wire, form-encoded
+        expect(up.requests[0]!.body).toContain(new URLSearchParams([["client_secret", SYN_SECRET]]).toString());
+        expect(up.requests.some((r) => r.url.includes("/sendMail"))).toBe(false);
+      },
+    );
+  });
+
+  it("(c) a token endpoint that reflects the raw form-encoded request body (either hex case)", async () => {
+    for (const lower of [false, true]) {
+      clearOutlookTokenCache();
+      await withUpstream(
+        (req, res) => {
+          const body = lower ? req.body.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()) : req.body;
+          // the bare encoded value too, with no `client_secret=` key to give it away
+          const value = /client_secret=([^&]*)/.exec(body)?.[1] ?? "";
+          reply(res, 400, { error: "invalid_request", error_description: `bad value ${value}; could not parse: ${body}` });
+        },
+        async (up) => {
+          const err = await providerError(send(outlookFor(up.url)));
+          expect(err.status).toBe(400);
+          expect(err.message).toContain("invalid_request");
+          expectNoSecret(err.message, SYN_SECRET);
+        },
+      );
+    }
+  });
+
+  it("(b) a Graph error whose JSON body reflects the secret (escaped, and \\u-escaped) and the token", async () => {
+    const escapedEveryChar = [...SYN_SECRET].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    const bodies = [
+      JSON.stringify({ error: { code: "ErrorInvalidRequest", message: `echo ${SYN_SECRET} with minted-jwt` } }),
+      `{"error":{"code":"ErrorInvalidRequest","message":"echo ${escapedEveryChar}","raw":"${JSON.stringify(SYN_SECRET).slice(1, -1)}"}}`,
+    ];
+    for (const body of bodies) {
+      clearOutlookTokenCache();
+      const logged: string[] = [];
+      vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      });
+      await withUpstream(
+        teamsUpstream((_req, res) => {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(body);
+        }),
+        async (up) => {
+          const err = await providerError(send(outlookFor(up.url)));
+          expect(err.status).toBe(400);
+          expect(err.message).toContain("HTTP 400 ErrorInvalidRequest");
+          expectNoSecret(err.message, SYN_SECRET);
+          expect(err.message).not.toContain("minted-jwt");
+        },
+      );
+      vi.restoreAllMocks();
+      expect(logged.length).toBe(1);
+      const line = logged[0]!;
+      expect(line).toMatch(/^\[outlook\] sendMail HTTP 400: /);
+      expectNoSecret(line, SYN_SECRET);
+      expect(line).not.toContain("minted-jwt");
+      // the logged body is still JSON, and parsing it cannot recover the secret
+      const parsed = JSON.parse(line.replace(/^\[outlook\] sendMail HTTP 400: /, "")) as unknown;
+      const strings = jsonStrings(parsed);
+      expect(strings).toContain("ErrorInvalidRequest");
+      for (const str of strings) {
+        expect(str).not.toContain(SYN_SECRET);
+        expect(str).not.toContain("minted-jwt");
+      }
+    }
+  });
+});
+
+describe("X19-S01: every adapter that relays upstream error text scrubs the credential it sent", () => {
+  /** an upstream that reflects whatever credential it was given, JSON-escaped */
+  const reflect = (status: number, shape: (auth: string) => unknown) => (req: CapturedRequest, res: ServerResponse) => {
+    if (req.url.includes("/oauth2/v2.0/token")) {
+      reply(res, 200, { token_type: "Bearer", expires_in: 3600, access_token: SYN_TOKEN });
+      return;
+    }
+    const auth = String(req.headers.authorization ?? "");
+    reply(res, status, shape(auth.replace(/^(Bearer|Basic) /, "")));
+  };
+  const JIRA_TOKEN = `ana@acme.test:${SYN_TOKEN}`;
+  const cases: Array<{
+    name: string;
+    secret: string;
+    shape: (auth: string) => unknown;
+    call: (url: string) => Promise<unknown>;
+  }> = [
+    {
+      name: "generic",
+      secret: SYN_TOKEN,
+      shape: (a) => ({ echoed: a }),
+      call: (url) => new GenericHttpConnectorProvider("generic", { baseUrl: url, token: SYN_TOKEN }).invoke({ operation: "read" }),
+    },
+    {
+      name: "webhook",
+      secret: SYN_TOKEN,
+      shape: (a) => ({ echoed: a }),
+      call: (url) => new WebhookConnectorProvider({ baseUrl: url, token: SYN_TOKEN }).invoke({ operation: "write", payload: {} }),
+    },
+    {
+      name: "slack",
+      secret: SYN_TOKEN,
+      shape: (a) => ({ ok: false, error: a }),
+      call: (url) => new SlackConnectorProvider({ token: SYN_TOKEN, baseUrl: url }).invoke({ operation: "read" }),
+    },
+    {
+      name: "github",
+      secret: SYN_TOKEN,
+      shape: (a) => ({ message: `Bad credentials: ${a}` }),
+      call: (url) => new GitHubConnectorProvider({ token: SYN_TOKEN, baseUrl: url }).invoke({ operation: "read" }),
+    },
+    {
+      name: "jira",
+      secret: SYN_TOKEN,
+      shape: (a) => ({ errorMessages: [`bad auth ${a} = ${Buffer.from(a, "base64").toString("utf8")}`] }),
+      call: (url) => new JiraConnectorProvider({ baseUrl: url, token: JIRA_TOKEN }).invoke({ operation: "read" }),
+    },
+    {
+      name: "teams",
+      secret: SYN_TOKEN,
+      shape: (a) => `upstream proxy says: ${a}`,
+      call: (url) =>
+        new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "app-1111", appPassword: SYN_SECRET, loginBaseUrl: url })),
+          baseUrl: url,
+        }).invoke({ operation: "read", object: CONV }),
+    },
+  ];
+  for (const c of cases) {
+    it(`${c.name}: the relayed upstream text carries no form of the credential, and keeps its status`, async () => {
+      for (const status of [400, 200]) {
+        if (status === 200 && c.name !== "slack") continue; // slack's ok:false envelope rides on a 200
+        await withUpstream(reflect(status === 200 ? 200 : 403, c.shape), async (up) => {
+          const err = await providerError(c.call(up.url));
+          expect(err.status).toBe(c.name === "slack" && status === 200 ? 502 : 403);
+          expect(err.message).toContain("[redacted]");
+          expectNoSecret(err.message, c.secret);
+          if (c.name === "jira") expect(err.message).not.toContain(Buffer.from(JIRA_TOKEN).toString("base64"));
+        });
+      }
+    });
+  }
+
+  it("teams: a token endpoint that reflects the client secret is scrubbed, status kept", async () => {
+    await withUpstream(
+      (req, res) => {
+        const submitted = new URLSearchParams(req.body).get("client_secret") ?? "";
+        reply(res, 401, { error: "invalid_client", error_description: `bad secret ${submitted} in ${req.body}` });
+      },
+      async (up) => {
+        const teams = new TeamsConnectorProvider({
+          credential: parseTeamsCredential(JSON.stringify({ appId: "app-1111", appPassword: SYN_SECRET, loginBaseUrl: up.url })),
+          baseUrl: up.url,
+        });
+        const err = await providerError(teams.invoke({ operation: "read", object: CONV }));
+        expect(err.status).toBe(401);
+        expect(err.message).toContain("HTTP 401: invalid_client");
+        expectNoSecret(err.message, SYN_SECRET);
+      },
+    );
   });
 });

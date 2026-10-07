@@ -679,6 +679,7 @@ function ConfigGeneratorCard() {
         onSubmit={(e) => {
           e.preventDefault();
           setOut(buildSnippet({ client, base, serverId, projectId, model }));
+          toast("Client configuration generated", "success");
           setCopied(false);
         }}
       >
@@ -721,6 +722,7 @@ function ConfigGeneratorCard() {
                 try {
                   await navigator.clipboard.writeText(out.snip);
                   setCopied(true);
+                  toast("Client configuration copied", "success");
                   setTimeout(() => setCopied(false), 1500);
                 } catch {
                   toast("Clipboard unavailable — select the text manually", "error");
