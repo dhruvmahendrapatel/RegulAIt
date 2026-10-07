@@ -34,6 +34,7 @@ import {
   type PullRequestRef,
   type PullRequestState,
 } from "./types.js";
+import { scrubSecrets } from "@regulait/shared";
 import { trimTrailingSlashes } from "./url.js";
 
 export interface BitbucketAdapterOptions {
@@ -82,13 +83,17 @@ export class BitbucketProvider implements GitProvider {
   readonly kind = "bitbucket" as const;
   private readonly base: string;
   private readonly auth: string;
+  /** X19-S01: every form of the credential the request carries, for the error scrub */
+  private readonly secrets: string[];
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: BitbucketAdapterOptions) {
     this.base = trimTrailingSlashes(opts.baseUrl ?? "https://api.bitbucket.org/2.0");
-    this.auth = opts.token.includes(":")
-      ? `Basic ${Buffer.from(opts.token).toString("base64")}`
-      : `Bearer ${opts.token}`;
+    const basic = opts.token.includes(":");
+    const encoded = Buffer.from(opts.token).toString("base64");
+    this.auth = basic ? `Basic ${encoded}` : `Bearer ${opts.token}`;
+    // the whole token, the app password alone, and the Basic header value
+    this.secrets = basic ? [opts.token, opts.token.slice(opts.token.indexOf(":") + 1), encoded] : [opts.token];
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
 
@@ -111,7 +116,7 @@ export class BitbucketProvider implements GitProvider {
     const text = await res.text();
     if (res.status >= 400) {
       throw new GitProviderError(
-        `bitbucket ${method} ${urlOrPath} failed (${res.status}): ${text}${hintFor(res.status)}`,
+        `bitbucket ${method} ${urlOrPath} failed (${res.status}): ${scrubSecrets(text, this.secrets)}${hintFor(res.status)}`,
         res.status,
       );
     }

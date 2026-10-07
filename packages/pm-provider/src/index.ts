@@ -24,6 +24,7 @@
 
 import { createHmac } from "node:crypto";
 import { z } from "zod";
+import { scrubSecrets } from "@regulait/shared";
 import { adfToText, textToAdf } from "./adf.js";
 
 export const PM_PROVIDER_KINDS = [
@@ -330,11 +331,15 @@ export class AzureDevOpsProvider implements PmProvider {
   readonly kind = "azure_devops" as const;
   private readonly base: string;
   private readonly auth: string;
+  /** X19-S01: every form of the PAT the request carries, for the error scrub */
+  private readonly secrets: string[];
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: AdoAdapterOptions) {
     this.base = opts.baseUrl.replace(/\/$/, "");
-    this.auth = `Basic ${Buffer.from(`:${opts.token}`).toString("base64")}`;
+    const encoded = Buffer.from(`:${opts.token}`).toString("base64");
+    this.auth = `Basic ${encoded}`;
+    this.secrets = [opts.token, encoded];
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
 
@@ -354,7 +359,8 @@ export class AzureDevOpsProvider implements PmProvider {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (res.status >= 400) {
-      throw new PmProviderError(`ado ${method} ${path} failed: ${await res.text()}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the credential it was sent
+      throw new PmProviderError(`ado ${method} ${path} failed: ${scrubSecrets(await res.text(), this.secrets)}`, res.status);
     }
     return res.json();
   }
@@ -449,11 +455,15 @@ export class JiraProvider implements PmProvider {
   private readonly base: string;
   private readonly auth: string;
   private readonly api: 2 | 3;
+  /** X19-S01: the whole "email:api-token", the API token alone, the header value */
+  private readonly secrets: string[];
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: JiraAdapterOptions) {
     this.base = opts.baseUrl.replace(/\/$/, "");
-    this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    const encoded = Buffer.from(opts.token).toString("base64");
+    this.auth = `Basic ${encoded}`;
+    this.secrets = [opts.token, opts.token.slice(opts.token.indexOf(":") + 1), encoded];
     this.api = opts.apiVersion ?? 2;
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
@@ -476,7 +486,8 @@ export class JiraProvider implements PmProvider {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (res.status >= 400) {
-      throw new PmProviderError(`jira ${method} ${path} failed: ${await res.text()}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the credential it was sent
+      throw new PmProviderError(`jira ${method} ${path} failed: ${scrubSecrets(await res.text(), this.secrets)}`, res.status);
     }
     const text = await res.text();
     return text ? JSON.parse(text) : null; // Jira returns 204/empty on updates
@@ -593,12 +604,13 @@ export class LinearProvider implements PmProvider {
       body: JSON.stringify({ query, variables }),
     });
     if (res.status >= 400) {
-      throw new PmProviderError(`linear graphql failed: ${await res.text()}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the key it was sent
+      throw new PmProviderError(`linear graphql failed: ${scrubSecrets(await res.text(), [this.token])}`, res.status);
     }
     const payload = (await res.json()) as { data?: T; errors?: Array<{ message?: string }> };
     if (payload.errors?.length) {
       throw new PmProviderError(
-        `linear graphql failed: ${payload.errors.map((e) => e.message).join("; ")}`,
+        `linear graphql failed: ${scrubSecrets(payload.errors.map((e) => e.message).join("; "), [this.token])}`,
       );
     }
     return payload.data as T;
@@ -735,11 +747,14 @@ export class AsanaProvider implements PmProvider {
   readonly kind = "asana" as const;
   private readonly base: string;
   private readonly auth: string;
+  /** X19-S01: the PAT, for the error scrub */
+  private readonly token: string;
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: AsanaAdapterOptions) {
     this.base = (opts.baseUrl ?? ASANA_DEFAULT_BASE).replace(/\/$/, "");
     this.auth = `Bearer ${opts.token}`;
+    this.token = opts.token;
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
 
@@ -754,7 +769,8 @@ export class AsanaProvider implements PmProvider {
       ...(body === undefined ? {} : { body: JSON.stringify({ data: body }) }),
     });
     if (res.status >= 400) {
-      throw new PmProviderError(`asana ${method} ${path} failed: ${await res.text()}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the PAT it was sent
+      throw new PmProviderError(`asana ${method} ${path} failed: ${scrubSecrets(await res.text(), [this.token])}`, res.status);
     }
     const text = await res.text();
     if (!text) return null;
@@ -878,7 +894,8 @@ export class MondayProvider implements PmProvider {
       body: JSON.stringify({ query, variables }),
     });
     if (res.status >= 400) {
-      throw new PmProviderError(`monday graphql failed: ${await res.text()}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the token it was sent
+      throw new PmProviderError(`monday graphql failed: ${scrubSecrets(await res.text(), [this.token])}`, res.status);
     }
     const payload = (await res.json()) as {
       data?: T;
@@ -888,11 +905,11 @@ export class MondayProvider implements PmProvider {
     };
     if (payload.errors?.length) {
       throw new PmProviderError(
-        `monday graphql failed: ${payload.errors.map((e) => e.message).join("; ")}`,
+        `monday graphql failed: ${scrubSecrets(payload.errors.map((e) => e.message).join("; "), [this.token])}`,
       );
     }
     if (payload.error_message) {
-      throw new PmProviderError(`monday graphql failed: ${payload.error_message}`);
+      throw new PmProviderError(`monday graphql failed: ${scrubSecrets(payload.error_message, [this.token])}`);
     }
     return payload.data as T;
   }
@@ -1093,7 +1110,7 @@ export class GenericWebhookProvider implements PmProvider {
     });
     if (res.status < 200 || res.status >= 300) {
       throw new PmProviderError(
-        `generic_webhook POST ${event} failed: ${await res.text()}`,
+        `generic_webhook POST ${event} failed: ${scrubSecrets(await res.text(), [this.token])}`,
         res.status,
       );
     }
