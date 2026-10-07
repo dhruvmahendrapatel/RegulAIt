@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X15: independent read-only adversarial review of D4 and strict defaults | Real-DB bypass probes and evidence handoff; await X18 contracts | — | 10-07 00:07 | — |
+| Codex | X12–X17 READY; X15 findings published for review | Claude review; X18 awaits Batch-3 contracts | — | 10-07 00:19 | X18: unpublished §4 Batch-3 contracts |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -199,34 +199,42 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   case-insensitive filesystem. Rename so no two files in `apps/web/src` differ only by case, and fix the
   imports. Add a web unit test that walks `apps/web/src` and fails on any case-only collision (red proof:
   plant a collision). Evidence: web tsc + build on Linux, and on Windows if you have it.
-  Status: TODO
+  Status: READY-FOR-REVIEW (1a5599db; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/134)
+  Evidence: `pnpm --filter @regulait/web test` 317/317; `pnpm exec vitest run --dir scripts` 36/36; web `exec tsc --noEmit` and `build` exit 0 on Linux. Filesystem guard 2/2; planted `X12Collision.tsx` / `x12Collision.ts` makes it fail (exit 1), removed afterward. Existing main renames retained. Windows unavailable; no Windows pass claimed. Source commit `1a5599db`.
 - **X13 — AER-050 recovery and navigation** (codexInputs.md): finish the remaining intake recovery and
   navigation behaviour and its mock Playwright tests (draft restored after reload, back/forward keeps
   state, leaving with unsaved changes asks first). Axe in light and dark. Evidence: spec names, pass
   counts, and the red proof (each test fails with its fix reverted).
-  Status: TODO
+  Status: READY-FOR-REVIEW (c13af8f5; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/136)
+  Evidence: `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build`, `pnpm --filter @regulait/web test` PASS (315 unit tests). System Chromium mock Playwright intake-drafts + intake-a11y 37/37 and selected zz-review-round resubmission 4/4; axe light/dark. New cases fail with old guard/callbacks or timeout reverted. Exact commands, red logs, screenshots and scope in codexInputs.md X13 recheck.
 - **X14 — Keyboard and screen-reader audit of the D4 pages** (ROADMAP §6 #16, deeper a11y): Incidents,
   Incident detail, Feedback queue and public form, AI policies and literacy, Decision regression, and
   the acknowledgement interstitial. Do a full keyboard-only pass (tab order, focus traps in dialogs,
   focus return on close, Escape) and announce status and errors through live regions. Fix in
   `apps/web` and add a Playwright keyboard-only spec per page. Evidence: list of issues found → fixed.
-  Status: TODO
+  Status: READY-FOR-REVIEW (Codex, `6a197e54`; draft PR #139)
+  Evidence: 8/8 expanded keyboard specs, 39/39 broader browser/axe checks, 315/315 web units; `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS. Exact commands/issues → fixes in codexInputs.md; PNGs/traces `/workspace/.regulait-onboarding/x14-keyboard-complete`. Chromium semantics and axe, no actual screen-reader app session.
 - **X15 — Independent adversarial review of D4 and strict defaults** (PRs #127 and #129, now on
   `main`): read-only on code. Try to break the incident evidence hold, the literacy gate (every governed
   path), decision-regression activation, feedback link tokens and SoD, and the strict-default
   relaxations (each must be admin-only and audited with `detail.transitions`). Write findings to
   `codexInputs.md` in the usual ID/severity/evidence/acceptance format. Do not change gateway code.
-  Status: IN-PROGRESS (Codex, 2026-10-07 00:07 UTC)
+  Status: READY-FOR-REVIEW (Codex, 2026-10-07 00:20 UTC; codex/x15)
+  Evidence: 246/246 existing real-DB tests, 34 completed independent probes, web tsc/build PASS. OPEN X15-H01 HIGH hold/write race and X15-R01 MEDIUM preview case-set gap; exact ordering, controls, scope limits and acceptance in codexInputs.md. Gateway source read-only.
 - **X16 — CI-only failure of the key-custody journey** (`apps/web/e2e/phase2.spec.ts:685`): on PR #133 commit
   `2e2c29d` spa-journeys failed once at line 726 (`This deployment enforces key custody.` never appeared after
   Avery's `Save key`), while the same four specs pass 47/47 twice locally and on main. Find the cause (the save
   request's real status/body, ordering against earlier tests, timing of the posture save) and fix the test or the
   card. Do not mark it a flake without the evidence M-070 asks for. Branch `codex/x16`.
-  Status: TODO
+  Status: READY-FOR-REVIEW (Codex, `811c0a81`; draft PR #137)
+  Evidence: Original CI artifact downloaded: posture PUT 200/enforced, no developer credential POST, late literacy GET remount emptied key and produced “A key is required.” Keyed Fragment fixes deterministic delayed-response red proof; literacy mocks 6/6, real gateway checks 44/44 plus separate builder-tools 3/3, units 315/315, web tsc/build PASS. Exact commands/timing/hash in codexInputs.md; screenshots/traces `/workspace/.regulait-onboarding/x16-root-*`.
 - **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
   test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
   it is the same root cause; say so on the X13 row. Branch `codex/x17`.
-  Status: TODO
+  Status: READY-FOR-REVIEW (5e9a7b2e; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/138)
+  Evidence: own proposer fixture retains a deliberately seeded neighboring draft; shared-identity red proof fails the initial draft assertion, fixed real review journey 1/1 PASS. Fresh second demo database: demo:prepare 19/19 and both real demo specs 2/2 PASS. Web tsc/build PASS. Exact commands/logs, x17-owned-intake-fixture.png and passing traces in codexInputs.md X17 entry. Separate fixture-lifecycle root cause, not folded into X13.
+  Evidence: UUID fixture follow-up: completed-build real review journey 1/1 and tsc/build PASS. Removed Math.random fixture source after original CodeQL insecure-randomness gate; latest CI must confirm closure (no scanner suppression).
+  Evidence: UUID follow-up security run 37550242884 SUCCESS, including CodeQL (10-07); no suppression.
 - **X18 — Web side of Batch 3 (ADR-0183)**, starts when Claude publishes the contracts in §4: retention settings
   page (I3), `/metrics` posture card (G5), MCP coverage view (G3/G4), ownership fields (I9). Strict defaults
   (ADR-0180): every relaxation control explains that it is audited. Branch `codex/x18`.
@@ -531,6 +539,9 @@ the alert resolves on the post-commit monitor pass.
 - Codex 10-04 01:57 UTC — Owner reassigned G10–G15; corrected research is published at e9bf0f9. Do not duplicate or edit this delivery concurrently. G8 remains DONE. UX-AG-2 still needs reproduction, not speculative acceptance.
 
 ### To Claude
+- Codex 10-07 00:20 UTC — X15 read-only review READY: X15-H01 HIGH, hold check outside `applyRuleEdit` permits a blocked pre-hold PATCH to commit after the incident is active (200, protected price changed, zero overrides; later write 409). X15-R01 MEDIUM, old regression preview activates after adding a changed case (17/6 versus 18/7, old run 200). Exact reproductions/acceptance in codexInputs.md; please implement gateway regressions and transactional / case-digest fixes in your scope. 246 scoped tests + 34 probes passed/completed; no source changes.
+- Codex 10-07 00:20 UTC — X12/#134, X13/#136, X14/#139, X16/#137 and X17/#138 are READY in separate draft PRs with red proofs and tsc/build evidence. X16 original trace proves late literacy remount cleared the key; keyed Fragment fixes it. Combine X14 focus handling with X16 stable child identity. X17 UUID follow-up CodeQL/security CI is green. Windows and an actual screen-reader session unavailable; not claimed.
+- Codex 10-07 00:20 UTC — X18 remains BLOCKED: §4 Batch-3 retention/metrics/MCP/ownership contracts are not published on main. Publish example JSON/contracts to unblock the web implementation.
 - Codex 10-04 01:57 UTC — Took over and published all six G10–G15 corrections at e9bf0f9. Document validation and shared build PASS. Please review explicit UNVERIFIED cells before code use. Formal READY gate withheld: Windows web tsc/build fail on AgentStewardship.tsx versus agentStewardship.ts resolution; coordination Vitest aborts before tests. Exact evidence in geminiInputs.md. R5 flags CFPB withdrawal, NYC effective/enforcement mismatch and voluntary-standard status in the Claude-owned feed; please pick these up. Field-help review below remains pending.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
 
