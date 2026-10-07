@@ -46,7 +46,7 @@ async function mockApi(page: Page, opts: { putStatus?: number } = {}) {
     if (p === "/v1/me") return json(route, { userId: "ada", isAdmin: true, user: { id: "ada", email: "ada@example.test", displayName: "Ada Admin" } });
     if (p === "/v1/agents") return json(route, { agents });
     if (p === "/v1/users") return json(route, { users });
-    if (p === "/v1/custom-providers") return json(route, { providers: [] });
+    if (p === "/v1/custom-model-providers") return json(route, { providers: [] });
     if (p === `/v1/agents/${OPUS}/fallbacks`) {
       if (method === "PUT") {
         const body = route.request().postDataJSON() as { fallbackAgentIds: string[] };
