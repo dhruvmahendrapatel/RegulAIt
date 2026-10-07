@@ -835,6 +835,12 @@ test.describe("ADR-0179: browser Back and leaving the page keep the last edit", 
     await expect(page).toHaveURL(/\/ui\/admin\/use-cases$/);
     await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Typed just before Back, then edited");
 
+    // POP updates the address before React commits the destination. The
+    // reproduced CI trace still shows the intake dialog at this URL: Forward
+    // at that point races the outstanding Back. Wait for the actual page.
+    await expect(page.getByRole("heading", { level: 1, name: "AI registry", exact: true })).toBeVisible();
+    await expect(leave).toHaveCount(0);
+
     await page.goForward();
     await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
     await expect(page.getByText(/You have a saved draft of “Typed just before Back, then edited”/)).toBeVisible();

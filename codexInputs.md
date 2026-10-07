@@ -4,6 +4,14 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X13 Forward CI follow-up — 2026-10-07 UTC
+
+CI run [37611645993](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37611645993), shard-2 job112760035386 at `8519ffe5`, failed the browser Back/Stay/Leave/Forward case after calling Forward: expected intake, remained on registry. **Reproduced locally: 1 failed, 14 passed in 15 identical repetitions.** Not labelled a flake. The failing local trace proves POP changed the address to `/ui/admin/use-cases` before React committed the registry: snapshot `before@call@764` (51485.489ms) still contains the intake's “Leave this registration?” dialog, and `before@call@768` (51505.952ms) still references that same rendered page when Forward is called. The registry finishes rendering in `after@call@768`, after the premature Forward.
+
+The test now waits for the actual **AI registry** heading and disappearance of the intake dialog before Forward, retaining its draft-save and exact recovered-title assertions. No extra sleep or product history entries. **15/15 identical repetitions PASS** with that observable destination wait. The prior scoped 45/45 mocks, 328/328 web units, builds and real journeys remain the product-change baseline; this follow-up changes test synchronisation only.
+
+Evidence: `/workspace/.regulait-onboarding/x13-forward-repeat-correct{,.log}` (red repeat9 trace), `x13-forward-final{,.log}` (15 green traces). Local follow-up worktree uses existing dependencies/compiled TOTP; symlinks are excluded from git. Intermediate attempts with wrong working directory, occupied Vite port and missing compiled TOTP are excluded. CI artifact access still proxy403, but check-run annotations and the independent local reproduction agree on the failing assertion. New CI pending after push.
+
 ## X13 B1/M1 review rework — 2026-10-07 UTC
 
 **B1 fixed:** Edited registrations and resubmissions offer an explicit **Discard and leave** when the latest draft cannot be kept, including oversized and unresolved initial reads. This stops queued/debounced/unmount saves synchronously, leaves without submitting, and preserves an earlier server draft. The ordinary Leave action still waits for a successful save; Stay retains the latest edit. In-flight submission/save disables discarding until the bounded save finishes. The dialog explains exactly which changes are given up.
