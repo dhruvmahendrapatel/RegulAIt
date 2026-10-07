@@ -768,6 +768,12 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.literacyExpirySweep,
         SCHEDULER_JOB_NAMES.alertSlaSweep,
         // ===== end ADR-0182 =====
+        // ===== ADR-0185 I3 =====
+        // Delete memory past its retention, keeping what an open incident
+        // holds. Driven end-to-end in zz-adr0185-a-memory-ownership.test.ts.
+        SCHEDULER_JOB_NAMES.semanticCachePurgeSweep,
+        SCHEDULER_JOB_NAMES.conversationRetentionSweep,
+        // ===== end ADR-0185 I3 =====
       ].sort(),
     );
     for (const def of registry.values()) {

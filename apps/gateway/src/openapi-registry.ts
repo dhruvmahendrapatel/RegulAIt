@@ -408,6 +408,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0082 — the standing agent dependency inventory. Internal: an admin
   // governance read whose aggregation shape is expected to grow.
   "GET /v1/inventory/agents": "internal",
+  "GET /v1/inventory/memory-stores": "internal",
+  "PUT /v1/servers/:serverId/owner": "internal",
+  "PUT /v1/connectors/:connectorId/owner": "internal",
   "GET /v1/inventory/agents/:agentId": "internal",
   "GET /v1/agents/:agentId/card": "internal",
   "GET /v1/inventory/graph": "internal",
@@ -1323,6 +1326,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/projects/:projectId/members/:userId": "projects",
   "PATCH /v1/projects/:projectId/members/:userId": "projects",
   "GET /v1/inventory/agents": "inventory",
+  "GET /v1/inventory/memory-stores": "inventory",
+  "PUT /v1/servers/:serverId/owner": "servers",
+  "PUT /v1/connectors/:connectorId/owner": "connectors",
   "GET /v1/inventory/agents/:agentId": "inventory",
   "GET /v1/agents/:agentId/card": "inventory",
   "GET /v1/inventory/graph": "inventory",

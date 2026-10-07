@@ -147,6 +147,7 @@ import {
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
+import { resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -178,7 +179,7 @@ import type { ArtifactModelProvider } from "@regulait/training-provider";
 import { egressRefusal } from "./egress-guard.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
-import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
+import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
@@ -215,6 +216,8 @@ import {
   traceForRoot,
   type TraceContext,
 } from "./tracing.js";
+// ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
+import { recordDecision } from "./metrics.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -2801,24 +2804,29 @@ export function registerAgentConnectorRoutes(
     if (!existing) return reply.status(404).send({ error: "unknown_agent" });
     // D4 DFX2: the drift baseline is how the incident's model behaviour is evaluated
     if (await agentEvidenceHoldRefused(db, req, reply, agentId, "expected served model")) return reply;
-    const [row] = await db
-      .update(agents)
-      .set({ expectedServedModel: body.expectedServedModel })
-      .where(eq(agents.id, agentId))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "agent",
-      objectId: agentId,
-      detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel },
-      effect: "allow",
-      ruleId: "agent-expected-served-model-set",
-      ruleChain: [],
-      reason:
-        body.expectedServedModel === null
-          ? `expected served model of agent '${existing.name}' cleared — drift is measured against its configured model`
-          : `expected served model of agent '${existing.name}' set to '${body.expectedServedModel}'`,
+    // X15-H01: re-checked inside the write's own transaction, serialised with hold creation
+    const row = await withAgentEvidenceHold(db, req, reply, agentId, "expected served model", async (db) => {
+      const [row] = await db
+        .update(agents)
+        .set({ expectedServedModel: body.expectedServedModel })
+        .where(eq(agents.id, agentId))
+        .returning();
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "agent",
+        objectId: agentId,
+        detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel },
+        effect: "allow",
+        ruleId: "agent-expected-served-model-set",
+        ruleChain: [],
+        reason:
+          body.expectedServedModel === null
+            ? `expected served model of agent '${existing.name}' cleared — drift is measured against its configured model`
+            : `expected served model of agent '${existing.name}' set to '${body.expectedServedModel}'`,
+      });
+      return row;
     });
+    if (row === EVIDENCE_HOLD_REFUSED) return reply;
     return reply.send(row);
   });
 
@@ -2856,7 +2864,9 @@ export function registerAgentConnectorRoutes(
     }
     const patch = updateAgentConfigSchema.parse(req.body ?? {});
     if (await agentEvidenceHoldRefused(db, req, reply, agentId, "model and prices")) return reply;
-    const res = await applyRuleEdit(db, {
+    // X15-H01: the hold is re-checked inside the edit's transaction (applyRuleEdit nests as a savepoint), under
+    // the hold lock, so an incident opened while this edit waits (e.g. on the agent row) cannot begin under it
+    const res = await withAgentEvidenceHold(db, req, reply, agentId, "model and prices", (tx) => applyRuleEdit(tx, {
       artifactType: "agent_config",
       artifactId: agentId,
       patch,
@@ -2865,7 +2875,8 @@ export function registerAgentConnectorRoutes(
       auditObjectType: "agent",
       auditRuleId: "agent-config-edited",
       auditDetail: { phase: "agent-config-edit", patch },
-    });
+    }));
+    if (res === EVIDENCE_HOLD_REFUSED) return reply;
     if (isRuleEditRefusal(res)) {
       return reply.status(res.status).send({ error: res.error, detail: res.detail });
     }
@@ -2893,14 +2904,15 @@ export function registerAgentConnectorRoutes(
     const [existing] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!existing) return reply.status(404).send({ error: "unknown_agent" });
     if (await agentEvidenceHoldRefused(db, req, reply, agentId, "system prompt")) return reply;
-    const created = await newVersion(db, {
+    const created = await withAgentEvidenceHold(db, req, reply, agentId, "system prompt", (tx) => newVersion(tx, {
       artifactType: "agent_system_prompt",
       artifactId: agentId,
       body: { systemPrompt: body.systemPrompt ?? null },
       label: `set via POST /v1/agents/:id/system-prompt`,
       authorUserId: req.authCtx.userId ?? null,
       activate: true,
-    });
+    }));
+    if (created === EVIDENCE_HOLD_REFUSED) return reply;
     const [row] = await db.select().from(agents).where(eq(agents.id, agentId));
     return { ...row!, configVersion: created.version.version };
   });
@@ -3279,31 +3291,35 @@ export function registerAgentConnectorRoutes(
     // Replace the whole ordered chain in one transaction — a partial chain is
     // never a valid intermediate state, and PUT-the-list avoids every
     // position-renumbering bug an incremental API would have.
-    await db.transaction(async (tx) => {
-      await tx.delete(agentFallbacks).where(eq(agentFallbacks.agentId, agentId));
-      if (body.fallbackAgentIds.length > 0) {
-        await tx.insert(agentFallbacks).values(
-          body.fallbackAgentIds.map((fallbackAgentId, position) => ({
-            agentId,
-            fallbackAgentId,
-            position,
-          })),
-        );
-      }
+    // X15-H01: the chain and its audit row in one transaction, the hold re-checked inside it
+    const done = await withAgentEvidenceHold(db, req, reply, agentId, "fallback endpoints", async (db) => {
+      await db.transaction(async (tx) => {
+        await tx.delete(agentFallbacks).where(eq(agentFallbacks.agentId, agentId));
+        if (body.fallbackAgentIds.length > 0) {
+          await tx.insert(agentFallbacks).values(
+            body.fallbackAgentIds.map((fallbackAgentId, position) => ({
+              agentId,
+              fallbackAgentId,
+              position,
+            })),
+          );
+        }
+      });
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "agent",
+        objectId: agentId,
+        detail: { phase: "fallback-chain", chain: body.fallbackAgentIds },
+        effect: "allow",
+        ruleId: "fallback-chain-configured",
+        ruleChain: [],
+        reason:
+          body.fallbackAgentIds.length === 0
+            ? `fallback chain cleared for agent '${agent.name}'`
+            : `fallback chain for agent '${agent.name}' set to ${body.fallbackAgentIds.length} hop(s); each hop is re-entitled per caller at dispatch time`,
+      });
     });
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "agent",
-      objectId: agentId,
-      detail: { phase: "fallback-chain", chain: body.fallbackAgentIds },
-      effect: "allow",
-      ruleId: "fallback-chain-configured",
-      ruleChain: [],
-      reason:
-        body.fallbackAgentIds.length === 0
-          ? `fallback chain cleared for agent '${agent.name}'`
-          : `fallback chain for agent '${agent.name}' set to ${body.fallbackAgentIds.length} hop(s); each hop is re-entitled per caller at dispatch time`,
-    });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return reply.send({ agentId, fallbackAgentIds: body.fallbackAgentIds });
   });
 
@@ -3848,6 +3864,7 @@ export function registerAgentConnectorRoutes(
       ceilingTier,
     });
     const decision = withModelPolicy(kernelDecision, invokeModelPolicy, CHAT_FEATURE, agent);
+    recordDecision({ surface: "agent", effect: decision.effect });
 
     // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
     // The candidate set starts as exactly the agents evaluateAgent would allow
@@ -4889,11 +4906,13 @@ export function registerAgentConnectorRoutes(
       });
       if (refusal) return reply.status(400).send(refusal);
     }
-    const [row] = await db.insert(connectors).values(body).returning();
+    const owner = await resolveRegistrationOwner(db, { actorUserId: req.authCtx.userId, requested: (req.body as { ownerUserId?: unknown } | null)?.ownerUserId });
+    if (!owner.ok) return reply.status(owner.status).send(owner.body);
+    const [row] = await db.insert(connectors).values({ ...body, ownerUserId: owner.ownerUserId }).returning();
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/connectors", async () => ({ connectors: await db.select().from(connectors) }));
+  app.get("/v1/connectors", async () => ({ connectors: await withOwnership(db, await db.select().from(connectors)) }));
 
   // --- connector credentials (admin-only via the global gate) ---
   // One platform credential per connector, encrypted at rest, never returned —

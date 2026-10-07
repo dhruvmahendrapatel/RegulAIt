@@ -113,6 +113,8 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { beginTrace, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
+// ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
+import { recordDecision } from "./metrics.js";
 
 /**
  * ADR-0070 amendment (2026-08-15) — what the governed connector body answers
@@ -397,6 +399,7 @@ export async function executeGovernedConnectorCall(
       roleConnectorGrants: roleConnectorGrantsForUser,
       connectorRevocations: connectorRevocationsForUser,
     });
+    recordDecision({ surface: "connector", effect: decision.effect });
 
     // Order evidence containing routing identity against policy activation.
     const audited = await db.transaction(async (tx) => {

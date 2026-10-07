@@ -122,6 +122,8 @@ import {
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import { activeDelegatorsFor } from "./delegations.js";
+// X15-H01: changing intended agents can widen an incident's evidence hold
+import { lockEvidenceHoldsExclusive } from "./agent-evidence-hold.js";
 // ADR-0058's evaluator, reused rather than reimplemented: a second copy of the
 // collector logic would drift from the one that produces real pack reports.
 import { evaluatePack } from "./compliance-packs.js";
@@ -2009,28 +2011,34 @@ export function registerUseCaseRoutes(
       intakeAnswers = merged;
       if (a.dataCategories !== undefined) dataSensitivity = deriveDataSensitivityFromCategories(a.dataCategories);
     }
-    const [updated] = await db
-      .update(aiUseCases)
-      .set({
-        ...(screening
-          ? {
-              euAiActTier: screening.tier,
-              euAiActReasons: screening.reasons,
-              euAiActRulesetVersion: screening.rulesetVersion,
-            }
-          : {}),
-        ...(intakeAnswers ? { intakeAnswers } : {}),
-        ...(screeningUnsure ? { screeningUnsure } : {}),
-        ...(body.frameworkRationales !== undefined ? { frameworkRationales: body.frameworkRationales } : {}),
-        ...(dataSensitivity ? { dataSensitivity } : {}),
-        ...(body.description !== undefined ? { description: body.description } : {}),
-        ...(body.businessContext !== undefined ? { businessContext: body.businessContext } : {}),
-        ...(body.intendedAgentIds !== undefined ? { intendedAgentIds: body.intendedAgentIds } : {}),
-        ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(aiUseCases.id, useCaseId))
-      .returning();
+    // X15-H01: a use case's intended agents are covered by its incidents' evidence holds, so changing them can
+    // widen a hold — that write takes the hold lock exclusively, as its transaction's first lock
+    const [updated] = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      if (body.intendedAgentIds !== undefined) await lockEvidenceHoldsExclusive(tx);
+      return tx
+          .update(aiUseCases)
+          .set({
+            ...(screening
+              ? {
+                  euAiActTier: screening.tier,
+                  euAiActReasons: screening.reasons,
+                  euAiActRulesetVersion: screening.rulesetVersion,
+                }
+              : {}),
+            ...(intakeAnswers ? { intakeAnswers } : {}),
+            ...(screeningUnsure ? { screeningUnsure } : {}),
+            ...(body.frameworkRationales !== undefined ? { frameworkRationales: body.frameworkRationales } : {}),
+            ...(dataSensitivity ? { dataSensitivity } : {}),
+            ...(body.description !== undefined ? { description: body.description } : {}),
+            ...(body.businessContext !== undefined ? { businessContext: body.businessContext } : {}),
+            ...(body.intendedAgentIds !== undefined ? { intendedAgentIds: body.intendedAgentIds } : {}),
+            ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(aiUseCases.id, useCaseId))
+          .returning();
+    });
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "ai_use_case",

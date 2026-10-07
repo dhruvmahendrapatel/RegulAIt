@@ -61,7 +61,9 @@ import {
   MCP_ADMISSION_HOLD_AT,
   MCP_ADMISSION_SCANNER_VERSION,
   manifestDigest,
+  maxSeverity,
   nextAdmissionState,
+  severityAtLeast,
   scanMcpManifest,
   type McpAdmissionFinding,
   type McpAdmissionMode,
@@ -241,6 +243,42 @@ async function observeRelease(
   };
 }
 
+/**
+ * ADR-0185 — THE RESERVED `mcp:` TOOL-NAME PREFIX. The gateway's own protocol
+ * grants are named `mcp:resources`, `mcp:prompts`, `mcp:completion` and
+ * `mcp:logging` (`MCP_PROTOCOL_GRANT_NAMES`), and they ride the same
+ * `(serverId, toolName)` grant table as tools. An upstream that names a TOOL
+ * `mcp:resources` would therefore line its tool up with a protocol grant (or a
+ * protocol grant up with its tool) — one row granting what the admin thought
+ * was the other. So any upstream tool whose name starts with `mcp:` (any case,
+ * after trimming) is a CRITICAL admission finding: the server is held, and the
+ * hold is not lifted by an earlier clearance — only by the upstream renaming
+ * the tool. Counts and locations only, like every other finding.
+ */
+export const MCP_RESERVED_TOOL_PREFIX = "mcp:";
+export const MCP_RESERVED_PREFIX_RULE = "mcp.reserved_name.prefix";
+
+export function reservedToolNameFindings(tools: readonly ScannableTool[]): McpAdmissionFinding[] {
+  const out: McpAdmissionFinding[] = [];
+  for (const tool of tools) {
+    const name = typeof tool?.name === "string" ? tool.name : "";
+    if (name.trim().toLowerCase().startsWith(MCP_RESERVED_TOOL_PREFIX)) {
+      out.push({ rule: MCP_RESERVED_PREFIX_RULE, severity: "critical", tool: name, where: "name", count: 1 });
+    }
+  }
+  return out;
+}
+
+/** the shared scan plus the reserved-name rule, with severity and the hold
+ * verdict recomputed over the combined findings */
+export function withReservedNameFindings(scan: McpAdmissionScan, tools: readonly ScannableTool[]): McpAdmissionScan {
+  const extra = reservedToolNameFindings(tools);
+  if (extra.length === 0) return scan;
+  const findings = [...scan.findings, ...extra];
+  const severity = maxSeverity(findings);
+  return { ...scan, findings, severity, holds: severityAtLeast(severity, MCP_ADMISSION_HOLD_AT) };
+}
+
 export async function loadAdmissionMode(db: Db): Promise<McpAdmissionMode> {
   const org = await loadOrgSettings(db);
   return org.mcpAdmissionMode;
@@ -371,13 +409,18 @@ async function scanAndPersistManifest(
     .where(eq(mcpServers.id, serverId));
   if (!before) return { mode, scan: null, state: null };
 
-  const scan = scanMcpManifest(tools);
-  const state = nextAdmissionState({
-    scan,
-    previousState: before.admissionState,
-    // a clearance is only ever honoured for the digest it was granted for
-    clearedDigest: before.admissionState === "cleared" ? before.admissionManifestDigest : null,
-  });
+  const scan = withReservedNameFindings(scanMcpManifest(tools), tools);
+  const reserved = scan.findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE);
+  const state = reserved
+    ? // ADR-0185 G3/G4: a reserved name holds the server whatever an admin
+      // cleared before — a clearance cannot make `mcp:resources` a tool
+      "held"
+    : nextAdmissionState({
+        scan,
+        previousState: before.admissionState,
+        // a clearance is only ever honoured for the digest it was granted for
+        clearedDigest: before.admissionState === "cleared" ? before.admissionManifestDigest : null,
+      });
 
   // DRIFT: a server that was clean/cleared and now holds is the event worth
   // filing. Recorded whether the mode enforces or only logs, because the whole
@@ -547,6 +590,18 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
       });
     }
     const findings = (before.admissionFindings as McpAdmissionFinding[] | null) ?? [];
+    // ADR-0185: a reserved `mcp:` tool name is not a judgement call an admin
+    // can override — the name collides with the gateway's own protocol grants
+    // whatever anyone decides. The upstream must rename the tool.
+    if (findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE)) {
+      return reply.status(409).send({
+        error: "reserved_tool_name",
+        detail:
+          `MCP server '${before.name}' declares a tool whose name starts with the reserved ` +
+          `'${MCP_RESERVED_TOOL_PREFIX}' prefix (the gateway's protocol grants use it). That cannot be ` +
+          `cleared; the upstream must rename the tool, and the next scan re-adjudicates it. Nothing was changed.`,
+      });
+    }
     const [row] = await db
       .update(mcpServers)
       .set({

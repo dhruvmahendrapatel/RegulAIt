@@ -4,6 +4,113 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X16 key-custody CI investigation — 2026-10-07 UTC
+
+Original CI run [37543718055](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37543718055), job
+112542824893, at `2e2c29db1d54340657058093314c4d112fc99375`: 46 passed, one failed at the developer custody
+explanation. Artifact access initially returned HTTP 403; the original artifact later downloaded successfully.
+Artifact `spa-journeys-failure`, id 11449489421, SHA256
+`34b548e64012ba4517104aef3eac0558afe2f6e5724b1fd782eef5f79faa9228` is retained at
+`/workspace/.regulait-onboarding/x16-original-artifact.zip`.
+
+**Cause supported by the 2e2c29d trace, not classified as a flake:** the posture PUT returned 200 with
+`keyCustodyEnforced: true`. Avery's account key was filled at trace time 42330.091 ms, but the literacy GET
+(start 42269.549 ms, duration 93.135 ms) finished around the Save key click (42359.996 ms). Its body was
+`required: false, current: true, documents: []`. The subsequent DOM snapshot (`after@call@1401`) contains
+**A key is required.** There is **no developer credential POST at all in this 2e2c29d trace**; this is not a claim about every failed run. The missing
+custody copy was therefore not a failed backend custody refusal: the form lost its input before submission.
+Claude's 2026-10-07 review reports a different ordering on `f676ca3`: a credential POST reached the gateway and returned **409 key_custody_enforced** about 1.4 seconds after Avery's sign-in; the later literacy remount erased the received notice. Both input-before-submit loss and notice-after-response loss share the same remount mechanism. That second CI observation is attributed to Claude's gateway-log review; only the original 2e2c29d artifact was independently inspected here.
+Only sanitized status/posture/error information is reproduced here; no credential bodies are published.
+
+`AcknowledgeGate` returned its page in fragment slot 0 before the async literacy response, then in slot 2
+beside two optional banner slots afterward. React remounted AccountPage and reset its input state, even
+though the Account route is exempt from the interstitial. Keep the page in a keyed Fragment across the
+loading/known-posture branches; no new DOM wrapper or gate relaxation. A controlled delayed-response
+browser regression fails on the old source with an empty key, then passes with the key retained, one real
+mocked 409/key_custody_enforced POST, the correct custody notice and no key left in the DOM. The initial
+read of the original trace and the controlled old-source failure distinguish this from a timing guess (M-070).
+
+The journey also awaits and checks its real posture PUT (200/enforced) and credential POST
+(409/key_custody_enforced), reporting only status/error. Two clean-source runs at the original revision
+hit an earlier strict-console favicon 404 (19 passed / 27 not run / 1 failed each). The included explicit
+bundled SVG favicon fixes that separate reproduced issue. It was not the original custody cause.
+
+The delayed-response regression and the existing literacy mock suite passed **6/6**; its old-source control
+failed exactly on retained input. Commands:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/adr0182-a14-literacy.mock.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-late-literacy-green`.
+Logs/traces: `x16-late-literacy-red`, `x16-late-literacy-green` beneath that setup directory. The earlier
+diagnostic-only revision passed the original four real-gateway specs **47/47** (`x16-fixed-browser.log`).
+Root-cause fix validation: `pnpm --filter @regulait/web test` **315/315**, web tsc and build PASS.
+Real-gateway phase1/phase2/phase6-agent-builder checks **44/44** passed on fresh `regulait_x16_root_cause`
+(`x16-root-browser.log`, full traces `x16-root-browser`, screenshots `x16-root-shots`). The fourth original
+spec, phase6-builder-tools, passed **3/3** separately on fresh `regulait_x16_root_tools`:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_DB=regulait_x16_root_tools E2E_PORT=3105 E2E_BASE_URL=http://127.0.0.1:3105 E2E_LOG_DIR=/workspace/.regulait-onboarding/x16-root-tools-logs E2E_SHOT_DIR=/workspace/.regulait-onboarding/x16-root-tools-shots pnpm --filter @regulait/web exec playwright test e2e/phase6-builder-tools.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-root-tools-browser`.
+Root-fix coverage is 44+3 separately, rather than a new single 47-case run. The first 44-case command also named an absent
+deep-links.spec.ts; that argument selected no tests and is not claimed as coverage. X14 also touches AcknowledgeGate for focus handling;
+merge both the keyed page preservation here and X14's entry/exit focus behavior when reviewing those drafts.
+
+## X17 review-policy fixture isolation — 2026-10-06 UTC (review pending)
+
+The real review-policy spec reused the preceding demo's proposer, so its initial draft GET could see that person's still-pending cleanup. This is separate from X13's navigation/failed-flush guards. Give the spec its own fresh admin identity; arrange the same current AI-policy standing as the seeded personas through the real self-acknowledgement route, without relaxing literacy or MFA. Assert its initial draft is null. Restore the original org policy and deactivate the fixture in teardown, including when policy restoration fails.
+
+Regression evidence: on the real `regulait_x17_demo` scratch database, plant a valid registration draft for the previous seeded admin. Reverting only the proposer login to that shared identity makes the new null-draft assertion fail with the exact earlier title/state (`x17-red-draft.log` and trace). Restoring the fresh identity completes the entire two-review/send-back/resubmit/approval journey: 1/1 passed (`x17-fixed.log`); the preceding admin's draft remains unchanged and every fixture account is deactivated. Initial fixture attempts exposed the fresh account's mandatory literacy gate; that prerequisite is now explicitly arranged, not disabled.
+
+Final integration: prepare a separate empty `regulait_x17_full` database with a local demo export key — `pnpm --filter @regulait/gateway demo:prepare` passes 19/19 readiness checks; `E2E_BASE_URL=http://127.0.0.1:3108 E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts --trace on --output=/workspace/.regulait-onboarding/x17-full-browser` passes both real demo specs (2/2). Web typecheck and production build pass. Screenshot: `x17-full-browser/**/x17-owned-intake-fixture.png`; passing traces are retained there, and the isolated contamination case under `x17-fixed-browser`.
+
+No gateway changes, no test-order retries, and no cleanup of another journey's draft. This closes the spec independence issue; it does not make asynchronous application draft deletion synchronous.
+
+X17 security-gate follow-up (2026-10-07): the original draft's CodeQL job
+[112557122023](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37548075701/job/112557122023)
+reported unallowlisted `js/insecure-randomness`, severity 7.8, at gateway `totp.ts:62`. The newly introduced
+fixture email carried a `Math.random()` identifier into the shared TOTP sign-in helper. Use Node's
+`crypto.randomUUID()` for that fixture identifier; no gateway cryptography or scanner allow-list changes.
+The precise SARIF path remains unavailable (artifact host productionresultssa15.blob.core.windows.net returns
+403); this is a targeted removal of the insecure test source, and closure of the security gate depends on
+CI, not a supposition about a false positive.
+
+On the completed X17 web build, the UUID fixture's real two-review/send-back/resubmission/approval scenario
+passed **1/1** (`x17-secure-fixture-final.log`, full trace and owned-fixture screenshot under
+`/workspace/.regulait-onboarding/x17-secure-fixture-final`). The same isolated database still contains the
+preceding administrator's seeded draft. Web tsc and build passed. Command after sourcing `x17-env.sh`:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-real.config.ts e2e/demo-review-policy.spec.ts --trace on --output=/workspace/.regulait-onboarding/x17-secure-fixture-final`.
+
+## X15 — Independent D4 / strict-default review — 2026-10-07
+
+Read-only product-source review of main `5c920dd8` (source baseline `94c0cb87`). Two OPEN findings below belong to Claude's gateway scope; no gateway/db/shared code, defaults, scanners, or existing tests were changed. This is a scoped adversarial review, not a certification of every live provider workflow.
+
+**X15-H01 — OPEN / HIGH — Incident evidence hold races an already-admitted configuration write.**
+
+Evidence: `apps/gateway/src/agents-connectors.ts:2858` checks `agentEvidenceHoldRefused` before calling `applyRuleEdit`; the subsequent transaction acquires the agent row lock. On a fresh real PostgreSQL database, hold that agent row in a second session (`BEGIN; SELECT id FROM agents WHERE id = $1 FOR UPDATE`), start authenticated admin `PATCH /v1/agents/:id` with `{costPerMTokIn:123}`, and confirm its real SQL is waiting for the row lock in `pg_stat_activity`. While it waits, create a serious incident linked to that agent through `POST /v1/incidents`; observe 201 and the active hold through `incidentsHoldingAgent`. Commit the locker. The pending PATCH returns **200**, price is **123**, hold remains active, and evidence-hold override audit count is **0**. A subsequent PATCH correctly returns **409 incident_evidence_hold**; short and oversized encoded override reasons return **422**. Reproduced in multiple fresh scratch databases. This is a write admitted before the incident that commits after the hold becomes active; it does not demonstrate that a newly submitted post-hold request bypasses the check.
+
+Impact: concurrent incident opening can leave the protected configuration changed after preservation starts, without an explicit override record.
+
+Acceptance: serialize incident/linked-dependency hold creation and protected writes with a consistent transactional lock/recheck protocol. Add a real-DB regression with the precise blocked-writer ordering above: after the incident commits the write must refuse without mutating the protected row, unless the actual permitted override path validates and audits the reason atomically. Preserve ordinary held-write refusal, administrative override controls, containment exemptions, and transitive dependent holds. Review other check-before-write call sites for the same race. A check performed outside the write transaction is insufficient.
+
+**X15-R01 — OPEN / MEDIUM — An active case-set change does not invalidate a decision-regression preview.**
+
+Evidence: preview an authenticated administrator's review-policy candidate adding a reviewer role to the high tier. The original preview covers **17** cases and reports **6** changed outcomes. Add a real active high-tier case through `POST /v1/governance/decision-regression/cases`, using shipped high-case answers. A fresh preview covers **18** cases and reports **7** changed outcomes. Activate the candidate via `PUT /v1/governance/review-policy`, but submit the **old** `regressionRunId`, `acceptChangedOutcomes:true`, and an acceptance reason for the original preview. Activation returns **200**; the accepted preview contains no entry for the added case. `decision-regression.ts:340–390` checks subject, candidate digest, age, and baseline-policy digest, but not the active case-set digest. The case-set update was sequential and committed; no timing assumption is needed.
+
+Impact: an administrator can approve a comparison that omits a case added since previewing. This is a preview-coverage assurance gap, not a non-admin privilege bypass; existing candidate/baseline/age checks still operate.
+
+Acceptance: bind preview admission to the current active-case digest/revision (including case edits/retirements), or invalidate relevant previews when that set changes. Add a regression where adding a changed case makes old-run activation fail closed, then a fresh preview with explicit acceptance succeeds. Preserve unchanged-case-set activation and the existing baseline, subject, digest, expiry, and no-acceptance controls. If the intended contract deliberately freezes the old case set, explicitly disclose that bound and obtain a documented product decision rather than presenting it as coverage of current cases.
+
+Passing controls and evidence:
+
+- Fresh database `regulait_x15_review_0007`: 12 existing real-DB suites, **246/246 PASS**: `zz-adr0182-d4-foundation`, `zz-adr0182-a11-decision-regression`, `zz-adr0182-a12-incidents`, `zz-adr0182-a12-record-integrity`, `zz-adr0182-a13-feedback`, `zz-adr0182-a14-literacy`, `zz-d4-dfx2-evidence-hold`, `zz-d4-dfx2-feedback`, `zz-adr0181-sb1-strict-defaults`, `zz-adr0181-sb2-strict-governance-defaults`, `zz-adr0181-sc-strict-defaults`, and `zz-adr0181-fx3-strict-fixes` (all `.test.ts`). Run with `DATABASE_URL=<fresh-local-db> pnpm --filter @regulait/gateway exec vitest run <those src files>` after activating the saved environment.
+- Final independent probe database `regulait_x15_review_0016`: **34 completed checks** against the actual built Fastify app and PostgreSQL. Each of 13 org relaxations refused non-admin writes (403), accepted authenticated administrator writes (200), and persisted the exact `detail.transitions[key] = {from,to}`; each setting was restored between probes. Other strict-default surfaces are covered by the existing SB/SC/FX suites, not an independent claim that every setting was manually probed.
+- One public feedback link limited to one use: eight concurrent submissions yielded **one 201, seven 410, uses=1**. Altered token and disabled-link checks returned 404. Outsider feedback reads and a non-owner resolution attempt returned 403. An admin filing their own appeal received **403 appeal_separation_of_duties**; a second admin could resolve it (200).
+- Literacy: a published all-user policy blocked native model invocation, the actual shared `agentDecision` used by copilot/builder/intake/playground, and the actual governed MCP decision. Client body spoofing of evaluation/platform origin, bootstrap session origin, or a principal object, plus forged origin headers, did not bypass the refusal. API-key acknowledgement returned **403 acknowledgement_requires_session**. A real interactive session acknowledgement made those three granted decision paths allow; native invoke used `dispatch:false`, MCP used decision-only evaluation, and no provider/connector execution was performed. Only unrelated MRM/dispatch-attribution gates were explicitly relaxed/restored in this fixture; literacy stayed enforced. The MCP registry row was synthetic test setup, not an egress-admission claim.
+- Every identified governed entry point was traced to its literacy posture or common decision function: MCP `governed-evaluate.ts:642`; native `agents-connectors.ts:3830`; fallback hops `:675` (origin derived from internal evaluation arguments); connectors `connector-call.ts:373`; compat `compat-core.ts:662`; copilot `copilot.ts:1512`; builder runtime/access, playground, and intake call that common decision; goal decomposition `decompose.ts:334`; orchestration planning/dispatch `orchestration.ts:1893/:1480`; RegulAIt-LLM `regulait-llm.ts:288`; human evaluation/red-team starts call `refuseRunStartWithoutLiteracy` at `evals.ts:2144` and `redteam.ts:1484`. Existing A14 tests execute native/connector/MCP and human run-start refusals, digest/expiry, audience, warn/off, and genuine break-glass-session controls. Compat, decomposition, orchestration, and RegulAIt-LLM were source-traced here, not separately exercised end to end with live upstreams. No missing literacy hook or origin-spoof bypass was reproduced; concurrent policy changes and live vendor workflows remain outside this evidence.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: PASS on the review branch before READY.
+
+Retained local artifacts (outside checkout): `/workspace/.regulait-onboarding/x15-baseline-tests.log`, `x15-probes-0016.log`, `x15-literacy-map.txt`, `x15-web-build.log`, and executable probe `x15-probes.mjs` (SHA256 `d629875722134fb5da2f6ed78e21cdb4233aa824f5e8eb71dd74e7fc4fa7f185`). Reproduce with `source /workspace/.regulait-onboarding/activate.sh` and `DATABASE_URL=<fresh-local-db> node /workspace/.regulait-onboarding/x15-probes.mjs`; requires the checked-out source's completed workspace build. Earlier probe iterations failed on harness response shapes / strict egress fixture admission, were corrected, and are not counted as completed runs. The reproduction ordering and controls above are included so the gateway owner can retain regression tests in their own scope.
+
+Other assignment handoffs: X12 [PR #134](https://github.com/dhruvmahendrapatel/RegulAIt/pull/134), X13 [#136](https://github.com/dhruvmahendrapatel/RegulAIt/pull/136), X14 [#139](https://github.com/dhruvmahendrapatel/RegulAIt/pull/139), X16 [#137](https://github.com/dhruvmahendrapatel/RegulAIt/pull/137), X17 [#138](https://github.com/dhruvmahendrapatel/RegulAIt/pull/138), with full task evidence in each PR's `codexInputs.md`. X14 and X16 both touch `AcknowledgeGate`: retain X14 focus behavior and X16 keyed child identity when combining. X17's UUID follow-up security workflow [37550242884](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37550242884) completed successfully, including CodeQL; no scanner suppression or gateway change. X18 remains blocked on Claude's unpublished §4 Batch-3 contracts.
+
+### X16 review follow-up — 2026-10-07
+
+Merged main `2ba28faf` with a merge commit (no rebase); task branch now preserves main's board unchanged. Added a second delayed-literacy regression that first observes the actual mocked 409 custody notice, then releases literacy and requires the notice to persist. With main's unkeyed gate restored temporarily, **1/1 failed** at the post-release notice assertion; fixed full literacy suite **7/7 PASS**. The earlier no-POST trace describes only `2e2c29d`; the reported `f676ca3` ordering includes a 409 POST and notice loss, as corrected above. Command: `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/adr0182-a14-literacy.mock.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-after409-green`; red control adds `--grep 'notice after a 409'` and uses `x16-after409-red`. Logs, full traces and both before-save/after-409 screenshots retained there. Web tsc/build PASS after merging main. No production code beyond the existing keyed-fragment fix was needed for the second ordering.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.
@@ -358,3 +465,46 @@ Local/upstream reviewed SHA `b5e1da5524a3705d1a69094f13cf10db60311298`. Other wo
 
 No enterprise-readiness or usability certification is implied. Remaining mobile/screen-reader/comprehension assurance belongs to the pilot gate.
 <!-- codex-enterprise-feedback:end -->
+
+## X14 — D4 keyboard and accessibility audit (2026-10-06)
+
+Scope: the incident register, incident detail, feedback queue, public feedback form, AI policies/literacy,
+decision regression and acknowledgement interstitial. Synthetic mocked gateway fixtures only. These are
+Chromium keyboard, accessibility-tree semantics and axe checks; no NVDA/VoiceOver session or accessibility
+certification is claimed.
+
+Issues found → fixed:
+
+- **Dialogs on all five audited dialog-bearing pages:** actual Tab/Shift+Tab escaped the modal and closing
+  did not reliably return to its trigger. The shared Modal now uses native `showModal()` for inert background
+  and focus return, with boundary Tab wrapping to keep focus out of browser chrome. Escape respects the
+  owner's close callback. Opening depends on visibility, so changing an inline callback while typing does
+  not reopen/refocus the dialog. No dependency or lockfile change.
+- **Decision regression tabs:** every tab was a tab stop and arrow/Home/End navigation was absent. The shared
+  Tabs now use a roving tab stop and the four keyboard navigation keys, retaining selection and focus.
+- **Feedback queue:** action errors and successful save/link confirmations were outside the active modal.
+  The modal now contains an alert and status region. Editing the answer clears the prior save notice; failed
+  saves retain the answer for keyboard retry. The public form already exposed its error/receipt correctly.
+- **Acknowledgement interstitial:** replacement content had no announced focus target; completing or
+  postponing acknowledgement left focus on the document body. A named region receives focus on entry,
+  and the revealed main heading receives focus on exit. Sidebar input is not interrupted.
+
+Each page has a keyboard-only Playwright scenario using actual Tab/Shift+Tab, Enter, Space and arrow keys;
+locating controls never calls `.focus()`, `.click()` or `.fill()`. Dialog cycles assert containment on every
+step and Escape asserts focus return. Incident edit/contain/close/report and literacy create/retire/completion/
+relaxation/publish dialogs are included. Failed feedback submission/save retries and live receipts are covered.
+Screenshots and traces are saved outside the source tree under `/workspace/.regulait-onboarding/x14-*`.
+
+Validation (Linux, pinned workspace dependencies):
+
+- Initial seven keyboard scenarios: **6 failed / 1 passed** before the fixes, with actual focus escape and
+  missing interstitial focus (`x14-red.log`). The public form was the passing control.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/adr0182-a11-decision-regression.mock.spec.ts e2e/adr0182-a12-incidents.mock.spec.ts e2e/adr0182-a13-feedback.mock.spec.ts e2e/adr0182-a14-literacy.mock.spec.ts e2e/intake-a11y.mock.spec.ts --output=/workspace/.regulait-onboarding/x14-full-browser`:
+  **39/39 passed**; includes the initial seven fixed scenarios and light/dark axe checks. Later expanded dialog
+  traversal and the postponement scenario are covered by the final command below.
+- Same four D4 spec paths, `--grep 'X14 keyboard' --trace on --output=/workspace/.regulait-onboarding/x14-keyboard-complete`:
+  **8/8 passed**, including every additional dialog and acknowledgement postponement. Log:
+  `/workspace/.regulait-onboarding/x14-keyboard-complete.log`; per-page PNGs and successful traces in that output directory.
+- `pnpm --filter @regulait/web test`: **315/315 passed** (40 files).
+- `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: **passed**.
+  `git diff --check`: **passed**. The existing large-chunk build warning remains.

@@ -78,3 +78,78 @@ export function redactMcpResult(result: unknown, international: readonly Interna
   }
   return transformed;
 }
+
+/**
+ * B3S-04 (batch-3 security review) — BASE64 `blob` CONTENT IS SCANNED OR
+ * WITHHELD, NEVER RELEASED UNSCANNED.
+ *
+ * MCP carries binary resource content as a base64 `blob` (an embedded resource
+ * in a tool result, `resources/read` contents). The PII block/warn/log scan
+ * read the JSON text of a result, in which a blob is opaque, so a text file
+ * full of PII went out unscanned whenever it was base64-wrapped. Now every
+ * `blob` is either DECODED AND SCANNED (its `mimeType` is `text/*`,
+ * `application/json` or `application/xml`, it is canonical base64 and the
+ * bytes are valid UTF-8) or reported UNSCANNABLE, and the caller withholds an
+ * unscannable result under every PII mode except off. (Redact mode already
+ * withholds any blob: base64 cannot be released redacted.)
+ */
+const SCANNABLE_BLOB_MIME = new Set(["application/json", "application/xml"]);
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+export function isScannableBlobMime(mime: unknown): boolean {
+  if (typeof mime !== "string") return false;
+  const base = mime.split(";")[0]!.trim().toLowerCase();
+  return base.startsWith("text/") || SCANNABLE_BLOB_MIME.has(base);
+}
+
+/** the decoded text of one blob, or null when it cannot be scanned */
+function decodeTextBlob(blob: unknown, mime: unknown): string | null {
+  if (typeof blob !== "string" || !isScannableBlobMime(mime)) return null;
+  if (blob.length % 4 !== 0 || !BASE64_RE.test(blob)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(blob, "base64"));
+  } catch {
+    return null;
+  }
+}
+
+export interface McpBlobContents {
+  /** the decoded text of every scannable blob, to be scanned with the rest */
+  texts: string[];
+  /** at least one blob (or a structure too deep to walk) cannot be scanned */
+  unscannable: boolean;
+  /** the result carries at least one blob */
+  any: boolean;
+}
+
+/** every base64 `blob` anywhere in an MCP result (tool result, resource contents, a notification) */
+export function decodeMcpBlobs(value: unknown): McpBlobContents {
+  const out: McpBlobContents = { texts: [], unscannable: false, any: false };
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 64) {
+      out.unscannable = true;
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+      return;
+    }
+    if (v && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(o, "blob")) {
+        out.any = true;
+        const text = decodeTextBlob(o.blob, o.mimeType);
+        if (text === null) out.unscannable = true;
+        else out.texts.push(text);
+      }
+      for (const [k, x] of Object.entries(o)) if (k !== "blob") walk(x, depth + 1);
+    }
+  };
+  walk(value, 0);
+  return out;
+}
+
+/** the text a non-redact PII (or guardrail) scan reads: the JSON plus every decoded blob */
+export function scannableMcpText(value: unknown, blobs: McpBlobContents): string {
+  return [JSON.stringify(value ?? null), ...blobs.texts].join("\n");
+}

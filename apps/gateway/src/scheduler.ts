@@ -92,6 +92,7 @@ import {
   type SchedulerRunRow,
   type SchedulerTrigger,
 } from "@regulait/db";
+import { recordJobRun, registerMetricJobNames } from "./metrics.js";
 
 /** the house convention for "the deployment itself acted, with no human behind
  * it" — the same all-zero id guardrails.ts and scheduler-health.ts use */
@@ -248,6 +249,8 @@ export function resolveSchedulerConfig(env: NodeJS.ProcessEnv = process.env): Sc
  * erasure this product exists to prevent.
  */
 export async function syncSchedulerJobs(db: Db, registry: SchedulerJobRegistry): Promise<void> {
+  // ADR-0185 G5: the registry's names are the only `job` label values
+  registerMetricJobNames(registry.keys());
   for (const def of registry.values()) {
     await db
       .insert(schedulerJobs)
@@ -551,6 +554,9 @@ export async function runSchedulerJob(
   });
 
   if (!claim.claimed) {
+    // ADR-0185 G5: a lease conflict is a skipped RUN (another instance ran
+    // it); not-due and disabled are not runs and are not counted
+    if (claim.reason === "lease_held") recordJobRun(def.name, "skipped");
     if (claim.reason === "lease_held") {
       await auditSchedulerEvent(db, {
         ruleId: "scheduler-job-skipped",
@@ -609,6 +615,7 @@ export async function runSchedulerJob(
       reason: `scheduled job '${def.name}' completed — ${items} item(s) processed`,
       detail: { phase: "finish", outcome: "ok", itemsProcessed: items, ...detail },
     });
+    recordJobRun(def.name, "ok");
     return {
       job: def.name,
       outcome: "ok",
@@ -647,6 +654,7 @@ export async function runSchedulerJob(
       reason: `scheduled job '${def.name}' FAILED: ${message}`,
       detail: { phase: "finish", outcome: "failed", error: message },
     });
+    recordJobRun(def.name, "failed");
     return {
       job: def.name,
       outcome: "failed",
@@ -697,6 +705,7 @@ export class Scheduler {
   constructor(db: Db, opts: SchedulerOptions) {
     this.db = db;
     this.registry = opts.registry;
+    registerMetricJobNames(opts.registry.keys());
     this.tickMs = opts.tickMs ?? DEFAULT_TICK_MS;
     this.leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
     this.instanceId = opts.instanceId ?? randomUUID();
@@ -743,6 +752,7 @@ export class Scheduler {
       if (this.inFlight.has(def.name)) {
         // Overlap: the previous pass of THIS job, in THIS process, has not
         // finished. Recorded as a skip so a chronically slow job is visible.
+        recordJobRun(def.name, "skipped");
         results.push({
           job: def.name,
           outcome: "skipped",
@@ -768,6 +778,7 @@ export class Scheduler {
         // refuses the claim transaction, say — the tick still continues.
         const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
         console.error(`[regulait] scheduler tick could not attempt '${def.name}': ${message}`);
+        recordJobRun(def.name, "failed");
         results.push({
           job: def.name,
           outcome: "failed",
