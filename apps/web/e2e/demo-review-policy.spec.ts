@@ -56,7 +56,11 @@ async function signIn(page: Page, email: string, password: string) {
   await page.getByLabel("Confirm new password").fill(password);
   await page.getByRole("button", { name: "Set password & continue" }).click();
   // ...and an admin who has not enrols now, from the secret on screen
-  await passTotp(page, email, page.getByRole("heading", { name: /Welcome back/ }));
+  // A new fixture has not acknowledged the required AI policy yet. That
+  // authenticated interstitial replaces Home; the journey acknowledges it
+  // below before entering the governed intake, without relaxing the gate.
+  await passTotp(page, email, page.getByRole("heading", { name: /Welcome back/ })
+    .or(page.getByRole("region", { name: "AI policy acknowledgement" })));
 }
 
 async function persona(browser: Browser, email: string, password: string) {
