@@ -338,7 +338,7 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     await expect(endpoints.locator("option")).toHaveCount(1); // the placeholder only
     await expect(page.getByTestId("no-enabled-endpoints")).toBeVisible();
     // and the unpriced discipline is stated where the cost boxes are
-    await expect(page.getByText(/leaving both cost fields blank is the/)).toBeVisible();
+    await expect(page.getByText(/Choose Unpriced when no token prices are recorded/)).toBeVisible();
     await shot(page, "phase5-08-agent-binding-no-enabled-endpoint");
     track.assertClean("agent binding before enable");
   });

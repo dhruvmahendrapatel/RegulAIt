@@ -97,3 +97,39 @@ test("UX-AG-3: unpriced is explicit, does not submit staged prices, and recorded
   await expect.poll(() => st.registrations.length).toBe(2);
   expect(st.registrations[1]).toMatchObject({ costPerMTokIn: 0, costPerMTokOut: 0 });
 });
+
+
+for (const partial of [false, true]) {
+  test(`R167-01: recorded pricing refuses ${partial ? "one" : "both"} missing token prices`, async ({ page }) => {
+    const st = await fixture(page);
+    const card = registration(page);
+    await card.getByLabel("Pricing for this custom model").selectOption("recorded");
+    const input = card.getByLabel("$/MTok in", { exact: true });
+    const output = card.getByLabel("$/MTok out", { exact: true });
+    if (partial) await input.fill("1");
+    await card.getByRole("button", { name: "Register agent", exact: true }).click();
+    await expect(input).toHaveAttribute("required", "");
+    await expect(output).toHaveAttribute("required", "");
+    expect(st.registrations).toHaveLength(0);
+    await input.fill("1");
+    await output.fill("2");
+    await card.getByRole("button", { name: "Register agent", exact: true }).click();
+    await expect.poll(() => st.registrations.length).toBe(1);
+    expect(st.registrations[0]).toMatchObject({ costPerMTokIn: 1, costPerMTokOut: 2 });
+  });
+}
+
+test("R167-02: explicit unpriced choice survives switching away from and back to Custom", async ({ page }) => {
+  await fixture(page);
+  const card = registration(page);
+  const pricing = card.getByLabel("Pricing for this custom model");
+  await pricing.selectOption("recorded");
+  await card.getByLabel("$/MTok in", { exact: true }).fill("1");
+  await card.getByLabel("$/MTok out", { exact: true }).fill("2");
+  await pricing.selectOption("unpriced");
+  await card.getByRole("radio", { name: "Mock", exact: true }).check();
+  await card.getByRole("radio", { name: "Custom endpoint", exact: true }).check();
+  await expect(pricing).toHaveValue("unpriced");
+  await expect(card.getByLabel("$/MTok in", { exact: true })).toBeDisabled();
+  await expect(card.getByLabel("$/MTok out", { exact: true })).toBeDisabled();
+});

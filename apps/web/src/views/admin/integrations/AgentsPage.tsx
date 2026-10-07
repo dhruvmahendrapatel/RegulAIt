@@ -184,6 +184,7 @@ const EMPTY_AGENT = {
   costPerMTokIn: "",
   costPerMTokOut: "",
   customPricing: "unpriced",
+  customPricingExplicit: false,
   systemPrompt: "",
 };
 
@@ -212,6 +213,10 @@ function RegisterAgentCard() {
         onSubmit={(e) => {
           e.preventDefault();
           if (isCustom && !selectedEndpoint?.enabled) return;
+          if (isCustom && !unpriced && (!f.costPerMTokIn.trim() || !f.costPerMTokOut.trim())) {
+            act.setError("Enter both input and output token prices, or choose Unpriced.");
+            return;
+          }
           void act
             .run(
               () =>
@@ -248,7 +253,7 @@ function RegisterAgentCard() {
                 provider: p,
                 customProviderId: p === "custom" ? previous.customProviderId : "",
                 // Preserve already entered prices when switching provider kinds.
-                customPricing: p === "custom" && (previous.costPerMTokIn || previous.costPerMTokOut)
+                customPricing: p === "custom" && !previous.customPricingExplicit && (previous.costPerMTokIn || previous.costPerMTokOut)
                   ? "recorded" : previous.customPricing,
               }));
             }}
@@ -281,17 +286,17 @@ function RegisterAgentCard() {
           </Field>
           {isCustom && (
             <Field label="Pricing for this custom model">
-              <Select value={f.customPricing} onChange={(e) => set("customPricing", e.target.value)}>
+              <Select value={f.customPricing} onChange={(e) => setF((previous) => ({ ...previous, customPricing: e.target.value, customPricingExplicit: true }))}>
                 <option value="unpriced">Unpriced — no recorded token prices</option>
                 <option value="recorded">Record token prices</option>
               </Select>
             </Field>
           )}
           <Field label="$/MTok in">
-            <Input type="number" min={0} step="any" disabled={unpriced} value={f.costPerMTokIn} onChange={(e) => set("costPerMTokIn", e.target.value)} />
+            <Input type="number" min={0} step="any" required={isCustom && !unpriced} disabled={unpriced} value={f.costPerMTokIn} onChange={(e) => set("costPerMTokIn", e.target.value)} />
           </Field>
           <Field label="$/MTok out">
-            <Input type="number" min={0} step="any" disabled={unpriced} value={f.costPerMTokOut} onChange={(e) => set("costPerMTokOut", e.target.value)} />
+            <Input type="number" min={0} step="any" required={isCustom && !unpriced} disabled={unpriced} value={f.costPerMTokOut} onChange={(e) => set("costPerMTokOut", e.target.value)} />
           </Field>
         </div>
         {isCustom && (
