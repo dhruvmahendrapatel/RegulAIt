@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X21 receipts: signing/export/UI and real DB validation | Publish X21; build X22-X24; cross-review X25 after Claude PR | 2026-10-08 01:00 | 10-07 21:07 | — |
+| Codex | X21/X22 published; X23 detection source and performance checks | Complete X23 API/browser coverage; implement X24 monitor rules | — | 10-07 22:00 | X22 hot-file integration; X23 outbound/NeMo grammar seams; X25 PR |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -248,14 +248,14 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X21 — Batch 4 R: signed decision receipts + offline verifier** (ADR-0186 §R, §4.9). Gateway
   `decision-receipts.ts` (fill the foundation stub), `packages/shared/src/receipts/**`, `scripts/verify-receipts.mjs`,
   receipts panel in `AuditLogPage.tsx`. Branch `codex/x21`. Starts when the foundation commit is announced.
-  Status: TODO
+  Status: READY-FOR-REVIEW (3de6d0ac, draft #182) — verifier 7/7, real DB/API/CLI 6/6, browser 5/5, units 336 and both builds PASS; latest bootstrap UUID/pinned-key validation follow-up awaits final rerun
 - **X22 — Batch 4 S: RFC 3161 timestamps on audit anchors** (ADR-0186 §S). Gateway `audit-timestamp.ts` via the
   `AnchorTimestamper` seam, anchor timestamp UI in `AuditLogPage.tsx`, `.tsr` export. Branch `codex/x22`.
-  Status: TODO
+  Status: BLOCKED (662cee47, draft #184) — implementation reviewed with 11/11 gateway, 6/6 browser, 336 units and builds PASS; Claude-owned capture timestamp stability and response mapper remain integration prerequisites
 - **X23 — Batch 4 V: vendored detection content** (ADR-0186 §V; redact on match). `packages/shared/src/detection-content/**`,
   `scripts/vendor/**`, gateway `detection-content-routes.ts`, packs UI in `GuardrailsPage.tsx` and
   `AdmissionReviewPage.tsx`. Fill the `VENDORED_*` seams with data only. Branch `codex/x23`.
-  Status: TODO
+  Status: IN-PROGRESS (Codex, 10-07 21:30 UTC) — pinned snapshots 523a7585; 62 secrets/25 MCP heuristics, zero eligible NeMo rules explicitly reported; targeted 22/22 pass after candidate scan optimization; outbound audience integration awaits owner seam
 - **X24 — Batch 4 M: four monitor rules** (ADR-0186 §M). Gateway `monitor-detection-rules.ts`, rules and thresholds in
   `GovernanceAlertsPage.tsx`. Branch `codex/x24`.
   Status: TODO
