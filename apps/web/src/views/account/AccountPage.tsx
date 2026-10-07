@@ -1,7 +1,8 @@
 /**
  * Account — identity, password change and TOTP MFA self-service (ADR-0025),
  * plus per-user BYO model keys (ModelKeysCard). Reached from the topbar user
- * menu; ?section= deep-links (password | mfa | keys | ai-policies). ADR-0182 A14 adds the AI policies section.
+ * menu; ?section= deep-links (password | mfa | passkeys | keys | ai-policies). ADR-0182 A14 adds the AI policies section;
+ * ADR-0186 A adds Passkeys.
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -14,6 +15,7 @@ import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
+import PasskeysCard from "./PasskeysCard";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
 import s from "../auth/auth.module.css";
@@ -24,6 +26,7 @@ export default function AccountPage() {
   const section = params.get("section");
   const pwRef = useRef<HTMLDivElement>(null);
   const mfaRef = useRef<HTMLDivElement>(null);
+  const passkeysRef = useRef<HTMLDivElement>(null);
   const sessionsRef = useRef<HTMLDivElement>(null);
   const keysRef = useRef<HTMLDivElement>(null);
   const policiesRef = useRef<HTMLDivElement>(null);
@@ -31,6 +34,7 @@ export default function AccountPage() {
   useEffect(() => {
     if (section === "password") pwRef.current?.scrollIntoView({ block: "start" });
     if (section === "mfa") mfaRef.current?.scrollIntoView({ block: "start" });
+    if (section === "passkeys") passkeysRef.current?.scrollIntoView({ block: "start" });
     if (section === "sessions") sessionsRef.current?.scrollIntoView({ block: "start" });
     if (section === "keys") keysRef.current?.scrollIntoView({ block: "start" });
     if (section === "ai-policies") policiesRef.current?.scrollIntoView({ block: "start" });
@@ -82,6 +86,11 @@ export default function AccountPage() {
         <div ref={mfaRef}>
           <MfaCard totpEnabled={Boolean(auth?.totpEnabled)} onChanged={() => void refresh()} />
         </div>
+        {auth?.userId && (
+          <div ref={passkeysRef} data-testid="account-passkeys">
+            <PasskeysCard />
+          </div>
+        )}
         <div ref={sessionsRef}>
           <SessionsCard />
         </div>

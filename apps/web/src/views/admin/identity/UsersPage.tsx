@@ -11,6 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { RefusalGuidance } from "../../../api/refusals";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
+import UserPasskeysPanel from "./UserPasskeysPanel";
 import type {
   AdminUser,
   ApiKey,
@@ -322,6 +323,7 @@ function UserDetail(props: {
         tabs={[
           { id: "lifecycle", label: "Lifecycle" },
           { id: "sessions", label: "Sessions" },
+          { id: "passkeys", label: "Passkeys" },
           { id: "overrides", label: "Overrides" },
         ]}
         active={tab}
@@ -388,6 +390,7 @@ function UserDetail(props: {
           </div>
         )}
         {tab === "sessions" && <SessionsPanel userId={user.id} />}
+        {tab === "passkeys" && <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />}
         {tab === "overrides" && <OverridesPanel userId={user.id} />}
       </div>
     </Card>

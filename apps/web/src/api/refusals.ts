@@ -109,6 +109,15 @@ export const BATCH4_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
   passkey_rp_unconfigured:
     "Passkeys aren't available yet: an administrator has to set this deployment's public address first",
   not_built: "This isn't available yet",
+  // ADR-0186 A (slice A1): the passkey and step-up ceremonies
+  passkey_attestation_refused:
+    "That passkey sent manufacturer details RegulAIt doesn't accept — try again, or use a different passkey",
+  passkey_already_registered: "That passkey is already registered",
+  fresh_sign_in_required: "Adding your first passkey needs a fresh sign-in — sign out, sign in again, then add it",
+  browser_session_required: "This can only be done by a person signed in to RegulAIt in a browser",
+  unknown_challenge: "That request isn't known for this session — start again",
+  unknown_step_up: "That confirmation request isn't known for this session — start again",
+  step_up_action_too_large: "This action can't be confirmed — its details are larger than any action has",
 };
 
 /** the guidance for a refusal, or null when it is not one a person resolves this way */
