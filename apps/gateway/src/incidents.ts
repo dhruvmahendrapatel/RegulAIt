@@ -154,6 +154,8 @@ import {
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings, type OrgSettingsRow } from "./org-settings.js";
 import { haltAgentInTx } from "./execution-control.js";
+// X15-H01: hold creation takes the evidence-hold lock exclusively (agent-evidence-hold.ts has no static edge back here)
+import { lockEvidenceHoldsExclusive } from "./agent-evidence-hold.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { buildExportBundle, resolveExportSigningKey } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
@@ -657,6 +659,7 @@ export async function createIncident(db: Db, input: CreateIncidentInput, actor: 
 
   return db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
+    await lockEvidenceHoldsExclusive(tx); // X15-H01: a new serious incident begins a hold — first lock of the transaction
     const [row] = await tx
       .insert(aiIncidents)
       .values({
@@ -912,6 +915,9 @@ export async function incidentsHoldingAgent(db: Db, agentId: string): Promise<Ar
     .map((i) => ({ id: i.id, ref: i.ref }));
 }
 
+/** X15-H01: the incidents each request has already overridden (keyed weakly on the request) */
+const overriddenIn = new WeakMap<FastifyRequest, Set<string>>();
+
 /**
  * THE EVIDENCE HOLD at an agent-configuration write path (Art. 73(6)). Call it
  * before the change is written; when it returns true it has already sent the
@@ -934,7 +940,10 @@ export async function incidentEvidenceHoldRefused(
   agentId: string,
   change: string,
 ): Promise<boolean> {
-  const holding = await incidentsHoldingAgent(db, agentId);
+  // X15-H01: the hold is asked twice per protected write (the route's pre-check, then inside the write's own
+  // transaction); an incident this request already overrode (and audited) is not asked again
+  const answered = overriddenIn.get(req);
+  const holding = (await incidentsHoldingAgent(db, agentId)).filter((h) => !answered?.has(h.id));
   if (holding.length === 0) return false;
   const actor = actorOf(req);
   const raw = req.headers[EVIDENCE_HOLD_OVERRIDE_HEADER];
@@ -976,6 +985,9 @@ export async function incidentEvidenceHoldRefused(
         });
       }
     });
+    const seen = overriddenIn.get(req) ?? new Set<string>();
+    for (const h of holding) seen.add(h.id);
+    overriddenIn.set(req, seen);
     return false;
   }
   const notAdmin = override !== null && !actor.isAdmin;
@@ -1416,6 +1428,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const org = await loadOrgSettings(db);
       const updated = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        await lockEvidenceHoldsExclusive(tx); // X15-H01: serious, status or use case may begin or widen the hold
         const [row] = await tx.update(aiIncidents).set({ ...next, updatedAt: new Date() }).where(eq(aiIncidents.id, incident.id)).returning();
         if (next.status !== incident.status) {
           await addEvent(tx, incident.id, "status", actor.userId, { from: incident.status, to: next.status });
@@ -1471,6 +1484,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       if (!(await linkTargetVisible(db, actor, body.objectType, body.objectId))) throw notVisible("link target", body.objectId);
       const added = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        await lockEvidenceHoldsExclusive(tx); // X15-H01: a link widens the hold to the linked agent
         const rows = await tx
           .insert(aiIncidentLinks)
           .values({ incidentId: incident.id, objectType: body.objectType, objectId: body.objectId, createdBy: actor.userId })
@@ -1665,6 +1679,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const paragraph = incidentClockById(clock.clockId)?.paragraph ?? clock.clockId;
       const updated = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        await lockEvidenceHoldsExclusive(tx); // X15-H01: a clock's status decides whether the hold binds
         const [row] = await tx
           .update(aiIncidentNotifications)
           .set({
@@ -1876,6 +1891,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const { incident } = await writable(db, actor, incidentId, "contain this incident");
       const result = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        await lockEvidenceHoldsExclusive(tx); // X15-H01: containment links the agent (widens the hold); before the halt's row lock
         const halt = await haltAgentInTx(tx, body.agentId, `incident ${incident.ref} containment: ${body.reason}`, {
           userId: actor.userId,
           via: actor.via,

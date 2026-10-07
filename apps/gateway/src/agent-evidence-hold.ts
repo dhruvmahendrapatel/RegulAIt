@@ -21,9 +21,32 @@
  * exactly incidents.ts's — this file only widens WHICH ids are asked, so
  * there is one hold and one override path, not two.
  *
+ * X15-H01 — THE CHECK AND THE WRITE ARE ONE TRANSACTION, SERIALISED WITH
+ * HOLD CREATION. A check made outside the write's transaction let a write that
+ * had passed it (and then waited, e.g. on the agent row's lock) commit after a
+ * serious incident's hold began, with no refusal and no override record. Now:
+ *
+ *   - every protected write runs inside `withAgentEvidenceHold`, whose
+ *     transaction FIRST takes `EVIDENCE_HOLD_LOCK_KEY` (shared), then re-asks
+ *     the hold (this request's already-overridden incidents are not asked
+ *     twice), then writes;
+ *   - every transaction that can begin or widen a hold (opening an incident,
+ *     linking an agent, marking it serious, containment, a clock move, a use
+ *     case's intended agents, a new dependency edge) FIRST takes the same key
+ *     exclusively (`lockEvidenceHoldsExclusive`).
+ *
+ * So a hold cannot commit while an admitted write is in flight (the write is
+ * ordered before it), and a write waiting behind a hold-creating transaction
+ * re-checks after it commits (and is refused, or overridden and audited in
+ * the write's own transaction). One global key, like ADR-0060's audit chain:
+ * shared holders never wait on each other, and hold creation is rare. LOCK
+ * ORDER: this key is the FIRST lock of any transaction that takes it — before
+ * row locks and before the audit-chain key — so it cannot form a cycle.
+ *
  * OPEN SOURCE FIRST (ADR-0176): nothing to adopt — this is RegulAIt policy
  * (which agents a regulatory hold covers) over our own tables; the traversal
- * is one recursive CTE in Postgres.
+ * is one recursive CTE in Postgres and the serialisation is Postgres's own
+ * transaction-scoped advisory lock.
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { sql, type Db } from "@regulait/db";
@@ -36,6 +59,23 @@ const incidents = () => import("./incidents.js");
 import { loadOrgSettings } from "./org-settings.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * X15-H01: the advisory-lock key hold creators (exclusive) and protected
+ * writes (shared) serialise on. Distinct from the other production keys
+ * (audit chain 6_000_000_060, health-probe claim 6_000_000_037, sign-in
+ * invariant 6_000_000_174); 182 is the ADR number, and the value is outside int4 so it
+ * cannot collide with a `hashtext(...)` key.
+ */
+export const EVIDENCE_HOLD_LOCK_KEY = 6_000_000_182;
+
+/** take the hold lock as the FIRST statement of a transaction that can begin or widen an evidence hold */
+export async function lockEvidenceHoldsExclusive(tx: Db): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(${EVIDENCE_HOLD_LOCK_KEY}::bigint)`);
+}
+
+/** what `withAgentEvidenceHold` returns when the hold refused the change (the reply is sent) */
+export const EVIDENCE_HOLD_REFUSED: unique symbol = Symbol("evidence-hold-refused");
 
 /**
  * `agentId` and every agent that depends on it, transitively: builder agents
@@ -103,4 +143,35 @@ export async function agentEvidenceHoldRefused(
     }
   }
   return false;
+}
+
+/**
+ * X15-H01 — run a protected write under the evidence hold, in ONE transaction:
+ * the hold lock (shared, or exclusive when the write adds a dependency edge
+ * that widens who a hold covers), the hold re-checked inside the transaction,
+ * then `write(tx)`. Returns `EVIDENCE_HOLD_REFUSED` when the hold refused (the
+ * 409/403/422 is sent and its audit row commits); the handler returns `reply`.
+ * The route's own `agentEvidenceHoldRefused` pre-check stays where it is (its
+ * refusal comes before validation); this closes the window between it and the
+ * commit. `write` must use the `tx` it is given for EVERY statement — a write
+ * on another connection could wait on a lock this transaction holds.
+ */
+export async function withAgentEvidenceHold<T>(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  agentIds: string | readonly string[],
+  change: string,
+  write: (tx: Db) => Promise<T>,
+  opts: { includeSelf?: boolean; widensHolds?: boolean } = {},
+): Promise<T | typeof EVIDENCE_HOLD_REFUSED> {
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    if (opts.widensHolds) await lockEvidenceHoldsExclusive(tx);
+    else await tx.execute(sql`select pg_advisory_xact_lock_shared(${EVIDENCE_HOLD_LOCK_KEY}::bigint)`);
+    if (await agentEvidenceHoldRefused(tx, req, reply, agentIds, change, { includeSelf: opts.includeSelf ?? true })) {
+      return EVIDENCE_HOLD_REFUSED;
+    }
+    return write(tx);
+  });
 }
