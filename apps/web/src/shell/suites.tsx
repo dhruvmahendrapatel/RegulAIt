@@ -313,6 +313,7 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Settings",
     items: [
       { label: "Organization", to: "/admin/organization" },
+      { label: "Memory & retention", to: "/admin/retention" },
       // ADR-0052 — the COMMERCIAL ceiling, deliberately beside the org-wide
       // functional ceiling rather than under Cost: a license caps how many
       // entitled users and which tier features exist, which is the same kind of

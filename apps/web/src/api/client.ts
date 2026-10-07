@@ -177,6 +177,18 @@ const CODE_SENTENCES: Record<string, string> = {
   admin_only: "Only an administrator can do this",
   rate_limited: "Too many requests — wait a moment and try again",
   network: "Couldn't reach the server — check your connection and try again",
+  conversation_expired: "This conversation has expired under your organisation's retention policy. Start a new conversation",
+  incident_evidence_hold: "This record is held as incident evidence and cannot be deleted while the hold applies",
+  owner_inactive: "That owner's account is inactive. Choose an active person or leave the integration unassigned",
+  unknown_owner: "That person is no longer available. Refresh the people list and choose an active owner",
+  mcp_transport_disabled: "This upstream transport is disabled by your organisation. An administrator must enable it through the audited MCP coverage settings",
+  mcp_stdio_unavailable: "This deployment has not enabled local MCP executables. Ask the deployment operator to configure allowed executable directories",
+  mcp_stdio_command_refused: "The local MCP executable or its arguments failed the deployment's security checks. Ask the operator to check its path, executable permission and file and parent-directory write permissions",
+  mcp_transport_immutable: "An MCP server's transport cannot be changed after registration. Register a new server for the other transport",
+  mcp_no_entitlement: "You have no entitlement on this MCP server. Ask an administrator for the specific access you need",
+  invalid_recipient: "Enter exact recipient mailbox addresses, without display names or wildcards",
+  outlook_only: "Additional email recipients can be configured only for Outlook workspaces",
+  allow_list_too_long: "An Outlook workspace can allow at most 50 additional recipients",
 };
 /** codes whose details already say everything; the code adds nothing a reader needs */
 const DETAILS_SUFFICE = new Set(["validation", "not_found"]);
