@@ -173,7 +173,7 @@ import {
   type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
 import { loadInterceptionSettings } from "./compat-core.js";
-import { resolveCustomProviderForDispatch } from "./custom-providers.js";
+import { customProviderDisabledRefusal, resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
 import type { ArtifactModelProvider } from "@regulait/training-provider";
 import { egressRefusal } from "./egress-guard.js";
@@ -2766,10 +2766,19 @@ export function registerAgentConnectorRoutes(
     }
     if (body.customProviderId) {
       const [cp] = await db
-        .select({ id: customModelProviders.id })
+        .select({ id: customModelProviders.id, name: customModelProviders.name, enabled: customModelProviders.enabled })
         .from(customModelProviders)
         .where(eq(customModelProviders.id, body.customProviderId));
       if (!cp) return reply.status(404).send({ error: "unknown_custom_provider" });
+      // R167-04 (ADR-0180): a disabled endpoint is refused HERE too, with the
+      // dispatch refusal's own 409 — binding an agent to it is not a quiet
+      // success that only fails on the first call. Rebinding an existing agent
+      // is not possible (PATCH refuses customProviderId), so this is the only
+      // place an agent is pointed at an endpoint.
+      if (!cp.enabled) {
+        const { status, error, detail } = customProviderDisabledRefusal(cp.name);
+        return reply.status(status).send({ error, detail });
+      }
     }
     const [row] = await db
       .insert(agents)
