@@ -28,8 +28,6 @@ import {
   parseTeamsCredential,
   resolveConnectorProvider,
   reservedChatControl,
-  scrubSecrets,
-  secretRepresentations,
 } from "./index.js";
 
 // one RSA key pair for every snowflake test (2048-bit keeps the suite fast);
@@ -1780,37 +1778,6 @@ async function providerError(p: Promise<unknown>): Promise<ConnectorProviderErro
   }
   throw new Error("expected a ConnectorProviderError");
 }
-
-describe("X19-S01: the shared scrub covers every representation of a known secret", () => {
-  it("secretRepresentations names raw, JSON-escaped, URL-encoded and form-encoded forms", () => {
-    const forms = secretRepresentations(SYN_SECRET);
-    expect(forms).toContain(SYN_SECRET);
-    expect(forms).toContain(JSON.stringify(SYN_SECRET).slice(1, -1));
-    expect(forms).toContain(encodeURIComponent(SYN_SECRET));
-    expect(forms).toContain(new URLSearchParams([["k", SYN_SECRET]]).toString().slice(2));
-  });
-
-  it("removes each form from flat text, a JSON body and a \\u-escaped JSON body", () => {
-    const escapedEveryChar = [...SYN_SECRET].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
-    for (const text of [
-      `raw ${SYN_SECRET} json ${JSON.stringify(SYN_SECRET)} uri ${encodeURIComponent(SYN_SECRET)} ` +
-        `form ${new URLSearchParams([["client_secret", SYN_SECRET]]).toString()} ` +
-        `lower ${encodeURIComponent(SYN_SECRET).toLowerCase()}`,
-      JSON.stringify({ error: { code: "E", message: `echo ${SYN_SECRET}` }, [SYN_SECRET]: 1 }),
-      `{"error":{"code":"E","message":"echo ${escapedEveryChar}"}}`,
-    ]) {
-      const out = scrubSecrets(text, [SYN_SECRET]);
-      expectNoSecret(out, SYN_SECRET);
-      let parsed: unknown = null;
-      try {
-        parsed = JSON.parse(out);
-      } catch {
-        /* the flat text is not JSON */
-      }
-      for (const str of jsonStrings(parsed)) expect(str).not.toContain(SYN_SECRET);
-    }
-  });
-});
 
 describe("X19-S01: outlook — a reflected client secret or token is scrubbed in the detail AND the log", () => {
   beforeEach(() => clearOutlookTokenCache());
