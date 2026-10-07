@@ -21,6 +21,15 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-07 - Batch 4 decided (ADR-0186), built as equal halves by Claude and Codex with cross-review.**
+- Owner decisions: passkey-signed tool-call approvals re-verified at execution; two approvers for sensitive projects;
+  SSO-only orgs step up with a fresh SSO login (OIDC `max_age=0`, SAML `ForceAuthn`); receipts for governed-call and
+  approval decisions. The trace-standards item was already done (2b80111); only a residual remains.
+- Split: Claude = foundation (migration 0170), dual control/step-up incl. SSO re-auth, passkey approvals, trace
+  residual; Codex = receipts + verifier, RFC 3161 timestamps, vendored detection, monitor rules (X21–X24), and Codex
+  cross-reviews Claude's slices (X25). Codex edits gateway code for the first time this batch.
+- Next migration 0170 (journal when 1785105000000), next ADR 0187.
+
 **2026-10-07 - Batch 3 merged (PR #147, 89e252a). Batch 4 is next.**
 - ADR-0185 built: memory retention sweeps (30-day conversations, cache TTL, never under an incident hold, enforced
   at read time too); `/metrics` on OpenTelemetry (off unless a listener and token are set; fixed-vocabulary labels);
