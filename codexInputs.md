@@ -14,6 +14,21 @@ Final integration: prepare a separate empty `regulait_x17_full` database with a 
 
 No gateway changes, no test-order retries, and no cleanup of another journey's draft. This closes the spec independence issue; it does not make asynchronous application draft deletion synchronous.
 
+X17 security-gate follow-up (2026-10-07): the original draft's CodeQL job
+[112557122023](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37548075701/job/112557122023)
+reported unallowlisted `js/insecure-randomness`, severity 7.8, at gateway `totp.ts:62`. The newly introduced
+fixture email carried a `Math.random()` identifier into the shared TOTP sign-in helper. Use Node's
+`crypto.randomUUID()` for that fixture identifier; no gateway cryptography or scanner allow-list changes.
+The precise SARIF path remains unavailable (artifact host productionresultssa15.blob.core.windows.net returns
+403); this is a targeted removal of the insecure test source, and closure of the security gate depends on
+CI, not a supposition about a false positive.
+
+On the completed X17 web build, the UUID fixture's real two-review/send-back/resubmission/approval scenario
+passed **1/1** (`x17-secure-fixture-final.log`, full trace and owned-fixture screenshot under
+`/workspace/.regulait-onboarding/x17-secure-fixture-final`). The same isolated database still contains the
+preceding administrator's seeded draft. Web tsc and build passed. Command after sourcing `x17-env.sh`:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-real.config.ts e2e/demo-review-policy.spec.ts --trace on --output=/workspace/.regulait-onboarding/x17-secure-fixture-final`.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.

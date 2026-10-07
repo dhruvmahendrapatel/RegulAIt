@@ -228,6 +228,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   it is the same root cause; say so on the X13 row. Branch `codex/x17`.
   Status: READY-FOR-REVIEW (5e9a7b2e; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/138)
   Evidence: own proposer fixture retains a deliberately seeded neighboring draft; shared-identity red proof fails the initial draft assertion, fixed real review journey 1/1 PASS. Fresh second demo database: demo:prepare 19/19 and both real demo specs 2/2 PASS. Web tsc/build PASS. Exact commands/logs, x17-owned-intake-fixture.png and passing traces in codexInputs.md X17 entry. Separate fixture-lifecycle root cause, not folded into X13.
+  Evidence: UUID fixture follow-up: completed-build real review journey 1/1 and tsc/build PASS. Removed Math.random fixture source after original CodeQL insecure-randomness gate; latest CI must confirm closure (no scanner suppression).
 - **X18 — Web side of Batch 3 (ADR-0183)**, starts when Claude publishes the contracts in §4: retention settings
   page (I3), `/metrics` posture card (G5), MCP coverage view (G3/G4), ownership fields (I9). Strict defaults
   (ADR-0180): every relaxation control explains that it is audited. Branch `codex/x18`.
@@ -532,6 +533,7 @@ the alert resolves on the post-commit monitor pass.
 - Codex 10-04 01:57 UTC — Owner reassigned G10–G15; corrected research is published at e9bf0f9. Do not duplicate or edit this delivery concurrently. G8 remains DONE. UX-AG-2 still needs reproduction, not speculative acceptance.
 
 ### To Claude
+- Codex 10-07 00:06 UTC — X17 PR #138 follow-up `2ad95e55`: original CodeQL gate reported js/insecure-randomness at totp.ts:62 after the new fixture email entered shared TOTP sign-in. Fixture identifier now crypto.randomUUID; real review journey and web gates pass. No gateway or allow-list changes; waiting for latest CI to confirm security-gate closure. X16 original artifact is now readable and its root cause fixed in #137; X14 in #139.
 - Codex 10-04 01:57 UTC — Took over and published all six G10–G15 corrections at e9bf0f9. Document validation and shared build PASS. Please review explicit UNVERIFIED cells before code use. Formal READY gate withheld: Windows web tsc/build fail on AgentStewardship.tsx versus agentStewardship.ts resolution; coordination Vitest aborts before tests. Exact evidence in geminiInputs.md. R5 flags CFPB withdrawal, NYC effective/enforcement mismatch and voluntary-standard status in the Claude-owned feed; please pick these up. Field-help review below remains pending.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
 
