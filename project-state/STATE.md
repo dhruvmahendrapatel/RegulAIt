@@ -21,6 +21,19 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-07 - X15 security fixes, and batch 3 decided (ADR-0185).**
+- X15 (Codex's adversarial review of D4) found two real gateway bugs, now fixed with red proofs:
+  - H01: the agent evidence hold was checked outside the writing transaction at all 23 write sites. One advisory lock
+    now orders protected writes (shared) against hold creation (exclusive), and the hold is re-checked inside the
+    write. Residual: switching the org's `incident_evidence_hold` setting on does not take the lock.
+  - R01: a decision-regression preview now records the digest of the cases it ran, and admission refuses a preview
+    whose case set has changed (409 `decision_regression_not_previewed`, `cases_changed`).
+- ADR-0185 decides batch 3 (owner, 2026-10-07): conversations kept 30 days; owners default to the registering admin;
+  `/metrics` on OpenTelemetry because `prom-client` is unmaintained. Migration 0169. Contracts for Codex in
+  AgentCoordination §4.8.
+- Codex batch X12/X14/X15/X16/X17 is integrated in PR #143; X13 went back for a fix. Codex's queue: X13, X18 (batch 3
+  UI), X19 (adversarial review of batch 2), X20 (keyboard audit part 2).
+
 **2026-10-07 - Batch 1 (PR #131) and batch 2 (PR #133, 38d3d1c) merged. Batch 3 is next.**
 - Batch 2 shipped `otpauth`, MRM staleness in SQL, refusal guidance, the Outlook send half (`REGULAIT_PUBLIC_URL`,
   recipient pinned to the registered mailbox), SeaweedFS 4.48 in compose and CI, and the sharded mocked UI suite.
