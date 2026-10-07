@@ -12,6 +12,7 @@
  *    produced it;
  *  - axe (WCAG 2.x A/AA) in light and dark on every screen.
  */
+import { activate, escapeToTrigger, expectDialogTrap, tabTo } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
@@ -240,4 +241,34 @@ test.describe("ADR-0182 A11: decision regression", () => {
     await expect(card.getByLabel(`Answers digest ${"e".repeat(64)}`)).toBeVisible();
     await expectAxeClean(page, "decision records tab");
   });
+});
+
+
+test("X14 keyboard: decision regression tabs and retirement dialog preserve focus and announce status", async ({ page }, testInfo) => {
+  const cap = await mockApi(page);
+  await page.goto("/ui/admin/governance/decision-regression");
+  const runs = page.getByRole("tab", { name: "Runs", exact: true });
+  const cases = page.getByRole("tab", { name: "Golden cases" });
+  await tabTo(page, runs);
+  await page.keyboard.press("End");
+  await expect(page.getByRole("tab", { name: "Settings" })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(runs).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(cases).toBeFocused();
+  await expect(cases).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowLeft");
+  await expect(runs).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  const trigger = page.getByRole("button", { name: "Retire case Benefits pre-check stays high" });
+  await activate(page, trigger);
+  const dialog = page.getByRole("dialog", { name: "Retire this case?" });
+  await expectDialogTrap(page, dialog);
+  await expectAxeClean(page, "keyboard retirement dialog");
+  await page.screenshot({ path: testInfo.outputPath("x14-decision-regression.png") });
+  await escapeToTrigger(page, dialog, trigger);
+  await activate(page, trigger);
+  await activate(page, dialog.getByRole("button", { name: "Retire case", exact: true }));
+  await expect.poll(() => cap.caseDeletes).toEqual([CASE]);
+  await expect(page.locator('[aria-live="polite"]')).toContainText("Case retired");
 });

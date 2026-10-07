@@ -674,37 +674,66 @@ export function Modal(props: {
   /** roomier dialog — for side-by-side content, not for more prose */
   wide?: boolean;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     if (!props.open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
+    const dialog = ref.current;
+    if (!dialog) return;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Native modality makes the background inert and owns the focus cycle.
+    // Open only on a visibility change: editing must not reset focus.
+    dialog.showModal();
+    return () => {
+      dialog.close();
+      if (trigger?.isConnected && (document.activeElement === document.body || dialog.contains(document.activeElement))) {
+        trigger.focus();
+      }
     };
-    document.addEventListener("keydown", onKey);
-    // focus the dialog so keyboard users land inside it
-    ref.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
-  }, [props.open, props.onClose]);
+  }, [props.open]);
   if (!props.open) return null;
   return (
-    <div className={s.scrim} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div
-        className={[s.modal, props.wide ? s.modalWide : "", props.className ?? ""].join(" ")}
-        role="dialog"
-        aria-modal="true"
-        aria-label={props.title}
-        tabIndex={-1}
-        ref={ref}
-      >
-        <div className={s.modalTitle}>{props.title}</div>
-        {props.children != null && <div className={s.modalBody}>{props.children}</div>}
-        {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
-      </div>
-    </div>
+    <dialog
+      className={[s.modal, props.wide ? s.modalWide : "", props.className ?? ""].join(" ")}
+      role="dialog"
+      aria-modal="true"
+      aria-label={props.title}
+      tabIndex={-1}
+      ref={ref}
+      onKeyDown={(event) => {
+        if (event.key !== "Tab" || event.defaultPrevented) return;
+        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+          'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
+        )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
+          element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+        const first = controls[0];
+        const last = controls.at(-1);
+        // Keep boundary Tab presses in the page rather than browser chrome.
+        if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) ||
+          (!event.shiftKey && document.activeElement === last)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        }
+      }}
+      onCancel={(event) => {
+        event.preventDefault();
+        props.onClose();
+      }}
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) {
+          props.onClose();
+        }
+      }}
+    >
+      <div className={s.modalTitle}>{props.title}</div>
+      {props.children != null && <div className={s.modalBody}>{props.children}</div>}
+      {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
+    </dialog>
   );
 }
 
-/** the owned confirm() — no native dialogs anywhere in the product */
+/** The owned confirmation surface — never window.confirm(). */
 export function ConfirmModal(props: {
   open: boolean;
   title: string;
@@ -740,6 +769,7 @@ export function Tabs(props: {
   active: string;
   onChange: (id: string) => void;
 }) {
+  const tabStop = props.tabs.find((tab) => tab.id === props.active)?.id ?? props.tabs[0]?.id;
   return (
     <div className={s.tabs} role="tablist">
       {props.tabs.map((t) => (
@@ -747,8 +777,19 @@ export function Tabs(props: {
           key={t.id}
           role="tab"
           aria-selected={t.id === props.active}
+          tabIndex={t.id === tabStop ? 0 : -1}
           className={t.id === props.active ? s.tabActive : s.tab}
           onClick={() => props.onChange(t.id)}
+          onKeyDown={(event) => {
+            const index = props.tabs.findIndex((tab) => tab.id === t.id);
+            const next = event.key === "Home" ? 0 : event.key === "End" ? props.tabs.length - 1 :
+              event.key === "ArrowRight" ? (index + 1) % props.tabs.length :
+              event.key === "ArrowLeft" ? (index - 1 + props.tabs.length) % props.tabs.length : null;
+            if (next === null) return;
+            event.preventDefault();
+            props.onChange(props.tabs[next]!.id);
+            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+          }}
         >
           {t.label}
         </button>

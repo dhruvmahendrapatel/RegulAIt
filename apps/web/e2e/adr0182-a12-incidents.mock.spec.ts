@@ -17,6 +17,7 @@
  *    a report recorded more than an hour back asks for a reason and sends it;
  *  - axe (WCAG 2.x A/AA) in light and dark on both pages and the dialogs.
  */
+import { activate, escapeToTrigger, expectDialogTrap, typeAt } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
@@ -302,4 +303,45 @@ test.describe("ADR-0182 A12: the AI incident register", () => {
     expect(cap.sent[0]).toMatchObject({ stage: "complete", reason: "sent by registered post; the receipt arrived today" });
     expect(typeof cap.sent[0]!.sentAt).toBe("string");
   });
+});
+
+
+test("X14 keyboard: incident register report traps focus, announces refusal and restores its trigger", async ({ page }, testInfo) => {
+  await mockApi(page);
+  await page.route("**/v1/incidents", (route) => route.request().method() === "POST"
+    ? json(route, { error: "internal" }, 500) : route.fallback());
+  await page.goto("/ui/incidents");
+  const trigger = page.getByRole("button", { name: "Report an incident", exact: true });
+  await activate(page, trigger);
+  const dialog = page.getByRole("dialog", { name: "Report an AI incident" });
+  await expectDialogTrap(page, dialog);
+  await typeAt(page, dialog.getByLabel("Title", { exact: true }), "Keyboard incident report");
+  await activate(page, dialog.getByRole("button", { name: "Open incident", exact: true }));
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await expectAxeClean(page, "keyboard report refusal");
+  await page.screenshot({ path: testInfo.outputPath("x14-incidents.png") });
+  await escapeToTrigger(page, dialog, trigger);
+});
+
+test("X14 keyboard: incident detail report dialog traps focus, announces refusal and restores its trigger", async ({ page }, testInfo) => {
+  await mockApi(page);
+  await page.route(`**/v1/incidents/${INC}/notifications/n-2/sent`, (route) => json(route, { error: "internal" }, 500));
+  await page.goto(`/ui/incidents/${INC}`);
+  for (const [action, title] of [["Edit", "Edit INC-00042"], ["Contain…", "Contain INC-00042"], ["Close…", "Close INC-00042"]]) {
+    const actionTrigger = page.getByRole("button", { name: action, exact: true });
+    await activate(page, actionTrigger);
+    const actionDialog = page.getByRole("dialog", { name: title, exact: true });
+    await expectDialogTrap(page, actionDialog);
+    await escapeToTrigger(page, actionDialog, actionTrigger);
+  }
+  const trigger = page.getByTestId("clock-art73-2-general").getByRole("button", { name: "Record the initial report for art73-2-general" });
+  await activate(page, trigger);
+  const dialog = page.getByRole("dialog", { name: "Record the initial report", exact: true });
+  await expectDialogTrap(page, dialog);
+  await typeAt(page, dialog.getByRole("textbox", { name: "Reference (optional)", exact: true }), "KEYBOARD-REPORT-42");
+  await activate(page, dialog.getByRole("button", { name: "Record", exact: true }));
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await expectAxeClean(page, "keyboard incident detail refusal");
+  await page.screenshot({ path: testInfo.outputPath("x14-incident-detail.png") });
+  await escapeToTrigger(page, dialog, trigger);
 });
