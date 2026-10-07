@@ -526,6 +526,25 @@ export function canonicalOutlookRecipients(text: string): string[] {
   return [...new Set(text.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean))];
 }
 
+/**
+ * What a save of the Outlook allow-list would do. `loaded` is the list the
+ * form opened with (an unchanged form sends nothing: no identical audit row,
+ * and a stale form cannot drop recipients another admin added); `current` is
+ * the list re-read just before saving, which decides whether the save adds a
+ * recipient and so needs confirmation (null = unreadable: confirm).
+ */
+export function outlookRecipientChange(loaded: readonly string[], text: string, current: readonly string[] | null):
+  | { kind: "error"; error: string }
+  | { kind: "unchanged" }
+  | { kind: "save"; recipients: string[]; adds: boolean } {
+  const recipients = canonicalOutlookRecipients(text);
+  if (recipients.length > OUTLOOK_RECIPIENT_ALLOW_LIST_MAX) return { kind: "error", error: `Allow at most ${OUTLOOK_RECIPIENT_ALLOW_LIST_MAX} additional recipient mailboxes.` };
+  const before = canonicalOutlookRecipients(loaded.join("\n"));
+  if (recipients.length === before.length && recipients.every((mailbox) => before.includes(mailbox))) return { kind: "unchanged" };
+  const stored = current === null ? null : canonicalOutlookRecipients(current.join("\n"));
+  return { kind: "save", recipients, adds: recipients.some((mailbox) => !(stored?.includes(mailbox) ?? false)) };
+}
+
 function OutlookRecipients({ connection, onSaved }: { connection: Connection; onSaved: () => void }) {
   const act = useAction();
   const [text, setText] = useState((connection.outlookRecipientAllowList ?? []).join("\n"));
@@ -533,14 +552,22 @@ function OutlookRecipients({ connection, onSaved }: { connection: Connection; on
   const save = async (recipients: string[]) => {
     if (await act.run(() => api.patch(`/v1/chatops/connections/${connection.id}`, { outlookRecipientAllowList: recipients }), "Outlook recipients saved")) onSaved();
   };
-  return <Card title={`Outlook recipients: ${connection.name}`}><form className={v.stack} onSubmit={(event) => {
-    event.preventDefault();
-    const recipients = canonicalOutlookRecipients(text);
-    if (recipients.length > OUTLOOK_RECIPIENT_ALLOW_LIST_MAX) { act.setError(`Allow at most ${OUTLOOK_RECIPIENT_ALLOW_LIST_MAX} additional recipient mailboxes.`); return; }
-    const old = canonicalOutlookRecipients((connection.outlookRecipientAllowList ?? []).join("\n"));
-    if (recipients.some((mailbox) => !old.includes(mailbox))) setPending(recipients);
-    else void save(recipients);
-  }}>
+  const loaded = connection.outlookRecipientAllowList ?? [];
+  const submit = async () => {
+    const edited = outlookRecipientChange(loaded, text, loaded);
+    if (edited.kind === "error") { act.setError(edited.error); return; }
+    if (edited.kind === "unchanged") { act.setError("No recipient changed; nothing was saved."); return; }
+    // classify against the list stored now, not the one this form loaded
+    const current = await api.get<ConnectionsResponse>("/v1/chatops/connections").then(
+      (response) => response.connections.find((row) => row.id === connection.id)?.outlookRecipientAllowList ?? null,
+      () => null,
+    );
+    const change = outlookRecipientChange(loaded, text, current);
+    if (change.kind !== "save") return;
+    if (change.adds) setPending(change.recipients);
+    else void save(change.recipients);
+  };
+  return <Card title={`Outlook recipients: ${connection.name}`}><form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     <Field label={`Additional recipients for ${connection.name}`}><Textarea value={text} onChange={(event) => setText(event.target.value)} disabled={act.busy} rows={4} /></Field>
     <p>One exact mailbox per line, at most 50. No display names or wildcards. The registered mailbox remains allowed. Adding recipients relaxes who may receive approval summaries and is audited; all changes are audited.</p>
     <Button type="submit" disabled={act.busy}>Save Outlook recipients</Button>

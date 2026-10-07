@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
-import { optionEls, QueryGate, serverOpts, useAction, useUserPicker, userOpts } from "../adminKit";
+import { optionEls, QueryGate, readCurrentOrgSettings, serverOpts, useAction, useUserPicker, userOpts } from "../adminKit";
 import { UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
 
@@ -32,16 +32,21 @@ type CoverageBody = Partial<{ mcpProtocolMethods: string[]; mcpUpstreamTransport
 /**
  * PUT /v1/org/settings is a partial update: send only the lists this admin
  * changed, so saving one cannot revert another admin's concurrent change to
- * the other. `adds` is true when a sent list enables something new.
+ * the other. `adds` is true when a sent list enables something that is not
+ * enabled in `current` — the settings re-read just before saving — or when
+ * that read failed (null).
  */
-export function coverageChanges(settings: Record<string, unknown>, methods: string[], transports: string[]): { body: CoverageBody; adds: boolean } {
+export function coverageChanges(settings: Record<string, unknown>, methods: string[], transports: string[], current: Record<string, unknown> | null): { body: CoverageBody; adds: boolean } {
   const before = (key: string) => (Array.isArray(settings[key]) ? settings[key] : []) as string[];
   const changed = (key: string, next: string[]) => next.length !== before(key).length || next.some((value) => !before(key).includes(value));
   const body: CoverageBody = {
     ...(changed("mcpProtocolMethods", methods) ? { mcpProtocolMethods: methods } : {}),
     ...(changed("mcpUpstreamTransports", transports) ? { mcpUpstreamTransports: transports } : {}),
   };
-  const adds = (body.mcpProtocolMethods ?? []).some((value) => !before("mcpProtocolMethods").includes(value)) || (body.mcpUpstreamTransports ?? []).some((value) => !before("mcpUpstreamTransports").includes(value));
+  // what is enabled NOW (null = unknown: anything sent may enable something)
+  const stored = (key: string) => (current && Array.isArray(current[key]) ? (current[key] as string[]) : null);
+  const enables = (key: string, next: string[] | undefined) => (next ?? []).some((value) => !(stored(key)?.includes(value) ?? false));
+  const adds = enables("mcpProtocolMethods", body.mcpProtocolMethods) || enables("mcpUpstreamTransports", body.mcpUpstreamTransports);
   return { body, adds };
 }
 
@@ -53,12 +58,13 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const unavailable = !Array.isArray(settings.mcpProtocolMethods) || !Array.isArray(settings.mcpUpstreamTransports);
   const save = (body: CoverageBody) => act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved");
   const toggle = (values: string[], value: string, checked: boolean) => checked ? [...values, value] : values.filter((item) => item !== value);
-  return <form className={v.stack} onSubmit={(event) => {
-    event.preventDefault();
-    const change = coverageChanges(settings, methods, transports);
-    if (Object.keys(change.body).length === 0) { act.setError("No MCP coverage setting changed."); return; }
+  const submit = async () => {
+    if (Object.keys(coverageChanges(settings, methods, transports, settings).body).length === 0) { act.setError("No MCP coverage setting changed."); return; }
+    // classify against the lists stored now, not the loaded snapshot
+    const change = coverageChanges(settings, methods, transports, await readCurrentOrgSettings());
     if (change.adds) setPending(change.body); else void save(change.body);
-  }}>
+  };
+  return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
     <fieldset disabled={act.busy || unavailable}><legend>Enabled protocol methods</legend>
       {MCP_PROTOCOL_METHODS.map((method) => <label key={method} className={v.row}><input type="checkbox" checked={methods.includes(method)} onChange={(event) => setMethods(toggle(methods, method, event.target.checked))} />{method} · {method.startsWith("logging/") ? "write" : "read"}</label>)}
@@ -114,12 +120,32 @@ function StdioUpdate({ servers }: { servers: McpServer[] }) {
     {server?.stdio && <StdioUpdateForm key={`${server.id}:${server.stdioCommandDigest}`} server={server} />}
   </Card>;
 }
+/** True when the form differs from the stored command or argv. */
+export function stdioSpecDirty(server: McpServer, command: string, args: string[]): boolean {
+  const stored = server.stdio;
+  return !stored || command !== stored.command || args.length !== stored.args.length || args.some((arg, index) => arg !== stored.args[index]);
+}
+/**
+ * The sentence after a PATCH, from what the gateway RETURNED: an identical
+ * command, argv and digest is a no-op there (no audit, admission kept), so it
+ * must not be reported as "admission scan required". The same command can
+ * still re-pin a new digest when the file on disk changed.
+ */
+export function stdioUpdateOutcome(before: McpServer, after: McpServer): string {
+  const state = after.admissionState ?? "not reported";
+  const changed = after.stdioCommandDigest !== before.stdioCommandDigest || (after.stdio ? stdioSpecDirty(before, after.stdio.command, after.stdio.args) : false);
+  return changed
+    ? `Command updated; admission is now ${state}. A new digest was pinned: scan and approve it again before use.`
+    : `Nothing changed: the command, arguments and pinned digest are the same, so admission stays ${state}.`;
+}
 function StdioUpdateForm({ server }: { server: McpServer }) {
   const act = useAction(); const [command, setCommand] = useState(server.stdio!.command); const [args, setArgs] = useState(server.stdio!.args);
-  return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void act.run(() => api.patch(`/v1/servers/${server.id}`, { stdio: { command, args } }), "Command updated; admission scan required"); }}>
+  const dirty = stdioSpecDirty(server, command, args);
+  return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void act.run(async () => stdioUpdateOutcome(server, await api.patch<McpServer>(`/v1/servers/${server.id}`, { stdio: { command, args } }))); }}>
     <Field label="Updated executable path"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} /></Field>
     <StdioArguments args={args} onChange={setArgs} disabled={act.busy} />
-    <Button type="submit" disabled={act.busy}>Update command and reset admission</Button>
+    {!dirty && <p>The command and arguments match what is stored. Submitting re-checks the file's digest: admission resets only if the executable on disk has changed.</p>}
+    <Button type="submit" disabled={act.busy}>{dirty ? "Update command and reset admission" : "Re-check executable digest"}</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form>;
 }

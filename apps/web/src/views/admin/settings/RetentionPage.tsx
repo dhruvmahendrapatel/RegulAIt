@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
-import { QueryGate, useAction } from "../adminKit";
+import { QueryGate, readCurrentOrgSettings, useAction } from "../adminKit";
 import v from "../../views.module.css";
 
 interface MemoryStore {
@@ -56,9 +56,11 @@ type RetentionBody = Partial<{ semanticCacheTtlSeconds: number; conversationRete
 /**
  * PUT /v1/org/settings is a partial update, so the form sends only the fields
  * this admin edited: re-sending an untouched field from the loaded snapshot
- * would silently revert another admin's concurrent change to it.
+ * would silently revert another admin's concurrent change to it. `extends` is
+ * classified against `current`, the settings re-read just before saving (null
+ * when that read failed, which always asks for confirmation).
  */
-export function retentionChanges(settings: Record<string, unknown>, ttl: string, days: string): { error: string } | { body: RetentionBody; extends: boolean } {
+export function retentionChanges(settings: Record<string, unknown>, ttl: string, days: string, current: Record<string, unknown> | null): { error: string } | { body: RetentionBody; extends: boolean } {
   const ttlEdited = ttl !== String(settings.semanticCacheTtlSeconds ?? "");
   const daysEdited = days !== String(settings.conversationRetentionDays ?? "");
   if ((ttlEdited && (!/^\d+$/.test(ttl) || Number(ttl) < 1 || Number(ttl) > 2592000)) || (daysEdited && (!/^\d+$/.test(days) || Number(days) < 1 || Number(days) > 2555))) {
@@ -68,7 +70,14 @@ export function retentionChanges(settings: Record<string, unknown>, ttl: string,
     ...(ttlEdited ? { semanticCacheTtlSeconds: Number(ttl) } : {}),
     ...(daysEdited ? { conversationRetentionDays: Number(days) } : {}),
   };
-  const extends_ = (body.semanticCacheTtlSeconds ?? 0) > Number(settings.semanticCacheTtlSeconds) || (body.conversationRetentionDays ?? 0) > Number(settings.conversationRetentionDays);
+  // classified against what is stored NOW; an unreadable value counts as a relaxation
+  const raises = (key: keyof RetentionBody) => {
+    const next = body[key];
+    if (next === undefined) return false;
+    const stored = current?.[key];
+    return typeof stored !== "number" || next > stored;
+  };
+  const extends_ = raises("semanticCacheTtlSeconds") || raises("conversationRetentionDays");
   return { body, extends: extends_ };
 }
 
@@ -79,14 +88,17 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
   const [pending, setPending] = useState<RetentionBody | null>(null);
   const unavailable = typeof settings.semanticCacheTtlSeconds !== "number" || typeof settings.conversationRetentionDays !== "number";
   const save = (body: RetentionBody) => act.run(() => api.put("/v1/org/settings", body), "Retention settings saved");
-  return <form className={v.stack} onSubmit={(event) => {
-    event.preventDefault();
-    const change = retentionChanges(settings, ttl, days);
+  const submit = async () => {
+    const edited = retentionChanges(settings, ttl, days, settings);
+    if ("error" in edited) { act.setError(edited.error); return; }
+    if (Object.keys(edited.body).length === 0) { act.setError("No retention setting changed."); return; }
+    // classify against the values stored now, not the loaded snapshot
+    const change = retentionChanges(settings, ttl, days, await readCurrentOrgSettings());
     if ("error" in change) { act.setError(change.error); return; }
-    if (Object.keys(change.body).length === 0) { act.setError("No retention setting changed."); return; }
     if (change.extends) setPending(change.body);
     else void save(change.body);
-  }}>
+  };
+  return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported its retention settings. Refresh before changing them.</p>}
     <Field label="Semantic cache lifetime (seconds)"><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={act.busy || unavailable} /></Field>
     <p>The default is 3,600 seconds. Extending it retains cached information longer; every change is audited.</p>

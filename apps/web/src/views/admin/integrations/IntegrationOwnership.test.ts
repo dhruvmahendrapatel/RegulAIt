@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { AdminUser } from "../../../api/adminTypes";
 import { USERS_LIST_MAX, userPickerPage } from "../adminKit";
-import { ownerStatus } from "./IntegrationOwnership";
+import { canSaveOwner, ownerStatus } from "./IntegrationOwnership";
 
 const person = (id: string, disabledAt: string | null = null): AdminUser => ({
   id, email: `${id}@example.test`, displayName: id, isAdmin: false, disabledAt,
@@ -41,5 +41,20 @@ describe("ownerStatus", () => {
     expect(ownerStatus("a", complete)).toBe("active");
     expect(ownerStatus("off", complete)).toBe("inactive");
     expect(ownerStatus("missing", complete)).toBe("not_found");
+  });
+});
+
+describe("canSaveOwner (PR #181 review)", () => {
+  it("refuses a save that would only restate the loaded owner", () => {
+    expect(canSaveOwner("a", { ownerUserId: "a" }, "active")).toBe(false);
+    expect(canSaveOwner("", { ownerUserId: null }, "none")).toBe(false);
+    expect(canSaveOwner("", {}, "none")).toBe(false);
+  });
+
+  it("allows a real change to an assignable owner or to unassigned", () => {
+    expect(canSaveOwner("b", { ownerUserId: "a" }, "active")).toBe(true);
+    expect(canSaveOwner("", { ownerUserId: "a" }, "none")).toBe(true);
+    expect(canSaveOwner("b", { ownerUserId: null }, "not_loaded")).toBe(true);
+    expect(canSaveOwner("gone", { ownerUserId: null }, "inactive")).toBe(false);
   });
 });

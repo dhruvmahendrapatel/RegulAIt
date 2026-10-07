@@ -35,13 +35,21 @@ export function ownerStatus(owner: string, page: UserPickerPage | undefined, sav
   return page?.complete ? "not_found" : "not_loaded";
 }
 
+/**
+ * Save is offered only for a real change to an owner who may hold it: saving
+ * the loaded owner again would write an identical owner-changed audit row and
+ * could restore a stale owner over another admin's change.
+ */
+export function canSaveOwner(owner: string, row: Pick<OwnedIntegration, "ownerUserId">, status: OwnerStatus): boolean {
+  return owner !== (row.ownerUserId ?? "") && status !== "inactive" && status !== "not_found";
+}
+
 function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIntegration }) {
   const users = useUserPicker();
   const act = useAction();
   const [owner, setOwner] = useState(row.ownerUserId ?? "");
   const active = users.data?.users.filter((user) => user.disabledAt === null) ?? [];
   const status = users.data ? ownerStatus(owner, users.data, row) : "none";
-  const unavailable = status === "inactive" || status === "not_found";
   return <form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
     void act.run(() => api.put(`/v1/${kind}/${row.id}/owner`, { ownerUserId: owner || null }), "Owner updated");
@@ -57,7 +65,7 @@ function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIn
     <p>Only active people can be assigned. Assigning or clearing an owner is audited and grants no permission to call this integration.</p>
     {users.data && !users.data.complete && <UserListTruncated count={users.data.users.length} />}
     {users.error && <p role="alert">Could not load people. <Button type="button" onClick={() => void users.refetch()}>Retry loading people</Button></p>}
-    <Button type="submit" disabled={act.busy || users.isLoading || !!users.error || unavailable}>Save owner</Button>
+    <Button type="submit" disabled={act.busy || users.isLoading || !!users.error || !canSaveOwner(owner, row, status)}>Save owner</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form>;
 }

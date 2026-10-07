@@ -19,6 +19,7 @@ import type {
   EgressAllowHost,
   McpServer,
   McpTool,
+  OrgSettingsResponse,
   Role,
   Team,
 } from "../../api/adminTypes";
@@ -109,6 +110,17 @@ export const useUserPicker = () =>
     queryKey: [...adminKeys.users, "picker", USERS_LIST_MAX],
     queryFn: async () => userPickerPage((await api.get<{ users: AdminUser[] }>(`/v1/users?limit=${USERS_LIST_MAX}`)).users),
   });
+/**
+ * The org settings as stored NOW, read just before a relaxation is classified,
+ * so a confirmation is decided against the current value rather than the
+ * snapshot the form loaded. null when the read fails: the caller then asks for
+ * confirmation rather than assume nothing is relaxed.
+ */
+export const readCurrentOrgSettings = (): Promise<Record<string, unknown> | null> =>
+  api.get<OrgSettingsResponse>("/v1/org/settings").then(
+    (response) => (response.settings ? (response.settings as unknown as Record<string, unknown>) : null),
+    () => null,
+  );
 export const useRoles = () =>
   useQuery({ queryKey: adminKeys.roles, queryFn: () => api.get<{ roles: Role[] }>("/v1/roles") });
 export const useTeams = () =>

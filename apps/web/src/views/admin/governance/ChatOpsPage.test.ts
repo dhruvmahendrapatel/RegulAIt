@@ -12,6 +12,7 @@ import {
   OUTLOOK_RECIPIENT_ALLOW_LIST_MAX,
   canonicalOutlookRecipients,
   chatOpsConnectionBody,
+  outlookRecipientChange,
   chatOpsProviderLabel,
   chatOpsProviderRegistrable,
   chatOpsProviderUnavailableReason,
@@ -144,5 +145,25 @@ describe("ChatOpsPage — Outlook recipients are counted in their canonical form
       expect(verdict.ok, text).toBe(true);
       expect(canonicalOutlookRecipients(text)).toEqual(verdict.value);
     }
+  });
+});
+
+describe("ChatOpsPage — an Outlook save sends only a real change, classified against the stored list (PR #181 review)", () => {
+  it("an unchanged canonical list is not sent", () => {
+    const loaded = ["cab@example.test", "security@example.test"];
+    expect(outlookRecipientChange(loaded, " CAB@example.test\nsecurity@example.test\n", loaded)).toEqual({ kind: "unchanged" });
+    expect(outlookRecipientChange(loaded, "security@example.test\ncab@example.test", loaded)).toEqual({ kind: "unchanged" });
+  });
+
+  it("a recipient another admin removed since load counts as an addition", () => {
+    const loaded = ["cab@example.test", "security@example.test"];
+    const now = ["security@example.test"];
+    expect(outlookRecipientChange(loaded, "cab@example.test", now)).toEqual({ kind: "save", recipients: ["cab@example.test"], adds: true });
+    // a removal against what is stored now is a tightening
+    expect(outlookRecipientChange(loaded, "security@example.test", now)).toEqual({ kind: "save", recipients: ["security@example.test"], adds: false });
+  });
+
+  it("asks for confirmation when the stored list could not be re-read", () => {
+    expect(outlookRecipientChange(["a@x.test", "b@x.test"], "a@x.test", null)).toEqual({ kind: "save", recipients: ["a@x.test"], adds: true });
   });
 });
