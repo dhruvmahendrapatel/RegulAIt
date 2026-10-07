@@ -126,7 +126,7 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import type { McpAdmissionMode, McpAdmissionState } from "@regulait/shared";
+import type { McpAdmissionMode, McpAdmissionState, McpUpstreamTransport } from "@regulait/shared";
 import { loadAdmissionMode, McpAdmissionHeldError } from "./mcp-admission.js";
 import { connectUpstream, syncUpstreamTools } from "./mcp-proxy.js";
 import { runSkillAdmissionRescan, type SkillRescanResult } from "./skill-admission.js";
@@ -192,6 +192,12 @@ interface EligibleRow {
   url: string;
   allowPrivateRanges: boolean | null;
   admissionState: McpAdmissionState;
+  /** ADR-0185 G4: the connect opens the row's own transport (a stdio server is
+   * re-scanned by starting its pinned command, through every stdio rule) */
+  transport: McpUpstreamTransport;
+  stdioCommand: string | null;
+  stdioArgs: string[] | null;
+  stdioCommandDigest: string | null;
 }
 
 /**
@@ -256,6 +262,10 @@ export async function runMcpAdmissionRescan(
       url: mcpServers.url,
       allowPrivateRanges: mcpServers.allowPrivateRanges,
       admissionState: mcpServers.admissionState,
+      transport: mcpServers.transport,
+      stdioCommand: mcpServers.stdioCommand,
+      stdioArgs: mcpServers.stdioArgs,
+      stdioCommandDigest: mcpServers.stdioCommandDigest,
     })
     .from(mcpServers)
     .where(inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]))

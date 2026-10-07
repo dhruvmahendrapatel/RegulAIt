@@ -88,6 +88,7 @@
  * way leaves its rows late rather than starved.
  */
 import { asc, eq, inArray, mcpServers, sql, type Db, type SQL } from "@regulait/db";
+import type { McpUpstreamTransport } from "@regulait/shared";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
 import { connectUpstream } from "./mcp-proxy.js";
@@ -161,6 +162,8 @@ export interface McpHealthProbeResult {
 type ProbeRow = BreakerRow & {
   url: string;
   allowPrivateRanges: boolean | null;
+  /** ADR-0185 G4: so an SSE upstream is probed over SSE */
+  transport: McpUpstreamTransport;
   lastHealthProbeAt: Date | null;
 };
 
@@ -182,7 +185,13 @@ export const HEALTH_PROBE_CLAIM_LOCK_KEY = 6_000_000_037;
  */
 export function healthProbeEligibility(): SQL {
   const cooldown = sql`make_interval(secs => ${breakerConfig().cooldownMs / 1000})`;
-  return sql`(${mcpServers.breakerOpenedAt} is null or now() - ${mcpServers.breakerOpenedAt} >= ${cooldown})`;
+  // ADR-0185 G4 — A STDIO UPSTREAM IS NEVER PROBED. A probe of one is not a
+  // look at a remote server's health: it STARTS a local process, on a timer,
+  // with nobody having asked for it, and takes one of the host's few stdio
+  // process slots from a real request. Its breaker still learns passively
+  // from real traffic, which is the enforcement anyway (this sweep only
+  // changes when the breaker learns).
+  return sql`(${mcpServers.transport} <> 'stdio' and (${mcpServers.breakerOpenedAt} is null or now() - ${mcpServers.breakerOpenedAt} >= ${cooldown}))`;
 }
 
 /**
@@ -244,6 +253,7 @@ export async function claimHealthProbeBatch(db: Db | Tx, limit: number, eligible
           name: mcpServers.name,
           url: mcpServers.url,
           allowPrivateRanges: mcpServers.allowPrivateRanges,
+          transport: mcpServers.transport,
           breakerOpenedAt: mcpServers.breakerOpenedAt,
           breakerLastError: mcpServers.breakerLastError,
           breakerConsecutiveFailures: mcpServers.breakerConsecutiveFailures,
@@ -274,6 +284,7 @@ export async function claimHealthProbeBatch(db: Db | Tx, limit: number, eligible
         name: picked.name,
         url: picked.url,
         allowPrivateRanges: picked.allowPrivateRanges,
+        transport: picked.transport,
         breakerOpenedAt: picked.breakerOpenedAt,
         breakerLastError: picked.breakerLastError,
         breakerConsecutiveFailures: picked.breakerConsecutiveFailures,
