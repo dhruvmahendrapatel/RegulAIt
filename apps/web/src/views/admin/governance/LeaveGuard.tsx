@@ -17,6 +17,12 @@ export function useLeaveGuard(opts: {
   beforeLeave?: () => Promise<boolean | void> | boolean | void;
   /** Explicitly give up unsaved changes without deleting an earlier draft. */
   onDiscard?: () => void;
+  /**
+   * R13-11: the unsaved changes can never be saved from this page (a different
+   * account is signed in now), so no retry can succeed: the dialog offers only
+   * Discard and leave, or Stay, and never asks to try saving again.
+   */
+  cannotSave?: boolean;
 }) {
   const navigate = useNavigate();
   const when = useRef(opts.when);
@@ -47,18 +53,21 @@ export function useLeaveGuard(opts: {
     if (blocker.state === "blocked") blocker.reset();
     setError(null);
   };
+  const notSaved = opts.cannotSave
+    ? "Your latest changes cannot be saved because a different account is signed in now. They are still on this page. Stay on this page, or discard them and leave."
+    : "Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, stay and keep editing, or discard the unsaved changes and leave.";
   const leave = async () => {
-    if (blocker.state !== "blocked") return;
+    if (blocker.state !== "blocked" || opts.cannotSave) return;
     setLeaving(true);
     setError(null);
     try {
       if (await opts.beforeLeave?.() === false) {
-        setError("Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, stay and keep editing, or discard the unsaved changes and leave.");
+        setError(notSaved);
         return;
       }
       blocker.proceed();
     } catch {
-      setError("Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, stay and keep editing, or discard the unsaved changes and leave.");
+      setError(notSaved);
     } finally {
       setLeaving(false);
     }
@@ -77,7 +86,7 @@ export function useLeaveGuard(opts: {
       onClose={stay}
       actions={
         <>
-          <Button onClick={() => void leave()} disabled={leaving}>Leave</Button>
+          {!opts.cannotSave && <Button onClick={() => void leave()} disabled={leaving}>Leave</Button>}
           {opts.onDiscard && <Button variant="danger" onClick={discardAndLeave} disabled={leaving}>Discard and leave</Button>}
           <Button variant="primary" onClick={stay} disabled={leaving}>Stay on this page</Button>
         </>

@@ -259,8 +259,10 @@ export function useIntakeDraft<S>(opts: {
     saved.current = null;
     setStatus({ kind: "idle" });
     try {
-      // the literal path keeps this delete visible to the UI-affordance check
-      await api.del(`/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`);
+      // the literal path keeps this delete visible to the UI-affordance check;
+      // R13-12: it names whose draft this is, so the gateway refuses it (409
+      // `draft_owner_changed`) if someone else has signed in on this browser since
+      await api.delWithHeaders(`/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`, draftOwnerHeaders(owner.current));
     } catch {
       // the next save replaces it anyway
     }
@@ -268,13 +270,15 @@ export function useIntakeDraft<S>(opts: {
 
   /** after a successful submission: stop saving, then delete the draft once every save has landed */
   const discard = useCallback(async () => {
-    // a saved draft the person never chose to resume is theirs to keep: only this page's own draft goes
-    const ownDraft = statusRef.current.kind !== "offer";
+    // a saved draft the person never chose to resume is theirs to keep: only this page's own draft goes;
+    // R13-12: once someone else is signed in, the draft under this cookie is theirs, not ours to touch
+    const ownDraft = statusRef.current.kind !== "offer" && !ownerChanged();
     stopped.current = true;
     clearTimer();
     setStatus({ kind: "done" });
     if (!ownDraft) return;
-    const run = queue.current.then(() => api.del(draftPath(scope)).catch(() => undefined));
+    const who = owner.current;
+    const run = queue.current.then(() => api.delWithHeaders(draftPath(scope), draftOwnerHeaders(who)).catch(() => undefined));
     queue.current = run.catch(() => undefined);
     await run;
   }, [scope]);
@@ -292,7 +296,14 @@ export function useIntakeDraft<S>(opts: {
     setStatus({ kind: "done" });
   }, []);
 
-  return { status, unsaved, flush: save, resume, startFresh, discard, abandon };
+  /**
+   * R13-12: the person signed in now is not the one whose draft this page
+   * loaded (an in-place sign-in change). Nothing this page holds can be saved,
+   * submitted or deleted on their behalf; the page refuses and says so.
+   */
+  const ownerHasChanged = owner.current !== null && opts.userId !== owner.current;
+
+  return { status, unsaved, ownerChanged: ownerHasChanged, flush: save, resume, startFresh, discard, abandon };
 }
 
 /** "Draft saved 14:05" — the time in the viewer's own clock */

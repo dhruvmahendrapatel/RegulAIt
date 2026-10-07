@@ -166,6 +166,8 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const [sections, setSections] = useState<QuestionnaireSection[]>(() => parsed.current.sections);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // R13-12: a resubmission refused because a different account is signed in now
+  const [ownerRefused, setOwnerRefused] = useState(false);
   // a retry after a failed questionnaire post does not PATCH the same body twice
   const patched = useRef<string | null>(null);
   // ADR-0179: a retry after a lost response sends the same Idempotency-Key, so
@@ -208,6 +210,8 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       <p>If you leave now, open the use case again to check whether it went back for review before resubmitting.</p>
     ) : kept && !draft.unsaved ? (
       <p>Your changes are saved as a draft for this use case. Open Update and resubmit again to pick up where you left off.</p>
+    ) : draft.ownerChanged ? (
+      <p>A different account is signed in now, so your latest changes cannot be saved to the previous account's draft. Discard them and leave, or stay on this page.</p>
     ) : kept ? (
       <p>Your latest changes are being saved. Leaving saves them first; open Update and resubmit again to pick up where you left off.</p>
     ) : (
@@ -217,6 +221,8 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
       durableForLeave(await draft.flush(), draft.unsaved),
     onDiscard: !busy && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
+    // R13-11: after an in-place sign-in change no retry can save these edits
+    cannotSave: !busy && draft.ownerChanged && draft.unsaved,
   });
 
   // Navigate after the successful submission has rendered with its guard off.
@@ -257,6 +263,15 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       setError("The use case has no intake workflow to resubmit to. An administrator needs to check its workflow.");
       return;
     }
+    // R13-12: these edits belong to the account that opened this page. Under
+    // another person's cookie the PATCH and the new questionnaire version would
+    // be sent as them, and the draft delete would remove their draft: send nothing.
+    if (draft.ownerChanged) {
+      setError(null);
+      setOwnerRefused(true);
+      return;
+    }
+    setOwnerRefused(false);
     setBusy(true);
     setError(null);
     try {
@@ -480,6 +495,11 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
               </div>
               <div className={s.callout}>Resubmitting starts a new review round. The reviewers see the new version and decide again.</div>
               {error ? <p className={v.errLine} role="alert">The use case was not resubmitted: {error} Retry continues where it stopped.</p> : null}
+              {ownerRefused ? (
+                <p className={v.errLine} role="alert">
+                  You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave.
+                </p>
+              ) : null}
             </div>
           </Card>
         )}

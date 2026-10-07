@@ -251,6 +251,8 @@ function RegisterUseCase() {
       <p>If you leave now, open Register AI use case again and submit from your draft: it remembers this submission, so finishing it will not create a second use case.</p>
     ) : draftKept(draft.status) && !draft.unsaved ? (
       <p>Your answers are saved as a draft. Open Register AI use case again to pick up where you left off.</p>
+    ) : draft.ownerChanged ? (
+      <p>A different account is signed in now, so your latest changes cannot be saved to the previous account's draft. Discard them and leave, or stay on this page.</p>
     ) : draftKept(draft.status) ? (
       <p>Your latest changes are being saved. Leaving saves them first; open Register AI use case again to pick up where you left off.</p>
     ) : (
@@ -260,6 +262,8 @@ function RegisterUseCase() {
       draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
       durableForLeave(await draft.flush(), draft.unsaved),
     onDiscard: !submitting && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
+    // R13-11: after an in-place sign-in change no retry can save these edits
+    cannotSave: !submitting && draft.ownerChanged && draft.unsaved,
   });
 
   // ---- the stack and the assistant ------------------------------------------

@@ -21,6 +21,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { refreshSessionInPlace } from "./refresh-session-fixture";
 
 const SHOTS = process.env.G2_SHOTS_DIR;
 if (SHOTS) mkdirSync(SHOTS, { recursive: true });
@@ -37,6 +38,8 @@ const RECERT = "66666666-1111-4111-8111-111111111111";
 type Persona = { id: string; isAdmin: boolean; displayName: string };
 const RILEY: Persona = { id: "riley", isAdmin: true, displayName: "Riley Reviewer" };
 const PAT: Persona = { id: "pat", isAdmin: false, displayName: "Pat Privacy" };
+/** R13-12: the person who signs in on Riley's browser while Riley's resubmission is open */
+const SAM: Persona = { id: "sam", isAdmin: true, displayName: "Sam Second" };
 
 const PEOPLE = [
   { id: "ada", name: "Ada Owner" }, { id: "avery", name: "Avery Approver" }, { id: "riley", name: "Riley Reviewer" },
@@ -137,8 +140,14 @@ interface State {
   /** ADR-0179: the Idempotency-Key each questionnaire post carried */
   artifactKeys: Array<string | undefined>;
   artifactFailures: number;
-  /** the resubmission's server-side draft (ADR-0171) */
+  /** the resubmission's server-side draft (ADR-0171) — Riley's */
   draft: { scope: string; state: unknown; updatedAt: string } | null;
+  /** R13-12: anyone else's draft for the same use case (drafts are per signed-in person) */
+  otherDraft: { scope: string; state: unknown; updatedAt: string } | null;
+  /** R13-12: every draft write, with the owner it named and the person whose cookie carried it */
+  draftWrites: Array<{ method: string; owner: string | undefined; as: string }>;
+  /** R13-12: writes the gateway refused because they named someone else (409 draft_owner_changed) */
+  draftOwnerRefusals: number;
   /** ADR-0171: the answers the owner was not sure about when they last submitted */
   resubmitUnsure: string[] | null;
 }
@@ -182,7 +191,7 @@ function detail(state: State) {
 async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<State> {
   const state: State = {
     persona: RILEY, status: "under_review", reviews: reviews(), acceptedRisk: false, recertification: false, resubmission: false, policy: savedPolicy(),
-    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactKeys: [], artifactFailures: 0, draft: null, resubmitUnsure: null, ...patch,
+    approvals: [roleApproval()], calls: [], puts: [], putReply: null, decides: [], decideReply: null, patches: [], artifacts: [], artifactKeys: [], artifactFailures: 0, draft: null, otherDraft: null, draftWrites: [], draftOwnerRefusals: 0, resubmitUnsure: null, ...patch,
   };
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
@@ -191,9 +200,22 @@ async function mockGateway(page: Page, patch: Partial<State> = {}): Promise<Stat
     const me = state.persona;
     // ADR-0171: the resubmission's own draft is kept beside the record, not among its calls
     if (p === "/v1/use-cases/draft") {
-      if (method === "PUT") state.draft = { scope: UC, state: route.request().postDataJSON().state, updatedAt: "2026-10-03T12:00:00Z" };
-      if (method === "DELETE") state.draft = null;
-      return method === "DELETE" ? route.fulfill({ status: 204 }) : json(route, { draft: state.draft });
+      const mine = me.id === RILEY.id;
+      if (method !== "GET") {
+        const owner = route.request().headers()["x-regulait-draft-owner"];
+        state.draftWrites.push({ method, owner, as: me.id });
+        // the gateway's rule (refuseOtherOwner): a write naming someone other than the caller stores nothing
+        if (owner !== undefined && owner !== me.id) {
+          state.draftOwnerRefusals += 1;
+          return json(route, { error: "draft_owner_changed" }, 409);
+        }
+      }
+      const stored = method === "PUT" ? { scope: UC, state: route.request().postDataJSON().state, updatedAt: "2026-10-03T12:00:00Z" } : null;
+      if (method === "PUT" || method === "DELETE") {
+        if (mine) state.draft = stored;
+        else state.otherDraft = stored;
+      }
+      return method === "DELETE" ? route.fulfill({ status: 204 }) : json(route, { draft: mine ? state.draft : state.otherDraft });
     }
     if (method !== "GET") state.calls.push(`${method} ${p}`);
     if (p === "/auth/me") return json(route, { userId: me.id, isAdmin: me.isAdmin, via: "session", user: { id: me.id, email: `${me.id}@example.test`, displayName: me.displayName }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
@@ -822,6 +844,57 @@ test.describe("update and resubmit", () => {
     await page.keyboard.press("Tab");
     // from the stage heading, Tab continues into the stage's first question
     await expect(page.getByLabel("Primary purpose domain")).toBeFocused();
+  });
+
+  // ---- R13-12: an in-place sign-in change while a resubmission is open ----
+  const description = (d: State["draft"]) => (d?.state as { description?: string } | undefined)?.description;
+  const SAMS_DRAFT = { scope: UC, state: { kind: "resubmission", version: 1, step: 0, description: "Sam's own edit" }, updatedAt: "2026-10-03T11:00:00Z" };
+
+  test("R13-12: after the session becomes someone else's, Resubmit sends no PATCH, no questionnaire and no draft delete", async ({ page }) => {
+    const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [], otherDraft: SAMS_DRAFT });
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    const purpose = "Riley's resubmission edit, saved under Riley.";
+    await page.getByLabel("What will the system do?").fill(purpose);
+    await expect.poll(() => description(state.draft)).toBe(purpose);
+    for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByRole("heading", { name: "Review and resubmit" })).toBeVisible();
+    await expect.poll(() => (state.draft?.state as { step?: number } | undefined)?.step).toBe(3);
+    state.persona = SAM;
+    expect(await refreshSessionInPlace(page)).toBe("sam");
+    await page.getByRole("button", { name: "Resubmit for review" }).click();
+    const refused = page.getByRole("alert").filter({ hasText: "You're now signed in as someone else." });
+    await Promise.race([refused.waitFor(), page.waitForURL(new RegExp(`/use-cases/${UC}$`))]);
+    expect(state.calls, "nothing is sent under the new person's cookie").toEqual([]);
+    expect(state.patches).toEqual([]);
+    expect(state.artifacts).toEqual([]);
+    expect(state.draftWrites.filter((w) => w.method === "DELETE"), "no draft delete at all").toEqual([]);
+    await expect(refused).toContainText("This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave.");
+    await expect(page).toHaveURL(/resubmit=/);
+    expect(state.otherDraft, "Sam's draft is untouched").toEqual(SAMS_DRAFT);
+    expect(description(state.draft), "Riley's draft is kept for Riley").toBe(purpose);
+  });
+
+  test("R13-12: a successful resubmission deletes its draft naming the owner", async ({ page }) => {
+    const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    const purpose = "Riley's resubmission, sent as Riley.";
+    await page.getByLabel("What will the system do?").fill(purpose);
+    await expect.poll(() => description(state.draft)).toBe(purpose);
+    for (let i = 0; i < 3; i += 1) await page.getByRole("button", { name: "Continue" }).click();
+    await page.getByRole("button", { name: "Resubmit for review" }).click();
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
+    expect(state.calls).toEqual([`PATCH /v1/use-cases/${UC}`, `POST /v1/workflows/instances/${INST}/artifacts`]);
+    await expect.poll(() => state.draftWrites.filter((w) => w.method === "DELETE")).toEqual([{ method: "DELETE", owner: "riley", as: "riley" }]);
+    expect(state.draft).toBeNull();
+  });
+
+  test("R13-12: Start fresh deletes the offered draft naming the owner", async ({ page }) => {
+    const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [], draft: { ...SAMS_DRAFT, state: { kind: "resubmission", version: 1, step: 0, description: "Riley's older edit" } } });
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    await page.getByRole("button", { name: "Start fresh" }).click();
+    await expect.poll(() => state.draftWrites).toEqual([{ method: "DELETE", owner: "riley", as: "riley" }]);
+    expect(state.draft).toBeNull();
+    await expect(page.getByLabel("What will the system do?")).toHaveValue(PURPOSE);
   });
 
   test("a use case that is not waiting for an update cannot be resubmitted", async ({ page }) => {

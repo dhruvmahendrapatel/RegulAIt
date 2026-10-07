@@ -1012,3 +1012,29 @@ test("R13-01: a saved registration can leave after an in-place session owner cha
   expect(gw.bobDrafts.size).toBe(0);
   expect(gw.creates).toHaveLength(0);
 });
+
+test("R13-11: unsaved edits after an in-place session owner change offer Discard or Stay, never a retry", async ({ page }) => {
+  const gw = await mockGateway(page);
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Use-case name").fill("Ada's saved proposal");
+  await expect(page.getByText(/^Draft saved /)).toBeVisible();
+  const saved = JSON.stringify(gw.drafts.get("new"));
+  const puts = gw.draftPuts;
+  gw.user = "bob";
+  expect(await refreshSessionInPlace(page)).toBe("b");
+  await page.getByLabel("Use-case name").fill("Ada's later edit, typed after the switch");
+  await page.getByRole("link", { name: "Cancel", exact: true }).click();
+  const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+  await expect(leave).toContainText("A different account is signed in now, so your latest changes cannot be saved");
+  await expect(leave).not.toContainText("saves them first");
+  await expect(leave).not.toContainText(/retry|try leave again/i);
+  await expect(leave.getByRole("button", { name: "Leave", exact: true })).toHaveCount(0);
+  await expectNoAxeViolations(page, "owner changed with unsaved edits");
+  await leave.getByRole("button", { name: "Discard and leave", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/intake/);
+  expect(JSON.stringify(gw.drafts.get("new"))).toBe(saved);
+  expect(gw.draftPuts).toBe(puts);
+  expect(gw.draftOwnerRefusals).toBe(0);
+  expect(gw.bobDrafts.size).toBe(0);
+  expect(gw.creates).toHaveLength(0);
+});

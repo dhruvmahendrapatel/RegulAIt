@@ -261,6 +261,10 @@ export const api = {
   /** PUT with extra request headers (e.g. the intake draft's owner precondition, ADR-0179) */
   putWithHeaders: async <T>(path: string, body: unknown, headers: Record<string, string>, signal?: AbortSignal) =>
     (await send<T>("PUT", path, body, headers, signal)).body,
+  /** DELETE with extra request headers (e.g. the intake draft's owner precondition, ADR-0179: a delete naming
+   * someone other than the signed-in caller is refused, so it can never remove another person's draft) */
+  delWithHeaders: async <T>(path: string, headers: Record<string, string>, body?: unknown) =>
+    (await send<T>("DELETE", path, body, headers)).body,
 };
 
 /**
