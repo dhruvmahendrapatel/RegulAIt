@@ -23,6 +23,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { generateTotpSecret, verifyTotp } from "../../gateway/dist/totp.js";
 import { passTotp, recordTotpSecret } from "./totp-sign-in";
+import { refreshSessionInPlace } from "./refresh-session-fixture";
 
 /** ADR-0181: the mocked gateway's admins have TOTP enrolled under this
  * synthetic secret; codes are checked with the gateway's own TOTP code */
@@ -613,6 +614,92 @@ test.describe("AER-052/053/054: explanations saved, plain-language screening, th
 const submitted = (page: Page) => page.getByRole("status").filter({ hasText: "Submitted for human review." });
 const notSaved = (page: Page) => page.getByRole("main").getByRole("alert").filter({ hasText: "Your draft could not be saved" });
 
+test("B1: a permanently oversized exit save can be discarded without removing an older draft", async ({ page }, testInfo) => {
+  const gw = await mockGateway(page);
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Use-case name").fill("Earlier saved proposal");
+  await expect.poll(() => (gw.drafts.get("new")?.state as Json)?.form?.title).toBe("Earlier saved proposal");
+  gw.draftPutStatus = 413;
+  await page.getByLabel("Use-case name").fill("Latest unsaved oversized proposal");
+  await expect(page.getByText("This draft is too large to save: your answers stay on this page until you submit.")).toBeVisible();
+  await page.getByRole("link", { name: "Cancel", exact: true }).click();
+  const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+  await leave.getByRole("button", { name: "Leave", exact: true }).click();
+  await expect(leave.getByRole("alert")).toContainText("could not be saved");
+  const puts = gw.draftPuts;
+  await expectNoAxeViolations(page, "discard oversized exit save");
+  await page.screenshot({ path: testInfo.outputPath("x13-discard-oversized.png") });
+  await leave.getByRole("button", { name: "Discard and leave", exact: true }).click();
+  await expect(page).toHaveURL(/\/ui\/admin\/use-cases$/);
+  expect(gw.draftPuts, "discard must suppress the automatic exit save").toBe(puts);
+  expect((gw.drafts.get("new")?.state as Json)?.form?.title).toBe("Earlier saved proposal");
+});
+
+test("B1: an unresolved initial draft read does not trap an edited registration", async ({ page }) => {
+  await mockGateway(page);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/v1/use-cases/draft?scope=new", async (route) => {
+    if (route.request().method() === "GET") { await held; await route.abort().catch(() => undefined); }
+    else await route.fallback();
+  });
+  try {
+    await page.goto("/ui/admin/governance/intake");
+    await page.getByLabel("Use-case name").fill("Leave despite unavailable initial read");
+    await page.getByRole("link", { name: "Cancel", exact: true }).click();
+    const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(leave.getByRole("alert")).toContainText("could not be saved");
+    await leave.getByRole("button", { name: "Discard and leave", exact: true }).click();
+    await expect(page).toHaveURL(/\/ui\/admin\/use-cases$/);
+  } finally { release(); }
+});
+
+test("M1: Back after direct URL entry warns and sends the latest exit snapshot", async ({ page }) => {
+  const gw = await mockGateway(page, { draftPutStatus: 500 });
+  // Two document navigations: the previous entry is outside this router's history.
+  await page.goto("/ui/admin/use-cases");
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Use-case name").fill("Unsaved direct-URL proposal");
+  expect(await unloadArmed(page)).toBe(true);
+  let warned = false;
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("beforeunload");
+    warned = true;
+    await dialog.dismiss();
+  });
+  // A dismissed native warning cancels navigation: wait only for that attempt,
+  // rather than asking Playwright to wait for a document that will not load.
+  await page.goBack({ timeout: 2000 }).catch((error: Error) => {
+    expect(error.message).toMatch(/Timeout|ERR_ABORTED/);
+  });
+  expect(warned, "Back out of a directly entered document must warn before leaving").toBe(true);
+  await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
+  await expect(page.getByLabel("Use-case name")).toHaveValue("Unsaved direct-URL proposal");
+
+  gw.draftPutStatus = null;
+  await page.getByLabel("Use-case name").fill("Latest direct-URL proposal");
+  const exits: Array<{ title: string; owner: string }> = [];
+  await page.exposeFunction("recordDraftExit", (body: string, owner: string) => {
+    exits.push({ title: JSON.parse(body).state.form.title, owner });
+  });
+  // Page request interception cannot complete a keepalive that outlives its
+  // document. Observe its actual invocation without replacing the fetch.
+  await page.evaluate(() => {
+    const original = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (String(input).startsWith("/v1/use-cases/draft") && init?.keepalive) {
+        void (window as any).recordDraftExit(String(init.body), (init.headers as Record<string, string>)["x-regulait-draft-owner"]);
+      }
+      return original(input, init);
+    };
+  });
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.goBack();
+  await expect(page).toHaveURL(/\/ui\/admin\/use-cases$/);
+  await expect.poll(() => exits).toContainEqual({ title: "Latest direct-URL proposal", owner: "u" });
+});
+
 async function signIn(page: Page, email: string) {
   recordTotpSecret(email, MOCK_TOTP_SECRET);
   await page.getByLabel("Email or username").fill(email);
@@ -643,6 +730,36 @@ test.describe("ADR-0179: a create waits for a durable draft save", () => {
     expect(gw.useCases).toHaveLength(1);
     expect(gw.artifacts).toHaveLength(1);
     expect(gw.risks).toHaveLength(1);
+  });
+
+  test("a stalled checkpoint save times out without creating; retry keeps the same durable attempt", async ({ page }) => {
+    const gw = await mockGateway(page);
+    await walkWithEdits(page);
+    await expect.poll(() => draftStep(gw)).toBe(5);
+    let stall = true;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("**/v1/use-cases/draft?scope=new", async (route) => {
+      if (stall && route.request().method() === "PUT" && route.request().postDataJSON().state.attempt) {
+        await held;
+        await route.abort().catch(() => undefined);
+      } else {
+        await route.fallback();
+      }
+    });
+    try {
+      await page.getByRole("button", { name: "Submit for human review" }).click();
+      await expect(notSaved(page)).toBeVisible({ timeout: 20_000 });
+      expect(gw.creates, "no create while its recovery key is not durable").toHaveLength(0);
+      stall = false;
+      release();
+      await notSaved(page).getByRole("button", { name: "Retry" }).click();
+      await expect(submitted(page)).toBeVisible();
+      expect(gw.creates).toHaveLength(1);
+      expect(gw.draftKeyAtCreate).toEqual([gw.creates[0]!.key]);
+    } finally {
+      release();
+    }
   });
 
   test("a refused save of a risk's key sends no risk; Retry registers it once", async ({ page }) => {
@@ -697,8 +814,10 @@ test.describe("ADR-0179: a create waits for a durable draft save", () => {
 test.describe("ADR-0179: browser Back and leaving the page keep the last edit", () => {
   test("an edit followed at once by browser Back asks first; Stay keeps it; Leave saves it; Forward recovers it exactly", async ({ page }) => {
     const gw = await mockGateway(page);
-    await page.goto("/ui/");
-    await page.goto("/ui/admin/governance/intake");
+    // Enter through a real SPA link so Back/Forward are router transitions;
+    // document exits are covered separately by the beforeunload checks.
+    await page.goto("/ui/admin/use-cases");
+    await page.getByRole("link", { name: "Register AI use case", exact: true }).click();
     const name = page.getByLabel("Use-case name");
     await name.fill("Typed just before Back");
     await page.evaluate(() => history.back());
@@ -714,8 +833,14 @@ test.describe("ADR-0179: browser Back and leaving the page keep the last edit", 
     await name.fill("Typed just before Back, then edited");
     await page.evaluate(() => history.back());
     await leave.getByRole("button", { name: "Leave", exact: true }).click();
-    await expect(page).toHaveURL(/\/ui\/?$/);
+    await expect(page).toHaveURL(/\/ui\/admin\/use-cases$/);
     await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Typed just before Back, then edited");
+
+    // POP updates the address before React commits the destination. The
+    // reproduced CI trace still shows the intake dialog at this URL: Forward
+    // at that point races the outstanding Back. Wait for the actual page.
+    await expect(page.getByRole("heading", { level: 1, name: "AI registry", exact: true })).toBeVisible();
+    await expect(leave).toHaveCount(0);
 
     await page.goForward();
     await expect(page).toHaveURL(/\/ui\/admin\/governance\/intake$/);
@@ -724,7 +849,7 @@ test.describe("ADR-0179: browser Back and leaving the page keep the last edit", 
     await expect(name).toHaveValue("Typed just before Back, then edited");
   });
 
-  test("an edit made just before a navigation the guard does not see (the search palette) is saved as the page unmounts", async ({ page }) => {
+  test("the search palette asks before leaving an edited intake, then saves before navigating", async ({ page }) => {
     const gw = await mockGateway(page);
     await page.goto("/ui/admin/governance/intake");
     await page.getByLabel("Use-case name").fill("Kept when the page unmounts");
@@ -734,8 +859,35 @@ test.describe("ADR-0179: browser Back and leaving the page keep the last edit", 
     await dialog.getByRole("combobox", { name: "Search pages, agents, models and projects" }).fill("models");
     await expect(dialog.getByRole("group", { name: "Pages" }).getByRole("option", { name: /^Models/ })).toBeVisible();
     await page.keyboard.press("Enter");
+    const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+    await expect(leave).toBeVisible();
+    await expect(page).toHaveURL(/\/intake$/);
+    await expectNoAxeViolations(page, "programmatic navigation asks first");
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
     await expect(page).toHaveURL(/\/ui\/models$/);
     await expect.poll(() => ((gw.drafts.get("new")?.state as Json | undefined)?.form as Json | undefined)?.title).toBe("Kept when the page unmounts");
+  });
+
+  test("a failed save on Leave keeps the dialog and latest edit; retry leaves only after saving", async ({ page }, testInfo) => {
+    const gw = await mockGateway(page);
+    await page.goto("/ui/admin/governance/intake");
+    gw.draftPutFails = () => true;
+    await page.getByLabel("Use-case name").fill("Keep this unsaved answer");
+    await page.getByRole("link", { name: "Cancel", exact: true }).click();
+    const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+    await expect(leave).toBeVisible();
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(leave.getByRole("alert")).toContainText("could not be saved");
+    await expect(page).toHaveURL(/\/intake$/);
+    await expect(page.getByLabel("Use-case name")).toHaveValue("Keep this unsaved answer");
+    expect(gw.drafts.has("new")).toBe(false);
+    await expectNoAxeViolations(page, "failed exit save keeps the form");
+    await page.screenshot({ path: testInfo.outputPath("x13-failed-exit-save.png") });
+
+    gw.draftPutFails = null;
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(page).toHaveURL(/\/use-cases$/);
+    expect(((gw.drafts.get("new")?.state as Json)?.form as Json)?.title).toBe("Keep this unsaved answer");
   });
 
   test("an edit made just before the page is closed or reloaded is saved on the way out", async ({ page }) => {
@@ -835,4 +987,54 @@ test.describe("ADR-0179: session loss and another user", () => {
     await expect(page.getByText(/You have a saved draft/)).toHaveCount(0);
     expect(await page.content()).not.toContain("second thoughts");
   });
+});
+
+
+test("R13-01: a saved registration can leave after an in-place session owner change without writing another person's draft", async ({ page }) => {
+  const gw = await mockGateway(page);
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Use-case name").fill("Ada's saved proposal");
+  await expect(page.getByText(/^Draft saved /)).toBeVisible();
+  const saved = JSON.stringify(gw.drafts.get("new"));
+  const puts = gw.draftPuts;
+  gw.user = "bob";
+  expect(await refreshSessionInPlace(page)).toBe("b");
+  await expect(page.getByLabel("Use-case name")).toHaveValue("Ada's saved proposal");
+  await page.getByRole("link", { name: "Cancel", exact: true }).click();
+  const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+  await expect(leave).toContainText("saved as a draft");
+  await expect(leave.getByRole("button", { name: /Discard/ })).toHaveCount(0);
+  await leave.getByRole("button", { name: "Leave", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/intake/);
+  expect(JSON.stringify(gw.drafts.get("new"))).toBe(saved);
+  expect(gw.draftPuts).toBe(puts);
+  expect(gw.draftOwnerRefusals).toBe(0);
+  expect(gw.bobDrafts.size).toBe(0);
+  expect(gw.creates).toHaveLength(0);
+});
+
+test("R13-11: unsaved edits after an in-place session owner change offer Discard or Stay, never a retry", async ({ page }) => {
+  const gw = await mockGateway(page);
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Use-case name").fill("Ada's saved proposal");
+  await expect(page.getByText(/^Draft saved /)).toBeVisible();
+  const saved = JSON.stringify(gw.drafts.get("new"));
+  const puts = gw.draftPuts;
+  gw.user = "bob";
+  expect(await refreshSessionInPlace(page)).toBe("b");
+  await page.getByLabel("Use-case name").fill("Ada's later edit, typed after the switch");
+  await page.getByRole("link", { name: "Cancel", exact: true }).click();
+  const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+  await expect(leave).toContainText("A different account is signed in now, so your latest changes cannot be saved");
+  await expect(leave).not.toContainText("saves them first");
+  await expect(leave).not.toContainText(/retry|try leave again/i);
+  await expect(leave.getByRole("button", { name: "Leave", exact: true })).toHaveCount(0);
+  await expectNoAxeViolations(page, "owner changed with unsaved edits");
+  await leave.getByRole("button", { name: "Discard and leave", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/intake/);
+  expect(JSON.stringify(gw.drafts.get("new"))).toBe(saved);
+  expect(gw.draftPuts).toBe(puts);
+  expect(gw.draftOwnerRefusals).toBe(0);
+  expect(gw.bobDrafts.size).toBe(0);
+  expect(gw.creates).toHaveLength(0);
 });

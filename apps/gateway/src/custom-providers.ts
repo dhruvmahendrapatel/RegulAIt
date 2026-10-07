@@ -106,6 +106,27 @@ export type CustomProviderResolution =
   | { ok: false; status: number; error: string; detail: string };
 
 /**
+ * R167-04 — the ONE refusal for a disabled custom endpoint, shared by dispatch
+ * (below) and agent registration (POST /v1/agents), so both answer with the
+ * same 409 code and wording. Secure by default (ADR-0180): an endpoint that has
+ * not been tested and enabled can neither be bound to a new agent nor called.
+ */
+export const CUSTOM_PROVIDER_DISABLED = "custom_provider_disabled";
+export function customProviderDisabledRefusal(name: string): {
+  ok: false;
+  status: 409;
+  error: typeof CUSTOM_PROVIDER_DISABLED;
+  detail: string;
+} {
+  return {
+    ok: false,
+    status: 409,
+    error: CUSTOM_PROVIDER_DISABLED,
+    detail: `custom provider '${name}' is disabled — an admin must run its connection test and enable it`,
+  };
+}
+
+/**
  * Resolve an agent's custom provider into a live, egress-guarded adapter.
  *
  * Called on EVERY dispatch, not once at registration: the allow-list may have
@@ -152,14 +173,7 @@ export async function resolveCustomProviderForDispatch(
       detail: `custom provider ${customProviderId} no longer exists`,
     };
   }
-  if (!row.enabled) {
-    return {
-      ok: false,
-      status: 409,
-      error: "custom_provider_disabled",
-      detail: `custom provider '${row.name}' is disabled — an admin must run its connection test and enable it`,
-    };
-  }
+  if (!row.enabled) return customProviderDisabledRefusal(row.name);
 
   // THE GUARD, at dispatch time. Not a cached verdict from registration day.
   const allowList = await loadEgressAllowList(db);

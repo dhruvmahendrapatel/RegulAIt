@@ -45,6 +45,7 @@ import {
   sql,
   users as usersTable,
   webauthnChallenges,
+  webauthnCredentials,
   type Db,
 } from "@regulait/db";
 import {
@@ -521,6 +522,34 @@ describe("ADR-0186 migration 0170: append-only evidence", () => {
 });
 
 describe("ADR-0186 migration 0170: ceremonies, grants and fresh SSO logins", () => {
+  it("stores a real-sized passkey (Postgres caps regex repetition at 255, so the length bounds are separate predicates)", async () => {
+    // a 64-byte credential id and a ~77-byte COSE key, base64url — both longer than 255 characters would be
+    // refused by a `{16,1366}` regex bound at insert time with "invalid repetition count(s)"
+    const longId = "A".repeat(400);
+    const longKey = "B".repeat(600);
+    const [row] = await db
+      .insert(webauthnCredentials)
+      .values({ userId: users.member.id, credentialId: longId, publicKey: longKey, label: `a186 ${RUN}` })
+      .returning({ id: webauthnCredentials.id });
+    try {
+      expect(row!.id).toBeTruthy();
+      await expectRefused(
+        db.insert(webauthnCredentials).values({ userId: users.member.id, credentialId: "A".repeat(1367), publicKey: longKey, label: "x" }),
+        /webauthn_credentials_credential_id_check/,
+      );
+      await expectRefused(
+        db.insert(webauthnCredentials).values({ userId: users.member.id, credentialId: "C".repeat(32), publicKey: "B".repeat(4097), label: "x" }),
+        /webauthn_credentials_public_key_check/,
+      );
+      await expectRefused(
+        db.insert(webauthnCredentials).values({ userId: users.member.id, credentialId: "not base64url!!!!!", publicKey: longKey, label: "x" }),
+        /webauthn_credentials_credential_id_check/,
+      );
+    } finally {
+      await db.delete(webauthnCredentials).where(eq(webauthnCredentials.id, row!.id));
+    }
+  });
+
   it("a challenge lives at most 5 minutes and carries exactly the binding its purpose needs", async () => {
     const sessionId = await mkSession(users.member.id);
     const now = new Date();

@@ -17,8 +17,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, egressAllowHosts, runMigrations, type Db } from "@regulait/db";
+import { agents, createDb, egressAllowHosts, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { customProviderDisabledRefusal } from "./custom-providers.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -257,6 +258,30 @@ describe("registration, connection test, and enablement", () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("connection_test_required");
+  });
+
+  it("R167-04: refuses to bind an agent to the still-disabled endpoint, with dispatch's own 409", async () => {
+    const res = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: {
+        name: "bound-to-a-disabled-endpoint",
+        provider: "custom",
+        customProviderId: providerId,
+        tier: 1,
+        modes: ["execute"],
+        model: "llama-3.3-70b",
+      },
+    });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("custom_provider_disabled");
+    // the SAME body the dispatch refusal sends (one shared builder)
+    const { error, detail } = customProviderDisabledRefusal("self-hosted-llama");
+    expect(res.json()).toEqual({ error, detail });
+    // nothing was registered
+    const [row] = await db.select({ id: agents.id }).from(agents).where(eq(agents.name, "bound-to-a-disabled-endpoint"));
+    expect(row).toBeUndefined();
   });
 
   it("runs a real connection test against the endpoint, through the guard", async () => {

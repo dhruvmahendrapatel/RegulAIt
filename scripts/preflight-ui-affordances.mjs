@@ -36,7 +36,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([]);
+const DELIBERATELY_API_ONLY = new Map([
+  // ADR-0186 foundation: both routes answer 501 `not_built` until Batch 4 slice A lands its passkey screens
+  // (Account → Passkeys, and the admin user page). Slice A removes these two entries and adds the controls.
+  ["/v1/auth/passkeys/:x", "ADR-0186 foundation stub (501 not_built); slice A adds the Account → Passkeys revoke control"],
+  ["/v1/users/:x/passkeys/:x", "ADR-0186 foundation stub (501 not_built); slice A adds the admin revoke control"],
+]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {
@@ -71,6 +76,8 @@ function main() {
   //   api.del(`/v1/x/${id}`)                 the easy one
   //   api.del<Thing>(`/v1/x/${id}`)          type parameter before the paren
   //   api.del(cond ? `/v1/a/..` : `/v1/b/..`) path chosen inside the call
+  //   api.delWithHeaders(`/v1/x/${id}`, h)   the same DELETE with request headers
+  //                                          (the intake draft's owner precondition)
   //
   // The first two misses each made this census OVERSTATE the gap, which is the
   // more dangerous direction: a report that cries wolf is switched off, and
@@ -80,7 +87,7 @@ function main() {
   const reached = new Map();
   for (const f of walk(webSrc)) {
     const src = readFileSync(f, "utf8");
-    for (const m of src.matchAll(/api\.(?:del|delete)(?:<[^>]*>)?\(/g)) {
+    for (const m of src.matchAll(/api\.(?:del|delete)(?:WithHeaders)?(?:<[^>]*>)?\(/g)) {
       const window = src.slice(m.index, m.index + 400);
       for (const lit of window.matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
         // a query string is not part of the route (the add side strips it too)
