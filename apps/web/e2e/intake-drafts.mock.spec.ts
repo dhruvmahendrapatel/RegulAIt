@@ -23,6 +23,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { generateTotpSecret, verifyTotp } from "../../gateway/dist/totp.js";
 import { passTotp, recordTotpSecret } from "./totp-sign-in";
+import { refreshSessionInPlace } from "./refresh-session-fixture";
 
 /** ADR-0181: the mocked gateway's admins have TOTP enrolled under this
  * synthetic secret; codes are checked with the gateway's own TOTP code */
@@ -986,4 +987,28 @@ test.describe("ADR-0179: session loss and another user", () => {
     await expect(page.getByText(/You have a saved draft/)).toHaveCount(0);
     expect(await page.content()).not.toContain("second thoughts");
   });
+});
+
+
+test("R13-01: a saved registration can leave after an in-place session owner change without writing another person's draft", async ({ page }) => {
+  const gw = await mockGateway(page);
+  await page.goto("/ui/admin/governance/intake");
+  await page.getByLabel("Use-case name").fill("Ada's saved proposal");
+  await expect(page.getByText(/^Draft saved /)).toBeVisible();
+  const saved = JSON.stringify(gw.drafts.get("new"));
+  const puts = gw.draftPuts;
+  gw.user = "bob";
+  expect(await refreshSessionInPlace(page)).toBe("b");
+  await expect(page.getByLabel("Use-case name")).toHaveValue("Ada's saved proposal");
+  await page.getByRole("link", { name: "Cancel", exact: true }).click();
+  const leave = page.getByRole("dialog", { name: "Leave this registration?" });
+  await expect(leave).toContainText("saved as a draft");
+  await expect(leave.getByRole("button", { name: /Discard/ })).toHaveCount(0);
+  await leave.getByRole("button", { name: "Leave", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/intake/);
+  expect(JSON.stringify(gw.drafts.get("new"))).toBe(saved);
+  expect(gw.draftPuts).toBe(puts);
+  expect(gw.draftOwnerRefusals).toBe(0);
+  expect(gw.bobDrafts.size).toBe(0);
+  expect(gw.creates).toHaveLength(0);
 });

@@ -56,6 +56,12 @@ export type DraftSaveOutcome =
 export const durableForSubmit = (outcome: DraftSaveOutcome): boolean =>
   outcome.kind === "saved" || (outcome.kind === "not-kept" && (outcome.reason === "off" || outcome.reason === "offer"));
 
+/** A fully saved draft can be left after the session owner changes without
+ * writing or deleting anything. Unsaved work still requires an explicit discard.
+ * This exception is for navigation only; durableForSubmit still refuses it. */
+export const durableForLeave = (outcome: DraftSaveOutcome, unsaved: boolean): boolean =>
+  outcome.kind === "saved" || (!unsaved && outcome.kind === "not-kept" && outcome.reason === "owner-changed");
+
 const SAVE_DELAY_MS = 1000;
 /** A stalled save must release the queue and offer a retry, without sending a keyed create. */
 const SAVE_TIMEOUT_MS = 15_000;

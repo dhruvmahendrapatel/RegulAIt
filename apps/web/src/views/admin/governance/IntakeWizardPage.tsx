@@ -55,7 +55,7 @@ import {
   questionId,
 } from "./intakeFields";
 import { IntakeResubmit } from "./IntakeResubmit";
-import { durableForSubmit, savedAtText, useIntakeDraft, type DraftSaveOutcome, type DraftStatus } from "./intakeDraft";
+import { durableForLeave, durableForSubmit, savedAtText, useIntakeDraft, type DraftSaveOutcome, type DraftStatus } from "./intakeDraft";
 import { useLeaveGuard } from "./LeaveGuard";
 import {
   BOOLEAN_QUESTIONS,
@@ -258,7 +258,7 @@ function RegisterUseCase() {
     ),
     beforeLeave: async () =>
       draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
-      (await draft.flush()).kind === "saved",
+      durableForLeave(await draft.flush(), draft.unsaved),
     onDiscard: !submitting && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
   });
 

@@ -4,6 +4,13 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X13 R13-01 review fix — 2026-10-07 UTC
+
+A fully saved registration could not leave after SessionProvider.refresh changed the signed-in owner in place: flush refused the actor change, while Discard was hidden because nothing was unsaved. Both registration and resubmission now use a navigation-only decision that permits owner-changed solely when the page has no unsaved work. The hook still checks the owner before comparing saved content, sends no PUT/DELETE for the changed owner, and durableForSubmit still refuses owner-changed; pending/failed saves remain blocked and explicit discard remains available for unsaved work.
+
+The regression invokes the real SessionProvider.refresh via a documented React development-fiber fixture, without patching save results or state. Against unchanged product code, registration genuinely fails at leaving the intake URL (`gemini-review/r13-red-results` and `r13-baseline-results`). Early resubmission fixture failures assumed a stable mounted form/dialog despite query-cache clearing and are excluded as red proofs; that exploratory test was removed. Final focused registration/failed-save/resubmission-retry/discard suite **4/4 PASS**, web units **330/330 PASS**, and web production build/typecheck PASS. Logs and traces: `/workspace/.regulait-onboarding/gemini-review/r13-{final.log,final-results,units.log,build.log}`. Existing prior broad intake evidence remains historical; the new owner-change regression is additional.
+
+
 ## X13 Forward CI follow-up — 2026-10-07 UTC
 
 CI run [37611645993](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37611645993), shard-2 job112760035386 at `8519ffe5`, failed the browser Back/Stay/Leave/Forward case after calling Forward: expected intake, remained on registry. **Reproduced locally: 1 failed, 14 passed in 15 identical repetitions.** Not labelled a flake. The failing local trace proves POP changed the address to `/ui/admin/use-cases` before React committed the registry: snapshot `before@call@764` (51485.489ms) still contains the intake's “Leave this registration?” dialog, and `before@call@768` (51505.952ms) still references that same rendered page when Forward is called. The registry finishes rendering in `after@call@768`, after the premature Forward.

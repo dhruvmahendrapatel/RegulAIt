@@ -50,7 +50,7 @@ import {
   questionId,
 } from "./intakeFields";
 import { canonicalDigest } from "./intakeCheckpoint";
-import { savedAtText, useIntakeDraft, type DraftStatus } from "./intakeDraft";
+import { durableForLeave, savedAtText, useIntakeDraft, type DraftStatus } from "./intakeDraft";
 import { useLeaveGuard } from "./LeaveGuard";
 import { missingFrom, newIdempotencyKey, outcomeUnknown, questionLabel } from "./registrationModel";
 import { deriveDataSensitivity } from "./dataSensitivity";
@@ -215,7 +215,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     ),
     beforeLeave: async () =>
       draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
-      (await draft.flush()).kind === "saved",
+      durableForLeave(await draft.flush(), draft.unsaved),
     onDiscard: !busy && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
   });
 
