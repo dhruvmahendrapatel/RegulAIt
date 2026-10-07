@@ -21,6 +21,8 @@ import { accountabilityOrgSettingsFields } from "./accountability.js";
 // ADR-0185 (batch 3): the retention / MCP settings are spread into updateOrgSettingsSchema, and the
 // transport and stdio vocabularies shape the server create/update bodies below.
 import { batch3OrgSettingsFields, MCP_UPSTREAM_TRANSPORTS, mcpStdioSpecSchema } from "./batch3.js";
+// ADR-0186 (batch 4): approvals, step-up, receipts, timestamps, detection settings ride updateOrgSettingsSchema.
+import { batch4OrgSettingsFields } from "./batch4.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -524,6 +526,7 @@ export {
   type GuardrailHit,
   type GuardrailPhase,
   type GuardrailDetector,
+  type GuardrailDetectContext,
   type GuardrailFinding,
   type GuardrailEvaluation,
 } from "./guardrails.js";
@@ -535,6 +538,8 @@ export {
 // local paths, exfiltration-shaped directives, hidden/bidi Unicode).
 // ADR-0176 — the one constant-time comparison (on node:crypto).
 export { constantTimeEqual } from "./constant-time.js";
+// X19-S01 — the one scrub of known credentials from upstream error material.
+export { scrubSecrets, secretRepresentations } from "./scrub-secrets.js";
 
 export {
   MCP_ADMISSION_SEVERITIES,
@@ -2392,6 +2397,9 @@ export const updateOrgSettingsSchema = z
     ...accountabilityOrgSettingsFields,
     // ADR-0185 (batch 3): memory retention, MCP protocol methods and upstream transports
     ...batch3OrgSettingsFields,
+    // ADR-0186 (batch 4): signature mode, step-up, sensitive quorum, receipts,
+    // anchor timestamps, vendored packs and the detection monitor's thresholds
+    ...batch4OrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -4565,3 +4573,23 @@ export {
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
 } from "./governance-monitor.js";
+
+// ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,
+// signed receipts, anchor timestamps, vendored detection content, monitor rules =====
+// The foundation's shared contract; each slice adds its own module (and its own
+// `export *` line here, under "To Claude" for Codex's slices).
+export * from "./batch4.js";
+export * from "./approval-signing.js";
+export * from "./detection-content/index.js";
+export {
+  injectionText,
+  vendoredCompileProblems,
+  vendoredInjectionHits,
+  vendoredPackEnabled,
+  vendoredSecretCount,
+  vendoredSecretSpans,
+  type VendoredInjectionHit,
+  type VendoredPackSelection,
+  type VendoredSpan,
+} from "./detection-content/match.js";
+export { vendoredMcpFindings } from "./detection-content/mcp.js";

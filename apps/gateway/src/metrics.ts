@@ -447,6 +447,54 @@ export function resolveMetricsConfig(env: NodeJS.ProcessEnv = process.env): Metr
   return { listen, onMainListener, token: env.REGULAIT_METRICS_TOKEN! };
 }
 
+/**
+ * ADR-0186 (AgentCoordination §4.9, X18) — the TOKEN-FREE metrics posture
+ * `GET /v1/org/posture` reports: where `/metrics` is served, never the token,
+ * the host or the port.
+ *  - `separateListener`: `off` (REGULAIT_METRICS_LISTEN unset), `loopback`
+ *    (bound to 127.0.0.0/8, ::1 or localhost — reachable from this host only)
+ *    or `non_loopback` (any other address, 0.0.0.0 and :: included);
+ *  - `mainListener`: `GET /metrics` is mounted on the public listener (the flag
+ *    is on AND a usable token exists — exactly when `registerMetricsHooks`
+ *    mounts it);
+ *  - `tokenConfigured`: REGULAIT_METRICS_TOKEN is set and usable (≥ 32 chars,
+ *    no whitespace) — whether it is, not what it is.
+ * Never throws: a setting the boot would refuse reads as the safer answer
+ * (`off`/false), because a gateway with that setting never started serving.
+ */
+export interface MetricsPosture {
+  separateListener: "off" | "loopback" | "non_loopback";
+  mainListener: boolean;
+  tokenConfigured: boolean;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
+  const v4 = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  return v4 !== null && v4.slice(1).every((o) => Number(o) <= 255);
+}
+
+export function metricsPosture(env: NodeJS.ProcessEnv = process.env): MetricsPosture {
+  const tokenConfigured = metricsTokenProblem(env.REGULAIT_METRICS_TOKEN) === null;
+  let mainFlag = false;
+  try {
+    mainFlag = flag(env, "REGULAIT_METRICS_ON_MAIN_LISTENER");
+  } catch {
+    mainFlag = false;
+  }
+  let separateListener: MetricsPosture["separateListener"] = "off";
+  const listenRaw = env.REGULAIT_METRICS_LISTEN?.trim() ?? "";
+  if (listenRaw !== "" && tokenConfigured) {
+    try {
+      separateListener = isLoopbackHost(parseListen(listenRaw).host) ? "loopback" : "non_loopback";
+    } catch {
+      separateListener = "off";
+    }
+  }
+  return { separateListener, mainListener: mainFlag && tokenConfigured, tokenConfigured };
+}
+
 /** the boot-log line */
 export function describeMetricsPosture(cfg: MetricsConfig, boundAddress: string | null): string {
   const separate = cfg.listen

@@ -222,6 +222,12 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.useCaseFeedback, ["resolutionNote"]],
   [s.aiPolicyDocuments, ["title", "editorialReason"]],
   [s.aiPolicyAcknowledgements, ["evidenceRef"]],
+  // ADR-0186 (batch 4, migration 0170): an approver's decision reason (the
+  // append-only `approval_decisions` row is scrubbed at its one insert, the
+  // same text `approvals.decision_reason` already gets), and a passkey's label
+  // and revoke reason.
+  [s.approvalDecisions, ["reason"]],
+  [s.webauthnCredentials, ["label", "revokeReason"]],
   // --- machine-written free text that quotes an error, and ADR-0111's
   //     EXPORTED OBSERVABILITY COPY ---
   //

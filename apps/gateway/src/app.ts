@@ -425,6 +425,14 @@ import {
 } from "./break-glass.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
+// ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
+// answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
+import { registerPasskeyRoutes } from "./passkeys.js";
+import { registerStepUpRoutes } from "./step-up.js";
+import { registerApprovalSigningRoutes } from "./approval-signatures.js";
+import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
+import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
+import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -4898,6 +4906,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFeedbackRoutes(app, db, { dataKey: opts.dataKey });
   registerAiLiteracyRoutes(app, db);
   registerAlertOwnershipRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0186 (batch 4, AgentCoordination §4.9). A: passkeys and step-up (self
+  // routes are in NON_ADMIN_ROUTES; the admin passkey routes are not). B: the
+  // approval signing options (the extended decide is the existing route).
+  // R: receipts. S: anchor timestamps. V: detection content. All admin-only
+  // unless listed in NON_ADMIN_ROUTES.
+  registerPasskeyRoutes(app, db);
+  registerStepUpRoutes(app, db);
+  registerApprovalSigningRoutes(app, db);
+  registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
+  registerAuditTimestampRoutes(app, db);
+  registerDetectionContentRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

@@ -14,7 +14,10 @@
  *    is minted until they enrol;
  *  - `ai-literacy-not-current` (the run-start refusal's `error`, or a governed
  *    call's `decision.ruleId`): the person has not acknowledged the AI policy that
- *    applies to them, outside the acknowledgement interstitial (ADR-0182 A14).
+ *    applies to them, outside the acknowledgement interstitial (ADR-0182 A14);
+ *  - 409 `custom_provider_disabled` (R167-04): a custom model endpoint is switched
+ *    off, so an agent cannot be bound to it (POST /v1/agents) or call it (dispatch);
+ *    an administrator tests and enables it on the Custom LLM providers page.
  *
  * The message replaces the generic sentence everywhere an `ApiError` is shown
  * (its `message`), and the surfaces that can carry a link render `to` with
@@ -24,7 +27,7 @@ import type { ApiErrorPayload } from "./client";
 
 export interface RefusalGuidance {
   /** the gateway refusal this answers */
-  code: "mfa_enrollment_required" | "ai-literacy-not-current";
+  code: "mfa_enrollment_required" | "ai-literacy-not-current" | "step_up_unavailable" | "custom_provider_disabled";
   /** what happened and what to do next, in words */
   message: string;
   /** the in-app route that resolves it */
@@ -68,7 +71,56 @@ export const REFUSAL_GUIDANCE = {
     to: "/account?section=ai-policies",
     linkLabel: "Open the AI policies on your Account page",
   },
+  // ADR-0186 A: the action needs a step-up, and the account has no way to give one
+  stepUpUnavailable: {
+    code: "step_up_unavailable",
+    message:
+      "This action needs you to confirm it's you, and your account has no way to do that yet. Set up an authenticator " +
+      "app on the Account page (or a passkey, once your organization offers them), then try again.",
+    to: "/account?section=mfa",
+    linkLabel: "Set up a way to confirm it's you",
+  },
+  customProviderDisabled: {
+    code: "custom_provider_disabled",
+    message:
+      "This custom model endpoint is switched off, so it can't be used. An administrator needs to run its connection " +
+      "test and turn it on under Integrations → Custom LLM providers, then try again.",
+    to: "/admin/custom-providers",
+    linkLabel: "Open Custom LLM providers (administrators)",
+  },
 } as const satisfies Record<string, RefusalGuidance>;
+
+/**
+ * ADR-0186 (batch 4) — the refusal codes of dual control, step-up and
+ * passkey-signed approvals as sentences a person reads (AgentCoordination §4.9).
+ * The code stays on `payload.error` for anything that branches on it (the
+ * step-up prompt branches on `step_up_required`, see `onStepUpRequired` in
+ * client.ts); `codeSentence` reads these.
+ */
+export const BATCH4_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
+  step_up_required:
+    "Confirm it's you to continue: this action needs a fresh passkey, authenticator code or sign-in",
+  step_up_unavailable: REFUSAL_GUIDANCE.stepUpUnavailable.message,
+  duplicate_approver:
+    "You (or the person you approve for) have already decided this — a different person must give the next approval",
+  quorum_unsatisfiable:
+    "This rule can never be met: it needs more different approvers than its approver pool has (the person making the call never counts)",
+  approval_requires_individual_signature:
+    "This approval has to be signed on its own with a passkey — it can't be decided in bulk",
+  chatops_step_up_required: "This approval can't be decided from chat — open it in RegulAIt and confirm it's you there",
+  sso_reauth_stale: "Your sign-in at your identity provider wasn't fresh — sign in again when asked, then try again",
+  sso_reauth_identity_mismatch:
+    "You signed in at your identity provider as someone other than the person using RegulAIt — sign in as yourself and try again",
+  passkey_signature_required: "Approving this call needs your passkey signature over it",
+  passkey_signature_invalid: "Your passkey signature couldn't be verified — try again with the passkey registered to your account",
+  passkey_challenge_expired: "The signing request expired — start again",
+  passkey_challenge_used: "That signing request was already used — start again",
+  approval_action_changed:
+    "The call changed after you were asked to approve it, so your signature no longer matches — review the call again",
+  passkey_rp_unconfigured:
+    "Passkeys aren't available yet: an administrator has to set this deployment's public address first",
+  not_built: "This isn't available yet",
+};
 
 /** the guidance for a refusal, or null when it is not one a person resolves this way */
 export function refusalGuidance(status: number, payload: ApiErrorPayload | null | undefined): RefusalGuidance | null {
@@ -76,10 +128,12 @@ export function refusalGuidance(status: number, payload: ApiErrorPayload | null 
   const code = typeof payload.error === "string" ? payload.error : null;
   const ruleId = (payload.decision as { ruleId?: unknown } | undefined)?.ruleId;
   if (code === LITERACY_REFUSAL_CODE || ruleId === LITERACY_REFUSAL_CODE) return REFUSAL_GUIDANCE.literacy;
+  if (code === "step_up_unavailable" && status === 422) return REFUSAL_GUIDANCE.stepUpUnavailable;
   if (code === "mfa_enrollment_required") {
     if (status === 409) return REFUSAL_GUIDANCE.keyIssueMfa;
     if (status === 403) return payload.credential === "api_key" ? REFUSAL_GUIDANCE.apiKeyMfa : REFUSAL_GUIDANCE.sessionMfa;
   }
+  if (code === "custom_provider_disabled" && status === 409) return REFUSAL_GUIDANCE.customProviderDisabled;
   return null;
 }
 

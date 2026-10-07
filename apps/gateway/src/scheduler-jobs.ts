@@ -102,6 +102,9 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0185 I3: defined and run by memory-retention.ts (block at the end)
   semanticCachePurgeSweep: "semantic-cache-purge-sweep",
   conversationRetentionSweep: "conversation-retention-sweep",
+  // ADR-0186: defined and run by decision-receipts.ts (R) and audit-timestamp.ts (S)
+  decisionReceiptSignSweep: "decision-receipt-sign-sweep",
+  anchorTimestampSweep: "anchor-timestamp-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -763,6 +766,8 @@ import { feedbackJobDefinitions } from "./feedback.js";
 import { literacyJobDefinitions } from "./ai-literacy.js";
 import { alertSlaJobDefinitions } from "./alert-ownership.js";
 import { memoryRetentionJobDefinitions } from "./memory-retention.js";
+import { decisionReceiptJobDefinitions } from "./decision-receipts.js";
+import { anchorTimestampJobDefinitions } from "./audit-timestamp.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -771,6 +776,8 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...literacyJobDefinitions(), // A14: literacy-expiry-sweep
     ...alertSlaJobDefinitions(), // S5: alert-sla-sweep
     ...memoryRetentionJobDefinitions(), // ADR-0185 I3: semantic-cache-purge-sweep, conversation-retention-sweep
+    ...decisionReceiptJobDefinitions(), // ADR-0186 R: decision-receipt-sign-sweep
+    ...anchorTimestampJobDefinitions(), // ADR-0186 S: anchor-timestamp-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

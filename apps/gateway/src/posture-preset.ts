@@ -33,6 +33,7 @@
  */
 
 import { publicUrlPosture } from "./public-url.js";
+import { metricsPosture } from "./metrics.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -347,8 +348,14 @@ export function registerPosturePresetRoutes(
    * preset, which is why it is a plain read with no side effects. */
   app.get("/v1/org/posture", async () => {
     const settings = await loadOrgSettings(db);
-    // ADR-0121 amendment: the deployment's public URL (a deployment fact, not a secret)
-    return { ...(await buildPostureReport(settings, { sink })), publicUrl: publicUrlPosture() };
+    // ADR-0121 amendment: the deployment's public URL (a deployment fact, not a secret).
+    // ADR-0186 (§4.9, X18): where /metrics is served — token-free, never the
+    // token, host or port; read from the environment on every request.
+    return {
+      ...(await buildPostureReport(settings, { sink })),
+      publicUrl: publicUrlPosture(),
+      metrics: metricsPosture(),
+    };
   });
 
   /**

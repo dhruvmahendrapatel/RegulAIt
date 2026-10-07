@@ -46,7 +46,7 @@
  */
 
 import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
-import { constantTimeEqual } from "@regulait/shared";
+import { constantTimeEqual, scrubSecrets, secretRepresentations } from "@regulait/shared";
 import { z } from "zod";
 
 export const CONNECTOR_PROVIDER_KINDS = [
@@ -218,8 +218,9 @@ export class GenericHttpConnectorProvider implements ConnectorProvider {
           })
         : await this.fetchImpl(url, { method: "GET", headers: this.headers(false) });
     if (res.status < 200 || res.status >= 300) {
+      // X19-S01: the upstream's text, scrubbed of the bearer credential it was sent
       throw new ConnectorProviderError(
-        `${this.kind} ${invocation.operation} ${url} failed: ${await res.text()}`,
+        `${this.kind} ${invocation.operation} ${url} failed: ${scrubSecrets(await res.text(), this.token ? [this.token] : [])}`,
         res.status,
       );
     }
@@ -271,8 +272,9 @@ export class WebhookConnectorProvider implements ConnectorProvider {
     });
     const res = await this.fetchImpl(this.url, { method: "POST", headers, body });
     if (res.status < 200 || res.status >= 300) {
+      // X19-S01: the receiver's text, scrubbed of the bearer credential it was sent
       throw new ConnectorProviderError(
-        `webhook ${invocation.operation} failed: ${await res.text()}`,
+        `webhook ${invocation.operation} failed: ${scrubSecrets(await res.text(), this.token ? [this.token] : [])}`,
         res.status,
       );
     }
@@ -593,7 +595,8 @@ export class SlackConnectorProvider implements ConnectorProvider {
     }
     const text = await res.text();
     if (res.status < 200 || res.status >= 300) {
-      throw new ConnectorProviderError(`slack ${apiCall} failed: ${text}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the bot token it was sent
+      throw new ConnectorProviderError(`slack ${apiCall} failed: ${scrubSecrets(text, [this.token])}`, res.status);
     }
     // envelope-level failure: HTTP 200 with ok:false
     const decoded = decodeBody(res.status, text);
@@ -608,7 +611,7 @@ export class SlackConnectorProvider implements ConnectorProvider {
         );
       }
       throw new ConnectorProviderError(
-        `slack ${apiCall} failed: ${code}`,
+        `slack ${apiCall} failed: ${scrubSecrets(code, [this.token])}`,
         SLACK_ERROR_STATUS[code] ?? 502,
       );
     }
@@ -737,17 +740,24 @@ export const loginBaseUrlSchema = z
     { message: "must be a plain http(s) URL with a host and at most a path — no credentials, query or fragment" },
   );
 
+// X19-S01: upstream error material is scrubbed by the ONE shared helper
+// (`@regulait/shared` scrub-secrets.ts); re-exported so existing imports work.
+export { scrubSecrets, secretRepresentations };
+
 /** ADR-0167 (SEC-01): what a failed token exchange tells the caller. The
  * login service's own `error` / `error_description` are what an operator
  * needs; the raw body is NEVER echoed — once a typed login host is reachable,
  * the body is whatever that host chose to say, and reflecting it to the
- * (non-admin) invoker would make the connector a read oracle for it. */
-export function tokenErrorDetail(text: string, status: number): string {
+ * (non-admin) invoker would make the connector a read oracle for it.
+ * X19-S01: and what IS relayed is scrubbed of the credentials the request
+ * carried (`secrets`) before it is capped, so a login host or proxy that
+ * reflects the submitted client secret cannot hand it to the caller. */
+export function tokenErrorDetail(text: string, status: number, secrets: readonly string[]): string {
   try {
     const parsed = JSON.parse(text) as { error?: unknown; error_description?: unknown };
     const parts = [parsed.error, parsed.error_description]
       .filter((p): p is string => typeof p === "string" && p.length > 0)
-      .map((p) => p.slice(0, 300));
+      .map((p) => scrubSecrets(p.replace(/[\r\n\t]+/g, " "), secrets).slice(0, 300));
     if (parts.length > 0) return `HTTP ${status}: ${parts.join(" — ")}`;
   } catch {
     /* not JSON: say so, do not echo */
@@ -850,7 +860,7 @@ export class TeamsConnectorProvider implements ConnectorProvider {
       // `error`/`error_description` is what an operator needs — and ONLY
       // those (ADR-0167): the raw body is withheld
       throw new ConnectorProviderError(
-        `teams token request failed: ${tokenErrorDetail(text, res.status)}`,
+        `teams token request failed: ${tokenErrorDetail(text, res.status, [this.cred.appPassword])}`,
         res.status === 400 || res.status === 401 ? 401 : res.status,
       );
     }
@@ -964,7 +974,7 @@ export class TeamsConnectorProvider implements ConnectorProvider {
         /* a non-JSON body is reported verbatim below */
       }
       throw new ConnectorProviderError(
-        `teams ${label} failed: ${code ?? text}`,
+        `teams ${label} failed: ${scrubSecrets(code ?? text, [this.cred.appPassword, accessToken])}`,
         res.status,
       );
     }
@@ -1124,16 +1134,8 @@ export function clearOutlookTokenCache(): void {
 
 
 export const OUTLOOK_ERROR_DETAIL_MAX = 300;
-/** strip bearer tokens, JWT-shaped strings and the given literal secrets */
-export function scrubSecrets(text: string, secrets: readonly string[] = []): string {
-  let out = text;
-  for (const sec of secrets) if (sec && sec.length >= 4) out = out.split(sec).join("[redacted]");
-  return out
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g, "[redacted-jwt]")
-    .replace(/((?:client_secret|access_token|password)["'=:\s]+)[^"'&\s,}]+/gi, "$1[redacted]");
-}
-/** Graph's `{error:{code,message}}` as one capped, scrubbed line */
+/** Graph's `{error:{code,message}}` as one capped, scrubbed line (the scrub is
+ * the shared `scrubSecrets`, applied before the cap) */
 export function graphErrorDetail(text: string, status: number, secrets: readonly string[] = []): string {
   let line = `HTTP ${status}`;
   try {
@@ -1205,7 +1207,7 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     }
     if (res.status >= 400) {
       throw new ConnectorProviderError(
-        `outlook token request failed: ${tokenErrorDetail(text, res.status)}`,
+        `outlook token request failed: ${tokenErrorDetail(text, res.status, [this.cred.appPassword])}`,
         res.status,
       );
     }
@@ -1286,6 +1288,8 @@ export class OutlookConnectorProvider implements ConnectorProvider {
         body,
       });
     const first = await this.accessToken();
+    // X19-S01: every credential this send put on the wire, for the scrub below
+    const sentTokens = [first.token];
     let res = await send(first.token);
     if (res.status === 401) {
       // the token was refused: it is never reused. A CACHED one refused before
@@ -1295,7 +1299,9 @@ export class OutlookConnectorProvider implements ConnectorProvider {
       outlookTokenCache.delete(this.cacheKey);
       if (first.fromCache) {
         await res.text();
-        res = await send(await this.mintAccessToken());
+        const fresh = await this.mintAccessToken();
+        sentTokens.push(fresh);
+        res = await send(fresh);
         if (res.status === 401) outlookTokenCache.delete(this.cacheKey);
       }
     }
@@ -1306,9 +1312,12 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     }
     if (res.status >= 400) {
       // ADR-0183 batch 2 review (L2): the caller sees Graph's error CODE and a
-      // capped, scrubbed message; the whole body goes to the server log only
-      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, [this.cred.appPassword])}`);
-      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, [this.cred.appPassword])}`, res.status);
+      // capped, scrubbed message; the whole body goes to the server log only.
+      // X19-S01: both sinks use the ONE scrub with the same credentials, so a
+      // JSON-escaped reflection is no more visible in the log than in the detail
+      const secrets = [this.cred.appPassword, ...sentTokens];
+      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, secrets)}`);
+      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, secrets)}`, res.status);
     }
     // Graph answers 202 with an EMPTY body on success. Reporting that honestly
     // matters: "accepted for delivery" is not "delivered", and the adapter does
@@ -1492,7 +1501,8 @@ export class GitHubConnectorProvider implements ConnectorProvider {
       } catch {
         /* keep raw text */
       }
-      throw new ConnectorProviderError(`github ${method} ${path} failed: ${detail}`, res.status);
+      // X19-S01: scrubbed of the token the request carried
+      throw new ConnectorProviderError(`github ${method} ${path} failed: ${scrubSecrets(detail, [this.token])}`, res.status);
     }
     return decodeBody(res.status, text);
   }
@@ -1546,6 +1556,7 @@ export class JiraConnectorProvider implements ConnectorProvider {
   readonly kind = "jira" as const;
   private readonly base: string;
   private readonly auth: string;
+  private readonly secrets: string[];
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: JiraAdapterOptions) {
@@ -1556,7 +1567,11 @@ export class JiraConnectorProvider implements ConnectorProvider {
       );
     }
     this.base = opts.baseUrl.replace(/\/$/, "");
-    this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    const encoded = Buffer.from(opts.token).toString("base64");
+    this.auth = `Basic ${encoded}`;
+    // the whole "email:api_token", the API token alone, and the header value
+    // (X19-S01) — the email alone is not a secret and is not scrubbed
+    this.secrets = [opts.token, opts.token.slice(opts.token.indexOf(":") + 1), encoded];
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
 
@@ -1692,7 +1707,8 @@ export class JiraConnectorProvider implements ConnectorProvider {
       } catch {
         /* keep raw text */
       }
-      throw new ConnectorProviderError(`jira ${method} ${path} failed: ${detail}`, res.status);
+      // X19-S01: scrubbed of the Basic credential in each form it took
+      throw new ConnectorProviderError(`jira ${method} ${path} failed: ${scrubSecrets(detail, this.secrets)}`, res.status);
     }
     return decodeBody(res.status, text);
   }
@@ -1960,12 +1976,13 @@ export class SnowflakeConnectorProvider implements ConnectorProvider {
     }
 
     const url = `${this.base}/api/v2/statements`;
+    const jwt = buildSnowflakeJwt(this.credential);
     const res = await this.fetchImpl(url, {
       method: "POST",
       headers: {
         accept: "application/json",
         "content-type": "application/json",
-        authorization: `Bearer ${buildSnowflakeJwt(this.credential)}`,
+        authorization: `Bearer ${jwt}`,
         "x-snowflake-authorization-token-type": "KEYPAIR_JWT",
       },
       body: JSON.stringify(body),
@@ -1993,8 +2010,9 @@ export class SnowflakeConnectorProvider implements ConnectorProvider {
       } catch {
         /* not JSON: the coarse line above stands */
       }
+      // X19-S01: scrubbed of the key-pair JWT the request carried
       throw new ConnectorProviderError(
-        `snowflake POST /api/v2/statements failed: ${detail}`,
+        `snowflake POST /api/v2/statements failed: ${scrubSecrets(detail, [jwt])}`,
         res.status,
       );
     }

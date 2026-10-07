@@ -65,11 +65,13 @@ import {
   nextAdmissionState,
   severityAtLeast,
   scanMcpManifest,
+  vendoredMcpFindings,
   type McpAdmissionFinding,
   type McpAdmissionMode,
   type McpAdmissionScan,
   type McpAdmissionState,
   type ScannableTool,
+  type VendoredDetectionPack,
 } from "@regulait/shared";
 import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
@@ -279,6 +281,24 @@ export function withReservedNameFindings(scan: McpAdmissionScan, tools: readonly
   return { ...scan, findings, severity, holds: severityAtLeast(severity, MCP_ADMISSION_HOLD_AT) };
 }
 
+/**
+ * ADR-0186 V — the agt-mcp-heuristics pack's findings joined to a scan, with
+ * severity and the hold verdict recomputed over the combined findings (the
+ * same shape as the reserved-name rule above). Empty until slice V fills the
+ * pack; `packs` is `org_settings.vendored_detection_packs`.
+ */
+export function withVendoredMcpFindings(
+  scan: McpAdmissionScan,
+  tools: readonly ScannableTool[],
+  packs: readonly VendoredDetectionPack[] | undefined,
+): McpAdmissionScan {
+  const extra = vendoredMcpFindings(tools, { packs });
+  if (extra.length === 0) return scan;
+  const findings = [...scan.findings, ...extra];
+  const severity = maxSeverity(findings);
+  return { ...scan, findings, severity, holds: severityAtLeast(severity, MCP_ADMISSION_HOLD_AT) };
+}
+
 export async function loadAdmissionMode(db: Db): Promise<McpAdmissionMode> {
   const org = await loadOrgSettings(db);
   return org.mcpAdmissionMode;
@@ -395,7 +415,8 @@ async function scanAndPersistManifest(
   tools: readonly ScannableTool[],
   trigger: McpAdmissionTrigger,
 ): Promise<{ mode: McpAdmissionMode; scan: McpAdmissionScan | null; state: McpAdmissionState | null }> {
-  const mode = await loadAdmissionMode(db);
+  const org = await loadOrgSettings(db);
+  const mode = org.mcpAdmissionMode;
   if (mode === "off") return { mode, scan: null, state: null };
 
   const [before] = await db
@@ -409,7 +430,11 @@ async function scanAndPersistManifest(
     .where(eq(mcpServers.id, serverId));
   if (!before) return { mode, scan: null, state: null };
 
-  const scan = withReservedNameFindings(scanMcpManifest(tools), tools);
+  const scan = withVendoredMcpFindings(
+    withReservedNameFindings(scanMcpManifest(tools), tools),
+    tools,
+    org.vendoredDetectionPacks,
+  );
   const reserved = scan.findings.some((f) => f.rule === MCP_RESERVED_PREFIX_RULE);
   const state = reserved
     ? // ADR-0185 G3/G4: a reserved name holds the server whatever an admin

@@ -6,7 +6,7 @@
  * retry, browser Back) is covered by e2e/intake-drafts.mock.spec.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DRAFT_OWNER_HEADER, draftOwnerHeaders, draftPath, durableForSubmit, putOnExit } from "./intakeDraft";
+import { DRAFT_OWNER_HEADER, draftOwnerHeaders, draftPath, durableForLeave, durableForSubmit, putOnExit } from "./intakeDraft";
 
 describe("ADR-0179 durableForSubmit", () => {
   it("sends only after a save the server holds", () => {
@@ -64,5 +64,20 @@ describe("ADR-0179 the exit save names whose draft it is", () => {
 
   it("a save refused because the person changed is not durable for a keyed submit", () => {
     expect(durableForSubmit({ kind: "not-kept", reason: "owner-changed" })).toBe(false);
+  });
+});
+
+
+describe("R13-01 owner changes during navigation", () => {
+  it("leaves fully saved work without granting permission to submit as the new owner", () => {
+    const outcome = { kind: "not-kept", reason: "owner-changed" } as const;
+    expect(durableForLeave(outcome, false)).toBe(true);
+    expect(durableForLeave(outcome, true)).toBe(false);
+    expect(durableForSubmit(outcome)).toBe(false);
+  });
+  it("still refuses failed saves and unsettled reads even when nothing appears unsaved", () => {
+    expect(durableForLeave({ kind: "failed", tooLarge: false }, false)).toBe(false);
+    expect(durableForLeave({ kind: "not-kept", reason: "loading" }, false)).toBe(false);
+    expect(durableForLeave({ kind: "not-kept", reason: "stopped" }, false)).toBe(false);
   });
 });

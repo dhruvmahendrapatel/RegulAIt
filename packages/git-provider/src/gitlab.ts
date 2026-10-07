@@ -38,6 +38,7 @@ import {
   type PullRequestRef,
   type PullRequestState,
 } from "./types.js";
+import { scrubSecrets } from "@regulait/shared";
 import { trimTrailingSlashes } from "./url.js";
 
 export interface GitLabAdapterOptions {
@@ -112,7 +113,7 @@ export class GitLabProvider implements GitProvider {
     const text = await res.text();
     if (res.status >= 400) {
       throw new GitProviderError(
-        `gitlab ${method} ${path} failed (${res.status}): ${text}${hintFor(res.status)}`,
+        `gitlab ${method} ${path} failed (${res.status}): ${scrubSecrets(text, [this.token])}${hintFor(res.status)}`,
         res.status,
       );
     }
