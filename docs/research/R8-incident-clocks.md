@@ -1,0 +1,15 @@
+# R8: Incident Notification Clocks
+
+This document tracks incident notification timelines for serious AI incidents across global jurisdictions, based on the requirements outlined in ADR-0182 slice S5.
+
+## 1. Notification Regimes
+
+| Regime / Jurisdiction | Trigger | Who must notify whom | Deadline (verbatim quote) | Clock Starts When | Incomplete Initial Report Allowed? | Source URL | Verified Date | Status |
+|---|---|---|---|---|---|---|---|---|
+| **EU AI Act** (Art 73) | Serious incident or death/widespread infringement | Providers & Deployers → National Competent Authorities | "immediately after the provider has established a causal link... but not later than 15 days after the provider or, where applicable, the deployer, becomes aware of the serious incident." (Death/infringement: "immediately and not later than 2 days") | Aware of incident | Yes | https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689 | 2026-10-06 | verified |
+| **GDPR** (Arts. 33/34) | Personal data breach likely to result in a risk to rights and freedoms | Controller → Supervisory Authority (Art 33); Controller → Data Subject (Art 34) | "without undue delay and, where feasible, not later than 72 hours after having become aware of it" | Become aware | Yes (in phases) | https://eur-lex.europa.eu/eli/reg/2016/679/oj | 2026-10-06 | verified |
+| **NIS2** (Art 23) | Significant cyber threat or incident | Essential and Important Entities → CSIRT / Competent Authority | "without undue delay and in any event within 24 hours of becoming aware of the significant incident, an early warning... within 72 hours of becoming aware of the significant incident, an incident notification" | Become aware | Yes (24h early warning) | https://eur-lex.europa.eu/eli/dir/2022/2555/oj | 2026-10-06 | verified |
+| **DORA** (Art 19 & RTS) | Major ICT-related incident | Financial entities → Competent Authority | "initial notification... without undue delay and in any event no later than 4 hours after classifying the incident as major, but no later than 24 hours after becoming aware" (based on RTS draft) | Classifying as major | Yes | https://eur-lex.europa.eu/eli/reg/2022/2554/oj | 2026-10-06 | UNVERIFIED |
+| **SEC Form 8-K** (Item 1.05) | Material cybersecurity incident | Registrant → SEC | "within four business days after the registrant determines that it has experienced a material cybersecurity incident" | Determines material | Yes | https://www.sec.gov/rules/final/2023/33-11216.pdf | 2026-10-06 | verified |
+| **UK GDPR & NIS Regs** | Personal data breach or NIS incident | Controller → ICO; OES → Competent Authority | "without undue delay and, where feasible, not later than 72 hours" | Become aware | Yes | https://www.legislation.gov.uk | 2026-10-06 | verified |
+| **Colorado AI Act** | Algorithmic discrimination incident | Developer / Deployer → Attorney General | "within 90 days after the developer or deployer discovers or receives a credible report" | Discovers or receives report | Yes | https://leg.colorado.gov/bills/sb24-205 | 2026-10-06 | verified |

@@ -311,14 +311,14 @@ before anything reaches code.
   Table: `| Project or library | Purpose | Licence (verified, date) | Use mode (A–E per ADR-0177) | Status
   (in use / next / soon / later / never) | Decision record | Re-check by |`. Flag any licence or
   ownership change since 2026-10-05.
-  Status: TODO
+  Status: DONE — delivered by Gemini 10-06
 - **G17 — Incident notification clocks, further regimes** `docs/research/R8-incident-clocks.md` (ADR-0182
   follow-up). For each regime give: the trigger, who must notify whom, the deadline as written (verbatim
   quote), what starts the clock, whether an initial or incomplete report is allowed, and the source URL
   and date checked. Cover GDPR Arts. 33/34; NIS2 Art. 23; DORA Art. 19 with its RTS/ITS timelines; SEC
   Form 8-K Item 1.05; UK GDPR and the UK NIS Regulations; Colorado AI Act (as amended); and any US state
   AI law with an incident duty. Mark each `verified` or `UNVERIFIED`. Claude encodes only verified rows.
-  Status: TODO
+  Status: DONE — delivered by Gemini 10-06
 - **G18 — Engine re-verification for batch 5** `docs/research/R9-engine-reverification.md` (ADR-0177
   requires re-verifying before each adapter batch). For promptfoo, modelscan, garak, NVIDIA OpenShell
   and PurpleLlama CyberSecEval, record as of today:
@@ -331,7 +331,7 @@ before anything reaches code.
   - air-gapped operation.
 
   Table per project, sources cited.
-  Status: TODO
+  Status: DONE — delivered by Gemini 10-06
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
