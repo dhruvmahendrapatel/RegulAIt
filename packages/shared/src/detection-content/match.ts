@@ -19,7 +19,8 @@
  * the ledger write) and always applies the secrets pack: redacting a credential
  * out of an immutable record is never the relaxation an admin asked for.
  */
-import { RE2JS } from "re2js";
+import { RE2JS, RE2Set } from "re2js";
+import { GENERATED_SECRET_RULES, GENERATED_SPACE_RUN_SAFE_IDS } from "./generated.js";
 import { VENDORED_DETECTION_PACKS, type VendoredDetectionPack } from "../batch4.js";
 import {
   normaliseForInjection,
@@ -55,12 +56,10 @@ export function compileVendored(_id: string, pattern: string, caseInsensitive: b
 /** each [start, end) of a non-empty match (UTF-16 indices) */
 export function* spansOf(re: RE2JS, text: string): Generator<[number, number]> {
   const m = re.matcher(text);
-  let from = 0;
-  while (from <= text.length && m.find(from)) {
+  while (m.find()) {
     const s = m.start();
     const e = m.end();
     if (e > s) yield [s, e];
-    from = e > s ? e : e + 1;
   }
 }
 
@@ -96,6 +95,68 @@ export interface VendoredSpan {
   rule: string;
 }
 
+const secretSets = new WeakMap<readonly VendoredSecretRule[], RE2Set | null>();
+function secretSet(rules: readonly VendoredSecretRule[]): RE2Set | null {
+  try {
+    const set = new RE2Set();
+    for (const rule of rules) set.add(`${rule.caseInsensitive ? "(?i:" : "(?:"}${rule.pattern})`);
+    set.compile();
+    // Precompile default scanning at import/boot, not the first ledger write.
+    // This tiny non-secret corpus also initializes DFA transitions.
+    set.match(" abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 ----- ");
+    return set;
+  } catch { return null; }
+}
+const spaceSafeIds = new Set<string>(GENERATED_SPACE_RUN_SAFE_IDS);
+const spaceSafeRules = GENERATED_SECRET_RULES.filter(rule => spaceSafeIds.has(rule.id));
+const spaceUnsafeRules = GENERATED_SECRET_RULES.filter(rule => !spaceSafeIds.has(rule.id));
+secretSets.set(GENERATED_SECRET_RULES, secretSet(GENERATED_SECRET_RULES));
+secretSets.set(spaceSafeRules, secretSet(spaceSafeRules));
+/** One combined RE2 scan selects candidates, then individual RE2 matchers
+ * locate exact spans. If the optimization cannot compile, retain every rule;
+ * a failed optimization must never suppress redaction. */
+export function secretCandidateRules(text: string, rules: readonly VendoredSecretRule[] = VENDORED_SECRET_RULES): readonly VendoredSecretRule[] {
+  if (!rules.length) return [];
+  let set = secretSets.get(rules);
+  if (set === undefined) {
+    set = secretSet(rules);
+    secretSets.set(rules, set);
+  }
+  if (!set) return rules;
+  // Exact spans always use the original. The converter proves that only
+  // flexible \s tokens can consume spaces in this cohort; candidate-only
+  // run compression therefore cannot remove a genuine hit. Unproved rules
+  // still run against the original, including AWS's bounded separators.
+  if (rules === GENERATED_SECRET_RULES && text.includes("  ")) {
+    const out: string[] = []; let previousSpace = false;
+    for (const char of text) {
+      if (char !== " " || !previousSpace) out.push(char);
+      previousSpace = char === " ";
+    }
+    const safeSet = secretSets.get(spaceSafeRules);
+    try {
+      const candidates = safeSet ? safeSet.match(out.join("")).map(index => spaceSafeRules[index]!) : spaceSafeRules;
+      const unsafe = spaceUnsafeRules.filter(rule => {
+        const re = compileVendored(rule.id, rule.pattern, rule.caseInsensitive);
+        return !re || re.test(text);
+      });
+      return [...candidates, ...unsafe];
+    } catch { return rules; }
+  }
+  try { return set.match(text).map((index) => rules[index]!); } catch { return rules; }
+}
+export function* secretRuleSpans(rule: VendoredSecretRule, text: string): Generator<[number, number]> {
+  const re = compileVendored(rule.id, rule.pattern, rule.caseInsensitive);
+  if (!re) return;
+  for (const [start, end] of spansOf(re, text)) {
+    if (rule.leftBoundary === "ascii_identifier" && start > 0) {
+      const code = text.charCodeAt(start - 1);
+      if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 95 || code === 45) continue;
+    }
+    yield [start, end];
+  }
+}
+
 /** every credential span the secrets pack finds (the audit scrub redacts them) */
 export function vendoredSecretSpans(
   text: string,
@@ -103,10 +164,8 @@ export function vendoredSecretSpans(
 ): VendoredSpan[] {
   if (!text || !vendoredPackEnabled(opts.packs, "pipelock-secrets")) return [];
   const out: VendoredSpan[] = [];
-  for (const rule of opts.rules ?? VENDORED_SECRET_RULES) {
-    const re = compileVendored(rule.id, rule.pattern, rule.caseInsensitive);
-    if (!re) continue;
-    for (const [start, end] of spansOf(re, text)) out.push({ start, end, rule: rule.id });
+  for (const rule of secretCandidateRules(text, opts.rules ?? VENDORED_SECRET_RULES)) {
+    for (const [start, end] of secretRuleSpans(rule, text)) out.push({ start, end, rule: rule.id });
   }
   return out;
 }

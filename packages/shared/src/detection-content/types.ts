@@ -23,6 +23,8 @@ export interface VendoredSecretRule {
   /** RE2 source */
   pattern: string;
   caseInsensitive?: boolean;
+  /** Separate the provider delimiter check from the redacted token span. */
+  leftBoundary?: "ascii_identifier";
   /** hosts this credential may legitimately be sent to (outbound enforcement,
    * slice V); absent = no audience restriction recorded upstream */
   audienceHosts?: readonly string[];

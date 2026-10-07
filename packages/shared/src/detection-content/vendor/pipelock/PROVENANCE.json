@@ -22,6 +22,16 @@
       "path": "internal/normalize/normalize.go",
       "sha256": "d161209f92aefb00cd1995b788d32e669bc13de0075921b74a080902f373b99c",
       "spdx": "Apache-2.0"
+    },
+    {
+      "path": "internal/scanner/core.go",
+      "sha256": "24d0d93136cfd4fd7b05fe9896b9cc334559c0de7c8ba1ed355f801b138ed02d",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "internal/scanner/scanner.go",
+      "sha256": "92a81d96911305d7f57da4f553f6a5ec1417574d16b883774387d4d8c1d30c7f",
+      "spdx": "Apache-2.0"
     }
   ]
 }
