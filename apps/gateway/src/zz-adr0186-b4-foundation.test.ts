@@ -20,9 +20,9 @@
  *    detection monitor rules are evaluated (no breach) rather than skipped.
  *
  * Global state (M-068): every setting relaxed here is restored to strict in a
- * `finally`/`afterAll`, env vars are restored, and the rows created are removed
- * (append-only rows that cannot be removed are made unreachable: their parents
- * are deleted, which the trigger allows only as SET NULL).
+ * `finally`/`afterAll`, env vars are restored, the rows created are removed,
+ * and the append-only evidence rows (which nothing may delete) are written
+ * only inside transactions that are rolled back.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
@@ -112,6 +112,23 @@ async function expectRefused(p: PromiseLike<unknown>, pattern: RegExp): Promise<
   expect(refusalText(e)).toMatch(pattern);
 }
 const rows = <T>(r: unknown) => (r as { rows: T[] }).rows;
+
+/** M-068: evidence rows cannot be deleted (that is the point), so the checks
+ * that write them run inside a transaction that is always rolled back; each
+ * refused statement runs in its own savepoint (a nested transaction). */
+class RolledBack extends Error {}
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+async function inRolledBackTx(body: (tx: Tx) => Promise<void>): Promise<void> {
+  await db
+    .transaction(async (tx) => {
+      await body(tx);
+      throw new RolledBack();
+    })
+    .catch((e: unknown) => {
+      if (!(e instanceof RolledBack)) throw e;
+    });
+}
+const inSavepoint = (tx: Tx, stmt: ReturnType<typeof sql>) => tx.transaction((sp) => sp.execute(stmt));
 
 async function lastSettingsAudit() {
   const [row] = await db
@@ -353,115 +370,133 @@ describe("ADR-0186 §4.9: GET /v1/org/posture reports where /metrics is served, 
 
 describe("ADR-0186 migration 0170: append-only evidence", () => {
   it("approval_decisions refuses UPDATE and DELETE; deleting the approval only sets the reference NULL", async () => {
-    const approvalId = await mkApproval(users.member.id, users.admin.id);
-    const [d] = await db
-      .insert(approvalDecisions)
-      .values({
-        approvalId,
-        deciderUserId: users.admin.id,
-        principalUserId: users.admin.id,
-        decision: "approved",
-        stepUpMethod: "totp",
-      })
-      .returning();
-    await expectRefused(
-      db.execute(sql`UPDATE approval_decisions SET decision = 'denied' WHERE id = ${d!.id}`),
-      /approval_decisions is append-only: UPDATE refused/,
-    );
-    await expectRefused(
-      db.execute(sql`DELETE FROM approval_decisions WHERE id = ${d!.id}`),
-      /approval_decisions is append-only: DELETE refused/,
-    );
-    // one decision per principal per approval
-    await expectRefused(
-      db.insert(approvalDecisions).values({
-        approvalId,
-        deciderUserId: users.member.id,
-        principalUserId: users.admin.id,
-        decision: "denied",
-        stepUpMethod: "totp",
-      }),
-      /approval_decisions_approval_principal_uq/,
-    );
-    // a signed decision is all-or-nothing, and only a passkey signs
-    await expectRefused(
-      db.insert(approvalDecisions).values({
-        approvalId,
-        principalUserId: users.member.id,
-        decision: "approved",
-        stepUpMethod: "totp",
-        signedPayload: { v: "x" },
-        signedDigest: "a".repeat(64),
-        assertion: {},
-        counterBefore: 0,
-      }),
-      /approval_decisions_signature_shape_check/,
-    );
-    await db.delete(approvals).where(eq(approvals.id, approvalId));
-    const [kept] = await db.select().from(approvalDecisions).where(eq(approvalDecisions.id, d!.id));
-    expect(kept).toMatchObject({ approvalId: null, decision: "approved", principalUserId: users.admin.id });
+    await inRolledBackTx(async (tx) => {
+      const [a] = await tx
+        .insert(approvals)
+        .values({ userId: users.member.id, approverUserId: users.admin.id, objectType: "mcp_tool", toolName: `a186_${RUN}` })
+        .returning({ id: approvals.id });
+      const approvalId = a!.id;
+      const [d] = await tx
+        .insert(approvalDecisions)
+        .values({
+          approvalId,
+          deciderUserId: users.admin.id,
+          principalUserId: users.admin.id,
+          decision: "approved",
+          stepUpMethod: "totp",
+        })
+        .returning();
+      await expectRefused(
+        inSavepoint(tx, sql`UPDATE approval_decisions SET decision = 'denied' WHERE id = ${d!.id}`),
+        /approval_decisions is append-only: UPDATE refused/,
+      );
+      await expectRefused(
+        inSavepoint(tx, sql`DELETE FROM approval_decisions WHERE id = ${d!.id}`),
+        /approval_decisions is append-only: DELETE refused/,
+      );
+      // one decision per principal per approval
+      await expectRefused(
+        tx.transaction((sp) =>
+          sp.insert(approvalDecisions).values({
+            approvalId,
+            deciderUserId: users.member.id,
+            principalUserId: users.admin.id,
+            decision: "denied",
+            stepUpMethod: "totp",
+          }),
+        ),
+        /approval_decisions_approval_principal_uq/,
+      );
+      // a signed decision is all-or-nothing, and only a passkey signs
+      await expectRefused(
+        tx.transaction((sp) =>
+          sp.insert(approvalDecisions).values({
+            approvalId,
+            principalUserId: users.member.id,
+            decision: "approved",
+            stepUpMethod: "totp",
+            signedPayload: { v: "x" },
+            signedDigest: "a".repeat(64),
+            assertion: {},
+            counterBefore: 0,
+          }),
+        ),
+        /approval_decisions_signature_shape_check/,
+      );
+      await tx.delete(approvals).where(eq(approvals.id, approvalId));
+      const [kept] = await tx.select().from(approvalDecisions).where(eq(approvalDecisions.id, d!.id));
+      expect(kept).toMatchObject({ approvalId: null, decision: "approved", principalUserId: users.admin.id });
+    });
   });
 
   it("decision_receipts refuse UPDATE and DELETE; keys are public-only and never deleted; the payload states its own seq, key and prev", async () => {
     const keyId = `a186-${RUN}`;
-    await expectRefused(
-      db.insert(receiptSigningKeys).values({
-        keyId: `${keyId}-priv`,
-        publicJwk: { kty: "OKP", crv: "Ed25519", x: "AAAA", d: "secret" } as never,
-      }),
-      /receipt_signing_keys_public_only_check/,
-    );
-    await expectRefused(
-      db.insert(receiptSigningKeys).values({ keyId: `${keyId}-nox`, publicJwk: { kty: "OKP", crv: "Ed25519" } as never }),
-      /receipt_signing_keys_public_only_check/,
-    );
-    await db.insert(receiptSigningKeys).values({ keyId, publicJwk: { kty: "OKP", crv: "Ed25519", x: "AAAA" } });
-    const [{ next }] = rows<{ next: string }>(
-      await db.execute(sql`SELECT (COALESCE(MAX(receipt_seq), 0) + 1)::text AS next FROM decision_receipts`),
-    ) as [{ next: string }];
-    const seq = Number(next);
-    const payload = {
-      v: "regulait.receipt.v1",
-      receiptSeq: seq,
-      audit: { id: "x", seq: 1, rowHash: "r", contentHash: "c" },
-      decision: {},
-      prev: RECEIPT_GENESIS_PREV,
-      keyId,
-    };
-    const auditId = randomUUID();
-    const values = {
-      receiptSeq: seq,
-      auditId,
-      auditSeq: 9_000_000_000 + seq,
-      payload,
-      payloadHash: "b".repeat(64),
-      prevHash: RECEIPT_GENESIS_PREV,
-      signature: "A".repeat(86),
-      keyId,
-    };
-    await expectRefused(
-      db.insert(decisionReceipts).values({ ...values, payload: { ...payload, receiptSeq: seq + 1 } }),
-      /decision_receipts_payload_check/,
-    );
-    await expectRefused(
-      db.insert(decisionReceipts).values({ ...values, payload: { ...payload, keyId: undefined } }),
-      /decision_receipts_payload_check/,
-    );
-    await db.insert(decisionReceipts).values(values);
-    await expectRefused(
-      db.execute(sql`UPDATE decision_receipts SET signature = ${"B".repeat(86)} WHERE receipt_seq = ${seq}`),
-      /decision_receipts is append-only: UPDATE refused/,
-    );
-    await expectRefused(
-      db.execute(sql`DELETE FROM decision_receipts WHERE receipt_seq = ${seq}`),
-      /decision_receipts is append-only: DELETE refused/,
-    );
-    await expectRefused(
-      db.execute(sql`DELETE FROM receipt_signing_keys WHERE key_id = ${keyId}`),
-      /receipt_signing_keys is append-only: DELETE refused/,
-    );
-    // a key may still be retired
-    await db.update(receiptSigningKeys).set({ retiredAt: new Date() }).where(eq(receiptSigningKeys.keyId, keyId));
+    await inRolledBackTx(async (tx) => {
+      await expectRefused(
+        tx.transaction((sp) =>
+          sp.insert(receiptSigningKeys).values({
+            keyId: `${keyId}-priv`,
+            publicJwk: { kty: "OKP", crv: "Ed25519", x: "AAAA", d: "secret" } as never,
+          }),
+        ),
+        /receipt_signing_keys_public_only_check/,
+      );
+      await expectRefused(
+        tx.transaction((sp) =>
+          sp.insert(receiptSigningKeys).values({ keyId: `${keyId}-nox`, publicJwk: { kty: "OKP", crv: "Ed25519" } as never }),
+        ),
+        /receipt_signing_keys_public_only_check/,
+      );
+      await tx.insert(receiptSigningKeys).values({ keyId, publicJwk: { kty: "OKP", crv: "Ed25519", x: "AAAA" } });
+      const [{ next }] = rows<{ next: string }>(
+        await tx.execute(sql`SELECT (COALESCE(MAX(receipt_seq), 0) + 1)::text AS next FROM decision_receipts`),
+      ) as [{ next: string }];
+      const seq = Number(next);
+      const payload = {
+        v: "regulait.receipt.v1",
+        receiptSeq: seq,
+        audit: { id: "x", seq: 1, rowHash: "r", contentHash: "c" },
+        decision: {},
+        prev: RECEIPT_GENESIS_PREV,
+        keyId,
+      };
+      const values = {
+        receiptSeq: seq,
+        auditId: randomUUID(),
+        auditSeq: 9_000_000_000 + seq,
+        payload,
+        payloadHash: "b".repeat(64),
+        prevHash: RECEIPT_GENESIS_PREV,
+        signature: "A".repeat(86),
+        keyId,
+      };
+      await expectRefused(
+        tx.transaction((sp) => sp.insert(decisionReceipts).values({ ...values, payload: { ...payload, receiptSeq: seq + 1 } })),
+        /decision_receipts_payload_check/,
+      );
+      await expectRefused(
+        tx.transaction((sp) => sp.insert(decisionReceipts).values({ ...values, payload: { ...payload, keyId: undefined } })),
+        /decision_receipts_payload_check/,
+      );
+      await tx.insert(decisionReceipts).values(values);
+      await expectRefused(
+        inSavepoint(tx, sql`UPDATE decision_receipts SET signature = ${"B".repeat(86)} WHERE receipt_seq = ${seq}`),
+        /decision_receipts is append-only: UPDATE refused/,
+      );
+      await expectRefused(
+        inSavepoint(tx, sql`DELETE FROM decision_receipts WHERE receipt_seq = ${seq}`),
+        /decision_receipts is append-only: DELETE refused/,
+      );
+      await expectRefused(
+        inSavepoint(tx, sql`DELETE FROM receipt_signing_keys WHERE key_id = ${keyId}`),
+        /receipt_signing_keys is append-only: DELETE refused/,
+      );
+      // a key may still be retired
+      await tx.update(receiptSigningKeys).set({ retiredAt: new Date() }).where(eq(receiptSigningKeys.keyId, keyId));
+    });
+    // rolled back: nothing of it is left for a later file (M-068)
+    const left = await db.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, keyId));
+    expect(left).toEqual([]);
   });
 
   it("approvals snapshot quorum 1 and the strict passkey mode; rules take a quorum of 1–5", async () => {
