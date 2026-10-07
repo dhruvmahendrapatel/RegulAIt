@@ -685,6 +685,23 @@ export const NON_ADMIN_ROUTES = new Set([
   // in-handler. DELIBERATELY ABSENT, so ADMIN-ONLY: filing a PM ticket for an
   // episode (it sends alert data to a third-party tool).
   "PUT /v1/governance/alerts/:alertId/owner",
+
+  // ADR-0186 (batch 4) — a signed-in user acting for themselves: their own
+  // passkeys and step-ups (each handler requires a SESSION and the caller's
+  // own identity; API keys cannot step up), and the signing options of an
+  // approval they are eligible to decide (eligibility checked in the handler,
+  // like the decide route above). The admin passkey routes
+  // (/v1/users/:userId/passkeys…), receipts, anchor timestamps and detection
+  // content stay admin-only by default.
+  "POST /v1/auth/passkeys/registration-options",
+  "POST /v1/auth/passkeys",
+  "GET /v1/auth/passkeys",
+  "PATCH /v1/auth/passkeys/:passkeyId",
+  "DELETE /v1/auth/passkeys/:passkeyId",
+  "POST /v1/auth/step-up/options",
+  "POST /v1/auth/step-up/verify",
+  "GET /v1/auth/step-up/:stepUpId",
+  "POST /v1/approvals/:approvalId/signing-options",
 ]);
 
 /**

@@ -11,9 +11,56 @@
  */
 
 import { humanize } from "./format";
-import { refusalGuidance, type RefusalGuidance } from "./refusals";
+import { BATCH4_REFUSAL_SENTENCES, refusalGuidance, type RefusalGuidance } from "./refusals";
 
 export const CSRF_HEADER = "x-regulait-csrf";
+
+/** ADR-0186 A: the request header that carries a step-up grant (`rgsu_…`) */
+export const STEP_UP_HEADER = "x-regulait-step-up";
+
+/**
+ * ADR-0186 A — a 403 `step_up_required` from any call, as an EVENT the UI can
+ * answer (a "confirm it's you" prompt that runs `POST /v1/auth/step-up/options`
+ * and `…/verify`, then retries the call with `STEP_UP_HEADER`). The refused call
+ * still throws its `ApiError` as before; this only tells whoever listens.
+ */
+export interface StepUpRequest {
+  /** the action kind the gateway named (`approval_decide`, `settings_relax`, …) */
+  actionKind: string | null;
+  /** the proofs it accepts, e.g. ["passkey", "totp", "sso"] */
+  methods: string[];
+  /** the refused request */
+  method: string;
+  path: string;
+  payload: ApiErrorPayload;
+}
+type StepUpListener = (request: StepUpRequest) => void;
+const stepUpListeners = new Set<StepUpListener>();
+
+/** subscribe to step-up requests; returns the unsubscribe function */
+export function onStepUpRequired(listener: StepUpListener): () => void {
+  stepUpListeners.add(listener);
+  return () => {
+    stepUpListeners.delete(listener);
+  };
+}
+
+function announceStepUp(method: string, path: string, payload: ApiErrorPayload): void {
+  const request: StepUpRequest = {
+    actionKind: typeof payload.actionKind === "string" ? payload.actionKind : null,
+    methods: Array.isArray(payload.methods) ? payload.methods.filter((m): m is string => typeof m === "string") : [],
+    method,
+    path,
+    payload,
+  };
+  for (const listener of [...stepUpListeners]) {
+    try {
+      listener(request);
+    } catch {
+      // a listener's failure never changes how the refused call is reported
+    }
+  }
+}
 
 export interface ApiErrorPayload {
   error?: string;
@@ -137,7 +184,7 @@ const DETAILS_SUFFICE = new Set(["validation", "not_found"]);
 /** a refusal code as words: a known one as its sentence, any other as `humanize(code)` */
 export function codeSentence(code: string): string {
   if (/^HTTP \d+$/.test(code)) return code;
-  return CODE_SENTENCES[code] ?? humanize(code);
+  return CODE_SENTENCES[code] ?? BATCH4_REFUSAL_SENTENCES[code] ?? humanize(code);
 }
 
 export function errMessage(status: number, json: ApiErrorPayload | null): string {
@@ -231,6 +278,8 @@ async function send<T>(method: string, path: string, body?: unknown, extraHeader
     throw new ApiError(401, payload ?? { error: "unauthenticated" });
   }
   const json = await parseBody(res);
+  // ADR-0186 A: tell the step-up prompt, then refuse the call as before
+  if (res.status === 403 && json?.error === "step_up_required") announceStepUp(method, path, json);
   if (!res.ok) throw new ApiError(res.status, json ?? { error: "HTTP " + res.status });
   return { body: (json ?? {}) as T, headers: res.headers };
 }

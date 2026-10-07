@@ -42,6 +42,22 @@ import {
   KRI_ON_BREACH,
   USE_CASE_DECISIONS,
   MCP_UPSTREAM_TRANSPORTS,
+  // ADR-0186 (migration 0170): the batch-4 vocabularies, in lockstep with the
+  // migration's CHECKs by being the same constants
+  ANCHOR_TSA_STATUSES,
+  APPROVAL_DECISION_METHODS,
+  APPROVAL_DECISION_VALUES,
+  APPROVAL_SIGNATURE_MODES,
+  AUDIT_ANCHOR_TIMESTAMP_MODES,
+  DECISION_RECEIPTS_MODES,
+  SSO_REAUTH_PROVIDER_KINDS,
+  STEP_UP_ACTION_KINDS,
+  STEP_UP_METHODS,
+  STEP_UP_MODES,
+  WEBAUTHN_CHALLENGE_PURPOSES,
+  type StepUpActionKind,
+  type VendoredDetectionPack,
+  type WebauthnTransport,
   type AiPolicyAudience,
   type AlertSlaHours,
   type IncidentClockRegime,
@@ -1362,6 +1378,16 @@ export const auditLog = pgTable(
         // (objectId null). Plain text column — no DDL.
         "conversation",
         "semantic_cache",
+        // ADR-0186 (batch 4): an approving principal's decision (objectId = the
+        // approval; receipts cover these), a passkey enrolled / renamed /
+        // revoked (objectId = the credential), a step-up issued / refused, a
+        // receipt-signing event, and the vendored detection content. Plain
+        // text column — no DDL.
+        "approval",
+        "webauthn_credential",
+        "step_up",
+        "decision_receipt",
+        "detection_content",
       ],
     })
       .notNull()
@@ -1469,8 +1495,44 @@ export const auditAnchors = pgTable(
     lastError: text("last_error"),
     deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // --- ADR-0186 S (migration 0170): an RFC 3161 trusted timestamp ---------
+    /** `not_configured` (the default, and every pre-0170 anchor: honestly "not
+     * timestamped") | `pending` | `granted` | `failed` */
+    tsaStatus: text("tsa_status", { enum: ANCHOR_TSA_STATUSES }).notNull().default("not_configured"),
+    /** the TSA the request went to */
+    tsaUrl: text("tsa_url"),
+    /** the DER TimeStampToken, base64 */
+    tsaToken: text("tsa_token"),
+    tsaGenTime: timestamp("tsa_gen_time", { withTimezone: true }),
+    tsaSerial: text("tsa_serial"),
+    tsaPolicyOid: text("tsa_policy_oid"),
+    /** sha256 hex of the anchor's canonical bytes, as the token's messageImprint */
+    tsaMessageImprint: text("tsa_message_imprint"),
+    /** the request nonce the response must echo */
+    tsaNonce: text("tsa_nonce"),
+    tsaAttempts: integer("tsa_attempts").notNull().default(0),
+    tsaNextAttemptAt: timestamp("tsa_next_attempt_at", { withTimezone: true }),
+    tsaLastError: text("tsa_last_error"),
   },
-  (t) => [index("audit_anchors_seq_idx").on(t.seq), index("audit_anchors_status_idx").on(t.status, t.seq)],
+  (t) => [
+    index("audit_anchors_seq_idx").on(t.seq),
+    index("audit_anchors_status_idx").on(t.status, t.seq),
+    index("audit_anchors_tsa_due_idx").on(t.tsaStatus, t.tsaNextAttemptAt),
+    check("audit_anchors_tsa_status_check", sql`${t.tsaStatus} IN ('not_configured', 'pending', 'granted', 'failed')`),
+    check("audit_anchors_tsa_attempts_check", sql`${t.tsaAttempts} >= 0`),
+    check(
+      "audit_anchors_tsa_imprint_check",
+      sql`${t.tsaMessageImprint} IS NULL OR ${t.tsaMessageImprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "audit_anchors_tsa_policy_oid_check",
+      sql`${t.tsaPolicyOid} IS NULL OR ${t.tsaPolicyOid} ~ '^[0-2](\.[0-9]+)+$'`,
+    ),
+    check(
+      "audit_anchors_tsa_granted_check",
+      sql`${t.tsaStatus} <> 'granted' OR (${t.tsaToken} IS NOT NULL AND ${t.tsaGenTime} IS NOT NULL AND ${t.tsaMessageImprint} IS NOT NULL AND ${t.tsaUrl} IS NOT NULL)`,
+    ),
+  ],
 );
 
 // §3 approval requirement rules: a granted call matching a rule pauses for
@@ -1511,9 +1573,17 @@ export const approvalRules = pgTable(
     approverUserId: uuid("approver_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    /** ADR-0186 A (migration 0170): distinct approving principals this rule
+     * needs (1–5). The required quorum of a call is the max over its matched
+     * rules and the sensitive-project quorum, snapshotted on `approvals.quorum`. */
+    quorum: integer("quorum").notNull().default(1),
+    /** ADR-0186 A: the pool of eligible approvers is the named approver plus the
+     * active members of this role (never the caller). SET NULL with the role. */
+    approverRoleId: uuid("approver_role_id").references(() => roles.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("approval_rules_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
     index("approval_rules_user_server_idx").on(t.userId, t.serverId),
     index("approval_rules_scope_idx").on(t.scope, t.serverScope, t.serverId),
     index("approval_rules_role_idx").on(t.roleId),
@@ -1664,8 +1734,18 @@ export const approvals = pgTable(
     // ADR-0173 batch 2b (migration 0144) — a 'connector_call' approval: the
     // connector the consent may be spent against. NULL on every other kind.
     connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    // ADR-0186 A/B (migration 0170) — SNAPSHOTTED AT QUEUE TIME. Consulted for
+    // the tool-call kinds (`mcp_tool`, `connector_call`) only. Every pre-0170
+    // row took quorum 1 and the strict `passkey` mode (no grandfathering).
+    /** distinct approving principals needed (1–5) */
+    quorum: integer("quorum").notNull().default(1),
+    /** how each approval must be proven: passkey signature over the call,
+     * a step-up, or nothing (an audited relaxation) */
+    signatureMode: text("signature_mode", { enum: APPROVAL_SIGNATURE_MODES }).notNull().default("passkey"),
   },
   (t) => [
+    check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
+    check("approvals_signature_mode_check", sql`${t.signatureMode} IN ('passkey', 'step_up', 'off')`),
     index("approvals_status_idx").on(t.status),
     check(
       "approvals_review_role_check",
@@ -3650,6 +3730,40 @@ export const orgSettings = pgTable(
      * (each still behind a per-user decision); strict [] = all refused. */
     mcpProtocolMethods: jsonb("mcp_protocol_methods").$type<McpProtocolMethod[]>().notNull().default([]),
 
+    // --- ADR-0186 (batch 4, migration 0170): all strict ---------------------
+    /** B: tool-call approvals are passkey-signed; step_up / off relax it */
+    approvalSignatureMode: text("approval_signature_mode", { enum: APPROVAL_SIGNATURE_MODES })
+      .notNull()
+      .default("passkey"),
+    /** A: the step-up actions need a fresh proof; off relaxes it */
+    stepUpMode: text("step_up_mode", { enum: STEP_UP_MODES }).notNull().default("required"),
+    /** A: a step-up grant's lifetime, 30–900 s; longer relaxes it */
+    stepUpMaxAgeSeconds: integer("step_up_max_age_seconds").notNull().default(120),
+    /** A: the actions that need a step-up; removing one relaxes it */
+    stepUpActions: jsonb("step_up_actions")
+      .$type<StepUpActionKind[]>()
+      .notNull()
+      .default([...STEP_UP_ACTION_KINDS]),
+    /** A: approvers needed for a call on an in-app-only classified project, 1–5 */
+    toolApprovalSensitiveQuorum: integer("tool_approval_sensitive_quorum").notNull().default(2),
+    /** R: signed decision receipts */
+    decisionReceiptsMode: text("decision_receipts_mode", { enum: DECISION_RECEIPTS_MODES }).notNull().default("on"),
+    /** S: RFC 3161 timestamps on audit anchors */
+    auditAnchorTimestampMode: text("audit_anchor_timestamp_mode", { enum: AUDIT_ANCHOR_TIMESTAMP_MODES })
+      .notNull()
+      .default("required"),
+    /** V: the vendored detection packs in force */
+    vendoredDetectionPacks: jsonb("vendored_detection_packs")
+      .$type<VendoredDetectionPack[]>()
+      .notNull()
+      .default(["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]),
+    /** M: the MCP server baseline window, 1–90 days; longer relaxes it */
+    monitorMcpBaselineDays: integer("monitor_mcp_baseline_days").notNull().default(14),
+    /** M: jailbreak findings before an alert, 1–100; higher relaxes it */
+    monitorJailbreakThreshold: integer("monitor_jailbreak_threshold").notNull().default(3),
+    /** M: the jailbreak correlation window, 1–168 hours; shorter relaxes it */
+    monitorJailbreakWindowHours: integer("monitor_jailbreak_window_hours").notNull().default(24),
+
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
       .notNull()
@@ -4231,6 +4345,36 @@ export const orgSettings = pgTable(
     check(
       "org_settings_mcp_protocol_methods_check",
       sql`jsonb_typeof(${t.mcpProtocolMethods}) = 'array' AND ${t.mcpProtocolMethods} <@ '["resources/list", "resources/templates/list", "resources/read", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel"]'::jsonb`,
+    ),
+    // ADR-0186 (migration 0170)
+    check(
+      "org_settings_approval_signature_mode_check",
+      sql`${t.approvalSignatureMode} IN ('passkey', 'step_up', 'off')`,
+    ),
+    check("org_settings_step_up_mode_check", sql`${t.stepUpMode} IN ('required', 'off')`),
+    check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
+    check(
+      "org_settings_step_up_actions_check",
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb`,
+    ),
+    check(
+      "org_settings_tool_approval_sensitive_quorum_check",
+      sql`${t.toolApprovalSensitiveQuorum} BETWEEN 1 AND 5`,
+    ),
+    check("org_settings_decision_receipts_mode_check", sql`${t.decisionReceiptsMode} IN ('on', 'off')`),
+    check(
+      "org_settings_audit_anchor_timestamp_mode_check",
+      sql`${t.auditAnchorTimestampMode} IN ('required', 'off')`,
+    ),
+    check(
+      "org_settings_vendored_detection_packs_check",
+      sql`jsonb_typeof(${t.vendoredDetectionPacks}) = 'array' AND ${t.vendoredDetectionPacks} <@ '["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]'::jsonb`,
+    ),
+    check("org_settings_monitor_mcp_baseline_days_check", sql`${t.monitorMcpBaselineDays} BETWEEN 1 AND 90`),
+    check("org_settings_monitor_jailbreak_threshold_check", sql`${t.monitorJailbreakThreshold} BETWEEN 1 AND 100`),
+    check(
+      "org_settings_monitor_jailbreak_window_hours_check",
+      sql`${t.monitorJailbreakWindowHours} BETWEEN 1 AND 168`,
     ),
   ],
 );
@@ -11206,3 +11350,302 @@ export const aiPolicyAcknowledgements = pgTable(
   ],
 );
 export type AiPolicyAcknowledgementRow = typeof aiPolicyAcknowledgements.$inferSelect;
+
+// =============================================================================
+// ADR-0186 (batch 4, migration 0170) — passkeys, step-up, dual control,
+// signed decision receipts. The CHECKs mirror the migration; the vocabularies
+// are the shared constants (`@regulait/shared` batch4.ts).
+// =============================================================================
+
+/** A/B: a user's passkey. Revoked, never deleted: the decisions it signed stay
+ * attributable. `credentialId` and `publicKey` (COSE) are base64url. */
+export const webauthnCredentials = pgTable(
+  "webauthn_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    credentialId: text("credential_id").notNull(),
+    publicKey: text("public_key").notNull(),
+    counter: bigint("counter", { mode: "number" }).notNull().default(0),
+    transports: jsonb("transports").$type<WebauthnTransport[]>().notNull().default([]),
+    aaguid: text("aaguid"),
+    backedUp: boolean("backed_up").notNull().default(false),
+    label: text("label").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    revokeReason: text("revoke_reason"),
+  },
+  (t) => [
+    unique("webauthn_credentials_credential_id_uq").on(t.credentialId),
+    check("webauthn_credentials_credential_id_check", sql`${t.credentialId} ~ '^[A-Za-z0-9_-]{16,1366}$'`),
+    check("webauthn_credentials_public_key_check", sql`${t.publicKey} ~ '^[A-Za-z0-9_-]{16,4096}$'`),
+    check("webauthn_credentials_counter_check", sql`${t.counter} >= 0`),
+    check(
+      "webauthn_credentials_transports_check",
+      sql`jsonb_typeof(${t.transports}) = 'array' AND ${t.transports} <@ '["usb", "nfc", "ble", "smart-card", "hybrid", "internal", "cable"]'::jsonb`,
+    ),
+    check(
+      "webauthn_credentials_aaguid_check",
+      sql`${t.aaguid} IS NULL OR ${t.aaguid} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+    check("webauthn_credentials_label_check", sql`length(btrim(${t.label})) BETWEEN 1 AND 100`),
+    check("webauthn_credentials_revoke_check", sql`(${t.revokedAt} IS NULL) = (${t.revokeReason} IS NULL)`),
+    index("webauthn_credentials_user_idx").on(t.userId).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+export type WebauthnCredentialRow = typeof webauthnCredentials.$inferSelect;
+
+/** A/B: one WebAuthn ceremony (≤ 5 min, single use, session-bound). The id of a
+ * `step_up` row is the `stepUpId` of `POST /v1/auth/step-up/options`. */
+export const webauthnChallenges = pgTable(
+  "webauthn_challenges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => authSessions.id, { onDelete: "cascade" }),
+    purpose: text("purpose", { enum: WEBAUTHN_CHALLENGE_PURPOSES }).notNull(),
+    /** base64url, as sent to the authenticator */
+    challenge: text("challenge").notNull(),
+    actionKind: text("action_kind", { enum: STEP_UP_ACTION_KINDS }),
+    actionDigest: text("action_digest"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "cascade" }),
+    decision: text("decision", { enum: APPROVAL_DECISION_VALUES }),
+    /** approval_sign: the `ApprovalSigningPayload` whose digest is the challenge */
+    signedPayload: jsonb("signed_payload"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("webauthn_challenges_challenge_uq").on(t.challenge),
+    check("webauthn_challenges_purpose_check", sql`${t.purpose} IN ('register', 'step_up', 'approval_sign')`),
+    check("webauthn_challenges_challenge_check", sql`${t.challenge} ~ '^[A-Za-z0-9_-]{22,128}$'`),
+    check(
+      "webauthn_challenges_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '5 minutes'`,
+    ),
+    check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
+    check(
+      "webauthn_challenges_action_kind_check",
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change')`,
+    ),
+    check(
+      "webauthn_challenges_action_digest_check",
+      sql`${t.actionDigest} IS NULL OR ${t.actionDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check("webauthn_challenges_decision_check", sql`${t.decision} IS NULL OR ${t.decision} IN ('approved', 'denied')`),
+    check(
+      "webauthn_challenges_shape_check",
+      sql`(${t.purpose} = 'register' AND ${t.actionKind} IS NULL AND ${t.actionDigest} IS NULL AND ${t.approvalId} IS NULL AND ${t.decision} IS NULL AND ${t.signedPayload} IS NULL) OR (${t.purpose} = 'step_up' AND ${t.actionKind} IS NOT NULL AND ${t.actionDigest} IS NOT NULL AND ${t.approvalId} IS NULL AND ${t.decision} IS NULL AND ${t.signedPayload} IS NULL) OR (${t.purpose} = 'approval_sign' AND ${t.actionKind} IS NULL AND ${t.actionDigest} IS NOT NULL AND ${t.approvalId} IS NOT NULL AND ${t.decision} IS NOT NULL AND ${t.signedPayload} IS NOT NULL)`,
+    ),
+    index("webauthn_challenges_user_idx").on(t.userId, t.purpose),
+    index("webauthn_challenges_expires_idx").on(t.expiresAt),
+  ],
+);
+export type WebauthnChallengeRow = typeof webauthnChallenges.$inferSelect;
+
+/** A: an issued step-up. The `rgsu_` token is stored only as sha256. */
+export const stepUpGrants = pgTable(
+  "step_up_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenHash: text("token_hash").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => authSessions.id, { onDelete: "cascade" }),
+    /** the `webauthn_challenges` row (purpose step_up) it completed */
+    stepUpId: uuid("step_up_id").references(() => webauthnChallenges.id, { onDelete: "set null" }),
+    method: text("method", { enum: STEP_UP_METHODS }).notNull(),
+    credentialId: uuid("credential_id").references(() => webauthnCredentials.id, { onDelete: "set null" }),
+    actionKind: text("action_kind", { enum: STEP_UP_ACTION_KINDS }).notNull(),
+    actionDigest: text("action_digest").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("step_up_grants_token_hash_uq").on(t.tokenHash),
+    check("step_up_grants_token_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
+    check(
+      "step_up_grants_action_kind_check",
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change')`,
+    ),
+    check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "step_up_grants_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '900 seconds'`,
+    ),
+    check("step_up_grants_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
+    check("step_up_grants_passkey_credential_check", sql`${t.credentialId} IS NULL OR ${t.method} = 'passkey'`),
+    index("step_up_grants_session_idx").on(t.sessionId),
+    index("step_up_grants_expires_idx").on(t.expiresAt),
+  ],
+);
+export type StepUpGrantRow = typeof stepUpGrants.$inferSelect;
+
+/** A: a fresh SSO login started for a step-up (≤ 5 min, single use). Verified
+ * only for the session's own user with `auth_time` after `requested_at`. */
+export const ssoReauthRequests = pgTable(
+  "sso_reauth_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    stepUpId: uuid("step_up_id")
+      .notNull()
+      .references(() => webauthnChallenges.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => authSessions.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind", { enum: SSO_REAUTH_PROVIDER_KINDS }).notNull(),
+    oidcProviderId: uuid("oidc_provider_id").references(() => oidcProviders.id, { onDelete: "cascade" }),
+    samlProviderId: uuid("saml_provider_id").references(() => samlProviders.id, { onDelete: "cascade" }),
+    /** OIDC `state` / SAML RelayState */
+    state: text("state").notNull(),
+    /** OIDC `nonce` / SAML AuthnRequest ID (the response's InResponseTo) */
+    nonce: text("nonce").notNull(),
+    /** OIDC PKCE verifier (null for SAML) */
+    codeVerifier: text("code_verifier"),
+    /** OIDC redirect URI / SAML ACS URL */
+    redirectUri: text("redirect_uri").notNull(),
+    actionDigest: text("action_digest").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** the ID token's `auth_time` / the assertion's `AuthnInstant` */
+    authTime: timestamp("auth_time", { withTimezone: true }),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("sso_reauth_requests_state_uq").on(t.state),
+    check("sso_reauth_requests_provider_kind_check", sql`${t.providerKind} IN ('oidc', 'saml')`),
+    check(
+      "sso_reauth_requests_provider_check",
+      sql`(${t.providerKind} = 'oidc' AND ${t.oidcProviderId} IS NOT NULL AND ${t.samlProviderId} IS NULL AND ${t.codeVerifier} IS NOT NULL) OR (${t.providerKind} = 'saml' AND ${t.samlProviderId} IS NOT NULL AND ${t.oidcProviderId} IS NULL AND ${t.codeVerifier} IS NULL)`,
+    ),
+    check("sso_reauth_requests_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "sso_reauth_requests_expiry_check",
+      sql`${t.expiresAt} > ${t.requestedAt} AND ${t.expiresAt} <= ${t.requestedAt} + interval '5 minutes'`,
+    ),
+    check(
+      "sso_reauth_requests_verified_check",
+      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND ${t.authTime} > ${t.requestedAt})`,
+    ),
+    check("sso_reauth_requests_used_check", sql`${t.usedAt} IS NULL OR ${t.verifiedAt} IS NOT NULL`),
+    index("sso_reauth_requests_step_up_idx").on(t.stepUpId),
+    index("sso_reauth_requests_expires_idx").on(t.expiresAt),
+  ],
+);
+export type SsoReauthRequestRow = typeof ssoReauthRequests.$inferSelect;
+
+/** A/B: APPEND-ONLY (trigger `approval_decisions_append_only`) — one row per
+ * approving principal. Parents are SET NULL: the record outlives them. */
+export const approvalDecisions = pgTable(
+  "approval_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** who clicked (a delegate deciding for someone) */
+    deciderUserId: uuid("decider_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** whose approval it counts as (the delegator); a principal counts once */
+    principalUserId: uuid("principal_user_id").references(() => users.id, { onDelete: "set null" }),
+    decision: text("decision", { enum: APPROVAL_DECISION_VALUES }).notNull(),
+    reason: text("reason"),
+    stepUpMethod: text("step_up_method", { enum: APPROVAL_DECISION_METHODS }).notNull(),
+    credentialId: uuid("credential_id").references(() => webauthnCredentials.id, { onDelete: "set null" }),
+    signedPayload: jsonb("signed_payload"),
+    signedDigest: text("signed_digest"),
+    /** the WebAuthn assertion response, as received */
+    assertion: jsonb("assertion"),
+    counterBefore: bigint("counter_before", { mode: "number" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("approval_decisions_approval_principal_uq").on(t.approvalId, t.principalUserId),
+    check("approval_decisions_decision_check", sql`${t.decision} IN ('approved', 'denied')`),
+    check("approval_decisions_method_check", sql`${t.stepUpMethod} IN ('passkey', 'totp', 'sso', 'none')`),
+    check(
+      "approval_decisions_signed_digest_check",
+      sql`${t.signedDigest} IS NULL OR ${t.signedDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check("approval_decisions_counter_check", sql`${t.counterBefore} IS NULL OR ${t.counterBefore} >= 0`),
+    check(
+      "approval_decisions_signature_shape_check",
+      sql`(${t.signedPayload} IS NULL) = (${t.signedDigest} IS NULL) AND (${t.signedPayload} IS NULL) = (${t.assertion} IS NULL) AND (${t.signedPayload} IS NULL) = (${t.counterBefore} IS NULL) AND (${t.signedPayload} IS NULL OR ${t.stepUpMethod} = 'passkey') AND (${t.credentialId} IS NULL OR ${t.stepUpMethod} = 'passkey')`,
+    ),
+    check("approval_decisions_reason_check", sql`${t.reason} IS NULL OR length(${t.reason}) <= 2000`),
+    index("approval_decisions_approval_idx").on(t.approvalId, t.decidedAt),
+  ],
+);
+export type ApprovalDecisionRow = typeof approvalDecisions.$inferSelect;
+
+/** R: the receipt-signing PUBLIC keys (a JWK carrying `d` is refused). Never deleted. */
+export const receiptSigningKeys = pgTable(
+  "receipt_signing_keys",
+  {
+    keyId: text("key_id").primaryKey(),
+    algorithm: text("algorithm").notNull().default("Ed25519"),
+    publicJwk: jsonb("public_jwk").$type<{ kty: "OKP"; crv: "Ed25519"; x: string }>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    firstUsedAt: timestamp("first_used_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("receipt_signing_keys_key_id_check", sql`${t.keyId} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
+    check("receipt_signing_keys_algorithm_check", sql`${t.algorithm} = 'Ed25519'`),
+    check(
+      "receipt_signing_keys_public_only_check",
+      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND NOT (${t.publicJwk} ? 'd'), false)`,
+    ),
+  ],
+);
+export type ReceiptSigningKeyRow = typeof receiptSigningKeys.$inferSelect;
+
+/** R: APPEND-ONLY (trigger `decision_receipts_append_only`) — one signed receipt
+ * per receipt-bearing audit row, chained by `prevHash`. No FK to audit_log: a
+ * receipt outlives a pruned audit row. */
+export const decisionReceipts = pgTable(
+  "decision_receipts",
+  {
+    receiptSeq: bigint("receipt_seq", { mode: "number" }).primaryKey(),
+    auditId: uuid("audit_id").notNull(),
+    auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
+    /** the `DecisionReceiptPayload` (shared batch4.ts) */
+    payload: jsonb("payload").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    prevHash: text("prev_hash").notNull(),
+    /** Ed25519 over the canonical payload, base64url (86 chars) */
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("decision_receipts_audit_id_uq").on(t.auditId),
+    unique("decision_receipts_audit_seq_uq").on(t.auditSeq),
+    check("decision_receipts_seq_check", sql`${t.receiptSeq} >= 1`),
+    check("decision_receipts_payload_hash_check", sql`${t.payloadHash} ~ '^[0-9a-f]{64}$'`),
+    check("decision_receipts_prev_hash_check", sql`${t.prevHash} ~ '^[0-9a-f]{64}$'`),
+    check("decision_receipts_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+    check(
+      "decision_receipts_payload_check",
+      sql`COALESCE(jsonb_typeof(${t.payload}) = 'object' AND ${t.payload} ->> 'v' = 'regulait.receipt.v1' AND jsonb_typeof(${t.payload} -> 'receiptSeq') = 'number' AND ${t.payload} ->> 'receiptSeq' = ${t.receiptSeq}::text AND ${t.payload} ->> 'keyId' = ${t.keyId} AND ${t.payload} ->> 'prev' = ${t.prevHash}, false)`,
+    ),
+  ],
+);
+export type DecisionReceiptRow = typeof decisionReceipts.$inferSelect;

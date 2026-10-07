@@ -73,6 +73,9 @@
  */
 import { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
 import { sha256Hex } from "./audit-chain.js";
+// ADR-0186 V: the vendored pipelock-secrets pack redacts on match here too. The
+// ledger write reads no settings, so the pack always applies on this path.
+import { vendoredSecretSpans } from "./detection-content/match.js";
 
 /** How many hex characters of the SHA-256 correlation fingerprint survive.
  * 12 hex = 48 bits: collision-free at any ledger size a control plane will
@@ -222,6 +225,9 @@ export function scrubAuditText(text: string): string {
       spans.push({ start, end, rule: shortRuleId(rule.id) });
     }
   }
+  // ADR-0186 V: vendored credential shapes (empty until slice V fills the pack);
+  // the marker names the vendored rule id, merged with any overlapping span below
+  for (const v of vendoredSecretSpans(text)) spans.push({ start: v.start, end: v.end, rule: v.rule });
   if (spans.length === 0) return text;
 
   // Two rules can match overlapping runs (an `api_key = eyJ…` trips both
