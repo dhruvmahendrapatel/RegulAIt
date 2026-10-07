@@ -94,7 +94,7 @@ describe("the shapes it catches", () => {
   it("takes a TRUNCATED PEM block to the end of the string rather than leaving the body", () => {
     const out = scrubAuditText("-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBSECRETBODY");
     expect(out).not.toContain("SECRETBODY");
-    expect(out).toMatch(/^\[redacted:private_key:\d+:[0-9a-f]{12}\]$/);
+    expect(out).toMatch(/^\[redacted:(?:[a-z0-9_.]+\+)*private_key(?:\+[a-z0-9_.]+)*:51:[0-9a-f]{12}\]$/);
   });
 
   it("keeps the assigned FIELD NAME and takes only the value", () => {
