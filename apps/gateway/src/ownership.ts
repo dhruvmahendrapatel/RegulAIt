@@ -134,11 +134,19 @@ export async function changeOwner(
     return target;
   }
   const fromOwnership = await ownershipOf(db, before.ownerUserId);
-  const [after] = await db
-    .update(table)
-    .set({ ownerUserId: target.ownerUserId })
-    .where(eq(table.id, before.id))
-    .returning({ id: table.id, ownerUserId: table.ownerUserId });
+  // each table named statically, so rule-write-guard.test.ts can see the writers
+  const [after] =
+    args.kind === "mcp_server"
+      ? await db
+          .update(mcpServers)
+          .set({ ownerUserId: target.ownerUserId })
+          .where(eq(mcpServers.id, before.id))
+          .returning({ id: mcpServers.id, ownerUserId: mcpServers.ownerUserId })
+      : await db
+          .update(connectors)
+          .set({ ownerUserId: target.ownerUserId })
+          .where(eq(connectors.id, before.id))
+          .returning({ id: connectors.id, ownerUserId: connectors.ownerUserId });
   const toOwnership: OwnershipState = after!.ownerUserId ? "owned" : "unowned";
   await db.insert(auditLog).values({
     userId: args.actorUserId ?? NIL,
