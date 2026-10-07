@@ -692,6 +692,16 @@ const DEMO_ASSURANCE_PROBES: Array<Record<string, unknown>> = [
   },
 ];
 
+/** the agents the assurance run tests: every MOCK agent of an approved use case and of the hero */
+export function assuranceAgentNames(fixtures: DemoIntakeFixtures, providerByName: ReadonlyMap<string, string>): string[] {
+  return [
+    ...new Set([
+      ...fixtures.useCases.filter((u) => u.targetStatus === "approved").flatMap((u) => u.intendedAgentNames),
+      ...fixtures.hero.intendedAgentNames,
+    ]),
+  ].filter((n) => providerByName.get(n) === "mock");
+}
+
 /**
  * Seed real, passing evidence for the agents the story ships: every mock agent
  * of an approved use case and of the hero (the only agents a key-less demo can
@@ -718,12 +728,7 @@ async function seedRequiredTestRuns(
     const modes = (agentsList.find((a) => a.name === n)?.modes ?? null) as string[] | null;
     return !modes || modes.length === 0 || modes.includes("execute") ? "execute" : modes[0]!;
   };
-  const names = [
-    ...new Set([
-      ...fixtures.useCases.filter((u) => u.targetStatus === "approved").flatMap((u) => u.intendedAgentNames),
-      ...fixtures.hero.intendedAgentNames,
-    ]),
-  ].filter((n) => provider.get(n) === "mock" && agentId.has(n));
+  const names = assuranceAgentNames(fixtures, provider).filter((n) => agentId.has(n));
   if (names.length === 0) return;
 
   // Every governed dispatch is attributed to a project here. The testing spend
@@ -777,6 +782,8 @@ async function seedRequiredTestRuns(
   }
   // ADR-0181: the strict guardrail default holds injection/jailbreak probes before they reach
   // the agent; open an audited, time-boxed window so the run measures the agent itself
+  // B4S-06: once an admin can step up, the bootstrap credential cannot open the
+  // window; demo:prepare's seed opened it during first-admin setup, and it is kept
   const guardrailWindow = await openAssuranceGuardrailWindow(call, operator, names.map((n) => agentId.get(n)!));
   report.notes.push(...guardrailWindow.notes);
   try {

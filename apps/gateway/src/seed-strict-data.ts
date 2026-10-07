@@ -188,7 +188,7 @@ export async function openAssuranceGuardrailWindow(
   const config = (await call("GET", "/v1/guardrails/config", undefined, auth)).body;
   const orgModes = (config.orgModes ?? {}) as Record<string, Mode>;
   const overrides = new Map(
-    ((config.overrides ?? []) as Array<{ scope: string; scopeId: string; createdBy?: string }>)
+    ((config.overrides ?? []) as Array<{ scope: string; scopeId: string; createdBy?: string; expired?: boolean; modes?: Record<string, Mode> }>)
       .filter((o) => o.scope === "agent")
       .map((o) => [o.scopeId, o]),
   );
@@ -201,6 +201,9 @@ export async function openAssuranceGuardrailWindow(
   const opened: string[] = [];
   const notes: string[] = [];
   let reclaimed = 0;
+  let kept = 0;
+  const sameModes = (a: Record<string, Mode>, b: Record<string, Mode>) =>
+    CONFIGURABLE_LAYERS.every((l) => (a[l] ?? null) === (b[l] ?? null));
   for (const id of new Set(agentIds)) {
     const existing = overrides.get(id);
     const leftover = existing?.createdBy === ASSURANCE_WINDOW_CREATED_BY;
@@ -209,6 +212,14 @@ export async function openAssuranceGuardrailWindow(
       continue;
     }
     if (!relaxes && !leftover) continue; // the org default already lets the probes reach the agent
+    // B4S-06: a LIVE window with exactly these modes, opened during first-admin
+    // setup (`seed --open-assurance-window`, before any admin could step up), is
+    // kept as it is — no second relaxation is written — and closed by restore()
+    if (leftover && existing?.expired === false && sameModes(existing.modes ?? {}, modes)) {
+      opened.push(id);
+      kept++;
+      continue;
+    }
     const r = await call(
       "PUT",
       `/v1/guardrails/config/agent/${id}`,
@@ -219,6 +230,9 @@ export async function openAssuranceGuardrailWindow(
       opened.push(id);
       if (leftover) reclaimed++;
     } else notes.push(`assurance guardrail window: could not open for agent ${id} (${r.status} ${String(r.body.error ?? "")})`);
+  }
+  if (kept > 0) {
+    notes.push(`assurance guardrail window: kept the ${kept} window(s) opened during first-admin setup (seed --open-assurance-window)`);
   }
   if (reclaimed > 0) {
     notes.push(`assurance guardrail window: reclaimed ${reclaimed} leftover window override(s) from an earlier run`);
