@@ -742,6 +742,35 @@ describe("B — the execution recheck", () => {
   });
 });
 
+describe("A — the recheck counts principals as the decide does", () => {
+  it("two approvals that became one principal (a delegation since) no longer meet a quorum of 2 at execution", async () => {
+    const tool = nextTool();
+    expect((await rule(tool)).statusCode).toBe(201);
+    const args = { text: "collapsed" };
+    const id = await queued(tool, args);
+    expect((await signAndDecide(P.a, id)).statusCode).toBe(200);
+    expect((await signAndDecide(P.b, id)).json()).toMatchObject({ status: "approved", approvals: 2 });
+    await db.update(orgSettings).set({ approvalDelegationEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const del = await withKey(AUTH, "POST", "/v1/delegations", {
+      fromUserId: P.a.id,
+      toUserId: P.b.id,
+      startsAt: new Date(Date.now() - 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    expect(del.statusCode, del.body).toBe(201);
+    try {
+      const before = upstreamHits.tool;
+      const out = await call(tool, args);
+      expect(out.kind).toBe("denied");
+      expect(upstreamHits.tool).toBe(before);
+      const [audited] = await auditFor(APPROVAL_SIGNATURE_RECHECK_FAILED_RULE, id);
+      expect(audited!.detail).toMatchObject({ why: "below_quorum" });
+    } finally {
+      await withKey(AUTH, "DELETE", `/v1/delegations/${del.json().id}`);
+    }
+  });
+});
+
 describe("B — channels, modes and the relying party", () => {
   it("bulk decide refuses an individual-signature approval by name", async () => {
     const tool = nextTool();

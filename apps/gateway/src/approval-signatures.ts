@@ -895,7 +895,7 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
   const rp = relyingParty();
   if (!rp) return { ok: false, why: "passkey_rp_unconfigured" };
   const decisions = (await decisionsFor(db, row.id)).filter((d) => d.decision === "approved");
-  const valid = new Set<string>();
+  const valid: ApprovalDecisionRow[] = [];
   for (const d of decisions) {
     const fail = (why: string): RecheckOutcome => ({ ok: false, why, principalUserId: d.principalUserId });
     const stored = d.signedPayload as ApprovalSigningPayload | null;
@@ -937,9 +937,10 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
     } catch {
       return fail("signature_invalid");
     }
-    if (d.principalUserId) valid.add(d.principalUserId);
+    valid.push(d);
   }
-  if (valid.size < row.quorum) return { ok: false, why: "below_quorum" };
+  // counted exactly as the decide counts them: a delegator and their delegate once
+  if ((await approvingPrincipals(db, valid)).length < row.quorum) return { ok: false, why: "below_quorum" };
   return { ok: true };
 }
 
