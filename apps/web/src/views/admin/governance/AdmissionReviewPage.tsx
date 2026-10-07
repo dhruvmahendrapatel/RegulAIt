@@ -21,6 +21,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
 import { ReasonModal, useAction } from "../adminKit";
 import v from "../../views.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 interface ReviewSkill {
   id: string;
@@ -295,7 +296,7 @@ function WaitingPeriodCard(props: {
           disabled={!valid || n === current || act.busy}
           onClick={() =>
             void act
-              .run(() => api.put("/v1/org/settings", { minReleaseAgeDays: n }), n === 0 ? "Waiting period off" : `Waiting period set to ${n} days`)
+              .run(() => putOrgSettings({ minReleaseAgeDays: n }), n === 0 ? "Waiting period off" : `Waiting period set to ${n} days`)
               .then(() => setDays(""))
           }
         >

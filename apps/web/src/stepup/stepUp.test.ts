@@ -93,3 +93,32 @@ describe("the header-carrying request helper", () => {
     expect(init.headers).toMatchObject({ "x-regulait-csrf": "1", [STEP_UP_HEADER]: "rgsu_t" });
   });
 });
+
+describe("every step-up-protected write in the app goes through withStepUp (ADR-0186 A)", () => {
+  it("no screen writes org settings except through putOrgSettings; no screen calls an owner change or the hold override unwrapped", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const path = await import("node:path");
+    const root = path.resolve(__dirname, "..");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir)) {
+        const p = path.join(dir, e);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.tsx?$/.test(e) && !/\.test\.tsx?$/.test(e)) files.push(p);
+      }
+    };
+    walk(root);
+    const offenders: string[] = [];
+    for (const f of files) {
+      if (f.endsWith(path.join("stepup", "stepUp.ts"))) continue;
+      const src = readFileSync(f, "utf8");
+      // the shared client's settings PUT would be refused for any relaxation, and nothing would resend it
+      if (/api\.put(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/org\/settings["'`]/.test(src)) offenders.push(`${f}: PUT /v1/org/settings`);
+      // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
+      for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
+        if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});

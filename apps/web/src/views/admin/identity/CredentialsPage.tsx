@@ -26,6 +26,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
 import v from "../../views.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 type Flag = "never_expires" | "past_expiry" | "unused" | "owner_deactivated" | "over_scoped";
 
@@ -363,7 +364,7 @@ function AlertingCard(props: { inv: CredentialInventory }) {
         <Button
           disabled={!valid || n === props.inv.unusedDays || act.busy}
           onClick={() =>
-            void act.run(() => api.put("/v1/org/settings", { credentialUnusedDays: n }), `Unused threshold set to ${n} days`).then(() => setDays(""))
+            void act.run(() => putOrgSettings({ credentialUnusedDays: n }), `Unused threshold set to ${n} days`).then(() => setDays(""))
           }
         >
           Save
@@ -397,7 +398,7 @@ function AlertingCard(props: { inv: CredentialInventory }) {
           disabled={act.busy}
           onClick={() =>
             void act.run(
-              () => api.put("/v1/org/settings", { staleCredentialAlerts: !props.inv.alerting }),
+              () => putOrgSettings({ staleCredentialAlerts: !props.inv.alerting }),
               props.inv.alerting ? "Credential alerts off (observe only)" : "Credential alerts on",
             )
           }

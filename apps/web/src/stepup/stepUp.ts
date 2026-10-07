@@ -17,7 +17,7 @@
  * shared client's `api.del` takes no headers). It reports refusals as the
  * shared `ApiError`, so every screen reads them the same way.
  */
-import { ApiError, CSRF_HEADER, STEP_UP_HEADER, onStepUpRequired, type ApiErrorPayload, type StepUpRequest } from "../api/client";
+import { ApiError, CSRF_HEADER, STEP_UP_HEADER, api as sharedApi, onStepUpRequired, type ApiErrorPayload, type StepUpRequest } from "../api/client";
 
 export interface StepUpAction {
   kind: string;
@@ -185,11 +185,25 @@ async function send<T>(method: string, path: string, body?: unknown, headers: Re
 
 /** the step-up-capable request helper (same CSRF header, same ApiError as the shared client) */
 export const api = {
-  get: <T>(path: string, headers?: Record<string, string>) => send<T>("GET", path, undefined, headers),
-  post: <T>(path: string, body: unknown = {}, headers?: Record<string, string>) => send<T>("POST", path, body, headers),
+  get: <T>(path: string) => sharedApi.get<T>(path),
+  // the writes go through the shared client (its session-loss handling, its
+  // refusal reading); only GET and PATCH, which it offers no header form of, are sent here
+  post: async <T>(path: string, body: unknown = {}, headers: Record<string, string> = {}) =>
+    (await sharedApi.postWithHeaders<T>(path, body, headers)).body,
   patch: <T>(path: string, body: unknown = {}, headers?: Record<string, string>) => send<T>("PATCH", path, body, headers),
-  del: <T>(path: string, body?: unknown, headers?: Record<string, string>) => send<T>("DELETE", path, body, headers),
+  put: <T>(path: string, body: unknown = {}, headers: Record<string, string> = {}) => sharedApi.putWithHeaders<T>(path, body, headers),
+  del: <T>(path: string, body?: unknown, headers: Record<string, string> = {}) => sharedApi.delWithHeaders<T>(path, headers, body),
 };
+
+/**
+ * `PUT /v1/org/settings` through step-up: a write that relaxes a setting (or
+ * changes break-glass access) is refused with `step_up_required`, confirmed in
+ * the dialog, and resent once with the grant. Every settings writer in the app
+ * goes through this.
+ */
+export function putOrgSettings<T = unknown>(body: Record<string, unknown>): Promise<T> {
+  return withStepUp((h) => api.put<T>("/v1/org/settings", body, h));
+}
 
 // ---------------------------------------------------------------------------
 // what each action is, in words (the dialog's first line)

@@ -29,6 +29,7 @@ import {
 import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 export default function SsoPage() {
   return (
@@ -659,7 +660,7 @@ function SessionsPolicyForm(props: { settings: Record<string, unknown> }) {
           e.preventDefault();
           void act.run(
             () =>
-              api.put("/v1/org/settings", {
+              putOrgSettings({
                 passwordMinLength: Number(f.passwordMinLength),
                 passwordRequireClasses: Number(f.passwordRequireClasses),
                 sessionLifetimeHours: Number(f.sessionLifetimeHours),
