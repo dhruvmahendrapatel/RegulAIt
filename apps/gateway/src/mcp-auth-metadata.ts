@@ -65,6 +65,7 @@
  * deliberately OUT OF SCOPE — see ADR-0097.
  */
 
+import { deploymentBaseUrl } from "./public-url.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 /** The MCP proxy route, as Fastify names it. */
@@ -90,10 +91,9 @@ export const PROTECTED_RESOURCE_METADATA_MCP_PATH = "/.well-known/oauth-protecte
  * reads; it is inlined here rather than imported so this module can be pulled
  * in by `route-classes.ts` (which the auth hook itself depends on) without
  * creating an import cycle. */
+/** REGULAIT_PUBLIC_URL when set, else the request's scheme and Host (see `deploymentBaseUrl`) */
 export function baseUrlFor(req: FastifyRequest): string {
-  const proto = req.protocol === "https" ? "https" : "http";
-  const host = req.headers.host ?? "localhost";
-  return `${proto}://${host}`;
+  return deploymentBaseUrl(req);
 }
 
 export function metadataUrlForServer(baseUrl: string, serverId: string): string {

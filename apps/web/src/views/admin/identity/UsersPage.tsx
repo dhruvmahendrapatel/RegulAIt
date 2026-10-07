@@ -9,6 +9,8 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import type { RefusalGuidance } from "../../../api/refusals";
+import { RefusalNotice } from "../../../ui/RefusalNotice";
 import type {
   AdminUser,
   ApiKey,
@@ -209,6 +211,7 @@ export default function UsersPage() {
             user={selected}
             activeAdmins={activeAdmins}
             onIssueKey={() => void issueKey(selected)}
+            refusal={act.guidance}
             onIssuePassword={(force) => void issuePassword(selected, force)}
             onPromote={() =>
               void act.run(
@@ -301,6 +304,8 @@ function UserDetail(props: {
   onDeactivate: () => void;
   onReactivate: () => void;
   onClearMfa: () => void;
+  /** ADR-0183 2.3: e.g. 409 mfa_enrollment_required on "Issue API key" */
+  refusal: RefusalGuidance | null;
 }) {
   const { user } = props;
   const lastAdmin = user.isAdmin && !user.disabledAt && props.activeAdmins <= 1;
@@ -325,6 +330,7 @@ function UserDetail(props: {
       <div style={{ marginTop: "var(--s2)" }}>
         {tab === "lifecycle" && (
           <div className={v.stack}>
+            <RefusalNotice guidance={props.refusal} />
             <div className={v.row}>
               {!user.disabledAt && (
                 <>

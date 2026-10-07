@@ -13,6 +13,7 @@ import {
   chatOpsProviderLabel,
   chatOpsProviderRegistrable,
   chatOpsProviderUnavailableReason,
+  outlookCredentialToken,
 } from "./ChatOpsPage";
 
 const base = { name: "n", connectorId: "c", signingSecret: "s3cret-value", defaultChannel: "d", allowFencedDecide: false };
@@ -32,7 +33,7 @@ describe("ChatOpsPage — the provider options", () => {
     expect(chatOpsProviderLabel("slack")).toBe("slack");
   });
 
-  it("labels outlook as send-only and says it is unavailable while the courier cannot post to it", () => {
+  it("labels outlook as send-only, and no longer unavailable once the courier can post to it (ADR-0183 2.6)", () => {
     const label = chatOpsProviderLabel("outlook");
     expect(label).toMatch(/^outlook \(/);
     expect(label).toMatch(/send-only/);
@@ -44,16 +45,20 @@ describe("ChatOpsPage — the provider options", () => {
 });
 
 describe("ChatOpsPage — ADR-0179 (AER-015): a provider with no outbound sender cannot be picked", () => {
-  it("outlook is offered but not registrable, and the reason names the missing sender and the inbound refusal", () => {
-    expect(chatOpsProviderRegistrable("outlook")).toBe(false);
-    const reason = chatOpsProviderUnavailableReason("outlook");
-    expect(reason).toMatch(/can't be registered for approval cards yet/);
-    expect(reason).toMatch(/no outbound sender/);
-    expect(reason).toMatch(/Inbound outlook stays refused/);
+  it("ADR-0183 2.6: outlook has its sender now, so it is registrable and shows no reason", () => {
+    expect(CHATOPS_OUTBOUND_PROVIDERS).toContain("outlook");
+    expect(chatOpsProviderRegistrable("outlook")).toBe(true);
+    expect(chatOpsProviderUnavailableReason("outlook")).toBeNull();
+    expect(chatOpsProviderLabel("outlook")).toBe("outlook (send-only by design, no signing secret)");
   });
 
-  it("slack and teams stay registrable, with no reason shown", () => {
-    for (const p of ["slack", "teams"]) {
+  it("a provider not in the outbound mirror is still refused, with the reason", () => {
+    expect(chatOpsProviderRegistrable("webex")).toBe(false);
+    expect(chatOpsProviderUnavailableReason("webex")).toMatch(/no outbound sender/);
+  });
+
+  it("slack, teams and outlook are registrable, with no reason shown", () => {
+    for (const p of ["slack", "teams", "outlook"]) {
       expect(chatOpsProviderRegistrable(p)).toBe(true);
       expect(chatOpsProviderUnavailableReason(p)).toBeNull();
     }
@@ -84,5 +89,25 @@ describe("ChatOpsPage — the connection body", () => {
     const body = chatOpsConnectionBody({ ...base, provider: "outlook" });
     expect(body).not.toHaveProperty("signingSecret");
     expect(body).toEqual({ name: "n", provider: "outlook", connectorId: "c", defaultChannel: "d", allowFencedDecide: false });
+  });
+});
+
+describe("ChatOpsPage — ADR-0183 2.6: the outlook app registration", () => {
+  const four = { tenantId: " contoso.onmicrosoft.com ", clientId: " client-1 ", clientSecret: "s3cret ", senderMailbox: " approvals@acme.test " };
+
+  it("maps the four fields onto the connector credential's JSON shape", () => {
+    const out = outlookCredentialToken(four);
+    expect("token" in out && out.token && JSON.parse(out.token)).toEqual({
+      appId: "client-1",
+      appPassword: "s3cret ", // a secret is taken exactly as typed
+      tenantId: "contoso.onmicrosoft.com",
+      senderUpn: "approvals@acme.test",
+    });
+  });
+
+  it("none filled = use the connector's stored credential; some filled = refused, never half-written", () => {
+    expect(outlookCredentialToken({ tenantId: "", clientId: "", clientSecret: "", senderMailbox: "" })).toEqual({ token: null });
+    const partial = outlookCredentialToken({ ...four, clientSecret: "" });
+    expect("error" in partial && partial.error).toMatch(/all four/);
   });
 });

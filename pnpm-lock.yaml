@@ -140,6 +140,9 @@ importers:
       openid-client:
         specifier: ^6.8.4
         version: 6.8.8
+      otpauth:
+        specifier: 9.5.2
+        version: 9.5.2
       re2js:
         specifier: 2.8.6
         version: 2.8.6
@@ -226,6 +229,9 @@ importers:
 
   packages/connector-provider:
     dependencies:
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
       zod:
         specifier: ^3.25.67
         version: 3.25.76
@@ -1153,6 +1159,10 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [glibc]
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
+    engines: {node: '>= 20.19.0'}
 
   '@node-saml/node-saml@5.1.0':
     resolution: {integrity: sha512-t3cJnZ4aC7HhPZ6MGylGZULvUtBOZ6FzuUndaHGXjmIZHXnLfC/7L8a57O9Q9V7AxJGKAiRM5zu2wNm9EsvQpw==}
@@ -2577,6 +2587,9 @@ packages:
 
   openid-client@6.8.8:
     resolution: {integrity: sha512-ZsucJA5Ad04Uv7YN4ql+s4GXNmb9uAYQwyJTsJx7CH/MX3JZioLE2pVKi1SC+YrbSLA4Px3Gi30dMjgOZtb6pA==}
+
+  otpauth@9.5.2:
+    resolution: {integrity: sha512-GQ5emWR/x1tcExT62IBT0UfO95wZzJZyxYOJOGVeQF47SYEN9vmh0vISvDZaNMuFJRG+IaWCKtfm+t9Bfoal6w==}
 
   package-json-from-dist@1.0.1:
     resolution: {integrity: sha512-UEZIS3/by4OC8vL3P2dTXRETpebLI2NiI5vIrjaD/5UtrkFX/tNbwjTSRAGC/+7CAo2pIcBaRgWmcBBHcsaCIw==}
@@ -4229,6 +4242,8 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
+  '@noble/hashes@2.4.0': {}
+
   '@node-saml/node-saml@5.1.0':
     dependencies:
       '@types/debug': 4.1.13
@@ -5568,6 +5583,10 @@ snapshots:
     dependencies:
       jose: 6.2.12
       oauth4webapi: 3.8.8
+
+  otpauth@9.5.2:
+    dependencies:
+      '@noble/hashes': 2.4.0
 
   package-json-from-dist@1.0.1: {}
 

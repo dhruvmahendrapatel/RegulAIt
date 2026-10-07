@@ -63,6 +63,7 @@
  * INBOUND EMAIL STAYS REFUSED (ADR-0121): an email is an unauthenticated
  * assertion, so there is no email route here at all.
  */
+import { joinPublicUrl, resolvePublicUrl } from "./public-url.js";
 import { z } from "zod";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import {
@@ -182,8 +183,19 @@ export {
  * and stored with the conversation so a reply posted later (a resumed turn)
  * links the same way. Relative (`/ui/…`) only when no origin was ever seen.
  */
-export const threadLink = (threadId: string, origin?: string | null) =>
-  `${origin ? origin.replace(/\/+$/, "") : ""}/ui/builder/inbox?tab=all&thread=${threadId}`;
+export const THREAD_LINK_UNAVAILABLE = "open regulAIt to view the thread";
+/** ADR-0121 amendment: the link's origin is REGULAIT_PUBLIC_URL ONLY — never the
+ * request's Host (a caller must not choose the domain of a link we post). The
+ * stored `origin` is ignored; unset → no link, just where to go. */
+export const threadLink = (threadId: string, _origin?: string | null): string => {
+  let pub: string | null = null;
+  try {
+    pub = resolvePublicUrl();
+  } catch {
+    pub = null;
+  }
+  return pub ? joinPublicUrl(pub, `/ui/builder/inbox?tab=all&thread=${threadId}`) : THREAD_LINK_UNAVAILABLE;
+};
 
 export type TurnPause = "confirmation" | "approval" | null;
 
@@ -353,7 +365,9 @@ export async function acceptInboundMessage(
   conn: ChatOpsConnectionRow,
   msg: InboundChatMessage,
   retryNum: number | null,
-  /** the gateway's public origin as this request reached it (links in replies) */
+  /** UNUSED since the ADR-0121 amendment: reply links take their origin from
+   * REGULAIT_PUBLIC_URL only (`threadLink`); the inbound routes pass null.
+   * Kept positional for `replyVia`; a non-null value is still only stored. */
   origin: string | null = null,
   /** how a reply reaches the platform: in the HTTP response (a Teams outgoing
    * webhook) or through the courier (Slack, and the Teams Bot Framework, which
