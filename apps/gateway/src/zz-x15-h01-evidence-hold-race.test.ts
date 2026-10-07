@@ -22,6 +22,12 @@
  *     refused 409 with nothing written.
  *  3. as 2, with an admin's override header: the change goes through and the
  *     override is audited in the same transaction as the write.
+ *  4. the refusal in 2 is SENT only after its transaction (and so its deny
+ *     audit row) has committed. A test-only deferred constraint trigger on
+ *     `audit_log` parks that COMMIT on an advisory lock; while it is parked
+ *     the 409 must not have reached the caller. (Sending it from inside the
+ *     open transaction made 2's audit assertion fail intermittently: the
+ *     caller could read before the commit.)
  *
  * Global state (M-040/M-068): the incidents this file opens are closed and
  * deleted, the use cases deleted; every id is this run's own.
@@ -89,6 +95,16 @@ async function waiting(extra: ReturnType<typeof sql>): Promise<number> {
   return Number(((res as unknown as { rows: Array<{ n: number }> }).rows ?? [])[0]?.n ?? 0);
 }
 
+/** backends of this database waiting for the advisory lock `key` (a bigint key: classid = high word, objid = low word) */
+async function waitingOnKey(key: number): Promise<number> {
+  const res = await k.db.execute(
+    sql`select count(*)::int as n from pg_locks l join pg_stat_activity a on a.pid = l.pid
+        where a.datname = current_database() and l.locktype = 'advisory' and not l.granted
+          and l.classid = ${Math.floor(key / 2 ** 32)} and l.objid = ${key % 2 ** 32} and l.objsubid = 1`,
+  );
+  return Number(((res as unknown as { rows: Array<{ n: number }> }).rows ?? [])[0]?.n ?? 0);
+}
+
 /** resolves once `cond` holds (polled), rejects after 15 s — a condition wait, not a sleep */
 async function until(cond: () => Promise<boolean>, what: string): Promise<void> {
   const deadline = Date.now() + 15_000;
@@ -151,7 +167,7 @@ describe("X15-H01: a write admitted before an evidence hold cannot commit after 
     // either the incident commits now, or it waits for the admitted write (on the hold lock)
     const order = await Promise.race([
       incident.then(() => "incident committed while the PATCH was pending" as const),
-      until(async () => (await waiting(sql`wait_event = 'advisory'`)) > 0, "the incident waiting on the hold lock").then(
+      until(async () => (await waitingOnKey(HOLD_LOCK_KEY)) > 0, "the incident waiting on the hold lock").then(
         () => "incident waited for the admitted PATCH" as const,
       ),
     ]);
@@ -198,7 +214,7 @@ describe("X15-H01: a write admitted before an evidence hold cannot commit after 
     const patch = k.req("PATCH", `/v1/agents/${a}`, admin.auth, { costPerMTokIn: 77 });
     const order = await Promise.race([
       patch.then(() => "PATCH finished before the hold committed" as const),
-      until(async () => (await waiting(sql`wait_event = 'advisory'`)) > 0, "the PATCH waiting on the hold lock").then(
+      until(async () => (await waitingOnKey(HOLD_LOCK_KEY)) > 0, "the PATCH waiting on the hold lock").then(
         () => "PATCH waited for the hold" as const,
       ),
     ]);
@@ -224,7 +240,7 @@ describe("X15-H01: a write admitted before an evidence hold cannot commit after 
     await creator.isReady;
     const reason = "patient harm continues, the price must change now";
     const patch = k.req("PATCH", `/v1/agents/${a}`, { ...admin.auth, [EVIDENCE_HOLD_OVERRIDE_HEADER]: reason }, { costPerMTokIn: 88 });
-    await Promise.race([patch, until(async () => (await waiting(sql`wait_event = 'advisory'`)) > 0, "the PATCH waiting on the hold lock")]);
+    await Promise.race([patch, until(async () => (await waitingOnKey(HOLD_LOCK_KEY)) > 0, "the PATCH waiting on the hold lock")]);
     creator.release();
     await creator.done;
     const r = await patch;
@@ -235,5 +251,53 @@ describe("X15-H01: a write admitted before an evidence hold cannot commit after 
     expect(over!.userId).toBe(admin.id);
     expect(over!.reason).toContain(reason);
     expect(over!.detail).toMatchObject({ agentId: a, change: "model and prices" });
+  });
+  it("the in-transaction refusal reaches the caller only after its deny audit row has committed", async () => {
+    const b = await k.model("held-d");
+    const inc = await holdOn(b);
+    const a = await k.model("commit-gate", { price: 4 });
+    // test-only: a deferred constraint trigger runs at COMMIT of a transaction that wrote a hold-refused audit
+    // row, and parks that COMMIT on COMMIT_GATE_KEY while this test holds it
+    const COMMIT_GATE_KEY = 7_000_000_015;
+    await k.db.execute(sql.raw(`
+      create or replace function x15h01_commit_gate() returns trigger language plpgsql as $$
+      begin perform pg_advisory_xact_lock_shared(${COMMIT_GATE_KEY}); return null; end $$`));
+    await k.db.execute(sql.raw(`
+      create constraint trigger x15h01_commit_gate after insert on audit_log deferrable initially deferred
+      for each row when (new.rule_id = 'ai-incident-evidence-hold-refused') execute function x15h01_commit_gate()`));
+    const gate = parked(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(${COMMIT_GATE_KEY}::bigint)`);
+    });
+    try {
+      await gate.isReady;
+      const creator = parked(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(${HOLD_LOCK_KEY}::bigint)`);
+        await tx.insert(aiIncidentLinks).values({ incidentId: inc.id, objectType: "agent", objectId: a, createdBy: admin.id });
+      });
+      await creator.isReady;
+      let answered = false;
+      const patch = k.req("PATCH", `/v1/agents/${a}`, admin.auth, { costPerMTokIn: 99 }).then((r) => {
+        answered = true;
+        return r;
+      });
+      await until(async () => answered || (await waitingOnKey(HOLD_LOCK_KEY)) > 0, "the PATCH waiting on the hold lock");
+      creator.release();
+      await creator.done;
+      // the PATCH re-checks, refuses, writes its deny audit row, and its COMMIT now waits on the gate
+      await until(async () => answered || (await waitingOnKey(COMMIT_GATE_KEY)) > 0, "the refusing transaction's COMMIT on the gate");
+      // anything the handler sent before COMMIT was issued has been delivered by now (it was queued first)
+      await new Promise((r) => setImmediate(r));
+      expect(answered, "the 409 reached the caller while its transaction (and deny audit row) had not committed").toBe(false);
+      gate.release();
+      const r = await patch;
+      expect({ status: r.statusCode, price: await priceOf(a) }, r.body).toEqual({ status: 409, price: 4 });
+      // the caller holds the 409, so the deny audit row is already there
+      expect((await lastAudit("ai-incident-evidence-hold-refused", inc.id))?.detail).toMatchObject({ agentId: a });
+    } finally {
+      gate.release();
+      await gate.done;
+      await k.db.execute(sql.raw("drop trigger if exists x15h01_commit_gate on audit_log"));
+      await k.db.execute(sql.raw("drop function if exists x15h01_commit_gate()"));
+    }
   });
 });

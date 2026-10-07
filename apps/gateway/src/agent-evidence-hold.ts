@@ -149,8 +149,8 @@ export async function agentEvidenceHoldRefused(
  * X15-H01 — run a protected write under the evidence hold, in ONE transaction:
  * the hold lock (shared, or exclusive when the write adds a dependency edge
  * that widens who a hold covers), the hold re-checked inside the transaction,
- * then `write(tx)`. Returns `EVIDENCE_HOLD_REFUSED` when the hold refused (the
- * 409/403/422 is sent and its audit row commits); the handler returns `reply`.
+ * then `write(tx)`. Returns `EVIDENCE_HOLD_REFUSED` when the hold refused (its
+ * audit row has committed, then the 409/403/422 is sent); the handler returns `reply`.
  * The route's own `agentEvidenceHoldRefused` pre-check stays where it is (its
  * refusal comes before validation); this closes the window between it and the
  * commit. `write` must use the `tx` it is given for EVERY statement — a write
@@ -165,13 +165,30 @@ export async function withAgentEvidenceHold<T>(
   write: (tx: Db) => Promise<T>,
   opts: { includeSelf?: boolean; widensHolds?: boolean } = {},
 ): Promise<T | typeof EVIDENCE_HOLD_REFUSED> {
-  return db.transaction(async (rawTx) => {
+  // The refusal is decided (and its deny audit row written) INSIDE the transaction, but SENT only after the
+  // transaction commits: a refusal sent from inside it reached the caller before its audit row was durable
+  // (or at all, had the commit failed), and a reader acting on the 409 could not see the row yet.
+  let refusal: { status: number; body: unknown } | null = null;
+  const deferred = {
+    status: (status: number) => ({
+      send: (body: unknown) => {
+        refusal = { status, body };
+      },
+    }),
+  } as unknown as FastifyReply;
+  const out = await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
     if (opts.widensHolds) await lockEvidenceHoldsExclusive(tx);
     else await tx.execute(sql`select pg_advisory_xact_lock_shared(${EVIDENCE_HOLD_LOCK_KEY}::bigint)`);
-    if (await agentEvidenceHoldRefused(tx, req, reply, agentIds, change, { includeSelf: opts.includeSelf ?? true })) {
+    if (await agentEvidenceHoldRefused(tx, req, deferred, agentIds, change, { includeSelf: opts.includeSelf ?? true })) {
       return EVIDENCE_HOLD_REFUSED;
     }
     return write(tx);
   });
+  if (out === EVIDENCE_HOLD_REFUSED) {
+    const sent = refusal as { status: number; body: unknown } | null;
+    if (!sent) throw new Error("evidence hold refused without a response");
+    void reply.status(sent.status).send(sent.body);
+  }
+  return out;
 }
