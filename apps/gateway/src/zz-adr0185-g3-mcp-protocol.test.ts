@@ -19,7 +19,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { EmptyResultSchema, LoggingMessageNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { auditLog, and, asc, createDb, eq, orgSettings, ORG_SETTINGS_ID, runMigrations, sql, type Db } from "@regulait/db";
+import { auditLog, and, asc, createDb, eq, mcpServers, orgSettings, ORG_SETTINGS_ID, runMigrations, sql, type Db } from "@regulait/db";
 import { MCP_PROTOCOL_METHODS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedProtocolCall } from "./mcp-protocol.js";
@@ -385,14 +385,35 @@ describe("ADR-0185 G3 — refused always, and unknown methods", () => {
     expect(rows.some((r) => JSON.stringify(r.detail).includes("made/up"))).toBe(false);
   });
 
-  it("an upstream TOOL named like a protocol grant is never listed or run under that grant", async () => {
+  it("an upstream TOOL named like a protocol grant holds the server under admission enforce (G4's finding)", async () => {
     await setMethods(MCP_PROTOCOL_METHODS);
     const u = await newUser();
     await grant(u, squatId, "mcp:resources");
     const client = await clientFor(u, squatId);
-    expect((await client.listTools()).tools.map((t) => t.name)).toEqual([]);
-    await expect(client.callTool({ name: "mcp:resources", arguments: {} })).rejects.toThrow(/Unknown tool/);
+    await expect(client.listTools()).rejects.toThrow(/Denied by policy: .*mcp\.reserved_name\.prefix/);
     await client.close();
+    const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, squatId));
+    expect(row?.admissionState).toBe("held");
+  });
+
+  it("with admission OFF the proxy still never lists or runs it under that grant (the tool path refuses regardless)", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const priorMode = org!.mcpAdmissionMode;
+    await db.update(orgSettings).set({ mcpAdmissionMode: "off" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    try {
+      const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `g3-squat-off-${Date.now()}`, url: squat.url } });
+      const offId = s.json().id as string;
+      const u = await newUser();
+      await grant(u, offId, "mcp:resources");
+      const client = await clientFor(u, offId);
+      expect((await client.listTools()).tools.map((t) => t.name)).toEqual([]);
+      await expect(client.callTool({ name: "mcp:resources", arguments: {} })).rejects.toThrow(/Unknown tool/);
+      await client.close();
+    } finally {
+      // M-068: the org-wide admission mode goes back
+      await db.update(orgSettings).set({ mcpAdmissionMode: priorMode }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
   });
 });
 
