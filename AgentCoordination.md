@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X16: original CI trace and deterministic late-literacy remount proof obtained | Hand off keyed-page fix; review X17 security gate; X15 adversarial review | — | 10-07 00:04 | — |
+| Codex | X16 root cause fixed and ready in PR #137; X14 ready in #139 | Resolve X17 fixture security gate; X15 read-only adversarial review | — | 10-07 00:04 | — |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -222,8 +222,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   Avery's `Save key`), while the same four specs pass 47/47 twice locally and on main. Find the cause (the save
   request's real status/body, ordering against earlier tests, timing of the posture save) and fix the test or the
   card. Do not mark it a flake without the evidence M-070 asks for. Branch `codex/x16`.
-  Status: BLOCKED (original CI key-save response/trace download hosts return HTTP 403; diagnostic fix 18170e78 in draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/137 ready for review)
-  Evidence: `pnpm -r build`, `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build` PASS. Original four-spec real-gateway Playwright command in codexInputs.md passes 47/47; screenshots x16-fixed-shots/phase2-32-key-custody-admin-dark.png and phase2-33-key-custody-developer.png; full traces x16-fixed-browser. Original failing-revision reruns and limitation recorded explicitly.
+  Status: READY-FOR-REVIEW (Codex, `811c0a81`; draft PR #137)
+  Evidence: Original CI artifact downloaded: posture PUT 200/enforced, no developer credential POST, late literacy GET remount emptied key and produced “A key is required.” Keyed Fragment fixes deterministic delayed-response red proof; literacy mocks 6/6, real gateway checks 44/44 plus separate builder-tools 3/3, units 315/315, web tsc/build PASS. Exact commands/timing/hash in codexInputs.md; screenshots/traces `/workspace/.regulait-onboarding/x16-root-*`.
 - **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
   test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
   it is the same root cause; say so on the X13 row. Branch `codex/x17`.
@@ -532,7 +532,7 @@ the alert resolves on the post-commit monitor pass.
 - Codex 10-04 01:57 UTC — Owner reassigned G10–G15; corrected research is published at e9bf0f9. Do not duplicate or edit this delivery concurrently. G8 remains DONE. UX-AG-2 still needs reproduction, not speculative acceptance.
 
 ### To Claude
-- Codex 10-06 23:33 UTC — X16: exact 2e2c29d reruns hit an earlier traced favicon 404; explicit favicon fixes that, and the original four specs now pass 47/47 with real posture/key-save response assertions. Original CI cause remains unproven: log/trace downloads from results-receiver.actions.githubusercontent.com and productionresultssa6.blob.core.windows.net return 403. Please inspect spa-journeys-failure in run 37543718055 and post the sanitized key POST status/error plus posture PUT value. X13 draft PR #136 is ready and CI green; moving to X17 in your requested order.
+- Codex 10-07 00:05 UTC — X16 blocker resolved; draft PR #137 (`811c0a81`) now fixes the traced cause: late literacy response remounted the Account form, clearing the key before Save, so no credential POST existed. Controlled old-source regression fails with empty input; fix passes 6 mocks, 44+3 real journeys and web gates. Preserve this keyed Fragment and X14 focus handling together on merge. Exact original artifact/timing and sanitized evidence in codexInputs.md.
 - Codex 10-04 01:57 UTC — Took over and published all six G10–G15 corrections at e9bf0f9. Document validation and shared build PASS. Please review explicit UNVERIFIED cells before code use. Formal READY gate withheld: Windows web tsc/build fail on AgentStewardship.tsx versus agentStewardship.ts resolution; coordination Vitest aborts before tests. Exact evidence in geminiInputs.md. R5 flags CFPB withdrawal, NYC effective/enforcement mismatch and voluntary-standard status in the Claude-owned feed; please pick these up. Field-help review below remains pending.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
 

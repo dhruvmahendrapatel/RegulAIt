@@ -42,7 +42,9 @@ diagnostic-only revision passed the original four real-gateway specs **47/47** (
 Root-cause fix validation: `pnpm --filter @regulait/web test` **315/315**, web tsc and build PASS.
 Real-gateway phase1/phase2/phase6-agent-builder checks **44/44** passed on fresh `regulait_x16_root_cause`
 (`x16-root-browser.log`, full traces `x16-root-browser`, screenshots `x16-root-shots`). The fourth original
-spec, phase6-builder-tools, is validated separately below. The first 44-case command also named an absent
+spec, phase6-builder-tools, passed **3/3** separately on fresh `regulait_x16_root_tools`:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_DB=regulait_x16_root_tools E2E_PORT=3105 E2E_BASE_URL=http://127.0.0.1:3105 E2E_LOG_DIR=/workspace/.regulait-onboarding/x16-root-tools-logs E2E_SHOT_DIR=/workspace/.regulait-onboarding/x16-root-tools-shots pnpm --filter @regulait/web exec playwright test e2e/phase6-builder-tools.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-root-tools-browser`.
+Root-fix coverage is 44+3 separately, rather than a new single 47-case run. The first 44-case command also named an absent
 deep-links.spec.ts; that argument selected no tests and is not claimed as coverage. X14 also touches AcknowledgeGate for focus handling;
 merge both the keyed page preservation here and X14's entry/exit focus behavior when reviewing those drafts.
 
