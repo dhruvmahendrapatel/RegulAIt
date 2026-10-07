@@ -26,7 +26,8 @@ export interface VendoredSecretRule {
   /** Separate the provider delimiter check from the redacted token span. */
   leftBoundary?: "ascii_identifier";
   /** hosts this credential may legitimately be sent to (outbound enforcement,
-   * slice V); absent = no audience restriction recorded upstream */
+   * slice V); absent/empty = no outbound exemption; the host-only seam does not
+   * represent upstream carrier/path/cryptographic grants */
   audienceHosts?: readonly string[];
 }
 

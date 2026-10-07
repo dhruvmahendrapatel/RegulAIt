@@ -141,8 +141,30 @@ function flexibleSpaces(pattern) {
   }
   return true;
 }
+// An initial literal is mandatory only when there is no top-level branch.
+// Unsupported syntax receives no prefilter. Never infer a literal from a
+// nested/optional branch or a class.
+function requiredPrefix(pattern) {
+  let depth=0, inClass=false, escaped=false;
+  for(const char of pattern) {
+    if(escaped){escaped=false;continue;}
+    if(char==='\\'){escaped=true;continue;}
+    if(char==='['){inClass=true;continue;}
+    if(char===']'){inClass=false;continue;}
+    if(inClass)continue;
+    if(char==='(')depth++;else if(char===')')depth--;else if(char==='|'&&depth===0)return null;
+  }
+  const start=pattern.startsWith('\\b')?pattern.slice(2):pattern;
+  const prefix=/^[A-Za-z0-9_"=:-]+/.exec(start)?.[0];
+  // A quantifier can make the last literal optional; omit it conservatively.
+  if(!prefix)return null;
+  const next=start[prefix.length];
+  const required=['?','*','{'].includes(next)?prefix.slice(0,-1):prefix;
+  return required.length>=3?required.toLowerCase():null;
+}
+const requiredPrefixes=Object.fromEntries(secrets.map(rule=>[rule.id,requiredPrefix(rule.pattern)]).filter(([,prefix])=>prefix));
 const spaceRunSafeIds = secrets.filter((rule) => flexibleSpaces(rule.pattern)).map(rule=>rule.id);
-const outputs = { GENERATED_SPACE_RUN_SAFE_IDS:spaceRunSafeIds, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
+const outputs = { GENERATED_REQUIRED_PREFIXES:requiredPrefixes, GENERATED_SPACE_RUN_SAFE_IDS:spaceRunSafeIds, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
 const result = '// Generated offline by scripts/vendor/convert-detection-content.mjs; do not edit.\n' + Object.entries(outputs).map(([name,value]) => `export const ${name} = ${JSON.stringify(value,null,2)} as const;\n`).join('\n');
 const output = path.join(base,'generated.ts');
 if (process.argv.includes('--check')) { if (readFileSync(output,'utf8') !== result) throw Error('Generated detection content differs; rerun converter'); }

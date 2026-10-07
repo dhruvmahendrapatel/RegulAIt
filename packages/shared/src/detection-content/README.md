@@ -22,7 +22,9 @@ imported**, and the API/UI say so. This is a coverage residual, not a claim of
 NeMo injection protection.
 
 Runtime matching uses RE2 only. A combined RE2 set selects candidates before
-individual matchers locate spans in the original text. For patterns proved to
+individual matchers locate spans in the original text. Conservative mandatory
+ASCII-prefix gates bypass absent patterns; non-ASCII inputs use the general
+matcher so Unicode case folding cannot hide a match. For patterns proved to
 consume ASCII spaces only via flexible `\s` quantifiers, the candidate scan
 collapses space runs; unproved patterns still scan original text. Candidate
 failures retain every rule. Provider left boundaries are checked separately so

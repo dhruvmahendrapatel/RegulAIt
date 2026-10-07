@@ -52,7 +52,7 @@ describe("Vendored detection admission and real consumers", () => {
   });
   it("candidate compression preserves raw RE2 hits and original redaction spans", () => {
     const rawRules = [...VENDORED_SECRET_RULES];
-    const samples = ["-----BEGIN RSA PRIVATE KEY-----", synthetic, `aws_secret_access_key: ${"A".repeat(40)}`, "secret access key='" + "A".repeat(40) + "'"];
+    const samples = ["-----BEGIN RSA PRIVATE KEY-----", synthetic, synthetic.toUpperCase(), `ſk-ant-${"A".repeat(22)}`, `aws_secret_access_key: ${"A".repeat(40)}`, "secret access key='" + "A".repeat(40) + "'"];
     for (const gap of [1, 2, 8, 50000]) for (const sample of samples) {
       const text = "prefix" + " ".repeat(gap) + sample + " ".repeat(gap) + "suffix";
       const optimized = new Set(secretCandidateRules(text).map(rule => rule.id));
