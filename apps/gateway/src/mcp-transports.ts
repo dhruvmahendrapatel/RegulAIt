@@ -24,7 +24,9 @@
  * and an admin enables `stdio` in `mcp_upstream_transports`. Then:
  *  - the command is an absolute path whose realpath lies inside an allowed
  *    directory (a symlink pointing out is refused), a regular file with an
- *    execute bit, and not world-writable;
+ *    execute bit, neither world- nor group-writable, and no directory from
+ *    its own up to the allowed directory is group- or world-writable
+ *    (B3S-06: `group_writable`, `writable_parent`);
  *  - argv is a fixed `string[]` (≤ 64 × 4 KiB, no NUL) handed to the SDK's
  *    cross-spawn with `shell: false` — never a shell line, never interpolated;
  *  - the child's environment is ONLY the SDK's safe default
@@ -42,8 +44,11 @@
  * DISCLOSED RESIDUE: the file is hashed and then spawned by its realpath, so a
  * swap in the gap between the two is not caught by the digest (a host that can
  * write into an allowed directory between those two syscalls already controls
- * that directory). The child runs as the gateway's own OS user with no further
- * isolation — process isolation and credential binding are PF-06 (batch 6).
+ * that directory). Only the ENTRY FILE is digest-pinned: an interpreter it
+ * names (`#!`) and the modules that interpreter loads are not. argv is stored
+ * in the audit log and shown to admins, so it must never carry a secret. The
+ * child runs as the gateway's own OS user with no further isolation — process
+ * isolation and credential binding are PF-06 (batch 6).
  */
 import { createHash } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
@@ -109,6 +114,8 @@ export const STDIO_REFUSAL_CODES = [
   "outside_allowed_dirs",
   "not_executable",
   "world_writable",
+  "group_writable",
+  "writable_parent",
   "invalid_argv",
 ] as const;
 export type StdioRefusalCode = (typeof STDIO_REFUSAL_CODES)[number];
@@ -195,6 +202,25 @@ export async function checkStdioCommand(
   if (!st.isFile()) return { ok: false, code: "not_executable", detail: "the command is not a regular file" };
   if ((st.mode & 0o002) !== 0) {
     return { ok: false, code: "world_writable", detail: "the command file is world-writable; anyone on the host could replace it" };
+  }
+  // B3S-06: a group member could rewrite the file as surely as anyone could
+  // a world-writable one
+  if ((st.mode & 0o020) !== 0) {
+    return { ok: false, code: "group_writable", detail: "the command file is group-writable; any member of its group could replace it" };
+  }
+  // B3S-06: nor may anyone but the owner be able to rename or replace it in
+  // place — every directory from the command's own up to the allowed
+  // directory must be writable by its owner only
+  for (let dir = path.dirname(real); ; dir = path.dirname(dir)) {
+    const ds = await stat(dir);
+    if ((ds.mode & 0o022) !== 0) {
+      return {
+        ok: false,
+        code: "writable_parent",
+        detail: `a directory holding the command (${dir}) is group- or world-writable; others could replace the command in it`,
+      };
+    }
+    if (dir === allowedDir || path.dirname(dir) === dir) break;
   }
   try {
     await access(real, fsConstants.X_OK);

@@ -147,3 +147,8 @@ a governed protocol request, the health probe's `tools/list` — is observed onc
   PF-06, batch 6.
 - The proxy route's pre-hijack 403 now carries the refusal's own contract code (`error: err.error`, e.g.
   `mcp_stdio_digest_mismatch`); a destination refusal is still `egress_blocked`.
+- stdio argv is stored in the audit log and shown to admins, so it must carry no secret; nothing enforces that
+  (documented in INSTALL.md). Credential binding for stdio children is PF-06, batch 6. (B3S-06)
+- Only the stdio entry file is digest-pinned: the interpreter named on a script's `#!` line and the modules it
+  loads are not. Pinning them needs process isolation (spawn from a verified, immutable copy): PF-06, batch 6.
+  (B3S-06)

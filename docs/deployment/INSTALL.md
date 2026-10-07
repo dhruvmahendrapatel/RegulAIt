@@ -315,6 +315,18 @@ stale-credential alerts on. Each is relaxable by an admin, and every change is a
 Metric labels carry no user, project, email, tool name, URL or URI. A stdio child gets only a minimal safe
 environment (never `DATABASE_URL` or `REGULAIT_DATA_KEY`), and its command's sha256 is pinned at registration.
 
+Before you register a stdio server:
+
+- **Put no secret in its arguments.** The argument list is stored in the audit log and shown to admins on the
+  server's page. Give the program its credentials some other way, such as a file only the gateway's user can read.
+- **Only the command file itself is pinned.** If it is a script, the interpreter it names on its `#!` line and
+  any modules that interpreter loads are not checked. Keep those where only an administrator can write them.
+  Pinning them, and running the child in isolation, is planned (PF-06).
+- **Keep the command and its directories writable by their owner only.** The gateway refuses a command file that
+  is world- or group-writable (`world_writable`, `group_writable`). It also refuses one in a directory that is
+  group- or world-writable, checking every directory from the file's up to the allowed directory
+  (`writable_parent`).
+
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always
 on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set — such checks stay pending until CI

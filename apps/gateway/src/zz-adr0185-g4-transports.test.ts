@@ -401,7 +401,7 @@ describe("G4 stdio: the double opt-in", () => {
 });
 
 describe("G4 stdio: the command rules (400 mcp_stdio_command_refused)", () => {
-  it("refuses a relative path, a symlink escape, a directory, a non-executable and a world-writable file", async () => {
+  it("refuses a relative path, a symlink escape, a directory, a non-executable, a world- or group-writable file, and a writable parent directory", async () => {
     await setTransports(["streamable_http", "stdio"]);
     const outside = writeExecutable(outsideDir, `evil-${RUN}`);
     const link = path.join(allowedDir, `escape-${RUN}`);
@@ -411,6 +411,22 @@ describe("G4 stdio: the command rules (400 mcp_stdio_command_refused)", () => {
     chmodSync(ww, 0o777);
     const sub = path.join(allowedDir, `dir-${RUN}`);
     mkdirSync(sub);
+    // B3S-06: a group-writable file, and good files in group-/world-writable directories
+    const gw = writeExecutable(allowedDir, `gw-${RUN}`);
+    chmodSync(gw, 0o775);
+    const gwDir = path.join(allowedDir, `gwdir-${RUN}`);
+    mkdirSync(gwDir);
+    chmodSync(gwDir, 0o775);
+    const inGwDir = writeExecutable(gwDir, `ok-${RUN}`);
+    const wwDir = path.join(allowedDir, `wwdir-${RUN}`);
+    mkdirSync(wwDir);
+    chmodSync(wwDir, 0o777);
+    const inWwDir = writeExecutable(wwDir, `ok-${RUN}`);
+    // a strict directory nested in a writable one is still under it
+    const nested = path.join(wwDir, `strict-${RUN}`);
+    mkdirSync(nested);
+    chmodSync(nested, 0o755);
+    const inNested = writeExecutable(nested, `ok-${RUN}`);
     const cases: Array<[string, string]> = [
       [`bin/${RUN}`, "not_absolute"],
       [outside, "outside_allowed_dirs"],
@@ -420,6 +436,10 @@ describe("G4 stdio: the command rules (400 mcp_stdio_command_refused)", () => {
       [path.join(allowedDir, `absent-${RUN}`), "not_executable"],
       [noexec, "not_executable"],
       [ww, "world_writable"],
+      [gw, "group_writable"],
+      [inGwDir, "writable_parent"],
+      [inWwDir, "writable_parent"],
+      [inNested, "writable_parent"],
     ];
     for (const [command, code] of cases) {
       const r = await registerStdio(`g4-cmd-${code}-${Math.random().toString(36).slice(2, 7)}`, command, []);
