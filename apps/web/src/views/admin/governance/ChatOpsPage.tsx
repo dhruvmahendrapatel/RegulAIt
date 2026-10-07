@@ -527,22 +527,30 @@ export function canonicalOutlookRecipients(text: string): string[] {
 }
 
 /**
- * What a save of the Outlook allow-list would do. `loaded` is the list the
- * form opened with (an unchanged form sends nothing: no identical audit row,
- * and a stale form cannot drop recipients another admin added); `current` is
- * the list re-read just before saving, which decides whether the save adds a
- * recipient and so needs confirmation (null = unreadable: confirm).
+ * What a save of the Outlook allow-list would do. The list is whole, so the
+ * form never sends it as loaded: this admin's delta (added and removed
+ * mailboxes, canonical, against `loaded`, the list the form opened with) is
+ * applied to `current`, the list re-read just before saving, so a recipient
+ * another admin added or removed meanwhile survives. Unchanged (no delta, or
+ * the merge equals what is stored) sends nothing; an unreadable `current`
+ * refuses rather than overwrite with a stale list. `adds` is decided on the
+ * merged list against `current`.
  */
 export function outlookRecipientChange(loaded: readonly string[], text: string, current: readonly string[] | null):
   | { kind: "error"; error: string }
   | { kind: "unchanged" }
   | { kind: "save"; recipients: string[]; adds: boolean } {
-  const recipients = canonicalOutlookRecipients(text);
-  if (recipients.length > OUTLOOK_RECIPIENT_ALLOW_LIST_MAX) return { kind: "error", error: `Allow at most ${OUTLOOK_RECIPIENT_ALLOW_LIST_MAX} additional recipient mailboxes.` };
+  const local = canonicalOutlookRecipients(text);
   const before = canonicalOutlookRecipients(loaded.join("\n"));
-  if (recipients.length === before.length && recipients.every((mailbox) => before.includes(mailbox))) return { kind: "unchanged" };
-  const stored = current === null ? null : canonicalOutlookRecipients(current.join("\n"));
-  return { kind: "save", recipients, adds: recipients.some((mailbox) => !(stored?.includes(mailbox) ?? false)) };
+  const added = local.filter((mailbox) => !before.includes(mailbox));
+  const removed = before.filter((mailbox) => !local.includes(mailbox));
+  if (added.length === 0 && removed.length === 0) return { kind: "unchanged" };
+  if (current === null) return { kind: "error", error: "Could not load the current recipients, so nothing was saved. Retry." };
+  const now = canonicalOutlookRecipients(current.join("\n"));
+  const recipients = [...new Set([...now.filter((mailbox) => !removed.includes(mailbox)), ...added])];
+  if (recipients.length === now.length && recipients.every((mailbox) => now.includes(mailbox))) return { kind: "unchanged" };
+  if (recipients.length > OUTLOOK_RECIPIENT_ALLOW_LIST_MAX) return { kind: "error", error: `Allow at most ${OUTLOOK_RECIPIENT_ALLOW_LIST_MAX} additional recipient mailboxes (including any added meanwhile).` };
+  return { kind: "save", recipients, adds: recipients.some((mailbox) => !now.includes(mailbox)) };
 }
 
 function OutlookRecipients({ connection, onSaved }: { connection: Connection; onSaved: () => void }) {
@@ -562,13 +570,14 @@ function OutlookRecipients({ connection, onSaved }: { connection: Connection; on
       const edited = outlookRecipientChange(loaded, text, loaded);
       if (edited.kind === "error") { act.setError(edited.error); return; }
       if (edited.kind === "unchanged") { act.setError("No recipient changed; nothing was saved."); return; }
-      // classify against the list stored now, not the one this form loaded
+      // merge into, and classify against, the list stored now
       const current = await api.get<ConnectionsResponse>("/v1/chatops/connections").then(
         (response) => response.connections.find((row) => row.id === connection.id)?.outlookRecipientAllowList ?? null,
         () => null,
       );
       const change = outlookRecipientChange(loaded, text, current);
-      if (change.kind !== "save") return;
+      if (change.kind === "error") { act.setError(change.error); return; }
+      if (change.kind === "unchanged") { act.setError("The stored recipients already match your change; nothing was saved."); return; }
       if (change.adds) { confirming = true; setPending(change.recipients); return; }
       await save(change.recipients);
     } finally {

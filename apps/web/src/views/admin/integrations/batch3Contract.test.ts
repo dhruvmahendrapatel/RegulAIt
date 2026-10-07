@@ -33,12 +33,12 @@ describe("Batch 3 browser contract", () => {
   it("sends only the MCP coverage list that was changed (PUT /v1/org/settings is partial)", () => {
     const loaded = { mcpProtocolMethods: ["resources/list"], mcpUpstreamTransports: ["streamable_http"] };
     expect(coverageChanges(loaded, ["resources/list", "prompts/list"], ["streamable_http"], loaded))
-      .toEqual({ body: { mcpProtocolMethods: ["resources/list", "prompts/list"] }, adds: true });
+      .toEqual({ kind: "save", body: { mcpProtocolMethods: ["resources/list", "prompts/list"] }, adds: true });
     expect(coverageChanges(loaded, ["resources/list"], [], loaded))
-      .toEqual({ body: { mcpUpstreamTransports: [] }, adds: false });
-    // order is not a change: the stored lists are sets
+      .toEqual({ kind: "save", body: { mcpUpstreamTransports: [] }, adds: false });
+    // order is not a change: the stored lists are sets (and nothing needs a re-read)
     expect(coverageChanges({ mcpProtocolMethods: ["a", "b"], mcpUpstreamTransports: [] }, ["b", "a"], [], null))
-      .toEqual({ body: {}, adds: false });
+      .toEqual({ kind: "unchanged" });
   });
   it("a stdio update that changed nothing is not reported as an admission reset (PR #181 review)", () => {
     const before = { id: "s", name: "s", url: "stdio:s", transport: "stdio", stdio: { command: "/opt/mcp/a", args: ["--x"] }, stdioCommandDigest: "d1", admissionState: "admitted" } as McpServer;
@@ -56,11 +56,24 @@ describe("Batch 3 browser contract", () => {
   it("classifies MCP coverage additions against the lists stored now (PR #181 review)", () => {
     const stale = { mcpProtocolMethods: ["resources/list", "prompts/list"], mcpUpstreamTransports: ["streamable_http"] };
     const now = { mcpProtocolMethods: ["resources/list"], mcpUpstreamTransports: ["streamable_http"] };
-    // another admin removed prompts/list; re-sending it re-enables it → confirm
-    expect(coverageChanges(stale, ["resources/list", "prompts/list", "completion/complete"], ["streamable_http"], now).adds).toBe(true);
+    // another admin removed prompts/list; this admin's own addition is what is confirmed
+    expect(coverageChanges(stale, ["resources/list", "prompts/list", "completion/complete"], ["streamable_http"], now))
+      .toEqual({ kind: "save", body: { mcpProtocolMethods: ["resources/list", "completion/complete"] }, adds: true });
+    // this admin removed resources/list: the concurrent removal of prompts/list stays
     expect(coverageChanges(stale, ["prompts/list"], ["streamable_http"], now))
-      .toEqual({ body: { mcpProtocolMethods: ["prompts/list"] }, adds: true });
-    // an unreadable current state asks for confirmation
-    expect(coverageChanges(stale, ["resources/list"], ["streamable_http"], null).adds).toBe(true);
+      .toEqual({ kind: "save", body: { mcpProtocolMethods: [] }, adds: false });
+    // a change that the stored lists already reflect sends nothing
+    expect(coverageChanges(stale, ["resources/list"], ["streamable_http"], now)).toEqual({ kind: "unchanged" });
+  });
+  it("merges this admin's coverage delta into the re-read lists, keeping a concurrent change (PR #181 review round 4)", () => {
+    const loaded = { mcpProtocolMethods: ["resources/list"], mcpUpstreamTransports: ["streamable_http"] };
+    const now = { mcpProtocolMethods: ["resources/list", "completion/complete"], mcpUpstreamTransports: ["streamable_http"] };
+    // loaded [a], this admin +b, another admin +c meanwhile → a, b, c
+    const change = coverageChanges(loaded, ["resources/list", "prompts/list"], ["streamable_http"], now);
+    expect(change).toMatchObject({ kind: "save", adds: true });
+    expect([...((change as { body: { mcpProtocolMethods: string[] } }).body.mcpProtocolMethods)].sort())
+      .toEqual(["completion/complete", "prompts/list", "resources/list"]);
+    // a failed re-read never sends the stale full list
+    expect(coverageChanges(loaded, ["resources/list", "prompts/list"], ["streamable_http"], null)).toMatchObject({ kind: "error" });
   });
 });

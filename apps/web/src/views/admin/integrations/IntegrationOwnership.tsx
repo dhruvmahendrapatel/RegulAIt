@@ -64,7 +64,7 @@ function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIn
     </Select></Field>
     <p>Only active people can be assigned. Assigning or clearing an owner is audited and grants no permission to call this integration.</p>
     {users.data && !users.data.complete && <UserListTruncated count={users.data.users.length} />}
-    {users.error && <p role="alert">Could not load people. <Button type="button" onClick={() => void users.refetch()}>Retry loading people</Button></p>}
+    {users.error && <PeopleLoadError onRetry={() => void users.refetch()} />}
     <Button type="submit" disabled={act.busy || users.isLoading || !!users.error || !canSaveOwner(owner, row, status)}>Save owner</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form>;
@@ -73,4 +73,9 @@ function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIn
 /** Shown when GET /v1/users returned its maximum page: the list is partial. */
 export function UserListTruncated({ count }: { count: number }) {
   return <p role="status">Only the first {count.toLocaleString()} people are loaded here, so some people cannot be picked. Someone missing from this list is not loaded, not inactive.</p>;
+}
+
+/** The people list failed to load: say so and offer the retry, never a silently disabled form. */
+export function PeopleLoadError({ onRetry }: { onRetry: () => void }) {
+  return <p role="alert">Could not load people. <Button type="button" onClick={onRetry}>Retry loading people</Button></p>;
 }

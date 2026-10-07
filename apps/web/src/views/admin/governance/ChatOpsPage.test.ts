@@ -155,15 +155,28 @@ describe("ChatOpsPage — an Outlook save sends only a real change, classified a
     expect(outlookRecipientChange(loaded, "security@example.test\ncab@example.test", loaded)).toEqual({ kind: "unchanged" });
   });
 
-  it("a recipient another admin removed since load counts as an addition", () => {
+  it("a concurrent removal stays removed; only this admin's own additions count", () => {
     const loaded = ["cab@example.test", "security@example.test"];
     const now = ["security@example.test"];
-    expect(outlookRecipientChange(loaded, "cab@example.test", now)).toEqual({ kind: "save", recipients: ["cab@example.test"], adds: true });
-    // a removal against what is stored now is a tightening
-    expect(outlookRecipientChange(loaded, "security@example.test", now)).toEqual({ kind: "save", recipients: ["security@example.test"], adds: false });
+    expect(outlookRecipientChange(loaded, "cab@example.test\nsecurity@example.test\nnew@example.test", now))
+      .toEqual({ kind: "save", recipients: ["security@example.test", "new@example.test"], adds: true });
+    // this admin also removed cab: the stored list already says so
+    expect(outlookRecipientChange(loaded, "security@example.test", now)).toEqual({ kind: "unchanged" });
+    // a removal this admin made is a tightening against what is stored now
+    expect(outlookRecipientChange(loaded, "cab@example.test", ["cab@example.test", "security@example.test"]))
+      .toEqual({ kind: "save", recipients: ["cab@example.test"], adds: false });
+  });
+});
+
+describe("ChatOpsPage — an Outlook save merges this admin's delta into the re-read list (PR #181 review round 4)", () => {
+  it("keeps a recipient another admin added meanwhile", () => {
+    // loaded [a], this admin +b, another admin +c meanwhile → a, b, c
+    const change = outlookRecipientChange(["a@x.test"], "a@x.test\nb@x.test", ["a@x.test", "c@x.test"]);
+    expect(change).toMatchObject({ kind: "save", adds: true });
+    expect([...(change as { recipients: string[] }).recipients].sort()).toEqual(["a@x.test", "b@x.test", "c@x.test"]);
   });
 
-  it("asks for confirmation when the stored list could not be re-read", () => {
-    expect(outlookRecipientChange(["a@x.test", "b@x.test"], "a@x.test", null)).toEqual({ kind: "save", recipients: ["a@x.test"], adds: true });
+  it("refuses rather than send a stale full list when the re-read failed", () => {
+    expect(outlookRecipientChange(["a@x.test"], "a@x.test\nb@x.test", null)).toMatchObject({ kind: "error" });
   });
 });

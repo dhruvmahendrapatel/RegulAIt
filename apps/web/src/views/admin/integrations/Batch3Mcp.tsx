@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
 import { optionEls, QueryGate, readCurrentOrgSettings, serverOpts, useAction, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
-import { UserListTruncated } from "./IntegrationOwnership";
+import { PeopleLoadError, UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
 
 // Browser-only mirrors of shared/batch3.ts; batch3 contract tests pin these.
@@ -29,25 +29,38 @@ export function McpCoverage({ servers }: { servers: McpServer[] }) {
 }
 
 type CoverageBody = Partial<{ mcpProtocolMethods: string[]; mcpUpstreamTransports: string[] }>;
+const COVERAGE_KEYS = ["mcpProtocolMethods", "mcpUpstreamTransports"] as const;
+export type CoverageChange =
+  | { kind: "unchanged" }
+  | { kind: "error"; error: string }
+  | { kind: "save"; body: CoverageBody; adds: boolean };
 /**
- * PUT /v1/org/settings is a partial update: send only the lists this admin
- * changed, so saving one cannot revert another admin's concurrent change to
- * the other. `adds` is true when a sent list enables something that is not
- * enabled in `current` — the settings re-read just before saving — or when
- * that read failed (null).
+ * PUT /v1/org/settings is a partial update and these are whole lists, so a
+ * save never sends the form's list as loaded. This admin's delta (added and
+ * removed, against `loaded`, the snapshot the form opened with) is applied to
+ * `current`, the lists re-read just before saving, and only a list whose
+ * merged value differs from what is stored is sent: another admin's
+ * concurrent change survives. `adds` is decided on that merged list against
+ * `current`. Without a readable `current` nothing is sent (no stale overwrite).
  */
-export function coverageChanges(settings: Record<string, unknown>, methods: string[], transports: string[], current: Record<string, unknown> | null): { body: CoverageBody; adds: boolean } {
-  const before = (key: string) => (Array.isArray(settings[key]) ? settings[key] : []) as string[];
-  const changed = (key: string, next: string[]) => next.length !== before(key).length || next.some((value) => !before(key).includes(value));
-  const body: CoverageBody = {
-    ...(changed("mcpProtocolMethods", methods) ? { mcpProtocolMethods: methods } : {}),
-    ...(changed("mcpUpstreamTransports", transports) ? { mcpUpstreamTransports: transports } : {}),
-  };
-  // what is enabled NOW (null = unknown: anything sent may enable something)
-  const stored = (key: string) => (current && Array.isArray(current[key]) ? (current[key] as string[]) : null);
-  const enables = (key: string, next: string[] | undefined) => (next ?? []).some((value) => !(stored(key)?.includes(value) ?? false));
-  const adds = enables("mcpProtocolMethods", body.mcpProtocolMethods) || enables("mcpUpstreamTransports", body.mcpUpstreamTransports);
-  return { body, adds };
+export function coverageChanges(loaded: Record<string, unknown>, methods: string[], transports: string[], current: Record<string, unknown> | null): CoverageChange {
+  const list = (source: Record<string, unknown> | null, key: string) => (source && Array.isArray(source[key]) ? (source[key] as string[]) : null);
+  const local = { mcpProtocolMethods: methods, mcpUpstreamTransports: transports };
+  const body: CoverageBody = {};
+  let adds = false;
+  for (const key of COVERAGE_KEYS) {
+    const before = list(loaded, key) ?? [];
+    const added = local[key].filter((value) => !before.includes(value));
+    const removed = before.filter((value) => !local[key].includes(value));
+    if (added.length === 0 && removed.length === 0) continue;
+    const now = list(current, key);
+    if (now === null) return { kind: "error", error: "Could not load the current MCP coverage, so nothing was saved. Retry." };
+    const merged = [...new Set([...now.filter((value) => !removed.includes(value)), ...added])];
+    if (merged.length === now.length && merged.every((value) => now.includes(value))) continue;
+    body[key] = merged;
+    if (merged.some((value) => !now.includes(value))) adds = true;
+  }
+  return Object.keys(body).length === 0 ? { kind: "unchanged" } : { kind: "save", body, adds };
 }
 
 function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
@@ -64,9 +77,11 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
     if (!flight.enter()) return;
     let confirming = false;
     try {
-      if (Object.keys(coverageChanges(settings, methods, transports, settings).body).length === 0) { act.setError("No MCP coverage setting changed."); return; }
-      // classify against the lists stored now, not the loaded snapshot
+      if (coverageChanges(settings, methods, transports, settings).kind === "unchanged") { act.setError("No MCP coverage setting changed."); return; }
+      // merge into, and classify against, the lists stored now
       const change = coverageChanges(settings, methods, transports, await readCurrentOrgSettings());
+      if (change.kind === "error") { act.setError(change.error); return; }
+      if (change.kind === "unchanged") { act.setError("The stored MCP coverage already matches your change; nothing was saved."); return; }
       if (change.adds) { confirming = true; setPending(change.body); return; }
       await save(change.body);
     } finally {
@@ -101,6 +116,7 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
   }}>
     <Field label="Protocol user"><Select required value={userId} onChange={(event) => setUserId(event.target.value)}>{optionEls(userOpts(users.data?.users.filter((user) => !user.disabledAt)), "— select —")}</Select></Field>
     {users.data && !users.data.complete && <UserListTruncated count={users.data.users.length} />}
+    {users.error && <PeopleLoadError onRetry={() => void users.refetch()} />}
     <Field label="Protocol server"><Select required value={serverId} onChange={(event) => setServerId(event.target.value)}>{optionEls(serverOpts(servers), "— select —")}</Select></Field>
     <Field label="Protocol grant"><Select value={grant} onChange={(event) => setGrant(event.target.value)}>{MCP_PROTOCOL_GRANT_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}</Select></Field>
     <p>Granting protocol access relaxes this person's default deny and is audited. The corresponding method must also be enabled above. Read-only server access does not include these grants; logging is a write operation.</p>

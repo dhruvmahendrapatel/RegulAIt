@@ -36,4 +36,10 @@ describe("retentionChanges", () => {
   it("asks for confirmation when the current values could not be read", () => {
     expect(retentionChanges(loaded, "1800", "30", null)).toEqual({ body: { semanticCacheTtlSeconds: 1800 }, extends: true });
   });
+
+  it("compares the parsed number, not the text: \"030\" is the stored 30 (PR #181 review round 4)", () => {
+    expect(retentionChanges(loaded, "3600", "030", loaded)).toEqual({ body: {}, extends: false });
+    expect(retentionChanges(loaded, "03600", "30", loaded)).toEqual({ body: {}, extends: false });
+    expect(retentionChanges(loaded, "3600", "031", loaded)).toEqual({ body: { conversationRetentionDays: 31 }, extends: true });
+  });
 });

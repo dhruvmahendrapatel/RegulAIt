@@ -61,8 +61,11 @@ type RetentionBody = Partial<{ semanticCacheTtlSeconds: number; conversationRete
  * when that read failed, which always asks for confirmation).
  */
 export function retentionChanges(settings: Record<string, unknown>, ttl: string, days: string, current: Record<string, unknown> | null): { error: string } | { body: RetentionBody; extends: boolean } {
-  const ttlEdited = ttl !== String(settings.semanticCacheTtlSeconds ?? "");
-  const daysEdited = days !== String(settings.conversationRetentionDays ?? "");
+  // an edit is a different NUMBER ("030" is the stored 30); text that is not
+  // a whole number counts as edited so the validation below reports it
+  const edited = (text: string, stored: unknown) => !/^\d+$/.test(text) || Number(text) !== stored;
+  const ttlEdited = edited(ttl, settings.semanticCacheTtlSeconds);
+  const daysEdited = edited(days, settings.conversationRetentionDays);
   if ((ttlEdited && (!/^\d+$/.test(ttl) || Number(ttl) < 1 || Number(ttl) > 2592000)) || (daysEdited && (!/^\d+$/.test(days) || Number(days) < 1 || Number(days) > 2555))) {
     return { error: "Enter whole numbers: cache lifetime 1–2,592,000 seconds; conversation retention 1–2,555 days." };
   }

@@ -122,3 +122,23 @@ test("retention: a cancelled or confirmed relaxation releases the form; a failed
   await expect.poll(() => writes).toEqual(["PUT /v1/org/settings"]);
   await expect(save).toBeEnabled();
 });
+
+test("protocol grants: a failed people list explains itself and offers Retry (PR #181 review round 4)", async ({ page }) => {
+  let failUsers = true;
+  await page.route("**/*", async (route) => {
+    const p = new URL(route.request().url()).pathname;
+    if (route.request().resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
+    if (p === "/auth/me" || p === "/v1/me") return json(route, ME);
+    if (p === "/v1/users") return failUsers ? json(route, { error: "internal" }, 500) : json(route, { users: [] });
+    if (p === "/v1/org/settings") return json(route, { settings: { mcpProtocolMethods: [], mcpUpstreamTransports: ["streamable_http"] } });
+    return json(route, p === "/v1/servers" ? { servers: [] } : {});
+  });
+  await page.goto("/ui/admin/mcp-servers");
+  const card = page.locator("form").filter({ has: page.getByRole("button", { name: "Add protocol grant" }) });
+  await expect(card.getByRole("alert").filter({ hasText: "Could not load people" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Add protocol grant" })).toBeDisabled();
+  failUsers = false;
+  await card.getByRole("button", { name: "Retry loading people" }).click();
+  await expect(card.getByRole("alert").filter({ hasText: "Could not load people" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Add protocol grant" })).toBeEnabled();
+});
