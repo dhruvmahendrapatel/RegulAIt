@@ -59,11 +59,11 @@ import { approvalTargetForServer, governedEvaluate, type RetiredApproval } from 
 import { prepareMcpPiiAction, redactMcpResult } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
-  auditMcpEgressDenied,
   auditMcpUpstreamUnreachable,
-  checkMcpServerUrl,
+  checkUpstreamDestination,
   guardedMcpConnect,
   McpEgressBlockedError,
+  type McpUpstreamRow,
 } from "./mcp-egress.js";
 import { timeouts } from "./timeouts.js";
 import {
@@ -176,21 +176,12 @@ function toolKind(tool: Tool): "read" | "write" {
  */
 export async function preflightUpstream(
   db: Db,
-  serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+  serverRow: McpUpstreamRow,
 ): Promise<void> {
   await assertAdmitted(db, serverRow.id);
-  const { decision, posture } = await checkMcpServerUrl(db, serverRow.url, serverRow.allowPrivateRanges);
-  if (!decision.ok) {
-    await auditMcpEgressDenied(db, {
-      serverId: serverRow.id,
-      url: serverRow.url,
-      phase: "connect",
-      decision,
-      reason: `MCP upstream connect refused: ${decision.reason}`,
-      openByDefault: posture.openByDefault,
-    });
-    throw new McpEgressBlockedError(decision);
-  }
+  // ADR-0185 G4: the destination decision (today the URL egress check, audited
+  // and thrown exactly as before) — the G4 slice branches it on transport
+  await checkUpstreamDestination(db, serverRow);
 }
 
 export async function connectUpstream(

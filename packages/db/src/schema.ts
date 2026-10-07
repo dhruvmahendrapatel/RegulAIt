@@ -41,9 +41,12 @@ import {
   INCIDENT_STATUSES,
   KRI_ON_BREACH,
   USE_CASE_DECISIONS,
+  MCP_UPSTREAM_TRANSPORTS,
   type AiPolicyAudience,
   type AlertSlaHours,
   type IncidentClockRegime,
+  type McpProtocolMethod,
+  type McpUpstreamTransport,
   type SeriousIncidentCriterion,
 } from "@regulait/shared";
 import {
@@ -754,8 +757,33 @@ export const mcpServers = pgTable("mcp_servers", {
    * changed manifest. Our own clock, never a publisher's date. */
   releaseDigest: text("release_digest"),
   releaseSeenAt: timestamp("release_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** ADR-0185 G4 (migration 0169) — how the gateway reaches this upstream.
+   * `streamable_http` (the default, so every pre-0169 row keeps what it used)
+   * and `sse` connect to `url` through the egress guard; `stdio` starts
+   * `stdioCommand` with the fixed argv `stdioArgs` (never a shell line) and the
+   * row's `url` is the `stdio:<name>` sentinel, which fails the egress check on
+   * any path that forgets to branch on transport. The shape is a DB CHECK
+   * (`mcp_servers_transport_shape`). */
+  transport: text("transport", { enum: MCP_UPSTREAM_TRANSPORTS }).notNull().default("streamable_http"),
+  /** stdio only: the absolute command path */
+  stdioCommand: text("stdio_command"),
+  /** stdio only: the argv, a JSON array of strings */
+  stdioArgs: jsonb("stdio_args").$type<string[]>(),
+  /** stdio only: sha256 of the command file, pinned at registration
+   * (`mcp-stdio-digest-mismatch` at connect) */
+  stdioCommandDigest: text("stdio_command_digest"),
+  /** ADR-0185 I9 — the accountable owner; default the registering admin.
+   * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
+   * deleted with its owner. */
+  ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
+  check(
+    "mcp_servers_transport_shape",
+    sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,
+  ),
+]);
 
 /**
  * ADR-0101 — an upstream MCP registry an operator configured. A fresh install
@@ -2161,6 +2189,9 @@ export const connectors = pgTable("connectors", {
   // pillar 5: flat list price per allowed call. Null = unpriced → cost null,
   // never invented (mirrors agents' costPerMTok null-safety).
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  /** ADR-0185 I9 (migration 0169) — the accountable owner; default the
+   * registering admin. ON DELETE SET NULL, like mcp_servers.owner_user_id. */
+  ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2532,7 +2563,11 @@ export const semanticCache = pgTable(
     outputTokens: integer("output_tokens").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("semantic_cache_user_agent_hash_uq").on(t.userId, t.agentId, t.promptHash)],
+  (t) => [
+    uniqueIndex("semantic_cache_user_agent_hash_uq").on(t.userId, t.agentId, t.promptHash),
+    // ADR-0185 I3 (migration 0169): the purge sweep walks oldest first
+    index("semantic_cache_created_at_idx").on(t.createdAt),
+  ],
 );
 
 // ORCHESTRATION (EPIC-05, pillar 7): one row per run. The task graph and run
@@ -2911,7 +2946,11 @@ export const conversations = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("conversations_user_updated_idx").on(t.userId, t.updatedAt)],
+  (t) => [
+    index("conversations_user_updated_idx").on(t.userId, t.updatedAt),
+    // ADR-0185 I3 (migration 0169): the retention sweep walks oldest first
+    index("conversations_updated_at_idx").on(t.updatedAt),
+  ],
 );
 
 // One row per persisted turn. Assistant turns carry the dispatch facts in
@@ -3588,7 +3627,22 @@ export const orgSettings = pgTable(
     semanticCachePolicy: text("semantic_cache_policy", { enum: SEMANTIC_CACHE_POLICIES })
       .notNull()
       .default("off"), // ADR-0181: off by default (was opt_in)
+    /** ADR-0185 I3: 1 s – 30 days (CHECK, migration 0169); since 0169 a purge
+     * sweep DELETES expired rows (before, the TTL only filtered reads) */
     semanticCacheTtlSeconds: integer("semantic_cache_ttl_seconds").notNull().default(3600),
+    /** ADR-0185 I3 (migration 0169): a conversation is deleted this many days
+     * after its last message unless an incident that is not closed holds it.
+     * Strict 30 (owner decision); longer, up to 2555, is an audited relaxation. */
+    conversationRetentionDays: integer("conversation_retention_days").notNull().default(30),
+    /** ADR-0185 G4 (migration 0169): the upstream transports an admin allows;
+     * strict ["streamable_http"]. stdio also needs REGULAIT_MCP_STDIO_ALLOWED_DIRS. */
+    mcpUpstreamTransports: jsonb("mcp_upstream_transports")
+      .$type<McpUpstreamTransport[]>()
+      .notNull()
+      .default(["streamable_http"]),
+    /** ADR-0185 G3 (migration 0169): the non-tool MCP methods the proxy relays
+     * (each still behind a per-user decision); strict [] = all refused. */
+    mcpProtocolMethods: jsonb("mcp_protocol_methods").$type<McpProtocolMethod[]>().notNull().default([]),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
@@ -4155,6 +4209,23 @@ export const orgSettings = pgTable(
       sql`jsonb_typeof(${t.alertSlaHours}) = 'object' AND jsonb_typeof(${t.alertSlaHours} -> 'high') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'medium') = 'number' AND jsonb_typeof(${t.alertSlaHours} -> 'low') = 'number' AND (${t.alertSlaHours} ->> 'high')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'medium')::numeric BETWEEN 1 AND 720 AND (${t.alertSlaHours} ->> 'low')::numeric BETWEEN 1 AND 720`,
     ),
     check("org_settings_alert_ticket_mode_check", sql`${t.alertTicketMode} IN ('manual', 'auto_high')`),
+    // ADR-0185 (migration 0169)
+    check(
+      "org_settings_conversation_retention_days_check",
+      sql`${t.conversationRetentionDays} BETWEEN 1 AND 2555`,
+    ),
+    check(
+      "org_settings_semantic_cache_ttl_seconds_check",
+      sql`${t.semanticCacheTtlSeconds} BETWEEN 1 AND 2592000`,
+    ),
+    check(
+      "org_settings_mcp_upstream_transports_check",
+      sql`jsonb_typeof(${t.mcpUpstreamTransports}) = 'array' AND ${t.mcpUpstreamTransports} <@ '["streamable_http", "sse", "stdio"]'::jsonb`,
+    ),
+    check(
+      "org_settings_mcp_protocol_methods_check",
+      sql`jsonb_typeof(${t.mcpProtocolMethods}) = 'array' AND ${t.mcpProtocolMethods} <@ '["resources/list", "resources/templates/list", "resources/read", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel"]'::jsonb`,
+    ),
   ],
 );
 
@@ -6383,9 +6454,22 @@ export const chatopsConnections = pgTable("chatops_connections", {
    * workspace (team id) whose signed events and interactions are accepted.
    * Slack only (DB check). */
   slackTeamId: text("slack_team_id"),
+  /** ADR-0185 (migration 0169) — the further recipients an outlook workspace
+   * may mail besides its registered mailbox (`defaultChannel`): exact
+   * lower-cased mailboxes, at most 50, empty (the strict default) for every
+   * other provider. */
+  outlookRecipientAllowList: jsonb("outlook_recipient_allow_list").$type<string[]>().notNull().default([]),
   createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
+  check(
+    "chatops_connections_outlook_allow_list_check",
+    sql`jsonb_typeof(${t.outlookRecipientAllowList}) = 'array' AND jsonb_array_length(${t.outlookRecipientAllowList}) <= 50 AND NOT jsonb_path_exists(${t.outlookRecipientAllowList}, '$[*] ? (@.type() != "string")') AND ${t.outlookRecipientAllowList}::text = lower(${t.outlookRecipientAllowList}::text)`,
+  ),
+  check(
+    "chatops_connections_outlook_allow_list_provider_check",
+    sql`${t.outlookRecipientAllowList} = '[]'::jsonb OR ${t.provider} = 'outlook'`,
+  ),
   check(
     "chatops_connections_bot_teams_check",
     sql`(${t.botAppId} IS NULL AND ${t.botTenantId} IS NULL AND ${t.botOpenidMetadataUrl} IS NULL) OR ${t.provider} = 'teams'`,
@@ -10852,7 +10936,7 @@ export const aiIncidentLinks = pgTable(
     primaryKey({ name: "ai_incident_links_pk", columns: [t.incidentId, t.objectType, t.objectId] }),
     check(
       "ai_incident_links_object_type_check",
-      sql`${t.objectType} IN ('agent', 'model', 'vendor', 'risk', 'condition', 'eval_run', 'redteam_run', 'governance_alert', 'feedback', 'pm_link')`,
+      sql`${t.objectType} IN ('agent', 'model', 'vendor', 'risk', 'condition', 'eval_run', 'redteam_run', 'governance_alert', 'feedback', 'pm_link', 'conversation')`,
     ),
     check("ai_incident_links_object_id_check", sql`length(btrim(${t.objectId})) BETWEEN 1 AND 200`),
     index("ai_incident_links_object_idx").on(t.objectType, t.objectId),

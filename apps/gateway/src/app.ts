@@ -412,6 +412,8 @@ import {
   registerOrgSettingsRoutes,
   startAuditPruneScheduler,
 } from "./org-settings.js";
+// ADR-0185 G5 — request metrics (a no-op seam until the meter lands)
+import { registerMetricsHooks } from "./metrics.js";
 import {
   breakGlassLockoutRefusal,
   dropBreakGlassUser,
@@ -792,6 +794,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (reply.statusCode >= 500) req.log.error(fields, "request failed");
     else req.log.warn(fields, "request refused");
   });
+  // ADR-0185 G5 — route-template / status-class / duration metrics, and the
+  // guarded `/metrics` route when REGULAIT_METRICS_ON_MAIN_LISTENER is set
+  registerMetricsHooks(app);
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof z.ZodError) {
@@ -1742,7 +1747,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   app.post("/v1/servers", async (req, reply) => {
-    const body = createServerSchema.parse(req.body);
+    const parsed = createServerSchema.parse(req.body);
+    // ADR-0185 G4 SEAM — SSE and stdio upstreams are not connectable in this
+    // build, so registering one is refused (fail closed) whatever the org
+    // allows; the G4 slice replaces this with the transport rules.
+    if (parsed.transport === "stdio" || parsed.transport === "sse") {
+      return reply.status(422).send({
+        error: "mcp_transport_disabled",
+        detail: `this gateway does not connect to MCP upstreams over '${parsed.transport}' yet. Nothing was saved.`,
+      });
+    }
+    // ADR-0185 I9 SEAM — `ownerUserId` is accepted by the schema and applied by
+    // the I9 slice (owner defaults to the registering admin); not written here.
+    const { ownerUserId: _owner, stdio: _stdio, ...body } = parsed;
     // ADR-0052 — THE EXPANSION GATE (inventory: `mcp_server.create`, "a new
     // tool surface is a wider footprint"). Refused once the license has
     // lapsed past its grace window; permitted in every other state including
@@ -1789,6 +1806,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const body = updateServerSchema.parse(req.body);
     const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!before) return reply.status(404).send({ error: "unknown_server" });
+    // ADR-0185 G4 — a server's transport is fixed at registration, and a stdio
+    // block applies to a stdio server only (I9's `ownerUserId` is applied by
+    // that slice, not here)
+    if (
+      (body.transport !== undefined && body.transport !== before.transport) ||
+      (body.stdio !== undefined && before.transport !== "stdio")
+    ) {
+      return reply.status(409).send({
+        error: "mcp_transport_immutable",
+        detail: `this server's transport is '${before.transport}'; register a new server to use another. Nothing was saved.`,
+      });
+    }
     const nextUrl = body.url ?? before.url;
     const nextFlag =
       body.allowPrivateRanges !== undefined ? body.allowPrivateRanges : before.allowPrivateRanges;
@@ -1803,15 +1832,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
       if (refusal) return reply.status(400).send(refusal);
     }
+    const patch = {
+      ...(body.name !== undefined ? { name: body.name } : {}),
+      ...(body.url !== undefined ? { url: body.url } : {}),
+      ...(body.allowPrivateRanges !== undefined
+        ? { allowPrivateRanges: body.allowPrivateRanges }
+        : {}),
+    };
+    // ADR-0185: a body that only restates the transport (or names fields a
+    // later slice applies) changes no column here — answer with the row
+    // rather than issue an empty UPDATE
+    if (Object.keys(patch).length === 0) return reply.send(before);
     const [row] = await db
       .update(mcpServers)
-      .set({
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.url !== undefined ? { url: body.url } : {}),
-        ...(body.allowPrivateRanges !== undefined
-          ? { allowPrivateRanges: body.allowPrivateRanges }
-          : {}),
-      })
+      .set(patch)
       .where(eq(mcpServers.id, serverId))
       .returning();
     return reply.send(row);

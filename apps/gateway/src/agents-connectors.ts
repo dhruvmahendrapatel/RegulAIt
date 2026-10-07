@@ -215,6 +215,8 @@ import {
   traceForRoot,
   type TraceContext,
 } from "./tracing.js";
+// ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
+import { recordDecision } from "./metrics.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -3861,6 +3863,7 @@ export function registerAgentConnectorRoutes(
       ceilingTier,
     });
     const decision = withModelPolicy(kernelDecision, invokeModelPolicy, CHAT_FEATURE, agent);
+    recordDecision({ surface: "agent", effect: decision.effect });
 
     // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
     // The candidate set starts as exactly the agents evaluateAgent would allow

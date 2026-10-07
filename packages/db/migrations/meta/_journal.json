@@ -1135,6 +1135,13 @@
       "when": 1785103000000,
       "tag": "0168_accountability_record_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 169,
+      "version": "7",
+      "when": 1785104000000,
+      "tag": "0169_batch3_memory_mcp_ownership",
+      "breakpoints": true
     }
   ]
 }

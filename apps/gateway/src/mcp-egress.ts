@@ -42,6 +42,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { auditLog, type Db } from "@regulait/db";
+import type { McpUpstreamTransport } from "@regulait/shared";
 import {
   checkEgress,
   createGuardedFetch,
@@ -247,6 +248,45 @@ export async function refuseMcpServerWrite(
     openByDefault: posture.openByDefault,
   });
   return { error: "egress_blocked", code: decision.code, detail };
+}
+
+/**
+ * ADR-0185 G4 — the upstream a connect would reach, as the preflight sees it.
+ * `transport` and the stdio columns are optional so every existing caller's
+ * row shape still fits; absent `transport` means `streamable_http`.
+ */
+export interface McpUpstreamRow {
+  id: string;
+  url: string;
+  allowPrivateRanges: boolean | null;
+  transport?: McpUpstreamTransport;
+  stdioCommand?: string | null;
+  stdioArgs?: string[] | null;
+  stdioCommandDigest?: string | null;
+}
+
+/**
+ * ADR-0185 G4 SEAM — THE DESTINATION HALF OF THE PREFLIGHT (`preflightUpstream`
+ * in mcp-proxy.ts runs admission first, then this). Today it is exactly the
+ * URL egress decision the preflight always made: audited (`phase: connect`)
+ * and thrown as `McpEgressBlockedError` on refusal. The G4 slice branches here
+ * on `transport` (SSE: the same URL check; stdio: the host's command rules).
+ * A stdio row's `stdio:<name>` sentinel URL fails this check, so until then a
+ * stdio row is refused, never connected.
+ */
+export async function checkUpstreamDestination(db: Db, serverRow: McpUpstreamRow): Promise<void> {
+  const { decision, posture } = await checkMcpServerUrl(db, serverRow.url, serverRow.allowPrivateRanges);
+  if (!decision.ok) {
+    await auditMcpEgressDenied(db, {
+      serverId: serverRow.id,
+      url: serverRow.url,
+      phase: "connect",
+      decision,
+      reason: `MCP upstream connect refused: ${decision.reason}`,
+      openByDefault: posture.openByDefault,
+    });
+    throw new McpEgressBlockedError(decision);
+  }
 }
 
 /**
