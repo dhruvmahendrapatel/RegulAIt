@@ -191,11 +191,16 @@ describe("ADR-0186 A: per-scope and halt-lifting relaxations", () => {
   it("PATCH /v1/rules/:kind/:ruleId/deploy-mode: narrowing where a rule applies needs settings_relax; every mode (null) does not", async () => {
     const [srv] = await db.insert(mcpServers).values({ name: `b4a-srv-${RUN}`, url: `https://b4a-${RUN}.example.com/mcp` }).returning({ id: mcpServers.id });
     created.servers.push(srv!.id);
+    // ADR-0186 B: a rule's approver pool never counts the caller, so a rule over the admin's own calls
+    // that names the admin as its approver is unsatisfiable (quorum_unsatisfiable). A second person approves.
+    const approver = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `b4a-scope-approver-${RUN}@example.com`, displayName: "b4a scope approver" } });
+    expect(approver.statusCode, approver.body).toBe(201);
+    created.users.push(approver.json().id as string);
     const rule = await app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/rules/approvals",
-      payload: { scope: "user", serverScope: "server", userId: admin.id, serverId: srv!.id, toolName: `b4a_${RUN}`, approverUserId: admin.id },
+      payload: { scope: "user", serverScope: "server", userId: admin.id, serverId: srv!.id, toolName: `b4a_${RUN}`, approverUserId: approver.json().id },
     });
     expect(rule.statusCode, rule.body).toBe(201);
     created.rules.push(rule.json().id);
