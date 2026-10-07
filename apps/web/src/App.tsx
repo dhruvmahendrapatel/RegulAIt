@@ -105,6 +105,7 @@ import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesP
 import CompliancePacksPage from "./views/admin/compliance/CompliancePacksPage";
 import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
 import OrganizationPage from "./views/admin/settings/OrganizationPage";
+import RetentionPage from "./views/admin/settings/RetentionPage";
 import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
 import FirstRunPage from "./views/admin/settings/FirstRunPage";
 import LicensingPage from "./views/admin/settings/LicensingPage";
@@ -295,6 +296,7 @@ function ApplicationRoutes() {
                 <Route path="compliance-packs" element={<CompliancePacksPage />} />
                 <Route path="infrastructure" element={<InfrastructurePage />} />
                 <Route path="organization" element={<OrganizationPage />} />
+                <Route path="retention" element={<RetentionPage />} />
                 <Route path="licensing" element={<LicensingPage />} />
                 {/* ADR-0063 */}
                 <Route path="data-key" element={<DataKeyPage />} />

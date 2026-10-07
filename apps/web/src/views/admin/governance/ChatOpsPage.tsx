@@ -21,7 +21,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, useAction, useConnectors } from "../adminKit";
 import v from "../../views.module.css";
 
@@ -139,6 +139,7 @@ interface Connection {
   /** ADR-0179 — false for a workspace the courier cannot post a card to (an
    * outlook row registered before registration was refused) */
   outboundSupported?: boolean;
+  outlookRecipientAllowList?: string[];
 }
 interface ConnectionsResponse {
   connections: Connection[];
@@ -299,6 +300,9 @@ export default function ChatOpsPage() {
           )}
         </QueryGate>
       </Card>
+
+      {(connections.data?.connections ?? []).filter((row) => row.provider === "outlook").map((row) =>
+        <OutlookRecipients key={`${row.id}:${JSON.stringify(row.outlookRecipientAllowList)}`} connection={row} onSaved={refresh} />)}
 
       <Card title="Connect a workspace">
         <p className={v.faint}>
@@ -507,4 +511,28 @@ export default function ChatOpsPage() {
       </Card>
     </>
   );
+}
+
+function OutlookRecipients({ connection, onSaved }: { connection: Connection; onSaved: () => void }) {
+  const act = useAction();
+  const [text, setText] = useState((connection.outlookRecipientAllowList ?? []).join("\n"));
+  const [pending, setPending] = useState<string[] | null>(null);
+  const save = async (recipients: string[]) => {
+    if (await act.run(() => api.patch(`/v1/chatops/connections/${connection.id}`, { outlookRecipientAllowList: recipients }), "Outlook recipients saved")) onSaved();
+  };
+  return <Card title={`Outlook recipients: ${connection.name}`}><form className={v.stack} onSubmit={(event) => {
+    event.preventDefault();
+    const recipients = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (recipients.length > 50) { act.setError("Allow at most 50 additional recipient mailboxes."); return; }
+    const old = (connection.outlookRecipientAllowList ?? []).map((mailbox) => mailbox.toLowerCase());
+    if (recipients.some((mailbox) => !old.includes(mailbox.toLowerCase()))) setPending(recipients);
+    else void save(recipients);
+  }}>
+    <Field label={`Additional recipients for ${connection.name}`}><Textarea value={text} onChange={(event) => setText(event.target.value)} disabled={act.busy} rows={4} /></Field>
+    <p>One exact mailbox per line, at most 50. No display names or wildcards. The registered mailbox remains allowed. Adding recipients relaxes who may receive approval summaries and is audited; all changes are audited.</p>
+    <Button type="submit" disabled={act.busy}>Save Outlook recipients</Button>
+    {act.error && <p role="alert">{act.error}</p>}
+    <ConfirmModal open={pending !== null} title="Allow more Outlook recipients?" body={<p>The resulting allow-list will contain {pending?.length ?? 0} exact mailboxes. Additional recipients may receive approval summaries; this relaxation is audited.</p>}
+      confirmLabel="Save audited recipients" onCancel={() => setPending(null)} onConfirm={() => { const recipients = pending; setPending(null); if (recipients) void save(recipients); }} />
+  </form></Card>;
 }
