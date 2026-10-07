@@ -15,8 +15,10 @@ import {
   aiUseCases,
   approvalAssignments,
   apiKeys,
+  approvalDecisions,
   approvalDelegations,
   approvalRules,
+  asc,
   approvals,
   auditLog,
   authSessions,
@@ -91,6 +93,9 @@ import {
   createAgentRevocationSchema,
   createApiKeySchema,
   createApprovalRuleSchema,
+  approvalDecidePasskeyField,
+  approvalRuleQuorumFields,
+  TOOL_CALL_APPROVAL_OBJECT_TYPES,
   createDataScopeRuleSchema,
   createConnectorRevocationSchema,
   createRateLimitSchema,
@@ -429,7 +434,13 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
 import { registerStepUpRoutes } from "./step-up.js";
-import { registerApprovalSigningRoutes } from "./approval-signatures.js";
+import {
+  approvalRuleQuorumRefusal,
+  decisionView,
+  decideToolCallApproval,
+  isToolCallApproval,
+  registerApprovalSigningRoutes,
+} from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
 import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
@@ -2931,9 +2942,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // DB CHECK always passes. B8c: the approvals create itself moved to
   // `createApprovalRuleRow` so the copilot's `rule_to_approval` applier rides
   // the exact create this route performs — never a parallel insert.
+  // ADR-0186 A: `quorum` (1–5) and `approverRoleId` ride beside the rule; a
+  // pool that can never reach the quorum is 422 `quorum_unsatisfiable`.
   app.post("/v1/rules/approvals", async (req, reply) => {
     const body = createApprovalRuleSchema.parse(req.body);
-    const row = await createApprovalRuleRow(db, body);
+    const raw = (req.body ?? {}) as Record<string, unknown>;
+    const dual = z
+      .object(approvalRuleQuorumFields)
+      .parse({ quorum: raw.quorum, approverRoleId: raw.approverRoleId });
+    const refusal = await approvalRuleQuorumRefusal(db, {
+      approverUserId: body.approverUserId,
+      approverRoleId: dual.approverRoleId ?? null,
+      quorum: dual.quorum ?? 1,
+      scope: body.scope ?? "user",
+      userId: body.userId ?? null,
+    });
+    if (refusal) return reply.status(refusal.status).send(refusal.body);
+    const row = await createApprovalRuleRow(db, body, dual);
     return reply.status(201).send(row);
   });
 
@@ -3013,6 +3038,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     const patch = crud.schema.parse(req.body ?? {});
+    // ADR-0186 A: moving an approval rule to a different approver must still
+    // leave a pool that can reach the rule's quorum
+    if (kind === "approvals" && "approverUserId" in patch && patch.approverUserId) {
+      const [current] = await db.select().from(approvalRules).where(eq(approvalRules.id, ruleId));
+      if (current) {
+        const refusal = await approvalRuleQuorumRefusal(db, {
+          approverUserId: patch.approverUserId,
+          approverRoleId: current.approverRoleId,
+          quorum: current.quorum,
+          scope: current.scope,
+          userId: current.userId,
+        });
+        if (refusal) return reply.status(refusal.status).send(refusal.body);
+      }
+    }
     const res = await applyRuleEdit(db, {
       artifactType: crud.artifactType,
       artifactId: ruleId,
@@ -3213,6 +3253,30 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // the role (any of them may decide it) — never the proposer's — and stays
     // visible to whoever decided it.
     const myReviewRoles = !req.authCtx.isAdmin && me ? reviewRoleIdsFor(await loadReviewPolicy(db), me) : [];
+    // ADR-0186 A: a tool-call approval is in the queue of every member of its
+    // rule's APPROVER ROLE (the eligible pool; never the caller's own), and
+    // stays visible to whoever recorded a decision on it.
+    const myPoolRuleIds =
+      !req.authCtx.isAdmin && me
+        ? (
+            await db
+              .select({ id: approvalRules.id })
+              .from(approvalRules)
+              .innerJoin(roleAssignments, eq(roleAssignments.roleId, approvalRules.approverRoleId))
+              .where(eq(roleAssignments.userId, me))
+          ).map((r) => r.id)
+        : [];
+    const myDecidedIds =
+      !req.authCtx.isAdmin && me
+        ? (
+            await db
+              .select({ id: approvalDecisions.approvalId })
+              .from(approvalDecisions)
+              .where(eq(approvalDecisions.deciderUserId, me))
+          )
+            .map((r) => r.id)
+            .filter((x): x is string => x !== null)
+        : [];
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
       : or(
@@ -3226,6 +3290,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               ? [and(inArray(approvals.reviewRoleId, myReviewRoles), sql`${approvals.userId} <> ${me}`)]
               : []),
             ...(me ? [and(sql`${approvals.reviewRoleId} IS NOT NULL`, eq(approvals.decidedBy, me))] : []),
+            ...(myPoolRuleIds.length
+              ? [
+                  and(
+                    inArray(approvals.ruleId, [...new Set(myPoolRuleIds)]),
+                    inArray(approvals.objectType, [...TOOL_CALL_APPROVAL_OBJECT_TYPES]),
+                    sql`${approvals.userId} <> ${me}`,
+                  ),
+                ]
+              : []),
+            ...(myDecidedIds.length ? [inArray(approvals.id, [...new Set(myDecidedIds)])] : []),
           ],
         );
     const conditions = [
@@ -3241,6 +3315,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
+    // ADR-0186 A/B: each tool-call row's per-principal decisions (never the assertion)
+    const toolCallRowIds = rows.filter((r) => isToolCallApproval(r)).map((r) => r.id);
+    const decisionRows = toolCallRowIds.length
+      ? await db
+          .select()
+          .from(approvalDecisions)
+          .where(inArray(approvalDecisions.approvalId, toolCallRowIds))
+          .orderBy(asc(approvalDecisions.decidedAt))
+      : [];
+    const decisionsByApproval = new Map<string, typeof decisionRows>();
+    for (const d of decisionRows) {
+      if (!d.approvalId) continue;
+      decisionsByApproval.set(d.approvalId, [...(decisionsByApproval.get(d.approvalId) ?? []), d]);
+    }
     const assignmentRows = rows.length
       ? await db
           .select()
@@ -3297,7 +3385,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       rows
         .flatMap((r) => [r.userId, r.approverUserId, r.decidedBy])
         .concat(conflictItems.map((i) => i.contributedByUserId))
-        .concat(acceptedCounterparts.map((c) => c.contributedByUserId)),
+        .concat(acceptedCounterparts.map((c) => c.contributedByUserId))
+        .concat(decisionRows.flatMap((d) => [d.principalUserId, d.deciderUserId])),
     );
     const instanceIds = ids(rows.map((r) => r.instanceId));
     const runIds = ids(rows.map((r) => r.runId));
@@ -3553,6 +3642,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
+        // ADR-0186 A/B (§4.9): the dual-control and signature view of a tool-call row
+        ...(isToolCallApproval(r)
+          ? (() => {
+              const ds = decisionsByApproval.get(r.id) ?? [];
+              const mine = ds.find((d) => d.deciderUserId === me) ?? null;
+              return {
+                approvalsCount: new Set(ds.filter((d) => d.decision === "approved").map((d) => d.principalUserId)).size,
+                myDecision: mine ? mine.decision : null,
+                decisions: ds.map((d) => ({
+                  ...decisionView(d),
+                  principalName: d.principalUserId ? (nameOf.get(d.principalUserId) ?? null) : null,
+                  deciderName: d.deciderUserId ? (nameOf.get(d.deciderUserId) ?? null) : null,
+                })),
+              };
+            })()
+          : {}),
         serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
         projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
         useCaseId:
@@ -3627,6 +3732,45 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   /**
+   * ADR-0173 §1 / batch 2b — a builder agent's turn paused on an MCP tool or
+   * connector-write approval RESUMES after the decision is final (approved ->
+   * the identical call, which the governed path matches to this approval by
+   * its argument digest; denied -> the model is told who denied it and why),
+   * as the thread's person and AFTER THE RESPONSE, as tracked background work.
+   * A failure is audited.
+   */
+  async function resumeBuilderStepsFor(
+    d: Db,
+    updated: typeof approvals.$inferSelect,
+    binaryDecision: "approved" | "denied",
+    deciderUserId: string,
+  ): Promise<void> {
+    const waiting = await builderStepsAwaitingApproval(d, updated.id);
+    if (!waiting.length) return;
+    scheduleBackgroundWork(d, async () => {
+      try {
+        await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+      } catch (err) {
+        await d.insert(auditLog).values({
+          userId: deciderUserId,
+          ...(updated.objectType === "connector_call"
+            ? { objectType: "connector" as const, objectId: updated.connectorId }
+            : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
+          detail: { approvalId: updated.id, phase: "builder-resume" },
+          effect: "deny",
+          ruleId: "builder-tool-step-resume-failed",
+          ruleChain: [],
+          reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+            err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+          }`
+            .replace(/\s+/g, " ")
+            .slice(0, 1000),
+        });
+      }
+    }, app.log);
+  }
+
+  /**
    * THE ONE DECIDE PATH (ADR-0046).
    *
    * Extracted from the route handler so that the BULK endpoint can call the
@@ -3648,6 +3792,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     deciderUserId: string | null;
     isAdmin: boolean;
     body: z.infer<typeof decideApprovalWithMeasuredSchema>;
+    /** ADR-0186 B: the passkey signature of a tool-call decision (the portal route only) */
+    passkey?: { challengeId: string; response: Record<string, unknown> } | undefined;
+    /** ADR-0186 A/B: the request (who signs, which session), and how the decision arrived */
+    req?: FastifyRequest | undefined;
+    channel?: "http" | "chat" | "bulk";
   }): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> {
     const fail = (status: number, payload: Record<string, unknown>) =>
       ({ ok: false as const, status, body: payload });
@@ -3693,6 +3842,50 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         error: "approval_superseded",
         detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
       });
+    }
+    // ADR-0186 A/B — a TOOL-CALL approval is decided by dual control and
+    // (strict default) a passkey signature over the exact call: the eligible
+    // pool (named approver + approver-role members, never the caller, a
+    // delegator and their delegate once), any deny vetoes, approval at the
+    // quorum under the row lock. No admin override: an admin outside the pool
+    // is not an approver of someone's tool call. Intake-only outcomes are
+    // refused by name exactly as below.
+    if (isToolCallApproval(row)) {
+      if (body.decision === "returned") {
+        return fail(422, {
+          error: "returned_only_on_intake_approval",
+          detail: "send back for information applies to an AI use-case intake sign-off only",
+        });
+      }
+      if ((body.conditions ?? []).length > 0) {
+        return fail(422, {
+          error: "conditions_only_on_intake_approval",
+          detail: "conditions are imposed only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      if (body.acceptRisks) {
+        return fail(422, {
+          error: "risk_acceptance_only_on_intake_approval",
+          detail: "risk is accepted only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      const decided = await decideToolCallApproval(db, {
+        row,
+        deciderUserId,
+        decision: body.decision === "approved" ? "approved" : "denied",
+        reason: body.reason?.trim() ? body.reason : null,
+        passkey: input.passkey,
+        req: input.req,
+        channel: input.channel ?? "http",
+      });
+      if (!decided.ok) return fail(decided.status, decided.body);
+      let pmMirror: Awaited<ReturnType<typeof mirrorApprovalDecision>> | null = null;
+      if (decided.finalized) {
+        const finalDecision = decided.finalized.status === "approved" ? "approved" : "denied";
+        await resumeBuilderStepsFor(db, decided.finalized, finalDecision, deciderUserId);
+        pmMirror = await mirrorApprovalDecision(db, opts.dataKey, decided.finalized, deciderUserId);
+      }
+      return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
     }
     // Only the rule's named approver may decide (§3) — with two sanctioned
     // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from
@@ -4123,77 +4316,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "run") {
         postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
       }
-      // ADR-0173 §1: an MCP tool approval a builder agent's turn is paused on.
-      // Nothing is decided here — the decision is the approval row above. The
-      // turn RESUMES after commit (approved -> the identical call, which the
-      // governed path matches to this approval by its argument digest; denied
-      // -> the model is told who denied it and why), as the thread's person —
-      // and AFTER THE RESPONSE (review): the approver's request never carries
-      // the resumed turn (model steps, tool calls), so the decide answers at
-      // once. Tracked background work: a closing app and a test drain it. A
-      // failure is audited (the resume records its own outcome on the step).
-      if (updated.objectType === "mcp_tool" && !postCommit) {
-        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
-        if (waiting.length) {
-          postCommit = async (d: Db) => {
-            scheduleBackgroundWork(d, async () => {
-              try {
-                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
-              } catch (err) {
-                await d.insert(auditLog).values({
-                  userId: deciderUserId,
-                  objectType: "mcp_tool",
-                  objectId: null,
-                  serverId: updated.serverId,
-                  toolName: updated.toolName,
-                  detail: { approvalId: updated.id, phase: "builder-resume" },
-                  effect: "deny",
-                  ruleId: "builder-tool-step-resume-failed",
-                  ruleChain: [],
-                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
-                  }`
-                    .replace(/\s+/g, " ")
-                    .slice(0, 1000),
-                });
-              }
-            }, app.log);
-          };
-        }
-      }
-      // ADR-0173 batch 2b: a CONNECTOR WRITE approval a builder turn is paused
-      // on — the same resume as the MCP branch above (resumeBuilderAfterApproval
-      // after commit, as tracked background work): approved -> the identical
-      // call, which the connector path matches to this approval by its argument
-      // digest and spends once; denied -> the model is told. A direct (non-
-      // builder) caller has no waiting step: it re-submits the identical call.
-      if (updated.objectType === "connector_call" && !postCommit) {
-        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
-        if (waiting.length) {
-          postCommit = async (d: Db) => {
-            scheduleBackgroundWork(d, async () => {
-              try {
-                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
-              } catch (err) {
-                await d.insert(auditLog).values({
-                  userId: deciderUserId,
-                  objectType: "connector",
-                  objectId: updated.connectorId,
-                  detail: { approvalId: updated.id, phase: "builder-resume" },
-                  effect: "deny",
-                  ruleId: "builder-tool-step-resume-failed",
-                  ruleChain: [],
-                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
-                  }`
-                    .replace(/\s+/g, " ")
-                    .slice(0, 1000),
-                });
-              }
-            }, app.log);
-          };
-        }
-      }
+      // ADR-0173 §1 / batch 2b: the builder resume after an MCP tool or
+      // connector-write approval now runs in the tool-call branch above
+      // (ADR-0186: those kinds are decided by dual control, never here).
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {
         await applyProjectApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -4341,11 +4466,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       throw parsed.error;
     }
     const body = parsed.data;
+    // ADR-0186 B: the passkey signature rides beside the decision
+    const { passkey } = z.object({ passkey: approvalDecidePasskeyField.optional() }).parse({
+      passkey: (req.body as { passkey?: unknown } | null)?.passkey,
+    });
     const outcome = await decideOneApproval({
       approvalId,
       deciderUserId: req.authCtx.userId,
       isAdmin: req.authCtx.isAdmin,
       body,
+      passkey,
+      req,
+      channel: "http",
     });
     if (!outcome.ok) return reply.status(outcome.status).send(outcome.body);
     return outcome.body;
@@ -4503,7 +4635,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // have, claiming, saved views, per-reviewer workload, and BULK. Bulk is
   // handed `decideOneApproval` — the very function the single-decision route
   // calls — so a bulk item cannot take a shortcut around any guard.
-  registerWorkbenchRoutes(app, db, { decideOne: decideOneApproval });
+  // ADR-0186: a bulk item can never be signed or stepped up (channel "bulk").
+  registerWorkbenchRoutes(app, db, { decideOne: (i) => decideOneApproval({ ...i, channel: "bulk" }) });
   // ADR-0061 — CHATOPS APPROVALS. Handed the SAME `decideOneApproval` the
   // portal route and the bulk endpoint use: the chat surface is a courier over
   // the one decide path, never a second authority path. The inbound callback
@@ -4512,7 +4645,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // the same reason: Slack holds no RegulAIt credential); every other route
   // here is admin-only.
   registerChatOpsRoutes(app, db, {
-    decideOne: decideOneApproval,
+    // ADR-0186: a chat tap can never sign or step up (channel "chat")
+    decideOne: (i) => decideOneApproval({ ...i, channel: "chat" }),
     ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
   });
   // ADR-0047 — executive & compliance reporting: report definitions, schedule

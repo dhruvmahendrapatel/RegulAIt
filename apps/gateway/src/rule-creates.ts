@@ -55,6 +55,8 @@ export async function createApprovalRuleRow(
   // proposal applier does), so it must be able to join one.
   db: DbOrTx,
   body: CreateApprovalRuleInput,
+  /** ADR-0186 A: dual control. Omitted -> the column defaults (quorum 1, no role). */
+  dualControl: { quorum?: number | undefined; approverRoleId?: string | null | undefined } = {},
 ): Promise<typeof approvalRules.$inferSelect> {
   const [row] = await db
     .insert(approvalRules)
@@ -66,6 +68,8 @@ export async function createApprovalRuleRow(
       // rather than defaulted here so the ONE default lives in the DDL.
       ...(body.approvalScope ? { approvalScope: body.approvalScope } : {}),
       approverUserId: body.approverUserId,
+      ...(dualControl.quorum !== undefined ? { quorum: dualControl.quorum } : {}),
+      ...(dualControl.approverRoleId !== undefined ? { approverRoleId: dualControl.approverRoleId } : {}),
     })
     .returning();
   return row!;

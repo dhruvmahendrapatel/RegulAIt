@@ -706,7 +706,10 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
     ["POST", "/v1/auth/step-up/verify"],
     ["GET", "/v1/auth/step-up/00000000-0000-4000-a000-000000000001"],
   ];
-  const SELF: Array<[Method, string]> = [
+  // slice B (signed approvals) has landed too: its signing options are proved
+  // in zz-b4ab-dual-control-signed-approvals.test.ts; what stays here is that
+  // the route is NOT admin-gated and an API key can never sign
+  const SELF_BUILT_B: Array<[Method, string]> = [
     ["POST", "/v1/approvals/00000000-0000-4000-a000-000000000001/signing-options"],
   ];
   const ADMIN: Array<[Method, string]> = [
@@ -721,11 +724,13 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
     ["GET", "/v1/detection-content"],
   ];
 
-  it("every self route answers 501 not_built to a non-admin (it is not admin-gated)", async () => {
-    for (const [m, url] of SELF) {
-      const r = await inject(m, url, users.member.auth, m === "GET" || m === "DELETE" ? undefined : {});
-      expect(r.statusCode, `${m} ${url}: ${r.body}`).toBe(501);
-      expect(r.json()).toEqual({ error: "not_built" });
+  it("slice B's signing options are not admin-gated and refuse any API key (only a browser session can sign)", async () => {
+    for (const [m, url] of SELF_BUILT_B) {
+      for (const who of [users.member, users.admin]) {
+        const r = await inject(m, url, who.auth, { decision: "approved" });
+        expect(r.statusCode, `${m} ${url}: ${r.body}`).toBe(403);
+        expect(r.json().error).toBe("passkey_signature_required");
+      }
     }
   });
 
