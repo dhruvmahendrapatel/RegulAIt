@@ -19,8 +19,13 @@
  */
 import {
   and,
+  approvalAssignmentRules,
+  approvalAssignments,
   approvalDelegations,
   approvalRules,
+  approvals,
+  approvalSlaPolicies,
+  ne,
   eq,
   gt,
   inArray,
@@ -90,6 +95,56 @@ export function requestedAtOf(approvalId: string): SQL {
 export async function isApproverRole(db: Q, roleId: string): Promise<boolean> {
   const [hit] = await db.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.approverRoleId, roleId)).limit(1);
   return !!hit;
+}
+
+/**
+ * G2 (B4S-02 owner principle): can membership of this team ROUTE or CLAIM an
+ * approval? A team is named by an enabled routing rule, by an SLA policy that
+ * escalates to it (reassign / add an assignee), or by the assignment (or
+ * escalation) of a pending approval. A member of such a team may claim the
+ * approval and — for every kind but a tool call, whose deciders are fixed at
+ * queue time (B4S-02) — decide it; so adding a member is a settings_relax act.
+ */
+export async function isApprovalTeam(db: Q, teamId: string): Promise<boolean> {
+  const [rule] = await db
+    .select({ id: approvalAssignmentRules.id })
+    .from(approvalAssignmentRules)
+    .where(
+      and(
+        eq(approvalAssignmentRules.enabled, true),
+        eq(approvalAssignmentRules.assigneeKind, "team"),
+        eq(approvalAssignmentRules.assigneeId, teamId),
+      ),
+    )
+    .limit(1);
+  if (rule) return true;
+  const [sla] = await db
+    .select({ id: approvalSlaPolicies.id })
+    .from(approvalSlaPolicies)
+    .where(
+      and(
+        ne(approvalSlaPolicies.escalateAction, "notify_only"),
+        eq(approvalSlaPolicies.escalateToKind, "team"),
+        eq(approvalSlaPolicies.escalateToId, teamId),
+      ),
+    )
+    .limit(1);
+  if (sla) return true;
+  const [assigned] = await db
+    .select({ id: approvalAssignments.id })
+    .from(approvalAssignments)
+    .innerJoin(approvals, eq(approvals.id, approvalAssignments.approvalId))
+    .where(
+      and(
+        eq(approvals.status, "pending"),
+        or(
+          and(eq(approvalAssignments.assigneeKind, "team"), eq(approvalAssignments.assigneeId, teamId)),
+          and(eq(approvalAssignments.escalationAssigneeKind, "team"), eq(approvalAssignments.escalationAssigneeId, teamId)),
+        ),
+      ),
+    )
+    .limit(1);
+  return Boolean(assigned);
 }
 
 /** union-find over delegation links: every id → its principal group's root */

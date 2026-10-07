@@ -104,6 +104,8 @@ import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
+import { isApproverRole } from "./approval-pool.js";
+import { requireStepUp } from "./step-up.js";
 // ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
 // versioned fields, so it goes through the one choke point.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -879,6 +881,24 @@ export function registerOnboardingRoutes(
     }
 
     const roleByName = new Map(knownRoles.map((r) => [r.name.toLowerCase(), r]));
+    // B4S-02 / G1 (owner principle): a mapping to a role an approval rule names
+    // as approver_role_id adds that group's holders to an approver pool — the
+    // same settings_relax step-up as POST /v1/group-role-mappings, bound to
+    // every such mapping this import creates (sorted, so the same file asks
+    // for the same grant)
+    const approverMappings: Array<{ source: string; externalGroup: string; roleId: string }> = [];
+    for (const e of plan.entries) {
+      if (e.action !== "create") continue;
+      const role = roleByName.get(e.roleName.toLowerCase())!;
+      if (await isApproverRole(db, role.id)) approverMappings.push({ source: e.source, externalGroup: e.externalGroup, roleId: role.id });
+    }
+    if (approverMappings.length > 0) {
+      approverMappings.sort((a, b) =>
+        `${a.source}\u0000${a.externalGroup}\u0000${a.roleId}`.localeCompare(`${b.source}\u0000${b.externalGroup}\u0000${b.roleId}`),
+      );
+      const facts = { values: { approverRoleGroups: approverMappings } };
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    }
     let created = 0;
     for (const e of plan.entries) {
       if (e.action !== "create") continue;

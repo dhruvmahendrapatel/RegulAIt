@@ -13,6 +13,11 @@
  *  - B4S-05: deleting ANY governance rule (rate limit, data scope — approval
  *    rules already were) and lifting a revocation (MCP, agent, connector) or
  *    narrowing one to read_only needs a settings_relax step-up.
+ *  - G1: an onboarding group→role import that maps a group to a role an
+ *    approval rule names as approver_role_id needs a settings_relax step-up
+ *    (a dry run, and mappings to other roles, need none).
+ *  - G2: adding a member to a team that routes or can claim approvals needs a
+ *    settings_relax step-up (a team nobody routes to needs none).
  *
  * Runs on its OWN scratch database (prefix `b4s2_`), dropped in afterAll
  * (M-068), so the global state it needs (which admins have a step-up method,
@@ -28,6 +33,11 @@ import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import {
   agentRevocations,
   agents,
+  approvalAssignmentRules,
+  approvalRules,
+  groupRoleMappings,
+  roles,
+  teamMembers,
   auditLog,
   authSessions,
   connectorRevocations,
@@ -476,5 +486,86 @@ describe("B4S-05: deleting a governance rule or lifting a revocation is a relaxa
     expect(ok.statusCode, ok.body).toBe(200);
     const back = await as(admin, "PATCH", url, { scope: "full" });
     expect(back.statusCode, back.body).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G1 / G2 — the two approver-pool doors round 1 left open
+// ---------------------------------------------------------------------------
+
+describe("G1 + G2: an approver pool is never padded through an import or a team without a step-up", () => {
+  let admin: Person;
+  let member: Person;
+  let approverRole: { id: string; name: string };
+  let plainRole: { id: string; name: string };
+  beforeAll(async () => {
+    admin = await mkPerson("pool-admin", true);
+    await enrolPasskey(admin);
+    member = await mkPerson("pool-member", false);
+    const [r1] = await db.insert(roles).values({ name: `b4s2 approvers ${RUN}` }).returning({ id: roles.id, name: roles.name });
+    const [r2] = await db.insert(roles).values({ name: `b4s2 readers ${RUN}` }).returning({ id: roles.id, name: roles.name });
+    approverRole = r1!;
+    plainRole = r2!;
+    await db.insert(approvalRules).values({ scope: "fleet", serverScope: "all", approverUserId: admin.id, approverRoleId: approverRole.id });
+  });
+
+  const mappingsFor = async (group: string) => db.select().from(groupRoleMappings).where(eq(groupRoleMappings.externalGroup, group));
+
+  it("G1: an import mapping a group to an approver role is refused without a grant; nothing is mapped; a grant admits it", async () => {
+    const rows = [
+      { source: "oidc", externalGroup: `g1-approvers-${RUN}`, roleName: approverRole.name },
+      { source: "scim", externalGroup: `g1-readers-${RUN}`, roleName: plainRole.name },
+    ];
+    const dry = await as(admin, "POST", "/v1/onboarding/imports/group-roles", { mode: "dry_run", rows });
+    expect(dry.statusCode, dry.body).toBe(200);
+    const key = await app.inject({ method: "POST", url: "/v1/onboarding/imports/group-roles", headers: admin.key, payload: { mode: "apply", rows } });
+    expect(key.statusCode, key.body).toBe(403);
+    expect(key.json()).toMatchObject({ error: "step_up_required", methods: [] });
+    const refused = await as(admin, "POST", "/v1/onboarding/imports/group-roles", { mode: "apply", rows });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().action).toEqual({
+      kind: "settings_relax",
+      body: { values: { approverRoleGroups: [{ source: "oidc", externalGroup: `g1-approvers-${RUN}`, roleId: approverRole.id }] } },
+    });
+    expect(await mappingsFor(`g1-approvers-${RUN}`)).toHaveLength(0);
+    expect(await mappingsFor(`g1-readers-${RUN}`)).toHaveLength(0);
+    const ok = await as(admin, "POST", "/v1/onboarding/imports/group-roles", { mode: "apply", rows }, {
+      [STEP_UP_HEADER]: await grantFor(admin, refused.json().action),
+    });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await mappingsFor(`g1-approvers-${RUN}`)).toHaveLength(1);
+  });
+
+  it("G1: an import mapping only to roles no approval rule names needs no step-up", async () => {
+    const r = await as(admin, "POST", "/v1/onboarding/imports/group-roles", {
+      mode: "apply",
+      rows: [{ source: "oidc", externalGroup: `g1-plain-${RUN}`, roleName: plainRole.name }],
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(await mappingsFor(`g1-plain-${RUN}`)).toHaveLength(1);
+  });
+
+  it("G2: adding a member to a team a routing rule assigns approvals to needs a step-up bound to team and member", async () => {
+    const t = await as(admin, "POST", "/v1/teams", { name: `b4s2-approver-team-${RUN}` });
+    expect(t.statusCode, t.body).toBe(201);
+    const teamId = t.json().id as string;
+    await db.insert(approvalAssignmentRules).values({ name: `b4s2 route ${RUN}`, objectType: "workflow_stage", assigneeKind: "team", assigneeId: teamId });
+    const key = await app.inject({ method: "POST", url: `/v1/teams/${teamId}/members`, headers: admin.key, payload: { userId: member.id } });
+    expect(key.statusCode, key.body).toBe(403);
+    const refused = await as(admin, "POST", `/v1/teams/${teamId}/members`, { userId: member.id });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { approverTeamMember: { teamId, userId: member.id } } } });
+    expect(await db.select().from(teamMembers).where(eq(teamMembers.teamId, teamId))).toHaveLength(0);
+    const ok = await as(admin, "POST", `/v1/teams/${teamId}/members`, { userId: member.id }, {
+      [STEP_UP_HEADER]: await grantFor(admin, refused.json().action),
+    });
+    expect(ok.statusCode, ok.body).toBe(201);
+  });
+
+  it("G2: a team nobody routes approvals to takes members with no step-up", async () => {
+    const t = await as(admin, "POST", "/v1/teams", { name: `b4s2-plain-team-${RUN}` });
+    expect(t.statusCode, t.body).toBe(201);
+    const r = await as(admin, "POST", `/v1/teams/${t.json().id}/members`, { userId: member.id });
+    expect(r.statusCode, r.body).toBe(201);
   });
 });

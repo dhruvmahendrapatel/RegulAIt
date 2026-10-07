@@ -7,6 +7,7 @@
  */
 import { useState } from "react";
 import { api, ApiError } from "../../../api/client";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select } from "../../../ui/kit";
@@ -138,7 +139,8 @@ export default function TeamsPage() {
             onSubmit={(e) => {
               e.preventDefault();
               void act.run(
-                () => api.post(`/v1/teams/${memberTeam}/members`, { userId: memberUser }),
+                // G2: adding someone to a team that routes or claims approvals widens an approver pool
+                () => withStepUp((h) => api.postWithHeaders(`/v1/teams/${memberTeam}/members`, { userId: memberUser }, h)),
                 "Member added",
               );
             }}
