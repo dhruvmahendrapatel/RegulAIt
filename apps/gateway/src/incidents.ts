@@ -378,7 +378,7 @@ interface Access {
  * it, so who is frozen and who may see why cannot drift apart.
  * `agentIdText` is an SQL expression yielding the agent id as text.
  */
-function incidentCoversAgent(agentIdText: SQL): SQL {
+export function incidentCoversAgent(agentIdText: SQL): SQL {
   return sql`(EXISTS (SELECT 1 FROM ${aiIncidentLinks} WHERE ${aiIncidentLinks.incidentId} = ${aiIncidents.id}
       AND ${aiIncidentLinks.objectType} = 'agent' AND ${aiIncidentLinks.objectId} = (${agentIdText})::text)
     OR EXISTS (SELECT 1 FROM ${aiUseCases} WHERE ${aiUseCases.id} = ${aiIncidents.useCaseId}

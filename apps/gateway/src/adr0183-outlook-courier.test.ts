@@ -41,6 +41,7 @@ import {
   connectorCredentials,
   connectors,
   createDb,
+  desc,
   eq,
   gte,
   governanceAlerts,
@@ -519,6 +520,55 @@ describe("6–8. failures, alerts and the inbound path that does not exist", () 
     // the registered recipient, named explicitly (any case), still sends
     const ok = await inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION, channel: RECIPIENT.toUpperCase() });
     expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it("ADR-0185: an admin's recipient allow-list adds exact mailboxes (audited with transitions); nothing else is reachable", async () => {
+    const EXTRA = "cab@example.test";
+    const [conn] = await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION));
+    const patch = (list: unknown) => inject("PATCH", `/v1/chatops/connections/${conn!.id}`, { outlookRecipientAllowList: list });
+    expect(conn!.outlookRecipientAllowList).toEqual([]); // strict default: the registered mailbox only
+    // refused by name, nothing saved
+    let res = await patch(["example.test"]);
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error).toBe("invalid_recipient");
+    res = await patch(["@example.test"]);
+    expect(res.json().error).toBe("invalid_recipient");
+    res = await patch(Array.from({ length: 51 }, (_, i) => `r${i}@example.test`));
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("allow_list_too_long");
+    expect((await db.select().from(chatopsConnections).where(eq(chatopsConnections.id, conn!.id)))[0]!.outlookRecipientAllowList).toEqual([]);
+
+    res = await patch([" CAB@Example.test ", EXTRA]);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().outlookRecipientAllowList).toEqual([EXTRA]);
+    const [changed] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, CHATOPS_RULE_IDS.outlookRecipientsChanged))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+    expect(changed!.objectId).toBe(conn!.id);
+    expect(changed!.detail).toMatchObject({ transitions: { outlookRecipientAllowList: { from: [], to: [EXTRA] } } });
+    const list = (await inject("GET", "/v1/chatops/connections")).json().connections as Array<{ name: string; outlookRecipientAllowList: string[] }>;
+    expect(list.find((c) => c.name === CONNECTION)?.outlookRecipientAllowList).toEqual([EXTRA]);
+
+    // the allow-listed mailbox (any case) is reachable; anything else is still refused
+    const approvalId = await makeApproval();
+    const ok = await inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION, channel: EXTRA.toUpperCase() });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(lastMail().message.toRecipients.map((r) => r.emailAddress.address.toLowerCase())).toEqual([EXTRA]);
+    const before = graphHits.length;
+    const refused = await inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION, channel: "other@example.test" });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error).toBe("recipient_not_registered");
+    expect(graphHits.length).toBe(before);
+
+    // emptied again: back to the registered mailbox only
+    res = await patch([]);
+    expect(res.statusCode).toBe(200);
+    const again = await inject("POST", `/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION, channel: EXTRA });
+    expect(again.statusCode).toBe(403);
+    expect(graphHits.length).toBe(before);
   });
 
   it("8: every inbound route still refuses outlook BY NAME", async () => {

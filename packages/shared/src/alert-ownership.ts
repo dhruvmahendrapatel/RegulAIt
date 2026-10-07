@@ -12,8 +12,9 @@
  * OWNER DERIVATION. An episode's subject names what it is about; the owner is
  * the accountable person already recorded for that thing, tried in this order:
  * the use case's owner, the agent's steward, the risk's owner, the vendor's
- * owner. A pair-keyed subject (`use_case:U>agent:A`) is the use case's first,
- * then the agent's. A KRI episode is its agent's when the KRI is agent-scoped
+ * owner, the MCP server's owner, the connector's owner (ADR-0185 I9). A
+ * pair-keyed subject (`use_case:U>agent:A`) is the use case's first, then the
+ * agent's. A KRI episode is its agent's when the KRI is agent-scoped
  * (a fleet or project KRI has no single accountable person). Nothing found =
  * unowned, and the SLA sweep escalates it to the admins; an owner is never
  * invented.
@@ -24,8 +25,9 @@
 import type { AlertSlaHours, AlertSlaSeverity, KriOnBreach } from "./accountability.js";
 import type { KriScope } from "./kri.js";
 
-/** the kinds of record an episode's owner is read from, in precedence order */
-export const ALERT_OWNER_SUBJECT_KINDS = ["use_case", "agent", "risk", "vendor"] as const;
+/** the kinds of record an episode's owner is read from, in precedence order.
+ * ADR-0185 I9: an MCP server's and a connector's owner come last. */
+export const ALERT_OWNER_SUBJECT_KINDS = ["use_case", "agent", "risk", "vendor", "mcp_server", "connector"] as const;
 export type AlertOwnerSubjectKind = (typeof ALERT_OWNER_SUBJECT_KINDS)[number];
 
 export interface AlertOwnerCandidate {
@@ -37,8 +39,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The records whose owner may own this episode, in precedence order (use case,
- * agent, risk, vendor). Reads the subject key's parts (`type:id`, joined by
- * `>`) and, for a KRI episode, the KRI's own scope from the finding's detail.
+ * agent, risk, vendor, MCP server, connector). Reads the subject key's parts
+ * (`type:id`, joined by `>`) and, for a KRI episode, the KRI's own scope from the finding's detail.
  * Ids that are not uuids are skipped (a subject key is data, never trusted).
  */
 export function alertOwnerCandidates(subjectKey: string, detail: Record<string, unknown> | null | undefined): AlertOwnerCandidate[] {

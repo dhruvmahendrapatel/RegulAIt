@@ -4,11 +4,14 @@ import {
   and,
   asc,
   conversationMessages,
+  auditLog,
   conversations,
   count,
   desc,
   eq,
+  gte,
   isNull,
+  or,
   projects,
   type Db,
 } from "@regulait/db";
@@ -17,6 +20,22 @@ import { createConversationSchema } from "@regulait/shared";
 import { z } from "zod";
 import { assertProjectAttribution } from "./projects.js";
 import { installConversationPresentationScrub } from "./conversation-presentation.js";
+import {
+  MEMORY_RETENTION_RULE_IDS,
+  conversationHeldSql,
+  conversationRetentionCutoff,
+  conversationRetentionState,
+  deleteOwnConversation,
+} from "./memory-retention.js";
+import { loadOrgSettings } from "./org-settings.js";
+
+/** ADR-0185 I3 — what a person is told about an expired or held conversation */
+const EXPIRED_DETAIL = (days: number) =>
+  `this conversation was last used more than ${days} days ago, past the organisation's conversation retention, ` +
+  `and has been (or is about to be) deleted`;
+const HELD_DETAIL =
+  "this conversation is kept as evidence for an incident that is not yet closed; it cannot be deleted or continued " +
+  "until the incident closes";
 
 /**
  * MULTI-TURN CONVERSATIONS — the storage and access layer behind the
@@ -61,7 +80,7 @@ export type ConversationContext =
        * needs ids and per-message sizes, and must never mutate these */
       messages: StoredConversationMessage[];
     }
-  | { ok: false; status: number; error: string };
+  | { ok: false; status: number; error: string; detail?: string };
 
 /**
  * Load a conversation for the INVOKE path: 404 unknown, 403 not the caller's
@@ -88,6 +107,15 @@ export async function loadOwnConversationForReplay(
   const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
   if (!row) return { ok: false, status: 404, error: "unknown_conversation" };
   if (row.userId !== userId) return { ok: false, status: 403, error: "forbidden" };
+  // ADR-0185 I3 — past retention it is not continued: expired and unheld it is
+  // gone (404); held, it is incident evidence, and a new turn would both alter
+  // it and restart its retention clock (409)
+  const retention = await conversationRetentionState(db, row);
+  if (retention.expired) {
+    return retention.held
+      ? { ok: false, status: 409, error: "incident_evidence_hold", detail: HELD_DETAIL }
+      : { ok: false, status: 404, error: "conversation_expired", detail: EXPIRED_DETAIL(retention.retentionDays) };
+  }
   const msgs = await db
     .select()
     .from(conversationMessages)
@@ -222,6 +250,13 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
           : projectId === "none"
             ? isNull(conversations.projectId)
             : eq(conversations.projectId, projectId);
+      // ADR-0185 I3 — an expired conversation no incident holds is not listed,
+      // whether or not the retention sweep has reached it yet
+      const { conversationRetentionDays } = await loadOrgSettings(db);
+      const live = or(
+        gte(conversations.updatedAt, conversationRetentionCutoff(new Date(), conversationRetentionDays)),
+        await conversationHeldSql(),
+      );
       const rows = await db
         .select({
           id: conversations.id,
@@ -239,7 +274,7 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
         .leftJoin(projects, eq(projects.id, conversations.projectId))
         .leftJoin(conversationMessages, eq(conversationMessages.conversationId, conversations.id))
         .where(
-          projectFilter ? and(eq(conversations.userId, userId), projectFilter) : eq(conversations.userId, userId),
+          and(eq(conversations.userId, userId), live, projectFilter),
         )
         .groupBy(conversations.id, agents.name, projects.name)
         .orderBy(desc(conversations.updatedAt));
@@ -254,6 +289,12 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
       if (!row) return reply.status(404).send({ error: "unknown_conversation" });
       // personal, admins included — see module doc
       if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
+      // ADR-0185 I3 — read-time enforcement: an expired, unheld conversation is
+      // gone even before the sweep deletes it; a held one stays readable
+      const retention = await conversationRetentionState(db, row);
+      if (retention.expired && !retention.held) {
+        return reply.status(404).send({ error: "conversation_expired", detail: EXPIRED_DETAIL(retention.retentionDays) });
+      }
       const [[agent], [project], messages] = await Promise.all([
         db.select({ name: agents.name }).from(agents).where(eq(agents.id, row.agentId)),
         row.projectId
@@ -275,6 +316,7 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
         ...row,
         agentName: agent?.name ?? null,
         projectName: project?.name ?? null,
+        retention: { expired: retention.expired, heldByIncident: retention.held, retentionDays: retention.retentionDays },
         messages,
       };
     });
@@ -284,13 +326,29 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
       const userId = req.authCtx.userId;
       if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
       const [row] = await db
-        .select({ id: conversations.id, userId: conversations.userId })
+        .select({ id: conversations.id, userId: conversations.userId, agentId: conversations.agentId })
         .from(conversations)
         .where(eq(conversations.id, conversationId));
       if (!row) return reply.status(404).send({ error: "unknown_conversation" });
       if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
-      // hard delete; conversation_messages cascade with the FK
-      await db.delete(conversations).where(eq(conversations.id, conversationId));
+      // hard delete; conversation_messages cascade with the FK. ADR-0185 I3:
+      // the incident hold is re-checked INSIDE the DELETE, so an incident that
+      // links this conversation (or covers its agent) a moment earlier still holds it
+      const out = await deleteOwnConversation(db, conversationId, userId);
+      if (!out.deleted) {
+        if (!out.held) return reply.status(404).send({ error: "unknown_conversation" });
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "conversation" as typeof auditLog.$inferInsert.objectType,
+          objectId: conversationId,
+          detail: { subsystem: "memory-retention", agentId: row.agentId },
+          effect: "deny",
+          ruleId: MEMORY_RETENTION_RULE_IDS.conversationDeleteHeld,
+          ruleChain: [],
+          reason: `conversation ${conversationId}: its owner's delete refused — an incident not yet closed holds it`,
+        });
+        return reply.status(409).send({ error: "incident_evidence_hold", detail: HELD_DETAIL });
+      }
       return { removed: true };
     });
   });
