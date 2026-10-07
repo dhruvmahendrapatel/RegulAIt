@@ -28,6 +28,15 @@
  * DELETE, so an incident opened between the two still holds the row (the
  * `feedback.ts` pattern).
  *
+ * B3S-03 — AND THE DELETE IS SERIALISED WITH HOLD CREATION. Under READ
+ * COMMITTED the re-check inside a DELETE reads the statement's snapshot, so an
+ * incident (or a link) committing while the DELETE ran was not seen and the
+ * row went. Every DELETE here (a person's own conversation, both sweeps) now
+ * runs in a transaction whose FIRST statement takes `EVIDENCE_HOLD_LOCK_KEY`
+ * shared (X15-H01's key; incident create / link / update take it exclusive):
+ * a DELETE that starts while a hold is being created waits for it to commit,
+ * and its re-check — a later statement, so a later snapshot — sees it.
+ *
  * READ TIME too, so a missed pass never extends what a person can see:
  * `conversationRetentionState` says whether a conversation is past retention
  * and whether it is held; `conversations.ts` answers 404
@@ -61,6 +70,7 @@ import {
 } from "@regulait/db";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { lockEvidenceHoldsShared } from "./agent-evidence-hold.js";
 
 export const MEMORY_RETENTION_JOB_NAMES = {
   semanticCachePurge: "semantic-cache-purge-sweep",
@@ -161,10 +171,15 @@ export async function deleteOwnConversation(
   userId: string,
 ): Promise<{ deleted: boolean; held: boolean }> {
   const held = await conversationHeldSql();
-  const rows = await db
-    .delete(conversations)
-    .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId), sql`NOT ${held}`))
-    .returning({ id: conversations.id });
+  // B3S-03: the hold lock (shared) first, then the re-check inside the DELETE
+  const rows = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    await lockEvidenceHoldsShared(tx);
+    return tx
+      .delete(conversations)
+      .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId), sql`NOT ${held}`))
+      .returning({ id: conversations.id });
+  });
   if (rows.length > 0) return { deleted: true, held: false };
   return { deleted: false, held: await conversationIsHeld(db, conversationId) };
 }
@@ -222,19 +237,24 @@ export async function runSemanticCachePurgeSweep(
       .limit(batch);
     if (due.length === 0) break;
     await opts.onBatchSelected?.(due.map((d) => d.id));
-    const rows = await db
-      .delete(semanticCache)
-      .where(
-        and(
-          inArray(
-            semanticCache.id,
-            due.map((d) => d.id),
+    // B3S-03: the hold lock (shared) first, then the re-check inside the DELETE
+    const rows = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      await lockEvidenceHoldsShared(tx);
+      return tx
+        .delete(semanticCache)
+        .where(
+          and(
+            inArray(
+              semanticCache.id,
+              due.map((d) => d.id),
+            ),
+            expired,
+            sql`NOT ${held}`,
           ),
-          expired,
-          sql`NOT ${held}`,
-        ),
-      )
-      .returning({ userId: semanticCache.userId, agentId: semanticCache.agentId, createdAt: semanticCache.createdAt });
+        )
+        .returning({ userId: semanticCache.userId, agentId: semanticCache.agentId, createdAt: semanticCache.createdAt });
+    });
     purged += rows.length;
     for (const r of rows) {
       users.add(r.userId);
@@ -323,6 +343,8 @@ export async function runConversationRetentionSweep(
     await opts.onBatchSelected?.(due.map((d) => d.id));
     const n = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
+      // B3S-03: the hold lock (shared) is this transaction's FIRST statement
+      await lockEvidenceHoldsShared(tx);
       const rows = await tx
         .delete(conversations)
         .where(
