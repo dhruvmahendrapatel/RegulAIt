@@ -13,7 +13,7 @@
  * unchanged. Copy follows Article 4 as amended by Regulation (EU) 2026/1744 ("support the development of AI
  * literacy"); it never claims to guarantee any level of literacy.
  */
-import { useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
@@ -219,48 +219,66 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
   const q = useMyLiteracy(enabled);
   const [, rerender] = useState(0);
   const data = enabled ? (q.data ?? null) : null;
-  if (!data || data.exempt || data.gateMode === "off") return <>{props.children}</>;
+  const gate = useRef<HTMLDivElement>(null);
+  const wasVisible = useRef(false);
+  const onAccount = location.pathname.startsWith("/account");
+  const visible = !!data && !data.exempt && data.gateMode !== "off" && data.required && !data.current && !onAccount && !dismissedFor(data);
+  useEffect(() => {
+    const main = document.getElementById("rgMain");
+    const active = document.activeElement;
+    // Announce replaced page content without interrupting sidebar input.
+    if (visible && (active === document.body || (active && main?.contains(active)))) gate.current?.focus();
+    if (!visible && wasVisible.current && active === document.body) {
+      (main?.querySelector<HTMLElement>("h1") ?? main)?.focus();
+    }
+    wasVisible.current = visible;
+  }, [visible]);
+  // Preserve the page's identity when the async posture adds banner slots.
+  // Without a key, moving children from slot 0 to slot 2 remounts live forms.
+  const content = <Fragment key="page">{props.children}</Fragment>;
+  if (!data || data.exempt || data.gateMode === "off") return <>{content}</>;
 
   const pending = data.required && !data.current;
   const soon = data.documents.filter((d) => d.state === "current" && d.expiresSoon);
-  const onAccount = location.pathname.startsWith("/account");
   const enforce = data.gateMode === "enforce";
 
-  if (pending && !onAccount && !dismissedFor(data)) {
+  if (visible) {
     return (
-      <Card title="Before you continue: AI policies to acknowledge">
-        <div className={v.stack}>
-          <p className={v.hint}>
-            Your organisation asks everyone who uses AI systems through regulAIt to read and acknowledge its AI
-            policies and trainings. This is one of the measures it takes to support the development of AI literacy
-            (Regulation (EU) 2024/1689, Article 4, as amended). It records that you read the current version; it is
-            not a test.
-            {enforce
-              ? " Until you acknowledge, your AI tool calls through regulAIt are refused."
-              : " Your organisation records the gap but does not refuse your calls."}
-          </p>
-          <LiteracyDocumentList data={data} />
-          <div className={v.row}>
-            <span className={v.faint}>
-              You can also do this later from <Link to="/account?section=ai-policies" style={{ textDecoration: "underline" }}>Account</Link>.
-            </span>
-            <span className={v.grow} />
-            <Button
-              variant="ghost"
-              onClick={() => {
-                try {
-                  sessionStorage.setItem(DISMISS_KEY, pendingSignature(data));
-                } catch {
-                  /* storage unavailable: the interstitial simply shows again */
-                }
-                rerender((n) => n + 1);
-              }}
-            >
-              Not now
-            </Button>
+      <div ref={gate} tabIndex={-1} role="region" aria-label="AI policy acknowledgement">
+        <Card title="Before you continue: AI policies to acknowledge">
+          <div className={v.stack}>
+            <p className={v.hint}>
+              Your organisation asks everyone who uses AI systems through regulAIt to read and acknowledge its AI
+              policies and trainings. This is one of the measures it takes to support the development of AI literacy
+              (Regulation (EU) 2024/1689, Article 4, as amended). It records that you read the current version; it is
+              not a test.
+              {enforce
+                ? " Until you acknowledge, your AI tool calls through regulAIt are refused."
+                : " Your organisation records the gap but does not refuse your calls."}
+            </p>
+            <LiteracyDocumentList data={data} />
+            <div className={v.row}>
+              <span className={v.faint}>
+                You can also do this later from <Link to="/account?section=ai-policies" style={{ textDecoration: "underline" }}>Account</Link>.
+              </span>
+              <span className={v.grow} />
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  try {
+                    sessionStorage.setItem(DISMISS_KEY, pendingSignature(data));
+                  } catch {
+                    /* storage unavailable: the interstitial simply shows again */
+                  }
+                  rerender((n) => n + 1);
+                }}
+              >
+                Not now
+              </Button>
+            </div>
           </div>
-        </div>
-      </Card>
+        </Card>
+      </div>
     );
   }
 
@@ -279,7 +297,7 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
           <Link to="/account?section=ai-policies" style={{ textDecoration: "underline" }}>Acknowledge again</Link>
         </div>
       )}
-      {props.children}
+      {content}
     </>
   );
 }
