@@ -29,6 +29,10 @@ passed **1/1** (`x17-secure-fixture-final.log`, full trace and owned-fixture scr
 preceding administrator's seeded draft. Web tsc and build passed. Command after sourcing `x17-env.sh`:
 `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-real.config.ts e2e/demo-review-policy.spec.ts --trace on --output=/workspace/.regulait-onboarding/x17-secure-fixture-final`.
 
+### X17 main integration — 2026-10-07
+
+Main `2ba28faf` merged at `98908135`, no rebase; task-branch board restored to main and status is in #142. Fresh database `regulait_x17_review_003637`: `pnpm -r build` PASS, explicit `pnpm --filter @regulait/web exec tsc --noEmit` PASS, `pnpm --filter @regulait/gateway demo:prepare` **19/19 readiness checks PASS**, and real review/send-back/resubmit/approval journey **1/1 PASS** (12.9s). Command: `source /workspace/.regulait-onboarding/x17-review-env.sh` then `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-real.config.ts e2e/demo-review-policy.spec.ts --trace on --output=/workspace/.regulait-onboarding/x17-main-browser`, with the gateway on its own loopback 3107 and that scratch database. Logs: `continue-workspace-build.log`, `x17-main-tsc.log`, `x17-main-prepare.log`, `x17-main-browser.log`; screenshots and full passing trace under `x17-main-browser`. This fresh positive control complements the earlier retained-neighbor-draft red/control runs; it does not claim a second full two-spec run after this merge. Own scratch gateway stopped after validation. The UUID revision's earlier complete CI passed, including security run 37550242884; the newly merged head's CI remains pending.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.
