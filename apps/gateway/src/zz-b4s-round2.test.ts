@@ -13,6 +13,10 @@
  *  - B4S-05: deleting ANY governance rule (rate limit, data scope — approval
  *    rules already were) and lifting a revocation (MCP, agent, connector) or
  *    narrowing one to read_only needs a settings_relax step-up.
+ *  - B4S-03: a call's sensitivity (and so the sensitive quorum) is decided by
+ *    the server: the attributed project OR the caller's project memberships;
+ *    the header can only raise it (the queue-time proof through the governed
+ *    MCP path is in zz-b4ab-dual-control-signed-approvals).
  *  - G1: an onboarding group→role import that maps a group to a role an
  *    approval rule names as approver_role_id needs a settings_relax step-up
  *    (a dry run, and mappings to other roles, need none).
@@ -31,6 +35,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import {
+  complianceProfiles,
+  projectMembers,
+  projects,
   agentRevocations,
   agents,
   approvalAssignmentRules,
@@ -67,6 +74,7 @@ import {
 import { buildApp } from "./app.js";
 import { ORG_SETTING_STRICTNESS } from "./org-setting-strictness.js";
 import { relaxedSettingKeys } from "./org-settings.js";
+import { callSensitivity } from "./approval-signatures.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -567,5 +575,30 @@ describe("G1 + G2: an approver pool is never padded through an import or a team 
     expect(t.statusCode, t.body).toBe(201);
     const r = await as(admin, "POST", `/v1/teams/${t.json().id}/members`, { userId: member.id });
     expect(r.statusCode, r.body).toBe(201);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B4S-03 — sensitivity is the server's answer; the header only raises it
+// ---------------------------------------------------------------------------
+
+describe("B4S-03: the sensitive quorum does not depend on the client header", () => {
+  it("attributed project OR the caller's membership of a sensitive project; never lowered by the header", async () => {
+    const caller = await mkPerson("sens-caller", false);
+    const outsider = await mkPerson("sens-outsider", false);
+    const [profile] = await db
+      .insert(complianceProfiles)
+      .values({ tag: `b4s2-sensitive-${RUN}`, piiMode: "block", mcpDefaultMode: "read_write" })
+      .returning();
+    const [sensitive] = await db.insert(projects).values({ name: `b4s2-sens-${RUN}`, classifications: [profile!.tag] }).returning({ id: projects.id });
+    const [plain] = await db.insert(projects).values({ name: `b4s2-plain-${RUN}` }).returning({ id: projects.id });
+    await db.insert(projectMembers).values({ projectId: sensitive!.id, userId: caller.id, role: "contributor" });
+    expect(await callSensitivity(db, { projectId: null, callerUserId: outsider.id })).toEqual([]);
+    expect(await callSensitivity(db, { projectId: plain!.id, callerUserId: outsider.id })).toEqual([]);
+    expect(await callSensitivity(db, { projectId: sensitive!.id, callerUserId: outsider.id })).toEqual(["attributed_project"]);
+    // the member cannot drop it by omitting the header or naming another project
+    expect(await callSensitivity(db, { projectId: null, callerUserId: caller.id })).toEqual(["caller_membership"]);
+    expect(await callSensitivity(db, { projectId: plain!.id, callerUserId: caller.id })).toEqual(["caller_membership"]);
+    expect(await callSensitivity(db, { projectId: sensitive!.id, callerUserId: caller.id })).toEqual(["attributed_project"]);
   });
 });

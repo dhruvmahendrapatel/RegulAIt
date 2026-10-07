@@ -46,6 +46,7 @@ import {
   eq,
   ORG_SETTINGS_ID,
   orgSettings,
+  projectMembers,
   projects,
   roleAssignments,
   roles,
@@ -620,9 +621,31 @@ describe("A — a pool that can never reach its quorum", () => {
     expect((await rule(lonelyTool, { quorum: 1, approverRoleId: null })).statusCode).toBe(201);
     const out = await call(lonelyTool, { text: "alone" }, project!.id);
     expect(out.kind).toBe("denied");
-    // unattributed, the same rule needs one approver
+    // B4S-03: the header only RAISES the quorum. A caller who works on no
+    // sensitive project, calling unattributed, needs the rule's one approver…
     const plain = await queued(lonelyTool, { text: "unattributed" });
     expect((await row(plain)).quorum).toBe(1);
+    // …but once the caller is a member of the sensitive project, leaving the
+    // header off (or naming a project that is not sensitive) no longer drops
+    // the sensitive quorum: the lonely rule cannot reach it, so the call is denied
+    const [plainProject] = await db.insert(projects).values({ name: `b4ab-plain-${RUN}` }).returning({ id: projects.id });
+    await db.insert(projectMembers).values({ projectId: project!.id, userId: P.caller.id, role: "contributor" });
+    try {
+      for (const attributed of [undefined, plainProject!.id]) {
+        const out2 = await call(lonelyTool, { text: `member-${attributed ?? "none"}` }, attributed);
+        expect(out2.kind, JSON.stringify(out2)).toBe("denied");
+        expect((out2 as { decision: { ruleId: string } }).decision.ruleId).toBe("approval-quorum-unsatisfiable");
+      }
+      const [audited] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, "approval-quorum-unsatisfiable"), eq(auditLog.toolName, lonelyTool)))
+        .orderBy(desc(auditLog.seq))
+        .limit(1);
+      expect(audited!.detail).toMatchObject({ quorum: 2, sensitive: true, sensitiveBecause: ["caller_membership"] });
+    } finally {
+      await db.delete(projectMembers).where(eq(projectMembers.userId, P.caller.id));
+    }
   });
 });
 

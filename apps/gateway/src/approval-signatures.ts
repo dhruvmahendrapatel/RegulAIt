@@ -63,6 +63,7 @@ import {
   lt,
   lte,
   or,
+  projectMembers,
   projects,
   roleAssignments,
   roles,
@@ -209,10 +210,52 @@ export async function projectIsSensitive(db: Q, projectId: string | null | undef
   return chatContentFenced(await projectPiiMode(db as Db, projectId));
 }
 
+/** why a call is treated as touching sensitive data (B4S-03); empty = it is not */
+export type SensitivitySource = "attributed_project" | "caller_membership";
+
+/**
+ * B4S-03 — is this call SENSITIVE, decided by the SERVER, never by the client
+ * alone? The `x-regulait-project-id` attribution can only RAISE the answer:
+ *
+ *  - `attributed_project`: the project the call is attributed to carries an
+ *    in-app-only classification (the header may name one; it is validated as
+ *    billable by the caller before it gets here);
+ *  - `caller_membership`: the calling person (a worker agent acts for the
+ *    person who started it, so this is the initiating user) is a member of
+ *    ANY project carrying one — omitting the header, or naming another
+ *    project, cannot drop the sensitive quorum for someone who works on
+ *    sensitive data.
+ *
+ * A server or connector carries no project binding in the schema (no column
+ * or link table ties a target to a project), so the target cannot be a
+ * source today; see the B4S-03 note in the ADR.
+ */
+export async function callSensitivity(
+  db: Q,
+  input: { projectId: string | null | undefined; callerUserId: string },
+): Promise<SensitivitySource[]> {
+  const out: SensitivitySource[] = [];
+  if (await projectIsSensitive(db, input.projectId)) out.push("attributed_project");
+  const memberOf = await db
+    .select({ id: projects.id })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+    .where(and(eq(projectMembers.userId, input.callerUserId), sql`jsonb_array_length(coalesce(${projects.classifications}, '[]'::jsonb)) > 0`));
+  for (const p of memberOf) {
+    if (p.id !== input.projectId && (await projectIsSensitive(db, p.id))) {
+      out.push("caller_membership");
+      break;
+    }
+  }
+  return out;
+}
+
 export interface ToolApprovalRequirements {
   quorum: number;
   signatureMode: ApprovalSignatureMode;
   sensitive: boolean;
+  /** what made it sensitive (B4S-03) */
+  sensitiveBecause: SensitivitySource[];
   ruleQuorum: number;
   pool: ApprovalPool;
   satisfiable: boolean;
@@ -236,7 +279,8 @@ export async function toolApprovalRequirements(
     : [];
   const ruleQuorum = Math.max(1, ...matched.map((r) => r.quorum));
   const org = await loadOrgSettings(db as Db);
-  const sensitive = await projectIsSensitive(db, input.projectId);
+  const sensitiveBecause = await callSensitivity(db, input);
+  const sensitive = sensitiveBecause.length > 0;
   const quorum = Math.max(ruleQuorum, sensitive ? org.toolApprovalSensitiveQuorum : 1);
   const pool = await loadApprovalPool(db, {
     namedApproverUserId: input.approverUserId,
@@ -247,6 +291,7 @@ export async function toolApprovalRequirements(
     quorum,
     signatureMode: org.approvalSignatureMode,
     sensitive,
+    sensitiveBecause,
     ruleQuorum,
     pool,
     satisfiable: pool.principals >= quorum,
@@ -265,7 +310,11 @@ export async function auditQuorumUnsatisfiableAtQueue(
 ): Promise<string> {
   const reason =
     `call to '${input.target.toolName}' needs ${input.req.quorum} different approvers` +
-    (input.req.sensitive ? " (its project carries an in-app-only data classification)" : "") +
+    (input.req.sensitiveBecause.includes("attributed_project")
+      ? " (its project carries an in-app-only data classification)"
+      : input.req.sensitive
+        ? " (the caller works on a project that carries an in-app-only data classification)"
+        : "") +
     `, but only ${input.req.pool.principals} eligible approver(s) exist besides the caller — denied rather than queued ` +
     "for an approval nobody could give";
   await db.insert(auditLog).values({
@@ -278,6 +327,7 @@ export async function auditQuorumUnsatisfiableAtQueue(
       quorum: input.req.quorum,
       ruleQuorum: input.req.ruleQuorum,
       sensitive: input.req.sensitive,
+      sensitiveBecause: input.req.sensitiveBecause,
       eligiblePrincipals: input.req.pool.principals,
       projectId: input.projectId,
     },
