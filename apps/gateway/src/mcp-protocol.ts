@@ -96,6 +96,7 @@ import {
 } from "./guardrails.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { recordSpan, type TraceContext } from "./tracing.js";
+import { decodeMcpBlobs, scannableMcpText } from "./mcp-pii.js";
 import { timeouts } from "./timeouts.js";
 import { classifyUpstreamError, withUpstreamRetry } from "./upstream-retry.js";
 import { breakerAdmits, recordUpstreamFailure, recordUpstreamSuccess } from "./upstream-breaker.js";
@@ -543,6 +544,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     let released: Record<string, unknown> = result;
     let outputHits: PiiHit[] = [];
     let withheldReason: string | null = null;
+    const blobs = decodeMcpBlobs(result);
     if (piiMode === "redact") {
       try {
         // base64 blobs cannot be inspected, so they cannot be released redacted
@@ -554,9 +556,15 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
         withheldReason = "output could not be released under the PII redaction policy";
       }
     } else if (piiMode) {
-      const chk = enforcePII(piiMode, { output: JSON.stringify(result) }, piiIntl);
-      outputHits = chk.hits;
-      if (chk.action === "block") withheldReason = `output contains PII: ${piiCategoryList(chk.hits)}`;
+      // B3S-04: a base64 `blob` is decoded and scanned with the rest; one
+      // that cannot be scanned withholds the result (every mode but off)
+      if (blobs.unscannable) {
+        withheldReason = "output carries encoded content that cannot be scanned for PII";
+      } else {
+        const chk = enforcePII(piiMode, { output: scannableMcpText(result, blobs) }, piiIntl);
+        outputHits = chk.hits;
+        if (chk.action === "block") withheldReason = `output contains PII: ${piiCategoryList(chk.hits)}`;
+      }
     }
     if (withheldReason) {
       await db.insert(auditLog).values({
@@ -584,7 +592,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       });
     }
     if (guardrails.active) {
-      const evaluation = runGuardrails(guardrails, "output", JSON.stringify(result));
+      const evaluation = runGuardrails(guardrails, "output", scannableMcpText(result, blobs));
       const g = guardrailOutcome(evaluation);
       if (g) {
         await recordGuardrailDecision(db, {
@@ -632,16 +640,19 @@ async function scanForRelay(
   },
 ): Promise<unknown | null> {
   let value: unknown = payload;
+  const blobs = decodeMcpBlobs(payload);
   try {
+    // B3S-04: a blob is never relayed unscanned (redact cannot rewrite one)
+    if (ctx.piiMode && (blobs.unscannable || (ctx.piiMode === "redact" && blobs.any))) return null;
     if (ctx.piiMode === "redact") {
       value = redactPiiPayload(payload, ctx.piiIntl).value;
-    } else if (ctx.piiMode && enforcePII(ctx.piiMode, { output: JSON.stringify(payload) }, ctx.piiIntl).action === "block") {
+    } else if (ctx.piiMode && enforcePII(ctx.piiMode, { output: scannableMcpText(payload, blobs) }, ctx.piiIntl).action === "block") {
       return null;
     }
   } catch {
     return null;
   }
-  if (ctx.guardrails.active && runGuardrails(ctx.guardrails, "output", JSON.stringify(value)).action === "block") {
+  if (ctx.guardrails.active && runGuardrails(ctx.guardrails, "output", scannableMcpText(value, blobs)).action === "block") {
     return null;
   }
   return value;

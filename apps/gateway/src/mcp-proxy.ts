@@ -57,7 +57,7 @@ import {
   type DispatchGuardrails,
 } from "./guardrails.js";
 import { approvalTargetForServer, governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
-import { prepareMcpPiiAction, redactMcpResult } from "./mcp-pii.js";
+import { decodeMcpBlobs, prepareMcpPiiAction, redactMcpResult, scannableMcpText } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
   auditMcpUpstreamUnreachable,
@@ -1130,6 +1130,7 @@ async function executeGovernedToolCallInner(
     let outputHits: PiiHit[] = [];
     let resultContent: unknown = content;
     let withheld = false;
+    let blobWithheld = false;
     if (preparedPii) {
       try {
         // Re-read output policy too. A tightened policy while the tool ran may
@@ -1145,14 +1146,26 @@ async function executeGovernedToolCallInner(
         resultContent = { content: [{ type: "text", text: "[output withheld: PII transformation could not be safely completed]" }], isError: true };
       }
     } else if (piiMode) {
-      const chk = enforcePII(piiMode, { output: JSON.stringify(content ?? null) }, piiIntl);
-      outputHits = chk.hits;
-      if (chk.action === "block") {
+      // B3S-04: a base64 `blob` is decoded and scanned with the rest, or —
+      // when it cannot be — the result is withheld (every mode but off)
+      const blobs = decodeMcpBlobs(content);
+      if (blobs.unscannable) {
         withheld = true;
+        blobWithheld = true;
         resultContent = {
-          content: [{ type: "text", text: piiWithheldMarker(chk.hits) }],
+          content: [{ type: "text", text: "[output withheld: encoded content that cannot be scanned for PII]" }],
           isError: true,
         };
+      } else {
+        const chk = enforcePII(piiMode, { output: scannableMcpText(content, blobs) }, piiIntl);
+        outputHits = chk.hits;
+        if (chk.action === "block") {
+          withheld = true;
+          resultContent = {
+            content: [{ type: "text", text: piiWithheldMarker(chk.hits) }],
+            isError: true,
+          };
+        }
       }
     }
     const anyHits = inputHits.length > 0 || outputHits.length > 0;
@@ -1169,7 +1182,7 @@ async function executeGovernedToolCallInner(
     let mgOutput: ReturnType<typeof runGuardrails> | null = null;
     let mgWithheld = false;
     if (mcpGuardrails.active) {
-      mgOutput = runGuardrails(mcpGuardrails, "output", JSON.stringify(content ?? null));
+      mgOutput = runGuardrails(mcpGuardrails, "output", scannableMcpText(content, decodeMcpBlobs(content)));
       if (mgOutput.action === "block") {
         mgWithheld = true;
         resultContent = {
@@ -1257,7 +1270,9 @@ async function executeGovernedToolCallInner(
         ruleChain: [],
         reason: preparedPii
           ? "Output could not be released under the PII policy; billed and withheld"
-          : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+          : blobWithheld
+            ? "output carries encoded content that cannot be scanned for PII — billed and withheld"
+            : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
       });
     } else if (piiMode === "warn" && anyHits) {
       await db.insert(auditLog).values({
