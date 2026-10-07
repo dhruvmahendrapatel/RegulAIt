@@ -252,7 +252,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const missing = missingFrom((key) => (key === "affectedPerson" ? affected : form[key as keyof ScreeningForm]));
   const describeComplete = Boolean(description.trim());
   const canContinue = step === DESCRIBE ? describeComplete : step === CLASSIFY ? describeComplete && answers !== null : true;
-  const goTo = (next: number) => setStep(Math.max(0, Math.min(REVIEW, next)));
+  const goTo = (next: number) => { if (!draft.ownerChanged) setStep(Math.max(0, Math.min(REVIEW, next))); };
   const setAnswer = (key: keyof ScreeningForm, value: string | string[]) => setForm((f) => ({ ...f, [key]: value }));
   const editable = sections.filter((section) => !isScreeningSection(section));
   const answersChanged = !sameAnswers(answers, resubmission.screeningAnswers);
@@ -317,6 +317,17 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       setBusy(false);
     }
   };
+
+  // R13-20/21: keep the editing state private to its original owner. The
+  // account-change notice replaces all old sections, progress and retry copy.
+  if (draft.ownerChanged) return <>
+    {leave.dialog}
+    <PageHeader title="Update and resubmit" sub="The account for this editing session changed." />
+    <Card>
+      <p role="alert">You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave.</p>
+      <Button disabled={busy} onClick={() => { draft.abandon(); setDone(true); }}>Discard and leave</Button>
+    </Card>
+  </>;
 
   const primary =
     step < REVIEW ? (

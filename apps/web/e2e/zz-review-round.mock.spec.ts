@@ -861,7 +861,7 @@ test.describe("update and resubmit", () => {
     await expect.poll(() => (state.draft?.state as { step?: number } | undefined)?.step).toBe(3);
     state.persona = SAM;
     expect(await refreshSessionInPlace(page)).toBe("sam");
-    await page.getByRole("button", { name: "Resubmit for review" }).click();
+    await expect(page.getByRole("button", { name: "Resubmit for review" })).toHaveCount(0);
     const refused = page.getByRole("alert").filter({ hasText: "You're now signed in as someone else." });
     await Promise.race([refused.waitFor(), page.waitForURL(new RegExp(`/use-cases/${UC}$`))]);
     expect(state.calls, "nothing is sent under the new person's cookie").toEqual([]);
@@ -963,16 +963,43 @@ test(`R13-13: unsaved resubmission survives cache reset with record HTTP ${recor
   // The cache reset is followed by a real router POP render at the current URL.
   // This does not patch the form or its hook state.
   await page.evaluate(() => window.dispatchEvent(new PopStateEvent("popstate")));
+  await expect(page.getByRole("alert").filter({hasText:"You're now signed in as someone else"})).toBeVisible();
+  await expect(page.getByLabel("What will the system do?")).toHaveCount(0);
+  // Reauthenticating the original owner recovers their in-memory edits.
+  state.persona=RILEY;
+  expect(await refreshSessionInPlace(page)).toBe("riley");
   await expect(page.getByLabel("What will the system do?")).toHaveValue("Latest unsaved Riley edit");
   if (recordStatus === 403) await expect(page.getByRole("status").filter({ hasText: "resubmission is paused" })).toBeVisible();
-  await page.getByRole("link", { name: "Cancel", exact: true }).click();
-  const leave = page.getByRole("dialog", { name: "Leave this resubmission?" });
-  await expect(leave.getByRole("button", { name: "Discard and leave" })).toBeVisible();
-  await leave.getByRole("button", { name: "Discard and leave" }).click();
+  state.persona=SAM;
+  expect(await refreshSessionInPlace(page)).toBe("sam");
+  await page.getByRole("button",{name:"Discard and leave",exact:true}).click();
   await expect(page).not.toHaveURL(/resubmit=/);
   expect(JSON.stringify(state.draft)).toBe(saved);
   expect(state.patches).toEqual([]);
   expect(state.artifacts).toEqual([]);
   expect(state.draftWrites.filter((write) => write.method === "DELETE")).toEqual([]);
 });
+}
+
+for(const recordStatus of [200,403]) for(const startStep of [0,2]) {
+ test(`R13-20/21: owner change at step ${startStep}, record HTTP ${recordStatus}, hides prior sections and saving/retry copy`,async({page})=>{
+  const state=await mockGateway(page,{status:"needs_info",resubmission:true,reviews:[]});
+  await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+  await page.getByLabel("What will the system do?").fill("PRIVATE ORIGINAL OWNER EDIT");
+  for(let i=0;i<startStep;i++)await page.getByRole("button",{name:"Continue",exact:true}).click();
+  state.persona=SAM;
+  if(recordStatus===403)await page.route(`**/v1/use-cases/${UC}`,route=>json(route,{error:"forbidden"},403));
+  expect(await refreshSessionInPlace(page)).toBe("sam");
+  await expect(page.getByRole("alert").filter({hasText:"You're now signed in as someone else"})).toBeVisible();
+  await expect(page.getByLabel("What will the system do?")).toHaveCount(0);
+  await expect(page.getByLabel("Primary purpose domain")).toHaveCount(0);
+  await expect(page.getByLabel("6. Risks and mitigations")).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Continue",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Back",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Refresh use-case record",exact:true})).toHaveCount(0);
+  await expect(page.getByText("Saving your draft…",{exact:true})).toHaveCount(0);
+  await page.getByRole("button",{name:"Discard and leave",exact:true}).click();
+  await expect(page).not.toHaveURL(/resubmit=/);
+  expect(state.patches).toEqual([]);expect(state.artifacts).toEqual([]);expect(state.draftWrites.filter(write=>write.method==="DELETE")).toEqual([]);
+ });
 }
