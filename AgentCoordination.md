@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X21/X22/X24 validated and published; Gemini review nits resolved | Respond to R21/R22/R23 reviews; cross-review X25 when PR opens | — | 10-07 22:32 | X23 outbound integration/test verdict; X25 PR; primary legal/pricing access |
+| Codex | Published receipt, timestamp, detection and monitor drafts; calendar/UX review fixes delivered | Owner cross-review/integration and X25 once A+B+T PR opens | Review-dependent | 10-07 22:36 | X23 outbound wiring/shared-test verdict; X25 PR; primary legal/pricing access |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -248,14 +248,14 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X21 — Batch 4 R: signed decision receipts + offline verifier** (ADR-0186 §R, §4.9). Gateway
   `decision-receipts.ts` (fill the foundation stub), `packages/shared/src/receipts/**`, `scripts/verify-receipts.mjs`,
   receipts panel in `AuditLogPage.tsx`. Branch `codex/x21`. Starts when the foundation commit is announced.
-  Status: READY-FOR-REVIEW (9381dd65, draft #182) — latest actual DB/API/CLI 6/6, verifier 7/7 and shared build PASS; original 5 browser/336 units and builds retained; no full gateway-suite claim
+  Status: READY-FOR-REVIEW (15a0cb91, draft #182) — latest actual DB/API/CLI 6/6, verifier 7/7 and shared build PASS; original 5 browser/336 units and builds retained; no full gateway-suite claim
 - **X22 — Batch 4 S: RFC 3161 timestamps on audit anchors** (ADR-0186 §S). Gateway `audit-timestamp.ts` via the
   `AnchorTimestamper` seam, anchor timestamp UI in `AuditLogPage.tsx`, `.tsr` export. Branch `codex/x22`.
-  Status: READY-FOR-REVIEW (1eebf0cf, draft #184) — authorized canonical capture-time/summary mapper integrated with two red proofs; post-main 13 gateway/crypto and 6 browser PASS, gateway typecheck PASS
+  Status: READY-FOR-REVIEW (7b715714, draft #184) — authorized canonical capture-time/summary mapper integrated with two red proofs; post-main 13 gateway/crypto and 6 browser PASS, gateway typecheck PASS
 - **X23 — Batch 4 V: vendored detection content** (ADR-0186 §V; redact on match). `packages/shared/src/detection-content/**`,
   `scripts/vendor/**`, gateway `detection-content-routes.ts`, packs UI in `GuardrailsPage.tsx` and
   `AdmissionReviewPage.tsx`. Fill the `VENDORED_*` seams with data only. Branch `codex/x23`.
-  Status: BLOCKED (c7f57e70, draft #185) — NeMo zero-rule residual accepted; Claude owns guarded-outbound wiring and central notices; historical shared-test adjudication pending; measured local checks unchanged
+  Status: BLOCKED (b8ed749c, draft #185) — NeMo zero-rule residual accepted; Claude owns guarded-outbound wiring and central notices; historical shared-test adjudication pending; measured local checks unchanged
 
 - **X24 — Batch 4 M: four monitor rules** (ADR-0186 §M). Gateway `monitor-detection-rules.ts`, rules and thresholds in
   `GovernanceAlertsPage.tsx`. Branch `codex/x24`.
