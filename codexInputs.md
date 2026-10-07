@@ -598,3 +598,9 @@ reverification from the persisted canonical record. Gateway `tsc --noEmit` PASS
 (`x22-seams-typecheck.log`). No live/public TSA or certificate-revocation check
 is claimed. Earlier 6/6 browser, 336 units and both build evidence remains in
 the initial X22 section; current-main integration follows this checkpoint.
+
+X22 post-main integration evidence (`1eebf0cf`): 13/13 gateway/crypto cases,
+6/6 browser cases and web build/typecheck PASS. Logs:
+`x22-current-main-{tests,browser,web-build}.log` in the onboarding directory.
+The authorized hot-file dependencies are complete; review and merge remain
+Claude's responsibility.
