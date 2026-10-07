@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
-import { QueryGate, readCurrentOrgSettings, useAction } from "../adminKit";
+import { QueryGate, readCurrentOrgSettings, useAction, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 
 interface MemoryStore {
@@ -83,31 +83,42 @@ export function retentionChanges(settings: Record<string, unknown>, ttl: string,
 
 function RetentionSettings({ settings }: { settings: Record<string, unknown> }) {
   const act = useAction();
+  const flight = useSingleFlight();
   const [ttl, setTtl] = useState(String(settings.semanticCacheTtlSeconds ?? ""));
   const [days, setDays] = useState(String(settings.conversationRetentionDays ?? ""));
   const [pending, setPending] = useState<RetentionBody | null>(null);
   const unavailable = typeof settings.semanticCacheTtlSeconds !== "number" || typeof settings.conversationRetentionDays !== "number";
   const save = (body: RetentionBody) => act.run(() => api.put("/v1/org/settings", body), "Retention settings saved");
   const submit = async () => {
-    const edited = retentionChanges(settings, ttl, days, settings);
-    if ("error" in edited) { act.setError(edited.error); return; }
-    if (Object.keys(edited.body).length === 0) { act.setError("No retention setting changed."); return; }
-    // classify against the values stored now, not the loaded snapshot
-    const change = retentionChanges(settings, ttl, days, await readCurrentOrgSettings());
-    if ("error" in change) { act.setError(change.error); return; }
-    if (change.extends) setPending(change.body);
-    else void save(change.body);
+    // busy BEFORE the re-read: a second submit meanwhile is ignored
+    if (!flight.enter()) return;
+    let confirming = false;
+    try {
+      const edited = retentionChanges(settings, ttl, days, settings);
+      if ("error" in edited) { act.setError(edited.error); return; }
+      if (Object.keys(edited.body).length === 0) { act.setError("No retention setting changed."); return; }
+      // classify against the values stored now, not the loaded snapshot
+      const change = retentionChanges(settings, ttl, days, await readCurrentOrgSettings());
+      if ("error" in change) { act.setError(change.error); return; }
+      if (change.extends) { confirming = true; setPending(change.body); return; }
+      await save(change.body);
+    } finally {
+      // a confirmation keeps the flight until it is cancelled or saved
+      if (!confirming) flight.leave();
+    }
   };
+  const busy = act.busy || flight.busy;
   return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported its retention settings. Refresh before changing them.</p>}
-    <Field label="Semantic cache lifetime (seconds)"><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={act.busy || unavailable} /></Field>
+    <Field label="Semantic cache lifetime (seconds)"><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={busy || unavailable} /></Field>
     <p>The default is 3,600 seconds. Extending it retains cached information longer; every change is audited.</p>
-    <Field label="Conversation retention (days)"><Input type="number" required min={1} max={2555} step={1} value={days} onChange={(event) => setDays(event.target.value)} disabled={act.busy || unavailable} /></Field>
+    <Field label="Conversation retention (days)"><Input type="number" required min={1} max={2555} step={1} value={days} onChange={(event) => setDays(event.target.value)} disabled={busy || unavailable} /></Field>
     <p>The strict default is 30 days since the last activity. More than 30 days relaxes that limit and is audited. Incident evidence holds still apply.</p>
-    <Button type="submit" variant="primary" disabled={act.busy || unavailable}>Save retention settings</Button>
+    <Button type="submit" variant="primary" disabled={busy || unavailable}>Save retention settings</Button>
     {act.error && <p role="alert">{act.error}</p>}
     <ConfirmModal open={pending !== null} title="Extend memory retention?" body={<p>{pending?.semanticCacheTtlSeconds !== undefined && <>Cache lifetime: {pending.semanticCacheTtlSeconds} seconds. </>}{pending?.conversationRetentionDays !== undefined && <>Conversation retention: {pending.conversationRetentionDays} days. </>}This retains information longer and the gateway audits the change.</p>}
-      confirmLabel="Save audited change" onCancel={() => setPending(null)} onConfirm={() => { const body = pending; setPending(null); if (body) void save(body); }} />
+      confirmLabel="Save audited change" onCancel={() => { setPending(null); flight.leave(); }}
+      onConfirm={() => { const body = pending; setPending(null); void (async () => { try { if (body) await save(body); } finally { flight.leave(); } })(); }} />
   </form>;
 }
 

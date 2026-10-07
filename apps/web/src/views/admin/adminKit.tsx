@@ -5,7 +5,7 @@
  * reveal, reason-required modals, and small display helpers. Everything here
  * composes the phase-1 kit — no new dependencies.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import { guidanceOf, type RefusalGuidance } from "../../api/refusals";
@@ -307,6 +307,29 @@ export function RemoveButton(props: {
       />
     </>
   );
+}
+
+/**
+ * One submit at a time for a form that awaits something (a re-read of the
+ * stored values) BEFORE its save starts. `enter()` is synchronous and refuses
+ * re-entry even within the same tick, so two submits cannot both reach the
+ * save; the caller `leave()`s on every exit path — including a cancelled or
+ * completed confirmation it handed the flight to.
+ */
+export function useSingleFlight() {
+  const held = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const enter = () => {
+    if (held.current) return false;
+    held.current = true;
+    setBusy(true);
+    return true;
+  };
+  const leave = () => {
+    held.current = false;
+    setBusy(false);
+  };
+  return { busy, enter, leave };
 }
 
 export function useAction() {

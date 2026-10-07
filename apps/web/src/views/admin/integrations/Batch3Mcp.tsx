@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
-import { optionEls, QueryGate, readCurrentOrgSettings, serverOpts, useAction, useUserPicker, userOpts } from "../adminKit";
+import { optionEls, QueryGate, readCurrentOrgSettings, serverOpts, useAction, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
 import { UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
 
@@ -52,6 +52,7 @@ export function coverageChanges(settings: Record<string, unknown>, methods: stri
 
 function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const act = useAction();
+  const flight = useSingleFlight();
   const [methods, setMethods] = useState<string[]>(Array.isArray(settings.mcpProtocolMethods) ? settings.mcpProtocolMethods : []);
   const [transports, setTransports] = useState<string[]>(Array.isArray(settings.mcpUpstreamTransports) ? settings.mcpUpstreamTransports : []);
   const [pending, setPending] = useState<CoverageBody | null>(null);
@@ -59,25 +60,36 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const save = (body: CoverageBody) => act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved");
   const toggle = (values: string[], value: string, checked: boolean) => checked ? [...values, value] : values.filter((item) => item !== value);
   const submit = async () => {
-    if (Object.keys(coverageChanges(settings, methods, transports, settings).body).length === 0) { act.setError("No MCP coverage setting changed."); return; }
-    // classify against the lists stored now, not the loaded snapshot
-    const change = coverageChanges(settings, methods, transports, await readCurrentOrgSettings());
-    if (change.adds) setPending(change.body); else void save(change.body);
+    // busy BEFORE the re-read: a second submit meanwhile is ignored
+    if (!flight.enter()) return;
+    let confirming = false;
+    try {
+      if (Object.keys(coverageChanges(settings, methods, transports, settings).body).length === 0) { act.setError("No MCP coverage setting changed."); return; }
+      // classify against the lists stored now, not the loaded snapshot
+      const change = coverageChanges(settings, methods, transports, await readCurrentOrgSettings());
+      if (change.adds) { confirming = true; setPending(change.body); return; }
+      await save(change.body);
+    } finally {
+      // a confirmation keeps the flight until it is cancelled or saved
+      if (!confirming) flight.leave();
+    }
   };
+  const busy = act.busy || flight.busy;
   return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
-    <fieldset disabled={act.busy || unavailable}><legend>Enabled protocol methods</legend>
+    <fieldset disabled={busy || unavailable}><legend>Enabled protocol methods</legend>
       {MCP_PROTOCOL_METHODS.map((method) => <label key={method} className={v.row}><input type="checkbox" checked={methods.includes(method)} onChange={(event) => setMethods(toggle(methods, method, event.target.checked))} />{method} · {method.startsWith("logging/") ? "write" : "read"}</label>)}
     </fieldset>
     <p>The strict default refuses all these methods. Enabling one relaxes that boundary and is audited; a matching user grant is still required.</p>
-    <fieldset disabled={act.busy || unavailable}><legend>Enabled upstream transports</legend>
+    <fieldset disabled={busy || unavailable}><legend>Enabled upstream transports</legend>
       {MCP_UPSTREAM_TRANSPORTS.map((transport) => <label key={transport} className={v.row}><input type="checkbox" checked={transports.includes(transport)} onChange={(event) => setTransports(toggle(transports, transport, event.target.checked))} />{transport}</label>)}
     </fieldset>
     <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. Stdio also requires operator-configured executable directories, a pinned command digest and admission approval.</p>
-    <Button type="submit" disabled={act.busy || unavailable}>Save MCP coverage</Button>
+    <Button type="submit" disabled={busy || unavailable}>Save MCP coverage</Button>
     {act.error && <p role="alert">{act.error}</p>}
     <ConfirmModal open={pending !== null} title="Enable more MCP coverage?" body={<p>{pending?.mcpProtocolMethods && <>Enabled methods: {pending.mcpProtocolMethods.join(", ") || "none"}. </>}{pending?.mcpUpstreamTransports && <>Transports: {pending.mcpUpstreamTransports.join(", ") || "none"}. </>}The gateway audits this relaxation; user grants and admission checks still apply.</p>}
-      confirmLabel="Save audited change" onCancel={() => setPending(null)} onConfirm={() => { const body = pending; setPending(null); if (body) void save(body); }} />
+      confirmLabel="Save audited change" onCancel={() => { setPending(null); flight.leave(); }}
+      onConfirm={() => { const body = pending; setPending(null); void (async () => { try { if (body) await save(body); } finally { flight.leave(); } })(); }} />
   </form>;
 }
 

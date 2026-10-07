@@ -22,7 +22,7 @@ import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
-import { QueryGate, useAction, useConnectors } from "../adminKit";
+import { QueryGate, useAction, useConnectors, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 
 /**
@@ -547,6 +547,7 @@ export function outlookRecipientChange(loaded: readonly string[], text: string, 
 
 function OutlookRecipients({ connection, onSaved }: { connection: Connection; onSaved: () => void }) {
   const act = useAction();
+  const flight = useSingleFlight();
   const [text, setText] = useState((connection.outlookRecipientAllowList ?? []).join("\n"));
   const [pending, setPending] = useState<string[] | null>(null);
   const save = async (recipients: string[]) => {
@@ -554,25 +555,35 @@ function OutlookRecipients({ connection, onSaved }: { connection: Connection; on
   };
   const loaded = connection.outlookRecipientAllowList ?? [];
   const submit = async () => {
-    const edited = outlookRecipientChange(loaded, text, loaded);
-    if (edited.kind === "error") { act.setError(edited.error); return; }
-    if (edited.kind === "unchanged") { act.setError("No recipient changed; nothing was saved."); return; }
-    // classify against the list stored now, not the one this form loaded
-    const current = await api.get<ConnectionsResponse>("/v1/chatops/connections").then(
-      (response) => response.connections.find((row) => row.id === connection.id)?.outlookRecipientAllowList ?? null,
-      () => null,
-    );
-    const change = outlookRecipientChange(loaded, text, current);
-    if (change.kind !== "save") return;
-    if (change.adds) setPending(change.recipients);
-    else void save(change.recipients);
+    // busy BEFORE the re-read: a second submit meanwhile is ignored
+    if (!flight.enter()) return;
+    let confirming = false;
+    try {
+      const edited = outlookRecipientChange(loaded, text, loaded);
+      if (edited.kind === "error") { act.setError(edited.error); return; }
+      if (edited.kind === "unchanged") { act.setError("No recipient changed; nothing was saved."); return; }
+      // classify against the list stored now, not the one this form loaded
+      const current = await api.get<ConnectionsResponse>("/v1/chatops/connections").then(
+        (response) => response.connections.find((row) => row.id === connection.id)?.outlookRecipientAllowList ?? null,
+        () => null,
+      );
+      const change = outlookRecipientChange(loaded, text, current);
+      if (change.kind !== "save") return;
+      if (change.adds) { confirming = true; setPending(change.recipients); return; }
+      await save(change.recipients);
+    } finally {
+      // a confirmation keeps the flight until it is cancelled or saved
+      if (!confirming) flight.leave();
+    }
   };
+  const busy = act.busy || flight.busy;
   return <Card title={`Outlook recipients: ${connection.name}`}><form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-    <Field label={`Additional recipients for ${connection.name}`}><Textarea value={text} onChange={(event) => setText(event.target.value)} disabled={act.busy} rows={4} /></Field>
+    <Field label={`Additional recipients for ${connection.name}`}><Textarea value={text} onChange={(event) => setText(event.target.value)} disabled={busy} rows={4} /></Field>
     <p>One exact mailbox per line, at most 50. No display names or wildcards. The registered mailbox remains allowed. Adding recipients relaxes who may receive approval summaries and is audited; all changes are audited.</p>
-    <Button type="submit" disabled={act.busy}>Save Outlook recipients</Button>
+    <Button type="submit" disabled={busy}>Save Outlook recipients</Button>
     {act.error && <p role="alert">{act.error}</p>}
     <ConfirmModal open={pending !== null} title="Allow more Outlook recipients?" body={<p>The resulting allow-list will contain {pending?.length ?? 0} exact mailboxes. Additional recipients may receive approval summaries; this relaxation is audited.</p>}
-      confirmLabel="Save audited recipients" onCancel={() => setPending(null)} onConfirm={() => { const recipients = pending; setPending(null); if (recipients) void save(recipients); }} />
+      confirmLabel="Save audited recipients" onCancel={() => { setPending(null); flight.leave(); }}
+      onConfirm={() => { const recipients = pending; setPending(null); void (async () => { try { if (recipients) await save(recipients); } finally { flight.leave(); } })(); }} />
   </form></Card>;
 }
