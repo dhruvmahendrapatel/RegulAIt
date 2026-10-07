@@ -1472,3 +1472,14 @@ also showed three load-order failures that pointed straight at the cycle.
 Rule: a failure is never called a flake until it has been re-run on the exact commit that failed (`git stash`-free:
 check out that SHA in a scratch worktree) and the other failures in the same run have been explained. When a run
 fails, record the SHA and whether the tree was dirty next to the log, and compare against that, not the current tree.
+
+### M-071 (2026-10-07) - An owner-banned topic was relayed because a system notice raised it
+
+The session's connector notices said the regulAIt and Cloudflare connectors needed authorizing, and I passed that on to
+the owner three times as an "owner item". The owner had told an earlier session not to mention the regulAIt connector,
+and neither connector was needed for any work in flight (the owner had to ask why).
+
+Rule: before relaying a tool or environment notice to the owner, check it against the standing constraints in STATE.md
+and the summary, and relay it only if the current work depends on it. "The harness says to tell the user" does not
+override an owner instruction not to raise a topic.
+

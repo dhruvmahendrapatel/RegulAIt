@@ -44,6 +44,8 @@
  * which is the criticism levelled at in-process scheduler health.
  */
 import { and, auditLog, eq, isNotNull, mcpServers, sql, type Db } from "@regulait/db";
+import type { McpUpstreamTransport } from "@regulait/shared";
+import { observeUpstream, recordBreakerTransition, setBreakerState } from "./metrics.js";
 
 /** the same sentinel every other module in this directory uses for a platform
  * act with no human behind it */
@@ -135,6 +137,9 @@ export interface BreakerRow {
   breakerOpenedAt: Date | null;
   breakerLastError: string | null;
   breakerConsecutiveFailures: number;
+  /** ADR-0185 G5: only for the `circuit_open` upstream metric's transport
+   * label; the row the proxy already holds carries it */
+  transport?: McpUpstreamTransport | string | null;
 }
 
 export type BreakerState = "closed" | "open" | "half_open";
@@ -171,6 +176,12 @@ export async function breakerAdmits(
 
   const openedAt = row.breakerOpenedAt!;
   if (state === "open") {
+    // ADR-0185 G5: a fast-fail is an upstream operation that contacted nobody
+    setBreakerState(row.id, "open");
+    observeUpstream(
+      { serverId: row.id, transport: (row.transport ?? "streamable_http") as McpUpstreamTransport, outcome: "circuit_open" },
+      0,
+    );
     const retryInMs = Math.max(0, cfg.cooldownMs - (Date.now() - openedAt.getTime()));
     return {
       refusedUntilMs: retryInMs,
@@ -198,10 +209,16 @@ export async function breakerAdmits(
   });
 
   if (elected) {
+    recordBreakerTransition(row.id, "half_open");
     return null;
   }
 
   // somebody else got there first — keep fast-failing rather than joining a herd
+  setBreakerState(row.id, "half_open");
+  observeUpstream(
+    { serverId: row.id, transport: (row.transport ?? "streamable_http") as McpUpstreamTransport, outcome: "circuit_open" },
+    0,
+  );
   return {
     refusedUntilMs: cfg.cooldownMs,
     reason:
@@ -225,6 +242,8 @@ export async function recordUpstreamFailure(
   error: string,
   cfg: BreakerConfig = active,
 ): Promise<void> {
+  // ADR-0185 G5: the transition is counted only once its transaction commits
+  let transitioned: "open" | null = null;
   await db.transaction(async (tx) => {
     const [updated] = await tx.update(mcpServers).set({
       breakerConsecutiveFailures: sql`${mcpServers.breakerConsecutiveFailures} + 1`,
@@ -238,6 +257,8 @@ export async function recordUpstreamFailure(
     if (updated.openedAt !== null) {
       await tx.update(mcpServers).set({ breakerOpenedAt: new Date() })
         .where(eq(mcpServers.id, row.id));
+      // half-open → open: the probe failed and the cooldown restarts
+      transitioned = "open";
       return;
     }
     if (updated.failures < cfg.failureThreshold) return;
@@ -253,7 +274,9 @@ export async function recordUpstreamFailure(
         `failures; calls are refused for ${cfg.cooldownMs}ms. Last error: ${error}`,
       detail: { consecutiveFailures: updated.failures, cooldownMs: cfg.cooldownMs },
     });
+    transitioned = "open";
   });
+  if (transitioned) recordBreakerTransition(row.id, transitioned);
 }
 
 /**
@@ -261,6 +284,7 @@ export async function recordUpstreamFailure(
  * breaker was actually open — otherwise every healthy call would write a row.
  */
 export async function recordUpstreamSuccess(db: Db, row: BreakerRow): Promise<void> {
+  let closed = false;
   await db.transaction(async (tx) => {
     const [current] = await tx.select({
       failures: mcpServers.breakerConsecutiveFailures,
@@ -279,8 +303,10 @@ export async function recordUpstreamSuccess(db: Db, row: BreakerRow): Promise<vo
         reason: `upstream '${row.name}' answered a probe; circuit closed and calls resume`,
         detail: { recoveredAfterFailures: current.failures },
       });
+      closed = true;
     }
   });
+  if (closed) recordBreakerTransition(row.id, "closed");
 }
 
 /** Every upstream currently circuit-broken — for the operator read below. */

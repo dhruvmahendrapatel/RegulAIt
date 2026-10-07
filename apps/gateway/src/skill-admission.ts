@@ -80,7 +80,7 @@ import {
   type SkillAdmissionState,
 } from "@regulait/shared";
 import { minReleaseAgeDays, quarantineDetail, recordSighting, skillReleaseStatus } from "./release-age.js";
-import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
+import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -510,51 +510,57 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
       .from(builderAgentSkills)
       .where(and(eq(builderAgentSkills.skillId, id), eq(builderAgentSkills.snapshotDigest, s.contentDigest), eq(builderAgentSkills.snapshotAdmissionState, "held")));
     if (await agentEvidenceHoldRefused(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`)) return reply;
-    const [row] = await db
-      .update(builderSkills)
-      .set({
-        admissionState: "admitted",
-        admittedBy: req.authCtx.userId ?? null,
-        admittedAt: new Date(),
-        admitReason: body.reason,
-        admittedDigest: body.digest,
-      })
-      .where(and(eq(builderSkills.id, id), eq(builderSkills.admissionState, "held"), eq(builderSkills.contentDigest, body.digest)))
-      .returning();
+    // X15-H01: the hold is re-checked inside the admission's own transaction, serialised with hold creation
+    const row = await withAgentEvidenceHold(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`, async (db) => {
+      const [row] = await db
+        .update(builderSkills)
+        .set({
+          admissionState: "admitted",
+          admittedBy: req.authCtx.userId ?? null,
+          admittedAt: new Date(),
+          admitReason: body.reason,
+          admittedDigest: body.digest,
+        })
+        .where(and(eq(builderSkills.id, id), eq(builderSkills.admissionState, "held"), eq(builderSkills.contentDigest, body.digest)))
+        .returning();
+      if (!row) return null;
+      // attachments pinned to this exact body are admitted with it
+      await db
+        .update(builderAgentSkills)
+        .set({ snapshotAdmissionState: "admitted" })
+        .where(
+          and(
+            eq(builderAgentSkills.skillId, id),
+            eq(builderAgentSkills.snapshotDigest, s.contentDigest),
+            eq(builderAgentSkills.snapshotAdmissionState, "held"),
+          ),
+        );
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_USER,
+        objectType: "builder_skill",
+        objectId: id,
+        detail: {
+          phase: "skill-admit",
+          digest: s.contentDigest,
+          version: s.version,
+          severity: s.admissionSeverity,
+          findings: s.admissionFindings ?? [],
+          reason: body.reason,
+        },
+        effect: "allow",
+        ruleId: "builder-skill-admitted",
+        ruleChain: [],
+        reason:
+          `skill '${s.name}' v${s.version} admitted despite admission findings — reason: ${body.reason}. The admission ` +
+          `is pinned to digest ${s.contentDigest.slice(0, 16)}; a changed body is scanned from scratch.`,
+      });
+      return row;
+    });
+    if (row === EVIDENCE_HOLD_REFUSED) return reply;
     if (!row) {
       const [now] = await db.select({ d: builderSkills.contentDigest }).from(builderSkills).where(eq(builderSkills.id, id));
       return reply.status(409).send(now && now.d !== body.digest ? changed : { error: "not_held" });
     }
-    // attachments pinned to this exact body are admitted with it
-    await db
-      .update(builderAgentSkills)
-      .set({ snapshotAdmissionState: "admitted" })
-      .where(
-        and(
-          eq(builderAgentSkills.skillId, id),
-          eq(builderAgentSkills.snapshotDigest, s.contentDigest),
-          eq(builderAgentSkills.snapshotAdmissionState, "held"),
-        ),
-      );
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NIL_USER,
-      objectType: "builder_skill",
-      objectId: id,
-      detail: {
-        phase: "skill-admit",
-        digest: s.contentDigest,
-        version: s.version,
-        severity: s.admissionSeverity,
-        findings: s.admissionFindings ?? [],
-        reason: body.reason,
-      },
-      effect: "allow",
-      ruleId: "builder-skill-admitted",
-      ruleChain: [],
-      reason:
-        `skill '${s.name}' v${s.version} admitted despite admission findings — reason: ${body.reason}. The admission ` +
-        `is pinned to digest ${s.contentDigest.slice(0, 16)}; a changed body is scanned from scratch.`,
-    });
     return reply.send({ skill: { id: row.id, admissionState: row.admissionState, admittedDigest: row.admittedDigest } });
   });
 
@@ -564,32 +570,39 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
     const body = skillVisibilityDecisionSchema.parse(req.body ?? {});
     const [s] = await db.select().from(builderSkills).where(eq(builderSkills.id, id));
     if (!s || s.archivedAt) return reply.status(404).send({ error: "unknown_skill" });
-    if (!s.requestedVisibility) return reply.status(409).send({ error: "no_pending_request" });
+    const requestedVisibility = s.requestedVisibility;
+    if (!requestedVisibility) return reply.status(409).send({ error: "no_pending_request" });
     const approve = body.decision === "approve";
     // D4 DFX2 (D4G-05): a widening that applies changes which runs carry the
     // skill on every agent that pinned it
+    let heldBy: string[] = [];
     if (approve) {
       const pinnedBy = await db.select({ agentId: builderAgentSkills.agentId }).from(builderAgentSkills).where(eq(builderAgentSkills.skillId, id));
-      if (await agentEvidenceHoldRefused(db, req, reply, pinnedBy.map((r) => r.agentId), `visibility of skill ${id} (pinned by this agent)`)) return reply;
+      heldBy = pinnedBy.map((r) => r.agentId);
+      if (await agentEvidenceHoldRefused(db, req, reply, heldBy, `visibility of skill ${id} (pinned by this agent)`)) return reply;
     }
-    await db
-      .update(builderSkills)
-      .set({
-        ...(approve ? { visibility: s.requestedVisibility } : {}),
-        requestedVisibility: null,
-        visibilityRequestedAt: null,
-      })
-      .where(eq(builderSkills.id, id));
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NIL_USER,
-      objectType: "builder_skill",
-      objectId: id,
-      detail: { phase: "skill-visibility", decision: body.decision, from: s.visibility, requested: s.requestedVisibility, reason: body.reason ?? null },
-      effect: approve ? "allow" : "deny",
-      ruleId: approve ? "builder-skill-visibility-approved" : "builder-skill-visibility-denied",
-      ruleChain: [],
-      reason: `widening skill '${s.name}' to ${s.requestedVisibility} ${approve ? "approved" : "denied"} by an admin` + (body.reason ? ` — ${body.reason}` : ""),
+    // X15-H01: an approved widening is re-checked inside its own transaction
+    const done = await withAgentEvidenceHold(db, req, reply, heldBy, `visibility of skill ${id} (pinned by this agent)`, async (db) => {
+      await db
+        .update(builderSkills)
+        .set({
+          ...(approve ? { visibility: requestedVisibility } : {}),
+          requestedVisibility: null,
+          visibilityRequestedAt: null,
+        })
+        .where(eq(builderSkills.id, id));
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_USER,
+        objectType: "builder_skill",
+        objectId: id,
+        detail: { phase: "skill-visibility", decision: body.decision, from: s.visibility, requested: s.requestedVisibility, reason: body.reason ?? null },
+        effect: approve ? "allow" : "deny",
+        ruleId: approve ? "builder-skill-visibility-approved" : "builder-skill-visibility-denied",
+        ruleChain: [],
+        reason: `widening skill '${s.name}' to ${s.requestedVisibility} ${approve ? "approved" : "denied"} by an admin` + (body.reason ? ` — ${body.reason}` : ""),
+      });
     });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return reply.send({ skill: { id, visibility: approve ? s.requestedVisibility : s.visibility, requestedVisibility: null } });
   });
 }

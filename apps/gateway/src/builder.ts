@@ -138,7 +138,7 @@ import {
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
-import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
+import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
  * control or invisible formatting characters (422 `skill_name_invalid`) */
@@ -712,7 +712,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     }
     return agent;
   };
-  const touch = (id: string) => db.update(builderAgents).set({ updatedAt: new Date() }).where(eq(builderAgents.id, id));
+  // X15-H01: takes the handle, so a write inside `withAgentEvidenceHold` touches on its own transaction
+  const touch = (id: string, on: Db = db) => on.update(builderAgents).set({ updatedAt: new Date() }).where(eq(builderAgents.id, id));
 
   // --- agents ----------------------------------------------------------------
 
@@ -830,35 +831,43 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       if (body[k] !== undefined) (set as Record<string, unknown>)[k] = body[k];
     }
     if (body.monthlyLimitUsd !== undefined) set.monthlyLimitUsd = body.monthlyLimitUsd;
-    const [updated] = await db.update(builderAgents).set(set).where(eq(builderAgents.id, agent.id)).returning();
-    if (body.sharedUserIds !== undefined) {
-      await db.delete(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id));
-      const uniq = [...new Set(body.sharedUserIds)].filter((u) => u !== agent.ownerUserId);
-      if (uniq.length) await db.insert(builderAgentShares).values(uniq.map((userId) => ({ agentId: agent.id, userId })));
-    }
-    const changed = Object.keys(body);
-    if (body.sharing !== undefined || body.sharedUserIds !== undefined) {
-      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-sharing-changed",
-        `sharing of '${agent.name}' set to ${body.sharing ?? agent.sharing}`,
-        { from: agent.sharing, to: body.sharing ?? agent.sharing, sharedUserIds: body.sharedUserIds ?? null });
-    }
-    if (body.monthlyLimitUsd !== undefined) {
-      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-limit-changed",
-        `monthly limit of '${agent.name}' set to ${body.monthlyLimitUsd === null ? "none" : `$${body.monthlyLimitUsd}`}`,
-        { from: agent.monthlyLimitUsd, to: body.monthlyLimitUsd });
-    }
-    if (body.projectId !== undefined && body.projectId !== agent.projectId) {
-      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-project-changed",
-        `spend of '${agent.name}' now bills to project ${body.projectId}`,
-        { from: agent.projectId, to: body.projectId });
-    }
-    const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd", "projectId"].includes(k));
-    if (rest.length) {
-      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-updated",
-        `builder agent '${updated!.name}' updated (${rest.join(", ")})`,
-        { fields: rest, ...(body.modelAgentId ? { modelAgentId: body.modelAgentId } : {}) });
-    }
-    return { agent: await agentDetail(db, updated!, viewer) };
+    // X15-H01: the hold is re-checked inside the write's transaction when the change is one it holds (the
+    // pre-check's condition); a new model is a new dependency edge, so it takes the hold lock exclusively
+    const heldChange =
+      body.instructions !== undefined || body.modelAgentId !== undefined || body.computerUse !== undefined || (body.name !== undefined && body.name !== agent.name) || (body.description !== undefined && body.description !== agent.description);
+    const updated = await withAgentEvidenceHold(db, req, reply, heldChange ? agent.id : [], "instructions, name, description, model or computer use", async (db) => {
+      const [updated] = await db.update(builderAgents).set(set).where(eq(builderAgents.id, agent.id)).returning();
+      if (body.sharedUserIds !== undefined) {
+        await db.delete(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id));
+        const uniq = [...new Set(body.sharedUserIds)].filter((u) => u !== agent.ownerUserId);
+        if (uniq.length) await db.insert(builderAgentShares).values(uniq.map((userId) => ({ agentId: agent.id, userId })));
+      }
+      const changed = Object.keys(body);
+      if (body.sharing !== undefined || body.sharedUserIds !== undefined) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-sharing-changed",
+          `sharing of '${agent.name}' set to ${body.sharing ?? agent.sharing}`,
+          { from: agent.sharing, to: body.sharing ?? agent.sharing, sharedUserIds: body.sharedUserIds ?? null });
+      }
+      if (body.monthlyLimitUsd !== undefined) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-limit-changed",
+          `monthly limit of '${agent.name}' set to ${body.monthlyLimitUsd === null ? "none" : `$${body.monthlyLimitUsd}`}`,
+          { from: agent.monthlyLimitUsd, to: body.monthlyLimitUsd });
+      }
+      if (body.projectId !== undefined && body.projectId !== agent.projectId) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-project-changed",
+          `spend of '${agent.name}' now bills to project ${body.projectId}`,
+          { from: agent.projectId, to: body.projectId });
+      }
+      const rest = changed.filter((k) => !["sharing", "sharedUserIds", "monthlyLimitUsd", "projectId"].includes(k));
+      if (rest.length) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-updated",
+          `builder agent '${updated!.name}' updated (${rest.join(", ")})`,
+          { fields: rest, ...(body.modelAgentId ? { modelAgentId: body.modelAgentId } : {}) });
+      }
+      return updated!;
+    }, { widensHolds: body.modelAgentId !== undefined && body.modelAgentId !== agent.modelAgentId });
+    if (updated === EVIDENCE_HOLD_REFUSED) return reply;
+    return { agent: await agentDetail(db, updated, viewer) };
   });
 
   app.delete("/v1/builder/agents/:id", async (req, reply) => {
@@ -870,11 +879,14 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // (containment, allowed), but it also stops being its parents' sub-agent —
     // a change to each parent, so a held parent holds it
     if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "archive (removes it as a sub-agent)", { includeSelf: false })) return reply;
-    await db.update(builderAgents).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderAgents.id, agent.id));
-    // an archived agent stops being anyone's sub-agent, and its schedules stop
-    await db.delete(builderAgentSubagents).where(eq(builderAgentSubagents.childId, agent.id));
-    await db.update(builderAgentSchedules).set({ enabled: false, nextRunAt: null }).where(eq(builderAgentSchedules.agentId, agent.id));
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-deleted", `builder agent '${agent.name}' archived`);
+    const done = await withAgentEvidenceHold(db, req, reply, agent.id, "archive (removes it as a sub-agent)", async (db) => {
+      await db.update(builderAgents).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderAgents.id, agent.id));
+      // an archived agent stops being anyone's sub-agent, and its schedules stop
+      await db.delete(builderAgentSubagents).where(eq(builderAgentSubagents.childId, agent.id));
+      await db.update(builderAgentSchedules).set({ enabled: false, nextRunAt: null }).where(eq(builderAgentSchedules.agentId, agent.id));
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-deleted", `builder agent '${agent.name}' archived`);
+    }, { includeSelf: false });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return reply.status(204).send();
   });
 
@@ -932,32 +944,35 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     });
     // ADR-0181: ask-first is on by default, so turning it off for a tool is a
     // relaxation — the audit row carries the previous toolbox (old -> new)
-    const previousTools = await db
-      .select({ kind: builderAgentTools.kind, refId: builderAgentTools.refId, requiresApproval: builderAgentTools.requiresApproval })
-      .from(builderAgentTools)
-      .where(eq(builderAgentTools.agentId, agent.id));
-    await db.transaction(async (tx) => {
-      await tx.delete(builderAgentTools).where(eq(builderAgentTools.agentId, agent.id));
-      if (rows.length) {
-        await tx.insert(builderAgentTools).values(
-          rows.map((t) => ({ agentId: agent.id, kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
-        );
-      }
-    });
-    await touch(agent.id);
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-tools-changed",
-      `toolbox of '${agent.name}' set to ${rows.length} tool(s)`,
-      {
-        tools: rows.map((t) => ({ kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
-        // keyed `kind:refId`; a tool absent on one side reads null (added / removed)
-        transitions: settingTransitions(
-          Object.fromEntries(previousTools.map((t) => [`${t.kind}:${t.refId}`, { requiresApproval: t.requiresApproval }])),
-          Object.fromEntries([
-            ...previousTools.map((t) => [`${t.kind}:${t.refId}`, null] as const),
-            ...rows.map((t) => [`${t.kind}:${t.refId}`, { requiresApproval: t.requiresApproval }] as const),
-          ]),
-        ),
+    const done = await withAgentEvidenceHold(db, req, reply, agent.id, "tools", async (db) => {
+      const previousTools = await db
+        .select({ kind: builderAgentTools.kind, refId: builderAgentTools.refId, requiresApproval: builderAgentTools.requiresApproval })
+        .from(builderAgentTools)
+        .where(eq(builderAgentTools.agentId, agent.id));
+      await db.transaction(async (tx) => {
+        await tx.delete(builderAgentTools).where(eq(builderAgentTools.agentId, agent.id));
+        if (rows.length) {
+          await tx.insert(builderAgentTools).values(
+            rows.map((t) => ({ agentId: agent.id, kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
+          );
+        }
       });
+      await touch(agent.id, db);
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-tools-changed",
+        `toolbox of '${agent.name}' set to ${rows.length} tool(s)`,
+        {
+          tools: rows.map((t) => ({ kind: t.kind, refId: t.refId, requiresApproval: t.requiresApproval })),
+          // keyed `kind:refId`; a tool absent on one side reads null (added / removed)
+          transitions: settingTransitions(
+            Object.fromEntries(previousTools.map((t) => [`${t.kind}:${t.refId}`, { requiresApproval: t.requiresApproval }])),
+            Object.fromEntries([
+              ...previousTools.map((t) => [`${t.kind}:${t.refId}`, null] as const),
+              ...rows.map((t) => [`${t.kind}:${t.refId}`, { requiresApproval: t.requiresApproval }] as const),
+            ]),
+          ),
+        });
+    });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 
@@ -981,19 +996,23 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         detail: "one of these agents already uses this agent (directly or through others) as a sub-agent",
       });
     }
-    await db.transaction(async (tx) => {
-      await tx.delete(builderAgentSubagents).where(eq(builderAgentSubagents.parentId, agent.id));
-      const seen = new Set<string>();
-      const rows = body.subagents.filter((s) => (seen.has(s.childId) ? false : (seen.add(s.childId), true)));
-      if (rows.length) {
-        await tx.insert(builderAgentSubagents).values(
-          rows.map((s, i) => ({ parentId: agent.id, childId: s.childId, name: s.name, description: s.description, position: i })),
-        );
-      }
-    });
-    await touch(agent.id);
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-subagents-changed",
-      `sub-agents of '${agent.name}' set to ${childIds.length}`, { childIds });
+    // X15-H01: a sub-agent edge widens who a hold covers, so the hold lock is taken exclusively
+    const done = await withAgentEvidenceHold(db, req, reply, agent.id, "sub-agents", async (db) => {
+      await db.transaction(async (tx) => {
+        await tx.delete(builderAgentSubagents).where(eq(builderAgentSubagents.parentId, agent.id));
+        const seen = new Set<string>();
+        const rows = body.subagents.filter((s) => (seen.has(s.childId) ? false : (seen.add(s.childId), true)));
+        if (rows.length) {
+          await tx.insert(builderAgentSubagents).values(
+            rows.map((s, i) => ({ parentId: agent.id, childId: s.childId, name: s.name, description: s.description, position: i })),
+          );
+        }
+      });
+      await touch(agent.id, db);
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-subagents-changed",
+        `sub-agents of '${agent.name}' set to ${childIds.length}`, { childIds });
+    }, { widensHolds: true });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 
@@ -1035,13 +1054,16 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       configuredPrompt(agent, next.map((n) => ({ name: n.snapshotName || rows.find((r) => r.id === n.skillId)!.name, body: n.bodySnapshot }))),
     );
     if (tooLarge) return reply.status(422).send(tooLarge);
-    await db.transaction(async (tx) => {
-      await tx.delete(builderAgentSkills).where(eq(builderAgentSkills.agentId, agent.id));
-      if (next.length) await tx.insert(builderAgentSkills).values(next);
+    const done = await withAgentEvidenceHold(db, req, reply, agent.id, "skills", async (db) => {
+      await db.transaction(async (tx) => {
+        await tx.delete(builderAgentSkills).where(eq(builderAgentSkills.agentId, agent.id));
+        if (next.length) await tx.insert(builderAgentSkills).values(next);
+      });
+      await touch(agent.id, db);
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skills-changed",
+        `skills of '${agent.name}' set to ${ids.length}`, { skillIds: ids });
     });
-    await touch(agent.id);
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skills-changed",
-      `skills of '${agent.name}' set to ${ids.length}`, { skillIds: ids });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 
@@ -1073,24 +1095,27 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const others = (await pinnedSkillsForRun(db, agent)).filter((x) => x.skillId !== skillId);
     const tooLarge = promptTooLarge(configuredPrompt(agent, [...others, { name: skill.name, body: skill.body }]));
     if (tooLarge) return reply.status(422).send(tooLarge);
-    await db
-      .update(builderAgentSkills)
-      .set((({ agentId: _a, skillId: _s, ...rest }) => rest)(pinned(agent.id, skill)))
-      .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
-    await touch(agent.id);
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-reattached",
-      `skill '${skill.name}' on '${agent.name}' updated to the library's current version`,
-      {
-        skillId,
-        from: link.skillUpdatedAt.toISOString(),
-        to: skill.updatedAt.toISOString(),
-        fromVersion: link.snapshotVersion,
-        toVersion: skill.version,
-        fromName: link.snapshotName,
-        toName: skill.name,
-        fromDigest: link.snapshotDigest,
-        toDigest: skillDigest(skill.name, skill.body),
-      });
+    const done = await withAgentEvidenceHold(db, req, reply, agent.id, `skill re-attach (${skillId})`, async (db) => {
+      await db
+        .update(builderAgentSkills)
+        .set((({ agentId: _a, skillId: _s, ...rest }) => rest)(pinned(agent.id, skill)))
+        .where(and(eq(builderAgentSkills.agentId, agent.id), eq(builderAgentSkills.skillId, skillId)));
+      await touch(agent.id, db);
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-skill-reattached",
+        `skill '${skill.name}' on '${agent.name}' updated to the library's current version`,
+        {
+          skillId,
+          from: link.skillUpdatedAt.toISOString(),
+          to: skill.updatedAt.toISOString(),
+          fromVersion: link.snapshotVersion,
+          toVersion: skill.version,
+          fromName: link.snapshotName,
+          toName: skill.name,
+          fromDigest: link.snapshotDigest,
+          toDigest: skillDigest(skill.name, skill.body),
+        });
+    });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return { agent: await agentDetail(db, (await loadVisibleAgent(db, agent.id, viewer))!, viewer) };
   });
 
@@ -1114,17 +1139,21 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         limit: BUILDER_LIMITS.memoryPerAgent,
       });
     }
-    const [row] = await db
-      .insert(builderAgentMemory)
-      .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId })
-      .returning();
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, { memoryId: row!.id });
+    const row = await withAgentEvidenceHold(db, req, reply, agent.id, "memory (add)", async (db) => {
+      const [row] = await db
+        .insert(builderAgentMemory)
+        .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId })
+        .returning();
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, { memoryId: row!.id });
+      return row!;
+    });
+    if (row === EVIDENCE_HOLD_REFUSED) return reply;
     const names = await userNames(db, [viewer.userId]);
     return reply.status(201).send({
-      id: row!.id,
-      content: row!.content,
+      id: row.id,
+      content: row.content,
       createdByName: names.get(viewer.userId) ?? null,
-      createdAt: row!.createdAt.toISOString(),
+      createdAt: row.createdAt.toISOString(),
     });
   });
 
@@ -1135,12 +1164,18 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const agent = await editable(req, reply, viewer);
     if (!agent) return;
     if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "memory (remove)")) return reply; // D4 DFX2 (D4G-05)
-    const deleted = await db
-      .delete(builderAgentMemory)
-      .where(and(eq(builderAgentMemory.id, memoryId), eq(builderAgentMemory.agentId, agent.id)))
-      .returning({ id: builderAgentMemory.id });
-    if (!deleted.length) return reply.status(404).send({ error: "unknown_memory" });
-    await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-removed", `memory removed from '${agent.name}'`, { memoryId });
+    const deleted = await withAgentEvidenceHold(db, req, reply, agent.id, "memory (remove)", async (db) => {
+      const deleted = await db
+        .delete(builderAgentMemory)
+        .where(and(eq(builderAgentMemory.id, memoryId), eq(builderAgentMemory.agentId, agent.id)))
+        .returning({ id: builderAgentMemory.id });
+      if (deleted.length) {
+        await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-removed", `memory removed from '${agent.name}'`, { memoryId });
+      }
+      return deleted.length > 0;
+    });
+    if (deleted === EVIDENCE_HOLD_REFUSED) return reply;
+    if (!deleted) return reply.status(404).send({ error: "unknown_memory" });
     return reply.status(204).send();
   });
 
@@ -1188,7 +1223,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         createdAt: now,
       })
       .returning();
-    await touch(agent.id);
+    await touch(agent.id, db);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-schedule-created",
       `schedule '${body.name}' (${body.cadence} ${body.timeUtc} UTC) added to '${agent.name}'` +
         (isOwner ? "" : " by someone other than the owner: saved off until the owner turns it on"),
@@ -1327,7 +1362,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       .insert(builderAgentChannels)
       .values({ agentId: agent.id, provider: body.provider, chatopsConnectionId: connectionId })
       .returning();
-    await touch(agent.id);
+    await touch(agent.id, db);
     await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-channel-added",
       `${body.provider} channel added to '${agent.name}'${connectionId ? "" : viewer.isAdmin ? " (needs setup: no matching ChatOps connection)" : " (needs setup: an admin binds the connection)"}`,
       { channelId: row!.id, provider: body.provider, chatopsConnectionId: connectionId });
@@ -1893,9 +1928,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // pinned it carries it (`skillVisible` in the runtime), so a visibility
     // change that applies now (a narrowing, or an admin's widening; anyone
     // else's widening is only a request) is a change to every agent holding a copy
+    let heldBy: string[] = [];
     if (body.visibility !== undefined && body.visibility !== s.visibility && (body.visibility === "private" || viewer.isAdmin)) {
-      const pinnedBy = await agentsPinning(db, s.id);
-      if (await agentEvidenceHoldRefused(db, req, reply, pinnedBy, `visibility of skill ${s.id} (pinned by this agent)`)) return reply;
+      heldBy = await agentsPinning(db, s.id);
+      if (await agentEvidenceHoldRefused(db, req, reply, heldBy, `visibility of skill ${s.id} (pinned by this agent)`)) return reply;
     }
     if (body.visibility !== undefined) {
       if (body.visibility === "private") Object.assign(set, { visibility: "private", requestedVisibility: null, visibilityRequestedAt: null });
@@ -1910,37 +1946,43 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     // still has that digest and that updated_at (to the millisecond a JS Date
     // carries). Otherwise a concurrent save has moved it and this one would
     // store a verdict for text it never scanned: 409, nothing written.
-    const [row] = await db
-      .update(builderSkills)
-      .set(set)
-      .where(
-        and(
-          eq(builderSkills.id, s.id),
-          eq(builderSkills.contentDigest, s.contentDigest),
-          sql`abs(extract(epoch from (${builderSkills.updatedAt} - ${s.updatedAt.toISOString()}::timestamptz))) < 0.001`,
-        ),
-      )
-      .returning();
+    // X15-H01: when the visibility change is held, it is re-checked inside the write's transaction
+    const row = await withAgentEvidenceHold(db, req, reply, heldBy, `visibility of skill ${s.id} (pinned by this agent)`, async (db) => {
+      const [row] = await db
+        .update(builderSkills)
+        .set(set)
+        .where(
+          and(
+            eq(builderSkills.id, s.id),
+            eq(builderSkills.contentDigest, s.contentDigest),
+            sql`abs(extract(epoch from (${builderSkills.updatedAt} - ${s.updatedAt.toISOString()}::timestamptz))) < 0.001`,
+          ),
+        )
+        .returning();
+      if (!row) return null;
+      if (admission && promptChanged) await sightSkill(db, s.id, admission.digest);
+      await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-updated",
+        `skill '${row.name}' updated (${Object.keys(body).join(", ")})`, {
+          fields: Object.keys(body),
+          version: row.version,
+          digest: row.contentDigest,
+          ...(promptChanged ? { fromVersion: s.version, fromDigest: s.contentDigest } : {}),
+          ...(next.name !== s.name ? { renamedFrom: s.name } : {}),
+          admissionState: row.admissionState,
+        });
+      if (admission) await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: row.name, admission, trigger: "update", previousState: s.admissionState });
+      if (requested) {
+        await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-visibility-requested",
+          `widening skill '${row.name}' to workspace is waiting for an admin`, { requested: "workspace" });
+      }
+      return row;
+    });
+    if (row === EVIDENCE_HOLD_REFUSED) return reply;
     if (!row) {
       return reply.status(409).send({
         error: "skill_changed_concurrently",
         detail: `skill '${s.name}' was changed by another save while this one was being checked; reload it and try again`,
       });
-    }
-    if (admission && promptChanged) await sightSkill(db, s.id, admission.digest);
-    await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-updated",
-      `skill '${row.name}' updated (${Object.keys(body).join(", ")})`, {
-        fields: Object.keys(body),
-        version: row.version,
-        digest: row.contentDigest,
-        ...(promptChanged ? { fromVersion: s.version, fromDigest: s.contentDigest } : {}),
-        ...(next.name !== s.name ? { renamedFrom: s.name } : {}),
-        admissionState: row.admissionState,
-      });
-    if (admission) await auditSkillAdmission(db, { userId: viewer.userId, skillId: s.id, name: row.name, admission, trigger: "update", previousState: s.admissionState });
-    if (requested) {
-      await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-visibility-requested",
-        `widening skill '${row.name}' to workspace is waiting for an admin`, { requested: "workspace" });
     }
     const [view] = await skillView([row!], viewer);
     return { skill: { ...view!, body: row!.body } };
@@ -1952,9 +1994,13 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const s = await visibleSkill(req, reply, viewer, true);
     if (!s) return;
     // D4 DFX2 (D4G-05): an archived skill drops out of every agent that pinned it
-    if (await agentEvidenceHoldRefused(db, req, reply, await agentsPinning(db, s.id), `removal of skill ${s.id} (pinned by this agent)`)) return reply;
-    await db.update(builderSkills).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderSkills.id, s.id));
-    await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-deleted", `skill '${s.name}' removed from the library`);
+    const pinnedBy = await agentsPinning(db, s.id);
+    if (await agentEvidenceHoldRefused(db, req, reply, pinnedBy, `removal of skill ${s.id} (pinned by this agent)`)) return reply;
+    const done = await withAgentEvidenceHold(db, req, reply, pinnedBy, `removal of skill ${s.id} (pinned by this agent)`, async (db) => {
+      await db.update(builderSkills).set({ archivedAt: new Date(), updatedAt: new Date() }).where(eq(builderSkills.id, s.id));
+      await audit(db, viewer.userId, "builder_skill", s.id, "builder-skill-deleted", `skill '${s.name}' removed from the library`);
+    });
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return reply.status(204).send();
   });
 

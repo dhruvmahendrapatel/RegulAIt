@@ -94,7 +94,7 @@ import {
   type MonitorAssuranceSubject,
 } from "@regulait/shared";
 import { canEditAgent, loadVisibleAgent, type Viewer } from "./builder-access.js";
-import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
+import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-05): Art. 73(6) evidence hold
 import { connectorOperations } from "./builder-tools.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { loadCardsForSubject } from "./mrm.js";
@@ -561,7 +561,8 @@ export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
     // the declaration and its audit row commit together or not at all
     let view: BuilderAgentAutonomyView;
     try {
-      view = await db.transaction(async (tx) => {
+      // X15-H01: the hold is re-checked inside the declaration's transaction (this one nests as a savepoint)
+      const got = await withAgentEvidenceHold(db, req, reply, agent.id, "declared autonomy class", (db) => db.transaction(async (tx) => {
         const [updated] = await tx
           .update(builderAgents)
           .set({
@@ -593,7 +594,9 @@ export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
             : `autonomy declaration of builder agent '${agent.name}' withdrawn (was ${agent.declaredAutonomyClass ?? "undeclared"}; observed ${v.observed.class} applies)`,
         });
         return v;
-      });
+      }));
+      if (got === EVIDENCE_HOLD_REFUSED) return reply;
+      view = got;
     } catch (e) {
       // the credential scrub can lengthen a note past the store's limit
       if (isCheckViolation(e, "builder_agents_autonomy_declared_ck")) {

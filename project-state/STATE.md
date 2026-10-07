@@ -1,5 +1,5 @@
 ---
-phase: adr0183-batch-3-next
+phase: adr0183-batch-4-next
 last_updated: 2026-10-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,40 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-07 - Batch 3 merged (PR #147, 89e252a). Batch 4 is next.**
+- ADR-0185 built: memory retention sweeps (30-day conversations, cache TTL, never under an incident hold, enforced
+  at read time too); `/metrics` on OpenTelemetry (off unless a listener and token are set; fixed-vocabulary labels);
+  MCP `resources`/`prompts`/`completion`/`logging` as per-user, per-method decisions, deny by default, not covered by
+  read-only grants; stdio and SSE upstreams (host directory allow-list plus admin opt-in, fixed argv, safe env,
+  pinned digest, same-origin SSE); owners on servers and connectors feeding alert ownership; memory-store
+  inventory; Outlook exact-mailbox recipient allow-list. Migration 0169.
+- Security review of the batch found 3 Medium and 3 Low, all fixed with red proofs before merge: a grantless caller
+  could spawn stdio processes; a mid-connect disconnect leaked the child and its slot; retention deletes skipped the
+  evidence-hold lock; base64 blobs skipped the PII scan; log relays ignored the caller's own grant; group-writable
+  stdio commands were accepted.
+- X15-H01 follow-up (PR #145): the evidence-hold refusal now commits its audit row before replying (the
+  intermittent race-test failure on main was a real ordering bug).
+- Gemini's G16–G18 research was pushed straight to `dhruv/active`; kept unmerged on `gemini/g16-g18`, changes
+  requested (EU AI Act Art. 73 death deadline is 10 days, not 2; unsourced versions; register errors).
+- Known test hygiene: `mcp-proxy.test` and one G3 test fail when re-run on a database they already used (pass on a
+  fresh one) — pre-existing, to fix.
+- Next: batch 4 (I6 dual control and step-up, passkey-signed approvals, signed receipts, RFC 3161 timestamps, trace
+  standards fix, vendored detection content, monitor rules). Next migration 0170, next ADR 0186. Codex: X13 rework,
+  X18 (batch 3 UI, API now live), X19, X20.
+
+**2026-10-07 - X15 security fixes, and batch 3 decided (ADR-0185).**
+- X15 (Codex's adversarial review of D4) found two real gateway bugs, now fixed with red proofs:
+  - H01: the agent evidence hold was checked outside the writing transaction at all 23 write sites. One advisory lock
+    now orders protected writes (shared) against hold creation (exclusive), and the hold is re-checked inside the
+    write. Residual: switching the org's `incident_evidence_hold` setting on does not take the lock.
+  - R01: a decision-regression preview now records the digest of the cases it ran, and admission refuses a preview
+    whose case set has changed (409 `decision_regression_not_previewed`, `cases_changed`).
+- ADR-0185 decides batch 3 (owner, 2026-10-07): conversations kept 30 days; owners default to the registering admin;
+  `/metrics` on OpenTelemetry because `prom-client` is unmaintained. Migration 0169. Contracts for Codex in
+  AgentCoordination §4.8.
+- Codex batch X12/X14/X15/X16/X17 is integrated in PR #143; X13 went back for a fix. Codex's queue: X13, X18 (batch 3
+  UI), X19 (adversarial review of batch 2), X20 (keyboard audit part 2).
 
 **2026-10-07 - Batch 1 (PR #131) and batch 2 (PR #133, 38d3d1c) merged. Batch 3 is next.**
 - Batch 2 shipped `otpauth`, MRM staleness in SQL, refusal guidance, the Outlook send half (`REGULAIT_PUBLIC_URL`,

@@ -302,6 +302,31 @@ admission `enforce`, a 7-day release-age cooldown, private MCP ranges closed, co
 endpoints adjudicated against the egress allow-list, and backup verification, spend monitoring and
 stale-credential alerts on. Each is relaxable by an admin, and every change is audited old → new.
 
+**Metrics and stdio MCP upstreams (ADR-0185).** Both are off unless you set them:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `REGULAIT_METRICS_LISTEN` | unset (no `/metrics` anywhere) | `host:port` or a port (e.g. `127.0.0.1:9464`): a **separate** listener that serves only `GET /metrics` (Prometheus text). Keep it on a private network. |
+| `REGULAIT_METRICS_TOKEN` | unset | Required (at least 32 characters, no whitespace) whenever either metrics variable is on, or the gateway **refuses to start**. Scrapers send it as `Authorization: Bearer <token>`; a wrong or missing token is a 401 `metrics_unauthorized`, counted rather than audited. |
+| `REGULAIT_METRICS_ON_MAIN_LISTENER` | off | `1`/`true`/`on` also mounts `GET /metrics` on the public listener, with the same token check. Any other value than on/off refuses boot. |
+| `REGULAIT_MCP_STDIO_ALLOWED_DIRS` | unset (stdio upstreams impossible) | Absolute directories, separated by `:`, that a stdio MCP server's command must resolve inside. An admin must also enable `stdio` in the org's MCP upstream transports; both are needed. Relative or missing entries allow nothing. |
+| `REGULAIT_MCP_STDIO_MAX_PROCS` | `4` | Most stdio upstream processes this host runs at once (one per request); capped at 64; a request past the cap is refused (`mcp_stdio_busy`), nothing started. |
+
+Metric labels carry no user, project, email, tool name, URL or URI. A stdio child gets only a minimal safe
+environment (never `DATABASE_URL` or `REGULAIT_DATA_KEY`), and its command's sha256 is pinned at registration.
+
+Before you register a stdio server:
+
+- **Put no secret in its arguments.** The argument list is stored in the audit log and shown to admins on the
+  server's page. Give the program its credentials some other way, such as a file only the gateway's user can read.
+- **Only the command file itself is pinned.** If it is a script, the interpreter it names on its `#!` line and
+  any modules that interpreter loads are not checked. Keep those where only an administrator can write them.
+  Pinning them, and running the child in isolation, is planned (PF-06).
+- **Keep the command and its directories writable by their owner only.** The gateway refuses a command file that
+  is world- or group-writable (`world_writable`, `group_writable`). It also refuses one in a directory that is
+  group- or world-writable, checking every directory from the file's up to the allowed directory
+  (`writable_parent`).
+
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always
 on a box with `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` set — such checks stay pending until CI
