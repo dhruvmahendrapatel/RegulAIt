@@ -185,6 +185,7 @@ function MetricsPostureCard() {
         <p>Separate metrics listener: {metrics.separateListener === "off" ? "off" : metrics.separateListener === "loopback" ? "loopback only" : "non-loopback"}.</p>
         <p>Main listener: {metrics.mainListener ? "metrics enabled" : "no metrics endpoint served"}.</p>
         <p>Bearer token configured: {metrics.tokenConfigured ? "yes" : "no"}.</p>
+        {/* Defensive state: the current gateway refuses enabled metrics listeners without a token. */}
         {(metrics.separateListener !== "off" || metrics.mainListener) && !metrics.tokenConfigured &&
           <p role="alert">The gateway reports an enabled metrics listener without a configured bearer token. Ask the deployment operator to check protection.</p>}
       </> : <p>Separate metrics listener: unmeasured. This gateway has not reported a complete metrics configuration. Ask the deployment operator to verify the listener and token protection.</p>)}
