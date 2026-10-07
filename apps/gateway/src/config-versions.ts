@@ -110,7 +110,7 @@ import {
   type ResolvedVersion,
 } from "@regulait/shared";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
-import { agentEvidenceHoldRefused } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-02): Art. 73(6) evidence hold
+import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-02): Art. 73(6) evidence hold
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -1202,6 +1202,19 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     artifactType === "agent_system_prompt" || artifactType === "agent_config"
       ? agentEvidenceHoldRefused(db, req, reply, artifactId, `${verb} of ${artifactType} (config versions)`)
       : Promise.resolve(false);
+  /** X15-H01 — the write a held route performs, in ONE transaction with the hold re-checked inside it and
+   * serialised with hold creation (`withAgentEvidenceHold`); a rule artifact's write runs as before. */
+  const agentHeldWrite = <T>(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    artifactType: ConfigArtifactType,
+    artifactId: string,
+    verb: string,
+    write: (tx: Db) => Promise<T>,
+  ): Promise<T | typeof EVIDENCE_HOLD_REFUSED> =>
+    artifactType === "agent_system_prompt" || artifactType === "agent_config"
+      ? withAgentEvidenceHold(db, req, reply, artifactId, `${verb} of ${artifactType} (config versions)`, write)
+      : write(db);
   /** Batch B7c — the manual door for the observation-retention sweep, exactly
    * as every ADR-0064 sweep keeps one (POST /v1/mrm/expiry-sweep etc.). Calls
    * the SAME function the scheduler job calls. Static segment, so it can never
@@ -1301,14 +1314,17 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     }
     // a draft (activate: false) changes nothing that serves; activating it does
     if (body.activate && (await agentHoldRefused(req, reply, artifactType, artifactId, "create and activate a version"))) return reply;
-    const res = await newVersion(db, {
-      artifactType,
-      artifactId,
-      body: body.body,
-      label: body.label ?? null,
-      authorUserId: req.authCtx.userId ?? null,
-      activate: body.activate,
-    });
+    const create = (on: Db) =>
+      newVersion(on, {
+        artifactType,
+        artifactId,
+        body: body.body,
+        label: body.label ?? null,
+        authorUserId: req.authCtx.userId ?? null,
+        activate: body.activate,
+      });
+    const res = body.activate ? await agentHeldWrite(req, reply, artifactType, artifactId, "create and activate a version", create) : await create(db);
+    if (res === EVIDENCE_HOLD_REFUSED) return reply;
     return reply.status(201).send({ version: res.version, activated: res.activated });
   });
 
@@ -1320,13 +1336,16 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       return reply.status(404).send({ error: "unknown_version" });
     }
     if (await agentHoldRefused(req, reply, artifactType, artifactId, `activate version ${body.version}`)) return reply;
-    const res = await activateVersion(db, {
-      artifactType,
-      artifactId,
-      version: body.version,
-      actorUserId: req.authCtx.userId ?? null,
-      reason: body.reason ?? null,
-    });
+    const res = await agentHeldWrite(req, reply, artifactType, artifactId, `activate version ${body.version}`, (on) =>
+      activateVersion(on, {
+        artifactType,
+        artifactId,
+        version: body.version,
+        actorUserId: req.authCtx.userId ?? null,
+        reason: body.reason ?? null,
+      }),
+    );
+    if (res === EVIDENCE_HOLD_REFUSED) return reply;
     return {
       activeVersion: res.target.version,
       previousVersion: res.previous?.version ?? null,
@@ -1362,13 +1381,16 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       });
     }
     if (await agentHoldRefused(req, reply, artifactType, artifactId, `roll back to version ${lastMove.fromVersion}`)) return reply;
-    const res = await activateVersion(db, {
-      artifactType,
-      artifactId,
-      version: lastMove.fromVersion,
-      actorUserId: req.authCtx.userId ?? null,
-      reason: body.reason,
-    });
+    const res = await agentHeldWrite(req, reply, artifactType, artifactId, `roll back to version ${lastMove.fromVersion}`, (on) =>
+      activateVersion(on, {
+        artifactType,
+        artifactId,
+        version: lastMove.fromVersion!,
+        actorUserId: req.authCtx.userId ?? null,
+        reason: body.reason,
+      }),
+    );
+    if (res === EVIDENCE_HOLD_REFUSED) return reply;
     return {
       activeVersion: res.target.version,
       rolledBackFrom: res.previous?.version ?? null,
@@ -1392,47 +1414,51 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     const current = versions.find((v) => v.status === "canary") ?? null;
     const adjust = current?.id === target.id;
     if (await agentHoldRefused(req, reply, artifactType, artifactId, `canary of version ${target.version} at ${body.pct}%`)) return reply;
-    const [row] = await db.transaction(async (tx) => {
-      if (current && current.id !== target.id) {
-        await tx
+    const row = await agentHeldWrite(req, reply, artifactType, artifactId, `canary of version ${target.version} at ${body.pct}%`, async (db) => {
+      const [row] = await db.transaction(async (tx) => {
+        if (current && current.id !== target.id) {
+          await tx
+            .update(configVersions)
+            // the displaced canary returns to `draft` — it was never active, so
+            // calling it `rolled_back` would misstate its history
+            .set({ status: "draft", canaryPct: null })
+            .where(eq(configVersions.id, current.id));
+        }
+        const r = await tx
           .update(configVersions)
-          // the displaced canary returns to `draft` — it was never active, so
-          // calling it `rolled_back` would misstate its history
-          .set({ status: "draft", canaryPct: null })
-          .where(eq(configVersions.id, current.id));
-      }
-      const r = await tx
-        .update(configVersions)
-        .set({ status: "canary", canaryPct: body.pct })
-        .where(eq(configVersions.id, target.id))
-        .returning();
-      await tx.insert(configActivationEvents).values({
-        artifactType,
-        artifactId,
-        versionId: target.id,
-        version: target.version,
-        action: adjust ? "canary_adjusted" : "canary_started",
-        canaryPct: body.pct,
-        actorUserId: req.authCtx.userId ?? null,
-        reason: body.reason ?? null,
+          .set({ status: "canary", canaryPct: body.pct })
+          .where(eq(configVersions.id, target.id))
+          .returning();
+        await tx.insert(configActivationEvents).values({
+          artifactType,
+          artifactId,
+          versionId: target.id,
+          version: target.version,
+          action: adjust ? "canary_adjusted" : "canary_started",
+          canaryPct: body.pct,
+          actorUserId: req.authCtx.userId ?? null,
+          reason: body.reason ?? null,
       });
       return r;
+      });
+      await auditConfig(
+        db,
+        req.authCtx.userId ?? null,
+        artifactId,
+        adjust ? "config-canary-adjusted" : "config-canary-started",
+        `version ${target.version} of ${artifactType} is now the canary at ${body.pct}% — ` +
+          canaryModeNote(artifactType),
+        {
+          artifactType,
+          version: target.version,
+          pct: body.pct,
+          live: canaryIsLive(artifactType),
+          canaryMode: canaryModeOf(artifactType),
+        },
+      );
+      return row;
     });
-    await auditConfig(
-      db,
-      req.authCtx.userId ?? null,
-      artifactId,
-      adjust ? "config-canary-adjusted" : "config-canary-started",
-      `version ${target.version} of ${artifactType} is now the canary at ${body.pct}% — ` +
-        canaryModeNote(artifactType),
-      {
-        artifactType,
-        version: target.version,
-        pct: body.pct,
-        live: canaryIsLive(artifactType),
-        canaryMode: canaryModeOf(artifactType),
-      },
-    );
+    if (row === EVIDENCE_HOLD_REFUSED) return reply;
     return {
       canaryVersion: row!.version,
       pct: row!.canaryPct,
@@ -1449,29 +1475,32 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     const canary = versions.find((v) => v.status === "canary");
     if (!canary) return reply.status(409).send({ error: "no_canary" });
     if (await agentHoldRefused(req, reply, artifactType, artifactId, `abandon the canary (version ${canary.version})`)) return reply;
-    await db
-      .update(configVersions)
-      .set({ status: "rolled_back", canaryPct: null })
-      .where(eq(configVersions.id, canary.id));
-    await db.insert(configActivationEvents).values({
-      artifactType,
-      artifactId,
-      versionId: canary.id,
-      version: canary.version,
-      action: "abandoned",
-      actorUserId: req.authCtx.userId ?? null,
-      reason: "canary abandoned",
+    const done = await agentHeldWrite(req, reply, artifactType, artifactId, `abandon the canary (version ${canary.version})`, async (db) => {
+      await db
+        .update(configVersions)
+        .set({ status: "rolled_back", canaryPct: null })
+        .where(eq(configVersions.id, canary.id));
+      await db.insert(configActivationEvents).values({
+        artifactType,
+        artifactId,
+        versionId: canary.id,
+        version: canary.version,
+        action: "abandoned",
+        actorUserId: req.authCtx.userId ?? null,
+        reason: "canary abandoned",
+      });
+      await auditConfig(
+        db,
+        req.authCtx.userId ?? null,
+        artifactId,
+        "config-canary-abandoned",
+        `the canary (version ${canary.version}) of ${artifactType} was abandoned — the ACTIVE version is untouched ` +
+          `and 100% of traffic returns to it immediately`,
+        { artifactType, version: canary.version },
+        "deny",
+      );
     });
-    await auditConfig(
-      db,
-      req.authCtx.userId ?? null,
-      artifactId,
-      "config-canary-abandoned",
-      `the canary (version ${canary.version}) of ${artifactType} was abandoned — the ACTIVE version is untouched ` +
-        `and 100% of traffic returns to it immediately`,
-      { artifactType, version: canary.version },
-      "deny",
-    );
+    if (done === EVIDENCE_HOLD_REFUSED) return reply;
     return { abandoned: canary.version };
   });
 
@@ -1566,7 +1595,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       );
       return reply.status(409).send({ error: decision.ruleId, detail: decision.reason });
     }
-    const res = await activateVersion(db, {
+    const res = await agentHeldWrite(req, reply, artifactType, artifactId, `promote the canary (version ${canary.version})`, (db) => activateVersion(db, {
       artifactType,
       artifactId,
       version: canary.version,
@@ -1580,7 +1609,8 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
             ? decision.reason
             : `${decision.reason} [${freshness.reason}]`,
       },
-    });
+    }));
+    if (res === EVIDENCE_HOLD_REFUSED) return reply;
     return {
       activeVersion: res.target.version,
       gate: decision.ruleId,

@@ -166,6 +166,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
   const [owner, setOwner] = useState("");
   const [incTitle, setIncTitle] = useState("");
   const [incSeverity, setIncSeverity] = useState<string>("medium");
+  const [notice, setNotice] = useState<string | null>(null);
   const isAdmin = !!auth?.isAdmin;
   // only an admin reassigns, and only an admin may list the users
   const users = useQuery({
@@ -180,13 +181,16 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
   const final = d ? RESOLVED.includes(d.status) : false;
 
   const close = () => {
+    setNotice(null);
+    act.setError(null);
     setStatus("");
     setNote("");
     setOwner("");
     setIncTitle("");
     props.onClose();
   };
-  const save = () =>
+  const save = () => {
+    setNotice(null);
     void act
       .run(async () => {
         await api.patch(`/v1/feedback/${props.id}`, {
@@ -198,19 +202,27 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
       }, "Answer saved. It is recorded in the audit trail.")
       .then((ok) => {
         if (ok) {
+          setNotice("Answer saved. It is recorded in the audit trail.");
           setStatus("");
           setOwner("");
         }
       });
-  const openIncident = () =>
+  };
+  const openIncident = () => {
+    setNotice(null);
     void act.run(async () => {
       const r = await api.post<{ incidentId: string }>(`/v1/feedback/${props.id}/open-incident`, { title: incTitle.trim(), severity: incSeverity });
       await q.refetch();
       return `Incident opened and linked (${r.incidentId.slice(0, 8)}).`;
+    }).then((ok) => {
+      if (ok) setNotice("Incident opened and linked. It is recorded in the audit trail.");
     });
+  };
 
   return (
     <Modal open={!!props.id} title={d ? `${KIND_LABEL[d.kind]} on ${d.useCaseName ?? "a use case"}` : "Feedback"} onClose={close} wide>
+      {act.error && <p role="alert">{act.error}</p>}
+      {notice && <p role="status">{notice}</p>}
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {d && (
           <div className={v.stack}>
@@ -281,7 +293,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
                   )}
                   <div className={v.row}>
                     <Field label="Status">
-                      <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+                      <Select value={status} onChange={(e) => { setStatus(e.target.value); setNotice(null); }}>
                         <option value="">keep {STATUS_LABEL[d.status].toLowerCase()}</option>
                         {statusOptions
                           .filter((s) => s !== d.status)
@@ -294,7 +306,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
                     </Field>
                     {isAdmin && (
                       <Field label="Reassign to">
-                        <Select value={owner} onChange={(e) => setOwner(e.target.value)}>
+                        <Select value={owner} onChange={(e) => { setOwner(e.target.value); setNotice(null); }}>
                           <option value="">keep the current owner</option>
                           {(users.data?.users ?? [])
                             .filter((u) => u.id !== d.ownerUserId && !u.disabledAt)
@@ -308,7 +320,7 @@ export function FeedbackDetail(props: { id: string | null; onClose: () => void }
                     )}
                   </div>
                   <Field label={resolving ? "Resolution (required)" : "Resolution note"} grow>
-                    <Textarea rows={4} maxLength={4000} value={note} onChange={(e) => setNote(e.target.value)} />
+                    <Textarea rows={4} maxLength={4000} value={note} onChange={(e) => { setNote(e.target.value); setNotice(null); }} />
                   </Field>
                   <div>
                     <Button variant="primary" disabled={act.busy || (!status && !note.trim() && !owner) || (resolving && !note.trim())} onClick={save}>

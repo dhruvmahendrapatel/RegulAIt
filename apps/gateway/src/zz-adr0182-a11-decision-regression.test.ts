@@ -6,7 +6,8 @@
  *    approval stays pending and the use case stays under review);
  *  - a review-policy PUT without a fresh matching preview → 409
  *    `decision_regression_not_previewed` (missing, a different body, stale,
- *    another subject, a moved baseline), audited, nothing stored;
+ *    another subject, a moved baseline, X15-R01: a golden set changed since the
+ *    preview by a case added or retired), audited, nothing stored;
  *  - changed outcomes without acceptance → 409
  *    `decision_regression_changes_unaccepted`;
  *  - the required-tests PUT and an `ai-use-case-intake/*` variant are gated
@@ -529,6 +530,53 @@ describe("reviewer overrides become cases", () => {
     expect(bad.statusCode).toBe(422);
     expect(bad.json().error).toBe("invalid_expected_outcome");
     expect((await inject("POST", "/v1/governance/decision-regression/cases", users.stranger.auth, { answers: {}, label: "x", expected: { tier: "high" } })).statusCode).toBe(403);
+  });
+});
+
+describe("X15-R01: a preview covers the golden set it ran, not a later one", () => {
+  const accept = { acceptChangedOutcomes: true, acceptReason: "routing the high tier to the privacy role" };
+
+  it("adding a case after the preview refuses activation (cases_changed); a fresh preview admits", async () => {
+    await setPolicy(emptyPolicy);
+    const before = await livePolicy();
+    const old = (await preview("review_policy", routedPolicy())).json();
+    expect(old.changed).toBeGreaterThan(0);
+    // a real, active high-tier case lands after the preview (sequential, committed)
+    const c = await inject("POST", "/v1/governance/decision-regression/cases", users.admin.auth, {
+      answers: answersOf("high-credit-scoring"),
+      label: `x15-r01 added case ${RUN}`,
+      expected: { tier: "high" },
+    });
+    expect(c.statusCode, c.body).toBe(201);
+    createdCaseIds.push(c.json().id);
+    const stale = await inject("PUT", POLICY, users.admin.auth, { ...routedPolicy(), regressionRunId: old.id, ...accept });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.json()).toMatchObject({ error: "decision_regression_not_previewed", reason: "cases_changed", runId: old.id });
+    // audited like its siblings; nothing stored
+    const audited = (await refusals("decision_regression_not_previewed")).filter((a) => a.objectId === old.id);
+    expect(audited.map((a) => (a.detail as { reason: string }).reason)).toEqual(["cases_changed"]);
+    expect((await livePolicy())!.version).toBe(before!.version);
+    // a fresh preview runs the added case, and with acceptance it saves
+    const fresh = (await preview("review_policy", routedPolicy())).json();
+    expect(fresh.cases).toBe(old.cases + 1);
+    expect(fresh.entries.some((e: { caseId: string }) => e.caseId === c.json().id)).toBe(true);
+    const ok = await inject("PUT", POLICY, users.admin.auth, { ...routedPolicy(), regressionRunId: fresh.id, ...accept });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().decisionRegression).toMatchObject({ outcome: "previewed", runId: fresh.id, changed: fresh.changed });
+  });
+
+  it("retiring a case after the preview refuses too; an unchanged case set still admits", async () => {
+    const caseId = createdCaseIds[createdCaseIds.length - 1]!;
+    const old = (await preview("review_policy", emptyPolicy)).json();
+    expect((await inject("DELETE", `/v1/governance/decision-regression/cases/${caseId}`, users.admin.auth)).statusCode).toBe(200);
+    const stale = await inject("PUT", POLICY, users.admin.auth, { ...emptyPolicy, regressionRunId: old.id, ...accept });
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.json().reason).toBe("cases_changed");
+    // the happy path: nothing changed between preview and write
+    const fresh = (await preview("review_policy", emptyPolicy)).json();
+    expect(fresh.cases).toBe(old.cases - 1);
+    const ok = await inject("PUT", POLICY, users.admin.auth, { ...emptyPolicy, regressionRunId: fresh.id, ...accept });
+    expect(ok.statusCode, ok.body).toBe(200);
   });
 });
 
