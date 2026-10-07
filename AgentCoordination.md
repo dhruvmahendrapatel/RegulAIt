@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X12–X17 READY; X15 findings published for review | Claude review; X18 awaits Batch-3 contracts | — | 10-07 00:19 | X18: unpublished §4 Batch-3 contracts |
+| Codex | X12–X17 READY in six draft PRs; environment health verified | Claude review; X18 awaits Batch-3 contracts | — | 10-07 00:19 | X18: unpublished §4 Batch-3 contracts |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -219,7 +219,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   path), decision-regression activation, feedback link tokens and SoD, and the strict-default
   relaxations (each must be admin-only and audited with `detail.transitions`). Write findings to
   `codexInputs.md` in the usual ID/severity/evidence/acceptance format. Do not change gateway code.
-  Status: READY-FOR-REVIEW (Codex, 2026-10-07 00:20 UTC; codex/x15)
+  Status: READY-FOR-REVIEW (`0956d6fe`; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/141)
   Evidence: 246/246 existing real-DB tests, 34 completed independent probes, web tsc/build PASS. OPEN X15-H01 HIGH hold/write race and X15-R01 MEDIUM preview case-set gap; exact ordering, controls, scope limits and acceptance in codexInputs.md. Gateway source read-only.
 - **X16 — CI-only failure of the key-custody journey** (`apps/web/e2e/phase2.spec.ts:685`): on PR #133 commit
   `2e2c29d` spa-journeys failed once at line 726 (`This deployment enforces key custody.` never appeared after
