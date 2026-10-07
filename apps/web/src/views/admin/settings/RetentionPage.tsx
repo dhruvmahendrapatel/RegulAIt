@@ -63,12 +63,14 @@ type RetentionBody = Partial<{ semanticCacheTtlSeconds: number; conversationRete
  * asks for confirmation).
  */
 export function retentionChanges(settings: Record<string, unknown>, ttl: string, days: string, current: Record<string, unknown> | null): { error: string } | { body: RetentionBody; extends: boolean } {
-  // an edit is a different NUMBER ("030" is the stored 30); text that is not
-  // a whole number counts as edited so the validation below reports it
-  const edited = (text: string, stored: unknown) => !/^\d+$/.test(text) || Number(text) !== stored;
+  // an edit is a different NUMBER: "030", "30.0" and "3e1" are all the stored
+  // 30, as `<input type="number">` reads them. Text that is not a whole number
+  // counts as edited so the validation below reports it.
+  const edited = (text: string, stored: unknown) => wholeNumber(text) === null || Number(text) !== stored;
+  const inBounds = (text: string, max: number) => { const n = wholeNumber(text); return n !== null && n >= 1 && n <= max; };
   const ttlEdited = edited(ttl, settings.semanticCacheTtlSeconds);
   const daysEdited = edited(days, settings.conversationRetentionDays);
-  if ((ttlEdited && (!/^\d+$/.test(ttl) || Number(ttl) < 1 || Number(ttl) > 2592000)) || (daysEdited && (!/^\d+$/.test(days) || Number(days) < 1 || Number(days) > 2555))) {
+  if ((ttlEdited && !inBounds(ttl, 2592000)) || (daysEdited && !inBounds(days, 2555))) {
     return { error: "Enter whole numbers: cache lifetime 1–2,592,000 seconds; conversation retention 1–2,555 days." };
   }
   const stillDifferent = (key: keyof RetentionBody, next: number) => current?.[key] !== next;
@@ -77,6 +79,17 @@ export function retentionChanges(settings: Record<string, unknown>, ttl: string,
     ...(daysEdited && stillDifferent("conversationRetentionDays", Number(days)) ? { conversationRetentionDays: Number(days) } : {}),
   };
   return { body, extends: retentionRelaxed(body, current).length > 0 };
+}
+
+// HTML's "valid floating-point number" grammar: the only text a number input
+// yields as its value (no whitespace, hex, "Infinity" or "1.")
+const FLOAT_SPELLING = /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?$/;
+
+/** The integer `text` spells ("30", "030", "30.0", "3e1"), or null when it is not a whole number. */
+function wholeNumber(text: string): number | null {
+  if (!FLOAT_SPELLING.test(text)) return null;
+  const value = Number(text);
+  return Number.isInteger(value) ? value : null;
 }
 
 /** `key:value` for each field of `body` that relaxes what `current` stores; an unreadable value counts as relaxed. */
@@ -185,6 +198,7 @@ function MetricsPostureCard() {
         <p>Separate metrics listener: {metrics.separateListener === "off" ? "off" : metrics.separateListener === "loopback" ? "loopback only" : "non-loopback"}.</p>
         <p>Main listener: {metrics.mainListener ? "metrics enabled" : "no metrics endpoint served"}.</p>
         <p>Bearer token configured: {metrics.tokenConfigured ? "yes" : "no"}.</p>
+        {/* Defensive state: the current gateway refuses enabled metrics listeners without a token. */}
         {(metrics.separateListener !== "off" || metrics.mainListener) && !metrics.tokenConfigured &&
           <p role="alert">The gateway reports an enabled metrics listener without a configured bearer token. Ask the deployment operator to check protection.</p>}
       </> : <p>Separate metrics listener: unmeasured. This gateway has not reported a complete metrics configuration. Ask the deployment operator to verify the listener and token protection.</p>)}
