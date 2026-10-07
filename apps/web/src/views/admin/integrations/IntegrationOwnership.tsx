@@ -24,7 +24,7 @@ function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIn
   const users = useUsers();
   const act = useAction();
   const [owner, setOwner] = useState(row.ownerUserId ?? "");
-  const active = users.data?.users.filter((user) => user.disabledAt === null) ?? [];
+  const active = users.data?.users?.filter((user) => user.disabledAt === null) ?? [];
   const unavailable = owner !== "" && !active.some((user) => user.id === owner);
   return <form className={v.stack} onSubmit={(event) => {
     event.preventDefault();

@@ -17,7 +17,8 @@ export function McpCoverage({ servers }: { servers: McpServer[] }) {
     <Card title="MCP protocol coverage">
       <p>Tool calls use their existing tool grants. Other protocol methods need both organisation enablement and a separate per-user protocol grant. A read-only server grant includes no protocol methods.</p>
       <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
-        {settings.data && <CoverageSettings key={JSON.stringify(settings.data.settings)} settings={settings.data.settings} />}
+        {settings.data?.settings ? <CoverageSettings key={JSON.stringify(settings.data.settings)} settings={settings.data.settings} />
+          : !settings.isLoading && !settings.error && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
       </QueryGate>
       <p>Subscriptions, sampling, elicitation and roots remain unsupported and are always refused.</p>
     </Card>
@@ -62,7 +63,7 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
   return <Card title="Per-user protocol grants"><form className={v.stack} onSubmit={(event) => {
     event.preventDefault(); void act.run(() => api.post("/v1/grants/tools", { userId, serverId, toolName: grant }), "Protocol grant added");
   }}>
-    <Field label="Protocol user"><Select required value={userId} onChange={(event) => setUserId(event.target.value)}>{optionEls(userOpts(users.data?.users.filter((user) => !user.disabledAt)), "— select —")}</Select></Field>
+    <Field label="Protocol user"><Select required value={userId} onChange={(event) => setUserId(event.target.value)}>{optionEls(userOpts(users.data?.users?.filter((user) => !user.disabledAt)), "— select —")}</Select></Field>
     <Field label="Protocol server"><Select required value={serverId} onChange={(event) => setServerId(event.target.value)}>{optionEls(serverOpts(servers), "— select —")}</Select></Field>
     <Field label="Protocol grant"><Select value={grant} onChange={(event) => setGrant(event.target.value)}>{MCP_PROTOCOL_GRANT_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}</Select></Field>
     <p>Granting protocol access relaxes this person's default deny and is audited. The corresponding method must also be enabled above. Read-only server access does not include these grants; logging is a write operation.</p>
