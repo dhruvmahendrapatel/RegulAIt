@@ -943,3 +943,36 @@ test.describe("the registry", () => {
     await checkScreen(page, "registry preview sent back", "registry-preview-resubmit");
   });
 });
+
+
+for (const recordStatus of [200, 403]) {
+test(`R13-13: unsaved resubmission survives cache reset with record HTTP ${recordStatus}`, async ({ page }) => {
+  const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
+  await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+  await page.getByLabel("What will the system do?").fill("Earlier saved Riley edit");
+  await expect.poll(() => (state.draft?.state as { description?: string } | undefined)?.description).toBe("Earlier saved Riley edit");
+  const saved = JSON.stringify(state.draft);
+  await page.route(`**/v1/use-cases/draft?scope=${UC}`, async (route) => {
+    if (route.request().method() === "PUT") return json(route, { error: "internal" }, 500);
+    return route.fallback();
+  });
+  await page.getByLabel("What will the system do?").fill("Latest unsaved Riley edit");
+  state.persona = SAM;
+  expect(await refreshSessionInPlace(page)).toBe("sam");
+  if (recordStatus === 403) await page.route(`**/v1/use-cases/${UC}`, (route) => json(route, { error: "forbidden" }, 403));
+  // The cache reset is followed by a real router POP render at the current URL.
+  // This does not patch the form or its hook state.
+  await page.evaluate(() => window.dispatchEvent(new PopStateEvent("popstate")));
+  await expect(page.getByLabel("What will the system do?")).toHaveValue("Latest unsaved Riley edit");
+  if (recordStatus === 403) await expect(page.getByRole("status").filter({ hasText: "resubmission is paused" })).toBeVisible();
+  await page.getByRole("link", { name: "Cancel", exact: true }).click();
+  const leave = page.getByRole("dialog", { name: "Leave this resubmission?" });
+  await expect(leave.getByRole("button", { name: "Discard and leave" })).toBeVisible();
+  await leave.getByRole("button", { name: "Discard and leave" }).click();
+  await expect(page).not.toHaveURL(/resubmit=/);
+  expect(JSON.stringify(state.draft)).toBe(saved);
+  expect(state.patches).toEqual([]);
+  expect(state.artifacts).toEqual([]);
+  expect(state.draftWrites.filter((write) => write.method === "DELETE")).toEqual([]);
+});
+}

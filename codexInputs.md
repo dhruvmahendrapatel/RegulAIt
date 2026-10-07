@@ -4,6 +4,12 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## R13-13 resubmission state preservation — 2026-10-07
+
+SessionProvider.refresh clears the query cache on owner change; the next router render used to unmount the record-dependent form and silently replace unsaved edits with the stored use-case description. Preserve the editing session's local record baseline across cache loading/error states, keep owner-bound draft and submit checks, and pause submission while current record access is unavailable. The form remains mounted; only explicit discard/navigation ends its state.
+
+Genuine baseline red: latest unsaved purpose disappears after real SessionProvider.refresh plus router POP. Final focused browser **8/8 PASS**, including successful and403 record reloads, owner-change refusal, owner-named draft deletes, failed-save retry/discard and busy exits. Web units **336/336 PASS**, production build/typecheck PASS. No PATCH, artifact POST or draft DELETE is sent under the changed owner; earlier saved draft is retained. Local evidence, not committed: `/workspace/.regulait-onboarding/gemini-review/r13-state-{red.log,red-results,final.log,final-results,units.log,final-build.log}`.
+
 ## X13 R13-01 review fix — 2026-10-07 UTC
 
 A fully saved registration could not leave after SessionProvider.refresh changed the signed-in owner in place: flush refused the actor change, while Discard was hidden because nothing was unsaved. Both registration and resubmission now use a navigation-only decision that permits owner-changed solely when the page has no unsaved work. The hook still checks the owner before comparing saved content, sends no PUT/DELETE for the changed owner, and durableForSubmit still refuses owner-changed; pending/failed saves remain blocked and explicit discard remains available for unsaved work.
