@@ -11381,8 +11381,9 @@ export const webauthnCredentials = pgTable(
   },
   (t) => [
     unique("webauthn_credentials_credential_id_uq").on(t.credentialId),
-    check("webauthn_credentials_credential_id_check", sql`${t.credentialId} ~ '^[A-Za-z0-9_-]{16,1366}$'`),
-    check("webauthn_credentials_public_key_check", sql`${t.publicKey} ~ '^[A-Za-z0-9_-]{16,4096}$'`),
+    // Postgres caps a regex repetition count at 255, so the length bound is a separate predicate
+    check("webauthn_credentials_credential_id_check", sql`${t.credentialId} ~ '^[A-Za-z0-9_-]+$' AND length(${t.credentialId}) BETWEEN 16 AND 1366`),
+    check("webauthn_credentials_public_key_check", sql`${t.publicKey} ~ '^[A-Za-z0-9_-]+$' AND length(${t.publicKey}) BETWEEN 16 AND 4096`),
     check("webauthn_credentials_counter_check", sql`${t.counter} >= 0`),
     check(
       "webauthn_credentials_transports_check",
