@@ -1,3 +1,7 @@
+# Open-source register
+
+Research inventory of product, content and CI dependencies. Licence verification is bounded to the cited artifact or source; this register does not itself admit new software.
+
 | Project or library | Purpose | Licence (verified, date) | Use mode (A–E per ADR-0177) | Status (in use / next / soon / later / never) | Decision record | Re-check by |
 |---|---|---|---|---|---|---|
 | `microsoft/agent-governance-toolkit` | MCP admission heuristics; wire-format alignment | MIT; [license](https://github.com/microsoft/agent-governance-toolkit/blob/main/LICENSE) read 2026-10-07 | C; D | next | [ADR-0177](../decisions/0177-open-source-security-and-observability-projects.md) §2 | 2026-11-06 |
@@ -173,9 +177,10 @@
 | Qwen3Guard (including Stream) | Customer-supplied classifier candidate; no weights bundled | UNVERIFIED selected weights/data and current terms; ADR Apache-2.0 claim is not a new primary-source check | D; E for unreviewed bundling | later | [ADR-0177](../decisions/0177-open-source-security-and-observability-projects.md) clean-room #13 | 2026-11-06 |
 | DeBERTa prompt-injection classifier (exact model not selected) | Customer-supplied classifier candidate; no weights bundled | UNVERIFIED selected weights/data and current terms; ADR Apache-2.0 claim is not a new primary-source check | D; E for unreviewed bundling | later | [ADR-0177](../decisions/0177-open-source-security-and-observability-projects.md) clean-room #13 | 2026-11-06 |
 | WildGuard | Customer-supplied classifier candidate; no weights bundled | UNVERIFIED selected weights/data and current terms; ADR Apache-2.0 claim is not a new primary-source check | D; E for unreviewed bundling | later | [ADR-0177](../decisions/0177-open-source-security-and-observability-projects.md) clean-room #13 | 2026-11-06 |
-
 | PurpleLlama CodeShield rule files | Candidate insecure-code patterns only; no Semgrep engine | MIT; [component license](https://github.com/meta-llama/PurpleLlama/blob/main/CodeShield/LICENSE) read 2026-10-07 | C | next | ADR-0177 clean-room #5 | 2026-11-06 |
 | PurpleLlama LlamaFirewall | Rejected stale package; clean-room goal checks use our judge | MIT; [component license](https://github.com/meta-llama/PurpleLlama/blob/main/LlamaFirewall/LICENSE) read 2026-10-07 | E | never | ADR-0177 §2 row4 / clean-room #10 | 2026-11-06 |
+| `asn1js` 3.0.10 | RFC 3161 ASN.1 parsing; declared by the Batch 4 foundation | BSD-3-Clause; npm package LICENSE read 2026-10-07; [artifact metadata](https://registry.npmjs.org/asn1js/3.0.10) | A | in use (declared dependency) | [ADR-0186](../decisions/0186-batch4-approvals-receipts-detection.md) | 2026-11-06 |
+| `@simplewebauthn/browser` 14.0.0 | Passkey browser ceremonies; declared by the Batch 4 foundation | MIT; npm package LICENSE.md read 2026-10-07; [artifact metadata](https://registry.npmjs.org/%40simplewebauthn%2Fbrowser/14.0.0) | A | in use (declared dependency) | [ADR-0186](../decisions/0186-batch4-approvals-receipts-detection.md) | 2026-11-06 |
 
 ## Scope and provenance
 
@@ -188,10 +193,12 @@ Clean-room feature coverage: #1 SimpleWebAuthn; #2 canonicalize/RFC8785; #3 pkij
 ## Changes and admission flags since 2026-10-05
 
 - OpenShell's root LICENSE changed in commit [0acb8d7f](https://github.com/NVIDIA/OpenShell/commit/0acb8d7f) to restore canonical Apache wording. Current text is Apache-2.0; this is a license-text change, not evidence of a license-family change. Re-check the exact pinned release and build artifact before admission.
-- Promptfoo's primary README identifies it as part of OpenAI and retains MIT. Gemini's “Promptfoo Inc.” owner and blanket “in use” engine claim are superseded: only mapping data is currently vendored; the engine is planned. That ownership statement predates this comparison in ADR-0177; no new acquisition date is inferred.
-- Corporate ownership changes since October5 remain UNVERIFIED unless a dated primary baseline exists. GitHub repository namespace and current copyright do not prove corporate control or that ownership stayed unchanged.
+- Promptfoo's primary README identifies it as part of OpenAI and retains MIT. The prior research input’s “Promptfoo Inc.” owner and blanket “in use” engine claim are superseded: only mapping data is currently vendored; the engine is planned. That ownership statement predates this comparison in ADR-0177; no new acquisition date is inferred.
+- Corporate ownership changes since October 5 remain UNVERIFIED unless a dated primary baseline exists. GitHub repository namespace and current copyright do not prove corporate control or that ownership stayed unchanged.
 - MIT library code in Standard Webhooks is under `libraries/LICENSE`; the specification repository root is Apache-2.0. Victory vendor metadata is MIT AND ISC, not blanket MIT; individual vendored d3 components retain ISC.
 - `dkjson` and `mediator_lua` primary license retrieval was unavailable (404 at the manifest's GitHub lead). Keep the manifest claim separate from new verification. Selected classifier weight/data terms and copied Sentinel subfolder licenses remain UNVERIFIED; no artifact is newly admitted by this document.
 - `@sigstore/verify`'s package metadata says Apache-2.0 and its upstream sigstore-js LICENSE was read; its npm tarball carries no LICENSE file. Upstream component/package redistribution notices still need confirmation at any pin.
 
-Read-only evidence, including original license bodies, GitHub release/advisory responses and installed package license texts, is saved under `/workspace/.regulait-onboarding/gemini-review/`. No engine/library was installed, executed or upgraded by this research. Sources were fetched using authenticated GitHub API requests and npm package archives without running lifecycle scripts.
+Read-only evidence, including original license bodies, GitHub release/advisory responses and installed package license texts, is saved under `/workspace/.regulait-onboarding/gemini-review/` (local evidence, not committed). No engine/library was installed, executed or upgraded by this research. Sources were fetched using authenticated GitHub API requests and npm package archives without running lifecycle scripts.
+
+Batch 4 follow-up: current main `ca3e36a1` declares the two new rows above. Their npm artifact licence files were read without executing lifecycle scripts. The earlier 64-direct-dependency inventory describes the dated baseline, not an updated total for the new foundation.
