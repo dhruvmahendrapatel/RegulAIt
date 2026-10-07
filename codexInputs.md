@@ -4,6 +4,50 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X16 key-custody CI investigation — 2026-10-07 UTC
+
+Original CI run [37543718055](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37543718055), job
+112542824893, at `2e2c29db1d54340657058093314c4d112fc99375`: 46 passed, one failed at the developer custody
+explanation. Artifact access initially returned HTTP 403; the original artifact later downloaded successfully.
+Artifact `spa-journeys-failure`, id 11449489421, SHA256
+`34b548e64012ba4517104aef3eac0558afe2f6e5724b1fd782eef5f79faa9228` is retained at
+`/workspace/.regulait-onboarding/x16-original-artifact.zip`.
+
+**Cause supported by the original trace, not classified as a flake:** the posture PUT returned 200 with
+`keyCustodyEnforced: true`. Avery's account key was filled at trace time 42330.091 ms, but the literacy GET
+(start 42269.549 ms, duration 93.135 ms) finished around the Save key click (42359.996 ms). Its body was
+`required: false, current: true, documents: []`. The subsequent DOM snapshot (`after@call@1401`) contains
+**A key is required.** There is **no developer credential POST at all** in the captured network. The missing
+custody copy was therefore not a failed backend custody refusal: the form lost its input before submission.
+Only sanitized status/posture/error information is reproduced here; no credential bodies are published.
+
+`AcknowledgeGate` returned its page in fragment slot 0 before the async literacy response, then in slot 2
+beside two optional banner slots afterward. React remounted AccountPage and reset its input state, even
+though the Account route is exempt from the interstitial. Keep the page in a keyed Fragment across the
+loading/known-posture branches; no new DOM wrapper or gate relaxation. A controlled delayed-response
+browser regression fails on the old source with an empty key, then passes with the key retained, one real
+mocked 409/key_custody_enforced POST, the correct custody notice and no key left in the DOM. The initial
+read of the original trace and the controlled old-source failure distinguish this from a timing guess (M-070).
+
+The journey also awaits and checks its real posture PUT (200/enforced) and credential POST
+(409/key_custody_enforced), reporting only status/error. Two clean-source runs at the original revision
+hit an earlier strict-console favicon 404 (19 passed / 27 not run / 1 failed each). The included explicit
+bundled SVG favicon fixes that separate reproduced issue. It was not the original custody cause.
+
+The delayed-response regression and the existing literacy mock suite passed **6/6**; its old-source control
+failed exactly on retained input. Commands:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/adr0182-a14-literacy.mock.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-late-literacy-green`.
+Logs/traces: `x16-late-literacy-red`, `x16-late-literacy-green` beneath that setup directory. The earlier
+diagnostic-only revision passed the original four real-gateway specs **47/47** (`x16-fixed-browser.log`).
+Root-cause fix validation: `pnpm --filter @regulait/web test` **315/315**, web tsc and build PASS.
+Real-gateway phase1/phase2/phase6-agent-builder checks **44/44** passed on fresh `regulait_x16_root_cause`
+(`x16-root-browser.log`, full traces `x16-root-browser`, screenshots `x16-root-shots`). The fourth original
+spec, phase6-builder-tools, passed **3/3** separately on fresh `regulait_x16_root_tools`:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_DB=regulait_x16_root_tools E2E_PORT=3105 E2E_BASE_URL=http://127.0.0.1:3105 E2E_LOG_DIR=/workspace/.regulait-onboarding/x16-root-tools-logs E2E_SHOT_DIR=/workspace/.regulait-onboarding/x16-root-tools-shots pnpm --filter @regulait/web exec playwright test e2e/phase6-builder-tools.spec.ts --trace on --output=/workspace/.regulait-onboarding/x16-root-tools-browser`.
+Root-fix coverage is 44+3 separately, rather than a new single 47-case run. The first 44-case command also named an absent
+deep-links.spec.ts; that argument selected no tests and is not claimed as coverage. X14 also touches AcknowledgeGate for focus handling;
+merge both the keyed page preservation here and X14's entry/exit focus behavior when reviewing those drafts.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.

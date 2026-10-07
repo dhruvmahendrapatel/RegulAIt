@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <style>.anchor{color:#0a0c0f}@media(prefers-color-scheme:dark){.anchor{color:#f0f4f7}}</style>
+  <g class="anchor" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-opacity=".55">
+    <path d="M16 52V14L44 20 16 33 46 50"/>
+  </g>
+  <g class="anchor" fill="currentColor">
+    <circle cx="16" cy="14" r="5.5"/><circle cx="16" cy="33" r="5.5"/>
+    <circle cx="16" cy="52" r="5.5"/><circle cx="46" cy="50" r="5.5"/>
+  </g>
+  <circle cx="44" cy="20" r="7" fill="#00b9d4"/>
+</svg>
