@@ -570,3 +570,47 @@ Validation (Linux, pinned workspace dependencies):
 - `pnpm --filter @regulait/web test`: **315/315 passed** (40 files).
 - `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: **passed**.
   `git diff --check`: **passed**. The existing large-chunk build warning remains.
+
+## X24 — measured detection monitor rules and R13-20/21 (2026-10-07)
+
+Implemented the four assigned rules in the actual loader. MCP drift compares
+attributed MCP decision records in the last 24 hours with the separate preceding
+`monitorMcpBaselineDays` window. Sharing widening observes scope increases or
+added recipients over 24 hours; recipient edits without a prior snapshot hold
+the subject. Prompt changes compare current active version IDs with activation
+history at the latest actual approving workflow decision; absent or ambiguous
+history holds existing episodes. Jailbreak correlation requires the configured
+finding count before an allowed MCP decision by the same user within the
+configured hours; same-time records require ledger sequences proving order.
+These are observations over retained records, not proof of causal attack
+success, successful upstream execution or complete history.
+
+Queries use one repeatable-read snapshot, return IDs/counts/version references,
+and refuse over 10,000 rows rather than resolving subjects from a truncated
+result. A load failure makes all four rules unevaluated via the existing monitor
+integration. No new route, setting, schema or detector library was added.
+The Alerts page shows measured threshold settings, accepts bounded integers,
+and saves changed fields through the existing audited settings route.
+
+R13-20/21: on an account change, resubmission now shows only the ownership
+notice and Discard-and-leave. It hides prior sections, Back/Continue, the draft
+saving line and Refresh. Hooks retain the original owner's editing state; only
+that account can recover it. Discard abandons locally without deleting either
+account's server draft. Four genuine red browser cases precede this fix.
+
+Evidence at b940342e plus the current-main merge 62385555:
+- Actual migrated disposable PostgreSQL loader and real repeated
+  `runGovernanceMonitor` passes: 8/8 (`x24-gateway-final.log`); the seven original
+  acceptance cases all fail against the unchanged foundation stub
+  (`x24-gateway-red.log`). Covers baseline, widening/recipients, approval/reapproval,
+  missing/tied history, ordered same-user correlation, stable episode IDs and
+  preserving episodes when the loader rejects malformed input.
+- Browser 17/17 (`x24-browser-final.log`): five monitor cases, four R13-20/21
+  cases across two steps/HTTP200+403, three R13-12, two R13-13 and three existing
+  review-policy checks. Owner red proof 4/4 fail (`x24-owner-red.log`). Screenshot
+  `/workspace/.regulait-onboarding/x24-monitor.png`.
+- Shared/gateway builds, web `tsc --noEmit`, final web build and 336 web units
+  PASS (`x24-{shared-build,gateway-final-build,web-final-tsc,web-final-build,web-final-units}.log`).
+
+Full unrelated gateway suites are not claimed green: foundation seam assertions
+still assume unimplemented slices and require the coordinating owner's updates.
