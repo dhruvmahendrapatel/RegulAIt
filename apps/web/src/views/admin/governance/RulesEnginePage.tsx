@@ -200,9 +200,14 @@ function ApprovalQuorumCell(props: { rule: ApprovalRule; roles: Opt[] }) {
           onClick={() => {
             setMinted(null);
             void act.run(async () => {
-              const r = await api.patch<{ versionMinted: number | null }>(
-                `/v1/rules/approvals/${props.rule.id}`,
-                approvalRuleQuorumPatch(quorum, roleId),
+              // ADR-0180: a lower quorum or a wider approver pool loosens dual control
+              // and is refused until the admin confirms it's them (settings_relax)
+              const r = await withStepUp((h) =>
+                stepUpApi.patch<{ versionMinted: number | null }>(
+                  `/v1/rules/approvals/${props.rule.id}`,
+                  approvalRuleQuorumPatch(quorum, roleId),
+                  h,
+                ),
               );
               setMinted(r.versionMinted ?? null);
             }, "Approvers updated");
@@ -364,7 +369,8 @@ export default function RulesEnginePage() {
             check the Simulation view before and after if the outcome matters.
           </p>
         }
-        onRemove={() => api.del(`/v1/rules/${kind}/${r.id}`)}
+        // ADR-0180: removing an approval rule removes its approval requirement (settings_relax)
+        onRemove={() => withStepUp((h) => api.delWithHeaders(`/v1/rules/${kind}/${r.id}`, h))}
         onDone={() => void refetchAll()}
       />
     ),

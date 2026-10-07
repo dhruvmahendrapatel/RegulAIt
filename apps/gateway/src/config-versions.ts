@@ -113,7 +113,13 @@ import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-02): Art. 73(6) evidence hold
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
-import { approvalRuleShape, assertApprovalRuleWritable } from "./approval-pool.js";
+import {
+  approvalRuleShape,
+  assertApprovalRuleLooseningStepUp,
+  assertApprovalRuleWritable,
+  type ApprovalRuleStepUp,
+} from "./approval-pool.js";
+import { approvalRuleStepUp } from "./step-up.js";
 
 /**
  * A `Db` OR a transaction handle. Drizzle's transaction type is not assignable
@@ -393,6 +399,8 @@ export async function newVersion(
     authorUserId: string | null;
     activate?: boolean;
     reason?: string | null;
+    /** ADR-0180: the route's settings_relax step-up, used when activating loosens an approval rule */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<{ version: ConfigVersionRow; activated: boolean }> {
   return db.transaction(async (tx) => mintVersionLocked(tx, args));
@@ -408,6 +416,8 @@ async function mintVersionLocked(
     authorUserId: string | null;
     activate?: boolean;
     reason?: string | null;
+    /** ADR-0180: the route's settings_relax step-up, used when activating loosens an approval rule */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<{ version: ConfigVersionRow; activated: boolean }> {
   // FIRST STATEMENT. Everything below reads state that a concurrent writer of
@@ -516,6 +526,7 @@ async function mintVersionLocked(
     version: next,
     actorUserId: args.authorUserId,
     reason: args.reason ?? null,
+    stepUp: args.stepUp,
   });
   return { version: activated.target, activated: true };
 }
@@ -546,6 +557,9 @@ export async function activateVersion(
     reason?: string | null;
     /** set when this activation is a promotion of the canary */
     promotion?: { ruleId: string; evalRunId: string | null; override: boolean; reason: string } | null;
+    /** ADR-0180: the route's settings_relax step-up for an activation that loosens an approval rule
+     * (absent → such an activation is refused while the policy asks for one) */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<{ target: ConfigVersionRow; previous: ConfigVersionRow | null; rollback: boolean }> {
   const outcome = await db.transaction(async (tx) => {
@@ -557,13 +571,24 @@ export async function activateVersion(
     if (!target) throw new Error("unknown_version");
     // ADR-0186 A — THE ONE GUARD, again at activation (rollback and canary
     // promotion included): membership may have moved since the version was minted
+    const previous = versions.find((v) => v.status === "active") ?? null;
     if (args.artifactType === "approval_rule") {
       const ruleRow = await loadRuleRow(tx, args.artifactType, args.artifactId);
       if (ruleRow) {
-        await assertApprovalRuleWritable(tx, approvalRuleShape({ ...ruleRow, ...(target.body as Record<string, unknown>) }));
+        const after = approvalRuleShape({ ...ruleRow, ...(target.body as Record<string, unknown>) });
+        await assertApprovalRuleWritable(tx, after);
+        // ADR-0180: activating (or rolling back to, or promoting) a version with a lower quorum or a
+        // wider pool than what enforces now needs the settings_relax step-up
+        if (previous?.id !== target.id) {
+          await assertApprovalRuleLooseningStepUp(tx, {
+            ruleId: args.artifactId,
+            before: approvalRuleShape({ ...ruleRow, ...((previous?.body ?? {}) as Record<string, unknown>) }),
+            after,
+            stepUp: args.stepUp,
+          });
+        }
       }
     }
-    const previous = versions.find((v) => v.status === "active") ?? null;
     const rollback = previous != null && previous.version > target.version;
 
     // ADR-0074 — THE BASELINE SEAM. If a shadow canary is running on this
@@ -733,6 +758,8 @@ export async function deleteRuleArtifact(
     actorUserId: string | null;
     /** names the route in the ledger and the audit row */
     routeLabel: string;
+    /** ADR-0180: removing an approval rule removes its approval requirement — the route's settings_relax step-up */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleDeleteSuccess | RuleDeleteRefusal> {
   const table = ruleTableFor(args.artifactType);
@@ -756,6 +783,15 @@ export async function deleteRuleArtifact(
       };
     }
     const versions = await loadVersions(tx, args.artifactType, args.artifactId);
+    if (args.artifactType === "approval_rule") {
+      const active = versions.find((v) => v.status === "active");
+      await assertApprovalRuleLooseningStepUp(tx, {
+        ruleId: args.artifactId,
+        before: approvalRuleShape({ ...row, ...((active?.body ?? {}) as Record<string, unknown>) }),
+        after: null,
+        stepUp: args.stepUp,
+      });
+    }
     const pointers = versions.filter((v) => v.status === "active" || v.status === "canary");
     for (const v of pointers) {
       await tx
@@ -1337,6 +1373,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         label: body.label ?? null,
         authorUserId: req.authCtx.userId ?? null,
         activate: body.activate,
+        stepUp: approvalRuleStepUp(db, req),
       });
     const res = body.activate ? await agentHeldWrite(req, reply, artifactType, artifactId, "create and activate a version", create) : await create(db);
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1358,6 +1395,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         version: body.version,
         actorUserId: req.authCtx.userId ?? null,
         reason: body.reason ?? null,
+        stepUp: approvalRuleStepUp(db, req),
       }),
     );
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1403,6 +1441,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         version: lastMove.fromVersion!,
         actorUserId: req.authCtx.userId ?? null,
         reason: body.reason,
+        stepUp: approvalRuleStepUp(db, req),
       }),
     );
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1610,11 +1649,13 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       );
       return reply.status(409).send({ error: decision.ruleId, detail: decision.reason });
     }
+    const stepUp = approvalRuleStepUp(db, req);
     const res = await agentHeldWrite(req, reply, artifactType, artifactId, `promote the canary (version ${canary.version})`, (db) => activateVersion(db, {
       artifactType,
       artifactId,
       version: canary.version,
       actorUserId: req.authCtx.userId ?? null,
+      stepUp,
       promotion: {
         ruleId: decision.ruleId,
         evalRunId: decision.evalRunId,

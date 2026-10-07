@@ -95,7 +95,7 @@ describe("the header-carrying request helper", () => {
 });
 
 describe("every step-up-protected write in the app goes through withStepUp (ADR-0186 A)", () => {
-  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped", async () => {
+  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped; no screen edits an approval rule or removes a rule unwrapped", async () => {
     const { readdirSync, readFileSync, statSync } = await import("node:fs");
     const path = await import("node:path");
     const root = path.resolve(__dirname, "..");
@@ -125,6 +125,9 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
         /(?<![A-Za-z])api\.(?:put|post|patch)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:execution\/mode["'`]|guardrails\/config\/|rules\/[^"'`]*\/deploy-mode|retention-holds\/release|agents\/[^"'`]*\/unhalt|servers\/[^"'`]*\/tools\/[^"'`]*\/unhalt)/g,
       );
       for (const m of scoped ?? []) offenders.push(`${f}: ${m}`);
+      // an approval rule's edit (a lower quorum, a wider pool) and a rule's removal loosen dual control (ADR-0180)
+      const ruleWrites = src.match(/(?<![A-Za-z])api\.(?:patch|del)(?:<[^>]*>)?\(\s*["'`]\/v1\/rules\/(?:approvals\/|\$\{)/g);
+      for (const m of ruleWrites ?? []) offenders.push(`${f}: ${m}`);
       // the Outlook recipient allow-list (adding a recipient widens where cards go)
       if (src.includes("outlookRecipientAllowList") && /api\.patch/.test(src) && !src.includes("withStepUp(")) {
         offenders.push(`${f}: outlookRecipientAllowList written without withStepUp`);

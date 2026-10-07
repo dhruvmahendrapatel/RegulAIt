@@ -433,7 +433,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { registerStepUpRoutes } from "./step-up.js";
+import { approvalRuleStepUp, registerStepUpRoutes } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
 import {
   decisionView,
@@ -3036,8 +3036,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     const patch = crud.schema.parse(req.body ?? {});
     // ADR-0186 A: an approval rule's edit is guarded inside applyRuleEdit (the
-    // satisfiability check every approval-rule write runs)
+    // satisfiability check every approval-rule write runs); ADR-0180: an edit
+    // that loosens dual control (a lower quorum, a wider pool) needs the
+    // settings_relax step-up, asked inside the writer's lock
     const res = await applyRuleEdit(db, {
+      stepUp: approvalRuleStepUp(db, req),
       artifactType: crud.artifactType,
       artifactId: ruleId,
       patch,
@@ -3062,6 +3065,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       artifactId: ruleId,
       actorUserId: req.authCtx.userId ?? null,
       routeLabel: `DELETE /v1/rules/${kind}/:ruleId`,
+      // ADR-0180: removing an approval rule removes its approval requirement
+      stepUp: approvalRuleStepUp(db, req),
     });
     if (!res.ok) return reply.status(res.status).send({ error: res.error, detail: res.detail });
     return reply.send({

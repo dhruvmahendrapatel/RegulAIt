@@ -112,7 +112,12 @@ import {
   type DbOrTxDeep,
 } from "./config-versions.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { approvalRuleShape, assertApprovalRuleWritable } from "./approval-pool.js";
+import {
+  approvalRuleShape,
+  assertApprovalRuleLooseningStepUp,
+  assertApprovalRuleWritable,
+  type ApprovalRuleStepUp,
+} from "./approval-pool.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -200,6 +205,10 @@ export async function applyRuleEdit<T = Record<string, unknown>>(
      * `beforeBody`, `afterBody`, `mintedVersion`); a route that already wrote a
      * meaningful detail shape keeps it rather than having it replaced. */
     auditDetail?: Record<string, unknown>;
+    /** ADR-0180: the route's `settings_relax` step-up for an approval-rule
+     * edit that loosens dual control (absent → such an edit is refused while
+     * the policy asks for one) */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleEditResult<T>> {
   const table = ruleTableFor(args.artifactType);
@@ -247,6 +256,7 @@ async function applyRuleEditLocked<T>(
     auditObjectType: AuditObjectType;
     auditRuleId: string;
     auditDetail?: Record<string, unknown>;
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleEditResult<T>> {
   // FIRST STATEMENT. Both reads below happen under it.
@@ -291,7 +301,15 @@ async function applyRuleEditLocked<T>(
   // ADR-0186 A — THE ONE GUARD on a plain row write of an approval rule (a minted
   // version is guarded where every version is: `newVersion` / `activateVersion`)
   if (args.artifactType === "approval_rule" && plan.kind === "row") {
-    await assertApprovalRuleWritable(db, approvalRuleShape({ ...row, ...plan.rowPatch }));
+    const after = approvalRuleShape({ ...row, ...plan.rowPatch });
+    await assertApprovalRuleWritable(db, after);
+    // ADR-0180: a lower quorum or a wider pool needs the settings_relax step-up
+    await assertApprovalRuleLooseningStepUp(db, {
+      ruleId: args.artifactId,
+      before: approvalRuleShape(row),
+      after,
+      stepUp: args.stepUp,
+    });
   }
 
   if (plan.kind === "mint") {
@@ -316,6 +334,7 @@ async function applyRuleEditLocked<T>(
       authorUserId: args.actorUserId,
       activate: true,
       reason: args.reason ?? plan.reason,
+      stepUp: args.stepUp,
     });
     mintedVersion = res.version.version;
     // `activateVersion` wrote the enforcing columns as the read-model, inside

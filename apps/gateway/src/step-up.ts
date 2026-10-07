@@ -99,6 +99,7 @@ import { hashToken } from "./token-hash.js";
 import { verifyTotp } from "./totp.js";
 import { decryptSecret } from "./secrets.js";
 import { resolvePublicUrl } from "./public-url.js";
+import { ApprovalRuleWriteRefusedError, type ApprovalRuleStepUp } from "./approval-pool.js";
 
 
 
@@ -470,6 +471,21 @@ export async function stepUpRefusal(
 ): Promise<{ status: number; body: Record<string, unknown> } | null> {
   const out = await checkStepUp(db, req, args, opts);
   return out.ok ? null : { status: out.status, body: out.body };
+}
+
+/**
+ * The `settings_relax` step-up an approval-rule write that LOOSENS dual control
+ * carries (ADR-0180, `assertApprovalRuleLooseningStepUp`): handed by the HTTP
+ * route to the rule writer, which calls it inside its lock with the facts it
+ * derived (`{ruleId, values}`). Spends the grant (on `db`, outside the
+ * writer's transaction, so a refusal's audit row survives the rollback), or
+ * throws the refusal for app.ts to answer.
+ */
+export function approvalRuleStepUp(db: Db, req: FastifyRequest): ApprovalRuleStepUp {
+  return async (facts) => {
+    const refusal = await stepUpRefusal(db, req, { kind: "settings_relax", facts: { ...facts } });
+    if (refusal) throw new ApprovalRuleWriteRefusedError(refusal.status, refusal.body);
+  };
 }
 
 // ---------------------------------------------------------------------------
