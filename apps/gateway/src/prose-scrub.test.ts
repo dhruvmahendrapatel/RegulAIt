@@ -586,6 +586,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     "ai_policy_documents.title",
     "ai_policy_documents.editorial_reason",
     "ai_policy_acknowledgements.evidence_ref",
+    // ADR-0186 (migration 0170)
+    "approval_decisions.reason",
+    "webauthn_credentials.label",
+    "webauthn_credentials.revoke_reason",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {

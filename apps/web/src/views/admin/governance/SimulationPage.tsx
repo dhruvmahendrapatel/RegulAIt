@@ -91,6 +91,8 @@ export default function SimulationPage() {
             className={a.formRow}
             onSubmit={(e) => {
               e.preventDefault();
+              if (act.busy) return;
+              setResult(null);
               void act.run(async () => {
                 const d = await api.post<EvaluateDecision>("/v1/evaluate", {
                   userId,
@@ -127,10 +129,15 @@ export default function SimulationPage() {
                 )}
               </Select>
             </Field>
-            <Button type="submit" variant="primary" disabled={act.busy}>
+            <Button type="submit" variant="primary" aria-disabled={act.busy}>
               Evaluate
             </Button>
           </form>
+          <p role="status" aria-live="polite" aria-atomic="true">
+            {act.busy ? "Evaluating access preview…" : result
+              ? `Access preview for ${evaluatedLabel}: ${result.effect === "allow" ? "allowed" : result.effect === "deny" ? "denied" : "approval required"}.${result.reason ? ` ${result.reason}` : ""}`
+              : ""}
+          </p>
           {act.error && (
             <div className={v.errLine} role="alert">
               {act.error}

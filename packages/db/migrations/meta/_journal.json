@@ -1142,6 +1142,13 @@
       "when": 1785104000000,
       "tag": "0169_batch3_memory_mcp_ownership",
       "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1785105000000,
+      "tag": "0170_batch4_approvals_receipts_detection",
+      "breakpoints": true
     }
   ]
 }

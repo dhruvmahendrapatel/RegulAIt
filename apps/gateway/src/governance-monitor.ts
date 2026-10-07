@@ -51,11 +51,13 @@ import {
 import {
   ACCOUNTABILITY_MONITOR_RULE_IDS,
   ASSURANCE_MONITOR_RULE_IDS,
+  DETECTION_MONITOR_RULE_IDS,
   MONITOR_RULES,
   MONITOR_RULE_IDS,
   effectiveRiskRating,
   type AccountabilityMonitorRuleId,
   type AssuranceMonitorRuleId,
+  type DetectionMonitorRuleId,
   type MonitorAssuranceInput,
   evaluateMonitorRules,
   kriStates,
@@ -89,6 +91,8 @@ import { incidentMonitorInput } from "./incidents.js";
 import { feedbackMonitorInput } from "./feedback.js";
 import { literacyMonitorInput } from "./ai-literacy.js";
 import { afterAlertsRaised, alertOwnershipAtRaise, alertOwnershipViews } from "./alert-ownership.js";
+// ADR-0186 M — the four detection rules' loader (slice M's module)
+import { detectionMonitorInput } from "./monitor-detection-rules.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -133,7 +137,11 @@ export interface MonitorOptionalInputs {
   incidents: AccountabilityLoader;
   feedback: AccountabilityLoader;
   literacy: AccountabilityLoader;
+  /** ADR-0186 M — the four detection rules (monitor-detection-rules.ts; the
+   * foundation's loader reports none, so none is evaluated) */
+  detection: DetectionLoader;
 }
+type DetectionLoader = (db: Db, now: Date) => Promise<Partial<Record<DetectionMonitorRuleId, MonitorAssuranceInput>>>;
 type AssuranceLoader = (db: Db, now: Date) => Promise<Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>>;
 type AccountabilityLoader = (
   db: Db,
@@ -153,6 +161,7 @@ const OPTIONAL_INPUT_RULES: Record<keyof MonitorOptionalInputs, readonly Monitor
   incidents: ["incident_notification_due", "incident_action_overdue"],
   feedback: ["feedback_sla_breached"],
   literacy: ["literacy_coverage_gap"],
+  detection: [...DETECTION_MONITOR_RULE_IDS],
 };
 const ASSURANCE_INPUTS = ["conditionMetrics", "requiredTests", "autonomy", "residualRisks"] as const;
 const ACCOUNTABILITY_INPUTS = ["incidents", "feedback", "literacy"] as const;
@@ -189,6 +198,7 @@ export async function runGovernanceMonitor(
     incidents: incidentMonitorInput,
     feedback: feedbackMonitorInput,
     literacy: literacyMonitorInput,
+    detection: detectionMonitorInput,
     ...opts.optionalInputs,
   };
   const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
@@ -334,6 +344,13 @@ export async function runGovernanceMonitor(
   for (const [ruleId, a] of Object.entries(accountability)) {
     for (const k of a?.heldSubjectKeys ?? []) heldSubjects.add(`${ruleId}|${k}`);
   }
+  // ADR-0186 M — the detection rules, the same way (a rule the loader did not
+  // report on is not evaluated this pass)
+  const detection: Partial<Record<DetectionMonitorRuleId, MonitorAssuranceInput>> = (await optional("detection")) ?? {};
+  const unreportedDetectionRules = DETECTION_MONITOR_RULE_IDS.filter((r) => detection[r] === undefined);
+  for (const [ruleId, a] of Object.entries(detection)) {
+    for (const k of a?.heldSubjectKeys ?? []) heldSubjects.add(`${ruleId}|${k}`);
+  }
 
   const findings = evaluateMonitorRules({
     useCases,
@@ -351,11 +368,13 @@ export async function runGovernanceMonitor(
     kris: kriInput,
     assurance,
     accountability,
+    detection,
   });
   const notEvaluated = new Set<string>([
     ...failedInputs.map((f) => f.ruleId),
     ...unreportedAssuranceRules,
     ...unreportedAccountabilityRules,
+    ...unreportedDetectionRules,
   ]);
   for (const f of failedInputs) {
     await db.insert(auditLog).values({

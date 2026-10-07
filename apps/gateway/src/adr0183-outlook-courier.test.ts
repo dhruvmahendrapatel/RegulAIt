@@ -27,8 +27,12 @@
  * 10. the mail link's origin is REGULAIT_PUBLIC_URL ONLY: a forged Host header
  *     never reaches a mail; unset (or unusable), registration is refused with
  *     422 `public_url_required` and a post to an existing workspace sends nothing.
+ * 11. X19-S01: a token endpoint or Graph that REFLECTS the client secret (raw,
+ *     form-encoded, JSON-escaped, \u-escaped) yields a 502 whose detail, the
+ *     audit rows and the log lines carry no form of it, and JSON.parse of the
+ *     logged body cannot recover it.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -91,8 +95,11 @@ let graphServer: http.Server;
 let loginBase = "";
 let graphBase = "";
 let mintSeq = 0;
-/** what the fake token endpoint answers: a token, or the client-secret refusal */
-let loginMode: "ok" | "invalid_client" = "ok";
+/** what the fake token endpoint answers: a token, the client-secret refusal,
+ * or (X19-S01) a refusal that reflects the submitted secret */
+let loginMode: "ok" | "invalid_client" | "reflect" = "ok";
+/** X19-S01: a Graph that answers 400 reflecting the secret it was told */
+let graphReflects: string | null = null;
 /** tokens the fake Graph refuses with 401 (a revoked token) */
 const graphRefuses = new Set<string>();
 
@@ -189,7 +196,18 @@ beforeAll(async () => {
   const resolved = resolveGatewayLogger({ LOG_LEVEL: "trace" } as NodeJS.ProcessEnv);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, logger: { ...(resolved as object), stream: sink } as never });
 
-  ({ server: loginServer, base: loginBase } = await serve(LOGIN_HOST, loginHits, (_req, _body, res) => {
+  ({ server: loginServer, base: loginBase } = await serve(LOGIN_HOST, loginHits, (_req, body, res) => {
+    if (loginMode === "reflect") {
+      // a broken proxy / hostile login host echoing what it was sent
+      const submitted = new URLSearchParams(body).get("client_secret") ?? "";
+      const encoded = /client_secret=([^&]*)/.exec(body)?.[1] ?? "";
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: "invalid_client",
+        error_description: `AADSTS7000215: Invalid client secret provided: ${submitted} (encoded ${encoded}, lower ${encoded.toLowerCase()}; body ${body})`,
+      }));
+      return;
+    }
     if (loginMode === "invalid_client") {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "invalid_client", error_description: "AADSTS7000215: Invalid client secret provided." }));
@@ -201,6 +219,15 @@ beforeAll(async () => {
   }));
   ({ server: graphServer, base: graphBase } = await serve(GRAPH_HOST, graphHits, (req, _body, res) => {
     const token = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+    if (graphReflects !== null) {
+      const every = [...graphReflects].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(
+        `{"error":{"code":"ErrorInvalidRequest","message":"echo ${JSON.stringify(graphReflects).slice(1, -1)} token ${token}",` +
+          `"innerError":{"escaped":"${every}"}}}`,
+      );
+      return;
+    }
     if (graphRefuses.has(token)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { code: "InvalidAuthenticationToken", message: "Access token has expired or is not yet valid." } }));
@@ -601,5 +628,90 @@ describe("9. the client secret never leaves the wire to the token endpoint", () 
       expect(hit.body).not.toContain(CLIENT_SECRET);
       expect(hit.authorization ?? "").not.toContain(CLIENT_SECRET);
     }
+  });
+});
+
+describe("11. X19-S01: a reflected client secret escapes no sink", () => {
+  /** synthetic: `"`, `\`, `+`, `/`, `=` and a space, so every encoding differs */
+  const SYN = `syn"th\\etic+secret/=value ${RUN}`;
+  const forms = [
+    SYN,
+    JSON.stringify(SYN).slice(1, -1),
+    JSON.stringify(JSON.stringify(SYN)).slice(1, -1),
+    encodeURIComponent(SYN),
+    encodeURIComponent(SYN).toLowerCase(),
+    new URLSearchParams([["k", SYN]]).toString().slice(2),
+    new URLSearchParams([["k", SYN]]).toString().slice(2).toLowerCase(),
+  ];
+  const leaks = (text: string) => forms.filter((f) => text.includes(f));
+  const strings = (v: unknown): string[] =>
+    typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...strings(x)]) : [];
+
+  it("token reflection: 502 chatops_post_failed with the upstream status and code; Graph never reached; Graph reflection: 502 and a scrubbed log", async () => {
+    const since = new Date();
+    const respFrom = responses.length;
+    const logFrom = logLines.length;
+    const consoleLines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      consoleLines.push(args.map(String).join(" "));
+    });
+    try {
+      const cred = await inject("POST", `/v1/connectors/${connectorId}/credential`, {
+        token: JSON.stringify({ appId: `client-${RUN}`, appPassword: SYN, tenantId: TENANT, senderUpn: SENDER, loginBaseUrl: loginBase }),
+      });
+      expect(cred.statusCode, cred.body).toBe(201);
+      clearOutlookTokenCache();
+
+      // (1) the token endpoint reflects the submitted secret, raw and form-encoded
+      loginMode = "reflect";
+      const before = { login: loginHits.length, graph: graphHits.length };
+      const res = await postCard(await makeApproval());
+      expect(res.statusCode, res.body).toBe(502);
+      expect(res.json()).toMatchObject({ error: "chatops_post_failed", upstreamStatus: 401 });
+      const detail = String(res.json().detail);
+      expect(detail).toContain("HTTP 401: invalid_client");
+      expect(detail).toContain("AADSTS7000215");
+      expect(leaks(detail), detail).toEqual([]);
+      expect(leaks(res.body), res.body).toEqual([]);
+      // positive control: the secret WAS on the token wire; Graph got nothing
+      expect(loginHits.length).toBe(before.login + 1);
+      expect(loginHits.at(-1)!.body).toContain(new URLSearchParams([["client_secret", SYN]]).toString());
+      expect(graphHits.length).toBe(before.graph);
+      // the alert courier records the same failure as an audit row
+      const alertRes = await inject("POST", `/v1/governance/alerts/${alertId}/post`, { connectionName: CONNECTION });
+      expect(alertRes.statusCode).toBe(502);
+      loginMode = "ok";
+
+      // (2) Graph answers 400 reflecting the secret JSON-escaped and \u-escaped, and the token
+      graphReflects = SYN;
+      const graphRes = await postCard(await makeApproval());
+      expect(graphRes.statusCode, graphRes.body).toBe(502);
+      expect(graphRes.json()).toMatchObject({ error: "chatops_post_failed", upstreamStatus: 400 });
+      expect(String(graphRes.json().detail)).toContain("HTTP 400 ErrorInvalidRequest");
+      expect(leaks(graphRes.body), graphRes.body).toEqual([]);
+      expect(graphRes.body).not.toMatch(/graph-token-\d/);
+    } finally {
+      loginMode = "ok";
+      graphReflects = null;
+      spy.mockRestore();
+    }
+
+    // every sink: responses, audit rows, the gateway's log, the adapter's console log
+    for (const body of responses.slice(respFrom)) expect(leaks(body), body).toEqual([]);
+    const audits = await db.select().from(auditLog).where(gte(auditLog.at, since));
+    expect(audits.some((r) => r.ruleId === CHATOPS_RULE_IDS.alertPostFailed)).toBe(true);
+    for (const row of audits) expect(leaks(JSON.stringify(row)), JSON.stringify(row)).toEqual([]);
+    for (const line of logLines.slice(logFrom)) expect(leaks(line), line).toEqual([]);
+    const graphLog = consoleLines.filter((l) => l.startsWith("[outlook] sendMail HTTP 400: "));
+    expect(graphLog.length).toBe(1);
+    for (const line of consoleLines) {
+      expect(leaks(line), line).toEqual([]);
+      expect(line).not.toMatch(/graph-token-\d/);
+    }
+    // the logged body is still JSON, and parsing it cannot recover the secret
+    const parsed = JSON.parse(graphLog[0]!.replace("[outlook] sendMail HTTP 400: ", "")) as unknown;
+    const decoded = strings(parsed);
+    expect(decoded).toContain("ErrorInvalidRequest");
+    for (const str of decoded) expect(leaks(str), str).toEqual([]);
   });
 });
