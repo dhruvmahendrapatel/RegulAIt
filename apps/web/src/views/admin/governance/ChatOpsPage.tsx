@@ -21,8 +21,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
-import { QueryGate, useAction, useConnectors } from "../adminKit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useConnectors, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 
 /**
@@ -139,6 +139,7 @@ interface Connection {
   /** ADR-0179 — false for a workspace the courier cannot post a card to (an
    * outlook row registered before registration was refused) */
   outboundSupported?: boolean;
+  outlookRecipientAllowList?: string[];
 }
 interface ConnectionsResponse {
   connections: Connection[];
@@ -299,6 +300,9 @@ export default function ChatOpsPage() {
           )}
         </QueryGate>
       </Card>
+
+      {(connections.data?.connections ?? []).filter((row) => row.provider === "outlook").map((row) =>
+        <OutlookRecipients key={`${row.id}:${JSON.stringify(row.outlookRecipientAllowList)}`} connection={row} />)}
 
       <Card title="Connect a workspace">
         <p className={v.faint}>
@@ -507,4 +511,111 @@ export default function ChatOpsPage() {
       </Card>
     </>
   );
+}
+
+/**
+ * Mirrors `OUTLOOK_RECIPIENT_ALLOW_LIST_MAX` and the canonical form in
+ * `outlookRecipientAllowListProblem` (packages/shared/src/batch3.ts): trimmed,
+ * lower-cased, de-duplicated — the SPA depends on no workspace package, and
+ * ChatOpsPage.test.ts runs both against the same inputs. Blank lines are not
+ * entries. The limit and the confirmation count the canonical list, the one
+ * the gateway stores.
+ */
+export const OUTLOOK_RECIPIENT_ALLOW_LIST_MAX = 50;
+export function canonicalOutlookRecipients(text: string): string[] {
+  return [...new Set(text.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean))];
+}
+
+/**
+ * What a save of the Outlook allow-list would do. The list is whole, so the
+ * form never sends it as loaded: this admin's delta (added and removed
+ * mailboxes, canonical, against `loaded`, the list the form opened with) is
+ * applied to `current`, the list re-read just before saving, so a recipient
+ * another admin added or removed meanwhile survives. Unchanged (no delta, or
+ * the merge equals what is stored) sends nothing; an unreadable `current`
+ * refuses rather than overwrite with a stale list. `adds` is decided on the
+ * merged list against `current`; `added` lists the mailboxes it newly allows.
+ */
+export function outlookRecipientChange(loaded: readonly string[], text: string, current: readonly string[] | null):
+  | { kind: "error"; error: string }
+  | { kind: "unchanged" }
+  | { kind: "save"; recipients: string[]; adds: boolean; added: string[] } {
+  const local = canonicalOutlookRecipients(text);
+  const before = canonicalOutlookRecipients(loaded.join("\n"));
+  const added = local.filter((mailbox) => !before.includes(mailbox));
+  const removed = before.filter((mailbox) => !local.includes(mailbox));
+  if (added.length === 0 && removed.length === 0) return { kind: "unchanged" };
+  if (current === null) return { kind: "error", error: "Could not load the current recipients, so nothing was saved. Retry." };
+  const now = canonicalOutlookRecipients(current.join("\n"));
+  const recipients = [...new Set([...now.filter((mailbox) => !removed.includes(mailbox)), ...added])];
+  if (recipients.length === now.length && recipients.every((mailbox) => now.includes(mailbox))) return { kind: "unchanged" };
+  if (recipients.length > OUTLOOK_RECIPIENT_ALLOW_LIST_MAX) return { kind: "error", error: `Allow at most ${OUTLOOK_RECIPIENT_ALLOW_LIST_MAX} additional recipient mailboxes (including any added meanwhile).` };
+  const newlyAllowed = recipients.filter((mailbox) => !now.includes(mailbox));
+  return { kind: "save", recipients, adds: newlyAllowed.length > 0, added: newlyAllowed };
+}
+
+function OutlookRecipients({ connection }: { connection: Connection }) {
+  const act = useAction();
+  const flight = useSingleFlight();
+  // after a save the form stays locked until the connections query has the server's list
+  const baseline = useSettleAfterWrite(["chatops", "connections"]);
+  const [text, setText] = useState((connection.outlookRecipientAllowList ?? []).join("\n"));
+  // the dialog keeps this admin's INTENT (the text, read against the load-time
+  // list), not the merged list: confirming re-reads and re-merges
+  type Shown = Extract<ReturnType<typeof outlookRecipientChange>, { kind: "save" }>;
+  const [pending, setPending] = useState<{ text: string; shown: Shown; changedWhileOpen: boolean } | null>(null);
+  const save = async (recipients: string[]) => {
+    if (await act.run(() => api.patch(`/v1/chatops/connections/${connection.id}`, { outlookRecipientAllowList: recipients }), "Outlook recipients saved")) await baseline.settle();
+  };
+  const loaded = connection.outlookRecipientAllowList ?? [];
+  const readCurrent = () => api.get<ConnectionsResponse>("/v1/chatops/connections").then(
+    (response) => response.connections.find((row) => row.id === connection.id)?.outlookRecipientAllowList ?? null,
+    () => null,
+  );
+  const confirm = async () => {
+    const intent = pending;
+    setPending(null);
+    let confirming = false;
+    try {
+      if (!intent) return;
+      // the dialog may have been open for minutes: merge into what is stored NOW
+      const change = outlookRecipientChange(loaded, intent.text, await readCurrent());
+      if (change.kind === "error") { act.setError(change.error); return; }
+      if (change.kind === "unchanged") { act.setError("The stored recipients already match your change; nothing was saved."); return; }
+      if (reconfirmNeeded(intent.shown.added, change)) { confirming = true; setPending({ ...intent, shown: change, changedWhileOpen: true }); return; }
+      await save(change.recipients);
+    } finally {
+      if (!confirming) flight.leave();
+    }
+  };
+  const submit = async () => {
+    // busy BEFORE the re-read: a second submit meanwhile is ignored
+    if (baseline.stale || !flight.enter()) return;
+    let confirming = false;
+    try {
+      const edited = outlookRecipientChange(loaded, text, loaded);
+      if (edited.kind === "error") { act.setError(edited.error); return; }
+      if (edited.kind === "unchanged") { act.setError("No recipient changed; nothing was saved."); return; }
+      // merge into, and classify against, the list stored now
+      const change = outlookRecipientChange(loaded, text, await readCurrent());
+      if (change.kind === "error") { act.setError(change.error); return; }
+      if (change.kind === "unchanged") { act.setError("The stored recipients already match your change; nothing was saved."); return; }
+      if (change.adds) { confirming = true; setPending({ text, shown: change, changedWhileOpen: false }); return; }
+      await save(change.recipients);
+    } finally {
+      // a confirmation keeps the flight until it is cancelled or saved
+      if (!confirming) flight.leave();
+    }
+  };
+  const busy = act.busy || flight.busy || baseline.stale;
+  return <Card title={`Outlook recipients: ${connection.name}`}><form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+    <Field label={`Additional recipients for ${connection.name}`}><Textarea value={text} onChange={(event) => setText(event.target.value)} disabled={busy} rows={4} /></Field>
+    <p>One exact mailbox per line, at most 50. No display names or wildcards. The registered mailbox remains allowed. Adding recipients relaxes who may receive approval summaries and is audited; all changes are audited.</p>
+    <Button type="submit" disabled={busy}>Save Outlook recipients</Button>
+    {act.error && <p role="alert">{act.error}</p>}
+    {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
+    <ConfirmModal open={pending !== null} title="Allow more Outlook recipients?" body={<p>{pending?.changedWhileOpen && <>The stored list changed while this was open; review the result again. </>}Newly allowed: {pending?.shown.added.join(", ")}. The resulting allow-list will contain {pending?.shown.recipients.length ?? 0} exact mailboxes. Additional recipients may receive approval summaries; this relaxation is audited.</p>}
+      confirmLabel="Save audited recipients" onCancel={() => { setPending(null); flight.leave(); }}
+      onConfirm={() => void confirm()} />
+  </form></Card>;
 }

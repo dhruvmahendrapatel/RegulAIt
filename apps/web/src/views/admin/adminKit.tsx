@@ -5,7 +5,7 @@
  * reveal, reason-required modals, and small display helpers. Everything here
  * composes the phase-1 kit — no new dependencies.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import { guidanceOf, type RefusalGuidance } from "../../api/refusals";
@@ -19,6 +19,7 @@ import type {
   EgressAllowHost,
   McpServer,
   McpTool,
+  OrgSettingsResponse,
   Role,
   Team,
 } from "../../api/adminTypes";
@@ -91,6 +92,35 @@ export const adminKeys = {
 
 export const useUsers = () =>
   useQuery({ queryKey: adminKeys.users, queryFn: () => api.get<{ users: AdminUser[] }>("/v1/users") });
+/**
+ * GET /v1/users is bounded (REL-10): it takes `limit` only — no cursor, no
+ * search, no by-id read. Mirrors LIST_MAX_LIMIT in
+ * apps/gateway/src/list-limit.ts. A picker that must show people beyond the
+ * default page asks for the maximum and says when even that was truncated:
+ * a person missing from a truncated page is "not loaded", never "inactive".
+ */
+export const USERS_LIST_MAX = 5_000;
+export interface UserPickerPage { users: AdminUser[]; complete: boolean }
+export const userPickerPage = (users: AdminUser[], limit = USERS_LIST_MAX): UserPickerPage => ({
+  users,
+  complete: users.length < limit,
+});
+export const useUserPicker = () =>
+  useQuery({
+    queryKey: [...adminKeys.users, "picker", USERS_LIST_MAX],
+    queryFn: async () => userPickerPage((await api.get<{ users: AdminUser[] }>(`/v1/users?limit=${USERS_LIST_MAX}`)).users),
+  });
+/**
+ * The org settings as stored NOW, read just before a relaxation is classified,
+ * so a confirmation is decided against the current value rather than the
+ * snapshot the form loaded. null when the read fails: the caller then asks for
+ * confirmation rather than assume nothing is relaxed.
+ */
+export const readCurrentOrgSettings = (): Promise<Record<string, unknown> | null> =>
+  api.get<OrgSettingsResponse>("/v1/org/settings").then(
+    (response) => (response.settings ? (response.settings as unknown as Record<string, unknown>) : null),
+    () => null,
+  );
 export const useRoles = () =>
   useQuery({ queryKey: adminKeys.roles, queryFn: () => api.get<{ roles: Role[] }>("/v1/roles") });
 export const useTeams = () =>
@@ -278,6 +308,70 @@ export function RemoveButton(props: {
     </>
   );
 }
+
+/**
+ * One submit at a time for a form that awaits something (a re-read of the
+ * stored values) BEFORE its save starts. `enter()` is synchronous and refuses
+ * re-entry even within the same tick, so two submits cannot both reach the
+ * save; the caller `leave()`s on every exit path — including a cancelled or
+ * completed confirmation it handed the flight to.
+ */
+export function useSingleFlight() {
+  const held = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const enter = () => {
+    if (held.current) return false;
+    held.current = true;
+    setBusy(true);
+    return true;
+  };
+  const leave = () => {
+    held.current = false;
+    setBusy(false);
+  };
+  return { busy, enter, leave };
+}
+
+/**
+ * After a successful write, a form's baseline must be the server's state, not
+ * the snapshot it was opened with. `settle()` refetches the queries under
+ * `queryKey` and resolves once they have answered; call it INSIDE the form's
+ * single-flight lock so the form stays disabled meanwhile. When the refetch
+ * fails the form stays `stale` (disabled, with `StaleAfterWrite` offering
+ * the retry) so it cannot write the same value twice or put back a value
+ * another admin has changed since.
+ */
+export function useSettleAfterWrite(queryKey: readonly unknown[]) {
+  const qc = useQueryClient();
+  const [stale, setStale] = useState(false);
+  const settle = async (): Promise<boolean> => {
+    await qc.invalidateQueries({ queryKey });
+    const ok = qc.getQueryCache().findAll({ queryKey }).every((query) => query.state.status !== "error");
+    setStale(!ok);
+    return ok;
+  };
+  return { stale, settle };
+}
+
+export function StaleAfterWrite({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p role="alert">
+      Saved, but the current values could not be reloaded. This form stays locked so it cannot write over a newer change.{" "}
+      <Button type="button" onClick={onRetry}>
+        Retry loading current values
+      </Button>
+    </p>
+  );
+}
+
+/**
+ * At confirmation time the change is re-derived from the values stored NOW.
+ * It is sent without asking again only when everything it newly relaxes was
+ * already in the dialog the person confirmed (`shown`); anything new opens the
+ * dialog again with the new content.
+ */
+export const reconfirmNeeded = (shown: readonly string[], next: { adds: boolean; added: readonly string[] }): boolean =>
+  next.adds && next.added.some((item) => !shown.includes(item));
 
 export function useAction() {
   const { toast } = useToast();
