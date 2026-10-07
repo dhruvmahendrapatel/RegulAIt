@@ -27,8 +27,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import {
+  and,
   approvalDelegations,
   approvals,
+  auditLog,
   authSessions,
   createDb,
   eq,
@@ -40,7 +42,7 @@ import {
   users as usersTable,
   type Db,
 } from "@regulait/db";
-import { STEP_UP_HEADER } from "@regulait/shared";
+import { APPROVAL_SIGNATURE_RECHECK_FAILED_RULE, STEP_UP_HEADER } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
@@ -485,3 +487,93 @@ describe("B4S-02: the writes that can pad an approver pool need settings_relax (
   });
 });
 
+describe("B4S-09: at execution, every approving decider must still be eligible", () => {
+  /** queue, approve with `p` (signed), then break `p`'s eligibility with `breakIt` and run the call */
+  async function approvedThenBroken(p: Person, breakIt: () => Promise<unknown>, approver: { s: Session; auth: SoftAuthenticator } = p) {
+    const tool = nextTool();
+    await rule(tool);
+    const args = { text: `recheck ${tool}` };
+    const id = await queued(tool, args);
+    const ok = await signAndDecide(approver, id);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().status).toBe("approved");
+    await breakIt();
+    const before = upstreamHits.tool;
+    const out = await call(tool, args);
+    return { id, out, ran: upstreamHits.tool - before };
+  }
+
+  async function expectRefused(r: { id: string; out: unknown; ran: number }, why: string) {
+    expect(r.ran).toBe(0);
+    expect((r.out as { kind: string }).kind, JSON.stringify(r.out)).toBe("denied");
+    expect((r.out as { decision: { ruleId: string } }).decision.ruleId).toBe(APPROVAL_SIGNATURE_RECHECK_FAILED_RULE);
+    expect((await row(r.id)).status).toBe("superseded");
+    const [audit] = await db
+      .select({ detail: auditLog.detail })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, APPROVAL_SIGNATURE_RECHECK_FAILED_RULE), sql`${auditLog.detail}->>'approvalId' = ${r.id}`));
+    expect((audit!.detail as { why: string }).why).toBe(why);
+  }
+
+  it("control: an approval whose decider is still eligible runs once", async () => {
+    const m = await person("still-eligible");
+    await addToRole(m.id);
+    const r = await approvedThenBroken(m, async () => undefined);
+    expect(r.ran).toBe(1);
+    expect((r.out as { kind: string }).kind).toBe("allowed");
+  });
+
+  it("a decider deactivated after approving: refused, superseded, audited, nothing runs", async () => {
+    const m = await person("deactivated-after");
+    await addToRole(m.id);
+    await expectRefused(
+      await approvedThenBroken(m, () => db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, m.id))),
+      "decider_ineligible",
+    );
+  });
+
+  it("a principal removed from the approver role after approving: refused", async () => {
+    const m = await person("removed-after");
+    await addToRole(m.id);
+    await expectRefused(
+      await approvedThenBroken(m, () => db.delete(roleAssignments).where(and(eq(roleAssignments.userId, m.id), eq(roleAssignments.roleId, roleId)))),
+      "principal_ineligible",
+    );
+  });
+
+  it("a delegate whose delegation ended after they approved on the approver's behalf: refused", async () => {
+    const del = await person("delegate-ended");
+    const [link] = await delegate(P.a.id, del.id);
+    await expectRefused(
+      await approvedThenBroken(P.a, () => db.delete(approvalDelegations).where(eq(approvalDelegations.id, link!.id)), del),
+      "delegation_ineligible",
+    );
+  });
+
+  it("in step_up mode too: a decider deactivated after approving is refused", async () => {
+    await db.execute(sql`UPDATE org_settings SET approval_signature_mode = 'step_up' WHERE id = ${ORG_SETTINGS_ID}`);
+    try {
+      const m = await person("step-up-mode");
+      await addToRole(m.id);
+      const tool = nextTool();
+      await rule(tool);
+      const args = { text: "step-up recheck" };
+      const id = await queued(tool, args);
+      expect((await row(id)).signatureMode).toBe("step_up");
+      const refused = await decide(m.s, id);
+      expect(refused.statusCode, refused.body).toBe(403);
+      const o = await as(m.s, "POST", "/v1/auth/step-up/options", { action: refused.json().action });
+      const v = await as(m.s, "POST", "/v1/auth/step-up/verify", { stepUpId: o.json().stepUpId, method: "passkey", response: m.auth.authenticate(o.json().passkey.options) });
+      expect(v.statusCode, v.body).toBe(200);
+      const ok = await decide(m.s, id, undefined, { [STEP_UP_HEADER]: v.json().stepUpToken });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect(ok.json().status).toBe("approved");
+      await db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, m.id));
+      const before = upstreamHits.tool;
+      const out = await call(tool, args);
+      await expectRefused({ id, out, ran: upstreamHits.tool - before }, "decider_ineligible");
+    } finally {
+      await db.execute(sql`UPDATE org_settings SET approval_signature_mode = 'passkey' WHERE id = ${ORG_SETTINGS_ID}`);
+    }
+  });
+});

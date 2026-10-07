@@ -839,18 +839,56 @@ export interface CallFacts {
 export type RecheckOutcome = { ok: true } | { ok: false; why: string; principalUserId?: string | null };
 
 /**
- * Re-verify EVERY approving signature of a passkey-mode tool-call approval
- * against the payload recomputed from the call actually being run. Any
- * mismatch (payload, digest, assertion, credential gone or revoked, fewer
- * valid principals than the snapshotted quorum) fails the whole approval.
- * Rows in `step_up` / `off` mode carry no signature to recheck.
+ * B4S-09: is every APPROVING decider of `row` still eligible, by the same
+ * predicate the decide applies (B4S-02)? The decider is an active account
+ * created before the call was queued; the principal they counted as is still
+ * in the approval's pool (the approver named then, or a member of the approver
+ * role since before then, active now); a decision made on someone's behalf
+ * still rides a live delegation created before the call was queued; and
+ * neither is linked to the caller by a delegation. Any failure fails the whole
+ * approval (fail closed): the people who approved must still be people who may.
+ */
+async function recheckDeciders(db: Q, row: ApprovalRow, decisions: readonly ApprovalDecisionRow[]): Promise<RecheckOutcome> {
+  if (decisions.length === 0) return { ok: true };
+  const pool = await poolForApproval(db, row);
+  for (const d of decisions) {
+    const fail = (why: string): RecheckOutcome => ({ ok: false, why, principalUserId: d.principalUserId });
+    if (!d.deciderUserId || !d.principalUserId) return fail("decider_unknown");
+    const [decider] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, d.deciderUserId), isNull(users.disabledAt), lt(users.createdAt, requestedAtOf(row.id))));
+    if (!decider) return fail("decider_ineligible");
+    if (!pool.members.includes(d.principalUserId)) return fail("principal_ineligible");
+    const live = await activeDelegationLinks(db, [d.deciderUserId]);
+    if (live.some(([from, to]) => from === row.userId || to === row.userId)) return fail("decider_linked_to_caller");
+    if (d.deciderUserId !== d.principalUserId) {
+      const prior = await activeDelegationLinks(db, [d.deciderUserId], { createdBefore: requestedAtOf(row.id) });
+      if (!prior.some(([from, to]) => from === d.principalUserId && to === d.deciderUserId)) return fail("delegation_ineligible");
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * THE EXECUTION RECHECK of a tool-call approval, under the consuming row lock.
+ * B4S-09: every approving decider is still eligible (`recheckDeciders`), in
+ * every signature mode. Then, in passkey mode, EVERY approving signature is
+ * re-verified against the payload recomputed from the call actually being
+ * run. Any mismatch (payload, digest, assertion, credential gone, revoked or
+ * enrolled after the call was queued, fewer valid principals than the
+ * snapshotted quorum) fails the whole approval. Rows in `step_up` / `off` mode
+ * carry no signature to recheck.
  */
 export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: CallFacts | null): Promise<RecheckOutcome> {
-  if (!isToolCallApproval(row) || row.signatureMode !== "passkey") return { ok: true };
+  if (!isToolCallApproval(row)) return { ok: true };
+  const decisions = (await decisionsFor(db, row.id)).filter((d) => d.decision === "approved");
+  const deciders = await recheckDeciders(db, row, decisions);
+  if (!deciders.ok) return deciders;
+  if (row.signatureMode !== "passkey") return { ok: true };
   if (!call) return { ok: false, why: "no_call_facts" };
   const rp = relyingParty();
   if (!rp) return { ok: false, why: "passkey_rp_unconfigured" };
-  const decisions = (await decisionsFor(db, row.id)).filter((d) => d.decision === "approved");
   const valid: ApprovalDecisionRow[] = [];
   for (const d of decisions) {
     const fail = (why: string): RecheckOutcome => ({ ok: false, why, principalUserId: d.principalUserId });
@@ -875,6 +913,7 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
     }
     const [cred] = await db.select().from(webauthnCredentials).where(eq(webauthnCredentials.id, d.credentialId));
     if (!cred || cred.revokedAt || cred.userId !== d.deciderUserId) return fail("credential_unusable");
+    if (!(await credentialPredates(db, cred.id, row.id))) return fail("credential_enrolled_after_request");
     try {
       const v = await verifyAuthenticationResponse({
         response: d.assertion as unknown as AuthenticationResponseJSON,
@@ -902,11 +941,14 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
 
 /** supersede an approval whose signatures failed the recheck, and audit it (inside the consuming transaction) */
 export async function supersedeOnRecheckFailure(db: Q, row: ApprovalRow, call: CallFacts | null, outcome: Extract<RecheckOutcome, { ok: false }>) {
+  const signatureFailure = !/ineligible|unknown|linked_to_caller/.test(outcome.why);
   await db
     .update(approvals)
     .set({
       status: "superseded",
-      decisionReason: "superseded: an approving signature did not verify against the call that tried to run",
+      decisionReason: signatureFailure
+        ? "superseded: an approving signature did not verify against the call that tried to run"
+        : "superseded: someone who approved is no longer eligible to approve it",
     })
     .where(and(eq(approvals.id, row.id), eq(approvals.status, "approved")));
   await db.insert(auditLog).values({
@@ -926,9 +968,11 @@ export async function supersedeOnRecheckFailure(db: Q, row: ApprovalRow, call: C
     effect: "deny",
     ruleId: APPROVAL_SIGNATURE_RECHECK_FAILED_RULE,
     ruleChain: [],
-    reason:
-      `approval '${row.id}' was superseded and the call refused: its approving signatures did not verify against ` +
-      `the call that tried to run (${outcome.why})`,
+    reason: signatureFailure
+      ? `approval '${row.id}' was superseded and the call refused: its approving signatures did not verify against ` +
+        `the call that tried to run (${outcome.why})`
+      : `approval '${row.id}' was superseded and the call refused: an approving decider is no longer eligible ` +
+        `(${outcome.why}) — the people who approved must still be people who may`,
   });
 }
 
