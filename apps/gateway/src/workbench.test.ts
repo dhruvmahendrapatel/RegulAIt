@@ -353,15 +353,27 @@ describe("routing — the rule decides WHOSE QUEUE, not who may decide", () => {
     expect(res.json().error).toBe("already_claimed");
   });
 
-  it("the claimer can now decide it through the ordinary endpoint", async () => {
+  it("on a TOOL-CALL approval the claim gives no decision right; the approver named at queue time decides it", async () => {
+    // B4S-02: routing "decides whose queue this shows in, never who may decide" —
+    // the claim re-pointed the stored approver to betty after the call was queued,
+    // so she has no named-approver standing (dual control would otherwise be
+    // satisfiable by a principal moved in afterwards); alex, named then, decides
     const res = await app.inject({
       method: "POST",
       url: `/v1/approvals/${teamApprovalId}/decide`,
       headers: bettyAuth,
       payload: { decision: "approved", reason: "reviewed" },
     });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().status).toBe("approved");
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("not_the_named_approver");
+    const named = await app.inject({
+      method: "POST",
+      url: `/v1/approvals/${teamApprovalId}/decide`,
+      headers: alexAuth,
+      payload: { decision: "approved", reason: "reviewed" },
+    });
+    expect(named.statusCode, named.body).toBe(200);
+    expect(named.json().status).toBe("approved");
   });
 
   it("a more specific rule wins by priority", async () => {

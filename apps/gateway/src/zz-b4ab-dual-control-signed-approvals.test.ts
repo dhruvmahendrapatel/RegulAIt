@@ -395,6 +395,16 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
   it("same principal twice → 403 duplicate_approver, directly and through delegation (a delegate and their delegator are one)", async () => {
     const tool = nextTool();
     expect((await rule(tool, { quorum: 3 })).statusCode).toBe(201);
+    // B4S-02: a delegation counts for a decision only when it existed before the call
+    // was queued, so a's delegation to e (outside the pool) is set up first
+    await db.update(orgSettings).set({ approvalDelegationEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const delAE = await withKey(AUTH, "POST", "/v1/delegations", {
+      fromUserId: P.a.id,
+      toUserId: P.e.id,
+      startsAt: new Date(Date.now() - 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    expect(delAE.statusCode, delAE.body).toBe(201);
     const id = await queued(tool, { text: "dup" });
     expect((await signAndDecide(P.a, id)).statusCode).toBe(200);
     const again = await as(P.a.s, "POST", `/v1/approvals/${id}/signing-options`, { decision: "approved" });
@@ -403,20 +413,13 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
     // a decide with no signature is refused the same way (eligibility comes first)
     expect((await decide(P.a, id, "approved")).json().error).toBe("duplicate_approver");
 
-    await db.update(orgSettings).set({ approvalDelegationEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-    const delAE = await withKey(AUTH, "POST", "/v1/delegations", {
-      fromUserId: P.a.id,
-      toUserId: P.e.id,
-      startsAt: new Date(Date.now() - 60_000).toISOString(),
-      endsAt: new Date(Date.now() + 3_600_000).toISOString(),
-    });
+    // b's delegation to d may come later: it only ever MERGES principals (stricter), live
     const delBD = await withKey(AUTH, "POST", "/v1/delegations", {
       fromUserId: P.b.id,
       toUserId: P.d.id,
       startsAt: new Date(Date.now() - 60_000).toISOString(),
       endsAt: new Date(Date.now() + 3_600_000).toISOString(),
     });
-    expect(delAE.statusCode, delAE.body).toBe(201);
     expect(delBD.statusCode, delBD.body).toBe(201);
     try {
       // e (outside the pool) acting as a's delegate: a already approved
