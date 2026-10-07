@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
-import { optionEls, QueryGate, readCurrentOrgSettings, reconfirmNeeded, serverOpts, useAction, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
+import { adminKeys, optionEls, QueryGate, readCurrentOrgSettings, reconfirmNeeded, serverOpts, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
 import { PeopleLoadError, UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
 
@@ -67,17 +67,21 @@ export function coverageChanges(loaded: Record<string, unknown>, methods: string
 function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const act = useAction();
   const flight = useSingleFlight();
+  // after a save the form stays locked until the settings query has the server's values
+  const baseline = useSettleAfterWrite(["admin", "org-settings"]);
   const [methods, setMethods] = useState<string[]>(Array.isArray(settings.mcpProtocolMethods) ? settings.mcpProtocolMethods : []);
   const [transports, setTransports] = useState<string[]>(Array.isArray(settings.mcpUpstreamTransports) ? settings.mcpUpstreamTransports : []);
   // the dialog keeps this admin's INTENT (the form's lists, read against the
   // load-time snapshot), not the merged lists: confirming re-reads and re-merges
   const [pending, setPending] = useState<{ methods: string[]; transports: string[]; shown: Extract<CoverageChange, { kind: "save" }>; changedWhileOpen: boolean } | null>(null);
   const unavailable = !Array.isArray(settings.mcpProtocolMethods) || !Array.isArray(settings.mcpUpstreamTransports);
-  const save = (body: CoverageBody) => act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved");
+  const save = async (body: CoverageBody) => {
+    if (await act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved")) await baseline.settle();
+  };
   const toggle = (values: string[], value: string, checked: boolean) => checked ? [...values, value] : values.filter((item) => item !== value);
   const submit = async () => {
     // busy BEFORE the re-read: a second submit meanwhile is ignored
-    if (!flight.enter()) return;
+    if (baseline.stale || !flight.enter()) return;
     let confirming = false;
     try {
       if (coverageChanges(settings, methods, transports, settings).kind === "unchanged") { act.setError("No MCP coverage setting changed."); return; }
@@ -108,7 +112,7 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
       if (!confirming) flight.leave();
     }
   };
-  const busy = act.busy || flight.busy;
+  const busy = act.busy || flight.busy || baseline.stale;
   return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported MCP protocol coverage. Refresh before changing it.</p>}
     <fieldset disabled={busy || unavailable}><legend>Enabled protocol methods</legend>
@@ -121,6 +125,7 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
     <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. Stdio also requires operator-configured executable directories, a pinned command digest and admission approval.</p>
     <Button type="submit" disabled={busy || unavailable}>Save MCP coverage</Button>
     {act.error && <p role="alert">{act.error}</p>}
+    {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
     <ConfirmModal open={pending !== null} title="Enable more MCP coverage?" body={<p>{pending?.changedWhileOpen && <>The stored coverage changed while this was open; review the result again. </>}{pending?.shown.body.mcpProtocolMethods && <>Enabled methods: {pending.shown.body.mcpProtocolMethods.join(", ") || "none"}. </>}{pending?.shown.body.mcpUpstreamTransports && <>Transports: {pending.shown.body.mcpUpstreamTransports.join(", ") || "none"}. </>}The gateway audits this relaxation; user grants and admission checks still apply.</p>}
       confirmLabel="Save audited change" onCancel={() => { setPending(null); flight.leave(); }}
       onConfirm={() => void confirm()} />
@@ -128,10 +133,22 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
 }
 
 function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
-  const users = useUserPicker(); const act = useAction();
+  const users = useUserPicker(); const act = useAction(); const flight = useSingleFlight();
   const [userId, setUserId] = useState(""); const [serverId, setServerId] = useState(""); const [grant, setGrant] = useState<string>(MCP_PROTOCOL_GRANT_NAMES[0]);
   return <Card title="Per-user protocol grants"><form className={v.stack} onSubmit={(event) => {
-    event.preventDefault(); void act.run(() => api.post("/v1/grants/tools", { userId, serverId, toolName: grant }), "Protocol grant added");
+    event.preventDefault();
+    if (!flight.enter()) return;
+    void (async () => {
+      try {
+        // a create form's baseline is empty: after a grant is added the choices
+        // are cleared, so a second click cannot mint the same grant again
+        if (await act.run(() => api.post("/v1/grants/tools", { userId, serverId, toolName: grant }), "Protocol grant added")) {
+          setUserId(""); setServerId(""); setGrant(MCP_PROTOCOL_GRANT_NAMES[0]);
+        }
+      } finally {
+        flight.leave();
+      }
+    })();
   }}>
     <Field label="Protocol user"><Select required value={userId} onChange={(event) => setUserId(event.target.value)}>{optionEls(userOpts(users.data?.users.filter((user) => !user.disabledAt)), "— select —")}</Select></Field>
     {users.data && !users.data.complete && <UserListTruncated count={users.data.users.length} />}
@@ -139,7 +156,7 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
     <Field label="Protocol server"><Select required value={serverId} onChange={(event) => setServerId(event.target.value)}>{optionEls(serverOpts(servers), "— select —")}</Select></Field>
     <Field label="Protocol grant"><Select value={grant} onChange={(event) => setGrant(event.target.value)}>{MCP_PROTOCOL_GRANT_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}</Select></Field>
     <p>Granting protocol access relaxes this person's default deny and is audited. The corresponding method must also be enabled above. Read-only server access does not include these grants; logging is a write operation.</p>
-    <Button type="submit" disabled={act.busy || users.isLoading || !!users.error}>Add protocol grant</Button>
+    <Button type="submit" disabled={act.busy || flight.busy || users.isLoading || !!users.error}>Add protocol grant</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form></Card>;
 }
@@ -187,12 +204,27 @@ export function stdioUpdateOutcome(before: McpServer, after: McpServer): string 
 }
 function StdioUpdateForm({ server }: { server: McpServer }) {
   const act = useAction(); const [command, setCommand] = useState(server.stdio!.command); const [args, setArgs] = useState(server.stdio!.args);
+  const flight = useSingleFlight();
+  // after a save the form stays locked until the servers query has the server's command and digest
+  const baseline = useSettleAfterWrite(adminKeys.servers);
   const dirty = stdioSpecDirty(server, command, args);
-  return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void act.run(async () => stdioUpdateOutcome(server, await api.patch<McpServer>(`/v1/servers/${server.id}`, { stdio: { command, args } }))); }}>
-    <Field label="Updated executable path"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} /></Field>
-    <StdioArguments args={args} onChange={setArgs} disabled={act.busy} />
+  const busy = act.busy || flight.busy || baseline.stale;
+  return <form className={v.stack} onSubmit={(event) => {
+    event.preventDefault();
+    if (baseline.stale || !flight.enter()) return;
+    void (async () => {
+      try {
+        if (await act.run(async () => stdioUpdateOutcome(server, await api.patch<McpServer>(`/v1/servers/${server.id}`, { stdio: { command, args } })))) await baseline.settle();
+      } finally {
+        flight.leave();
+      }
+    })();
+  }}>
+    <Field label="Updated executable path"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={busy} /></Field>
+    <StdioArguments args={args} onChange={setArgs} disabled={busy} />
     {!dirty && <p>The command and arguments match what is stored. Submitting re-checks the file's digest: admission resets only if the executable on disk has changed.</p>}
-    <Button type="submit" disabled={act.busy}>{dirty ? "Update command and reset admission" : "Re-check executable digest"}</Button>
+    <Button type="submit" disabled={busy}>{dirty ? "Update command and reset admission" : "Re-check executable digest"}</Button>
     {act.error && <p role="alert">{act.error}</p>}
+    {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
   </form>;
 }

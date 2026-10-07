@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
-import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, useAction, useSingleFlight } from "../adminKit";
+import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 
 interface MemoryStore {
@@ -90,15 +90,19 @@ export function retentionRelaxed(body: RetentionBody, current: Record<string, un
 function RetentionSettings({ settings }: { settings: Record<string, unknown> }) {
   const act = useAction();
   const flight = useSingleFlight();
+  // after a save the form stays locked until the settings query has the server's values
+  const baseline = useSettleAfterWrite(["admin", "org-settings"]);
   const [ttl, setTtl] = useState(String(settings.semanticCacheTtlSeconds ?? ""));
   const [days, setDays] = useState(String(settings.conversationRetentionDays ?? ""));
   // the dialog keeps this admin's INTENT (the typed values); confirming re-reads
   const [pending, setPending] = useState<{ ttl: string; days: string; body: RetentionBody; relaxed: string[]; changedWhileOpen: boolean } | null>(null);
   const unavailable = typeof settings.semanticCacheTtlSeconds !== "number" || typeof settings.conversationRetentionDays !== "number";
-  const save = (body: RetentionBody) => act.run(() => api.put("/v1/org/settings", body), "Retention settings saved");
+  const save = async (body: RetentionBody) => {
+    if (await act.run(() => api.put("/v1/org/settings", body), "Retention settings saved")) await baseline.settle();
+  };
   const submit = async () => {
     // busy BEFORE the re-read: a second submit meanwhile is ignored
-    if (!flight.enter()) return;
+    if (baseline.stale || !flight.enter()) return;
     let confirming = false;
     try {
       const edited = retentionChanges(settings, ttl, days, settings);
@@ -139,7 +143,7 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
       if (!confirming) flight.leave();
     }
   };
-  const busy = act.busy || flight.busy;
+  const busy = act.busy || flight.busy || baseline.stale;
   return <form className={v.stack} onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     {unavailable && <p role="alert">This gateway has not reported its retention settings. Refresh before changing them.</p>}
     <Field label="Semantic cache lifetime (seconds)"><Input type="number" required min={1} max={2592000} step={1} value={ttl} onChange={(event) => setTtl(event.target.value)} disabled={busy || unavailable} /></Field>
@@ -148,6 +152,7 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
     <p>The strict default is 30 days since the last activity. More than 30 days relaxes that limit and is audited. Incident evidence holds still apply.</p>
     <Button type="submit" variant="primary" disabled={busy || unavailable}>Save retention settings</Button>
     {act.error && <p role="alert">{act.error}</p>}
+    {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
     <ConfirmModal open={pending !== null} title="Extend memory retention?" body={<p>{pending?.changedWhileOpen && <>The stored settings changed while this was open; review the result again. </>}{pending?.body.semanticCacheTtlSeconds !== undefined && <>Cache lifetime: {pending.body.semanticCacheTtlSeconds} seconds. </>}{pending?.body.conversationRetentionDays !== undefined && <>Conversation retention: {pending.body.conversationRetentionDays} days. </>}This retains information longer and the gateway audits the change.</p>}
       confirmLabel="Save audited change" onCancel={() => { setPending(null); flight.leave(); }}
       onConfirm={() => void confirm()} />

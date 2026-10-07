@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "../../../api/client";
 import { Button, Card, Field, Select } from "../../../ui/kit";
 import type { AdminUser } from "../../../api/adminTypes";
-import { optionEls, useAction, useUserPicker, userOpts, type UserPickerPage } from "../adminKit";
+import { adminKeys, optionEls, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight, useUserPicker, userOpts, type UserPickerPage } from "../adminKit";
 import v from "../../views.module.css";
 
 interface OwnedIntegration { id: string; name: string; ownerUserId?: string | null; ownership?: "owned" | "unowned" | "orphaned" }
@@ -47,15 +47,27 @@ export function canSaveOwner(owner: string, row: Pick<OwnedIntegration, "ownerUs
 function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIntegration }) {
   const users = useUserPicker();
   const act = useAction();
+  const flight = useSingleFlight();
+  // the rows come from the page's servers/connectors query: after a save the
+  // form stays locked until that query has the server's new owner
+  const baseline = useSettleAfterWrite(adminKeys[kind]);
   const [owner, setOwner] = useState(row.ownerUserId ?? "");
   const active = users.data?.users.filter((user) => user.disabledAt === null) ?? [];
   const status = users.data ? ownerStatus(owner, users.data, row) : "none";
+  const busy = act.busy || flight.busy || baseline.stale;
   return <form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
-    void act.run(() => api.put(`/v1/${kind}/${row.id}/owner`, { ownerUserId: owner || null }), "Owner updated");
+    if (busy || !flight.enter()) return;
+    void (async () => {
+      try {
+        if (await act.run(() => api.put(`/v1/${kind}/${row.id}/owner`, { ownerUserId: owner || null }), "Owner updated")) await baseline.settle();
+      } finally {
+        flight.leave();
+      }
+    })();
   }}>
     <p>Current ownership: {row.ownership ?? "not reported"}. An orphaned integration names a person whose account is no longer active.</p>
-    <Field label={`Owner for ${row.name}`}><Select value={owner} onChange={(event) => setOwner(event.target.value)} disabled={act.busy || users.isLoading || !!users.error}>
+    <Field label={`Owner for ${row.name}`}><Select value={owner} onChange={(event) => setOwner(event.target.value)} disabled={busy || users.isLoading || !!users.error}>
       <option value="">Unassigned</option>
       {status === "inactive" && <option value={owner} disabled>Current owner inactive — choose an active person or unassign</option>}
       {status === "not_found" && <option value={owner} disabled>Current owner not found — choose an active person or unassign</option>}
@@ -65,7 +77,8 @@ function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIn
     <p>Only active people can be assigned. Assigning or clearing an owner is audited and grants no permission to call this integration.</p>
     {users.data && !users.data.complete && <UserListTruncated count={users.data.users.length} />}
     {users.error && <PeopleLoadError onRetry={() => void users.refetch()} />}
-    <Button type="submit" disabled={act.busy || users.isLoading || !!users.error || !canSaveOwner(owner, row, status)}>Save owner</Button>
+    {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
+    <Button type="submit" disabled={busy || users.isLoading || !!users.error || !canSaveOwner(owner, row, status)}>Save owner</Button>
     {act.error && <p role="alert">{act.error}</p>}
   </form>;
 }

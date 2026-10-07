@@ -333,6 +333,38 @@ export function useSingleFlight() {
 }
 
 /**
+ * After a successful write, a form's baseline must be the server's state, not
+ * the snapshot it was opened with. `settle()` refetches the queries under
+ * `queryKey` and resolves once they have answered; call it INSIDE the form's
+ * single-flight lock so the form stays disabled meanwhile. When the refetch
+ * fails the form stays `stale` (disabled, with `StaleAfterWrite` offering
+ * the retry) so it cannot write the same value twice or put back a value
+ * another admin has changed since.
+ */
+export function useSettleAfterWrite(queryKey: readonly unknown[]) {
+  const qc = useQueryClient();
+  const [stale, setStale] = useState(false);
+  const settle = async (): Promise<boolean> => {
+    await qc.invalidateQueries({ queryKey });
+    const ok = qc.getQueryCache().findAll({ queryKey }).every((query) => query.state.status !== "error");
+    setStale(!ok);
+    return ok;
+  };
+  return { stale, settle };
+}
+
+export function StaleAfterWrite({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p role="alert">
+      Saved, but the current values could not be reloaded. This form stays locked so it cannot write over a newer change.{" "}
+      <Button type="button" onClick={onRetry}>
+        Retry loading current values
+      </Button>
+    </p>
+  );
+}
+
+/**
  * At confirmation time the change is re-derived from the values stored NOW.
  * It is sent without asking again only when everything it newly relaxes was
  * already in the dialog the person confirmed (`shown`); anything new opens the
