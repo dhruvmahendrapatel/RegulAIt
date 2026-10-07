@@ -56,7 +56,15 @@ export type DraftSaveOutcome =
 export const durableForSubmit = (outcome: DraftSaveOutcome): boolean =>
   outcome.kind === "saved" || (outcome.kind === "not-kept" && (outcome.reason === "off" || outcome.reason === "offer"));
 
+/** A fully saved draft can be left after the session owner changes without
+ * writing or deleting anything. Unsaved work still requires an explicit discard.
+ * This exception is for navigation only; durableForSubmit still refuses it. */
+export const durableForLeave = (outcome: DraftSaveOutcome, unsaved: boolean): boolean =>
+  outcome.kind === "saved" || (!unsaved && outcome.kind === "not-kept" && outcome.reason === "owner-changed");
+
 const SAVE_DELAY_MS = 1000;
+/** A stalled save must release the queue and offer a retry, without sending a keyed create. */
+const SAVE_TIMEOUT_MS = 15_000;
 /** a keepalive request body may be at most 64 KiB; a larger exit save goes as an ordinary request */
 const KEEPALIVE_MAX_BYTES = 60_000;
 export const draftPath = (scope: string) => `/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`;
@@ -170,6 +178,7 @@ export function useIntakeDraft<S>(opts: {
           draftPath(scope),
           { state: JSON.parse(body) as unknown },
           draftOwnerHeaders(owner.current),
+          AbortSignal.timeout(SAVE_TIMEOUT_MS),
         );
         saved.current = body;
         if (!stopped.current) {
@@ -250,8 +259,10 @@ export function useIntakeDraft<S>(opts: {
     saved.current = null;
     setStatus({ kind: "idle" });
     try {
-      // the literal path keeps this delete visible to the UI-affordance check
-      await api.del(`/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`);
+      // the literal path keeps this delete visible to the UI-affordance check;
+      // R13-12: it names whose draft this is, so the gateway refuses it (409
+      // `draft_owner_changed`) if someone else has signed in on this browser since
+      await api.delWithHeaders(`/v1/use-cases/draft?scope=${encodeURIComponent(scope)}`, draftOwnerHeaders(owner.current));
     } catch {
       // the next save replaces it anyway
     }
@@ -259,13 +270,15 @@ export function useIntakeDraft<S>(opts: {
 
   /** after a successful submission: stop saving, then delete the draft once every save has landed */
   const discard = useCallback(async () => {
-    // a saved draft the person never chose to resume is theirs to keep: only this page's own draft goes
-    const ownDraft = statusRef.current.kind !== "offer";
+    // a saved draft the person never chose to resume is theirs to keep: only this page's own draft goes;
+    // R13-12: once someone else is signed in, the draft under this cookie is theirs, not ours to touch
+    const ownDraft = statusRef.current.kind !== "offer" && !ownerChanged();
     stopped.current = true;
     clearTimer();
     setStatus({ kind: "done" });
     if (!ownDraft) return;
-    const run = queue.current.then(() => api.del(draftPath(scope)).catch(() => undefined));
+    const who = owner.current;
+    const run = queue.current.then(() => api.delWithHeaders(draftPath(scope), draftOwnerHeaders(who)).catch(() => undefined));
     queue.current = run.catch(() => undefined);
     await run;
   }, [scope]);
@@ -276,7 +289,21 @@ export function useIntakeDraft<S>(opts: {
     return serialized !== saved.current;
   })();
 
-  return { status, unsaved, flush: save, resume, startFresh, discard };
+  /** Leave without another save; an earlier server draft remains available. */
+  const abandon = useCallback(() => {
+    stopped.current = true;
+    clearTimer();
+    setStatus({ kind: "done" });
+  }, []);
+
+  /**
+   * R13-12: the person signed in now is not the one whose draft this page
+   * loaded (an in-place sign-in change). Nothing this page holds can be saved,
+   * submitted or deleted on their behalf; the page refuses and says so.
+   */
+  const ownerHasChanged = owner.current !== null && opts.userId !== owner.current;
+
+  return { status, unsaved, ownerChanged: ownerHasChanged, flush: save, resume, startFresh, discard, abandon };
 }
 
 /** "Draft saved 14:05" — the time in the viewer's own clock */
