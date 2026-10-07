@@ -4,7 +4,6 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
-<<<<<<< HEAD
 
 ## X18 R18-01/02 review fixes — 2026-10-07 UTC
 
@@ -36,7 +35,7 @@ Validation: typecheck/production build PASS; **331/331 web units**. `e2e/batch3.
 Commands: `E2E_DB=regulait_x18_browser E2E_PORT=3108 E2E_BASE_URL=http://127.0.0.1:3108 E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test e2e/batch3.spec.ts`, with an operator-allowed local fixture via `E2E_MCP_STDIO_COMMAND`/`REGULAIT_MCP_STDIO_ALLOWED_DIRS`. The second run uses `regulait_x18_no_stdio`, port3109, no stdio opt-in. Both use synthetic `REGULAIT_PUBLIC_URL=https://regulait.example.test`. Evidence under `/workspace/.regulait-onboarding/`: `x18-real-final{,.log}`, `x18-no-stdio{,.log}`, `x18-final-build.log`, `x18-units2.log`. The executable is never invoked, Outlook credentials are registration-only and **no messages are sent**. Settings restored, user fixtures deactivated; integration rows remain in disposable scratch databases.
 
 Earlier failed runs are retained: implicit browser context for axe, the strict stdio schema rejecting an HTTP-only field, a registry link incorrectly located as a row, and cleanup's duplicate deactivation/empty JSON body. Final counts include successful cleanup. No gateway/shared/database/scripts/workflow changes. Claude review, CI and metrics contract answer pending.
-=======
+
 ## X13 R13-01 review fix — 2026-10-07 UTC
 
 A fully saved registration could not leave after SessionProvider.refresh changed the signed-in owner in place: flush refused the actor change, while Discard was hidden because nothing was unsaved. Both registration and resubmission now use a navigation-only decision that permits owner-changed solely when the page has no unsaved work. The hook still checks the owner before comparing saved content, sends no PUT/DELETE for the changed owner, and durableForSubmit still refuses owner-changed; pending/failed saves remain blocked and explicit discard remains available for unsaved work.
@@ -92,7 +91,6 @@ Four corrected baseline cases fail against main and four controls pass (`x20-red
 Final validation: `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts identity-policy-keyboard.mock.spec.ts sso-admin.mock.spec.ts policy-simulation-incomplete.mock.spec.ts --trace=on --output=/workspace/.regulait-onboarding/x20-final` — **12 total cases PASS: 8 new keyboard page audits and 4 existing regression cases**, **32 full-page axe analyses PASS**, WCAG 2 A/AA, 2.1 A/AA and 2.2 AA in light/dark. Includes modal Tab/Shift-Tab traps, Escape/return focus, required reason and server-refusal live errors, native multi-selection, recorded override/MFA reasons, synthetic clipboard success/refusal, and held-request repeated-Enter checks proving one evaluation/rule request. `pnpm --filter @regulait/web test` **328/328 PASS**; `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS. Logs/traces are under `/workspace/.regulait-onboarding/x20-{final,final.log,red-corrected,red-corrected.log,units.log,typecheck.log,build.log}`.
 
 Limits: synthetic API fixtures verify browser semantics and request shapes, not backend authorization. No actual screen-reader session was available; live-region/accessible-name checks and axe do not establish complete assistive-technology compatibility. Cancellation restores modal triggers; successful deletion of a removed trigger is outside this audit. Coordination lint still fails on inherited Claude messages older than 12h; M2 expressly prohibits deleting them. Claude alone reviews/merges and marks VERIFIED.
->>>>>>> origin/main
 
 ## X16 key-custody CI investigation — 2026-10-07 UTC
 
