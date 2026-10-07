@@ -35,6 +35,7 @@
 import { publicUrlPosture } from "./public-url.js";
 import { metricsPosture } from "./metrics.js";
 import { approvalSigningPosture } from "./approval-signatures.js";
+import { bootstrapStepUpPosture } from "./step-up.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -336,7 +337,7 @@ export interface HardenOutcome {
 export function registerPosturePresetRoutes(
   app: FastifyInstance,
   db: Db,
-  opts: { sink?: AnchorSink | null } = {},
+  opts: { sink?: AnchorSink | null; bootstrapConfigured?: boolean } = {},
 ) {
   // AER-012: ONE sink for the life of the app — the same object the audit-chain
   // and posture routes hold when `buildApp` passes it, else resolved from the
@@ -358,6 +359,8 @@ export function registerPosturePresetRoutes(
       metrics: metricsPosture(),
       // ADR-0186 B: passkey-signed approvals with no relying party fail closed — say so
       approvalSigning: approvalSigningPosture(settings.approvalSignatureMode),
+      // B4S-06: the bootstrap credential passes a step-up only during first-admin setup
+      bootstrap: await bootstrapStepUpPosture(db, opts.bootstrapConfigured === true),
     };
   });
 

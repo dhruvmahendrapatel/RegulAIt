@@ -2,6 +2,12 @@
  * B4S round 2 (ADR-0186 A / ADR-0180) — proof by attack for the second
  * security-fix round:
  *
+ *  - B4S-06: the bootstrap credential (header or exchanged session) passes a
+ *    step-up only while no active admin has a usable step-up method; after
+ *    that a protected action from it is refused 403 step_up_required
+ *    (credential "bootstrap", no methods) and the posture reports
+ *    `bootstrap_token_configured`. This block runs FIRST, on a database where
+ *    no admin has a method yet.
  *  - B4S-07: a fresh SSO sign-in is a step-up method only on a SECURE request
  *    (https, or https at a trusted proxy). Over plain http it is neither listed
  *    in a refusal nor started by /options.
@@ -233,6 +239,88 @@ afterAll(async () => {
     async () => dropScratchDatabase(adminDb, SCRATCH_DB),
     async () => adminDb?.$client.end(),
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// B4S-06 — the bootstrap credential passes a step-up only before an admin can
+// ---------------------------------------------------------------------------
+
+describe("B4S-06: the bootstrap credential passes step-up only during first-admin setup", () => {
+  let first: Person;
+  let bootSession: string;
+  const relax = (minutes: number, headers: Record<string, string> = {}) => boot("PUT", "/v1/org/settings", { sessionIdleMinutes: minutes }, headers);
+  const relaxViaSession = (minutes: number) => as({ token: bootSession }, "PUT", "/v1/org/settings", { sessionIdleMinutes: minutes });
+  const posture = async () => (await boot("GET", "/v1/org/posture")).json().bootstrap;
+
+  beforeAll(async () => {
+    first = await mkPerson("first-admin", true);
+    const ex = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: BOOT } });
+    expect(ex.statusCode, ex.body).toBe(200);
+    bootSession = ex.cookies.find((c) => c.name === "regulait_session")!.value;
+  });
+  afterAll(async () => {
+    // put the strict value back through the step-up the admin can now give is not this block's subject
+    await db.execute(sql`UPDATE org_settings SET session_idle_minutes = 30`);
+  });
+
+  it("while no admin can step up, the bootstrap header and its exchanged session pass (first-admin setup)", async () => {
+    expect(await posture()).toEqual({ configured: true, adminWithStepUpMethod: false, passesStepUp: true, findings: [] });
+    expect((await relax(40)).statusCode).toBe(200);
+    expect((await relaxViaSession(45)).statusCode).toBe(200);
+  });
+
+  it("a non-admin's method, or a disabled admin's, does not close the door", async () => {
+    const plain = await mkPerson("plain-with-totp", false);
+    await db.execute(sql`UPDATE users SET totp_enabled = true WHERE id = ${plain.id}`);
+    const gone = await mkPerson("disabled-admin", true);
+    await db.execute(sql`UPDATE users SET totp_enabled = true, disabled_at = now() WHERE id = ${gone.id}`);
+    expect((await posture()).adminWithStepUpMethod).toBe(false);
+    expect((await relax(50)).statusCode).toBe(200);
+  });
+
+  it("once an admin enrols a passkey, a protected action from the bootstrap header or its session is refused", async () => {
+    await enrolPasskey(first);
+    for (const r of [await relax(55), await relaxViaSession(55)]) {
+      expect(r.statusCode, r.body).toBe(403);
+      expect(r.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", methods: [], credential: "bootstrap" });
+    }
+    // an unprotected write still works (the credential is not revoked, only no longer a step-up)
+    const u = await boot("POST", "/v1/users", { email: `b4s2-after-${RUN}@example.com`, displayName: "after" });
+    expect(u.statusCode, u.body).toBe(201);
+    // and the person who CAN step up does the protected write the real way
+    const refused = await as(first, "PUT", "/v1/org/settings", { sessionIdleMinutes: 55 });
+    expect(refused.statusCode).toBe(403);
+    const ok = await as(first, "PUT", "/v1/org/settings", { sessionIdleMinutes: 55 }, { [STEP_UP_HEADER]: await grantFor(first, refused.json().action) });
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it("the posture reports bootstrap_token_configured while the token is still set", async () => {
+    const p = await posture();
+    expect(p).toMatchObject({ configured: true, adminWithStepUpMethod: true, passesStepUp: false });
+    expect(p.findings.map((f: { code: string }) => f.code)).toEqual(["bootstrap_token_configured"]);
+  });
+
+  it("an admin's SSO link counts even when the bootstrap request is plain http; TOTP counts", async () => {
+    await db.execute(sql`UPDATE webauthn_credentials SET revoked_at = now(), revoke_reason = 'b4s2 test' WHERE user_id = ${first.id}`);
+    expect((await posture()).adminWithStepUpMethod).toBe(false);
+    await db.execute(sql`UPDATE users SET totp_enabled = true WHERE id = ${first.id}`);
+    expect((await relax(60)).statusCode).toBe(403);
+    await db.execute(sql`UPDATE users SET totp_enabled = false WHERE id = ${first.id}`);
+    const [sp] = await db
+      .insert(samlProviders)
+      .values({ name: `b4s2-saml6-${RUN}`, entityId: `https://idp6.b4s2-${RUN}.example/m`, idpSsoUrl: `https://idp6.b4s2-${RUN}.example/sso`, idpSigningCerts: [makeSamlCert()] })
+      .returning({ id: samlProviders.id });
+    await db.insert(federatedIdentities).values({
+      userId: first.id,
+      samlProviderId: sp!.id,
+      issuer: `https://idp6.b4s2-${RUN}.example/m`,
+      subjectFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+      subject: first.email,
+      linkedVia: "jit",
+    });
+    expect((await relax(60)).statusCode).toBe(403);
+    // the SAML link stays: every later block runs with an admin who can step up
+  });
 });
 
 // ---------------------------------------------------------------------------

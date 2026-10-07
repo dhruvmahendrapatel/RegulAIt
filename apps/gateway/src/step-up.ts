@@ -36,10 +36,17 @@
  * virtual key, a chat tap and a bulk operation never can, so a protected
  * action from one is refused (403 `step_up_required` with no methods, or
  * `chatops_step_up_required`). The deploy-time BOOTSTRAP credential (header or
- * exchanged session) is not a person and has no identity to prove: it is
- * already the root of the deployment (it can mint admins), so a step-up adds
- * nothing against its holder; it passes, and the protected route's own audit
- * row records `via: bootstrap` as before.
+ * exchanged session) is not a person and has no identity to prove. B4S-06: it
+ * passes a step-up ONLY during first-admin setup — while no active admin has a
+ * usable step-up method (`adminWithStepUpMethodExists`) — because then nobody
+ * could give one and the deployment must still be configurable. From the
+ * moment an admin can step up, a protected action from the bootstrap
+ * credential is refused 403 `step_up_required` with no methods and
+ * `credential: "bootstrap"` (the same shape as an API key's: the action does
+ * need a step-up, and this credential can never give one — `step_up_unavailable`
+ * would wrongly say the ORG has no way to step up, when an admin does), and
+ * GET /v1/org/posture reports `bootstrap_token_configured` while the token is
+ * still set.
  *
  * POLICY: `org_settings.step_up_mode` (`required` strict; `off` is a relaxation
  * and itself needs a `settings_relax` step-up) and `step_up_actions` (all six
@@ -319,6 +326,59 @@ export async function stepUpMethodsFor(
   return { methods, sso, passkeyCount: passkeys.length };
 }
 
+/**
+ * B4S-06: does any ACTIVE administrator have a usable step-up method — an
+ * enrolled authenticator app, an unrevoked passkey (with a relying party
+ * configured: without one no passkey can be used by anyone), or a linked
+ * identity at an enabled SSO provider? An SSO link counts whatever the current
+ * request's scheme: whether a fresh SSO sign-in is usable depends on how the
+ * ADMIN reaches RegulAIt, not on how the bootstrap caller did (a plain-http
+ * request to the gateway port must not reopen the bootstrap door).
+ */
+export async function adminWithStepUpMethodExists(db: Db): Promise<boolean> {
+  const passkey = relyingParty()
+    ? sql`EXISTS (SELECT 1 FROM ${webauthnCredentials} wc WHERE wc.user_id = ${users.id} AND wc.revoked_at IS NULL)`
+    : sql`false`;
+  const [hit] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      and(
+        eq(users.isAdmin, true),
+        isNull(users.disabledAt),
+        sql`(${users.totpEnabled} = true OR ${passkey} OR EXISTS (
+          SELECT 1 FROM ${federatedIdentities} fi
+          LEFT JOIN ${oidcProviders} op ON op.id = fi.oidc_provider_id
+          LEFT JOIN ${samlProviders} sp ON sp.id = fi.saml_provider_id
+          WHERE fi.user_id = ${users.id} AND (op.enabled = true OR sp.enabled = true)))`,
+      ),
+    )
+    .limit(1);
+  return Boolean(hit);
+}
+
+/** what GET /v1/org/posture says about the bootstrap credential (B4S-06) */
+export async function bootstrapStepUpPosture(db: Db, bootstrapConfigured: boolean) {
+  const adminCanStepUp = await adminWithStepUpMethodExists(db);
+  return {
+    configured: bootstrapConfigured,
+    adminWithStepUpMethod: adminCanStepUp,
+    passesStepUp: bootstrapConfigured && !adminCanStepUp,
+    findings:
+      bootstrapConfigured && adminCanStepUp
+        ? [
+            {
+              code: "bootstrap_token_configured",
+              detail:
+                "REGULAIT_BOOTSTRAP_TOKEN is still set although an administrator can now step up: it is a full-admin " +
+                "credential with no identity. Protected actions from it are refused; unset it (and restart) once " +
+                "first-admin setup is done.",
+            },
+          ]
+        : [],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The check every protected route makes
 // ---------------------------------------------------------------------------
@@ -382,7 +442,24 @@ export async function checkStepUp(
       },
     };
   }
-  if (caller.kind === "bootstrap") return { ok: true, method: "bootstrap" };
+  if (caller.kind === "bootstrap") {
+    // B4S-06: first-admin setup only (see the header)
+    if (!(await adminWithStepUpMethodExists(db))) return { ok: true, method: "bootstrap" };
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        error: "step_up_required",
+        actionKind: args.kind,
+        methods: [],
+        credential: "bootstrap",
+        detail:
+          "the bootstrap credential cannot confirm who is acting, and an administrator here can: sign in to RegulAIt " +
+          "as that administrator and do this there (the bootstrap credential passes a step-up only until an admin " +
+          "has a way to give one; unset REGULAIT_BOOTSTRAP_TOKEN once setup is done)",
+      },
+    };
+  }
   if (caller.kind === "key" || args.channel === "bulk") {
     return {
       ok: false,

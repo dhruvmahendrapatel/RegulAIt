@@ -228,7 +228,7 @@ export type SensitivitySource = "attributed_project" | "caller_membership";
  *
  * A server or connector carries no project binding in the schema (no column
  * or link table ties a target to a project), so the target cannot be a
- * source today; see the B4S-03 note in the ADR.
+ * source today (reported for the ADR as an open item).
  */
 export async function callSensitivity(
   db: Q,
