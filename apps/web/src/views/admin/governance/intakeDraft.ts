@@ -279,7 +279,14 @@ export function useIntakeDraft<S>(opts: {
     return serialized !== saved.current;
   })();
 
-  return { status, unsaved, flush: save, resume, startFresh, discard };
+  /** Leave without another save; an earlier server draft remains available. */
+  const abandon = useCallback(() => {
+    stopped.current = true;
+    clearTimer();
+    setStatus({ kind: "done" });
+  }, []);
+
+  return { status, unsaved, flush: save, resume, startFresh, discard, abandon };
 }
 
 /** "Draft saved 14:05" — the time in the viewer's own clock */

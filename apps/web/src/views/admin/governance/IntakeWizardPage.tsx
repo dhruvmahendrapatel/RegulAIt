@@ -259,6 +259,7 @@ function RegisterUseCase() {
     beforeLeave: async () =>
       draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
       (await draft.flush()).kind === "saved",
+    onDiscard: !submitting && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
   });
 
   // ---- the stack and the assistant ------------------------------------------

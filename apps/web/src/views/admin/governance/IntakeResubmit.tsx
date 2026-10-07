@@ -216,6 +216,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     beforeLeave: async () =>
       draft.status.kind === "off" || draft.status.kind === "done" || draft.status.kind === "offer" ||
       (await draft.flush()).kind === "saved",
+    onDiscard: !busy && draft.unsaved && draft.status.kind !== "saving" ? draft.abandon : undefined,
   });
 
   // Navigate after the successful submission has rendered with its guard off.

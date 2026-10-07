@@ -775,6 +775,24 @@ test.describe("update and resubmit", () => {
     expect((state.draft?.state as { description?: string } | undefined)?.description).toBe(description);
   });
 
+  test("B1: a permanently refused resubmission draft can be discarded without resubmitting", async ({ page }) => {
+    const state = await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
+    await page.route(`**/v1/use-cases/draft?scope=${UC}`, async (route) => {
+      if (route.request().method() === "PUT") await route.fulfill({ status: 413, contentType: "application/json", body: '{"error":"draft_too_large"}' });
+      else await route.fallback();
+    });
+    await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+    await page.getByLabel("What will the system do?").fill("Discard this oversized resubmission edit");
+    await page.getByRole("link", { name: "Cancel", exact: true }).click();
+    const leave = page.getByRole("dialog", { name: "Leave this resubmission?" });
+    await leave.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(leave.getByRole("alert")).toContainText("could not be saved");
+    await leave.getByRole("button", { name: "Discard and leave", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/governance/use-cases/${UC}$`));
+    expect(state.calls).toEqual([]);
+    expect(state.draft).toBeNull();
+  });
+
   test("ADR-0171: Cancel and Back wait while a resubmission is in flight; with no edits, Cancel leaves without asking", async ({ page }) => {
     await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
     // nothing edited: Cancel just leaves

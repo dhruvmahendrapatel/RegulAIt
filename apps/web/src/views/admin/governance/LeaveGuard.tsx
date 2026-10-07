@@ -15,6 +15,8 @@ export function useLeaveGuard(opts: {
   body: ReactNode;
   /** Return false to keep the form when its latest changes cannot be saved. */
   beforeLeave?: () => Promise<boolean | void> | boolean | void;
+  /** Explicitly give up unsaved changes without deleting an earlier draft. */
+  onDiscard?: () => void;
 }) {
   const navigate = useNavigate();
   const when = useRef(opts.when);
@@ -51,15 +53,20 @@ export function useLeaveGuard(opts: {
     setError(null);
     try {
       if (await opts.beforeLeave?.() === false) {
-        setError("Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, or stay and keep editing.");
+        setError("Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, stay and keep editing, or discard the unsaved changes and leave.");
         return;
       }
       blocker.proceed();
     } catch {
-      setError("Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, or stay and keep editing.");
+      setError("Your latest changes could not be saved. They are still on this page. Try Leave again to retry saving, stay and keep editing, or discard the unsaved changes and leave.");
     } finally {
       setLeaving(false);
     }
+  };
+  const discardAndLeave = () => {
+    if (leaving || blocker.state !== "blocked" || !opts.onDiscard) return;
+    opts.onDiscard();
+    blocker.proceed();
   };
 
   const requestLeave = useCallback((to: string) => navigate(to), [navigate]);
@@ -71,12 +78,14 @@ export function useLeaveGuard(opts: {
       actions={
         <>
           <Button onClick={() => void leave()} disabled={leaving}>Leave</Button>
+          {opts.onDiscard && <Button variant="danger" onClick={discardAndLeave} disabled={leaving}>Discard and leave</Button>}
           <Button variant="primary" onClick={stay} disabled={leaving}>Stay on this page</Button>
         </>
       }
     >
       <div className={v.stack}>
         {opts.body}
+        {opts.onDiscard && <p>Discarding leaves without saving these latest changes. An earlier saved draft may still be available.</p>}
         {error && <p role="alert">{error}</p>}
       </div>
     </Modal>
