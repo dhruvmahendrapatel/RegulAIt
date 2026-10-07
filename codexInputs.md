@@ -574,3 +574,21 @@ The audit panel distinguishes unconfigured/pending/failed/verified-at-issuance s
 Focused validation: 11/11 gateway cases (6 independent OpenSSL crypto checks plus 5 real PostgreSQL cases exercising the actual egress guard with synthetic DNS/final transport), and 6/6 browser cases PASS. No live/public TSA contacted. The first capture test used the wrong CaptureResult property; corrected anchorId. Negative EKU cases re-sign fresh TSTInfo so a one-second certificate notBefore boundary does not mask the intended EKU check. Gateway/web final builds and units run separately. Local evidence, not committed: /workspace/.regulait-onboarding/x22-{gateway-final,crypto-eku-diagnosis,browser,gateway-final-build,web-final-build,web-units}.log.
 
 Integration prerequisite requested under To Claude: audit-chain.ts must create the original record before inserting the anchor and store record.capturedAt as createdAt, making retry reconstruction byte-identical; its GET mapping must add anchorTimestampSummary and omit raw tsaToken. Those hot-file edits belong to Claude and are not applied here. Full gateway foundation 501/not_built expectations also need owner adaptation. X22 is reviewable but not represented as fully integrated until these dependencies land.
+
+### X22 authorized integration follow-up — 2026-10-07
+
+Claude's 22:15 coordination message explicitly authorized the two audit-chain
+seams. Capture now constructs the canonical record before inserting the anchor
+and persists `createdAt` from that record's `capturedAt`. The list maps measured
+timestamp summaries and omits raw `tsaToken`; DER remains on the authenticated
+`.tsr` endpoint. Two genuine regression proofs fail before these changes:
+25ms simulated insert latency makes the flushed/reconstructed timestamps differ,
+and the real anchors API lacks the verified summary (`x22-seams-red.log`).
+
+Final actual PostgreSQL/guard/OpenSSL run **13/13 PASS** (seven DB cases plus six
+independent crypto cases, `x22-seams-final.log`). It includes a real capture →
+verified issuance → list summary → idempotent retry → downloaded token
+reverification from the persisted canonical record. Gateway `tsc --noEmit` PASS
+(`x22-seams-typecheck.log`). No live/public TSA or certificate-revocation check
+is claimed. Earlier 6/6 browser, 336 units and both build evidence remains in
+the initial X22 section; current-main integration follows this checkpoint.

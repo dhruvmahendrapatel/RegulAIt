@@ -74,7 +74,7 @@ import {
   type ChainedAuditRow,
 } from "@regulait/shared";
 
-import { anchorTimestamper as defaultAnchorTimestamper } from "./audit-timestamp.js";
+import { anchorTimestampSummary, anchorTimestamper as defaultAnchorTimestamper } from "./audit-timestamp.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -753,6 +753,7 @@ export async function captureAnchor(
 
   const id = randomUUID();
   const destination = sink?.destination ?? "none";
+  const record = anchorRecordOf(head);
   await db.insert(auditAnchors).values({
     id,
     seq: head.seq,
@@ -760,10 +761,10 @@ export async function captureAnchor(
     headAt: head.headAt,
     algorithm: AUDIT_CHAIN_ALGORITHM,
     destination,
+    createdAt: new Date(record.capturedAt),
     status: "pending",
   });
 
-  const record = anchorRecordOf(head);
   const flushed = await flushAnchorRow(db, sink, { id, record });
   // ADR-0186 S: a trusted timestamp for this anchor (never changes the flush outcome)
   await timestampAfterFlush(db, timestamper, { id, record, flushStatus: flushed.status });
@@ -1218,7 +1219,7 @@ export function registerAuditChainRoutes(
     const observation = sink ? ((await sink.observe?.()) ?? null) : null;
     const tamperResistant = observation?.tamperResistant ?? sink?.tamperResistant ?? false;
     return {
-      anchors: rows,
+      anchors: rows.map(row => ({ ...row, tsaToken: undefined, timestamp: anchorTimestampSummary(row) })),
       sink: sink
         ? { destination: sink.destination, tamperResistant, mode: observation?.mode ?? null }
         : null,

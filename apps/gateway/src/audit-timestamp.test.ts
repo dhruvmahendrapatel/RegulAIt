@@ -97,6 +97,32 @@ describe.skipIf(!base)("X22 real timestamp persistence and guarded transport", (
     expect(transport.requests).toHaveLength(before);
     await db.update(orgSettings).set({ auditAnchorTimestampMode: "required" });
   });
+  it("persists the captured canonical record unchanged across insert latency",async()=>{
+    let written:unknown;
+    const sink:AnchorSink={destination:"local_worm",tamperResistant:false,write:async record=>{written=record;return "synthetic-location";},readLatest:async()=>null};
+    const delayed=new Proxy(db,{get(target,key){
+      if(key==="insert")return (table:unknown)=>table===auditAnchors?{values:async(value:typeof auditAnchors.$inferInsert)=>{await target.insert(auditAnchors).values(value);await new Promise(resolve=>setTimeout(resolve,25));}}:target.insert(table as typeof auditAnchors);
+      const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+    }});
+    const result=await captureAnchor(delayed,sink,null,{afterFlush:async()=>{}});
+    const [stored]=await db.select().from(auditAnchors).where(eq(auditAnchors.id,result!.anchorId));
+    expect(anchorRecordFromRow(stored!)).toEqual(written);
+  });
+  it("returns verified summaries rather than raw tokens on the anchors list",async()=>{
+    process.env.REGULAIT_TSA_URL="https://tsa.example.test/";process.env.REGULAIT_TSA_TRUST_BUNDLE=tsa.trustBundle;
+    await db.insert(egressAllowHosts).values({host:"tsa.example.test",allowPrivateRanges:false,allowPlaintextHttp:false,note:"synthetic TSA"}).onConflictDoNothing();
+    const sink:AnchorSink={destination:"local_worm",tamperResistant:false,write:async()=>"synthetic-location",readLatest:async()=>null};
+    const captured=await captureAnchor(db,sink,null);
+    const [row]=await db.select().from(auditAnchors).where(eq(auditAnchors.id,captured!.anchorId));expect(row!.tsaStatus).toBe("granted");
+    const response=await app.inject({method:"GET",url:"/v1/audit/anchors",headers:auth});expect(response.statusCode).toBe(200);
+    const listed=response.json().anchors.find((item:{id:string})=>item.id===row!.id);
+    expect(listed.timestamp).toMatchObject({status:"granted",verified:true});expect(listed).not.toHaveProperty("tsaToken");
+    const before=transport.requests.length;
+    expect((await app.inject({method:"POST",url:`/v1/audit/anchors/${row!.id}/timestamp`,headers:auth})).statusCode).toBe(200);
+    expect(transport.requests).toHaveLength(before);
+    const download=await app.inject({method:"GET",url:`/v1/audit/anchors/${row!.id}/timestamp.tsr`,headers:auth});expect(download.statusCode).toBe(200);
+    const checked=await verifyTimestampResponse(download.rawPayload,{bytes:anchorCanonicalBytes(anchorRecordFromRow(row!)),nonceHex:row!.tsaNonce!,trust:parseTimestampTrustBundle(readFileSync(tsa.trustBundle,"utf8")),now:new Date()});expect(checked.imprint).toBe(row!.tsaMessageImprint);
+  });
   it("refuses anonymous access and malformed or unknown anchor IDs", async () => {
     expect((await app.inject({ method: "POST", url: `/v1/audit/anchors/${randomUUID()}/timestamp` })).statusCode).toBe(401);
     expect((await app.inject({ method: "POST", url: "/v1/audit/anchors/invalid/timestamp", headers: auth })).statusCode).toBe(400);
