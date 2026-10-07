@@ -433,8 +433,8 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, registerStepUpRoutes } from "./step-up.js";
-import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
+import { approvalRuleStepUp, registerStepUpRoutes, requireStepUp } from "./step-up.js";
+import { ApprovalRuleWriteRefusedError, isApproverRole } from "./approval-pool.js";
 import {
   decisionView,
   decideToolCallApproval,
@@ -1524,6 +1524,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const target = await loadUser(userId);
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (target.isAdmin === body.isAdmin) return reply.status(409).send({ error: "no_change" });
+    // B4S-02 (owner principle): granting admin widens who may override a
+    // decision and administer every control, so it needs a settings_relax
+    // step-up bound to the user; a demotion tightens and needs none
+    if (body.isAdmin && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { isAdmin: true } } })).ok) {
+      return reply;
+    }
     /** the flag write, the break-glass list clean-up and the audit row */
     const apply = async (x: Pick<Db, "update" | "insert">, email: string) => {
       const [row] = await x
@@ -2276,6 +2282,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
+    // B4S-02 (owner principle): a role an approval rule names as its approver
+    // role is an approver pool — adding someone to it needs a settings_relax
+    // step-up bound to the user and the role
+    if (
+      (await isApproverRole(db, body.roleId)) &&
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { approverRoleId: body.roleId } } })).ok
+    ) {
+      return reply;
+    }
     const [row] = await db
       .insert(roleAssignments)
       .values({ userId, roleId: body.roleId, origin: "direct" })
@@ -3103,6 +3118,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (to?.disabledAt) {
       return reply.status(422).send({ error: "delegate_disabled", detail: "the delegate account is deactivated" });
     }
+    // B4S-02 (owner principle): a delegation lets someone decide for an
+    // approver — it needs a settings_relax step-up bound to who, for whom, when
+    const delegationFacts = {
+      values: {
+        delegation: {
+          fromUserId: body.fromUserId,
+          toUserId: body.toUserId,
+          startsAt: body.startsAt.toISOString(),
+          endsAt: body.endsAt.toISOString(),
+        },
+      },
+    };
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: delegationFacts })).ok) return reply;
     const [row] = await db
       .insert(approvalDelegations)
       .values({

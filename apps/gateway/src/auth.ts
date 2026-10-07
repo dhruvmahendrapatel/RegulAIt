@@ -57,6 +57,7 @@ import {
   claimSsoReauthByState,
   finishSsoReauth,
   isSsoReauthState,
+  requireStepUp,
   STEP_UP_CEREMONY_SECONDS,
   stepUpResultPage,
   type SsoReauthStart,
@@ -1677,6 +1678,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "this user already has a password — pass force:true to overwrite it (audited reset)",
       });
     }
+    // B4S-02 (owner principle): issuing someone else's password lets the issuer
+    // sign in as them (and decide as them) — a settings_relax step-up bound to the user
+    if (
+      req.authCtx.userId !== userId &&
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { password: "issued" } } })).ok
+    ) {
+      return reply;
+    }
     // generated server-side: 18 random bytes -> 24 url-safe chars, always
     // passes any policy up to length 24 / 3 classes
     const password = "Rg1-" + randomBytes(18).toString("base64url");
@@ -1710,6 +1719,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (!target.totpEnabled && !target.totpSecretCiphertext) {
       return reply.status(409).send({ error: "totp_not_enabled" });
+    }
+    // B4S-02 (owner principle): clearing someone else's second factor removes
+    // their proof of identity — a settings_relax step-up bound to the user
+    if (
+      req.authCtx.userId !== userId &&
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { mfa: "cleared" } } })).ok
+    ) {
+      return reply;
     }
     await db
       .update(users)

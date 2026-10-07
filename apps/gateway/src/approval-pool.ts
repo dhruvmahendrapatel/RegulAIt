@@ -20,24 +20,36 @@
 import {
   and,
   approvalDelegations,
+  approvalRules,
   eq,
   gt,
   inArray,
   isNull,
+  lt,
   lte,
   or,
   orgSettings,
   ORG_SETTINGS_ID,
   roleAssignments,
   roles,
+  sql,
   users,
   type Db,
+  type SQL,
 } from "@regulait/db";
 
 type Q = Pick<Db, "select">;
 
-/** active delegation links touching any of `ids` (none when the org turned delegation off) */
-export async function activeDelegationLinks(db: Q, ids: readonly string[]): Promise<Array<[string, string]>> {
+/**
+ * Active delegation links touching any of `ids` (none when the org turned
+ * delegation off). `createdBefore` keeps only links that already existed then
+ * (B4S-02: a delegation used to decide a queued approval must predate it).
+ */
+export async function activeDelegationLinks(
+  db: Q,
+  ids: readonly string[],
+  opts: { createdBefore?: Date | SQL | null } = {},
+): Promise<Array<[string, string]>> {
   const uniq = [...new Set(ids)];
   if (uniq.length === 0) return [];
   // read straight off the singleton (no org-settings import: this module sits
@@ -56,9 +68,28 @@ export async function activeDelegationLinks(db: Q, ids: readonly string[]): Prom
         or(inArray(approvalDelegations.fromUserId, uniq), inArray(approvalDelegations.toUserId, uniq)),
         lte(approvalDelegations.startsAt, now),
         gt(approvalDelegations.endsAt, now),
+        ...(opts.createdBefore ? [lt(approvalDelegations.createdAt, opts.createdBefore)] : []),
       ),
     );
   return rows.map((r) => [r.from, r.to]);
+}
+
+/**
+ * B4S-02: a queued approval's `requested_at`, read by the database in the same
+ * statement — compared there at full precision, never as a millisecond JS Date.
+ */
+export function requestedAtOf(approvalId: string): SQL {
+  return sql`(SELECT requested_at FROM approvals WHERE id = ${approvalId})`;
+}
+
+/**
+ * B4S-02 (owner principle): is `roleId` an approver role — named as
+ * `approver_role_id` by any approval rule? Adding someone to it widens that
+ * rule's approver pool, so the write needs a `settings_relax` step-up.
+ */
+export async function isApproverRole(db: Q, roleId: string): Promise<boolean> {
+  const [hit] = await db.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.approverRoleId, roleId)).limit(1);
+  return !!hit;
 }
 
 /** union-find over delegation links: every id → its principal group's root */
@@ -98,24 +129,43 @@ export interface ApprovalPool {
  * The eligible pool for one approval (or one rule): the named approver plus
  * the ACTIVE members of `approverRoleId` (disabled users never count), minus
  * the caller and everyone linked to the caller by an active delegation.
+ *
+ * `asOf` (B4S-02, a queued approval's `requested_at`): dual control must not
+ * be satisfiable by principals created after the call was queued, so only an
+ * account created before then counts, and a role member counts only through a
+ * role assignment granted before then (the named approver needs none). A
+ * `namedApproverUserId` of null names nobody (the approval's snapshot approver
+ * could not be established).
  */
 export async function loadApprovalPool(
   db: Q,
-  input: { namedApproverUserId: string; approverRoleId: string | null; callerUserId: string | null },
+  input: { namedApproverUserId: string | null; approverRoleId: string | null; callerUserId: string | null; asOf?: Date | SQL | null },
 ): Promise<ApprovalPool> {
-  const candidates = new Set<string>([input.namedApproverUserId]);
+  const candidates = new Set<string>(input.namedApproverUserId ? [input.namedApproverUserId] : []);
   if (input.approverRoleId) {
     const members = await db
       .select({ userId: roleAssignments.userId })
       .from(roleAssignments)
-      .where(eq(roleAssignments.roleId, input.approverRoleId));
+      .where(
+        and(
+          eq(roleAssignments.roleId, input.approverRoleId),
+          ...(input.asOf ? [lt(roleAssignments.createdAt, input.asOf)] : []),
+        ),
+      );
     for (const m of members) candidates.add(m.userId);
   }
   const ids = [...candidates];
+  if (ids.length === 0) return { members: [], principals: 0 };
   const active = await db
     .select({ id: users.id })
     .from(users)
-    .where(and(inArray(users.id, ids), isNull(users.disabledAt)));
+    .where(
+      and(
+        inArray(users.id, ids),
+        isNull(users.disabledAt),
+        ...(input.asOf ? [lt(users.createdAt, input.asOf)] : []),
+      ),
+    );
   let members = active.map((u) => u.id);
   const links = await activeDelegationLinks(db, input.callerUserId ? [...members, input.callerUserId] : members);
   const roots = principalRoots(input.callerUserId ? [...members, input.callerUserId] : members, links);

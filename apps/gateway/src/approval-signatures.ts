@@ -49,6 +49,7 @@ import { generateAuthenticationOptions, verifyAuthenticationResponse, type Authe
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import {
   and,
+  approvalAssignments,
   approvalDecisions,
   approvalDelegations,
   approvalRules,
@@ -99,7 +100,7 @@ import {
   stepUpCallerOf,
 } from "./step-up.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { activeDelegationLinks, loadApprovalPool, principalRoots, type ApprovalPool } from "./approval-pool.js";
+import { activeDelegationLinks, loadApprovalPool, principalRoots, requestedAtOf, type ApprovalPool } from "./approval-pool.js";
 export {
   activeDelegationLinks,
   approvalRuleQuorumRefusal,
@@ -134,12 +135,53 @@ async function approverRoleOf(db: Q, ruleId: string | null): Promise<string | nu
   return rule?.approverRoleId ?? null;
 }
 
-/** the pool of an approval row (live membership, live delegations) */
+/** the audit rules whose rows record a move of an approval's named approver (with `previousApproverUserId`) */
+const APPROVER_MOVED_RULES = ["approval-routed", "approval-claimed"] as const;
+
+/**
+ * B4S-02: WHO WAS NAMED when the call was queued. `approvals.approver_user_id`
+ * can be re-pointed after queue time (a routing rule, a claim, an SLA
+ * reassignment), and routing "decides whose queue this shows in, never who is
+ * allowed to decide" — so the named-approver standing belongs to the approver
+ * of the snapshot, not to whoever the row points at now. Every re-pointing
+ * path creates the approval's assignment first, so:
+ *  - no assignment → never routed or re-pointed: the stored approver;
+ *  - the first routing/claim audit row → the approver it moved away from;
+ *  - an assignment with no routing rule → its assignee, which mirrored the
+ *    approver when it was made (an SLA reassignment comes after it);
+ *  - otherwise (routed, with no record of who was named before) → null: no
+ *    one has the named approver's standing (the strictest fallback).
+ */
+export async function snapshotNamedApprover(db: Q, row: ApprovalRow): Promise<string | null> {
+  const [assignment] = await db
+    .select({ ruleId: approvalAssignments.ruleId, assigneeId: approvalAssignments.assigneeId })
+    .from(approvalAssignments)
+    .where(eq(approvalAssignments.approvalId, row.id));
+  if (!assignment) return row.approverUserId;
+  const [moved] = await db
+    .select({ detail: auditLog.detail })
+    .from(auditLog)
+    .where(and(inArray(auditLog.ruleId, [...APPROVER_MOVED_RULES]), sql`${auditLog.detail}->>'approvalId' = ${row.id}`))
+    .orderBy(auditLog.seq)
+    .limit(1);
+  const previous = (moved?.detail as { previousApproverUserId?: unknown } | undefined)?.previousApproverUserId;
+  if (moved) return typeof previous === "string" && UUID_RE.test(previous) ? previous : null;
+  return assignment.ruleId === null ? assignment.assigneeId : null;
+}
+
+/**
+ * The pool of a QUEUED approval row (B4S-02): the approver named when it was
+ * queued plus the members of the rule's approver role, counted as of
+ * `requested_at` — an account, or a role assignment, created after the call
+ * was queued does not count — and active now. Delegations are read live (they
+ * only ever merge principals or exclude the caller's links here).
+ */
 export async function poolForApproval(db: Q, row: ApprovalRow): Promise<ApprovalPool> {
   return loadApprovalPool(db, {
-    namedApproverUserId: row.approverUserId,
+    namedApproverUserId: await snapshotNamedApprover(db, row),
     approverRoleId: await approverRoleOf(db, row.ruleId),
     callerUserId: row.userId,
+    asOf: requestedAtOf(row.id),
   });
 }
 
@@ -295,6 +337,15 @@ interface Eligibility {
   pool: ApprovalPool;
 }
 
+/** B4S-02 (b): was this passkey enrolled before the approval's call was queued? */
+async function credentialPredates(db: Q, credentialRowId: string, approvalId: string): Promise<boolean> {
+  const [hit] = await db
+    .select({ id: webauthnCredentials.id })
+    .from(webauthnCredentials)
+    .where(and(eq(webauthnCredentials.id, credentialRowId), lt(webauthnCredentials.createdAt, requestedAtOf(approvalId))));
+  return !!hit;
+}
+
 /** may `deciderUserId` decide `row`, as whom — and have they (as that principal) already? */
 async function eligibilityOf(db: Q, row: ApprovalRow, deciderUserId: string, existing: readonly ApprovalDecisionRow[]): Promise<Eligibility | Refusal> {
   if (deciderUserId === row.userId) {
@@ -303,7 +354,24 @@ async function eligibilityOf(db: Q, row: ApprovalRow, deciderUserId: string, exi
       detail: "the person whose call this is can never decide its approval — someone else in the approver pool must",
     });
   }
+  // B4S-02 (a)(e): the decider is an account that existed when the call was
+  // queued and is active now — a principal created afterwards, or deactivated
+  // since, never counts towards dual control
+  const [decider] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, deciderUserId), isNull(users.disabledAt), lt(users.createdAt, requestedAtOf(row.id))));
+  if (!decider) {
+    return refuse(403, {
+      error: "approver_not_eligible",
+      detail:
+        "only an active account that already existed when this call was queued can decide it — someone who was " +
+        "eligible then must decide",
+    });
+  }
   const links = await activeDelegationLinks(db, [deciderUserId]);
+  // (d): a delegation lets the decider act for a pool member only when it already existed when the call was queued
+  const priorLinks = await activeDelegationLinks(db, [deciderUserId], { createdBefore: requestedAtOf(row.id) });
   const identity = new Set<string>([deciderUserId]);
   for (const [from, to] of links) {
     if (from === deciderUserId) identity.add(to);
@@ -321,7 +389,7 @@ async function eligibilityOf(db: Q, row: ApprovalRow, deciderUserId: string, exi
   if (pool.members.includes(deciderUserId)) {
     principalUserId = deciderUserId;
   } else {
-    const delegators = links.filter(([, to]) => to === deciderUserId).map(([from]) => from).filter((f) => pool.members.includes(f));
+    const delegators = priorLinks.filter(([, to]) => to === deciderUserId).map(([from]) => from).filter((f) => pool.members.includes(f));
     if (delegators.length > 0) {
       principalUserId = delegators.includes(row.approverUserId) ? row.approverUserId : [...delegators].sort()[0]!;
       onBehalfOf = principalUserId;
@@ -331,8 +399,8 @@ async function eligibilityOf(db: Q, row: ApprovalRow, deciderUserId: string, exi
     return refuse(403, {
       error: "not_the_named_approver",
       detail:
-        "only the named approver, an active member of the rule's approver role, or someone they have delegated to " +
-        "may decide this tool-call approval",
+        "only the approver named when this call was queued, an active member of the rule's approver role since " +
+        "before it was queued, or someone they had delegated to by then may decide this tool-call approval",
     });
   }
   identity.add(principalUserId);
@@ -536,6 +604,14 @@ export async function decideToolCallApproval(db: Db, input: ToolCallDecideInput)
           )
       : [];
     if (!cred) return invalid("unknown_or_revoked_credential");
+    // B4S-02 (b): the passkey that signs must have been enrolled before the call was queued
+    if (!(await credentialPredates(db, cred.id, row.id))) {
+      await auditSignatureFailure(db, deciderUserId, row, "credential_enrolled_after_request");
+      return refuse(403, {
+        error: "passkey_enrolled_after_request",
+        detail: "this passkey was enrolled after the call was queued — sign with a passkey you already had then",
+      });
+    }
     let verified: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
     try {
       verified = await verifyAuthenticationResponse({
@@ -912,12 +988,28 @@ export function registerApprovalSigningRoutes(app: FastifyInstance, db: Db): voi
     if (!bindableRow(row)) {
       return reply.status(409).send({ error: "approval_action_changed", detail: "this approval no longer describes a call that can be signed" });
     }
-    const creds = await activePasskeys(db, caller.userId);
-    if (creds.length === 0) {
+    const all = await activePasskeys(db, caller.userId);
+    if (all.length === 0) {
       return reply.status(403).send({
         error: "passkey_signature_required",
         enrolled: false,
         detail: "approving a tool call needs a passkey: enrol one on your Account page first",
+      });
+    }
+    // B4S-02 (b): only a passkey enrolled before the call was queued may sign it
+    const prior = new Set(
+      (
+        await db
+          .select({ id: webauthnCredentials.id })
+          .from(webauthnCredentials)
+          .where(and(eq(webauthnCredentials.userId, caller.userId), lt(webauthnCredentials.createdAt, requestedAtOf(row.id))))
+      ).map((c) => c.id),
+    );
+    const creds = all.filter((c) => prior.has(c.id));
+    if (creds.length === 0) {
+      return reply.status(403).send({
+        error: "passkey_enrolled_after_request",
+        detail: "your passkeys were all enrolled after this call was queued — only one you already had then can sign it",
       });
     }
     // hygiene: this user's own long-finished signing ceremonies

@@ -31,6 +31,8 @@ import {
   type Db,
 } from "@regulait/db";
 import { scimAssertedGroupsFor } from "./group-roles.js";
+import { isApproverRole } from "./approval-pool.js";
+import { requireStepUp } from "./step-up.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -103,6 +105,13 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
     const body = createMappingSchema.parse(req.body);
     const [role] = await db.select().from(roles).where(eq(roles.id, body.roleId));
     if (!role) return reply.status(422).send({ error: "unknown_role" });
+    // B4S-02 (owner principle): mapping a group to an approver role adds its
+    // holders to that approver pool — the same settings_relax step-up as
+    // assigning the role directly, bound to the group and the role
+    if (await isApproverRole(db, body.roleId)) {
+      const facts = { values: { approverRoleGroup: { source: body.source, externalGroup: body.externalGroup, roleId: body.roleId } } };
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    }
     const [row] = await db
       .insert(groupRoleMappings)
       .values(body)

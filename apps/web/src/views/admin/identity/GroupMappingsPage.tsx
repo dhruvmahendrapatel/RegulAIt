@@ -26,6 +26,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { AssertedGroup, GroupRoleMapping, Role } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -92,11 +93,9 @@ export default function GroupMappingsPage() {
             onSubmit={(e) => {
               e.preventDefault();
               void act.run(async () => {
-                await api.post("/v1/group-role-mappings", {
-                  source,
-                  externalGroup: externalGroup.trim(),
-                  roleId,
-                });
+                // B4S-02: mapping a group to an approver role widens an approver pool
+                const body = { source, externalGroup: externalGroup.trim(), roleId };
+                await withStepUp((h) => stepUpApi.post("/v1/group-role-mappings", body, h));
                 setExternalGroup("");
               }, "Mapping created");
             }}
