@@ -93,6 +93,7 @@ import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
 import { connectUpstream } from "./mcp-proxy.js";
 import { timeouts } from "./timeouts.js";
+import { withUpstreamRetry } from "./upstream-retry.js";
 import {
   breakerAdmits,
   breakerConfig,
@@ -420,7 +421,15 @@ export async function runMcpHealthProbeSweep(
         // Bounded by G2's list deadline: an upstream that answers `initialize`
         // and then hangs is precisely the case, so an unbounded await here would
         // hang the whole sweep on its first sick server.
-        await client.listTools(undefined, { timeout: timeouts().mcpListToolsMs });
+        //
+        // ADR-0185 G5: observed as one upstream operation on /metrics (the
+        // connect above is observed inside guardedMcpConnect). One attempt and
+        // the same one deadline: the probe's verdict is this single call.
+        await withUpstreamRetry(({ deadlineMs }) => client.listTools(undefined, { timeout: deadlineMs }), {
+          budgetMs: timeouts().mcpListToolsMs,
+          maxAttempts: 1,
+          observe: { serverId: row.id, transport: row.transport },
+        });
         out.healthy += 1;
       } finally {
         await client.close().catch(() => {});

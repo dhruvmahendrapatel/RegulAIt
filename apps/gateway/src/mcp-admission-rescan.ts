@@ -293,7 +293,7 @@ export async function runMcpAdmissionRescan(
       // verdict. `"rescan"` labels the audit row and changes nothing else.
       const client = await connectUpstream(db, row);
       try {
-        await syncUpstreamTools(db, row.id, client, "rescan");
+        await syncUpstreamTools(db, row.id, client, "rescan", row.transport);
         reachedManifest = true;
       } finally {
         await client.close().catch(() => {});

@@ -42,6 +42,7 @@ import {
   type PiiHit,
   type PreparedPiiApproval,
   type ScannableTool,
+  type McpUpstreamTransport,
 } from "@regulait/shared";
 // ADR-0070 — the tool span. A governed tool call is the other half of what a
 // trace tree must show: which tool the model asked for, with which arguments,
@@ -194,7 +195,7 @@ export async function preflightUpstream(
 
 export async function connectUpstream(
   db: Db,
-  serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+  serverRow: McpUpstreamRow,
   opts: { retry?: RetryReport; retryAttempts?: number } = {},
 ): Promise<Client> {
   // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
@@ -680,7 +681,7 @@ async function executeGovernedToolCallInner(
       let upstreamTools;
       try {
         upstream = await connectUpstream(db, serverRow);
-        upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream discovery failed under PII redaction");
@@ -1046,6 +1047,11 @@ async function executeGovernedToolCallInner(
           // severs legitimate work is worse than the hang it replaced.
           budgetMs: timeouts().mcpCallToolMs,
           maxAttempts: attemptsForToolKind(kind),
+          // ADR-0185 G5: the call is one upstream operation on /metrics. The
+          // connect before it is observed separately, once per attempt, inside
+          // guardedMcpConnect — so connectUpstream deliberately passes no
+          // `observe` (it would count every connect twice).
+          observe: { serverId: serverRow.id, transport: serverRow.transport },
         },
       );
     } catch (err) {
@@ -1495,6 +1501,8 @@ export async function syncUpstreamTools(
   serverId: string,
   client: Client,
   trigger: McpAdmissionTrigger = "sync",
+  /** ADR-0185 G5: the row's transport, for the `/metrics` label only */
+  transport?: McpUpstreamTransport | null,
 ): Promise<Tool[]> {
   // G2: a manifest is small, so a slow one is a sick upstream, not a busy one.
   // ADR-0128: and reading a manifest is idempotent by definition, so it is one
@@ -1502,7 +1510,7 @@ export async function syncUpstreamTools(
   // one deadline, which is the whole sequence's budget.
   const { tools } = await withUpstreamRetry(
     ({ deadlineMs }) => client.listTools(undefined, { timeout: deadlineMs }),
-    { budgetMs: timeouts().mcpListToolsMs },
+    { budgetMs: timeouts().mcpListToolsMs, observe: { serverId, transport } },
   );
   // ADR-0097 — SCAN BEFORE UPSERT. This is the one moment the gateway sees a
   // manifest, and scanning here rather than after the upsert is what keeps a
@@ -1581,7 +1589,7 @@ export async function resolveNodeToolContext(
       let upstreamTools;
       try {
         upstream = await connectUpstream(db, serverRow);
-        upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         if (classifyUpstreamError(err).why !== "our_own_refusal") {
           await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
@@ -1903,7 +1911,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // reason, never a fabricated empty tool list. The dirty manifest was not
       // stored either (syncUpstreamTools scans before it upserts).
       if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream).catch(async (err: unknown) => {
+      const upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport).catch(async (err: unknown) => {
         if (err instanceof McpAdmissionHeldError) {
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
         }

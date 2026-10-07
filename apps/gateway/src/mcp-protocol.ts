@@ -526,6 +526,9 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
           budgetMs: spec.budget === "list" ? timeouts().mcpListToolsMs : timeouts().mcpCallToolMs,
           // AER-038's rule for tools, kept: one attempt
           maxAttempts: 1,
+          // ADR-0185 G5: one upstream operation on /metrics (the connect is
+          // observed separately inside guardedMcpConnect)
+          observe: { serverId: serverRow.id, transport: serverRow.transport },
         },
       )) as Record<string, unknown>;
     } catch (err) {
