@@ -44,6 +44,26 @@ describe("retentionChanges", () => {
     expect(retentionChanges(loaded, "3600", "031", loaded)).toEqual({ body: { conversationRetentionDays: 31 }, extends: true });
   });
 
+  it("accepts the whole-number spellings a number input accepts: \"30.0\" and \"3e1\" are 30 (PR #181 review, comment 4212952370)", () => {
+    // the same number as stored is unchanged, not a validation error
+    expect(retentionChanges(loaded, "3600", "30.0", loaded)).toEqual({ body: {}, extends: false });
+    expect(retentionChanges(loaded, "3.6e3", "3e1", loaded)).toEqual({ body: {}, extends: false });
+    // a different whole number in either spelling is sent as that integer
+    expect(retentionChanges(loaded, "3600", "31.0", loaded)).toEqual({ body: { conversationRetentionDays: 31 }, extends: true });
+    expect(retentionChanges(loaded, "1.8e3", "30", loaded)).toEqual({ body: { semanticCacheTtlSeconds: 1800 }, extends: false });
+  });
+
+  it("still refuses non-integers, empty, out-of-bounds and text a number input never produces", () => {
+    for (const days of ["30.5", "3.05e1", "", "0", "0.0", "2556", "2.556e3", "-1", "0x1e", " 30", "Infinity", "NaN", "1e400"]) {
+      expect(retentionChanges(loaded, "3600", days, loaded), JSON.stringify(days)).toHaveProperty("error");
+    }
+    for (const ttl of ["3600.5", "", "2592001", "2.592001e6"]) {
+      expect(retentionChanges(loaded, ttl, "30", loaded), JSON.stringify(ttl)).toHaveProperty("error");
+    }
+    // the upper bounds themselves are allowed in any spelling
+    expect(retentionChanges(loaded, "2.592e6", "2555.0", loaded)).toEqual({ body: { semanticCacheTtlSeconds: 2592000, conversationRetentionDays: 2555 }, extends: true });
+  });
+
   it("drops a field whose value already equals what is stored now (PR #181 review round 5)", () => {
     const now = { semanticCacheTtlSeconds: 3600, conversationRetentionDays: 20 };
     expect(retentionChanges(loaded, "3600", "20", now)).toEqual({ body: {}, extends: false });
