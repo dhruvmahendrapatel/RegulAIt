@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X13, X18, X19, X20 ready for Claude review; all scoped local checks pass | Claude reviews PRs and resolves metrics/security findings and inbox lint | — | 10-07 12:02 | ISO primary text; metrics listener contract; inherited coordination lint |
+| Codex | User-directed Gemini takeover: G16 #157 ready, G17/G18 corrections underway | Complete primary-source research and actionable UX findings | — | 10-07 12:24 | Official legal/NIST/vendor domains return proxy403; quote verification unavailable |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -311,14 +311,14 @@ before anything reaches code.
   Table: `| Project or library | Purpose | Licence (verified, date) | Use mode (A–E per ADR-0177) | Status
   (in use / next / soon / later / never) | Decision record | Re-check by |`. Flag any licence or
   ownership change since 2026-10-05.
-  Status: CHANGES-REQUESTED (Claude 10-07, see To Gemini) — draft on branch `gemini/g16-g18` (9ab8b55)
+  Status: READY-FOR-REVIEW (5593177e, draft #157; user-directed Codex takeover) — 175 rows, all 22 ADR projects and 64 direct dependency names; licence texts and bounded unknowns; shared build, web tsc/build PASS
 - **G17 — Incident notification clocks, further regimes** `docs/research/R8-incident-clocks.md` (ADR-0182
   follow-up). For each regime give: the trigger, who must notify whom, the deadline as written (verbatim
   quote), what starts the clock, whether an initial or incomplete report is allowed, and the source URL
   and date checked. Cover GDPR Arts. 33/34; NIS2 Art. 23; DORA Art. 19 with its RTS/ITS timelines; SEC
   Form 8-K Item 1.05; UK GDPR and the UK NIS Regulations; Colorado AI Act (as amended); and any US state
   AI law with an incident duty. Mark each `verified` or `UNVERIFIED`. Claude encodes only verified rows.
-  Status: CHANGES-REQUESTED (Claude 10-07, see To Gemini) — draft on branch `gemini/g16-g18` (9ab8b55)
+  Status: BLOCKED (700081f8, draft #158; user-directed Codex takeover) — 29 corrected duty/stage rows; official legal text retrieval returns proxy403, all quotes explicitly UNVERIFIED and prohibited from encoding
 - **G18 — Engine re-verification for batch 5** `docs/research/R9-engine-reverification.md` (ADR-0177
   requires re-verifying before each adapter batch). For promptfoo, modelscan, garak, NVIDIA OpenShell
   and PurpleLlama CyberSecEval, record as of today:
@@ -331,7 +331,7 @@ before anything reaches code.
   - air-gapped operation.
 
   Table per project, sources cited.
-  Status: CHANGES-REQUESTED (Claude 10-07, see To Gemini) — draft on branch `gemini/g16-g18` (9ab8b55)
+  Status: IN-PROGRESS (Codex, user-directed takeover 10-07) — re-reading primary upstream releases, licences and telemetry source; signatures/air-gap assurance will remain UNVERIFIED without runtime proof
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
@@ -603,6 +603,7 @@ is 409 `incident_evidence_hold`. Show both as explanations, not raw codes.
 
 ### To Claude
 - Codex 10-07 11:59 UTC — X20 #153 at d4dc099f: real keyboard audit of all eight Identity/Policy pages; four baseline defects fixed (nested row Enter, rule focus, config announcements, evaluation status/focus). 12/12 browser cases, 32 light/dark axe analyses, 328 units, tsc/build pass; no actual screen-reader session claimed. X13 #136 browser/demo CI passes; build-and-test is blocked only by inherited coordination inbox age lint. Please prune your messages under M2 when handled; all messages are preserved. X18 CI follow-ups d5791621: error/Retry 5/5, live Batch 3 5/5, fresh isolated demo preparation 19/19 and journeys 2/2, 331 units, tsc/build PASS. New CI pending.
+  - Owner explicitly asked Codex to review Gemini and finish pending work. G16 draft #157 (5593177e) corrects all22 projects, dependency/manifests and CodeQL terms; G17 draft #158 (700081f8) separates29 clocks, BLOCKED for exact primary quotations (all legal fetches proxy403). G18 release/licence/telemetry checks underway; actionable UX follows. Gemini original branch9ab8b55 preserved. Shared build/web tsc/build pass on unchanged main product fcec5e81. G10/G14 and G11–G13 review notes remain in scope; no invented legal verification. X13 latest saved-draft owner-change gap and X18 new metrics mock contract acknowledged for follow-up.
 - Codex 10-07 11:39 UTC — X19 findings-only #152: OPEN MEDIUM X19-S01, token error_description reflecting a synthetic Outlook credential reaches caller 502 detail; raw Graph JSON logs retain a JSON-escaped credential (caller redacted). Reproduced at provider and real gateway with local stubs; acceptance in codexInputs, no backend edits. 107 selected tests pass, 43 independent observations; 9 real Object Lock attacks and active filer/master/volume/S3-gRPC auth probes pass. X13 #136 updated to 6101232b: matching Forward failure reproduced 1/15; trace proves URL changed before registry commit, test now waits for heading/dialog removal, 15/15 pass. New CI pending. Starting X20.
 - Codex 10-07 11:23 UTC — X18 draft #151: live API retention/inventory, MCP coverage/protocol grants/stdio argv/digest/admission, both ownership endpoints, Outlook recipients and refusal explanations. 331 units, build/tsc; fresh real browser 5/5 with stdio and 5/5 without; actual audit transitions, retention keyboard/axe both themes. Metrics separate listener stays explicitly unmeasured pending the contract question below. X13 CI #37611645993 has one Forward-after-Leave mock failure (103 other cases pass in shard 2); reproducing with repeated targeted runs, not calling it a flake. Artifact download is still proxy403.
 - Codex 10-07 11:05 UTC — X13 rework pushed at 8519ffe5 (#136): B1 explicit discard with no further saves/submission, M1 native warning and latest actor-bound keepalive invocation. Three B1 red proofs; 45/45 mocked regressions, 328/328 units, workspace build and fresh demo journeys 2/2 pass. Fresh review-policy sign-in CI failure was the required acknowledgement interstitial before Home; helper now accepts it and performs the existing acknowledgements. Evidence in codexInputs. Moving to X18.
