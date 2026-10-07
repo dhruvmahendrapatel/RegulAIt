@@ -35,10 +35,12 @@ import { z } from "zod";
 import {
   and,
   approvalDecisions,
+  approvalRules,
   approvals,
   auditLog,
   authSessions,
   complianceProfiles,
+  configVersions,
   createDb,
   desc,
   eq,
@@ -60,6 +62,9 @@ import { approvalQuorumTestHooks, approvalSigningPosture } from "./approval-sign
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { createApprovalRuleRow } from "./rule-creates.js";
+import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { drainBackgroundWork } from "./background-work.js";
 
@@ -251,6 +256,8 @@ beforeAll(async () => {
   // this suite is about approvals, not the MFA dial or MCP admission of a local double
   await relaxIdentityForTest(db, { mfaRequired: "off" });
   await relaxStrictAdmissionForTest(db);
+  // versions here are activated directly; the preview gate is not what this suite tests
+  await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const up = await startUpstream();
@@ -499,6 +506,75 @@ describe("A — a pool that can never reach its quorum", () => {
     const patch = await withKey(AUTH, "PATCH", `/v1/rules/approvals/${ok.json().id}`, { approverUserId: P.b.id });
     expect(patch.statusCode, patch.body).toBe(422);
     expect(patch.json().error).toBe("quorum_unsatisfiable");
+  });
+
+  it("PATCH runs the same check: quorum and approver role are editable, an unsatisfiable edit is 422 and changes nothing", async () => {
+    const tool = nextTool();
+    const made = await rule(tool, { quorum: 2 });
+    expect(made.statusCode, made.body).toBe(201);
+    const id = made.json().id as string;
+    const up = await withKey(AUTH, "PATCH", `/v1/rules/approvals/${id}`, { quorum: 3 });
+    expect(up.statusCode, up.body).toBe(200);
+    expect(up.json()).toMatchObject({ quorum: 3, approverRoleId: roleId });
+    const tooMany = await withKey(AUTH, "PATCH", `/v1/rules/approvals/${id}`, { quorum: 4 });
+    expect(tooMany.statusCode, tooMany.body).toBe(422);
+    expect(tooMany.json()).toMatchObject({ error: "quorum_unsatisfiable", quorum: 4, eligiblePrincipals: 3 });
+    const noRole = await withKey(AUTH, "PATCH", `/v1/rules/approvals/${id}`, { approverRoleId: null });
+    expect(noRole.statusCode).toBe(422);
+    expect(noRole.json().error).toBe("quorum_unsatisfiable");
+    const badRole = await withKey(AUTH, "PATCH", `/v1/rules/approvals/${id}`, { approverRoleId: "00000000-0000-4000-a000-000000000009" });
+    expect(badRole.statusCode).toBe(422);
+    expect(badRole.json().error).toBe("unknown_role");
+    const outOfRange = await withKey(AUTH, "PATCH", `/v1/rules/approvals/${id}`, { quorum: 6 });
+    expect(outOfRange.statusCode).toBe(400);
+    const [after] = await db.select().from(approvalRules).where(eq(approvalRules.id, id));
+    expect(after).toMatchObject({ quorum: 3, approverRoleId: roleId });
+  });
+
+  it("the version path runs it too: minting (draft or active) and activating an unsatisfiable approval-rule version is 422", async () => {
+    const tool = nextTool();
+    const made = await rule(tool, { quorum: 2 });
+    const id = made.json().id as string;
+    const versions = async () => (await db.select().from(configVersions).where(eq(configVersions.artifactId, id))).length;
+    // the subject named as approver with no role: nobody else can ever approve
+    const self = await withKey(AUTH, "POST", `/v1/config-versions/approval_rule/${id}`, {
+      body: { approverUserId: P.caller.id, approverRoleId: null, quorum: 1 },
+      activate: true,
+    });
+    expect(self.statusCode, self.body).toBe(422);
+    expect(self.json().error).toBe("quorum_unsatisfiable");
+    const draft = await withKey(AUTH, "POST", `/v1/config-versions/approval_rule/${id}`, { body: { quorum: 5 }, activate: false });
+    expect(draft.statusCode).toBe(422);
+    expect(await versions()).toBe(0);
+    // a satisfiable draft is stored; when the pool shrinks before it is activated, activation is refused
+    const ok = await withKey(AUTH, "POST", `/v1/config-versions/approval_rule/${id}`, { body: { quorum: 3 }, activate: false });
+    expect(ok.statusCode, ok.body).toBe(201);
+    await db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, P.d.id));
+    try {
+      const act = await withKey(AUTH, "POST", `/v1/config-versions/approval_rule/${id}/activate`, { version: ok.json().version.version });
+      expect(act.statusCode, act.body).toBe(422);
+      expect(act.json().error).toBe("quorum_unsatisfiable");
+    } finally {
+      await db.update(usersTable).set({ disabledAt: null }).where(eq(usersTable.id, P.d.id));
+    }
+    const [after] = await db.select().from(approvalRules).where(eq(approvalRules.id, id));
+    expect(after!.quorum).toBe(2);
+  });
+
+  it("the create choke point the copilot's rule_to_approval applier calls refuses an unsatisfiable rule", async () => {
+    const tool = nextTool();
+    const before = (await db.select().from(approvalRules).where(eq(approvalRules.toolName, tool))).length;
+    await expect(
+      createApprovalRuleRow(db, {
+        scope: "user",
+        serverScope: "server",
+        userId: P.caller.id,
+        serverId,
+        toolName: tool,
+        approverUserId: P.caller.id,
+      }),
+    ).rejects.toBeInstanceOf(ApprovalRuleWriteRefusedError);
+    expect((await db.select().from(approvalRules).where(eq(approvalRules.toolName, tool))).length).toBe(before);
   });
 
   it("queue time: a pool that shrank below the quorum DENIES the call and audits it", async () => {

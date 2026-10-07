@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../api/client";
-import { approvalRuleBody } from "../admin/governance/approvalRuleForm";
+import { approvalRuleBody, approvalRuleQuorumPatch } from "../admin/governance/approvalRuleForm";
 import { decideApproval, isToolCallApproval, quorumProgress, signedDecisionErrorText, type SignedDecideDeps } from "./signedDecision";
 
 function deps(over: Partial<SignedDecideDeps> = {}) {
@@ -109,5 +109,9 @@ describe("approval rule form", () => {
       quorum: 3,
       approverRoleId: "r1",
     });
+  });
+  it("the inline editor PATCHes the quorum and the role (none = null)", () => {
+    expect(approvalRuleQuorumPatch("3", "r1")).toEqual({ quorum: 3, approverRoleId: "r1" });
+    expect(approvalRuleQuorumPatch("1", "")).toEqual({ quorum: 1, approverRoleId: null });
   });
 });

@@ -113,6 +113,7 @@ import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-02): Art. 73(6) evidence hold
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
+import { approvalRuleShape, assertApprovalRuleWritable } from "./approval-pool.js";
 
 /**
  * A `Db` OR a transaction handle. Drizzle's transaction type is not assignable
@@ -412,6 +413,12 @@ async function mintVersionLocked(
   // FIRST STATEMENT. Everything below reads state that a concurrent writer of
   // the same artifact could otherwise move underneath it.
   await lockRuleArtifact(db, args.artifactType, args.artifactId);
+  // ADR-0186 A — THE ONE GUARD: an approval-rule version whose pool could never
+  // reach its quorum is refused when it is written (draft or active)
+  if (args.artifactType === "approval_rule") {
+    const ruleRow = await loadRuleRow(db, args.artifactType, args.artifactId);
+    if (ruleRow) await assertApprovalRuleWritable(db, approvalRuleShape({ ...ruleRow, ...args.body }));
+  }
   let existing = await loadVersions(db, args.artifactType, args.artifactId);
 
   // ADR-0073 — THE LAZY BASELINE (ADR-0048 §7's behaviour-preserving default,
@@ -548,6 +555,14 @@ export async function activateVersion(
     const versions = await loadVersions(tx, args.artifactType, args.artifactId);
     const target = versions.find((v) => v.version === args.version);
     if (!target) throw new Error("unknown_version");
+    // ADR-0186 A — THE ONE GUARD, again at activation (rollback and canary
+    // promotion included): membership may have moved since the version was minted
+    if (args.artifactType === "approval_rule") {
+      const ruleRow = await loadRuleRow(tx, args.artifactType, args.artifactId);
+      if (ruleRow) {
+        await assertApprovalRuleWritable(tx, approvalRuleShape({ ...ruleRow, ...(target.body as Record<string, unknown>) }));
+      }
+    }
     const previous = versions.find((v) => v.status === "active") ?? null;
     const rollback = previous != null && previous.version > target.version;
 

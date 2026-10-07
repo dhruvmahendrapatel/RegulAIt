@@ -174,11 +174,29 @@ export const PASSKEY_REFUSALS = {
 } as const;
 export type PasskeyRefusalCode = keyof typeof PASSKEY_REFUSALS;
 
+/** A2+B: the dual-control and signed-approval refusals slice A2+B added, with
+ * the HTTP status each is sent with. `caller_cannot_approve`: the caller (or
+ * someone delegation-linked to them) decides their own tool call;
+ * `approval_not_signable`: signing options for an approval that is not a
+ * passkey-mode tool-call approval; `unknown_role`: a rule names an approver role
+ * that does not exist; `approval_quorum_unsatisfiable`: a connector write denied
+ * at queue time because no pool can approve it; `approval_signature_recheck_failed`:
+ * a connector write whose approval failed the execution-time signature recheck. */
+export const APPROVAL_REFUSALS = {
+  caller_cannot_approve: 403,
+  approval_not_signable: 409,
+  unknown_role: 422,
+  approval_quorum_unsatisfiable: 403,
+  approval_signature_recheck_failed: 403,
+} as const;
+export type ApprovalRefusalCode = keyof typeof APPROVAL_REFUSALS;
+
 export const BATCH4_REFUSAL_CODES = [
   ...(Object.keys(STEP_UP_REFUSALS) as StepUpRefusalCode[]),
   ...(Object.keys(PASSKEY_REFUSALS) as PasskeyRefusalCode[]),
+  ...(Object.keys(APPROVAL_REFUSALS) as ApprovalRefusalCode[]),
 ] as const;
-export type Batch4RefusalCode = StepUpRefusalCode | PasskeyRefusalCode;
+export type Batch4RefusalCode = StepUpRefusalCode | PasskeyRefusalCode | ApprovalRefusalCode;
 
 /** the `step_up_required` body: what the client must prove, and for which action */
 export interface StepUpRequiredBody {

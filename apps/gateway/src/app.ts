@@ -434,8 +434,8 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
 import { registerStepUpRoutes } from "./step-up.js";
+import { ApprovalRuleWriteRefusedError } from "./approval-pool.js";
 import {
-  approvalRuleQuorumRefusal,
   decisionView,
   decideToolCallApproval,
   isToolCallApproval,
@@ -839,6 +839,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rule/profile silently absent.
     if (err instanceof ConfigVersionUnresolvableError) {
       return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
+    }
+    // ADR-0186 A: an approval-rule write whose pool can never reach its quorum
+    if (err instanceof ApprovalRuleWriteRefusedError) {
+      return reply.status(err.status).send(err.body);
     }
     if (err instanceof ExternalEffectBlockedError) {
       return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
@@ -2950,14 +2954,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const dual = z
       .object(approvalRuleQuorumFields)
       .parse({ quorum: raw.quorum, approverRoleId: raw.approverRoleId });
-    const refusal = await approvalRuleQuorumRefusal(db, {
-      approverUserId: body.approverUserId,
-      approverRoleId: dual.approverRoleId ?? null,
-      quorum: dual.quorum ?? 1,
-      scope: body.scope ?? "user",
-      userId: body.userId ?? null,
-    });
-    if (refusal) return reply.status(refusal.status).send(refusal.body);
+    // the satisfiability guard runs inside createApprovalRuleRow (every create)
     const row = await createApprovalRuleRow(db, body, dual);
     return reply.status(201).send(row);
   });
@@ -3038,21 +3035,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     const patch = crud.schema.parse(req.body ?? {});
-    // ADR-0186 A: moving an approval rule to a different approver must still
-    // leave a pool that can reach the rule's quorum
-    if (kind === "approvals" && "approverUserId" in patch && patch.approverUserId) {
-      const [current] = await db.select().from(approvalRules).where(eq(approvalRules.id, ruleId));
-      if (current) {
-        const refusal = await approvalRuleQuorumRefusal(db, {
-          approverUserId: patch.approverUserId,
-          approverRoleId: current.approverRoleId,
-          quorum: current.quorum,
-          scope: current.scope,
-          userId: current.userId,
-        });
-        if (refusal) return reply.status(refusal.status).send(refusal.body);
-      }
-    }
+    // ADR-0186 A: an approval rule's edit is guarded inside applyRuleEdit (the
+    // satisfiability check every approval-rule write runs)
     const res = await applyRuleEdit(db, {
       artifactType: crud.artifactType,
       artifactId: ruleId,

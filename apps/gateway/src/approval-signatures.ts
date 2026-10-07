@@ -99,6 +99,14 @@ import {
   stepUpCallerOf,
 } from "./step-up.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { activeDelegationLinks, loadApprovalPool, principalRoots, type ApprovalPool } from "./approval-pool.js";
+export {
+  activeDelegationLinks,
+  approvalRuleQuorumRefusal,
+  loadApprovalPool,
+  principalRoots,
+  type ApprovalPool,
+} from "./approval-pool.js";
 import { projectPiiMode } from "./projects.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
@@ -115,91 +123,6 @@ export function isToolCallApproval(row: { objectType: string }): boolean {
 // ---------------------------------------------------------------------------
 // Principals: the pool, delegation links, counting
 // ---------------------------------------------------------------------------
-
-/** active delegation links touching any of `ids` (none when the org turned delegation off) */
-export async function activeDelegationLinks(db: Q, ids: readonly string[]): Promise<Array<[string, string]>> {
-  const uniq = [...new Set(ids)];
-  if (uniq.length === 0) return [];
-  const org = await loadOrgSettings(db as Db);
-  if (!org.approvalDelegationEnabled) return [];
-  const now = new Date();
-  const rows = await db
-    .select({ from: approvalDelegations.fromUserId, to: approvalDelegations.toUserId })
-    .from(approvalDelegations)
-    .where(
-      and(
-        or(inArray(approvalDelegations.fromUserId, uniq), inArray(approvalDelegations.toUserId, uniq)),
-        lte(approvalDelegations.startsAt, now),
-        gt(approvalDelegations.endsAt, now),
-      ),
-    );
-  return rows.map((r) => [r.from, r.to]);
-}
-
-/** union-find over delegation links: every id → its principal group's root */
-export function principalRoots(ids: readonly string[], links: ReadonlyArray<readonly [string, string]>): Map<string, string> {
-  const parent = new Map<string, string>();
-  const find = (x: string): string => {
-    if (!parent.has(x)) parent.set(x, x);
-    let r = x;
-    while (parent.get(r) !== r) r = parent.get(r)!;
-    let c = x;
-    while (parent.get(c) !== r) {
-      const n = parent.get(c)!;
-      parent.set(c, r);
-      c = n;
-    }
-    return r;
-  };
-  for (const id of ids) find(id);
-  for (const [a, b] of links) {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra !== rb) parent.set(ra, rb);
-  }
-  const out = new Map<string, string>();
-  for (const id of parent.keys()) out.set(id, find(id));
-  return out;
-}
-
-export interface ApprovalPool {
-  /** eligible people: the named approver and active approver-role members, never the caller or anyone delegation-linked to them */
-  members: string[];
-  /** how many distinct principals they make (a delegator and their delegate are one) */
-  principals: number;
-}
-
-/**
- * The eligible pool for one approval (or one rule): the named approver plus
- * the ACTIVE members of `approverRoleId` (disabled users never count), minus
- * the caller and everyone linked to the caller by an active delegation.
- */
-export async function loadApprovalPool(
-  db: Q,
-  input: { namedApproverUserId: string; approverRoleId: string | null; callerUserId: string | null },
-): Promise<ApprovalPool> {
-  const candidates = new Set<string>([input.namedApproverUserId]);
-  if (input.approverRoleId) {
-    const members = await db
-      .select({ userId: roleAssignments.userId })
-      .from(roleAssignments)
-      .where(eq(roleAssignments.roleId, input.approverRoleId));
-    for (const m of members) candidates.add(m.userId);
-  }
-  const ids = [...candidates];
-  const active = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(and(inArray(users.id, ids), isNull(users.disabledAt)));
-  let members = active.map((u) => u.id);
-  const links = await activeDelegationLinks(db, input.callerUserId ? [...members, input.callerUserId] : members);
-  const roots = principalRoots(input.callerUserId ? [...members, input.callerUserId] : members, links);
-  if (input.callerUserId) {
-    const callerRoot = roots.get(input.callerUserId);
-    members = members.filter((m) => m !== input.callerUserId && roots.get(m) !== callerRoot);
-  }
-  return { members: members.sort(), principals: new Set(members.map((m) => roots.get(m))).size };
-}
 
 /** the rule's approver role, when the approval names a rule row that has one */
 async function approverRoleOf(db: Q, ruleId: string | null): Promise<string | null> {
@@ -218,49 +141,6 @@ export async function poolForApproval(db: Q, row: ApprovalRow): Promise<Approval
     approverRoleId: await approverRoleOf(db, row.ruleId),
     callerUserId: row.userId,
   });
-}
-
-// ---------------------------------------------------------------------------
-// Rule writes: a pool that can never reach the quorum is refused
-// ---------------------------------------------------------------------------
-
-export interface QuorumUnsatisfiable {
-  status: 422;
-  body: { error: "quorum_unsatisfiable"; quorum: number; eligiblePrincipals: number; detail: string };
-}
-
-/**
- * Can this rule's pool ever reach its quorum? Best case for the caller: the
- * caller is outside the pool, except for a user-scoped rule, whose subject IS
- * every caller. Returns the refusal, or null. `approverRoleId` must name an
- * existing role (else a 422 `unknown_role`).
- */
-export async function approvalRuleQuorumRefusal(
-  db: Q,
-  rule: { approverUserId: string; approverRoleId: string | null; quorum: number; scope?: string | null; userId?: string | null },
-): Promise<QuorumUnsatisfiable | { status: 422; body: { error: "unknown_role"; detail: string } } | null> {
-  if (rule.approverRoleId) {
-    const [role] = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, rule.approverRoleId));
-    if (!role) return { status: 422, body: { error: "unknown_role", detail: "approverRoleId names no role" } };
-  }
-  const pool = await loadApprovalPool(db, {
-    namedApproverUserId: rule.approverUserId,
-    approverRoleId: rule.approverRoleId,
-    callerUserId: rule.scope === "user" && rule.userId ? rule.userId : null,
-  });
-  if (pool.principals >= rule.quorum) return null;
-  return {
-    status: 422,
-    body: {
-      error: "quorum_unsatisfiable",
-      quorum: rule.quorum,
-      eligiblePrincipals: pool.principals,
-      detail:
-        `this rule needs ${rule.quorum} different approvers but its pool (the named approver and the active members ` +
-        `of its approver role, never the caller, a delegator and their delegate counting once) has only ` +
-        `${pool.principals}: add people to the approver role or lower the quorum`,
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------

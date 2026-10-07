@@ -18,3 +18,8 @@ export function approvalRuleBody(subject: Record<string, unknown>, extra: Record
     ...(extra.approverRoleId ? { approverRoleId: extra.approverRoleId } : {}),
   };
 }
+
+/** the exact body PATCH /v1/rules/approvals/:id receives from the inline editor */
+export function approvalRuleQuorumPatch(quorum: string, approverRoleId: string): { quorum: number; approverRoleId: string | null } {
+  return { quorum: Number(quorum), approverRoleId: approverRoleId || null };
+}

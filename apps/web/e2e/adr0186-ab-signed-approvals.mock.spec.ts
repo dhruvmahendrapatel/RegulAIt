@@ -61,6 +61,7 @@ interface Captured {
   signingOptions: Array<{ id: string; body: unknown }>;
   decides: Array<{ id: string; body: Row; grant: string | null }>;
   rules: Row[];
+  rulePatches: Row[];
   stepUpOptions: unknown[];
 }
 
@@ -101,9 +102,16 @@ function toolApproval(over: Row = {}): Row {
 
 async function mockApi(
   page: Page,
-  opts: { me: typeof BEN; admin: boolean; approvals: Row[]; decideRefusal?: { status: number; body: Row }; ruleRefusal?: Row },
+  opts: {
+    me: typeof BEN;
+    admin: boolean;
+    approvals: Row[];
+    decideRefusal?: { status: number; body: Row };
+    ruleRefusal?: Row;
+    approvalRules?: Row[];
+  },
 ): Promise<Captured> {
-  const cap: Captured = { signingOptions: [], decides: [], rules: [], stepUpOptions: [] };
+  const cap: Captured = { signingOptions: [], decides: [], rules: [], rulePatches: [], stepUpOptions: [] };
   const me = { userId: opts.me.id, isAdmin: opts.admin, user: opts.me };
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -156,7 +164,17 @@ async function mockApi(
       if (opts.ruleRefusal) return json(route, opts.ruleRefusal, 422);
       return json(route, { id: "r-new", ...(req.postDataJSON() as Row) }, 201);
     }
-    if (p === "/v1/rules/approvals" || p === "/v1/rules/data-scopes" || p === "/v1/rules/rate-limits") return json(route, { rules: [] });
+    const rulePatch = /^\/v1\/rules\/approvals\/([^/]+)$/.exec(p);
+    if (rulePatch && method === "PATCH") {
+      const body = req.postDataJSON() as Row;
+      cap.rulePatches.push(body);
+      if ((body.quorum as number) > 3) {
+        return json(route, { error: "quorum_unsatisfiable", quorum: body.quorum, eligiblePrincipals: 3, detail: "this rule needs 4 different approvers but its pool has only 3" }, 422);
+      }
+      return json(route, { ...(opts.approvalRules?.[0] ?? {}), ...body, versionMinted: null });
+    }
+    if (p === "/v1/rules/approvals") return json(route, { rules: opts.approvalRules ?? [] });
+    if (p === "/v1/rules/data-scopes" || p === "/v1/rules/rate-limits") return json(route, { rules: [] });
     if (p === "/v1/users" && method === "GET") {
       return json(route, { users: [AVERY, BEN, { id: "u-dana", email: "dana@example.test", displayName: "Dana Developer" }].map((u) => ({ ...u, isAdmin: false, disabledAt: null, createdAt: iso(-90) })) });
     }
@@ -291,5 +309,36 @@ test.describe("ADR-0186 A2+B: dual control and passkey-signed approvals", () => 
     await expect(form.getByRole("alert")).toContainText("has only 2");
     expect(cap.rules).toHaveLength(1);
     expect(cap.rules[0]).toMatchObject({ scope: "user", userId: "u-dana", approverUserId: AVERY.id, quorum: 3, approverRoleId: "role-approvers" });
+  });
+
+  test("an approval rule's quorum and approver role are edited in place through PATCH; an unsatisfiable edit is refused verbatim", async ({ page }) => {
+    const ruleRow = {
+      id: "r-1",
+      scope: "user",
+      serverScope: "server",
+      userId: "u-dana",
+      serverId: "s-repo",
+      roleId: null,
+      teamId: null,
+      toolName: "write_file",
+      writeOnly: false,
+      approverUserId: AVERY.id,
+      quorum: 1,
+      approverRoleId: null,
+      deployMode: null,
+      createdAt: iso(-2),
+    };
+    const cap = await mockApi(page, { me: { ...BEN, id: "u-admin", displayName: "Admin" }, admin: true, approvals: [], approvalRules: [ruleRow] });
+    await page.goto("/ui/admin/rules");
+    await page.getByLabel("Approvers needed for rule r-1").selectOption("3");
+    await page.getByLabel("Approver role for rule r-1").selectOption("role-approvers");
+    const row = page.getByRole("row").filter({ has: page.getByLabel("Approvers needed for rule r-1") });
+    await row.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => cap.rulePatches.length).toBe(1);
+    expect(cap.rulePatches[0]).toEqual({ quorum: 3, approverRoleId: "role-approvers" });
+    await page.getByLabel("Approvers needed for rule r-1").selectOption("4");
+    await row.getByRole("button", { name: "Save" }).click();
+    await expect(row.getByRole("alert")).toContainText("has only 3");
+    expect(cap.rulePatches[1]).toEqual({ quorum: 4, approverRoleId: "role-approvers" });
   });
 });

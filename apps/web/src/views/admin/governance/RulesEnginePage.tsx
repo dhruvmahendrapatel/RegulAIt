@@ -36,7 +36,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
-import { APPROVAL_QUORUM_CHOICES, approvalRuleBody } from "./approvalRuleForm";
+import { APPROVAL_QUORUM_CHOICES, approvalRuleBody, approvalRuleQuorumPatch } from "./approvalRuleForm";
 
 interface Subject {
   scope: "user" | "role" | "team" | "fleet";
@@ -157,6 +157,73 @@ const DEPLOY_MODES: RuleDeployMode[] = ["hosted", "byoc", "air_gapped"];
  * than as a paste-the-rule-id form: the rule you are scoping is the row you
  * are looking at.
  */
+/**
+ * ADR-0186 A — edit an approval rule's dual control in place: how many
+ * different approvers it needs and the approver role whose active members join
+ * the named approver. The PATCH runs the same satisfiability check as the
+ * create (a pool that can never reach the number is refused, shown verbatim);
+ * on a versioned rule the edit mints and activates a version.
+ */
+function ApprovalQuorumCell(props: { rule: ApprovalRule; roles: Opt[] }) {
+  const act = useAction();
+  const [quorum, setQuorum] = useState(String(props.rule.quorum ?? 1));
+  const [roleId, setRoleId] = useState(props.rule.approverRoleId ?? "");
+  const [minted, setMinted] = useState<number | null>(null);
+  const dirty = quorum !== String(props.rule.quorum ?? 1) || roleId !== (props.rule.approverRoleId ?? "");
+  return (
+    <span className={v.stackTight}>
+      <span className={v.rowTight}>
+        <Select
+          aria-label={`Approvers needed for rule ${props.rule.id}`}
+          value={quorum}
+          disabled={act.busy}
+          onChange={(e) => setQuorum(e.target.value)}
+        >
+          {APPROVAL_QUORUM_CHOICES.map((n) => (
+            <option key={n} value={String(n)}>
+              {n}
+            </option>
+          ))}
+        </Select>
+        <Select
+          aria-label={`Approver role for rule ${props.rule.id}`}
+          value={roleId}
+          disabled={act.busy}
+          onChange={(e) => setRoleId(e.target.value)}
+        >
+          {optionEls(props.roles, "— no role —")}
+        </Select>
+        <Button
+          size="sm"
+          disabled={act.busy || !dirty}
+          onClick={() => {
+            setMinted(null);
+            void act.run(async () => {
+              const r = await api.patch<{ versionMinted: number | null }>(
+                `/v1/rules/approvals/${props.rule.id}`,
+                approvalRuleQuorumPatch(quorum, roleId),
+              );
+              setMinted(r.versionMinted ?? null);
+            }, "Approvers updated");
+          }}
+        >
+          Save
+        </Button>
+      </span>
+      {minted != null && (
+        <span className={v.faint}>
+          This rule is versioned — the change was minted and activated as <strong>v{minted}</strong>.
+        </span>
+      )}
+      {act.error && (
+        <span className={v.errLine} role="alert">
+          {act.error}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function DeployModeCell(props: { kind: RuleKind; rule: RuleBase }) {
   const act = useAction();
   // ADR-0074: `deployMode` is a VERSIONED field. On a rule somebody has
@@ -393,9 +460,8 @@ export default function RulesEnginePage() {
               },
               {
                 key: "quorum",
-                header: "Approvers needed",
-                render: (r) =>
-                  `${r.quorum ?? 1}${r.approverRoleId ? ` · from role ${names.roleName.get(r.approverRoleId) ?? r.approverRoleId}` : ""}`,
+                header: "Approvers needed · approver role",
+                render: (r) => <ApprovalQuorumCell rule={r} roles={rOpts} />,
               },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
               modeColumn<ApprovalRule>("approvals"),
