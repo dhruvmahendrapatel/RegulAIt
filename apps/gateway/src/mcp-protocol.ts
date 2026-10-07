@@ -543,7 +543,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     if (piiMode === "redact") {
       try {
         // base64 blobs cannot be inspected, so they cannot be released redacted
-        if (JSON.stringify(result).includes('"blob"')) throw new Error("uninspectable");
+        if (carriesBlob(result)) throw new Error("uninspectable");
         const transformed = redactPiiPayload(result, piiIntl);
         outputHits = transformed.hits;
         released = transformed.value as Record<string, unknown>;
@@ -605,6 +605,17 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   } finally {
     if (upstream) await upstream.close();
   }
+}
+
+/** does a result carry base64 content (`blob`) anywhere? Redaction cannot
+ * inspect it, so such a result is never released under `redact`. */
+function carriesBlob(value: unknown, depth = 0): boolean {
+  if (depth > 64) return true;
+  if (Array.isArray(value)) return value.some((v) => carriesBlob(v, depth + 1));
+  if (value && typeof value === "object") {
+    return Object.entries(value).some(([k, v]) => k === "blob" || carriesBlob(v, depth + 1));
+  }
+  return false;
 }
 
 /** the output scans for one relayed upstream notification: null = drop it */
