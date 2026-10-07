@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
-import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { Role, RoleAssignment, RoleGrants } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -114,7 +114,7 @@ export default function RolesPage() {
               e.preventDefault();
               void act.run(
                 // B4S-02: adding someone to an approver role widens an approver pool
-                () => withStepUp((h) => stepUpApi.post(`/v1/users/${assignUser}/roles`, { roleId: assignRole }, h)),
+                () => withStepUp((h) => api.postWithHeaders(`/v1/users/${assignUser}/roles`, { roleId: assignRole }, h)),
                 "Role assigned",
               );
             }}

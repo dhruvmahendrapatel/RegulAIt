@@ -24,7 +24,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { Approval } from "../../../api/types";
 import { ago } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
@@ -231,7 +231,7 @@ export default function ReviewWorkbenchPage() {
                     escalateAction: pAction,
                     ...(pAction === "notify_only" ? {} : { escalateToKind: pKind, escalateToId: pTarget }),
                   };
-                  await withStepUp((h) => stepUpApi.post("/v1/approvals/sla-policies", body, h));
+                  await withStepUp((h) => api.postWithHeaders("/v1/approvals/sla-policies", body, h));
                   setPName("");
                   setPTarget("");
                   await refreshAll();
@@ -337,7 +337,7 @@ export default function ReviewWorkbenchPage() {
                     priority: Number(rPriority),
                     ...(rPolicy ? { slaPolicyId: rPolicy } : {}),
                   };
-                  await withStepUp((h) => stepUpApi.post("/v1/approvals/assignment-rules", body, h));
+                  await withStepUp((h) => api.postWithHeaders("/v1/approvals/assignment-rules", body, h));
                   setRName("");
                   setRTarget("");
                   await refreshAll();

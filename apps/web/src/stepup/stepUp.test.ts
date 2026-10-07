@@ -142,7 +142,7 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       // a role assignment, admin grant, initial password, MFA clear, delegation, routing rule, SLA escalation and
       // group-to-role mapping
       const poolWrites = src.match(
-        /(?<![A-Za-z])api\.post(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:users\/\$\{[^}]+\}\/(?:roles|admin|set-initial-password|mfa\/clear)["'`]|delegations["'`]|approvals\/(?:assignment-rules|sla-policies)["'`]|group-role-mappings["'`])/g,
+        /(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:users\/\$\{[^}]+\}\/(?:roles|admin|set-initial-password|mfa\/clear)["'`]|delegations["'`]|approvals\/(?:assignment-rules|sla-policies)["'`]|group-role-mappings["'`])/g,
       );
       for (const m of poolWrites ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp

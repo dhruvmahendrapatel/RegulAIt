@@ -16,7 +16,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
-import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { Approval } from "../../../api/types";
 import type { Delegation } from "../../../api/adminTypes";
 import { ago, approvalStageLabel } from "../../../api/format";
@@ -504,7 +504,7 @@ function DelegationsCard() {
             endsAt: new Date(endsAt).toISOString(),
             ...(reason ? { reason } : {}),
           };
-          void act.run(() => withStepUp((h) => stepUpApi.post("/v1/delegations", body, h)), "Delegation created");
+          void act.run(() => withStepUp((h) => api.postWithHeaders("/v1/delegations", body, h)), "Delegation created");
         }}
       >
         <Field label="Delegator (from)">

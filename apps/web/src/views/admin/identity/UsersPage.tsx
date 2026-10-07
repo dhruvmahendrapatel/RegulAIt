@@ -9,7 +9,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { RefusalGuidance } from "../../../api/refusals";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import UserPasskeysPanel from "./UserPasskeysPanel";
@@ -81,9 +81,11 @@ export default function UsersPage() {
   const issuePassword = async (u: AdminUser, force: boolean) => {
     await act.run(async () => {
       // B4S-02: issuing someone else's password needs the admin to confirm it's them
-      const issued = await withStepUp((h) =>
-        stepUpApi.post<{ password: string }>(`/v1/users/${u.id}/set-initial-password`, force ? { force: true } : {}, h),
-      );
+      const issued = (
+        await withStepUp((h) =>
+          api.postWithHeaders<{ password: string }>(`/v1/users/${u.id}/set-initial-password`, force ? { force: true } : {}, h),
+        )
+      ).body;
       setReveal({
         title: `One-time password for ${u.email}`,
         secret: issued.password,
@@ -218,7 +220,7 @@ export default function UsersPage() {
             onPromote={() =>
               void act.run(
                 // B4S-02: granting admin needs the acting admin to confirm it's them
-                () => withStepUp((h) => stepUpApi.post(`/v1/users/${selected.id}/admin`, { isAdmin: true }, h)),
+                () => withStepUp((h) => api.postWithHeaders(`/v1/users/${selected.id}/admin`, { isAdmin: true }, h)),
                 "Promoted to admin",
               )
             }
@@ -229,7 +231,7 @@ export default function UsersPage() {
                 onConfirm: () =>
                   void act.run(
                     // a demotion asks for nothing; the same wrapper keeps every admin-flag write on one path
-                    () => withStepUp((h) => stepUpApi.post(`/v1/users/${selected.id}/admin`, { isAdmin: false }, h)),
+                    () => withStepUp((h) => api.postWithHeaders(`/v1/users/${selected.id}/admin`, { isAdmin: false }, h)),
                     "Demoted to member",
                   ),
               })
@@ -288,7 +290,7 @@ export default function UsersPage() {
           if (u)
             void act.run(
               // B4S-02: clearing someone else's second factor needs the admin to confirm it's them
-              () => withStepUp((h) => stepUpApi.post(`/v1/users/${u.id}/mfa/clear`, { reason }, h)),
+              () => withStepUp((h) => api.postWithHeaders(`/v1/users/${u.id}/mfa/clear`, { reason }, h)),
               "MFA cleared — they can sign in with their password and re-enroll",
             );
         }}
