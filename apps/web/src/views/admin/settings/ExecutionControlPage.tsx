@@ -172,16 +172,15 @@ export default function ExecutionControlPage() {
       } else if (p.kind === "halt-agent") {
         await api.post(`/v1/agents/${p.agentId}/halt`, { reason });
       } else if (p.kind === "unhalt-agent") {
-        await api.post(`/v1/agents/${p.agentId}/unhalt`, { reason });
+        await withStepUp((h) => stepUpApi.post(`/v1/agents/${p.agentId}/unhalt`, { reason }, h));
       } else if (p.kind === "halt-tool") {
         await api.post(
           `/v1/servers/${p.serverId}/tools/${encodeURIComponent(p.toolName)}/halt`,
           { reason },
         );
       } else {
-        await api.post(
-          `/v1/servers/${p.serverId}/tools/${encodeURIComponent(p.toolName)}/unhalt`,
-          { reason },
+        await withStepUp((h) =>
+          stepUpApi.post(`/v1/servers/${p.serverId}/tools/${encodeURIComponent(p.toolName)}/unhalt`, { reason }, h),
         );
       }
       await refresh();

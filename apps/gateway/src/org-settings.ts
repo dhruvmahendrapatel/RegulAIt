@@ -820,7 +820,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // mode needs its own `break_glass` step-up. Looked at first WITHOUT
       // spending it and spent last, so a write that needs both step-ups never
       // burns one grant on the other's refusal.
-      const breakGlass = breakGlassChange(differs);
+      const breakGlass = breakGlassChange(differs, before as { localSignIn?: unknown; breakGlassUserIds?: unknown });
       if (breakGlass) {
         const refusal = await breakGlassStepUpRefusal(db, req, breakGlass, { spend: false });
         if (refusal) return reply.status(refusal.status).send(refusal.body);

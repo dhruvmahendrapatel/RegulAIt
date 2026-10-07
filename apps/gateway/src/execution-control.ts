@@ -364,6 +364,12 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/agents/:agentId/unhalt", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     const body = haltSchema.parse(req.body);
+    // ADR-0186 A: lifting a halt loosens a protection: a settings_relax step-up bound to this agent
+    const [held] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
+    if (held?.haltedAt) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { agentId, values: { halted: false } } });
+      if (!su.ok) return reply;
+    }
     const result = await db.transaction(async (tx) => {
       const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
       if (!before) return null;
@@ -433,6 +439,18 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/servers/:serverId/tools/:toolName/unhalt", async (req, reply) => {
     const { serverId, toolName } = toolParam.parse(req.params);
     const body = haltSchema.parse(req.body);
+    // ADR-0186 A: lifting a halt loosens a protection: a settings_relax step-up bound to this tool
+    const [held] = await db
+      .select({ haltedAt: mcpTools.haltedAt })
+      .from(mcpTools)
+      .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
+    if (held?.haltedAt) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { serverId, toolName, values: { halted: false } },
+      });
+      if (!su.ok) return reply;
+    }
     const result = await db.transaction(async (tx) => {
       const [before] = await tx.select().from(mcpTools)
         .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName))).for("update");

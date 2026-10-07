@@ -122,7 +122,7 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       // per-scope and halt-lifting relaxations: the execution mode, a per-object guardrail
       // override, a rule's deploy-mode scope, and releasing held evidence
       const scoped = src.match(
-        /(?<![A-Za-z])api\.(?:put|post|patch)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:execution\/mode["'`]|guardrails\/config\/|rules\/[^"'`]*\/deploy-mode|retention-holds\/release)/g,
+        /(?<![A-Za-z])api\.(?:put|post|patch)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:execution\/mode["'`]|guardrails\/config\/|rules\/[^"'`]*\/deploy-mode|retention-holds\/release|agents\/[^"'`]*\/unhalt|servers\/[^"'`]*\/tools\/[^"'`]*\/unhalt)/g,
       );
       for (const m of scoped ?? []) offenders.push(`${f}: ${m}`);
       // the Outlook recipient allow-list (adding a recipient widens where cards go)

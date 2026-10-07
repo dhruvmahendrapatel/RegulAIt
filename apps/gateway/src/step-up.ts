@@ -536,11 +536,26 @@ export function relaxedAgainst(
   return out;
 }
 
-/** the break-glass fields of an org-settings write that change what is stored, or null */
-export function breakGlassChange(differs: Record<string, unknown>): Record<string, unknown> | null {
+/** a break-glass list as a set: null (never set) and [] both name nobody, and order means nothing */
+function breakGlassSet(v: unknown): string {
+  return JSON.stringify(Array.isArray(v) ? [...new Set(v.map(String))].sort() : []);
+}
+
+/**
+ * The break-glass fields of an org-settings write that really change what is
+ * stored, or null. `breakGlassUserIds` compares as a SET (a stored null and a
+ * submitted [] both name nobody; the same people in another order are the
+ * same list), so re-saving an unchanged sign-in policy asks for nothing.
+ */
+export function breakGlassChange(
+  differs: Record<string, unknown>,
+  before: { localSignIn?: unknown; breakGlassUserIds?: unknown } = {},
+): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};
-  if ("localSignIn" in differs) out.localSignIn = differs.localSignIn;
-  if ("breakGlassUserIds" in differs) out.breakGlassUserIds = differs.breakGlassUserIds;
+  if ("localSignIn" in differs && differs.localSignIn !== before.localSignIn) out.localSignIn = differs.localSignIn;
+  if ("breakGlassUserIds" in differs && breakGlassSet(differs.breakGlassUserIds) !== breakGlassSet(before.breakGlassUserIds)) {
+    out.breakGlassUserIds = differs.breakGlassUserIds;
+  }
   return Object.keys(out).length > 0 ? out : null;
 }
 

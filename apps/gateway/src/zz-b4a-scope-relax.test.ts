@@ -23,6 +23,7 @@ import {
   guardrailConfigs,
   inArray,
   mcpServers,
+  mcpTools,
   ORG_SETTINGS_ID,
   runMigrations,
   sql,
@@ -205,6 +206,28 @@ describe("ADR-0186 A: per-scope and halt-lifting relaxations", () => {
       body: { ruleKind: "approvals", ruleId, values: { deployMode: "byoc" } },
     });
     expect((await asAdmin("PATCH", url, { deployMode: null })).statusCode).toBe(200);
+  });
+
+  it("POST /v1/agents/:id/unhalt and the per-tool unhalt: halting needs nothing; lifting the halt needs settings_relax", async () => {
+    const [a] = await db.insert(agents).values({ name: `b4a-halt-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+    created.agents.push(a!.id);
+    expect((await asAdmin("POST", `/v1/agents/${a!.id}/halt`, { reason: "b4a incident drill halt" })).statusCode).toBe(200);
+    await provesStepUp("POST", `/v1/agents/${a!.id}/unhalt`, { reason: "b4a incident drill is over" }, {
+      kind: "settings_relax",
+      body: { agentId: a!.id, values: { halted: false } },
+    });
+    // nothing halted: nothing to lift, nothing asked
+    expect((await asAdmin("POST", `/v1/agents/${a!.id}/unhalt`, { reason: "b4a incident drill again" })).statusCode).toBe(200);
+
+    const [srv] = await db.insert(mcpServers).values({ name: `b4a-halt-srv-${RUN}`, url: `https://b4a-halt-${RUN}.example.com/mcp` }).returning({ id: mcpServers.id });
+    created.servers.push(srv!.id);
+    await db.insert(mcpTools).values({ serverId: srv!.id, name: "b4a_tool", kind: "write" });
+    const tool = `/v1/servers/${srv!.id}/tools/b4a_tool`;
+    expect((await asAdmin("POST", `${tool}/halt`, { reason: "b4a incident drill halt" })).statusCode).toBe(200);
+    await provesStepUp("POST", `${tool}/unhalt`, { reason: "b4a incident drill is over" }, {
+      kind: "settings_relax",
+      body: { serverId: srv!.id, toolName: "b4a_tool", values: { halted: false } },
+    });
   });
 
   it("POST /v1/retention-holds/release: releasing held evidence needs evidence_hold_override", async () => {

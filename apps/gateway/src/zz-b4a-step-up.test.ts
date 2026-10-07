@@ -630,6 +630,16 @@ describe("step-up grants: single use, bound to kind+digest, session-bound, expir
     await db.execute(sql`UPDATE org_settings SET break_glass_user_ids = '[]'::jsonb, step_up_max_age_seconds = 120 WHERE id = ${ORG_SETTINGS_ID}`);
   });
 
+  it("re-saving an unchanged break-glass list (a stored null and [], the same ids in another order) asks for nothing", async () => {
+    await db.execute(sql`UPDATE org_settings SET break_glass_user_ids = NULL WHERE id = ${ORG_SETTINGS_ID}`);
+    const same = await as(admin, "PUT", "/v1/org/settings", { breakGlassUserIds: [], localSignIn: "enabled" });
+    expect(same.statusCode, same.body).toBe(200);
+    // a real change is still asked for
+    const real = await as(admin, "PUT", "/v1/org/settings", { breakGlassUserIds: [people.admin.id] });
+    expect(real.statusCode, real.body).toBe(403);
+    expect(real.json().actionKind).toBe("break_glass");
+  });
+
   it("step_up_mode=off is itself a relaxation needing a step-up, audited with transitions; while off nothing is asked", async () => {
     const off = await as(admin, "PUT", "/v1/org/settings", { stepUpMode: "off" });
     expect(off.statusCode, off.body).toBe(403);
