@@ -30,7 +30,9 @@
  *    default, ADR-0180 §1) the write needs `regressionRunId` naming a
  *    preview of the SAME subject whose candidate digest equals the submitted
  *    body's, no older than `decision_regression_max_age_minutes`, taken
- *    against the configuration still live; and, if that run changed any
+ *    against the configuration still live AND the golden set still live
+ *    (X15-R01: a case added, retired or changed since the preview means the
+ *    run no longer covers the current cases); and, if that run changed any
  *    outcome, `acceptChangedOutcomes: true` with an `acceptReason`. Refusals
  *    are 409 `decision_regression_not_previewed` /
  *    `decision_regression_changes_unaccepted`, audited. `warn` records the
@@ -60,9 +62,11 @@ import {
   eq,
   governanceReviewPolicy,
   governanceReviewPolicyVersions,
+  gte,
   inArray,
   isNotNull,
   isNull,
+  lte,
   or,
   sql,
   useCaseDecisionRecords,
@@ -199,6 +203,15 @@ export async function loadRegressionCases(db: Writer): Promise<DecisionRegressio
   ];
 }
 
+/**
+ * X15-R01: the digest of the golden set a run replays — every case's id,
+ * source, answers and expectation, in run order. A preview records it; the
+ * gate admits the preview only while the live set still has the same digest.
+ */
+export function caseSetDigest(cases: DecisionRegressionCase[]): string {
+  return accountabilityDigest(cases.map((c) => ({ id: c.id, source: c.source, answers: c.answers, expected: c.expected })));
+}
+
 // ---------------------------------------------------------------------------
 // One computation (a preview, or a warn-mode activation)
 // ---------------------------------------------------------------------------
@@ -207,6 +220,8 @@ export interface ComputedRegression {
   subject: DecisionRegressionSubject;
   candidateDigest: string;
   baselineDigest: string;
+  /** the golden set this computation replayed (X15-R01) */
+  caseSetDigest: string;
   diff: RegressionDiff;
   entries: DecisionRegressionRunEntry[];
 }
@@ -233,7 +248,14 @@ export async function computeRegression(
   const cases = await loadRegressionCases(db);
   const run = runDecisionRegression(cases, { ...live.config, ...candidate }, { baseline: live.config });
   const diff = run.baselineDiff!;
-  return { subject, candidateDigest, baselineDigest: baselineDigestFor(subject, live), diff, entries: runEntries(cases, diff) };
+  return {
+    subject,
+    candidateDigest,
+    baselineDigest: baselineDigestFor(subject, live),
+    caseSetDigest: caseSetDigest(cases),
+    diff,
+    entries: runEntries(cases, diff),
+  };
 }
 
 async function insertRun(
@@ -290,7 +312,15 @@ const SUBJECT_COPY: Record<DecisionRegressionSubject, string> = {
 
 interface GateProblem {
   code: typeof DECISION_REGRESSION_NOT_PREVIEWED | typeof DECISION_REGRESSION_CHANGES_UNACCEPTED;
-  reason: "missing" | "unknown_run" | "subject_mismatch" | "digest_mismatch" | "stale" | "baseline_moved" | "changes_unaccepted";
+  reason:
+    | "missing"
+    | "unknown_run"
+    | "subject_mismatch"
+    | "digest_mismatch"
+    | "stale"
+    | "baseline_moved"
+    | "cases_changed"
+    | "changes_unaccepted";
   detail: string;
   run: DecisionRegressionRunRow | null;
 }
@@ -376,6 +406,21 @@ export async function checkDecisionRegressionGate(db: Writer, input: GateInput):
         run,
       };
     }
+    // X15-R01: the run covers the golden set it replayed. Its digest is in the
+    // preview's own audit row (written in the run's transaction); a case added,
+    // retired or changed since — or no recorded digest — means it does not
+    // cover the cases live now.
+    const previewed = await previewCaseSetDigest(db, run);
+    if (previewed === null || previewed !== caseSetDigest(await loadRegressionCases(db))) {
+      return {
+        code: DECISION_REGRESSION_NOT_PREVIEWED,
+        reason: "cases_changed",
+        detail:
+          `the golden cases changed after run ${run.id} was taken (a case was added, retired or changed), ` +
+          "so it does not cover the cases live now: preview again",
+        run,
+      };
+    }
     if (run.changed > 0 && !(input.acceptance.acceptChangedOutcomes === true && input.acceptance.acceptReason)) {
       return {
         code: DECISION_REGRESSION_CHANGES_UNACCEPTED,
@@ -392,6 +437,37 @@ export async function checkDecisionRegressionGate(db: Writer, input: GateInput):
   if (!problem) return { ok: true, mode, run: admitted, problem: null };
   if (mode === "warn") return { ok: true, mode, run: problem.run, problem };
   return { ok: false, mode, problem };
+}
+
+/**
+ * The case-set digest a preview recorded, read from its `decision-regression-
+ * previewed` audit row. That row is written in the run's own transaction with
+ * the same `now()`, so `(user_id, at)` (indexed) finds it without scanning the
+ * trail; the id and rule pin it exactly. Null when absent (a run whose author
+ * was since deleted, so `created_by` no longer names the row's user; a pruned
+ * row; a preview from before X15-R01): the gate then refuses, and a fresh
+ * preview is the remedy. Kept in the audit row so no migration was needed; a
+ * `case_set_digest` column on the run would carry it the same way.
+ */
+async function previewCaseSetDigest(db: Writer, run: DecisionRegressionRunRow): Promise<string | null> {
+  const from = new Date(run.createdAt.getTime() - 1000);
+  const to = new Date(run.createdAt.getTime() + 1000);
+  const [row] = await asDb(db)
+    .select({ detail: auditLog.detail })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.userId, run.createdBy ?? NO_IDENTITY),
+        gte(auditLog.at, from),
+        lte(auditLog.at, to),
+        eq(auditLog.objectType, "decision_regression"),
+        eq(auditLog.objectId, run.id),
+        eq(auditLog.ruleId, "decision-regression-previewed"),
+      ),
+    )
+    .limit(1);
+  const digest = (row?.detail as { caseSetDigest?: unknown } | null | undefined)?.caseSetDigest;
+  return typeof digest === "string" ? digest : null;
 }
 
 /** the 409 body and the audit row of a refusal (written by the caller AFTER
@@ -839,6 +915,7 @@ export function registerDecisionRegressionRoutes(app: FastifyInstance, db: Db): 
           subject,
           candidateDigest,
           baselineDigest: computed.baselineDigest,
+          caseSetDigest: computed.caseSetDigest,
           cases: computed.diff.cases,
           changed: computed.diff.changed,
           changedCaseIds: computed.entries.map((e) => e.caseId),
