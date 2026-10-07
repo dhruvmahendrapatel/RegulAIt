@@ -182,6 +182,7 @@ import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
+import { changeOwner, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
 import {
@@ -1760,8 +1761,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/servers", async (req, reply) => {
     const parsed = createServerSchema.parse(req.body);
     const transport = parsed.transport ?? "streamable_http";
-    // ADR-0185 I9 SEAM — `ownerUserId` is accepted by the schema and applied by
-    // the I9 slice (owner defaults to the registering admin); not written here.
     const label = `MCP server '${parsed.name}'`;
     // ADR-0185 G4 — THE TRANSPORT RULES, before anything else is decided: the
     // org must have enabled the transport (422 mcp_transport_disabled); a
@@ -1788,6 +1787,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       what: `registering MCP server '${parsed.name}'`,
     });
     if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
+    // ADR-0185 I9 — the owner defaults to the registering admin (the bootstrap
+    // token registers it unowned); a named owner must be an existing, active
+    // user (422 unknown_owner / owner_inactive, nothing saved)
+    const owner = await resolveRegistrationOwner(db, { actorUserId: req.authCtx.userId, requested: parsed.ownerUserId });
+    if (!owner.ok) return reply.status(owner.status).send(owner.body);
     let values: typeof mcpServers.$inferInsert;
     if (parsed.transport === "stdio") {
       // the row's url is the `stdio:<name>` sentinel (DB CHECK), which no
@@ -1801,6 +1805,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         stdioCommand: stdio.command,
         stdioArgs: stdio.args,
         stdioCommandDigest: stdio.digest,
+        ownerUserId: owner.ownerUserId,
       };
     } else {
       // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
@@ -1820,6 +1825,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         url: parsed.url,
         transport,
         ...(parsed.allowPrivateRanges !== undefined ? { allowPrivateRanges: parsed.allowPrivateRanges } : {}),
+        ownerUserId: owner.ownerUserId,
       };
     }
     // ADR-0097: the registration path sets the admission state EXPLICITLY
@@ -1870,8 +1876,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const isStdio = before.transport === "stdio";
     // ADR-0185 G4 — a server's transport is fixed at registration; a stdio
     // block applies to a stdio server only, and a stdio server has no url or
-    // private-range posture to change (I9's `ownerUserId` is applied by that
-    // slice, not here)
+    // private-range posture to change (`ownerUserId` is applied below, after
+    // every refusal, through I9's audited owner change)
     if (
       (body.transport !== undefined && body.transport !== before.transport) ||
       (body.stdio !== undefined && !isStdio) ||
@@ -1943,6 +1949,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         };
       }
     }
+    // ADR-0185 I9 — an owner named on PATCH goes through the same audited
+    // change as PUT …/owner (422 unknown_owner / owner_inactive). It runs after
+    // every refusal above, so a refused PATCH changes no owner either.
+    if (body.ownerUserId !== undefined) {
+      const owned = await changeOwner(db, { kind: "mcp_server", id: serverId, ownerUserId: body.ownerUserId, actorUserId: req.authCtx.userId });
+      if (!owned.ok) return reply.status(owned.status).send(owned.body);
+      before.ownerUserId = owned.body.ownerUserId;
+    }
     const patch: Partial<typeof mcpServers.$inferInsert> = {
       ...(body.name !== undefined ? { name: body.name } : {}),
       // a stdio row's url IS its name (`stdio:<name>`, a DB CHECK): a rename
@@ -1954,9 +1968,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : {}),
       ...stdioPatch,
     };
-    // ADR-0185: a body that only restates the transport (or names fields a
-    // later slice applies) changes no column here — answer with the row
-    // rather than issue an empty UPDATE
+    // ADR-0185: a body that only restates the transport (or only changes the
+    // owner, already written above) changes no column here — answer with the
+    // row rather than issue an empty UPDATE
     if (Object.keys(patch).length === 0) return reply.send(mcpServerView(before));
     const [row] = await db
       .update(mcpServers)
@@ -1981,7 +1995,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.send(mcpServerView(row!));
   });
 
-  app.get("/v1/servers", async () => ({ servers: (await db.select().from(mcpServers)).map(mcpServerView) }));
+  app.get("/v1/servers", async () => ({
+    servers: (await withOwnership(db, await db.select().from(mcpServers))).map(mcpServerView),
+  }));
 
   app.get("/v1/servers/:serverId/tools", async (req) => {
     const { serverId } = uuidParam.parse(req.params);
@@ -4517,6 +4533,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ledgers, no new collection. Admin-only via the default gate: it names
   // users, grants, and org-wide run history, the audit log's record class.
   registerInventoryRoutes(app, db);
+  // ADR-0185 I9 — PUT /v1/servers/:serverId/owner and
+  // PUT /v1/connectors/:connectorId/owner (admin-only via the default gate)
+  registerOwnershipRoutes(app, db);
   // ADR-0090 — grant certification campaigns (campaign CRUD only; the
   // keep/revoke decisions ride the one approvals decide path above).
   registerGrantCertificationRoutes(app, db);
