@@ -74,7 +74,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { breakGlassChange, breakGlassStepUpRefusal, settingsRelaxStepUpRefusal } from "./step-up.js";
+import { breakGlassChange, breakGlassStepUpRefusal, settingsRelaxStepUpRefusal, stepUpRefusal } from "./step-up.js";
 
 export type { OrgSettingsRow };
 
@@ -948,6 +948,18 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // rather than replacing a record somebody already reads
     const beforeMode =
       ((await currentEffectiveBody(db, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
+    // ADR-0186 A: NARROWING where a rule applies (from every deploy mode to one,
+    // or from one to another) stops it applying somewhere it applied: a
+    // settings_relax step-up bound to the rule and its new scope. Widening it
+    // to every mode (null) needs none.
+    const nextMode = body.deployMode ?? null;
+    if (nextMode !== null && nextMode !== beforeMode) {
+      const refusal = await stepUpRefusal(db, req, {
+        kind: "settings_relax",
+        facts: { ruleKind: kind, ruleId, values: { deployMode: nextMode } },
+      });
+      if (refusal) return reply.status(refusal.status).send(refusal.body);
+    }
     const res = await applyRuleEdit<{ id: string; deployMode: string | null }>(db, {
       artifactType: RULE_ARTIFACT_TYPES[kind],
       artifactId: ruleId,

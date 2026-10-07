@@ -36,6 +36,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 interface Subject {
   scope: "user" | "role" | "team" | "fleet";
@@ -178,9 +179,12 @@ function DeployModeCell(props: { kind: RuleKind; rule: RuleBase }) {
           setMinted(null);
           void act.run(
             async () => {
-              const r = await api.patch<{ versionMinted: number | null }>(
-                `/v1/rules/${props.kind}/${props.rule.id}/deploy-mode`,
-                { deployMode: next },
+              const r = await withStepUp((h) =>
+                stepUpApi.patch<{ versionMinted: number | null }>(
+                  `/v1/rules/${props.kind}/${props.rule.id}/deploy-mode`,
+                  { deployMode: next },
+                  h,
+                ),
               );
               setMinted(r.versionMinted ?? null);
             },

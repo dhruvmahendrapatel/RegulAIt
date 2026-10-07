@@ -57,6 +57,7 @@
  * `reason: "erasure"` is how an admin acts on a request today.
  */
 import type { FastifyInstance } from "fastify";
+import { requireStepUp } from "./step-up.js";
 import { z } from "zod";
 import {
   and,
@@ -1272,9 +1273,21 @@ export function registerAutomationRuleRoutes(
     };
   });
 
-  app.post("/v1/retention-holds/release", async (req) => {
+  app.post("/v1/retention-holds/release", async (req, reply) => {
     const b = releaseBody.parse(req.body);
     const actorUserId = req.authCtx.userId ?? null;
+    // ADR-0186 A: releasing held evidence is an evidence-hold override: a step-up
+    // bound to the reason, the person, the traces named and the reference
+    const su = await requireStepUp(db, req, reply, {
+      kind: "evidence_hold_override",
+      facts: {
+        release: b.reason,
+        userId: b.userId ?? null,
+        traceIds: b.reason === "erasure" ? null : [...(b.traceIds ?? [])].sort(),
+        reference: b.reference ?? null,
+      },
+    });
+    if (!su.ok) return reply;
     return b.reason === "erasure"
       ? releaseRetentionHolds(db, { reason: "erasure", userId: b.userId, reference: b.reference, actorUserId })
       : releaseRetentionHolds(db, { reason: "admin", userId: b.userId, traceIds: b.traceIds, reference: b.reference, actorUserId });

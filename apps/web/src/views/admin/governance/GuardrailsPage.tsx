@@ -263,7 +263,7 @@ export default function GuardrailsPage() {
               onSubmit={(e) => {
                 e.preventDefault();
                 void act.run(async () => {
-                  await api.put(`/v1/guardrails/config/${ovScope}/${ovTarget}`, { modes: ovModes });
+                  await withStepUp((h) => stepUpApi.put(`/v1/guardrails/config/${ovScope}/${ovTarget}`, { modes: ovModes }, h));
                   setOvTarget("");
                   setOvModes({});
                   await config.refetch();

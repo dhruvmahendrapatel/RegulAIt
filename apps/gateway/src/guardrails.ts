@@ -27,7 +27,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { requireRelaxStepUp } from "./step-up.js";
+import { requireRelaxStepUp, requireStepUp } from "./step-up.js";
 import {
   agents,
   and,
@@ -684,6 +684,24 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       ? { expiresAt: new Date(now.getTime() + body.assuranceWindow.ttlMinutes * 60_000) }
       : null;
     const before = previousModes(existingInForce ?? (await loadOrgGuardrailConfig(db)));
+    // ADR-0186 A: an override that LOWERS any detector below the org's mode, or that
+    // opens or extends the time-boxed assurance window, is a relaxation: a
+    // settings_relax step-up bound to the object and the lowered modes
+    {
+      const orgModes = previousModes(await loadOrgGuardrailConfig(db));
+      const lowered: Record<string, unknown> = {};
+      for (const [d, mode] of Object.entries(body.modes ?? {})) {
+        const id = d as keyof typeof orgModes;
+        const org = orgModes[id];
+        if (!mode || !org) continue;
+        if (GUARDRAIL_MODES.indexOf(mode) < GUARDRAIL_MODES.indexOf(org)) lowered[d] = mode;
+      }
+      if (body.assuranceWindow) lowered.assuranceWindowMinutes = body.assuranceWindow.ttlMinutes;
+      if (Object.keys(lowered).length > 0) {
+        const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { scope, scopeId, values: lowered } });
+        if (!su.ok) return reply;
+      }
+    }
     const row = await upsert(scope, scopeId, body, actor, window);
     await audit(
       actor,

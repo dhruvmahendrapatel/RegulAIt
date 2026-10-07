@@ -64,6 +64,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { requireStepUp } from "./step-up.js";
 import {
   and,
   approvals,
@@ -1090,6 +1091,18 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         return reply.status(400).send({ error: problem.error, detail: problem.detail, ...(problem.invalid ? { invalid: problem.invalid } : {}) });
       }
       recipients = problem.value;
+      // ADR-0186 A: ADDING a recipient widens where approval cards may be mailed:
+      // a settings_relax step-up bound to this workspace and the added mailboxes
+      // (removing one narrows it and needs none)
+      const from = before.outlookRecipientAllowList ?? [];
+      const added = recipients.filter((m) => !from.includes(m)).sort();
+      if (added.length > 0) {
+        const su = await requireStepUp(db, req, reply, {
+          kind: "settings_relax",
+          facts: { connectionId, values: { outlookRecipientsAdded: added } },
+        });
+        if (!su.ok) return reply;
+      }
     }
     const botChange = body.botAppId !== undefined || body.botTenantId !== undefined || body.botOpenidMetadataUrl !== undefined;
     const bot = {

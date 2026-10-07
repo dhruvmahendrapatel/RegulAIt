@@ -119,6 +119,16 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
         /(?<![A-Za-z])api\.(?:put|post)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:org\/settings\/assurance-gate-mode|mrm\/enforcement|interception\/settings|policy-simulations\/settings|guardrails\/config)["'`]/g,
       );
       for (const m of dedicated ?? []) offenders.push(`${f}: ${m}`);
+      // per-scope and halt-lifting relaxations: the execution mode, a per-object guardrail
+      // override, a rule's deploy-mode scope, and releasing held evidence
+      const scoped = src.match(
+        /(?<![A-Za-z])api\.(?:put|post|patch)(?:WithHeaders)?(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:execution\/mode["'`]|guardrails\/config\/|rules\/[^"'`]*\/deploy-mode|retention-holds\/release)/g,
+      );
+      for (const m of scoped ?? []) offenders.push(`${f}: ${m}`);
+      // the Outlook recipient allow-list (adding a recipient widens where cards go)
+      if (src.includes("outlookRecipientAllowList") && /api\.patch/.test(src) && !src.includes("withStepUp(")) {
+        offenders.push(`${f}: outlookRecipientAllowList written without withStepUp`);
+      }
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

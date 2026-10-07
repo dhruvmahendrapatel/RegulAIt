@@ -357,7 +357,7 @@ async function seedDemoIntakeRun(
   await seedRiskAcceptances(call, ada.auth, useCaseId, report);
 
   // --- required AI tests (ADR-0180 A3): real red-team runs for the agents the story ships ---
-  await seedRequiredTestRuns(call, ada, agentId, fixtures, report);
+  await seedRequiredTestRuns(call, ada, agentId, fixtures, report, BOOT);
 
   // --- accountability records (ADR-0182 D4): one feedback item that became a closed incident ---
   await seedDemoAccountability(call, { ada, dana, avery }, useCaseId, report);
@@ -705,6 +705,9 @@ async function seedRequiredTestRuns(
   agentId: Map<string, string>,
   fixtures: DemoIntakeFixtures,
   report: DemoSeedReport,
+  /** the deploy-time bootstrap credential: opening the guardrail window is a relaxation that needs a
+   * step-up (ADR-0186 A), which a persona's API key can never give; the seeding operator opens it */
+  operator: Record<string, string>,
 ): Promise<void> {
   const ok = (s: number) => s >= 200 && s < 300;
   const auth = ada.auth;
@@ -774,7 +777,7 @@ async function seedRequiredTestRuns(
   }
   // ADR-0181: the strict guardrail default holds injection/jailbreak probes before they reach
   // the agent; open an audited, time-boxed window so the run measures the agent itself
-  const guardrailWindow = await openAssuranceGuardrailWindow(call, auth, names.map((n) => agentId.get(n)!));
+  const guardrailWindow = await openAssuranceGuardrailWindow(call, operator, names.map((n) => agentId.get(n)!));
   report.notes.push(...guardrailWindow.notes);
   try {
     for (const name of names) {

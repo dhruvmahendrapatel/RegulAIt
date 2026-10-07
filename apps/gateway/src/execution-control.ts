@@ -55,6 +55,17 @@ import {
 import { EXECUTION_MODES, type ExecutionMode } from "@regulait/policy-kernel";
 import { loadOrgSettings } from "./org-settings.js";
 import { EXECUTION_MODE_NOTES } from "./execution-posture.js";
+import { checkStepUp, requireStepUp } from "./step-up.js";
+
+/** how restrictive each mode is: normal < the two partial restrictions < halted */
+const EXECUTION_MODE_RANK: Record<ExecutionMode, number> = { normal: 0, read_only: 1, require_approval: 1, halted: 2 };
+
+/** ADR-0186 A: does moving from `from` to `to` lift any restriction? (a lateral move between the partial
+ * restrictions lets through what the other refused, so it counts; entering a halt never does) */
+export function executionModeLoosens(from: ExecutionMode, to: ExecutionMode): boolean {
+  if (from === to || to === "halted") return false;
+  return EXECUTION_MODE_RANK[to] <= EXECUTION_MODE_RANK[from];
+}
 
 /** Distinct rule ids per event: an operator alerts on each separately. */
 export const EXECUTION_CONTROL_RULE_IDS = {
@@ -273,11 +284,27 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
       }
     }
 
-    await loadOrgSettings(db);
+    const current = (await loadOrgSettings(db)).executionMode as ExecutionMode;
+    // ADR-0186 A: LIFTING a restriction (a move to a less restrictive mode, or
+    // across between the two partial restrictions) needs a settings_relax
+    // step-up bound to the new mode; entering a halt or tightening never does
+    const facts = { values: { executionMode: body.mode } };
+    let cleared = false;
+    if (executionModeLoosens(current, body.mode)) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts });
+      if (!su.ok) return reply;
+      cleared = true;
+    }
     return db.transaction(async (tx) => {
       const [before] = await tx.select().from(orgSettings)
         .where(eq(orgSettings.id, ORG_SETTINGS_ID)).for("update");
       const wasMode = before!.executionMode as ExecutionMode;
+      // the step-up was decided against `current`: when the mode changed meanwhile so
+      // that this write now lifts a restriction, it is decided again on the mode it replaces
+      if (!cleared && executionModeLoosens(wasMode, body.mode)) {
+        const again = await checkStepUp(db, req, { kind: "settings_relax", facts });
+        if (!again.ok) return reply.status(again.status).send(again.body);
+      }
       if (wasMode === body.mode) {
         return {
           mode: wasMode,
