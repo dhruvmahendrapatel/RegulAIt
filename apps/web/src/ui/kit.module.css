@@ -372,6 +372,7 @@
   padding: var(--s3);
 }
 .modal {
+  color: var(--text);
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -381,6 +382,9 @@
   max-height: 86vh;
   overflow-y: auto;
   padding: var(--s3);
+}
+.modal::backdrop {
+  background: var(--scrim);
 }
 /* side-by-side content (the shared-context conflict view) needs room */
 .modalWide {

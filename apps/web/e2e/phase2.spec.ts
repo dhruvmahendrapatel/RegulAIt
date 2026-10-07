@@ -687,7 +687,13 @@ test("key custody enforced: the key card explains the state instead of offering 
 }) => {
   await nav("Client access", "Client access");
   await page.getByLabel("Enforce key custody").selectOption("true");
+  const postureSaved = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/v1/interception/settings" && response.request().method() === "PUT",
+  );
   await page.getByRole("button", { name: "Save posture" }).click();
+  const posture = await postureSaved;
+  expect(posture.status(), "the custody fixture must be persisted before either reader opens the key card").toBe(200);
+  expect((await posture.json()).settings.keyCustodyEnforced).toBe(true);
   await expect(page.getByText("Posture saved").first()).toBeVisible();
 
   // (a) the ADMIN path — proactive, no failed write needed
@@ -720,7 +726,17 @@ test("key custody enforced: the key card explains the state instead of offering 
   const keyField = dev.getByLabel("API key");
   await expect(keyField).toBeVisible();
   await keyField.fill("sk-e2e-custody-refused-0123456789");
+  const keySaved = dev.waitForResponse((response) =>
+    /\/v1\/users\/[^/]+\/model-credentials$/.test(new URL(response.url()).pathname) &&
+    response.request().method() === "POST",
+  );
   await dev.getByRole("button", { name: "Save key" }).click();
+  const refused = await keySaved;
+  const result = await refused.json();
+  // Report only the response code, never the request's key or response details.
+  expect({ status: refused.status(), error: result.error }, "the developer must receive the real custody refusal").toEqual({
+    status: 409, error: "key_custody_enforced",
+  });
 
   // …and the refusal turns into the explanation, not a raw error string
   try {

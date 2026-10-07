@@ -14,6 +14,7 @@
  *    case's name, submits, and says plainly when a link cannot be used;
  *  - axe (WCAG 2.x A/AA) in light and dark on every page and dialog.
  */
+import { activate, escapeToTrigger, expectDialogTrap, selectAt, tabTo, typeAt } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
@@ -198,7 +199,7 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     const save = dialog.getByRole("button", { name: "Save answer" });
     await expect(save).toBeDisabled();
     expect(state.patches).toEqual([]);
-    await dialog.getByLabel("Resolution (required)").fill("Reviewed by a person: the refusal is reversed.");
+    await dialog.getByLabel("Resolution (required)", { exact: true }).fill("Reviewed by a person: the refusal is reversed.");
     await save.click();
     await expect.poll(() => state.patches.length).toBe(1);
     expect(state.patches[0]).toEqual({
@@ -337,4 +338,50 @@ test.describe("ADR-0182 A13: feedback and appeal", () => {
     await page.reload();
     await expect(page.getByRole("alert")).toContainText("This feedback link has expired.");
   });
+});
+
+
+test("X14 keyboard: feedback queue keeps focus in the answer dialog and announces errors", async ({ page }, testInfo) => {
+  const state = await mockGateway(page);
+  let refuse = true;
+  await page.route(`**/v1/feedback/${F_SOON}`, (route) => refuse && route.request().method() === "PATCH"
+    ? json(route, { error: "internal" }, 500) : route.fallback());
+  await page.goto("/ui/feedback");
+  const trigger = page.getByRole("table").getByRole("row").filter({ hasText: "Due soon" }).getByRole("button", { name: /^Open appeal/ });
+  await activate(page, trigger);
+  const dialog = page.getByRole("dialog", { name: "Appeal on Claims triage assistant" });
+  await expectDialogTrap(page, dialog);
+  await selectAt(page, dialog.getByLabel("Status", { exact: true }), "overturned");
+  await typeAt(page, dialog.getByLabel("Resolution (required)", { exact: true }), "Keyboard reviewer reverses the synthetic refusal.");
+  await activate(page, dialog.getByRole("button", { name: "Save answer" }));
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await expectAxeClean(page, "keyboard feedback refusal", '[role="dialog"]');
+  await page.screenshot({ path: testInfo.outputPath("x14-feedback-queue.png") });
+  refuse = false;
+  await activate(page, dialog.getByRole("button", { name: "Save answer" }));
+  await expect(dialog.getByRole("status")).toContainText("Answer saved");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(state.patches).toHaveLength(1);
+  await escapeToTrigger(page, dialog, trigger);
+});
+
+test("X14 keyboard: public feedback radio group, failed submission and receipt are accessible", async ({ page }, testInfo) => {
+  const state = await mockGateway(page);
+  let refuse = true;
+  await page.route(`**/v1/feedback/l/${TOKEN}`, (route) => refuse && route.request().method() === "POST"
+    ? json(route, { error: "internal" }, 500) : route.fallback());
+  await page.goto(`/ui/f/${TOKEN}`);
+  await tabTo(page, page.getByRole("radio", { name: /Report a problem/ }));
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("radio", { name: /Appeal a decision/ })).toBeChecked();
+  await typeAt(page, page.getByLabel("What decision, and why should it be reviewed?"), "Please review this synthetic rejected claim.");
+  await activate(page, page.getByRole("button", { name: "Send appeal" }));
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expectAxeClean(page, "keyboard public feedback refusal");
+  refuse = false;
+  await activate(page, page.getByRole("button", { name: "Send appeal" }));
+  await expect(page.getByRole("status")).toContainText("Reference dddddddd");
+  expect(state.feedbackPosts).toHaveLength(1);
+  await expectAxeClean(page, "keyboard public feedback receipt");
+  await page.screenshot({ path: testInfo.outputPath("x14-public-feedback.png") });
 });
