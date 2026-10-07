@@ -80,6 +80,8 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
+import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
+import type { McpUpstreamTransport } from "@regulait/shared";
 
 export interface RetryConfig {
   /**
@@ -314,6 +316,13 @@ export interface RetryOptions {
   maxAttempts?: number;
   cfg?: RetryConfig;
   report?: RetryReport;
+  /**
+   * ADR-0185 G5: when set, the WHOLE sequence is observed once as
+   * `regulait_mcp_upstream_requests_total` / `_duration_seconds` — one
+   * operation, however many attempts it took (the breaker's unit, above).
+   * Only the server id and transport are taken: never a URL or a tool name.
+   */
+  observe?: { serverId: string; transport?: McpUpstreamTransport | string | null };
   /** injected for tests: a deterministic schedule, and no real waiting */
   rng?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -334,6 +343,43 @@ export interface RetryOptions {
  * them at once, for the benefit of a stack trace nobody reads.
  */
 export async function withUpstreamRetry<T>(
+  fn: (attempt: { index: number; deadlineMs: number }) => Promise<T>,
+  opts: RetryOptions,
+): Promise<T> {
+  if (!opts.observe) return retrySequence(fn, opts);
+  const observe = opts.observe;
+  const now = opts.now ?? Date.now;
+  const startedAt = now();
+  const done = (outcome: MetricUpstreamOutcome) =>
+    observeUpstream(
+      {
+        serverId: observe.serverId,
+        // an unrecognised value is folded by safeLabel, never passed through
+        transport: (observe.transport ?? "streamable_http") as McpUpstreamTransport,
+        outcome,
+      },
+      now() - startedAt,
+    );
+  try {
+    const value = await retrySequence(fn, opts);
+    done("ok");
+    return value;
+  } catch (err) {
+    done(upstreamOutcomeOf(err));
+    throw err;
+  }
+}
+
+/** how a failed sequence reads on the upstream metric: our own refusal, a
+ * deadline, or anything else the upstream did */
+export function upstreamOutcomeOf(err: unknown): MetricUpstreamOutcome {
+  const why = classifyUpstreamError(err).why;
+  if (why === "our_own_refusal") return "refused";
+  if (why === "deadline_spent_the_budget") return "timeout";
+  return "error";
+}
+
+async function retrySequence<T>(
   fn: (attempt: { index: number; deadlineMs: number }) => Promise<T>,
   opts: RetryOptions,
 ): Promise<T> {
