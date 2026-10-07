@@ -82,7 +82,11 @@ test("retention inventory is honest and an audited extension persists only after
   await page.goto("/ui/admin/retention");
   await expect(page.getByRole("heading", { name: "Memory & retention", exact: true })).toBeVisible();
   await expect(page.getByText("No retention sweep implemented", { exact: true })).toHaveCount(2);
-  await expect(page.getByText("Separate metrics listener: unmeasured.", { exact: false })).toBeVisible();
+  const metrics = (await request("/v1/org/posture")).metrics;
+  expect(metrics).toEqual({ separateListener: "off", mainListener: false, tokenConfigured: false });
+  await expect(page.getByText("Separate metrics listener: off.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Main listener: no metrics endpoint served.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Bearer token configured: no.", { exact: true })).toBeVisible();
   await typeAt(page, page.getByLabel("Conversation retention (days)"), "31");
   const trigger = page.getByRole("button", { name: "Save retention settings" });
   await activate(page, trigger);

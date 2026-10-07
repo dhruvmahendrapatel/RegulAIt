@@ -5,6 +5,10 @@ Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
 
+## X18 live foundation check — 2026-10-07
+
+Built the actual foundation gateway and ran the Batch 3 browser journey against a fresh isolated database with this branch’s SPA explicitly selected. **5/5 PASS**, including exact live metrics block `{separateListener:"off",mainListener:false,tokenConfigured:false}`, matching three visible configuration statements, retention audit, MCP grants, stdio refusal, Outlook recipients and ownership. This is no-stdio-opt-in coverage; earlier opt-in evidence remains historical. First run served the default checkout’s SPA because the gateway-dist symlink resolves its default path there; that failed retention-page lookup is excluded, and the final run sets `REGULAIT_WEB_DIST` explicitly. Local evidence, not committed: `gemini-review/r18-foundation-live-final{.log,-results}`.
+
 ## X18 integration and R18-11/12 — 2026-10-07
 
 Merged main ca3e36a1 after Claude integrated X13, moved retention into the shared RouterProvider route list, and retained main's review-policy fixture wording. The initial merge-script failure captured conflict markers in773eafa7; immediately corrected atf362e2fe without rewriting pushed history, and all subsequent checks run on the corrected tree. Added mainListener:true with and without a configured token; registration and update now link the inline no-secrets warning to fieldsets and argument inputs using unique aria-describedby IDs. Mocked metrics/stdio checks **12/12 PASS**, web units **339/339 PASS**, production build/typecheck PASS. The real foundation metricsPosture() matches the three-field contract; live listener verification follows the fresh build. Logs: `/workspace/.regulait-onboarding/gemini-review/r18-integrated-{browser.log,results,units.log,build.log}` (local evidence, not committed).
