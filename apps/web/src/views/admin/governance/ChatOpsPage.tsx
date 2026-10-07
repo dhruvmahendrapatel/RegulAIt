@@ -34,8 +34,9 @@ import v from "../../views.module.css";
  */
 export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"];
 /** Mirror of the gateway's `CHATOPS_OUTBOUND_PROVIDERS` (ADR-0113): the ones
- * the courier can post a card to. Pinned by the same suite. */
-export const CHATOPS_OUTBOUND_PROVIDERS = ["slack", "teams"];
+ * the courier can post a card to — outlook since ADR-0183 batch 2.6 (a Graph
+ * sendMail courier). Pinned by the same suite. */
+export const CHATOPS_OUTBOUND_PROVIDERS = ["slack", "teams", "outlook"];
 /** Providers with NO inbound path by decision (ADR-0121): registered with no
  * signing secret, and the API refuses one. Pinned by the same suite against
  * shared's `verifyChatSignature` (`inbound_unsupported_by_design`). */
@@ -44,7 +45,7 @@ export const CHATOPS_SEND_ONLY_PROVIDERS = ["outlook"];
 /** ADR-0179 (AER-015): a provider the courier cannot post to cannot be
  * registered — the API answers 422 `outbound_provider_unavailable` — so its
  * option is shown, disabled, with the reason. Derived from the outbound mirror,
- * so the option comes back the day a sender lands. */
+ * so outlook's option came back the day its sender landed (ADR-0183 2.6). */
 export function chatOpsProviderRegistrable(provider: string): boolean {
   return CHATOPS_OUTBOUND_PROVIDERS.includes(provider);
 }
@@ -95,6 +96,30 @@ export function chatOpsConnectionBody(input: {
       }
     : {};
   return { ...rest, ...(signingSecret || !appId ? { signingSecret } : {}), ...bot };
+}
+
+/**
+ * ADR-0183 2.6 — the four fields of an outlook app registration, as the
+ * connector credential the gateway stores encrypted (ADR-0023 structured JSON,
+ * the same store and shape as the Teams credential): client id → `appId`,
+ * client secret → `appPassword`, tenant → `tenantId`, sender mailbox →
+ * `senderUpn`. All four or none: none means the chosen connector already holds
+ * its credential; some is refused here rather than half-written.
+ */
+export interface OutlookAppFields {
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  senderMailbox: string;
+}
+export function outlookCredentialToken(f: OutlookAppFields): { token: string | null } | { error: string } {
+  const v = { tenantId: f.tenantId.trim(), clientId: f.clientId.trim(), clientSecret: f.clientSecret, senderMailbox: f.senderMailbox.trim() };
+  const filled = [v.tenantId, v.clientId, v.clientSecret, v.senderMailbox].filter((x) => x !== "").length;
+  if (filled === 0) return { token: null };
+  if (filled < 4) {
+    return { error: "Fill in all four app registration fields (tenant ID, client ID, client secret, sender mailbox), or none to use the connector's stored credential." };
+  }
+  return { token: JSON.stringify({ appId: v.clientId, appPassword: v.clientSecret, tenantId: v.tenantId, senderUpn: v.senderMailbox }) };
 }
 
 interface Connection {
@@ -152,6 +177,8 @@ export default function ChatOpsPage() {
   const [botAppId, setBotAppId] = useState("");
   const [botTenantId, setBotTenantId] = useState("");
   const [botOpenidMetadataUrl, setBotOpenidMetadataUrl] = useState("");
+  const [outlookApp, setOutlookApp] = useState<OutlookAppFields>({ tenantId: "", clientId: "", clientSecret: "", senderMailbox: "" });
+  const setApp = (k: keyof OutlookAppFields) => (e: { target: { value: string } }) => setOutlookApp((a) => ({ ...a, [k]: e.target.value }));
   const sendOnly = CHATOPS_SEND_ONLY_PROVIDERS.includes(provider);
 
   const [linkConnection, setLinkConnection] = useState("");
@@ -165,7 +192,7 @@ export default function ChatOpsPage() {
 
   return (
     <>
-      <PageHeader title="ChatOps approvals" sub="The Approvals Queue in Slack/Teams — bound to the real human, never the bot." />
+      <PageHeader title="ChatOps approvals" sub="The Approvals Queue in Slack, Teams or Outlook — bound to the real human, never the bot." />
 
       <Card title="How this is safe">
         <p className={v.dim}>{connections.data?.posture ?? "Loading…"}</p>
@@ -173,6 +200,10 @@ export default function ChatOpsPage() {
           A chat tap is not a re-authenticated session. Inbound callbacks are verified against the workspace signing
           secret over the exact raw body, inside a replay window, before anything else happens; the chat user id is then
           mapped to a regulAIt human and the one decide path re-checks entitlement server-side.
+        </p>
+        <p className={v.faint}>
+          Outlook only delivers: the email carries the request summary (withheld when the approval is sensitive) and a
+          link to the approval in regulAIt. It is decided there, after signing in, never by replying to the email.
         </p>
       </Card>
 
@@ -292,7 +323,7 @@ export default function ChatOpsPage() {
             {chatOpsProviderUnavailableReason(p)}
           </p>
         ))}
-        <Field label="Connector (holds the bot token)">
+        <Field label={sendOnly ? "Connector (holds the app registration)" : "Connector (holds the bot token)"}>
           <Select value={connectorId} onChange={(e) => setConnectorId(e.target.value)}>
             <option value="">select…</option>
             {(connectors.data?.connectors ?? []).map((c) => (
@@ -303,10 +334,33 @@ export default function ChatOpsPage() {
           </Select>
         </Field>
         {sendOnly ? (
-          <p className={v.faint}>
-            {provider} has no inbound path, so there is no signing secret to set: an email is an unauthenticated
-            assertion, not a signed callback, and approvals are decided from the portal link the message carries.
-          </p>
+          <>
+            <p className={v.faint}>
+              {provider} has no inbound path, so there is no signing secret to set: an email is an unauthenticated
+              assertion, not a signed callback, and approvals are decided from the portal link the message carries.
+            </p>
+            <p className={v.faint}>
+              The app registration that sends the mail (application permission Mail.Send) is stored encrypted on the
+              connector above, like every other credential, and is never displayed again. Leave these empty if the
+              connector already holds it.
+            </p>
+            <p className={v.faint}>
+              The link in each email uses only the gateway&apos;s configured public URL (REGULAIT_PUBLIC_URL); an Outlook
+              workspace cannot be registered until it is set.
+            </p>
+            <Field label="Tenant ID">
+              <Input value={outlookApp.tenantId} onChange={setApp("tenantId")} placeholder="contoso.onmicrosoft.com" autoComplete="off" />
+            </Field>
+            <Field label="Client ID">
+              <Input value={outlookApp.clientId} onChange={setApp("clientId")} autoComplete="off" />
+            </Field>
+            <Field label="Client secret (write-only — never displayed again)">
+              <Input type="password" value={outlookApp.clientSecret} onChange={setApp("clientSecret")} autoComplete="new-password" />
+            </Field>
+            <Field label="Sender mailbox">
+              <Input value={outlookApp.senderMailbox} onChange={setApp("senderMailbox")} placeholder="regulait-approvals@acme.com" autoComplete="off" />
+            </Field>
+          </>
         ) : (
           <Field label="Signing secret (write-only — never displayed again)">
             <Input type="password" value={signingSecret} onChange={(e) => setSigningSecret(e.target.value)} />
@@ -336,12 +390,14 @@ export default function ChatOpsPage() {
             placeholder={sendOnly ? "approvers@acme.com" : "C0123456789"}
           />
         </Field>
-        <Field label="Allow deciding SENSITIVE (compliance-fenced) approvals from chat">
-          <Select value={allowFencedDecide ? "yes" : "no"} onChange={(e) => setAllowFencedDecide(e.target.value === "yes")}>
-            <option value="no">no — sensitive approvals are in-app only (recommended)</option>
-            <option value="yes">yes — a chat tap may decide them</option>
-          </Select>
-        </Field>
+        {sendOnly ? null : (
+          <Field label="Allow deciding SENSITIVE (compliance-fenced) approvals from chat">
+            <Select value={allowFencedDecide ? "yes" : "no"} onChange={(e) => setAllowFencedDecide(e.target.value === "yes")}>
+              <option value="no">no — sensitive approvals are in-app only (recommended)</option>
+              <option value="yes">yes — a chat tap may decide them</option>
+            </Select>
+          </Field>
+        )}
         {act.error ? <p className={v.errLine}>{act.error}</p> : null}
         <div className={v.row}>
           <Button
@@ -350,17 +406,27 @@ export default function ChatOpsPage() {
             onClick={() =>
               void act
                 .run(
-                  () =>
-                    api.post(
+                  async () => {
+                    if (sendOnly) {
+                      const cred = outlookCredentialToken(outlookApp);
+                      if ("error" in cred) throw new Error(cred.error);
+                      // the app registration goes to the connector's own encrypted
+                      // credential store first; registration then checks it parses
+                      if (cred.token) await api.post(`/v1/connectors/${connectorId}/credential`, { token: cred.token });
+                    }
+                    await api.post(
                       "/v1/chatops/connections",
                       chatOpsConnectionBody({
-                        name, provider, connectorId, signingSecret, defaultChannel, allowFencedDecide,
+                        name, provider, connectorId, signingSecret, defaultChannel,
+                        allowFencedDecide: sendOnly ? false : allowFencedDecide,
                         botAppId, botTenantId, botOpenidMetadataUrl,
                       }),
-                    ),
+                    );
+                  },
                   "Workspace connected",
                 )
                 .then((ok) => {
+                  setOutlookApp((a) => ({ ...a, clientSecret: "" }));
                   if (ok) {
                     setSigningSecret("");
                     refresh();

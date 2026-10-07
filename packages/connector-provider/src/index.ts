@@ -46,6 +46,7 @@
  */
 
 import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
+import { constantTimeEqual } from "@regulait/shared";
 import { z } from "zod";
 
 export const CONNECTOR_PROVIDER_KINDS = [
@@ -1073,6 +1074,78 @@ export interface OutlookAdapterOptions {
   /** the Graph base; defaults to the global endpoint */
   baseUrl?: string | null;
   fetchImpl?: FetchLike;
+  /** the clock the token cache reads (tests); defaults to Date.now */
+  now?: () => number;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0121 amendment (ADR-0183 batch 2.6) — THE APP-ONLY TOKEN IS CACHED.
+//
+// The adapter used to mint a token per invoke ("nothing cached, nothing to
+// revoke"). Once outlook became a real courier, every approval card and alert
+// paid a second round trip to the Entra login host for a token that lives about
+// an hour. The token is now cached in this process, and the revocation concern
+// is answered rather than dropped:
+//  - the KEY is a sha256 over the login host, tenant, client id AND client
+//    secret, so rotating or replacing the credential in RegulAIt misses the
+//    cache at once (and the secret itself is never a key, a log line or a value);
+//  - an entry is used only while it has more than OUTLOOK_TOKEN_REFRESH_MARGIN_MS
+//    left; inside the margin the next send mints a fresh one (refresh);
+//  - Graph answering 401 (the token was revoked, or the app's consent withdrawn,
+//    before its expiry) EVICTS the entry and the send is retried ONCE with a
+//    freshly minted token — a 401 means nothing was sent, so the retry cannot
+//    send twice;
+//  - a token response with no usable `expires_in` is not cached at all;
+//  - at most OUTLOOK_TOKEN_CACHE_MAX credentials are held (oldest evicted).
+// A cached token is no stronger than a freshly minted one: Graph honours an
+// app-only token until its own expiry whichever way it was obtained, so the
+// cache adds no lifetime the token did not already have.
+// Open-source check (ADR-0176): @azure/identity's ClientSecretCredential caches
+// and refreshes, but makes its own HTTP calls through the Azure SDK pipeline
+// (and an instance-discovery request), outside the injected egress-guarded
+// fetch every request here must use; adapting it would need a custom pipeline
+// HttpClient in a package that has no Azure dependency. The hard requirement it
+// cannot meet is "every request URL adjudicated by the egress guard".
+// ---------------------------------------------------------------------------
+
+export const OUTLOOK_TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
+export const OUTLOOK_TOKEN_CACHE_MAX = 64;
+// Keyed by the non-secret identifiers only. Nothing is derived from the client
+// secret (no hash of it is ever computed); instead the entry remembers the
+// secret it was minted with and a lookup only hits when the presented secret is
+// equal (constant-time), so a rotated secret never reuses the old token.
+const outlookTokenCache = new Map<string, { accessToken: string; expiresAtMs: number; appPassword: string }>();
+
+
+/** forget every cached outlook token (tests; an operator-initiated reset) */
+export function clearOutlookTokenCache(): void {
+  outlookTokenCache.clear();
+}
+
+
+export const OUTLOOK_ERROR_DETAIL_MAX = 300;
+/** strip bearer tokens, JWT-shaped strings and the given literal secrets */
+export function scrubSecrets(text: string, secrets: readonly string[] = []): string {
+  let out = text;
+  for (const sec of secrets) if (sec && sec.length >= 4) out = out.split(sec).join("[redacted]");
+  return out
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g, "[redacted-jwt]")
+    .replace(/((?:client_secret|access_token|password)["'=:\s]+)[^"'&\s,}]+/gi, "$1[redacted]");
+}
+/** Graph's `{error:{code,message}}` as one capped, scrubbed line */
+export function graphErrorDetail(text: string, status: number, secrets: readonly string[] = []): string {
+  let line = `HTTP ${status}`;
+  try {
+    const e = (JSON.parse(text) as { error?: { code?: unknown; message?: unknown } }).error;
+    if (e && typeof e === "object") {
+      line = `HTTP ${status} ${typeof e.code === "string" ? e.code : ""}: ${typeof e.message === "string" ? e.message : ""}`;
+    }
+  } catch {
+    line = `HTTP ${status}: ${text}`;
+  }
+  const clean = scrubSecrets(line.replace(/[\r\n\t]+/g, " "), secrets);
+  return clean.length > OUTLOOK_ERROR_DETAIL_MAX ? `${clean.slice(0, OUTLOOK_ERROR_DETAIL_MAX)}…` : clean;
 }
 
 export class OutlookConnectorProvider implements ConnectorProvider {
@@ -1081,19 +1154,36 @@ export class OutlookConnectorProvider implements ConnectorProvider {
   private readonly login: string;
   private readonly cred: OutlookCredential;
   private readonly fetchImpl: FetchLike;
+  private readonly now: () => number;
+  private readonly cacheKey: string;
 
   constructor(opts: OutlookAdapterOptions) {
     this.base = (opts.baseUrl ?? OUTLOOK_DEFAULT_GRAPH_BASE_URL).replace(/\/$/, "");
     this.cred = opts.credential;
     this.login = (opts.credential.loginBaseUrl ?? OUTLOOK_DEFAULT_LOGIN_BASE_URL).replace(/\/$/, "");
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+    this.now = opts.now ?? Date.now;
+    this.cacheKey = JSON.stringify([this.login, this.cred.tenantId, this.cred.appId]);
   }
 
-  /** One token per invoke, for the same reason the Teams adapter does it: a
-   * cached token outliving a revoked credential is worse than a second
-   * round-trip, and this interface has no lifecycle hook to evict one. It goes
-   * through the SAME `fetchImpl`, so the login host is egress-adjudicated too. */
-  private async accessToken(): Promise<string> {
+  /** A cached token while it has more than the refresh margin left, else a
+   * freshly minted one (see the cache header above). */
+  private async accessToken(): Promise<{ token: string; fromCache: boolean }> {
+    const cached = outlookTokenCache.get(this.cacheKey);
+    if (
+      cached &&
+      constantTimeEqual(cached.appPassword, this.cred.appPassword) &&
+      cached.expiresAtMs - OUTLOOK_TOKEN_REFRESH_MARGIN_MS > this.now()
+    ) {
+      return { token: cached.accessToken, fromCache: true };
+    }
+    outlookTokenCache.delete(this.cacheKey);
+    return { token: await this.mintAccessToken(), fromCache: false };
+  }
+
+  /** The client-credentials exchange. It goes through the SAME `fetchImpl` as
+   * the send, so the login host is egress-adjudicated too. */
+  private async mintAccessToken(): Promise<string> {
     const url = `${this.login}/${encodeURIComponent(this.cred.tenantId)}/oauth2/v2.0/token`;
     const form = new URLSearchParams({
       grant_type: "client_credentials",
@@ -1119,13 +1209,25 @@ export class OutlookConnectorProvider implements ConnectorProvider {
         res.status,
       );
     }
-    const decoded = decodeBody(res.status, text).body as { access_token?: unknown } | null;
+    const decoded = decodeBody(res.status, text).body as { access_token?: unknown; expires_in?: unknown } | null;
     const token = decoded && typeof decoded === "object" ? decoded.access_token : null;
     if (typeof token !== "string" || !token) {
       throw new ConnectorProviderError(
         "outlook token response carried no access_token — refusing to send with no credential",
         502,
       );
+    }
+    const expiresIn = decoded && typeof decoded === "object" ? Number(decoded.expires_in) : NaN;
+    if (Number.isFinite(expiresIn) && expiresIn > 0) {
+      if (outlookTokenCache.size >= OUTLOOK_TOKEN_CACHE_MAX) {
+        const oldest = outlookTokenCache.keys().next().value;
+        if (oldest !== undefined) outlookTokenCache.delete(oldest);
+      }
+      outlookTokenCache.set(this.cacheKey, {
+        accessToken: token,
+        expiresAtMs: this.now() + expiresIn * 1000,
+        appPassword: this.cred.appPassword,
+      });
     }
     return token;
   }
@@ -1172,24 +1274,41 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     });
 
     // Token first, so a credential failure never opens a socket to Graph.
-    const accessToken = await this.accessToken();
     const url = `${this.base}/v1.0/users/${encodeURIComponent(this.cred.senderUpn)}/sendMail`;
-    const res = await this.fetchImpl(url, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${accessToken}`,
-        "content-type": "application/json",
-      },
-      body,
-    });
+    const send = async (accessToken: string) =>
+      this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body,
+      });
+    const first = await this.accessToken();
+    let res = await send(first.token);
+    if (res.status === 401) {
+      // the token was refused: it is never reused. A CACHED one refused before
+      // its expiry (revoked, consent withdrawn) is retried ONCE with a freshly
+      // minted token — a 401 sent nothing, so the retry cannot send twice. A
+      // fresh token refused is the answer, and is reported below.
+      outlookTokenCache.delete(this.cacheKey);
+      if (first.fromCache) {
+        await res.text();
+        res = await send(await this.mintAccessToken());
+        if (res.status === 401) outlookTokenCache.delete(this.cacheKey);
+      }
+    }
     const text = await res.text();
     const decoded = decodeBody(res.status, text);
     if (res.status === 429) {
       throw new ConnectorProviderError("outlook sendMail rate-limited by Microsoft Graph (HTTP 429)", 429);
     }
     if (res.status >= 400) {
-      throw new ConnectorProviderError(`outlook sendMail failed: ${text}`, res.status);
+      // ADR-0183 batch 2 review (L2): the caller sees Graph's error CODE and a
+      // capped, scrubbed message; the whole body goes to the server log only
+      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, [this.cred.appPassword])}`);
+      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, [this.cred.appPassword])}`, res.status);
     }
     // Graph answers 202 with an EMPTY body on success. Reporting that honestly
     // matters: "accepted for delivery" is not "delivered", and the adapter does

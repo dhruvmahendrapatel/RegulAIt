@@ -700,6 +700,61 @@ describe("ADR-0036 — replay and initiation mode", () => {
   });
 });
 
+describe("ADR-0183 batch 2 review — REGULAIT_PUBLIC_URL pins the ACS and the entity id", () => {
+  const PUB = "https://sp.regulait.example";
+  const FORGED = "attacker.example";
+  const postAcsAs = (providerId: string, signedXml: string, host: string) =>
+    app.inject({
+      method: "POST",
+      url: `/auth/saml/${providerId}/acs`,
+      headers: { ...FORM, host },
+      payload: `SAMLResponse=${encodeURIComponent(Buffer.from(signedXml, "utf8").toString("base64"))}`,
+    });
+  /** an assertion minted for ANOTHER SP at the forged host: its Destination,
+   * Recipient and Audience all name that host */
+  const forHost = (providerId: string, email: string, base: string) =>
+    buildResponse({
+      providerId, email, inResponseTo: null,
+      recipient: `${base}/auth/saml/${providerId}/acs`,
+      audience: spEntityId(base, {} as NodeJS.ProcessEnv),
+    });
+
+  it("a forged Host cannot move Destination/Recipient/Audience when the public URL is set; the public URL's own assertion is accepted", async () => {
+    const p = await mkProvider({ allowIdpInitiated: true });
+    const email = `sam.pub.${randomBytes(3).toString("hex")}@corp.example`;
+    await mkUser(email, "Sam Public");
+    const prior = process.env.REGULAIT_PUBLIC_URL;
+    process.env.REGULAIT_PUBLIC_URL = PUB;
+    try {
+      const forged = forHost(p.id, email, `http://${FORGED}`);
+      const refused = await postAcsAs(p.id, signAssertion(forged.xml, keyA), FORGED);
+      expect(refused.statusCode, refused.body).toBeGreaterThanOrEqual(400);
+      expect(refused.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+      // the metadata names the public URL, whatever Host asked
+      const md = await app.inject({ method: "GET", url: `/auth/saml/${p.id}/metadata`, headers: { host: FORGED } });
+      expect(md.body).toContain(`${PUB}/auth/saml/${p.id}/acs`);
+      expect(md.body).not.toContain(FORGED);
+      // the assertion minted for THIS deployment's public URL passes, even via a forged Host
+      const good = forHost(p.id, email, PUB);
+      const ok = await postAcsAs(p.id, signAssertion(good.xml, keyA), FORGED);
+      expect(ok.statusCode, ok.body).toBe(302);
+    } finally {
+      if (prior === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+      else process.env.REGULAIT_PUBLIC_URL = prior;
+    }
+  });
+
+  it("unset: today's behaviour — the ACS follows the request's Host", async () => {
+    const p = await mkProvider({ allowIdpInitiated: true });
+    const email = `sam.host.${randomBytes(3).toString("hex")}@corp.example`;
+    await mkUser(email, "Sam Host");
+    delete process.env.REGULAIT_PUBLIC_URL;
+    const forged = forHost(p.id, email, `http://${FORGED}`);
+    const res = await postAcsAs(p.id, signAssertion(forged.xml, keyA), FORGED);
+    expect(res.statusCode, res.body).toBe(302);
+  });
+});
+
 describe("ADR-0036 — identity mapping, JIT and the domain backstop", () => {
   it("JIT OFF (the default) refuses an unknown subject with a 403 + audit row", async () => {
     const p = await mkProvider();

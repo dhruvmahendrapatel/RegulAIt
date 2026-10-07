@@ -739,7 +739,14 @@ test("key custody enforced: the key card explains the state instead of offering 
   });
 
   // …and the refusal turns into the explanation, not a raw error string
-  await expect(dev.getByText("This deployment enforces key custody.")).toBeVisible();
+  try {
+    await expect(dev.getByText("This deployment enforces key custody.")).toBeVisible();
+  } catch (err) {
+    // CI-only failure on PR #133 (X16): the job's page snapshot is the admin's
+    // page, so print what the developer's page actually shows
+    console.log(`[key-custody] developer page at ${dev.url()}:\n${await dev.locator("main").innerText().catch((e) => String(e))}`);
+    throw err;
+  }
   await expect(dev.getByText("An admin can lift it in Client access.")).toBeVisible();
   await expect(dev.getByLabel("API key")).toHaveCount(0);
   await expect(dev.getByText("No keys of your own")).toBeVisible();

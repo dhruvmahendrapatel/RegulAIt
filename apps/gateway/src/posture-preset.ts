@@ -32,6 +32,7 @@
  *    argues against everywhere else.
  */
 
+import { publicUrlPosture } from "./public-url.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -346,7 +347,8 @@ export function registerPosturePresetRoutes(
    * preset, which is why it is a plain read with no side effects. */
   app.get("/v1/org/posture", async () => {
     const settings = await loadOrgSettings(db);
-    return buildPostureReport(settings, { sink });
+    // ADR-0121 amendment: the deployment's public URL (a deployment fact, not a secret)
+    return { ...(await buildPostureReport(settings, { sink })), publicUrl: publicUrlPosture() };
   });
 
   /**

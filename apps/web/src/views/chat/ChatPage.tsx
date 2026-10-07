@@ -44,6 +44,8 @@ import {
 } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
 import { useToast } from "../../ui/toast";
+import { LITERACY_REFUSAL_CODE, REFUSAL_GUIDANCE } from "../../api/refusals";
+import { RefusalNotice } from "../../ui/RefusalNotice";
 import { bindingsFromGranted } from "../models/modelBindings";
 import { modelPolicyDefault, modelPolicyVerdict, useModelPolicy } from "../models/modelPolicy";
 import v from "../views.module.css";
@@ -1001,6 +1003,7 @@ function ExchangeView(props: { x: Exchange; me: string }) {
           {x.streaming && <span className={s.caret} aria-label="streaming" />}
         </div>
         {x.note && <div className={s.note}>{x.note}</div>}
+        {x.denied?.ruleId === LITERACY_REFUSAL_CODE && <RefusalNotice guidance={REFUSAL_GUIDANCE.literacy} />}
         <div className={s.meta}>{badges}</div>
         {hasTrace && (
           <details className={s.trace}>

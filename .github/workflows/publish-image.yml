@@ -16,14 +16,15 @@ name: Publish image
 # supply-chain surface". A registry-publishing job is the LAST place to relax
 # that — it is the step that signs artefacts with a token that can write
 # packages. So this uses the Docker CLI already present on the runner plus
-# `actions/checkout`, and nothing else.
+# `actions/checkout` (SHA-pinned), plus the cosign release binary checked against its pinned SHA-256.
 #
-# ── Visibility ───────────────────────────────────────────────────────────────
-# The repository is PRIVATE, so the package GHCR creates inherits that and a
-# pull requires `docker login ghcr.io` with a PAT carrying `read:packages`.
-# Making it public is a disclosure decision about an image built from a private
-# repository — it is deliberately NOT automated here. Change it by hand under
-# the package's settings if that is what you want.
+# ── Visibility and signing ───────────────────────────────────────────────────
+# The repository is PUBLIC (checked 2026-10-06). The package GHCR creates does
+# NOT inherit that: it starts private, so a pull needs `docker login ghcr.io`
+# with a PAT carrying `read:packages` until someone makes the package public
+# under its settings — a disclosure decision deliberately not automated here.
+# Every pushed digest is signed keylessly with cosign (ADR-0184) and the
+# signature verified against THIS workflow's identity before the run ends.
 
 on:
   workflow_dispatch:
@@ -45,8 +46,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # ADR-0184: keyless cosign signing needs the job's OIDC token; this job only
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Resolve image reference
         id: ref
@@ -82,6 +90,26 @@ jobs:
             docker push "${IMAGE}:${{ inputs.tag }}"
           fi
 
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64
+          echo "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - name: Sign and verify the published image (keyless)
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.ref.outputs.image }}'
+          SHA='${{ steps.ref.outputs.sha }}'
+          ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:sha-${SHA}")"
+          "$RUNNER_TEMP/bin/cosign" sign --yes "$ref"
+          COSIGN="$RUNNER_TEMP/bin/cosign" \
+          COSIGN_IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-image.yml@${GITHUB_REF}" \
+            scripts/security-cosign-verify.sh "$ref" signed
+          echo "Verify a pull: cosign verify --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-image.yml@${GITHUB_REF} --certificate-oidc-issuer https://token.actions.githubusercontent.com $ref" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Say what was published
         run: |
           IMAGE='${{ steps.ref.outputs.image }}'
@@ -94,5 +122,5 @@ jobs:
             [ -n "${{ inputs.tag }}" ] && echo "docker pull ${IMAGE}:${{ inputs.tag }}"
             echo '```'
             echo ""
-            echo "The repository is private, so the package is too — \`docker login ghcr.io\` with a PAT carrying \`read:packages\` before pulling."
+            echo "The package starts private on GHCR (the repository itself is public): \`docker login ghcr.io\` with a PAT carrying \`read:packages\` before pulling, unless it has been made public. The digest is cosign-signed (see the verify line above)."
           } >> "$GITHUB_STEP_SUMMARY"

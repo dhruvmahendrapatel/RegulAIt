@@ -1,0 +1,145 @@
+name: Mocked UI suite (sharded)
+
+# REUSABLE (ADR-0183 batch 2.4). The mocked UI suite — every `*.mock.spec.ts`
+# under apps/web/e2e, run by playwright.demo-mock.config.ts — had grown to 267
+# tests and ~16 min serial (demo.yml, 2026-10-06), which pushed demo-journey
+# past its cap. It is called by ci.yml (`spa-mock`) and demo.yml (`demo-mock`)
+# so the shard layout and the coverage proof live in one place.
+#
+# WHAT A SHARD NEEDS: no database, no gateway, no `pnpm -r build`. The suite
+# is Vite (the config's own webServer, on :4179) plus Playwright route mocks;
+# apps/web imports no workspace package, and Vite's dev proxy points at :3000,
+# where no CI job runs anything, so an unmocked call fails the same way in
+# every job. A fresh runner per shard is the "fresh state" M-068 asks for.
+#
+# ORDER (M-068): the config runs one worker and is not fullyParallel, so
+# Playwright shards by whole FILE, in file order. Every spec keeps the
+# neighbours and the order it has in an unsharded run within its shard; a
+# spec can only lose its predecessors, never gain new ones.
+#
+# THE PROOF (`coverage`): the unsharded `--list` is compared with the union of
+# the shard reports by test id (file:line:column + title path). Every listed
+# test must have run in exactly one shard, no shard may run an unlisted test,
+# and every shard 1..N must have reported. A per-shard "N passed" sum cannot
+# tell a dropped spec from a doubled one; this can
+# (scripts/playwright-shard-coverage.mjs, with its own tests in scripts/).
+on:
+  workflow_call:
+    inputs:
+      artifact-prefix:
+        description: distinguishes the callers' artifacts
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    name: shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    # MEASURED 2026-10-06 at 37c0de0, one worker, on a shared dev container
+    # slower than a CI runner: shard 1 = 96 tests in 7.4 min, shard 2 = 88 in
+    # 9.3 min, shard 3 = 83 in 6.2 min (23.0 min serial, all 267 passed; the
+    # slowest shard carries 41% of the time, because Playwright splits files by
+    # test COUNT, not duration). On a CI runner the unsharded suite took 16.0
+    # min, so the slowest shard is ~6.5 min, plus ~2–3 min of install and
+    # browser download. 15 is that plus margin — a blast-radius cap, not a
+    # target. Re-measure before raising it; add a shard instead.
+    timeout-minutes: 15
+    strategy:
+      # one failing shard must not cancel the others: the coverage job needs
+      # every report, and a cancelled shard hides which specs it would have run
+      fail-fast: false
+      matrix:
+        # SHARD COUNT: three. Each shard pays ~2–3 billed minutes of setup, so
+        # a fourth would cut the slowest shard to ~5 min for another ~3 billed
+        # minutes a run; three keeps every shard well under the cap. `--shard`
+        # reads the total from strategy.job-total, so adding an entry here is
+        # the whole change, and the coverage job checks the new layout.
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      # Some mocked specs sign in through e2e/totp-sign-in.ts, which imports the
+      # BUILT gateway (apps/gateway/dist/totp.js). Without this step every shard,
+      # and the --list in the coverage job, fails with "Cannot find module".
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
+
+      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      - name: Mocked UI suite, shard ${{ matrix.shard }} of ${{ strategy.job-total }}
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --shard=${{ matrix.shard }}/${{ strategy.job-total }} --reporter=list,github,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/mock-shard-${{ matrix.shard }}.json
+
+      # always: the coverage job needs a failing shard's report too
+      - name: Shard report for the coverage check
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mock-shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Keep the evidence when it fails
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-failure-${{ matrix.shard }}
+          path: apps/web/test-results
+          retention-days: 7
+
+  coverage:
+    name: every spec ran exactly once
+    needs: shard
+    # runs when a shard failed too, so a red run still says whether the shards
+    # covered the suite; it does not run on a cancelled (superseded) run
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # `--list` loads the spec files but launches no browser and no web server
+      - run: pnpm install --frozen-lockfile
+      # Some mocked specs sign in through e2e/totp-sign-in.ts, which imports the
+      # BUILT gateway (apps/gateway/dist/totp.js). Without this step every shard,
+      # and the --list in the coverage job, fails with "Cannot find module".
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ${{ inputs.artifact-prefix }}-report-*
+          path: ${{ runner.temp }}/shards
+          merge-multiple: true
+
+      - name: Unsharded list
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-mock.config.ts --list --reporter=json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/full-list.json
+
+      - name: Every listed spec ran in exactly one shard
+        run: node scripts/playwright-shard-coverage.mjs "$RUNNER_TEMP/full-list.json" "$RUNNER_TEMP"/shards/mock-shard-*.json
