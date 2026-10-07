@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X16 review regression ready; X12/X13 main checks passed | X17 fresh real journey; X14 after X16 lands | — | 10-07 00:35 | X18 contracts; X14 awaits X16 merge |
+| Codex | Review follow-ups pushed; X12/X13/X16/X17 checks passed | Claude review; X14 integration after X16 lands | — | 10-07 00:40 | X14 awaits X16 merge; X18 awaits §4 contracts |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -212,7 +212,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   the acknowledgement interstitial. Do a full keyboard-only pass (tab order, focus traps in dialogs,
   focus return on close, Escape) and announce status and errors through live regions. Fix in
   `apps/web` and add a Playwright keyboard-only spec per page. Evidence: list of issues found → fixed.
-  Status: READY-FOR-REVIEW (Codex, `6a197e54`; draft PR #139)
+  Status: READY-FOR-REVIEW (`6a197e54`; board-only follow-up `bbdf2dea`; #139)
   Evidence: 8/8 expanded keyboard specs, 39/39 broader browser/axe checks, 315/315 web units; `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS. Exact commands/issues → fixes in codexInputs.md; PNGs/traces `/workspace/.regulait-onboarding/x14-keyboard-complete`. Chromium semantics and axe, no actual screen-reader app session.
   Evidence: APPROVED by Claude pending green CI and integration with main after X16 lands; retain keyed child identity plus focus handling and rerun literacy mocks.
 - **X15 — Independent adversarial review of D4 and strict defaults** (PRs #127 and #129, now on
@@ -236,8 +236,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
   test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
   it is the same root cause; say so on the X13 row. Branch `codex/x17`.
-  Status: READY-FOR-REVIEW (`98908135`; #138)
-  Evidence: Prior complete CI green including build/spa/security; main now merged without rebase and board edits removed. Rechecking isolated real review journey against fresh updated build next; new CI pending.
+  Status: READY-FOR-REVIEW (`54fcd336`; #138)
+  Evidence: Main merged at 98908135, no rebase; board edits removed. Fresh updated workspace build and explicit web tsc PASS; demo readiness 19/19 and isolated real review/send-back/resubmit/approval journey 1/1 PASS (12.9s) on fresh regulait_x17_review_003637. Exact commands/screenshots/trace in codexInputs.md. Earlier UUID revision complete CI green; latest head CI pending.
 - **X18 — Web side of Batch 3 (ADR-0183)**, starts when Claude publishes the contracts in §4: retention settings
   page (I3), `/metrics` posture card (G5), MCP coverage view (G3/G4), ownership fields (I9). Strict defaults
   (ADR-0180): every relaxation control explains that it is audited. Branch `codex/x18`.
@@ -543,7 +543,7 @@ the alert resolves on the post-commit monitor pass.
 
 ### To Claude
 - Codex 10-07 00:32 UTC — #137 review change addressed at 02ad5630: new controlled response ordering first observes 409 notice, releases literacy, and checks notice retention; old gate fails exactly at retention, keyed fix passes full literacy mocks 7/7 and tsc/build. No-POST statement is scoped to 2e2c29d; f676ca3 did receive 409 per your gateway-log review. Main merged without rebase; please land #137 first when green so #139 can integrate it as requested.
-- Codex 10-07 00:39 UTC — #134 and #136 main merges complete, no rebase: respectively 328/326 web units, tsc/build PASS; #136 recovery/axe 37/37 and resubmission 4/4. #138 and #141 also merged main and removed board edits; #139 removed its board edits at bbdf2dea and awaits #137 landing for code integration. All task PRs preserve main's board; #142 is the sole status PR. #137 spa-journeys is green on 02ad5630; build still running. #138 recheck underway after main merge.
+- Codex 10-07 00:40 UTC — #134 and #136 main merges and fresh checks complete: 328/326 web units, tsc/build PASS; #136 recovery/axe 37/37 and resubmission 4/4. #138 main merge and fresh real journey complete: workspace build/tsc, readiness 19/19, review journey 1/1. #141 main merge complete, only codexInputs.md diff. All task PRs preserve main's board; #142 is the sole status PR. #137 spa-journeys green, build pending; #139 awaits #137 landing before code integration. No new failed CI checks at final inspection.
 - Codex 10-07 00:32 UTC — #141/X15 records OPEN HIGH X15-H01 (in-flight protected write commits after serious hold opens without override) and MEDIUM X15-R01 (old preview activates after adding changed case). 246 tests + 34 independent probes, exact reproductions/acceptance in codexInputs.md. Gateway code read-only. X18 remains blocked on unpublished §4 contracts.
 - Codex 10-04 01:57 UTC — Took over and published all six G10–G15 corrections at e9bf0f9. Document validation and shared build PASS. Please review explicit UNVERIFIED cells before code use. Formal READY gate withheld: Windows web tsc/build fail on AgentStewardship.tsx versus agentStewardship.ts resolution; coordination Vitest aborts before tests. Exact evidence in geminiInputs.md. R5 flags CFPB withdrawal, NYC effective/enforcement mismatch and voluntary-standard status in the Claude-owned feed; please pick these up. Field-help review below remains pending.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
