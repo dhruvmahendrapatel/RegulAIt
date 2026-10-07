@@ -10,6 +10,7 @@
  *  - copy uses the amended Article 4 wording ("support the development of AI literacy");
  *  - axe (WCAG 2.x A/AA) in light and dark on each screen.
  */
+import { activate, escapeToTrigger, expectDialogTrap, selectAt, tabTo, typeAt } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
@@ -201,7 +202,7 @@ test.describe("ADR-0182 A14: AI literacy", () => {
     await dialog.getByRole("button", { name: "Publish" }).click();
     await expect(dialog.getByRole("alert")).toContainText("at least 10 characters");
     expect(cap.publishes).toHaveLength(0);
-    await dialog.getByLabel("Why does this change not need re-acknowledgement? (audited)").fill("Fixed a typo in section 2; no rule changed.");
+    await dialog.getByLabel("Why does this change not need re-acknowledgement? (audited)", { exact: true }).fill("Fixed a typo in section 2; no rule changed.");
     await expectAxeClean(page, "publish dialog");
     await dialog.getByRole("button", { name: "Publish" }).click();
     await expect.poll(() => cap.publishes.length).toBe(1);
@@ -295,4 +296,68 @@ test.describe("ADR-0182 A14: AI literacy", () => {
     await expect(dialog.getByRole("alert")).toContainText("at least 10 characters");
     expect(retires).toBe(0);
   });
+});
+
+
+test("X14 keyboard: policy publishing preserves typing, traps focus and announces validation", async ({ page }, testInfo) => {
+  await mockApi(page, { admin: true });
+  await page.goto("/ui/admin/governance/literacy");
+  await activate(page, page.getByRole("button", { name: "Show people", exact: true }));
+  const actions = [
+    [page.getByRole("button", { name: "New document", exact: true }), "New AI policy or training"],
+    [page.getByRole("button", { name: "Retire", exact: true }).nth(1), "Retire “Acceptable use of AI” version 2?"],
+    [page.getByRole("row", { name: /Ben Builder/ }).getByRole("button", { name: "Record completion" }), "Record a completion for Ben Builder"],
+  ] as const;
+  for (const [actionTrigger, title] of actions) {
+    await activate(page, actionTrigger);
+    const actionDialog = page.getByRole("dialog", { name: title, exact: true });
+    await expectDialogTrap(page, actionDialog);
+    await escapeToTrigger(page, actionDialog, actionTrigger);
+  }
+  await selectAt(page, page.getByLabel("Gate mode", { exact: true }), "warn");
+  const saveSettings = page.getByRole("button", { name: "Save literacy settings", exact: true });
+  await activate(page, saveSettings);
+  const relaxation = page.getByRole("dialog", { name: "Relax the AI literacy settings?", exact: true });
+  await expectDialogTrap(page, relaxation);
+  await escapeToTrigger(page, relaxation, saveSettings);
+  const trigger = page.getByRole("button", { name: "Publish", exact: true });
+  await activate(page, trigger);
+  const dialog = page.getByRole("dialog", { name: /Publish/ });
+  await expectDialogTrap(page, dialog);
+  const editorial = dialog.getByLabel("This is an editorial change: keep the existing acknowledgements");
+  await tabTo(page, editorial);
+  await page.keyboard.press("Space");
+  await activate(page, dialog.getByRole("button", { name: "Publish", exact: true }));
+  await expect(dialog.getByRole("alert")).toContainText("at least 10 characters");
+  await typeAt(page, dialog.getByLabel("Why does this change not need re-acknowledgement? (audited)", { exact: true }), "Only a synthetic spelling correction; the policy is unchanged.");
+  await expectAxeClean(page, "keyboard policy publish validation", '[role="dialog"]');
+  await page.screenshot({ path: testInfo.outputPath("x14-literacy.png") });
+  await escapeToTrigger(page, dialog, trigger);
+});
+
+test("X14 keyboard: acknowledgement interstitial announces entry and focuses the revealed page", async ({ page }, testInfo) => {
+  const cap = await mockApi(page, { admin: false });
+  await page.goto("/ui/feedback");
+  const gate = page.getByRole("region", { name: "AI policy acknowledgement" });
+  await expect(gate).toBeFocused();
+  await tabTo(page, gate.getByLabel("I have read version 2"));
+  await page.keyboard.press("Space");
+  await activate(page, gate.getByRole("button", { name: "Acknowledge", exact: true }));
+  await expect(gate).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Feedback and appeals", level: 1 })).toBeFocused();
+  expect(cap.acks).toHaveLength(1);
+  await expect(page.locator('[aria-live="polite"]')).toContainText("Acknowledged");
+  await page.screenshot({ path: testInfo.outputPath("x14-acknowledgement.png") });
+});
+
+
+test("X14 keyboard: postponing acknowledgement focuses the page and announces the remaining gate", async ({ page }) => {
+  await mockApi(page, { admin: false });
+  await page.goto("/ui/feedback");
+  const gate = page.getByRole("region", { name: "AI policy acknowledgement" });
+  await expect(gate).toBeFocused();
+  await activate(page, gate.getByRole("button", { name: "Not now", exact: true }));
+  await expect(gate).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Feedback and appeals", level: 1 })).toBeFocused();
+  await expect(page.getByRole("status").filter({ hasText: "to acknowledge" })).toContainText("AI tool calls through regulAIt are refused");
 });

@@ -358,3 +358,46 @@ Local/upstream reviewed SHA `b5e1da5524a3705d1a69094f13cf10db60311298`. Other wo
 
 No enterprise-readiness or usability certification is implied. Remaining mobile/screen-reader/comprehension assurance belongs to the pilot gate.
 <!-- codex-enterprise-feedback:end -->
+
+## X14 — D4 keyboard and accessibility audit (2026-10-06)
+
+Scope: the incident register, incident detail, feedback queue, public feedback form, AI policies/literacy,
+decision regression and acknowledgement interstitial. Synthetic mocked gateway fixtures only. These are
+Chromium keyboard, accessibility-tree semantics and axe checks; no NVDA/VoiceOver session or accessibility
+certification is claimed.
+
+Issues found → fixed:
+
+- **Dialogs on all five audited dialog-bearing pages:** actual Tab/Shift+Tab escaped the modal and closing
+  did not reliably return to its trigger. The shared Modal now uses native `showModal()` for inert background
+  and focus return, with boundary Tab wrapping to keep focus out of browser chrome. Escape respects the
+  owner's close callback. Opening depends on visibility, so changing an inline callback while typing does
+  not reopen/refocus the dialog. No dependency or lockfile change.
+- **Decision regression tabs:** every tab was a tab stop and arrow/Home/End navigation was absent. The shared
+  Tabs now use a roving tab stop and the four keyboard navigation keys, retaining selection and focus.
+- **Feedback queue:** action errors and successful save/link confirmations were outside the active modal.
+  The modal now contains an alert and status region. Editing the answer clears the prior save notice; failed
+  saves retain the answer for keyboard retry. The public form already exposed its error/receipt correctly.
+- **Acknowledgement interstitial:** replacement content had no announced focus target; completing or
+  postponing acknowledgement left focus on the document body. A named region receives focus on entry,
+  and the revealed main heading receives focus on exit. Sidebar input is not interrupted.
+
+Each page has a keyboard-only Playwright scenario using actual Tab/Shift+Tab, Enter, Space and arrow keys;
+locating controls never calls `.focus()`, `.click()` or `.fill()`. Dialog cycles assert containment on every
+step and Escape asserts focus return. Incident edit/contain/close/report and literacy create/retire/completion/
+relaxation/publish dialogs are included. Failed feedback submission/save retries and live receipts are covered.
+Screenshots and traces are saved outside the source tree under `/workspace/.regulait-onboarding/x14-*`.
+
+Validation (Linux, pinned workspace dependencies):
+
+- Initial seven keyboard scenarios: **6 failed / 1 passed** before the fixes, with actual focus escape and
+  missing interstitial focus (`x14-red.log`). The public form was the passing control.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/adr0182-a11-decision-regression.mock.spec.ts e2e/adr0182-a12-incidents.mock.spec.ts e2e/adr0182-a13-feedback.mock.spec.ts e2e/adr0182-a14-literacy.mock.spec.ts e2e/intake-a11y.mock.spec.ts --output=/workspace/.regulait-onboarding/x14-full-browser`:
+  **39/39 passed**; includes the initial seven fixed scenarios and light/dark axe checks. Later expanded dialog
+  traversal and the postponement scenario are covered by the final command below.
+- Same four D4 spec paths, `--grep 'X14 keyboard' --trace on --output=/workspace/.regulait-onboarding/x14-keyboard-complete`:
+  **8/8 passed**, including every additional dialog and acknowledgement postponement. Log:
+  `/workspace/.regulait-onboarding/x14-keyboard-complete.log`; per-page PNGs and successful traces in that output directory.
+- `pnpm --filter @regulait/web test`: **315/315 passed** (40 files).
+- `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: **passed**.
+  `git diff --check`: **passed**. The existing large-chunk build warning remains.
