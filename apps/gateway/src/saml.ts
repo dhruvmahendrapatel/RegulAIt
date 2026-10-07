@@ -41,6 +41,7 @@
  * letting an IdP attribute select one would let a misconfigured IdP
  * impersonate an account. `allowed_email_domains` is the mandatory backstop.
  */
+import { deploymentBaseUrl } from "./public-url.js";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { SAML, ValidateInResponseTo } from "@node-saml/node-saml";
@@ -162,10 +163,11 @@ export function spEntityId(baseUrl: string, env: NodeJS.ProcessEnv = process.env
   return `${baseUrl}/auth/saml/metadata`;
 }
 
+/** REGULAIT_PUBLIC_URL when set — a forged Host then cannot move the ACS
+ * (Destination/Recipient) or the default entity id (Audience) — else the
+ * request's scheme and Host (see `deploymentBaseUrl`) */
 function baseUrlFor(req: FastifyRequest): string {
-  const proto = requestIsSecure(req) ? "https" : "http";
-  const host = req.headers.host ?? "localhost";
-  return `${proto}://${host}`;
+  return deploymentBaseUrl(req);
 }
 
 export function acsUrlFor(baseUrl: string, providerId: string): string {

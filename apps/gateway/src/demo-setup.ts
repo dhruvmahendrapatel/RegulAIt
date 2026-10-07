@@ -547,9 +547,10 @@ ${blocked
     k === "schedulerEnabled"
       ? "    schedulerEnabled              export REGULAIT_SCHEDULER=on  and restart the gateway"
       : k === "auditAnchorTamperResistant"
-        ? "    auditAnchorTamperResistant    docker compose up  (MinIO gives a REAL Object Lock\n" +
-          "                                  COMPLIANCE bucket; the gateway grades the bucket by\n" +
-          "                                  asking it, so no flag can fake this)"
+        ? "    auditAnchorTamperResistant    docker compose up  (the local S3-compatible store gives\n" +
+          "                                  a REAL Object Lock COMPLIANCE bucket; the gateway\n" +
+          "                                  grades the bucket by asking it, so no flag can\n" +
+          "                                  fake this)"
         : `    ${k}`,
   )
   .join("\n")}

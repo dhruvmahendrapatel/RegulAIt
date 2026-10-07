@@ -550,10 +550,10 @@ describe("3 + 7. channel turns: resumed replies go back, links are absolute, tex
   it("a pause notice links absolutely into /ui; confirming in the web app posts the resumed reply into the Slack thread", async () => {
     const ts = await slack(`please <<use-tool:${plainName("plain")}>>`);
     const map = await mappedThread(ts);
-    const link = `http://localhost:80/ui/builder/inbox?tab=all&thread=${map.builderThreadId}`;
+    const link = "open regulAIt to view the thread"; // REGULAIT_PUBLIC_URL unset; the request Host is never used
     // (Slack text is escaped: the link's `&` travels as `&amp;`, which Slack shows and links as `&`)
     expect(repliesIn(ts)).toEqual([expect.stringContaining(escapeSlackText(`Waiting for your confirmation in RegulAIt before using a tool: ${link}`))]);
-    expect(map).toMatchObject({ replyTarget: CHANNEL, replyThreadRef: ts, linkOrigin: "http://localhost:80" });
+    expect(map).toMatchObject({ replyTarget: CHANNEL, replyThreadRef: ts, linkOrigin: null }); // the request Host is no longer even stored (ADR-0183 batch 2 review)
     const detail = (await k.req("GET", `/v1/builder/threads/${map.builderThreadId}`, owner.auth)).json();
     const before = hit("plain");
     const ok = await confirm(owner, map.builderThreadId, detail.pending.stepId, "approve");
@@ -577,7 +577,8 @@ describe("3 + 7. channel turns: resumed replies go back, links are absolute, tex
     const replies = repliesIn(ts);
     expect(replies).toHaveLength(2);
     expect(replies[1]).toContain("waiting on a tool step");
-    expect(replies[1]).toContain(escapeSlackText(`http://localhost:80/ui/builder/inbox?tab=all&thread=${map.builderThreadId}`));
+    expect(replies[1]).toContain("open regulAIt to view the thread");
+    expect(replies.join("")).not.toContain("localhost:80/ui/builder");
     expect(replies[1]).toContain("confirm or cancel");
     const detail = (await k.req("GET", `/v1/builder/threads/${map.builderThreadId}`, owner.auth)).json();
     expect((await cancel(owner, map.builderThreadId, detail.pending.stepId)).statusCode).toBe(200);

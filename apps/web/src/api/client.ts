@@ -11,6 +11,7 @@
  */
 
 import { humanize } from "./format";
+import { refusalGuidance, type RefusalGuidance } from "./refusals";
 
 export const CSRF_HEADER = "x-regulait-csrf";
 
@@ -34,11 +35,14 @@ export interface ApiErrorPayload {
 export class ApiError extends Error {
   status: number;
   payload: ApiErrorPayload;
+  /** ADR-0183 2.3: what to do next and where, for a refusal the person can resolve */
+  guidance: RefusalGuidance | null;
   constructor(status: number, payload: ApiErrorPayload) {
     super(errMessage(status, payload));
     this.name = "ApiError";
     this.status = status;
     this.payload = payload;
+    this.guidance = refusalGuidance(status, payload);
   }
 }
 
@@ -137,6 +141,10 @@ export function codeSentence(code: string): string {
 }
 
 export function errMessage(status: number, json: ApiErrorPayload | null): string {
+  // ADR-0183 2.3: a refusal the person resolves themselves says what to do next,
+  // instead of the code as words plus the API-facing detail
+  const guidance = refusalGuidance(status, json);
+  if (guidance) return guidance.message;
   const code = json && typeof json.error === "string" && json.error ? json.error : "HTTP " + status;
   const details = errDetails(json);
   if (details.length && DETAILS_SUFFICE.has(code)) return details.join("; ");

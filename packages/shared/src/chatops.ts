@@ -503,14 +503,8 @@ function escapeHtml(v: string): string {
  * switch loosens the FENCE, not this channel's own limits.
  */
 export function outlookMessageForCard(card: ApprovalCard): OutlookMessagePayload {
-  const lines = [`<p>${escapeHtml(card.text).replace(/\n/g, "<br/>")}</p>`];
-  if (/^https?:\/\//i.test(card.portalUrl)) {
-    lines.push(`<p><a href="${escapeHtml(card.portalUrl)}">Open in RegulAIt to decide</a></p>`);
-  } else {
-    // no public base URL configured: say where to go rather than emit a dead
-    // link, exactly as the Teams renderer declines a dead Action.OpenUrl
-    lines.push(`<p>Decide in RegulAIt: ${escapeHtml(card.portalUrl)}</p>`);
-  }
+  const lines = [`<p>${outlookHtml(card.text)}</p>`];
+  lines.push(outlookPortalLine(card.portalUrl, "Open this approval in RegulAIt to decide"));
   if (card.inAppOnlyNote) {
     lines.push(`<p><em>${escapeHtml(card.inAppOnlyNote)}</em></p>`);
   }
@@ -523,6 +517,53 @@ export function outlookMessageForCard(card: ApprovalCard): OutlookMessagePayload
       ? "RegulAIt: an approval needs you (content withheld)"
       : "RegulAIt: an approval needs you",
     body: { contentType: "HTML", content: lines.join("\n") },
+  };
+}
+
+/** Slack-mrkdwn card text as mail HTML: escaped FIRST, then the two markers the
+ * composer uses (`*bold*`, `` `code` ``) become tags, and line breaks `<br/>`.
+ * Escaping first means no operator-supplied text can open a tag of its own. */
+function outlookHtml(text: string): string {
+  return escapeHtml(text)
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s.,;:!?)])/g, "$1<strong>$2</strong>")
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\n/g, "<br/>");
+}
+
+/** the portal link: a link only when absolute; otherwise the path as text, the
+ * same way the Teams renderer declines a dead Action.OpenUrl */
+function outlookPortalLine(portalUrl: string, label: string): string {
+  return /^https?:\/\//i.test(portalUrl)
+    ? `<p><a href="${escapeHtml(portalUrl)}">${escapeHtml(label)}</a></p>`
+    : `<p>Open RegulAIt at: ${escapeHtml(portalUrl)}</p>`;
+}
+
+/**
+ * ADR-0183 batch 2.6 — a governance alert (ADR-0162) as mail. Information
+ * only, like the chat alert card: no action of any kind, a link to the alert,
+ * and the same "replies are not read" footnote. Built from the alert's own
+ * fields rather than the Slack-escaped card text. Pure.
+ */
+export function outlookMessageForAlert(input: {
+  severity: "low" | "medium" | "high";
+  ruleLabel: string;
+  title: string;
+  portalUrl: string;
+}): OutlookMessagePayload {
+  const oneLineCapped = (v: string, max: number) => v.replace(/[\r\n\t]+/g, " ").trim().slice(0, max);
+  const sev = input.severity.toUpperCase();
+  const label = oneLineCapped(input.ruleLabel, 120);
+  return {
+    subject: `RegulAIt: governance alert (${sev}) — ${label}`,
+    body: {
+      contentType: "HTML",
+      content: [
+        `<p><strong>Governance alert</strong> — ${escapeHtml(sev)} — ${escapeHtml(label)}</p>`,
+        `<p>${escapeHtml(oneLineCapped(input.title, 500))}</p>`,
+        outlookPortalLine(input.portalUrl, "Open this alert in RegulAIt"),
+        "<p><small>This is a notification. Replies to this message are not read.</small></p>",
+      ].join("\n"),
+    },
   };
 }
 

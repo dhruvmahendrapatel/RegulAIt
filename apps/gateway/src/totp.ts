@@ -1,75 +1,52 @@
 /**
- * TOTP (RFC 6238 via HMAC-SHA1) — the gateway's one implementation.
+ * TOTP (RFC 6238, HMAC-SHA1, 6 digits, 30-second step) — the gateway's one
+ * implementation, built on the `otpauth` library (MIT, ADR-0176; batch 2.1 of
+ * ADR-0183 replaced the hand-written HOTP and base32 code that lived here).
  *
- * Moved out of `auth.ts` (which re-exports every name, so existing imports
- * are unchanged) for ADR-0181: with MFA required for admins by default, the
- * Playwright journeys must answer enrolment and sign-in challenges by
- * computing codes from the enrolment secret, and they do it with THIS code
- * (`apps/gateway/dist/totp.js`), not a second implementation. This module
- * imports only node:crypto and the shared constant-time compare, so loading
- * it never opens a database or reads configuration.
+ * What stays RegulAIt's own, and why:
+ *  - the WINDOW and the REPLAY rule in `verifyTotp`: the previous, current and
+ *    next step are tried, and any step at or before the last one accepted is
+ *    refused. `otpauth`'s validator answers "which delta matched" but knows
+ *    nothing of a consumed step, so each candidate step is checked on its own
+ *    with `HOTP.validate({ window: 0 })` (its constant-time compare);
+ *  - the enrolment URI in `otpauthUri`: its exact bytes (`RegulAIt%3A<email>`,
+ *    `secret` before `issuer`) are what every enrolled authenticator was given
+ *    and what the docs show. `otpauth`'s own `TOTP#toString()` orders and
+ *    escapes them differently (`RegulAIt:<email>?issuer=…`); both parse to the
+ *    same account, but the URI is kept byte-for-byte rather than changed under
+ *    existing enrolments.
+ *
+ * Secrets are stored as unpadded upper-case base32 of 20 random bytes, exactly
+ * as before, so every enrolled secret keeps working (proved in `totp.test.ts`
+ * against the RFC 6238 Appendix B vectors and the previous implementation).
+ *
+ * Moved out of `auth.ts` (which re-exports every name) for ADR-0181: the
+ * Playwright journeys compute codes with THIS module
+ * (`apps/gateway/dist/totp.js`), so it imports only `otpauth`, never a
+ * database or configuration.
  */
-import { createHmac, randomBytes } from "node:crypto";
-import { constantTimeEqual } from "@regulait/shared";
-
-const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-export function base32Encode(buf: Buffer): string {
-  let bits = 0;
-  let value = 0;
-  let out = "";
-  for (const byte of buf) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
-  return out;
-}
-
-export function base32Decode(s: string): Buffer {
-  const clean = s.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
-  let bits = 0;
-  let value = 0;
-  const out: number[] = [];
-  for (const ch of clean) {
-    const idx = BASE32_ALPHABET.indexOf(ch);
-    if (idx < 0) throw new Error("invalid base32");
-    value = (value << 5) | idx;
-    bits += 5;
-    if (bits >= 8) {
-      out.push((value >>> (bits - 8)) & 0xff);
-      bits -= 8;
-    }
-  }
-  return Buffer.from(out);
-}
+import { HOTP, Secret, TOTP } from "otpauth";
 
 export const TOTP_PERIOD_SECONDS = 30;
 export const TOTP_DIGITS = 6;
+const ALGORITHM = "SHA1";
+const CODE_SHAPE = new RegExp(`^[0-9]{${TOTP_DIGITS}}$`);
 
 export function generateTotpSecret(): string {
-  return base32Encode(randomBytes(20)); // 160-bit secret per RFC 4226
+  return new Secret({ size: 20 }).base32; // 160-bit secret per RFC 4226
 }
 
 export function totpStep(atMs: number = Date.now()): number {
-  return Math.floor(atMs / 1000 / TOTP_PERIOD_SECONDS);
+  return TOTP.counter({ period: TOTP_PERIOD_SECONDS, timestamp: atMs });
 }
 
 export function totpCode(secretBase32: string, step: number): string {
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(step));
-  const digest = createHmac("sha1", base32Decode(secretBase32)).update(counter).digest();
-  const offset = digest[digest.length - 1]! & 0x0f;
-  const bin =
-    ((digest[offset]! & 0x7f) << 24) |
-    (digest[offset + 1]! << 16) |
-    (digest[offset + 2]! << 8) |
-    digest[offset + 3]!;
-  return String(bin % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, "0");
+  return HOTP.generate({
+    secret: Secret.fromBase32(secretBase32),
+    algorithm: ALGORITHM,
+    digits: TOTP_DIGITS,
+    counter: step,
+  });
 }
 
 /**
@@ -84,10 +61,16 @@ export function verifyTotp(
   lastUsedStep: number | null,
   atMs: number = Date.now(),
 ): number | null {
+  // anything but six ASCII digits can never match, and refusing it here keeps a
+  // multi-byte string away from the library's byte-length compare
+  if (!CODE_SHAPE.test(code)) return null;
+  const secret = Secret.fromBase32(secretBase32);
   const now = totpStep(atMs);
   for (const step of [now, now - 1, now + 1]) {
     if (lastUsedStep !== null && step <= lastUsedStep) continue;
-    if (constantTimeEqual(totpCode(secretBase32, step), code)) return step;
+    if (HOTP.validate({ token: code, secret, algorithm: ALGORITHM, digits: TOTP_DIGITS, counter: step, window: 0 }) === 0) {
+      return step;
+    }
   }
   return null;
 }

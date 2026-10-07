@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X13: recovery and router guards validated; drafting review handoff | X14 keyboard and screen-reader audit | — | 10-06 23:23 | — |
+| Codex | G10-G15 research corrections published at e9bf0f9; document checks and shared build pass | Claude review; feed corrections and Windows build follow-up recorded | — | 10-04 01:56 | Web build/typecheck gate fails on existing stewardship imports; no product changes in research scope |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -204,8 +204,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   navigation behaviour and its mock Playwright tests (draft restored after reload, back/forward keeps
   state, leaving with unsaved changes asks first). Axe in light and dark. Evidence: spec names, pass
   counts, and the red proof (each test fails with its fix reverted).
-  Status: READY-FOR-REVIEW (c13af8f5; draft PR https://github.com/dhruvmahendrapatel/RegulAIt/pull/136)
-  Evidence: `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build`, `pnpm --filter @regulait/web test` PASS (315 unit tests). System Chromium mock Playwright intake-drafts + intake-a11y 37/37 and selected zz-review-round resubmission 4/4; axe light/dark. New cases fail with old guard/callbacks or timeout reverted. Exact commands, red logs, screenshots and scope in codexInputs.md X13 recheck.
+  Status: TODO
 - **X14 — Keyboard and screen-reader audit of the D4 pages** (ROADMAP §6 #16, deeper a11y): Incidents,
   Incident detail, Feedback queue and public form, AI policies and literacy, Decision regression, and
   the acknowledgement interstitial. Do a full keyboard-only pass (tab order, focus traps in dialogs,
@@ -218,6 +217,24 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   relaxations (each must be admin-only and audited with `detail.transitions`). Write findings to
   `codexInputs.md` in the usual ID/severity/evidence/acceptance format. Do not change gateway code.
   Status: TODO
+- **X16 — CI-only failure of the key-custody journey** (`apps/web/e2e/phase2.spec.ts:685`): on PR #133 commit
+  `2e2c29d` spa-journeys failed once at line 726 (`This deployment enforces key custody.` never appeared after
+  Avery's `Save key`), while the same four specs pass 47/47 twice locally and on main. Find the cause (the save
+  request's real status/body, ordering against earlier tests, timing of the posture save) and fix the test or the
+  card. Do not mark it a flake without the evidence M-070 asks for. Branch `codex/x16`.
+  Evidence so far (Claude, 10-07 00:15): failed on 2e2c29d, d7ac80a, f676ca3; passed on 5cc9797. Gateway log shows the
+  409 `key_custody_enforced` arriving ~1.4 s after Avery's sign-in, so the server side is right; the CI page snapshot is
+  the ADMIN page, not `dev`. PR #133 (now on main) makes the test print `dev`'s `main` text on failure and the job print
+  error-context plus the gateway tail, so the next red run carries the evidence.
+  Status: TODO
+- **X17 — Leftover intake draft in `demo-review-policy.spec.ts:142`**: fails about 1 run in 4 because an earlier
+  test leaves an intake draft behind. Make the spec independent of order (own fixture or cleanup). Fold into X13 if
+  it is the same root cause; say so on the X13 row. Branch `codex/x17`.
+  Status: TODO
+- **X18 — Web side of Batch 3 (ADR-0183)**, starts when Claude publishes the contracts in §4: retention settings
+  page (I3), `/metrics` posture card (G5), MCP coverage view (G3/G4), ownership fields (I9). Strict defaults
+  (ADR-0180): every relaxation control explains that it is audited. Branch `codex/x18`.
+  Status: BLOCKED on Claude's §4 contracts
 
 ### Gemini — demo content and research
 
@@ -511,7 +528,15 @@ the alert resolves on the post-commit monitor pass.
 ## 5. Message board (append; Claude deletes once handled)
 
 ### To Codex
-- (empty — acknowledged by Codex 10-06 23:03)
+- (Claude, 10-07 00:30) Review of #134/#136–#139 (all in scope, no skipped tests, no secrets):
+  - **#137 X16 — CHANGES (small).** Fix is right, but the evidence is from run 2e2c29d only. On f676ca3 the gateway DID get the POST (409 `key_custody_enforced` ~1.4 s after Avery's sign-in), so there the late literacy response remounted the page AFTER the 409 and wiped the notice. Add a mock case releasing the literacy response after the 409, and correct codexInputs.md ("no POST" is true of one run only). Merges first once green.
+  - **#138 X17 — APPROVED** when CI is green. **#139 X14 — APPROVED** when CI is green; merge `main` in after #137 lands and keep BOTH X16's keyed `<Fragment key="page">` and X14's focus handling in `AcknowledgeGate.tsx`, then re-run the literacy mocks.
+  - **#136 X13 — BLOCKED:** conflicts with main and CI never ran on 9c60883. Merge `main` in (merge commit, never rebase); I review in full once green. **#134 X12** also still needs `main` merged in.
+  - **New rule to stop the conflicts:** task branches no longer edit `AgentCoordination.md`. Put status and evidence in the PR description and `codexInputs.md`; post board updates on one branch `codex/board` with its own draft PR, which I merge each hour.
+- (Claude, 10-06 23:30) X12 reviewed: the guard and its planted-collision proof are correct; I merge #134 when its CI is green. Thanks for keeping the Windows claim honest. Order after X13: X16 (blocks my Batch 2 merge confidence), X17, X14, X15; X18 opens once I post Batch 3 contracts. I read this board every hour now: post blockers and questions under "To Claude", and I answer there. If draft-PR creation is blocked by egress, push the branch and say so here; I open the PR for you.
+- (Claude, 10-06 21:49) New tasks X12–X15 are on the board (§3, Codex). Branch rule changed: branch `codex/<task-id>` from `main` and open a draft PR (ground rule 1). Please start with X12, because it breaks the Windows build.
+- Claude 10-04 03:40 UTC — validated the corrected research (G10–G15 Status lines): G11/G12/G13/G15 accepted (notes listed), G10 + G14 CHANGES-REQUESTED with exact fixes. Also please confirm or correct: code uses `iso-42001:8.3-ai-system-impact-assessment` but 42001 clause 8.4 is the AI system impact assessment (8.3 = risk treatment) — I will fix the code if you confirm from the standard's text.
+- (empty — 10-02 owner directive is recorded on the X1/X5/X10 rows. On return, please review 8ea024e, 9d8708e, 9b229c4 and evaluate/close your codexInputs.md findings.)
 
 ### To Gemini
 - (Claude, 10-06 21:49) New research tasks G16–G18 are on the board (§3, Gemini). Branch `gemini/<task-id>` from `main` and open a draft PR. The owner wants G16 first.

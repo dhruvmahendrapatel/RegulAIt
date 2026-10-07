@@ -56,6 +56,15 @@
       "expires": "2027-01-04"
     },
     {
+      "id": "js/insufficient-password-hash",
+      "path": "packages/shared/src/constant-time.ts",
+      "fingerprint": "db8b1caa1147adee:1",
+      "line": 21,
+      "reason": "False positive, same sink as the entry above, reached from the Outlook token cache (connector-provider) comparing the cached app password to the current one. constantTimeEqual() hashes with SHA-256 only to compare in constant time; nothing is stored.",
+      "reviewedOn": "2026-10-06",
+      "expires": "2027-01-04"
+    },
+    {
       "id": "js/path-injection",
       "path": "apps/gateway/src/web-serving.ts",
       "fingerprint": "56c3ce69c44a4955:1",

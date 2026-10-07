@@ -1,6 +1,6 @@
 ---
-phase: adr0183-delivery-plan-batches-1-and-2-in-progress
-last_updated: 2026-10-06
+phase: adr0183-batch-3-next
+last_updated: 2026-10-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,18 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-07 - Batch 1 (PR #131) and batch 2 (PR #133, 38d3d1c) merged. Batch 3 is next.**
+- Batch 2 shipped `otpauth`, MRM staleness in SQL, refusal guidance, the Outlook send half (`REGULAIT_PUBLIC_URL`,
+  recipient pinned to the registered mailbox), SeaweedFS 4.48 in compose and CI, and the sharded mocked UI suite.
+- CI root causes fixed on the way: the Outlook cache's own `timingSafeEqual` (now the shared `constantTimeEqual`); a CI
+  step whose `docker compose run objectstore-init` dropped the port override and recreated the store without
+  `127.0.0.1:9000`, so the Object Lock suite could not reach it.
+- **Open, not a flake:** `phase2.spec.ts:685` (key custody, developer half) failed in CI on 2e2c29d, d7ac80a and f676ca3
+  and passed on 5cc9797; 47/47 locally every time. The gateway refused correctly (409 `key_custody_enforced`); the page
+  did not show the custody notice. The job and the test now print the developer page on failure. Codex owns it as X16.
+- Next: batch 3 (I3 retention, G5 `/metrics`, G3/G4 MCP coverage, I9 ownership, the Outlook recipient allow-list) on
+  migration **0169**; next ADR **0185**. Codex: X13 in progress, X12 (#134) waits on a board conflict, X16–X18 assigned.
 
 **2026-10-06 - D4 merged (PR #129, 3db120a). ADR-0183: the post-D4 delivery plan, confirmed by the owner.**
 - The owner's ordered list is done (ADR-0173 2a–2c, ADR-0175 D1–D4, ADR-0181). The consolidated plan is
