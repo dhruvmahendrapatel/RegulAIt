@@ -1802,6 +1802,26 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
     // refusal is already audited inside the guard and nothing left the box.
     let upstream: Client | null = null;
+    // B3S-02: the close handler is registered BEFORE anything connects. A
+    // client that disconnected while the upstream was still being opened (a
+    // stdio spawn + initialize, an HTTP handshake) used to leave it open: the
+    // handler was attached only after the connect returned, when the socket's
+    // `close` had already fired, so the child kept running and its process
+    // slot was never given back. Now the handler closes whatever is open when
+    // it fires, and a connect that completes after it fired is closed at once
+    // (below).
+    let clientGone = false;
+    let proxyTransport: StreamableHTTPServerTransport | null = null;
+    const closeUpstreamSession = () => {
+      const u = upstream;
+      upstream = null;
+      if (u) void u.close().catch(() => undefined);
+    };
+    reply.raw.on("close", () => {
+      clientGone = true;
+      if (proxyTransport) void proxyTransport.close();
+      closeUpstreamSession();
+    });
     // ADR-0128: the sequence reports into this, so the ONE failure row below can
     // say how hard we tried. A row per attempt was deliberately not written —
     // see upstream-retry.ts for why, which is verbatim the breaker's reasoning.
@@ -1883,6 +1903,12 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // local; only a manifest request needs a connection at this boundary.
       if (needsManifest && !storedManifest) {
         upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
+      }
+      // B3S-02: the client left while we were connecting — close it now
+      if (clientGone || reply.raw.destroyed || req.raw.socket?.destroyed) {
+        closeUpstreamSession();
+        reply.hijack();
+        return;
       }
     } catch (err) {
       const refused = ownRefusal(err);
@@ -2125,11 +2151,14 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
 
     // Stateless mode: one transport per request, no session tracking yet.
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    proxyTransport = transport;
     reply.hijack();
-    reply.raw.on("close", () => {
+    // B3S-02: the client may have left while the protocol surface was built
+    if (clientGone || req.raw.socket?.destroyed) {
       void transport.close();
-      void upstream?.close();
-    });
+      closeUpstreamSession();
+      return;
+    }
     await proxy.connect(transport);
     await transport.handleRequest(req.raw, reply.raw, req.body);
     // ADR-0185 G3: notification handlers run on the microtask queue after the

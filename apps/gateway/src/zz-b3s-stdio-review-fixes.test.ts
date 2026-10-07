@@ -249,3 +249,44 @@ describe("B3S-01: no stdio process for a caller with no entitlement on the serve
     expect(await waitFor(() => liveStdioProcesses() === 0)).toBe(true);
   });
 });
+
+describe("B3S-02: a client that disconnects mid-connect leaves no stdio child and no taken slot", () => {
+  it("drop the socket while the child is still initializing: the slot is released and the child exits", async () => {
+    const marker = markerPath(`drop-${RUN}`);
+    const serverId = await registerStdio(`b3s-drop-${RUN}`, writeExecutable(`drop-${RUN}`), [marker, "--gate"]);
+    await grantServer(users.member.id, serverId);
+    expect(liveStdioProcesses()).toBe(0);
+    // no idle keep-alive sockets left over from earlier clients: the only
+    // connection the server holds from here on is this request's
+    app.server.closeIdleConnections();
+    const connections = () =>
+      new Promise<number>((resolve, reject) => app.server.getConnections((err, n) => (err ? reject(err) : resolve(n))));
+    expect(await waitFor(async () => (await connections()) === 0)).toBe(true);
+
+    const body = JSON.stringify(LIST);
+    const req = http.request({
+      host: "127.0.0.1",
+      port: PORT,
+      path: `/mcp/${serverId}`,
+      method: "POST",
+      agent: false,
+      headers: { ...users.member.auth, ...MCP_HEADERS, "content-length": Buffer.byteLength(body) },
+    });
+    req.on("error", () => undefined);
+    req.end(body);
+
+    // PAUSE POINT: the child is running and has not answered `initialize`
+    expect(await waitFor(() => starts(marker).length === 1), "the manifest connect started the child").toBe(true);
+    const [pid] = starts(marker);
+    expect(liveStdioProcesses()).toBe(1);
+
+    // the client goes away, and the gateway has seen it go
+    req.destroy();
+    expect(await waitFor(async () => (await connections()) === 0), "the gateway saw the disconnect").toBe(true);
+
+    // only now does the connect complete
+    process.kill(pid!, "SIGUSR2");
+    expect(await waitFor(() => !alive(pid!), 5000), "the child of a departed client exits").toBe(true);
+    expect(await waitFor(() => liveStdioProcesses() === 0, 5000), "its process slot is given back").toBe(true);
+  });
+});
