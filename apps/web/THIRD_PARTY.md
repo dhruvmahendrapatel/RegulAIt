@@ -10,3 +10,13 @@ fetched from a CDN or any other network location at run time, so the UI works ai
 | `@dagrejs/dagre` | 3.1.1 | MIT | Computes the run graph's left-to-right layered layout. Transitive: `@dagrejs/graphlib` (MIT). |
 | `recharts` | 3.10.1 | MIT | Draws the Monitoring page's series charts and dashboard panels (ADR-0173 batch 2c; new dashboards only, the existing hand-written charts are a later replacement item). SVG, keyboard layer off in favour of a data table under every chart, colours from tokens. Transitive: `react-redux` 9.3.0, `redux` 5.0.1, `redux-thunk` 3.1.0, `reselect` 5.2.0, `immer` 11.1.21, `es-toolkit` 1.52.0, `eventemitter3` 5.0.4, `decimal.js-light` 2.5.1, `tiny-invariant` 1.3.3, `clsx` 2.1.1, `use-sync-external-store` (MIT); `victory-vendor` 37.3.6 (MIT AND ISC, vendored d3 modules); `d3-array`, `d3-format`, `d3-path`, `d3-scale`, `d3-shape`, `d3-time`, `d3-time-format`, `internmap` (ISC). |
 | `react-is` | 18.3.1 | MIT | recharts' peer dependency, pinned to the app's React 18 line (the auto-installed 19.x would misread React 18 elements). |
+
+## Test-only development dependencies (never shipped)
+
+These run only in the browser test suites (`apps/web/e2e`, Playwright). Nothing in `src/` or the Vite config imports
+them, so they are not bundled into the shipped web build (checked: no match for `axe-core` in `apps/web/dist` after
+`pnpm --filter @regulait/web build`). A licence outside the allow-list above is accepted here only on that condition.
+
+| Package | Version | Licence | Why |
+|---|---|---|---|
+| `@axe-core/playwright` | 4.13.0 | MPL-2.0 | Runs automated accessibility checks inside the Playwright specs. Exception: MPL-2.0 is not on the shipped-code allow-list; it is used only in browser test runs and never bundled into the shipped web build. Transitive: `axe-core` 4.13.0 (MPL-2.0, the same exception and the same test-only use). |

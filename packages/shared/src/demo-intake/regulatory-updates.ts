@@ -148,10 +148,10 @@ export const REGULATORY_UPDATES: RegulatoryUpdate[] = [
     effectiveDate: "2026-08-02",
     status: "in_force",
     frameworks: ["eu-ai-act"],
-    controlRefs: [
-      "eu-ai-act:art-4-ai-literacy",
-      "eu-ai-act:art-12-record-keeping",
-    ],
+    // Art. 50 has no control in the EU AI Act pack yet, and Art. 4 (literacy) and Art. 12 (record-keeping)
+    // are not what this entry is about, so it links none rather than the wrong ones (R5:43 review, 2026-10-07).
+    // Link the Art. 50 control here once the pack gains one in a new revision.
+    controlRefs: [],
     sourceUrl: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32024R1689",
     verifiedOn: "2026-10-05",
   },
