@@ -102,6 +102,7 @@ import {
   createRoleToolGrantSchema,
   createServerGrantSchema,
   createServerSchema,
+  mcpStdioSentinelUrl,
   createToolGrantSchema,
   createToolSchema,
   createUserSchema,
@@ -129,7 +130,7 @@ import {
   csvRecord,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
-import { refuseMcpServerWrite } from "./mcp-egress.js";
+import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
   AUTH_REFUSAL_DETAIL,
@@ -1746,20 +1747,35 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { id: row.id, revokedAt: row.revokedAt };
   });
 
+  /**
+   * ADR-0185 G4 — a server row as the API shows it: every column, plus
+   * `stdio: {command, args}` for a stdio server (null otherwise), so the UI
+   * edits argv as a list of separate strings and never as one shell line.
+   */
+  const mcpServerView = (row: typeof mcpServers.$inferSelect) => ({
+    ...row,
+    stdio: row.transport === "stdio" ? { command: row.stdioCommand, args: row.stdioArgs ?? [] } : null,
+  });
+
   app.post("/v1/servers", async (req, reply) => {
     const parsed = createServerSchema.parse(req.body);
-    // ADR-0185 G4 SEAM — SSE and stdio upstreams are not connectable in this
-    // build, so registering one is refused (fail closed) whatever the org
-    // allows; the G4 slice replaces this with the transport rules.
-    if (parsed.transport === "stdio" || parsed.transport === "sse") {
-      return reply.status(422).send({
-        error: "mcp_transport_disabled",
-        detail: `this gateway does not connect to MCP upstreams over '${parsed.transport}' yet. Nothing was saved.`,
-      });
-    }
+    const transport = parsed.transport ?? "streamable_http";
     // ADR-0185 I9 SEAM — `ownerUserId` is accepted by the schema and applied by
     // the I9 slice (owner defaults to the registering admin); not written here.
-    const { ownerUserId: _owner, stdio: _stdio, ...body } = parsed;
+    const label = `MCP server '${parsed.name}'`;
+    // ADR-0185 G4 — THE TRANSPORT RULES, before anything else is decided: the
+    // org must have enabled the transport (422 mcp_transport_disabled); a
+    // stdio server also needs the host opt-in (422 mcp_stdio_unavailable)
+    // and a command that passes every host rule (400
+    // mcp_stdio_command_refused + code). Audited; nothing is saved.
+    const transportCheck = await checkMcpTransportWrite(db, {
+      transport,
+      stdio: parsed.transport === "stdio" ? parsed.stdio : undefined,
+      userId: req.authCtx.userId ?? null,
+      phase: "registration",
+      label,
+    });
+    if (!transportCheck.ok) return reply.status(transportCheck.status).send(transportCheck.body);
     // ADR-0052 — THE EXPANSION GATE (inventory: `mcp_server.create`, "a new
     // tool surface is a wider footprint"). Refused once the license has
     // lapsed past its grace window; permitted in every other state including
@@ -1769,21 +1785,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const licenseRefusal = await refuseIfExpansionBlocked(db, {
       actorUserId: req.authCtx.userId ?? null,
       objectType: "mcp_server",
-      what: `registering MCP server '${body.name}'`,
+      what: `registering MCP server '${parsed.name}'`,
     });
     if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
-    // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
-    // at the moment somebody types it, audited, not a surprise at first tool
-    // call. (Write-time is not sufficient — connectUpstream re-checks every
-    // time — but it is the earliest honest failure.)
-    const refusal = await refuseMcpServerWrite(db, {
-      url: body.url,
-      allowPrivateRanges: body.allowPrivateRanges ?? null,
-      userId: req.authCtx.userId ?? null,
-      phase: "registration",
-      label: `MCP server '${body.name}' url`,
-    });
-    if (refusal) return reply.status(400).send(refusal);
+    let values: typeof mcpServers.$inferInsert;
+    if (parsed.transport === "stdio") {
+      // the row's url is the `stdio:<name>` sentinel (DB CHECK), which no
+      // fetch can reach; the command's sha256 is pinned here and checked at
+      // every connect (`mcp-stdio-digest-mismatch`)
+      const stdio = transportCheck.stdio!;
+      values = {
+        name: parsed.name,
+        url: mcpStdioSentinelUrl(parsed.name),
+        transport: "stdio",
+        stdioCommand: stdio.command,
+        stdioArgs: stdio.args,
+        stdioCommandDigest: stdio.digest,
+      };
+    } else {
+      // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
+      // at the moment somebody types it, audited, not a surprise at first tool
+      // call. (Write-time is not sufficient — connectUpstream re-checks every
+      // time — but it is the earliest honest failure.) SSE takes the same one.
+      const refusal = await refuseMcpServerWrite(db, {
+        url: parsed.url,
+        allowPrivateRanges: parsed.allowPrivateRanges ?? null,
+        userId: req.authCtx.userId ?? null,
+        phase: "registration",
+        label: `${label} url`,
+      });
+      if (refusal) return reply.status(400).send(refusal);
+      values = {
+        name: parsed.name,
+        url: parsed.url,
+        transport,
+        ...(parsed.allowPrivateRanges !== undefined ? { allowPrivateRanges: parsed.allowPrivateRanges } : {}),
+      };
+    }
     // ADR-0097: the registration path sets the admission state EXPLICITLY
     // rather than inheriting migration 0103's DEFAULT. The default exists for
     // rows that predate the scanner ('grandfathered' — trusted because they
@@ -1792,32 +1830,61 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // review queue shows separately.
     const [row] = await db
       .insert(mcpServers)
-      .values({ ...body, admissionState: REGISTRATION_ADMISSION_STATE })
+      .values({ ...values, admissionState: REGISTRATION_ADMISSION_STATE })
       .returning();
-    return reply.status(201).send(row);
+    if (row!.transport === "stdio") {
+      // a host command the gateway will start is the widest thing an admin can
+      // register: the fact, the command and its pinned digest are on the trail
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        serverId: row!.id,
+        objectType: "mcp_server",
+        objectId: row!.id,
+        detail: {
+          phase: "registration",
+          transport: "stdio",
+          command: row!.stdioCommand,
+          args: row!.stdioArgs,
+          digest: row!.stdioCommandDigest,
+        },
+        effect: "allow",
+        ruleId: "mcp-stdio-server-registered",
+        ruleChain: [],
+        reason: `${label} registered as a stdio upstream: ${row!.stdioCommand} (sha256 ${row!.stdioCommandDigest} pinned)`,
+      });
+    }
+    return reply.status(201).send(mcpServerView(row!));
   });
 
   /** ADR-0043: update an MCP server's destination / private-range posture.
    * Changing either re-runs the write-time egress check against the NEXT
    * values (null allowPrivateRanges restores inheritance of the org default).
+   * ADR-0185 G4: the transport is fixed; a stdio server's command/argv may be
+   * replaced (re-checked, re-pinned, admission back to `unscanned`).
    * Admin-only via the default gate, like the registry POST above. */
   app.patch("/v1/servers/:serverId", async (req, reply) => {
     const { serverId } = uuidParam.parse(req.params);
     const body = updateServerSchema.parse(req.body);
     const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!before) return reply.status(404).send({ error: "unknown_server" });
-    // ADR-0185 G4 — a server's transport is fixed at registration, and a stdio
-    // block applies to a stdio server only (I9's `ownerUserId` is applied by
-    // that slice, not here)
+    const isStdio = before.transport === "stdio";
+    // ADR-0185 G4 — a server's transport is fixed at registration; a stdio
+    // block applies to a stdio server only, and a stdio server has no url or
+    // private-range posture to change (I9's `ownerUserId` is applied by that
+    // slice, not here)
     if (
       (body.transport !== undefined && body.transport !== before.transport) ||
-      (body.stdio !== undefined && before.transport !== "stdio")
+      (body.stdio !== undefined && !isStdio) ||
+      (isStdio && (body.url !== undefined || body.allowPrivateRanges !== undefined))
     ) {
       return reply.status(409).send({
         error: "mcp_transport_immutable",
-        detail: `this server's transport is '${before.transport}'; register a new server to use another. Nothing was saved.`,
+        detail: isStdio && body.transport === undefined && body.stdio === undefined
+          ? `this server is a stdio upstream: it has no url or private-range posture. Nothing was saved.`
+          : `this server's transport is '${before.transport}'; register a new server to use another. Nothing was saved.`,
       });
     }
+    const label = `MCP server '${before.name}'`;
     const nextUrl = body.url ?? before.url;
     const nextFlag =
       body.allowPrivateRanges !== undefined ? body.allowPrivateRanges : before.allowPrivateRanges;
@@ -1828,30 +1895,93 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         userId: req.authCtx.userId ?? null,
         serverId,
         phase: "update",
-        label: `MCP server '${before.name}' url`,
+        label: `${label} url`,
       });
       if (refusal) return reply.status(400).send(refusal);
     }
-    const patch = {
+    let stdioPatch: Partial<typeof mcpServers.$inferInsert> = {};
+    let stdioChange: Record<string, { from: unknown; to: unknown }> | null = null;
+    if (body.stdio !== undefined) {
+      const check = await checkMcpTransportWrite(db, {
+        transport: "stdio",
+        stdio: body.stdio,
+        userId: req.authCtx.userId ?? null,
+        serverId,
+        phase: "update",
+        label,
+      });
+      if (!check.ok) return reply.status(check.status).send(check.body);
+      const next = check.stdio!;
+      const changed =
+        next.command !== before.stdioCommand ||
+        JSON.stringify(next.args) !== JSON.stringify(before.stdioArgs) ||
+        next.digest !== before.stdioCommandDigest;
+      if (changed) {
+        // A DIFFERENT PROGRAM IS A DIFFERENT SERVER as far as admission is
+        // concerned: whatever was scanned, held or cleared was about the old
+        // one, so the verdict and any clearance go, and the next connect's
+        // manifest is adjudicated from scratch.
+        stdioChange = {
+          command: { from: before.stdioCommand, to: next.command },
+          args: { from: before.stdioArgs, to: next.args },
+          digest: { from: before.stdioCommandDigest, to: next.digest },
+          admissionState: { from: before.admissionState, to: "unscanned" },
+        };
+        stdioPatch = {
+          stdioCommand: next.command,
+          stdioArgs: next.args,
+          stdioCommandDigest: next.digest,
+          admissionState: "unscanned",
+          admissionScannedAt: null,
+          admissionFindings: null,
+          admissionSeverity: null,
+          admissionScannerVersion: null,
+          admissionManifestDigest: null,
+          admissionClearedBy: null,
+          admissionClearedAt: null,
+          admissionClearReason: null,
+        };
+      }
+    }
+    const patch: Partial<typeof mcpServers.$inferInsert> = {
       ...(body.name !== undefined ? { name: body.name } : {}),
+      // a stdio row's url IS its name (`stdio:<name>`, a DB CHECK): a rename
+      // rewrites both in one statement
+      ...(body.name !== undefined && isStdio ? { url: mcpStdioSentinelUrl(body.name) } : {}),
       ...(body.url !== undefined ? { url: body.url } : {}),
       ...(body.allowPrivateRanges !== undefined
         ? { allowPrivateRanges: body.allowPrivateRanges }
         : {}),
+      ...stdioPatch,
     };
     // ADR-0185: a body that only restates the transport (or names fields a
     // later slice applies) changes no column here — answer with the row
     // rather than issue an empty UPDATE
-    if (Object.keys(patch).length === 0) return reply.send(before);
+    if (Object.keys(patch).length === 0) return reply.send(mcpServerView(before));
     const [row] = await db
       .update(mcpServers)
       .set(patch)
       .where(eq(mcpServers.id, serverId))
       .returning();
-    return reply.send(row);
+    if (stdioChange) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        serverId,
+        objectType: "mcp_server",
+        objectId: serverId,
+        detail: { phase: "update", transport: "stdio", transitions: stdioChange },
+        effect: "allow",
+        ruleId: "mcp-stdio-command-changed",
+        ruleChain: [],
+        reason:
+          `${label}: stdio command changed to ${row!.stdioCommand} (sha256 ${row!.stdioCommandDigest} pinned); ` +
+          `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
+      });
+    }
+    return reply.send(mcpServerView(row!));
   });
 
-  app.get("/v1/servers", async () => ({ servers: await db.select().from(mcpServers) }));
+  app.get("/v1/servers", async () => ({ servers: (await db.select().from(mcpServers)).map(mcpServerView) }));
 
   app.get("/v1/servers/:serverId/tools", async (req) => {
     const { serverId } = uuidParam.parse(req.params);
