@@ -14,7 +14,10 @@
  *    is minted until they enrol;
  *  - `ai-literacy-not-current` (the run-start refusal's `error`, or a governed
  *    call's `decision.ruleId`): the person has not acknowledged the AI policy that
- *    applies to them, outside the acknowledgement interstitial (ADR-0182 A14).
+ *    applies to them, outside the acknowledgement interstitial (ADR-0182 A14);
+ *  - 409 `custom_provider_disabled` (R167-04): a custom model endpoint is switched
+ *    off, so an agent cannot be bound to it (POST /v1/agents) or call it (dispatch);
+ *    an administrator tests and enables it on the Custom LLM providers page.
  *
  * The message replaces the generic sentence everywhere an `ApiError` is shown
  * (its `message`), and the surfaces that can carry a link render `to` with
@@ -24,7 +27,7 @@ import type { ApiErrorPayload } from "./client";
 
 export interface RefusalGuidance {
   /** the gateway refusal this answers */
-  code: "mfa_enrollment_required" | "ai-literacy-not-current";
+  code: "mfa_enrollment_required" | "ai-literacy-not-current" | "custom_provider_disabled";
   /** what happened and what to do next, in words */
   message: string;
   /** the in-app route that resolves it */
@@ -68,6 +71,14 @@ export const REFUSAL_GUIDANCE = {
     to: "/account?section=ai-policies",
     linkLabel: "Open the AI policies on your Account page",
   },
+  customProviderDisabled: {
+    code: "custom_provider_disabled",
+    message:
+      "This custom model endpoint is switched off, so it can't be used. An administrator needs to run its connection " +
+      "test and turn it on under Integrations → Custom LLM providers, then try again.",
+    to: "/admin/custom-providers",
+    linkLabel: "Open Custom LLM providers (administrators)",
+  },
 } as const satisfies Record<string, RefusalGuidance>;
 
 /** the guidance for a refusal, or null when it is not one a person resolves this way */
@@ -80,6 +91,7 @@ export function refusalGuidance(status: number, payload: ApiErrorPayload | null 
     if (status === 409) return REFUSAL_GUIDANCE.keyIssueMfa;
     if (status === 403) return payload.credential === "api_key" ? REFUSAL_GUIDANCE.apiKeyMfa : REFUSAL_GUIDANCE.sessionMfa;
   }
+  if (code === "custom_provider_disabled" && status === 409) return REFUSAL_GUIDANCE.customProviderDisabled;
   return null;
 }
 
