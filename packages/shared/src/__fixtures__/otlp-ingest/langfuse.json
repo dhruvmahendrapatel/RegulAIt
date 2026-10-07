@@ -1,0 +1,158 @@
+{
+  "$comment": [
+    "ADR-0186 T / ADR-0177 row 18. HAND-WRITTEN from Langfuse's public OTLP ingest documentation; no Langfuse code is copied, depended on, bundled or hosted. Langfuse is only an OTLP export destination a customer may point us at.",
+    "Source: https://langfuse.com/integrations/native/opentelemetry, opened 2026-10-07 (HTTP 200; quoted sentences confirmed on the published page), and read in full from its public docs source, github.com/langfuse/langfuse-docs @ dbc5c71946a20b44d2844992d010362469039b76 (2026-10-07), content/integrations/native/opentelemetry/index.mdx.",
+    "Each rule below quotes the sentence it comes from in its 'doc' field. VERIFIED = the quoted sentence was read in that file; nothing here is UNVERIFIED.",
+    "Finding recorded by this fixture: the documented observation input/output mapping reads langfuse.observation.input, gen_ai.prompt, input.value (OpenInference) and gen_ai.tool.call.arguments/result, and the documented user mapping reads user.id. Our otel_genai profile sends chat content as gen_ai.input.messages/gen_ai.output.messages and the user as enduser.id, which the doc does not list (they land in metadata.attributes). The openinference profile sends input.value/output.value and user.id, so it is the profile to choose for Langfuse."
+  ],
+  "tool": "langfuse",
+  "verified": true,
+  "transport": {
+    "path": "/api/public/otel/v1/traces",
+    "acceptsContentTypes": [
+      "application/json",
+      "application/x-protobuf"
+    ],
+    "directFromRegulait": true,
+    "doc": "Please note that Langfuse currently supports OTLP over HTTP with both `HTTP/JSON` and `HTTP/protobuf`. `gRPC` is not supported yet. ... the trace endpoint is `/api/public/otel/v1/traces`."
+  },
+  "span": {
+    "required": {
+      "traceId": "^[0-9a-f]{32}$",
+      "spanId": "^[0-9a-f]{16}$",
+      "name": "^.+$",
+      "startTimeUnixNano": "^[1-9][0-9]{18}$",
+      "endTimeUnixNano": "^[1-9][0-9]{18}$"
+    },
+    "doc": "Missing timestamps are filled in. If `startTimeUnixNano` or `endTimeUnixNano` is missing or unparseable, Langfuse copies the remaining edge ... Send both fields on every span. (traceId/spanId: the OTLP/HTTP JSON encoding, lowercase hex, which Langfuse accepts as HTTP/JSON.) Timestamps are nanoseconds: 19 digits for any date from 2001 to 2286, so a millisecond or second value fails."
+  },
+  "forbiddenKeySegments": {
+    "segments": [
+      "__proto__",
+      "constructor",
+      "prototype"
+    ],
+    "doc": "Attribute keys that contain `__proto__`, `constructor`, or `prototype` as a path segment ... are silently dropped during ingestion."
+  },
+  "profiles": {
+    "otel_genai": {
+      "everySpanOfASession": {
+        "keys": [
+          "session.id"
+        ],
+        "doc": "certain trace-level attributes should be propagated to **all spans** ... `sessionId` (via `langfuse.session.id` or `session.id`)"
+      },
+      "byKind": {
+        "llm": {
+          "allOf": [
+            "gen_ai.operation.name"
+          ],
+          "anyOf": [
+            [
+              "langfuse.observation.model.name",
+              "gen_ai.request.model",
+              "gen_ai.response.model",
+              "llm.model_name",
+              "model"
+            ],
+            [
+              "gen_ai.usage.input_tokens",
+              "langfuse.observation.usage_details",
+              "llm.token_count.prompt"
+            ]
+          ],
+          "valueTypes": {
+            "gen_ai.request.model": "stringValue",
+            "gen_ai.usage.input_tokens": "intValue",
+            "gen_ai.usage.output_tokens": "intValue"
+          },
+          "doc": "model: `gen_ai.request.model`, `gen_ai.response.model` ...; usage: `gen_ai.usage.*`; type: inferred from other conventions (for example `gen_ai.operation.name`), then from a model attribute (`generation`)"
+        },
+        "tool": {
+          "allOf": [
+            "gen_ai.operation.name"
+          ],
+          "contentAnyOf": [
+            [
+              "langfuse.observation.input",
+              "gen_ai.prompt",
+              "input.value",
+              "gen_ai.tool.call.arguments"
+            ],
+            [
+              "langfuse.observation.output",
+              "gen_ai.completion",
+              "output.value",
+              "gen_ai.tool.call.result"
+            ]
+          ],
+          "doc": "input: ... `gen_ai.tool.call.arguments` (OpenTelemetry GenAI tool spans, used when no other input attribute is set); output: ... `gen_ai.tool.call.result`"
+        }
+      }
+    },
+    "openinference": {
+      "everySpanOfASession": {
+        "keys": [
+          "session.id",
+          "user.id"
+        ],
+        "doc": "`userId` (via `langfuse.user.id` or `user.id`); `sessionId` (via `langfuse.session.id` or `session.id`) ... need to be present on each span in the trace"
+      },
+      "byKind": {
+        "llm": {
+          "allOf": [
+            "gen_ai.operation.name"
+          ],
+          "anyOf": [
+            [
+              "langfuse.observation.model.name",
+              "gen_ai.request.model",
+              "gen_ai.response.model",
+              "llm.model_name",
+              "model"
+            ],
+            [
+              "gen_ai.usage.input_tokens",
+              "langfuse.observation.usage_details",
+              "llm.token_count.prompt"
+            ]
+          ],
+          "contentAnyOf": [
+            [
+              "langfuse.observation.input",
+              "gen_ai.prompt",
+              "input.value"
+            ],
+            [
+              "langfuse.observation.output",
+              "gen_ai.completion",
+              "output.value"
+            ]
+          ],
+          "valueTypes": {
+            "llm.model_name": "stringValue",
+            "llm.token_count.prompt": "intValue"
+          },
+          "doc": "input: `langfuse.observation.input`, `gen_ai.prompt`, `input.value` (OpenInference); output: `langfuse.observation.output`, `gen_ai.completion`, `output.value` (OpenInference); model: ... `llm.model_name`; usage: ... `llm.token_count.*`"
+        },
+        "tool": {
+          "contentAnyOf": [
+            [
+              "langfuse.observation.input",
+              "gen_ai.prompt",
+              "input.value",
+              "gen_ai.tool.call.arguments"
+            ],
+            [
+              "langfuse.observation.output",
+              "gen_ai.completion",
+              "output.value",
+              "gen_ai.tool.call.result"
+            ]
+          ],
+          "doc": "as for otel_genai"
+        }
+      }
+    }
+  }
+}
