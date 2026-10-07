@@ -283,12 +283,12 @@ facts before anything reaches code.
   bias/fairness; quality: hallucination, groundedness, relevance; conversation: AI disclosure, human
   escalation; agent behaviour: tool selection, plan adherence, excessive agency; image/voice). Table:
   `| Evaluator | What it checks | Method (heuristic/LLM judge/code/human) | NIST AI RMF 1.0 subcategories | ISO/IEC 42001:2023 Annex A controls | EU AI Act articles | OWASP LLM Top 10 2025 ID | Sources |`
-  Status: BLOCKED (60066756, draft #162; Codex takeover follow-up) — 35 candidate NIST IDs/rationales, primary OWASP SSRF/scope corrections and Art50 leads delivered; NIST/EU primary bodies proxy403, ISO licensed mappings UNVERIFIED
+  Status: MERGED via #162 (Claude 10-07 13:30; follow-ups in To Codex) — BLOCKED (60066756, draft #162; Codex takeover follow-up) — 35 candidate NIST IDs/rationales, primary OWASP SSRF/scope corrections and Art50 leads delivered; NIST/EU primary bodies proxy403, ISO licensed mappings UNVERIFIED
 - **G11 — Model provider facts** `docs/research/R2-model-provider-facts.md` for OpenAI, Anthropic, Google
   (Gemini API, Vertex AI), Amazon Bedrock, Azure AI Foundry/Azure OpenAI, xAI, Mistral, Meta Llama (hosted),
   Cohere, DeepSeek, Groq, Together AI, Fireworks AI, Perplexity, Ollama, Hugging Face. Table:
   `| Provider | GA flagship + one fast model (API ids) | Context window | $/1M tokens in/out (as of) | Zero-retention / no-training option | Data-residency regions | OpenAI-compatible endpoint | Anthropic-compatible endpoint | Sources |`
-  Status: VERIFIED WITH NOTES (Claude, 10-04); current-pricing follow-up BLOCKED (1febafba, draft #163) — current GA flagship/long-context tiers cannot be primary-verified (proxy403); historical Oct4 facts preserved, no stale prices pasted onto newer IDs
+  Status: MERGED via #163 (Claude 10-07 13:30; follow-ups in To Codex) — VERIFIED WITH NOTES (Claude, 10-04); current-pricing follow-up BLOCKED (1febafba, draft #163) — current GA flagship/long-context tiers cannot be primary-verified (proxy403); historical Oct4 facts preserved, no stale prices pasted onto newer IDs
 - **G12 — Integration catalog notes** `docs/research/R3-integration-catalog.md` for the ~50 apps whose logo
   keys are in `apps/web/src/ui/logos/svg/` (Slack, Teams, Outlook, Gmail, Google Drive/Calendar/Docs/Sheets,
   OneDrive, SharePoint, Jira, Confluence, Linear, Asana, Trello, monday.com, ClickUp, Notion, Airtable, GitHub,
@@ -296,13 +296,13 @@ facts before anything reaches code.
   Splunk, Sentry, Okta, Snowflake, Databricks, PostgreSQL, MongoDB, Stripe, Twilio, Zoom, Box, Dropbox, Figma,
   SAP, Oracle, Workday). Table:
   `| App | Category | Neutral description (≤ 90 chars) | Data an agent could reach | Main governance risk | Official MCP server (link or "none found") | Auth model | Sources |`
-  Status: VERIFIED WITH NOTES (Claude, 10-04); follow-up READY-FOR-REVIEW (1430c225, draft #164) — six rows refreshed from primary vendor GitHub READMEs; exact Salesforce first-GA date/PagerDuty hosted endpoint remain UNVERIFIED
+  Status: MERGED via #164 (Claude 10-07 13:30; follow-ups in To Codex) — VERIFIED WITH NOTES (Claude, 10-04); follow-up READY-FOR-REVIEW (1430c225, draft #164) — six rows refreshed from primary vendor GitHub READMEs; exact Salesforce first-GA date/PagerDuty hosted endpoint remain UNVERIFIED
 - **G13 — Governance agent templates** `docs/research/R4-agent-template-ideas.md`: 12 templates for GRC teams
   (e.g. intake reviewer, vendor AI due-diligence, policy Q&A, evidence collector, model change reviewer,
   incident triage, weekly brief, access-review helper, regulatory watcher, DPIA drafter, red-team summariser,
   board report drafter). Per template: name; tagline; 4–6 steps; instructions ≤ 150 words incl. what it must
   never do; 2–3 skills (name + line); 0–2 sub-agents; schedule; integrations (from G12); human approval points.
-  Status: VERIFIED WITH NOTES (Claude, 10-04); follow-up READY-FOR-REVIEW (0337f032, draft #165) — 12 unique template-specific Never/approval decisions, max109 instruction words, manual contract checks PASS
+  Status: MERGED via #165 (Claude 10-07 13:30; follow-ups in To Codex) — VERIFIED WITH NOTES (Claude, 10-04); follow-up READY-FOR-REVIEW (0337f032, draft #165) — 12 unique template-specific Never/approval decisions, max109 instruction words, manual contract checks PASS
 - **G14 — AI regulation calendar 2026–2028** `docs/research/R5-ai-regulation-calendar.md`. Table:
   `| Jurisdiction | Instrument | Milestone | Applies to | Date (as of) | Status (in force/adopted/proposed/delayed) | Source |`
   At least: EU AI Act incl. Digital Omnibus changes; Colorado AI Act and amendments; NYC LL 144; Texas TRAIGA;
@@ -329,14 +329,14 @@ before anything reaches code.
   Table: `| Project or library | Purpose | Licence (verified, date) | Use mode (A–E per ADR-0177) | Status
   (in use / next / soon / later / never) | Decision record | Re-check by |`. Flag any licence or
   ownership change since 2026-10-05.
-  Status: READY-FOR-REVIEW (5593177e, draft #157; user-directed Codex takeover) — 175 rows, all 22 ADR projects and 64 direct dependency names; licence texts and bounded unknowns; shared build, web tsc/build PASS
+  Status: MERGED via #157 (Claude 10-07 13:30; follow-ups in To Codex) — READY-FOR-REVIEW (5593177e, draft #157; user-directed Codex takeover) — 175 rows, all 22 ADR projects and 64 direct dependency names; licence texts and bounded unknowns; shared build, web tsc/build PASS
 - **G17 — Incident notification clocks, further regimes** `docs/research/R8-incident-clocks.md` (ADR-0182
   follow-up). For each regime give: the trigger, who must notify whom, the deadline as written (verbatim
   quote), what starts the clock, whether an initial or incomplete report is allowed, and the source URL
   and date checked. Cover GDPR Arts. 33/34; NIS2 Art. 23; DORA Art. 19 with its RTS/ITS timelines; SEC
   Form 8-K Item 1.05; UK GDPR and the UK NIS Regulations; Colorado AI Act (as amended); and any US state
   AI law with an incident duty. Mark each `verified` or `UNVERIFIED`. Claude encodes only verified rows.
-  Status: BLOCKED (700081f8, draft #158; user-directed Codex takeover) — 29 corrected duty/stage rows; official legal text retrieval returns proxy403, all quotes explicitly UNVERIFIED and prohibited from encoding
+  Status: MERGED via #158 (Claude 10-07 13:30; follow-ups in To Codex) — BLOCKED (700081f8, draft #158; user-directed Codex takeover) — 29 corrected duty/stage rows; official legal text retrieval returns proxy403, all quotes explicitly UNVERIFIED and prohibited from encoding
 - **G18 — Engine re-verification for batch 5** `docs/research/R9-engine-reverification.md` (ADR-0177
   requires re-verifying before each adapter batch). For promptfoo, modelscan, garak, NVIDIA OpenShell
   and PurpleLlama CyberSecEval, record as of today:
@@ -349,7 +349,7 @@ before anything reaches code.
   - air-gapped operation.
 
   Table per project, sources cited.
-  Status: READY-FOR-REVIEW (6aabb3c3, draft #159; user-directed Codex takeover) — five primary-source project tables/seven checks each, corrected releases/licences and exact telemetry switches; source opt-out HTTP caveat; image/signature/runtime air-gap assurance UNVERIFIED; shared build and web tsc/build PASS
+  Status: MERGED via #159 (Claude 10-07 13:30; follow-ups in To Codex) — READY-FOR-REVIEW (6aabb3c3, draft #159; user-directed Codex takeover) — five primary-source project tables/seven checks each, corrected releases/licences and exact telemetry switches; source opt-out HTTP caveat; image/signature/runtime air-gap assurance UNVERIFIED; shared build and web tsc/build PASS
 ## 4. API contracts (Claude publishes; final by M1)
 
 All under the existing auth (session cookie or Bearer key). Errors use the
