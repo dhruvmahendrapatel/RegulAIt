@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
-import { optionEls, QueryGate, readCurrentOrgSettings, serverOpts, useAction, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
+import { optionEls, QueryGate, readCurrentOrgSettings, reconfirmNeeded, serverOpts, useAction, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
 import { PeopleLoadError, UserListTruncated } from "./IntegrationOwnership";
 import v from "../../views.module.css";
 
@@ -33,7 +33,7 @@ const COVERAGE_KEYS = ["mcpProtocolMethods", "mcpUpstreamTransports"] as const;
 export type CoverageChange =
   | { kind: "unchanged" }
   | { kind: "error"; error: string }
-  | { kind: "save"; body: CoverageBody; adds: boolean };
+  | { kind: "save"; body: CoverageBody; adds: boolean; added: string[] };
 /**
  * PUT /v1/org/settings is a partial update and these are whole lists, so a
  * save never sends the form's list as loaded. This admin's delta (added and
@@ -41,13 +41,14 @@ export type CoverageChange =
  * `current`, the lists re-read just before saving, and only a list whose
  * merged value differs from what is stored is sent: another admin's
  * concurrent change survives. `adds` is decided on that merged list against
- * `current`. Without a readable `current` nothing is sent (no stale overwrite).
+ * `current` (`added` names each newly enabled value as `key:value`). Without a
+ * readable `current` nothing is sent (no stale overwrite).
  */
 export function coverageChanges(loaded: Record<string, unknown>, methods: string[], transports: string[], current: Record<string, unknown> | null): CoverageChange {
   const list = (source: Record<string, unknown> | null, key: string) => (source && Array.isArray(source[key]) ? (source[key] as string[]) : null);
   const local = { mcpProtocolMethods: methods, mcpUpstreamTransports: transports };
   const body: CoverageBody = {};
-  let adds = false;
+  const newlyEnabled: string[] = [];
   for (const key of COVERAGE_KEYS) {
     const before = list(loaded, key) ?? [];
     const added = local[key].filter((value) => !before.includes(value));
@@ -58,9 +59,9 @@ export function coverageChanges(loaded: Record<string, unknown>, methods: string
     const merged = [...new Set([...now.filter((value) => !removed.includes(value)), ...added])];
     if (merged.length === now.length && merged.every((value) => now.includes(value))) continue;
     body[key] = merged;
-    if (merged.some((value) => !now.includes(value))) adds = true;
+    newlyEnabled.push(...merged.filter((value) => !now.includes(value)).map((value) => `${key}:${value}`));
   }
-  return Object.keys(body).length === 0 ? { kind: "unchanged" } : { kind: "save", body, adds };
+  return Object.keys(body).length === 0 ? { kind: "unchanged" } : { kind: "save", body, adds: newlyEnabled.length > 0, added: newlyEnabled };
 }
 
 function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
@@ -68,7 +69,9 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   const flight = useSingleFlight();
   const [methods, setMethods] = useState<string[]>(Array.isArray(settings.mcpProtocolMethods) ? settings.mcpProtocolMethods : []);
   const [transports, setTransports] = useState<string[]>(Array.isArray(settings.mcpUpstreamTransports) ? settings.mcpUpstreamTransports : []);
-  const [pending, setPending] = useState<CoverageBody | null>(null);
+  // the dialog keeps this admin's INTENT (the form's lists, read against the
+  // load-time snapshot), not the merged lists: confirming re-reads and re-merges
+  const [pending, setPending] = useState<{ methods: string[]; transports: string[]; shown: Extract<CoverageChange, { kind: "save" }>; changedWhileOpen: boolean } | null>(null);
   const unavailable = !Array.isArray(settings.mcpProtocolMethods) || !Array.isArray(settings.mcpUpstreamTransports);
   const save = (body: CoverageBody) => act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved");
   const toggle = (values: string[], value: string, checked: boolean) => checked ? [...values, value] : values.filter((item) => item !== value);
@@ -82,10 +85,26 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
       const change = coverageChanges(settings, methods, transports, await readCurrentOrgSettings());
       if (change.kind === "error") { act.setError(change.error); return; }
       if (change.kind === "unchanged") { act.setError("The stored MCP coverage already matches your change; nothing was saved."); return; }
-      if (change.adds) { confirming = true; setPending(change.body); return; }
+      if (change.adds) { confirming = true; setPending({ methods, transports, shown: change, changedWhileOpen: false }); return; }
       await save(change.body);
     } finally {
       // a confirmation keeps the flight until it is cancelled or saved
+      if (!confirming) flight.leave();
+    }
+  };
+  const confirm = async () => {
+    const intent = pending;
+    setPending(null);
+    let confirming = false;
+    try {
+      if (!intent) return;
+      // the dialog may have been open for minutes: merge into what is stored NOW
+      const change = coverageChanges(settings, intent.methods, intent.transports, await readCurrentOrgSettings());
+      if (change.kind === "error") { act.setError(change.error); return; }
+      if (change.kind === "unchanged") { act.setError("The stored MCP coverage already matches your change; nothing was saved."); return; }
+      if (reconfirmNeeded(intent.shown.added, change)) { confirming = true; setPending({ ...intent, shown: change, changedWhileOpen: true }); return; }
+      await save(change.body);
+    } finally {
       if (!confirming) flight.leave();
     }
   };
@@ -102,9 +121,9 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
     <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. Stdio also requires operator-configured executable directories, a pinned command digest and admission approval.</p>
     <Button type="submit" disabled={busy || unavailable}>Save MCP coverage</Button>
     {act.error && <p role="alert">{act.error}</p>}
-    <ConfirmModal open={pending !== null} title="Enable more MCP coverage?" body={<p>{pending?.mcpProtocolMethods && <>Enabled methods: {pending.mcpProtocolMethods.join(", ") || "none"}. </>}{pending?.mcpUpstreamTransports && <>Transports: {pending.mcpUpstreamTransports.join(", ") || "none"}. </>}The gateway audits this relaxation; user grants and admission checks still apply.</p>}
+    <ConfirmModal open={pending !== null} title="Enable more MCP coverage?" body={<p>{pending?.changedWhileOpen && <>The stored coverage changed while this was open; review the result again. </>}{pending?.shown.body.mcpProtocolMethods && <>Enabled methods: {pending.shown.body.mcpProtocolMethods.join(", ") || "none"}. </>}{pending?.shown.body.mcpUpstreamTransports && <>Transports: {pending.shown.body.mcpUpstreamTransports.join(", ") || "none"}. </>}The gateway audits this relaxation; user grants and admission checks still apply.</p>}
       confirmLabel="Save audited change" onCancel={() => { setPending(null); flight.leave(); }}
-      onConfirm={() => { const body = pending; setPending(null); void (async () => { try { if (body) await save(body); } finally { flight.leave(); } })(); }} />
+      onConfirm={() => void confirm()} />
   </form>;
 }
 

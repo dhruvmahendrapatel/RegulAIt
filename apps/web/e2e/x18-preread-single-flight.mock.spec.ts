@@ -118,6 +118,8 @@ test("retention: a cancelled or confirmed relaxation releases the form; a failed
   await page.getByLabel("Conversation retention (days)").fill("20");
   await save.click();
   await expect(dialog).toBeVisible();
+  // the confirm-time re-read succeeds again (round 5: a failed one refuses)
+  failReread = false;
   await dialog.getByRole("button", { name: "Save audited change" }).click();
   await expect.poll(() => writes).toEqual(["PUT /v1/org/settings"]);
   await expect(save).toBeEnabled();

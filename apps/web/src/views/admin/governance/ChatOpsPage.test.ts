@@ -159,12 +159,12 @@ describe("ChatOpsPage — an Outlook save sends only a real change, classified a
     const loaded = ["cab@example.test", "security@example.test"];
     const now = ["security@example.test"];
     expect(outlookRecipientChange(loaded, "cab@example.test\nsecurity@example.test\nnew@example.test", now))
-      .toEqual({ kind: "save", recipients: ["security@example.test", "new@example.test"], adds: true });
+      .toEqual({ kind: "save", recipients: ["security@example.test", "new@example.test"], adds: true, added: ["new@example.test"] });
     // this admin also removed cab: the stored list already says so
     expect(outlookRecipientChange(loaded, "security@example.test", now)).toEqual({ kind: "unchanged" });
     // a removal this admin made is a tightening against what is stored now
     expect(outlookRecipientChange(loaded, "cab@example.test", ["cab@example.test", "security@example.test"]))
-      .toEqual({ kind: "save", recipients: ["cab@example.test"], adds: false });
+      .toEqual({ kind: "save", recipients: ["cab@example.test"], adds: false, added: [] });
   });
 });
 

@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
-import { QueryGate, readCurrentOrgSettings, useAction, useSingleFlight } from "../adminKit";
+import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, useAction, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 
 interface MemoryStore {
@@ -56,9 +56,11 @@ type RetentionBody = Partial<{ semanticCacheTtlSeconds: number; conversationRete
 /**
  * PUT /v1/org/settings is a partial update, so the form sends only the fields
  * this admin edited: re-sending an untouched field from the loaded snapshot
- * would silently revert another admin's concurrent change to it. `extends` is
- * classified against `current`, the settings re-read just before saving (null
- * when that read failed, which always asks for confirmation).
+ * would silently revert another admin's concurrent change to it. A field whose
+ * value already equals `current` (the settings re-read just before saving) is
+ * dropped too: it would be a write with no effect and an audit row. `extends`
+ * is classified against `current` (null when that read failed, which always
+ * asks for confirmation).
  */
 export function retentionChanges(settings: Record<string, unknown>, ttl: string, days: string, current: Record<string, unknown> | null): { error: string } | { body: RetentionBody; extends: boolean } {
   // an edit is a different NUMBER ("030" is the stored 30); text that is not
@@ -69,19 +71,20 @@ export function retentionChanges(settings: Record<string, unknown>, ttl: string,
   if ((ttlEdited && (!/^\d+$/.test(ttl) || Number(ttl) < 1 || Number(ttl) > 2592000)) || (daysEdited && (!/^\d+$/.test(days) || Number(days) < 1 || Number(days) > 2555))) {
     return { error: "Enter whole numbers: cache lifetime 1–2,592,000 seconds; conversation retention 1–2,555 days." };
   }
+  const stillDifferent = (key: keyof RetentionBody, next: number) => current?.[key] !== next;
   const body: RetentionBody = {
-    ...(ttlEdited ? { semanticCacheTtlSeconds: Number(ttl) } : {}),
-    ...(daysEdited ? { conversationRetentionDays: Number(days) } : {}),
+    ...(ttlEdited && stillDifferent("semanticCacheTtlSeconds", Number(ttl)) ? { semanticCacheTtlSeconds: Number(ttl) } : {}),
+    ...(daysEdited && stillDifferent("conversationRetentionDays", Number(days)) ? { conversationRetentionDays: Number(days) } : {}),
   };
-  // classified against what is stored NOW; an unreadable value counts as a relaxation
-  const raises = (key: keyof RetentionBody) => {
-    const next = body[key];
-    if (next === undefined) return false;
+  return { body, extends: retentionRelaxed(body, current).length > 0 };
+}
+
+/** `key:value` for each field of `body` that relaxes what `current` stores; an unreadable value counts as relaxed. */
+export function retentionRelaxed(body: RetentionBody, current: Record<string, unknown> | null): string[] {
+  return (Object.keys(body) as Array<keyof RetentionBody>).filter((key) => {
     const stored = current?.[key];
-    return typeof stored !== "number" || next > stored;
-  };
-  const extends_ = raises("semanticCacheTtlSeconds") || raises("conversationRetentionDays");
-  return { body, extends: extends_ };
+    return typeof stored !== "number" || body[key]! > stored;
+  }).map((key) => `${key}:${body[key]}`);
 }
 
 function RetentionSettings({ settings }: { settings: Record<string, unknown> }) {
@@ -89,7 +92,8 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
   const flight = useSingleFlight();
   const [ttl, setTtl] = useState(String(settings.semanticCacheTtlSeconds ?? ""));
   const [days, setDays] = useState(String(settings.conversationRetentionDays ?? ""));
-  const [pending, setPending] = useState<RetentionBody | null>(null);
+  // the dialog keeps this admin's INTENT (the typed values); confirming re-reads
+  const [pending, setPending] = useState<{ ttl: string; days: string; body: RetentionBody; relaxed: string[]; changedWhileOpen: boolean } | null>(null);
   const unavailable = typeof settings.semanticCacheTtlSeconds !== "number" || typeof settings.conversationRetentionDays !== "number";
   const save = (body: RetentionBody) => act.run(() => api.put("/v1/org/settings", body), "Retention settings saved");
   const submit = async () => {
@@ -101,12 +105,37 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
       if ("error" in edited) { act.setError(edited.error); return; }
       if (Object.keys(edited.body).length === 0) { act.setError("No retention setting changed."); return; }
       // classify against the values stored now, not the loaded snapshot
-      const change = retentionChanges(settings, ttl, days, await readCurrentOrgSettings());
+      const current = await readCurrentOrgSettings();
+      const change = retentionChanges(settings, ttl, days, current);
       if ("error" in change) { act.setError(change.error); return; }
-      if (change.extends) { confirming = true; setPending(change.body); return; }
+      if (Object.keys(change.body).length === 0) { act.setError("The stored retention settings already match your change; nothing was saved."); return; }
+      if (change.extends) { confirming = true; setPending({ ttl, days, body: change.body, relaxed: retentionRelaxed(change.body, current), changedWhileOpen: false }); return; }
       await save(change.body);
     } finally {
       // a confirmation keeps the flight until it is cancelled or saved
+      if (!confirming) flight.leave();
+    }
+  };
+  const confirm = async () => {
+    const intent = pending;
+    setPending(null);
+    let confirming = false;
+    try {
+      if (!intent) return;
+      // the dialog may have been open for minutes: re-derive against what is stored NOW
+      const current = await readCurrentOrgSettings();
+      if (current === null) { act.setError("Could not load the current retention settings, so nothing was saved. Retry."); return; }
+      const change = retentionChanges(settings, intent.ttl, intent.days, current);
+      if ("error" in change) { act.setError(change.error); return; }
+      if (Object.keys(change.body).length === 0) { act.setError("The stored retention settings already match your change; nothing was saved."); return; }
+      const relaxed = retentionRelaxed(change.body, current);
+      if (reconfirmNeeded(intent.relaxed, { adds: change.extends, added: relaxed })) {
+        confirming = true;
+        setPending({ ...intent, body: change.body, relaxed, changedWhileOpen: true });
+        return;
+      }
+      await save(change.body);
+    } finally {
       if (!confirming) flight.leave();
     }
   };
@@ -119,9 +148,9 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
     <p>The strict default is 30 days since the last activity. More than 30 days relaxes that limit and is audited. Incident evidence holds still apply.</p>
     <Button type="submit" variant="primary" disabled={busy || unavailable}>Save retention settings</Button>
     {act.error && <p role="alert">{act.error}</p>}
-    <ConfirmModal open={pending !== null} title="Extend memory retention?" body={<p>{pending?.semanticCacheTtlSeconds !== undefined && <>Cache lifetime: {pending.semanticCacheTtlSeconds} seconds. </>}{pending?.conversationRetentionDays !== undefined && <>Conversation retention: {pending.conversationRetentionDays} days. </>}This retains information longer and the gateway audits the change.</p>}
+    <ConfirmModal open={pending !== null} title="Extend memory retention?" body={<p>{pending?.changedWhileOpen && <>The stored settings changed while this was open; review the result again. </>}{pending?.body.semanticCacheTtlSeconds !== undefined && <>Cache lifetime: {pending.body.semanticCacheTtlSeconds} seconds. </>}{pending?.body.conversationRetentionDays !== undefined && <>Conversation retention: {pending.body.conversationRetentionDays} days. </>}This retains information longer and the gateway audits the change.</p>}
       confirmLabel="Save audited change" onCancel={() => { setPending(null); flight.leave(); }}
-      onConfirm={() => { const body = pending; setPending(null); void (async () => { try { if (body) await save(body); } finally { flight.leave(); } })(); }} />
+      onConfirm={() => void confirm()} />
   </form>;
 }
 

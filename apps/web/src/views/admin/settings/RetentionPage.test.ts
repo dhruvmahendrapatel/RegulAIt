@@ -4,7 +4,8 @@
  * admin's concurrent change to the field it left alone.
  */
 import { describe, expect, it } from "vitest";
-import { retentionChanges } from "./RetentionPage";
+import { retentionChanges, retentionRelaxed } from "./RetentionPage";
+import { reconfirmNeeded } from "../adminKit";
 
 const loaded = { semanticCacheTtlSeconds: 3600, conversationRetentionDays: 30 };
 
@@ -41,5 +42,20 @@ describe("retentionChanges", () => {
     expect(retentionChanges(loaded, "3600", "030", loaded)).toEqual({ body: {}, extends: false });
     expect(retentionChanges(loaded, "03600", "30", loaded)).toEqual({ body: {}, extends: false });
     expect(retentionChanges(loaded, "3600", "031", loaded)).toEqual({ body: { conversationRetentionDays: 31 }, extends: true });
+  });
+
+  it("drops a field whose value already equals what is stored now (PR #181 review round 5)", () => {
+    const now = { semanticCacheTtlSeconds: 3600, conversationRetentionDays: 20 };
+    expect(retentionChanges(loaded, "3600", "20", now)).toEqual({ body: {}, extends: false });
+    expect(retentionChanges(loaded, "7200", "20", now)).toEqual({ body: { semanticCacheTtlSeconds: 7200 }, extends: true });
+  });
+
+  it("asks again only when the confirmed change now relaxes something the dialog did not show", () => {
+    const shown = retentionRelaxed({ conversationRetentionDays: 31 }, loaded);
+    expect(shown).toEqual(["conversationRetentionDays:31"]);
+    // same relaxation after the re-read: send without asking again
+    expect(reconfirmNeeded(shown, { adds: true, added: retentionRelaxed({ conversationRetentionDays: 31 }, { conversationRetentionDays: 25 }) })).toBe(false);
+    // the cache lifetime now relaxes too (another admin lowered it meanwhile): ask again
+    expect(reconfirmNeeded(shown, { adds: true, added: retentionRelaxed({ semanticCacheTtlSeconds: 3600, conversationRetentionDays: 31 }, { semanticCacheTtlSeconds: 60, conversationRetentionDays: 30 }) })).toBe(true);
   });
 });

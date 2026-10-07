@@ -332,6 +332,15 @@ export function useSingleFlight() {
   return { busy, enter, leave };
 }
 
+/**
+ * At confirmation time the change is re-derived from the values stored NOW.
+ * It is sent without asking again only when everything it newly relaxes was
+ * already in the dialog the person confirmed (`shown`); anything new opens the
+ * dialog again with the new content.
+ */
+export const reconfirmNeeded = (shown: readonly string[], next: { adds: boolean; added: readonly string[] }): boolean =>
+  next.adds && next.added.some((item) => !shown.includes(item));
+
 export function useAction() {
   const { toast } = useToast();
   const invalidate = useAdminInvalidate();

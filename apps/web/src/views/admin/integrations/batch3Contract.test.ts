@@ -33,9 +33,9 @@ describe("Batch 3 browser contract", () => {
   it("sends only the MCP coverage list that was changed (PUT /v1/org/settings is partial)", () => {
     const loaded = { mcpProtocolMethods: ["resources/list"], mcpUpstreamTransports: ["streamable_http"] };
     expect(coverageChanges(loaded, ["resources/list", "prompts/list"], ["streamable_http"], loaded))
-      .toEqual({ kind: "save", body: { mcpProtocolMethods: ["resources/list", "prompts/list"] }, adds: true });
+      .toEqual({ kind: "save", body: { mcpProtocolMethods: ["resources/list", "prompts/list"] }, adds: true, added: ["mcpProtocolMethods:prompts/list"] });
     expect(coverageChanges(loaded, ["resources/list"], [], loaded))
-      .toEqual({ kind: "save", body: { mcpUpstreamTransports: [] }, adds: false });
+      .toEqual({ kind: "save", body: { mcpUpstreamTransports: [] }, adds: false, added: [] });
     // order is not a change: the stored lists are sets (and nothing needs a re-read)
     expect(coverageChanges({ mcpProtocolMethods: ["a", "b"], mcpUpstreamTransports: [] }, ["b", "a"], [], null))
       .toEqual({ kind: "unchanged" });
@@ -58,10 +58,10 @@ describe("Batch 3 browser contract", () => {
     const now = { mcpProtocolMethods: ["resources/list"], mcpUpstreamTransports: ["streamable_http"] };
     // another admin removed prompts/list; this admin's own addition is what is confirmed
     expect(coverageChanges(stale, ["resources/list", "prompts/list", "completion/complete"], ["streamable_http"], now))
-      .toEqual({ kind: "save", body: { mcpProtocolMethods: ["resources/list", "completion/complete"] }, adds: true });
+      .toEqual({ kind: "save", body: { mcpProtocolMethods: ["resources/list", "completion/complete"] }, adds: true, added: ["mcpProtocolMethods:completion/complete"] });
     // this admin removed resources/list: the concurrent removal of prompts/list stays
     expect(coverageChanges(stale, ["prompts/list"], ["streamable_http"], now))
-      .toEqual({ kind: "save", body: { mcpProtocolMethods: [] }, adds: false });
+      .toEqual({ kind: "save", body: { mcpProtocolMethods: [] }, adds: false, added: [] });
     // a change that the stored lists already reflect sends nothing
     expect(coverageChanges(stale, ["resources/list"], ["streamable_http"], now)).toEqual({ kind: "unchanged" });
   });
