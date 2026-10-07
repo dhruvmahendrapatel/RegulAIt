@@ -125,6 +125,13 @@ describe("REGULATORY_UPDATES", () => {
 // cannot quietly reintroduce a withdrawn circular as current, a voluntary
 // standard as law in force, or an enforcement date as the effective date.
 describe("REGULATORY_UPDATES — G14-FEED reconciliation", () => {
+  it("the Art. 50 transparency entry links no unrelated EU AI Act controls", () => {
+    const u = REGULATORY_UPDATES.find((x) => x.key === "eu-ai-act-transparency-in-force");
+    expect(u, "missing entry 'eu-ai-act-transparency-in-force'").toBeDefined();
+    // every linked control must be an Art. 50 control; none exists in the pack yet, so the list is empty
+    for (const ref of u!.controlRefs) expect(ref).toMatch(/^eu-ai-act:art-50-/);
+  });
+
   const byKey = (key: string) => {
     const u = REGULATORY_UPDATES.find((x) => x.key === key);
     expect(u, `missing entry '${key}'`).toBeDefined();
