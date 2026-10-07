@@ -18,6 +18,7 @@
     "test": "vitest run --dir src"
   },
   "dependencies": {
+    "@regulait/shared": "workspace:*",
     "zod": "^3.25.67"
   },
   "devDependencies": {

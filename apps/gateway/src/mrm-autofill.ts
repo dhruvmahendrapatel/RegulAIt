@@ -680,75 +680,163 @@ const SERVING_ACTIVATION_ACTIONS = [
   "rolled_back",
 ] as const;
 
-/** the eval-run columns a drift comparison reads */
-const evalDriftColumns = {
-  id: evalRuns.id,
-  agentId: evalRuns.agentId,
-  datasetId: evalRuns.datasetId,
-  datasetVersion: evalRuns.datasetVersion,
-  scoringSemantics: evalRuns.scoringSemantics,
-  mode: evalRuns.mode,
-  judgeAgentId: evalRuns.judgeAgentId,
-  judgePanel: evalRuns.judgePanel,
-  repetitions: evalRuns.repetitions,
-  projectId: evalRuns.projectId,
-  trigger: evalRuns.trigger,
-  gatePassed: evalRuns.gatePassed,
-  regression: evalRuns.regression,
-  cases: evalRuns.cases,
-  passedCases: evalRuns.passedCases,
-  meanScore: evalRuns.meanScore,
-  passRate: evalRuns.passRate,
-  tolerance: evalRuns.tolerance,
-};
-
-type EvalDriftRow = {
-  agentId: string | null;
-  datasetId: string;
-  datasetVersion: number;
-  scoringSemantics: number;
-  mode: string;
-  judgeAgentId: string | null;
-  judgePanel: unknown;
-  repetitions: number;
-  projectId: string | null;
-  trigger: string;
-  gatePassed: boolean | null;
+/**
+ * ADR-0183 batch 2.2 — THE RUN COMPARISON, IN ONE QUERY.
+ *
+ * Every completed eval run and finished red-team run since the sign-off is
+ * paired, inside Postgres, with its CERTIFICATION-ERA run: the latest one at or
+ * before the sign-off that measured the same thing the same way. Before this,
+ * the candidates and every certification-era run of their datasets/libraries
+ * were read in two round trips and matched in JavaScript by a JSON key.
+ *
+ * "The same thing the same way":
+ *  - eval: same subject agent, dataset and version, scoring semantics, mode,
+ *    judge (or judge panel) and repetitions, and project (whose compliance
+ *    cascade shapes the input). Nullable columns match NULL to NULL, and a
+ *    JSON-null panel matches a NULL one (the old key read both as null);
+ *  - red-team: same agent, library and scoring semantics.
+ * A red-team run's backing eval row is counted once, as the red-team run, so
+ * neither side of the eval comparison is a red-team-backed row. Ties on
+ * `started_at` break on `id` (the old path left them to row order).
+ *
+ * The red-team verdict (a HIGHER attack-success rate is worse) is a plain
+ * comparison and is made here. The eval verdict is NOT re-implemented in SQL:
+ * it stays `evaluateEvalGate` with the certification-era run's tolerance, the
+ * one definition of an eval regression (ADR-0072), applied to the pairs this
+ * query returns — a second, SQL copy of the gate would be a mirror that can
+ * drift (ADR-0121 §4).
+ */
+type RunComparisonRow = {
+  kind: "eval" | "redteam";
+  trigger: string | null;
+  gate_passed: boolean | null;
   regression: boolean | null;
-  cases: number;
-  passedCases: number;
-  meanScore: number | null;
-  passRate: number | null;
-  tolerance: number;
+  cases: number | null;
+  passed_cases: number | null;
+  mean_score: number | null;
+  pass_rate: number | null;
+  scoring_semantics: number;
+  ref_found: boolean;
+  ref_cases: number | null;
+  ref_passed_cases: number | null;
+  ref_mean_score: number | null;
+  ref_pass_rate: number | null;
+  ref_tolerance: number | null;
+  ref_scoring_semantics: number | null;
+  asr_worse: boolean | null;
 };
 
-/** two runs are comparable only when they measured the same thing the same
- * way: same subject, suite version, semantics, mode, measuring instrument
- * (judge or panel, and its repetitions) and project (whose compliance cascade
- * shapes the input) */
-function evalComparisonKey(r: EvalDriftRow): string {
-  return JSON.stringify([
-    r.agentId,
-    r.datasetId,
-    r.datasetVersion,
-    r.scoringSemantics,
-    r.mode,
-    r.judgeAgentId,
-    r.judgePanel ?? null,
-    r.repetitions,
-    r.projectId,
-  ]);
+const idList = (ids: readonly string[]) => sql.join(ids.map((id) => sql`${id}`), sql`, `);
+
+/** `evalScope` for a raw-SQL alias of eval_runs */
+function evalScopeOn(alias: string, card: CardSubject, agentIds: string[]): SQL {
+  const t = sql.raw(alias);
+  if (card.agentId) return sql`${t}.agent_id = ${card.agentId}`;
+  return agentIds.length
+    ? sql`(${t}.custom_provider_id = ${card.customProviderId!} OR ${t}.agent_id IN (${idList(agentIds)}))`
+    : sql`${t}.custom_provider_id = ${card.customProviderId!}`;
 }
 
-function evalAggregateOf(r: EvalDriftRow): EvalAggregate | null {
-  if (r.meanScore == null || r.passRate == null) return null;
-  return {
-    cases: r.cases,
-    passedCases: r.passedCases,
-    failedCases: r.cases - r.passedCases,
-    meanScore: r.meanScore,
-    passRate: r.passRate,
-  };
+function runComparisonsSinceCertification(db: Db, card: CardSubject, agentIds: string[], since: Date) {
+  const sinceIso = since.toISOString();
+  const notBacked = (alias: string) =>
+    sql`NOT EXISTS (SELECT 1 FROM redteam_runs b WHERE b.eval_run_id = ${sql.raw(alias)}.id)`;
+  const evalPairs = sql`
+    SELECT 'eval' AS kind, c.trigger, c.gate_passed, c.regression, c.cases, c.passed_cases,
+           c.mean_score, c.pass_rate, c.scoring_semantics,
+           (r.id IS NOT NULL) AS ref_found, r.cases AS ref_cases, r.passed_cases AS ref_passed_cases,
+           r.mean_score AS ref_mean_score, r.pass_rate AS ref_pass_rate, r.tolerance AS ref_tolerance,
+           r.scoring_semantics AS ref_scoring_semantics, NULL::boolean AS asr_worse
+      FROM eval_runs c
+      LEFT JOIN LATERAL (
+        SELECT r.id, r.cases, r.passed_cases, r.mean_score, r.pass_rate, r.tolerance, r.scoring_semantics
+          FROM eval_runs r
+         WHERE ${evalScopeOn("r", card, agentIds)}
+           AND r.status = 'completed' AND ${notBacked("r")}
+           AND r.started_at <= ${sinceIso}::timestamptz
+           AND r.agent_id IS NOT DISTINCT FROM c.agent_id
+           AND r.dataset_id = c.dataset_id
+           AND r.dataset_version = c.dataset_version
+           AND r.scoring_semantics = c.scoring_semantics
+           AND r.mode = c.mode
+           AND r.judge_agent_id IS NOT DISTINCT FROM c.judge_agent_id
+           AND COALESCE(r.judge_panel, 'null'::jsonb) = COALESCE(c.judge_panel, 'null'::jsonb)
+           AND r.repetitions = c.repetitions
+           AND r.project_id IS NOT DISTINCT FROM c.project_id
+         ORDER BY r.started_at DESC, r.id DESC
+         LIMIT 1
+      ) r ON true
+     WHERE ${evalScopeOn("c", card, agentIds)}
+       AND c.status = 'completed' AND ${notBacked("c")}
+       AND c.started_at > ${sinceIso}::timestamptz`;
+  const redteamPairs = sql`
+    SELECT 'redteam' AS kind, NULL::text, NULL::boolean, NULL::boolean, NULL::integer, NULL::integer,
+           NULL::double precision, NULL::double precision, c.scoring_semantics,
+           (r.asr IS NOT NULL), NULL::integer, NULL::integer, NULL::double precision, NULL::double precision,
+           NULL::double precision, r.scoring_semantics, (c.asr > r.asr)
+      FROM redteam_runs c
+      LEFT JOIN LATERAL (
+        SELECT r.asr, r.scoring_semantics
+          FROM redteam_runs r
+         WHERE r.agent_id = c.agent_id
+           AND r.library_id = c.library_id
+           AND r.scoring_semantics = c.scoring_semantics
+           AND r.started_at <= ${sinceIso}::timestamptz
+           AND r.finished_at IS NOT NULL AND r.asr IS NOT NULL
+         ORDER BY r.started_at DESC, r.id DESC
+         LIMIT 1
+      ) r ON true
+     WHERE c.agent_id IN (${idList(agentIds)})
+       AND c.started_at > ${sinceIso}::timestamptz
+       AND c.finished_at IS NOT NULL AND c.asr IS NOT NULL`;
+  return db.execute(agentIds.length ? sql`${evalPairs} UNION ALL ${redteamPairs}` : evalPairs);
+}
+
+/** apply the verdicts to the pairs `runComparisonsSinceCertification` returned */
+function countRunRegressions(res: unknown): { evalRegressions: number; redteamRegressions: number } {
+  const rows = ((res as { rows?: RunComparisonRow[] }).rows ?? []) as RunComparisonRow[];
+  let evalRegressions = 0;
+  let redteamRegressions = 0;
+  for (const row of rows) {
+    if (row.kind === "redteam") {
+      if (row.asr_worse === true) redteamRegressions += 1;
+      continue;
+    }
+    const serverGateFailed =
+      SERVER_EVAL_TRIGGERS.has(row.trigger ?? "") && (row.gate_passed === false || row.regression === true);
+    const current: EvalAggregate | null =
+      row.mean_score == null || row.pass_rate == null
+        ? null
+        : {
+            cases: row.cases!,
+            passedCases: row.passed_cases!,
+            failedCases: row.cases! - row.passed_cases!,
+            meanScore: row.mean_score,
+            passRate: row.pass_rate,
+          };
+    const reference: EvalAggregate | null =
+      !row.ref_found || row.ref_mean_score == null || row.ref_pass_rate == null
+        ? null
+        : {
+            cases: row.ref_cases!,
+            passedCases: row.ref_passed_cases!,
+            failedCases: row.ref_cases! - row.ref_passed_cases!,
+            meanScore: row.ref_mean_score,
+            passRate: row.ref_pass_rate,
+          };
+    const worseThanCertified =
+      current !== null &&
+      reference !== null &&
+      evaluateEvalGate({
+        current,
+        baseline: reference,
+        tolerance: row.ref_tolerance!,
+        currentSemantics: row.scoring_semantics,
+        baselineSemantics: row.ref_scoring_semantics!,
+      }).regression;
+    if (serverGateFailed || worseThanCertified) evalRegressions += 1;
+  }
+  return { evalRegressions, redteamRegressions };
 }
 
 /** eval runs whose trigger the SERVER sets, with thresholds an admin configured */
@@ -861,8 +949,6 @@ export async function computeCardStaleness(
       ),
     ),
   ];
-  // a red-team run's eval rows are counted once, as the red-team run
-  const notRedteamBacked = sql`NOT EXISTS (SELECT 1 FROM ${redteamRuns} WHERE ${redteamRuns.evalRunId} = ${evalRuns.id})`;
   const none = Promise.resolve([{ n: 0 }]);
 
   const [
@@ -873,8 +959,7 @@ export async function computeCardStaleness(
     revocationsSince,
     risksSince,
     regressionsSince,
-    evalCandidates,
-    rtCandidates,
+    runComparisons,
     guardrailWrites,
     activationsSince,
     agentConfigEditsSince,
@@ -933,23 +1018,7 @@ export async function computeCardStaleness(
         ),
       ),
     // --- drift inputs ----------------------------------------------------
-    db
-      .select(evalDriftColumns)
-      .from(evalRuns)
-      .where(and(evalWhere, eq(evalRuns.status, "completed"), notRedteamBacked, gt(evalRuns.startedAt, since))),
-    agentIds.length
-      ? db
-          .select({ agentId: redteamRuns.agentId, libraryId: redteamRuns.libraryId, scoringSemantics: redteamRuns.scoringSemantics, asr: redteamRuns.asr })
-          .from(redteamRuns)
-          .where(
-            and(
-              inArray(redteamRuns.agentId, agentIds),
-              gt(redteamRuns.startedAt, since),
-              isNotNull(redteamRuns.finishedAt),
-              isNotNull(redteamRuns.asr),
-            ),
-          )
-      : Promise.resolve([] as Array<{ agentId: string | null; libraryId: string; scoringSemantics: number; asr: number | null }>),
+    runComparisonsSinceCertification(db, card, agentIds, since),
     agentIds.length
       ? db
           .select({ ruleId: auditLog.ruleId, detail: auditLog.detail })
@@ -1010,74 +1079,7 @@ export async function computeCardStaleness(
       .where(and(eq(auditLog.ruleId, "mrm-card-updated"), eq(auditLog.objectId, card.id), gt(auditLog.at, since))),
   ], sequential);
 
-  // --- the certification-era references the runs are compared with --------
-  const evalDatasetIds = [...new Set(evalCandidates.map((r) => r.datasetId))];
-  const rtLibraryIds = [...new Set(rtCandidates.map((r) => r.libraryId))];
-  const [evalRefs, rtRefs] = await readAll([
-    evalDatasetIds.length
-      ? db
-          .select(evalDriftColumns)
-          .from(evalRuns)
-          .where(
-            and(
-              evalWhere,
-              eq(evalRuns.status, "completed"),
-              notRedteamBacked,
-              inArray(evalRuns.datasetId, evalDatasetIds),
-              lte(evalRuns.startedAt, since),
-            ),
-          )
-          .orderBy(desc(evalRuns.startedAt))
-      : Promise.resolve([] as EvalDriftRow[]),
-    rtLibraryIds.length && agentIds.length
-      ? db
-          .select({ agentId: redteamRuns.agentId, libraryId: redteamRuns.libraryId, scoringSemantics: redteamRuns.scoringSemantics, asr: redteamRuns.asr })
-          .from(redteamRuns)
-          .where(
-            and(
-              inArray(redteamRuns.agentId, agentIds),
-              inArray(redteamRuns.libraryId, rtLibraryIds),
-              lte(redteamRuns.startedAt, since),
-              isNotNull(redteamRuns.finishedAt),
-              isNotNull(redteamRuns.asr),
-            ),
-          )
-          .orderBy(desc(redteamRuns.startedAt))
-      : Promise.resolve([] as Array<{ agentId: string | null; libraryId: string; scoringSemantics: number; asr: number | null }>),
-  ], sequential);
-
-  // newest first, so the first row per key IS the certification-era run
-  const evalRefByKey = new Map<string, EvalDriftRow>();
-  for (const r of evalRefs) if (!evalRefByKey.has(evalComparisonKey(r))) evalRefByKey.set(evalComparisonKey(r), r);
-  let evalRegressions = 0;
-  for (const run of evalCandidates) {
-    const serverGateFailed =
-      SERVER_EVAL_TRIGGERS.has(run.trigger) && (run.gatePassed === false || run.regression === true);
-    const ref = evalRefByKey.get(evalComparisonKey(run));
-    const current = evalAggregateOf(run);
-    const reference = ref ? evalAggregateOf(ref) : null;
-    const worseThanCertified =
-      current !== null &&
-      reference !== null &&
-      evaluateEvalGate({
-        current,
-        baseline: reference,
-        tolerance: ref!.tolerance,
-        currentSemantics: run.scoringSemantics,
-        baselineSemantics: ref!.scoringSemantics,
-      }).regression;
-    if (serverGateFailed || worseThanCertified) evalRegressions += 1;
-  }
-
-  const rtKey = (r: { agentId: string | null; libraryId: string; scoringSemantics: number }) =>
-    JSON.stringify([r.agentId, r.libraryId, r.scoringSemantics]);
-  const rtRefByKey = new Map<string, number>();
-  for (const r of rtRefs) if (r.asr != null && !rtRefByKey.has(rtKey(r))) rtRefByKey.set(rtKey(r), r.asr);
-  let redteamRegressions = 0;
-  for (const run of rtCandidates) {
-    const refAsr = rtRefByKey.get(rtKey(run));
-    if (run.asr != null && refAsr !== undefined && run.asr > refAsr) redteamRegressions += 1;
-  }
+  const { evalRegressions, redteamRegressions } = countRunRegressions(runComparisons);
 
   const risks = await classifyRiskChanges(db, agentIds, since, sequential);
   const changes = {

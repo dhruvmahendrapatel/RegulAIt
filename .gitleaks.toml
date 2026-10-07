@@ -128,3 +128,28 @@ condition = "AND"
 paths = ['''^README\.md$''']
 regexTarget = "secret"
 regexes = ['''^dev-bootstrap$''']
+
+[[allowlists]]
+description = "Shell variable references passed to curl --user (the values come from the environment, never the file)"
+condition = "AND"
+paths = ['''^docker-compose\.yml$''', '''^\.github/workflows/ci\.yml$''']
+regexTarget = "secret"
+regexes = [
+  '''^"\$\$\{AWS_ACCESS_KEY_ID\}:\$\$\{AWS_SECRET_ACCESS_KEY\}"$''',
+  '''^"\$\$S3_ACCESS_KEY_ID:\$\$S3_SECRET_ACCESS_KEY"$''',
+]
+
+[[allowlists]]
+description = "The former dev/CI object-store default (synthetic, public in README since ADR-0060), only in the commit that moved CI to SeaweedFS; later commits use regulait-dev-objectstore via env"
+condition = "AND"
+paths = ['''^\.github/workflows/ci\.yml$''']
+commits = ["37c0de01f66c77557f914ca3d3a4a2d6ab2d2b58"]
+regexTarget = "secret"
+regexes = ['''^regulait:regulait-dev-minio$''']
+
+[[allowlists]]
+description = "RFC 6238 Appendix B public test seed (ASCII 12345678901234567890 in base32)"
+condition = "AND"
+paths = ['''^apps/gateway/src/totp\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ$''']

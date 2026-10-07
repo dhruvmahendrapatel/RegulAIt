@@ -23,6 +23,8 @@ import { Badge, Button, Card, EmptyState, ErrorState, Input, Select, SkeletonBlo
 import { ModelTileBody } from "../../ui/ModelPicker";
 import { Logo } from "../../ui/logos/Logo";
 import { useToast } from "../../ui/toast";
+import { LITERACY_REFUSAL_CODE, REFUSAL_GUIDANCE } from "../../api/refusals";
+import { RefusalNotice } from "../../ui/RefusalNotice";
 import {
   bindingsFromGranted,
   bindingsFromRegistry,
@@ -404,6 +406,7 @@ function RunResult(props: { run: RunState; bindings: ModelBinding[]; requestedId
           <span className={s.stat}>{fmtLatency(run.latencyMs)}</span>
         </div>
         {run.reason && <p className={s.resultText}>{run.reason}</p>}
+        {run.ruleId === LITERACY_REFUSAL_CODE && <RefusalNotice guidance={REFUSAL_GUIDANCE.literacy} />}
       </div>
     );
   }

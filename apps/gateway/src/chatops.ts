@@ -105,6 +105,9 @@ import {
   SLACK_RETRY_NUM_HEADER,
   teamsActivityForCard,
   teamsActivityFreshness,
+  outlookMessageForAlert,
+  outlookMessageForCard,
+  type OutlookMessagePayload,
   type ApprovalCard,
   verifyChatSignature,
   type ChatOpsProvider,
@@ -120,6 +123,9 @@ import {
   type InboundResult,
 } from "./builder-channels.js";
 import {
+  ConnectorProviderError,
+  OUTLOOK_DEFAULT_GRAPH_BASE_URL,
+  parseOutlookCredential,
   resolveConnectorProvider,
   SlackConnectorProvider,
   SLACK_DEFAULT_BASE_URL,
@@ -128,8 +134,8 @@ import {
 import { ConnectionEgressBlockedError, guardConnectionCall } from "./connection-egress.js";
 import { EgressBlockedError } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { joinPublicUrl, PUBLIC_URL_ENV, resolvePublicUrl } from "./public-url.js";
 import { projectPiiMode } from "./projects.js";
-import { baseUrlFor } from "./mcp-auth-metadata.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
@@ -149,8 +155,45 @@ type OwnMessageUpdate = { [OWN_MESSAGE_UPDATE]: { ts: string; text: string; bloc
  * Teams was in between ADR-0061 and ADR-0113. Keeping the lists separate is
  * what stops the next inbound-only provider from being silently assumed
  * postable.
+ *
+ * ADR-0121 amendment (ADR-0183 batch 2.6): outlook joins — the SEND half only.
+ * Its courier is a Microsoft Graph `sendMail` carrying the request summary and
+ * the portal link; inbound stays `inbound_unsupported_by_design`.
  */
-export const CHATOPS_OUTBOUND_PROVIDERS: readonly ChatOpsProvider[] = ["slack", "teams"];
+export const CHATOPS_OUTBOUND_PROVIDERS: readonly ChatOpsProvider[] = ["slack", "teams", "outlook"];
+
+/** the providers a card is posted to as MAIL: no decide affordance, ever */
+const MAIL_PROVIDERS: readonly ChatOpsProvider[] = ["outlook"];
+/** an outlook "channel" is one recipient mailbox */
+const mailboxSchema = z.string().email().max(200);
+
+/**
+ * ADR-0121 amendment — the ONLY origin a link in mail may use. Never the
+ * request's Host: whoever posts a card must not choose the domain in a mail the
+ * organisation's own mailbox sends. Null (with the refusal body) when
+ * REGULAIT_PUBLIC_URL is unset or unusable.
+ */
+function mailPublicUrl(): { ok: true; url: string } | { ok: false; status: 422; body: Record<string, unknown> } {
+  let url: string | null = null;
+  let why = "it is unset";
+  try {
+    url = resolvePublicUrl();
+  } catch (err) {
+    why = err instanceof Error ? err.message : String(err);
+  }
+  if (url) return { ok: true, url };
+  return {
+    ok: false,
+    status: 422,
+    body: {
+      error: "public_url_required",
+      detail:
+        `outlook mail links to the approval in RegulAIt, and that link may only use the deployment's public URL ` +
+        `(${PUBLIC_URL_ENV}) — never the origin a request happened to arrive on. ${why === "it is unset" ? `${PUBLIC_URL_ENV} is unset` : why}. ` +
+        `Set it to this deployment's https origin and restart; nothing was sent.`,
+    },
+  };
+}
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const CHATOPS_RULE_IDS = {
@@ -175,6 +218,8 @@ export const CHATOPS_RULE_IDS = {
   /** ADR-0173 batch 2b review — the Slack workspace pin */
   slackTeamChanged: "chatops-slack-team-changed",
   slackRefusedTeam: "chatops-slack-refused-team",
+  /** ADR-0183 batch 2 review (L1) — mail goes to the registered mailbox only */
+  postRefusedRecipient: "chatops-post-refused-unregistered-recipient",
 } as const;
 
 /** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
@@ -356,9 +401,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         // outlook connection legitimately holds none, and reporting `true`
         // for it would assert a control that does not exist.
         signingSecretSet: r.signingSecretCiphertext !== null,
-        // ADR-0179 (AER-015) — whether a card can be posted here at all. False
-        // for an outlook row registered before registration was refused: it
-        // still lists and still refuses inbound, and a post to it answers 501.
+        // ADR-0179 (AER-015) — whether a card can be posted here at all. Every
+        // registrable provider can since ADR-0183 2.6 gave outlook its sender;
+        // false would mark a provider registered inbound-first.
         outboundSupported: CHATOPS_OUTBOUND_PROVIDERS.includes(r.provider as ChatOpsProvider),
         // ADR-0173 batch 2b — the Teams bot (identifiers, not secrets)
         botAppId: r.botAppId,
@@ -384,10 +429,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     // after the admin had registered it and been told it was connected. The
     // refusal now happens here, FIRST, before the connector or the data key is
     // looked at, because nothing else about the request can make it work.
-    // Read from the outbound list rather than naming outlook, so it lifts the
-    // day a sender lands. Existing rows are untouched: they still list, still
-    // refuse inbound (ADR-0121) and still 501 on a post, and the list below
-    // now says so with `outboundSupported: false`.
+    // Read from the outbound list rather than naming outlook, so it lifted the
+    // day a sender landed (ADR-0183 2.6: outlook now sends). It stays as the
+    // wall for any future provider registered inbound-first.
     if (!CHATOPS_OUTBOUND_PROVIDERS.includes(body.provider)) {
       return reply.status(422).send({
         error: "outbound_provider_unavailable",
@@ -411,6 +455,47 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         error: "connector_kind_mismatch",
         detail: `connector '${connector.name}' has providerKind '${connector.providerKind ?? "null"}', not '${body.provider}' — ChatOps posts through the existing connector adapter and its existing credential`,
       });
+    }
+    // ADR-0183 2.6 — AN OUTLOOK WORKSPACE IS REGISTERED ONLY WHEN IT CAN SEND.
+    // Strict by default: the recipient must be one mailbox, a mail approval
+    // can never be chat-decidable, and the connector must already hold the
+    // app registration (tenant, client id, client secret, sender mailbox) in
+    // the encrypted connector credential store — checked by parsing it, so a
+    // workspace that would fail its first send is refused now, by name.
+    if (body.provider === "outlook") {
+      const pub = mailPublicUrl();
+      if (!pub.ok) return reply.status(pub.status).send(pub.body);
+      if (!mailboxSchema.safeParse(body.defaultChannel).success) {
+        return reply.status(400).send({
+          error: "invalid_recipient",
+          detail: "an outlook workspace's default channel is the ONE mailbox approval mail is sent to (e.g. approvers@acme.com)",
+        });
+      }
+      if (body.allowFencedDecide) {
+        return reply.status(400).send({
+          error: "fenced_decide_not_applicable",
+          detail:
+            "outlook carries no decision of any kind (ADR-0121): approvals are decided in the portal, so there is no " +
+            "chat decide to allow for sensitive approvals",
+        });
+      }
+      const [cred] = await db.select().from(connectorCredentials).where(eq(connectorCredentials.connectorId, connector.id));
+      if (!cred) {
+        return reply.status(400).send({
+          error: "connector_credential_missing",
+          detail:
+            `connector '${connector.name}' holds no credential: set its app registration first ` +
+            `({appId, appPassword, tenantId, senderUpn} — the client id, client secret, tenant and sender mailbox)`,
+        });
+      }
+      try {
+        parseOutlookCredential(decryptSecret(opts.dataKey, cred.tokenCiphertext));
+      } catch (err) {
+        if (err instanceof ConnectorProviderError) {
+          return reply.status(400).send({ error: "invalid_connector_credential", detail: err.message });
+        }
+        throw err;
+      }
     }
     // ADR-0121 — THE SIGNING SECRET IS PER-PROVIDER, AND BOTH DIRECTIONS ARE
     // REFUSED RATHER THAN QUIETLY TOLERATED.
@@ -590,17 +675,24 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     card: ApprovalCard,
     actorUserId: string | null,
     label: string,
+    /** ADR-0183 2.6: the mail an outlook workspace sends for this card; null =
+     * this kind of card is not sent as mail (a decided card: outlook has no
+     * inbound decision to retire) */
+    mail: OutlookMessagePayload | null = null,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     // The SAME composed card, rendered for the provider that will show it. The
     // fence decision is NOT re-taken here: `card.actions` is already empty when
-    // `chatDecidable` said no, and both renderers read that one field.
+    // `chatDecidable` said no, and both renderers read that one field. The mail
+    // renderer reads no action at all (ADR-0121 §2).
     return postToChat(
       conn,
       channel,
       (provider) =>
-        provider === "teams"
-          ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
-          : { op: "chat.postMessage", text: card.text, blocks: card.blocks },
+        provider === "outlook"
+          ? mail && { op: "sendMail", ...mail }
+          : provider === "teams"
+            ? { op: "conversations.sendToConversation", ...teamsActivityForCard(card) }
+            : { op: "chat.postMessage", text: card.text, blocks: card.blocks },
       actorUserId,
       label,
     );
@@ -616,7 +708,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   async function postToChat(
     conn: typeof chatopsConnections.$inferSelect,
     channel: string,
-    payloadFor: (provider: "slack" | "teams") => Record<string, unknown> | OwnMessageUpdate,
+    payloadFor: (provider: "slack" | "teams" | "outlook") => Record<string, unknown> | OwnMessageUpdate | null,
     actorUserId: string | null,
     label: string,
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
@@ -648,7 +740,50 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     const baseUrl =
       cred.baseUrl ??
       connector.baseUrl ??
-      (conn.provider === "teams" ? TEAMS_DEFAULT_BASE_URL : SLACK_DEFAULT_BASE_URL);
+      (conn.provider === "teams"
+        ? TEAMS_DEFAULT_BASE_URL
+        : conn.provider === "outlook"
+          ? OUTLOOK_DEFAULT_GRAPH_BASE_URL
+          : SLACK_DEFAULT_BASE_URL);
+    const kind = conn.provider as "slack" | "teams" | "outlook";
+    // an outlook "channel" is ONE recipient mailbox, whoever named it
+    if (kind === "outlook" && !mailboxSchema.safeParse(channel).success) {
+      return { ok: false, status: 400, body: { error: "invalid_recipient", detail: "an outlook message is sent to ONE mailbox address" } };
+    }
+    // ADR-0183 batch 2 review (L1) — STRICT: mail goes to the workspace's
+    // REGISTERED mailbox only. A per-post `channel` override naming any other
+    // address would let whoever posts make the organisation's own mailbox send
+    // an approval summary anywhere, including off-domain. Refused and audited.
+    // (An admin-set allow-list of further recipients needs its own column and
+    // is a follow-up; until then the registered recipient is the whole list.)
+    if (kind === "outlook" && channel.trim().toLowerCase() !== conn.defaultChannel.trim().toLowerCase()) {
+      await audit(actorUserId, "chatops_connection", conn.id, CHATOPS_RULE_IDS.postRefusedRecipient, "deny",
+        `outlook workspace '${conn.name}': mail to an unregistered recipient refused ('${label}')`,
+        { registered: conn.defaultChannel, requested: channel, label });
+      return {
+        ok: false,
+        status: 403,
+        body: {
+          error: "recipient_not_registered",
+          detail: "an outlook workspace sends mail to its registered mailbox only; register a workspace for another recipient",
+        },
+      };
+    }
+    if (kind === "outlook") {
+      const pub = mailPublicUrl();
+      if (!pub.ok) return pub;
+    }
+    const payload = payloadFor(kind);
+    if (payload === null) {
+      return {
+        ok: false,
+        status: 501,
+        body: {
+          error: "message_kind_unsupported",
+          detail: `this kind of message is not sent to ${conn.provider} workspaces ('${label}')`,
+        },
+      };
+    }
 
     // EVERY post is guarded — no vendor-default exemption. Posting approval
     // content to a third party is exactly the shape ADR-0034 exists for, so
@@ -682,12 +817,20 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       throw err;
     }
 
-    const provider = resolveConnectorProvider(
-      { kind: conn.provider as "slack" | "teams", baseUrl, token },
-      guarded.fetchImpl as unknown as Parameters<typeof resolveConnectorProvider>[1],
-    );
-
-    const payload = payloadFor(conn.provider === "teams" ? "teams" : "slack");
+    let provider;
+    try {
+      provider = resolveConnectorProvider(
+        { kind, baseUrl, token },
+        guarded.fetchImpl as unknown as Parameters<typeof resolveConnectorProvider>[1],
+      );
+    } catch (err) {
+      // a credential the adapter cannot parse (ADR-0023 structured JSON):
+      // its message names the shape, never the values
+      if (err instanceof ConnectorProviderError) {
+        return { ok: false, status: 400, body: { error: "invalid_connector_credential", detail: err.message } };
+      }
+      throw err;
+    }
 
     let result;
     try {
@@ -721,9 +864,22 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
             error: "egress_blocked",
             code: err.decision.code,
             detail:
-              `chatops workspace '${conn.name}': ${err.decision.reason} (a Teams post reaches the Microsoft Entra ` +
-              `login host as well as the Bot Connector service host — BOTH need an Egress Allow Hosts entry)`,
+              `chatops workspace '${conn.name}': ${err.decision.reason} (` +
+              (conn.provider === "outlook"
+                ? "an Outlook send reaches the Microsoft Entra login host as well as Microsoft Graph"
+                : "a Teams post reaches the Microsoft Entra login host as well as the Bot Connector service host") +
+              " — BOTH need an Egress Allow Hosts entry)",
           },
+        };
+      }
+      // ADR-0183 2.6: a provider refusal (a bad client secret, Graph's 4xx, a
+      // 429) is a named 502, not an opaque 500. The adapter's message names the
+      // upstream's error code and description, never the credential.
+      if (err instanceof ConnectorProviderError) {
+        return {
+          ok: false,
+          status: 502,
+          body: { error: "chatops_post_failed", upstreamStatus: err.status ?? null, detail: err.message },
         };
       }
       throw err;
@@ -734,8 +890,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     // `chatops_messages.message_ref` stores — but the field is read PER
     // PROVIDER rather than by a `ts ?? id` fallback, so a response that happens
     // to carry both cannot silently make one provider read the other's handle.
-    const refField = conn.provider === "teams" ? "id" : "ts";
-    const messageRef = typeof body[refField] === "string" ? (body[refField] as string) : null;
+    // Graph's sendMail answers 202 with no handle at all: outlook has none.
+    const refField = conn.provider === "teams" ? "id" : conn.provider === "outlook" ? null : "ts";
+    const messageRef = refField && typeof body[refField] === "string" ? (body[refField] as string) : null;
     return { ok: true, messageRef };
   }
 
@@ -764,7 +921,12 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     if (!conn.enabled) return reply.status(422).send({ error: "connection_disabled" });
 
     const fenced = await fenceFor(row);
-    const decidable = chatDecidable({ fenced, allowFencedDecide: conn.allowFencedDecide });
+    const mail = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider);
+    // mail links ONLY to REGULAIT_PUBLIC_URL; unset → refused, nothing composed or sent
+    const pub = mail ? mailPublicUrl() : null;
+    if (pub && !pub.ok) return reply.status(pub.status).send(pub.body);
+    // ADR-0121 §2: mail is never decidable, whatever the fence or the workspace says
+    const decidable = !mail && chatDecidable({ fenced, allowFencedDecide: conn.allowFencedDecide });
     const [requester] = await db.select({ email: users.email }).from(users).where(eq(users.id, row.userId));
     const [approver] = await db.select({ email: users.email }).from(users).where(eq(users.id, row.approverUserId));
 
@@ -775,13 +937,17 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       stageId: row.stageId,
       requesterLabel: requester?.email ?? null,
       approverLabel: approver?.email ?? null,
-      portalUrl: portalUrl(approvalId),
+      // mail is read away from the portal, so it carries an ABSOLUTE link, and
+      // its origin is REGULAIT_PUBLIC_URL alone — the request's Host is never
+      // read for it. The link is the approval's page, never a token: opening it
+      // means signing in.
+      portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${portalUrl(approvalId)}`) : portalUrl(approvalId),
       fenced,
       decidable,
     });
 
     const channel = body.channel ?? conn.defaultChannel;
-    const posted = await postCard(conn, channel, card, req.authCtx.userId, "approval-mirror");
+    const posted = await postCard(conn, channel, card, req.authCtx.userId, "approval-mirror", mail ? outlookMessageForCard(card) : null);
     if (!posted.ok) return reply.status(posted.status).send(posted.body);
 
     const [msg] = await db
@@ -814,8 +980,24 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       portalUrl: alertPortalUrl(alert.id),
     });
     let posted: Awaited<ReturnType<typeof postCard>>;
+    const pub = conn.provider === "outlook" ? mailPublicUrl() : null;
     try {
-      posted = await postCard(conn, channel, card, actorUserId, "monitor-alert");
+      posted =
+        pub && !pub.ok
+          ? pub
+          : await postCard(
+              conn,
+              channel,
+              card,
+              actorUserId,
+              "monitor-alert",
+              outlookMessageForAlert({
+                severity: alert.severity,
+                ruleLabel: (MONITOR_RULES as Record<string, { label: string }>)[alert.ruleId]?.label ?? alert.ruleId,
+                title: alert.title,
+                portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${alertPortalUrl(alert.id)}`) : `/ui${alertPortalUrl(alert.id)}`,
+              }),
+            );
     } catch (err) {
       posted = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
     }
@@ -974,28 +1156,31 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       conn,
       input.target,
       (provider) =>
-        provider === "teams"
-          ? input.threadRef
-            ? { op: "conversations.replyToActivity", text: input.text, textFormat: "plain", replyToId: input.threadRef }
-            : { op: "conversations.sendToConversation", text: input.text, textFormat: "plain" }
-          : input.updateRef
-            ? // ADR-0173 batch 2b: an answered "Ask first" message is
-              // rewritten in place, through the courier-only update
-              ({
-                [OWN_MESSAGE_UPDATE]: {
-                  ts: input.updateRef,
+        // outlook has no inbound conversation to reply into (ADR-0121)
+        provider === "outlook"
+          ? null
+          : provider === "teams"
+            ? input.threadRef
+              ? { op: "conversations.replyToActivity", text: input.text, textFormat: "plain", replyToId: input.threadRef }
+              : { op: "conversations.sendToConversation", text: input.text, textFormat: "plain" }
+            : input.updateRef
+              ? // ADR-0173 batch 2b: an answered "Ask first" message is
+                // rewritten in place, through the courier-only update
+                ({
+                  [OWN_MESSAGE_UPDATE]: {
+                    ts: input.updateRef,
+                    text: escapeSlackText(input.text),
+                    ...(input.blocks ? { blocks: input.blocks } : {}),
+                  },
+                } satisfies OwnMessageUpdate)
+              : {
+                  // an "Ask first" pause carries Block Kit buttons (composed
+                  // inert in shared)
+                  op: "chat.postMessage",
                   text: escapeSlackText(input.text),
                   ...(input.blocks ? { blocks: input.blocks } : {}),
+                  ...(input.threadRef ? { thread_ts: input.threadRef } : {}),
                 },
-              } satisfies OwnMessageUpdate)
-            : {
-                // an "Ask first" pause carries Block Kit buttons (composed
-                // inert in shared)
-                op: "chat.postMessage",
-                text: escapeSlackText(input.text),
-                ...(input.blocks ? { blocks: input.blocks } : {}),
-                ...(input.threadRef ? { thread_ts: input.threadRef } : {}),
-              },
       actorUserId,
       label,
     );
@@ -1283,7 +1468,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
       const retryRaw = headers[SLACK_RETRY_NUM_HEADER];
       const retryNum = retryRaw && /^\d{1,4}$/.test(retryRaw) ? Number(retryRaw) : null;
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum, baseUrlFor(req)));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, retryNum));
       return reply.status(ack.status).send(ack.body);
     });
 
@@ -1302,7 +1487,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       const fresh = teamsActivityFreshness(parsed.timestamp, now());
       if (!fresh.ok) return reply.status(401).send({ error: "unauthenticated", code: fresh.code });
 
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null, baseUrlFor(req)));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, parsed.message, null));
       return reply.status(ack.status).send(ack.body);
     });
 
@@ -1354,7 +1539,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         return reply.status(403).send({ error: "tenant_not_allowed", detail: "this bot accepts activities from its pinned tenant only" });
       }
       if (activity.kind === "ignored") return reply.status(200).send({ ok: true, ignored: activity.reason });
-      const ack = run(await acceptInboundMessage(db, channelDeps, conn, activity.message, null, baseUrlFor(req), "courier"));
+      const ack = run(await acceptInboundMessage(db, channelDeps, conn, activity.message, null, null, "courier"));
       return reply.status(ack.status).send(ack.body);
     });
   });
