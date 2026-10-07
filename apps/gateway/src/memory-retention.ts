@@ -82,10 +82,9 @@ export const PURGE_BATCH = 500;
 /** batches per pass: a pass deletes at most PURGE_BATCH × this, the rest next pass */
 export const PURGE_MAX_BATCHES = 20;
 
-/** `audit_log.object_type` is plain text; these two are not in schema.ts's
- * TypeScript enum yet (a type-only addition requested from its owner) */
-const OBJECT_CONVERSATION = "conversation" as typeof auditLog.$inferInsert.objectType;
-const OBJECT_SEMANTIC_CACHE = "semantic_cache" as typeof auditLog.$inferInsert.objectType;
+/** `audit_log.object_type` values this module writes (schema.ts enum, type-only) */
+const OBJECT_CONVERSATION = "conversation" as const;
+const OBJECT_SEMANTIC_CACHE = "semantic_cache" as const;
 
 // ---------------------------------------------------------------------------
 // the hold predicates

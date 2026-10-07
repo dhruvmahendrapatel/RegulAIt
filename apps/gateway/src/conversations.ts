@@ -339,7 +339,7 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
         if (!out.held) return reply.status(404).send({ error: "unknown_conversation" });
         await db.insert(auditLog).values({
           userId,
-          objectType: "conversation" as typeof auditLog.$inferInsert.objectType,
+          objectType: "conversation",
           objectId: conversationId,
           detail: { subsystem: "memory-retention", agentId: row.agentId },
           effect: "deny",

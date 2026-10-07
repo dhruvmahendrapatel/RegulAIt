@@ -1356,6 +1356,12 @@ export const auditLog = pgTable(
         "feedback_link",
         "ai_policy_document",
         "ai_policy_acknowledgement",
+        // ADR-0185 I3: memory retention. A conversation purged by the sweep or
+        // refused deletion under an incident hold (objectId = the
+        // conversation), and the per-pass semantic-cache purge summary
+        // (objectId null). Plain text column — no DDL.
+        "conversation",
+        "semantic_cache",
       ],
     })
       .notNull()
