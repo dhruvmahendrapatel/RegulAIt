@@ -1,5 +1,5 @@
 ---
-phase: adr0183-batch-3-next
+phase: adr0183-batch-4-next
 last_updated: 2026-10-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,27 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-07 - Batch 3 merged (PR #147, 89e252a). Batch 4 is next.**
+- ADR-0185 built: memory retention sweeps (30-day conversations, cache TTL, never under an incident hold, enforced
+  at read time too); `/metrics` on OpenTelemetry (off unless a listener and token are set; fixed-vocabulary labels);
+  MCP `resources`/`prompts`/`completion`/`logging` as per-user, per-method decisions, deny by default, not covered by
+  read-only grants; stdio and SSE upstreams (host directory allow-list plus admin opt-in, fixed argv, safe env,
+  pinned digest, same-origin SSE); owners on servers and connectors feeding alert ownership; memory-store
+  inventory; Outlook exact-mailbox recipient allow-list. Migration 0169.
+- Security review of the batch found 3 Medium and 3 Low, all fixed with red proofs before merge: a grantless caller
+  could spawn stdio processes; a mid-connect disconnect leaked the child and its slot; retention deletes skipped the
+  evidence-hold lock; base64 blobs skipped the PII scan; log relays ignored the caller's own grant; group-writable
+  stdio commands were accepted.
+- X15-H01 follow-up (PR #145): the evidence-hold refusal now commits its audit row before replying (the
+  intermittent race-test failure on main was a real ordering bug).
+- Gemini's G16–G18 research was pushed straight to `dhruv/active`; kept unmerged on `gemini/g16-g18`, changes
+  requested (EU AI Act Art. 73 death deadline is 10 days, not 2; unsourced versions; register errors).
+- Known test hygiene: `mcp-proxy.test` and one G3 test fail when re-run on a database they already used (pass on a
+  fresh one) — pre-existing, to fix.
+- Next: batch 4 (I6 dual control and step-up, passkey-signed approvals, signed receipts, RFC 3161 timestamps, trace
+  standards fix, vendored detection content, monitor rules). Next migration 0170, next ADR 0186. Codex: X13 rework,
+  X18 (batch 3 UI, API now live), X19, X20.
 
 **2026-10-07 - X15 security fixes, and batch 3 decided (ADR-0185).**
 - X15 (Codex's adversarial review of D4) found two real gateway bugs, now fixed with red proofs:
