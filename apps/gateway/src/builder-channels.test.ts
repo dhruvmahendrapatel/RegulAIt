@@ -10,7 +10,7 @@
  * thread, no usage row, no reply) and, where it makes sense, the same call
  * succeeding once the rule allows it.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import http from "node:http";
 import {
   and,
@@ -552,6 +552,13 @@ describe("which agent answers", () => {
 
 describe("what goes back", () => {
   it("an agent whose project blocks sensitive content gets a link in chat, not its reply", async () => {
+    // the link needs the deployment's public URL (ADR-0121 amendment); restored below
+    const priorPub = process.env.REGULAIT_PUBLIC_URL;
+    process.env.REGULAIT_PUBLIC_URL = "https://regulait.example.test";
+    onTestFinished(() => {
+      if (priorPub === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+      else process.env.REGULAIT_PUBLIC_URL = priorPub;
+    });
     const tag = `bld-chan-block-${k.RUN}`;
     expect((await k.req("POST", "/v1/compliance/profiles", k.BOOT, { tag, piiMode: "block" })).statusCode).toBeLessThan(300);
     const proj = await k.req("POST", "/v1/projects", k.BOOT, { name: `bld-chan-fenced-${k.RUN}`, classifications: [tag] });
@@ -594,7 +601,16 @@ describe("what goes back", () => {
     expect(pauseOf(ok({ steps: [{ status: "done" }] }))).toBeNull();
     expect(pauseOf({ ok: false, status: 403, error: "agent_denied" })).toBeNull();
     // the link is the SPA's (under /ui), absolute when the public origin is known
-    expect(threadLink("t1", "https://gw.example.com/")).toBe("https://gw.example.com/ui/builder/inbox?tab=all&thread=t1");
-    expect(threadLink("t1", null)).toBe("/ui/builder/inbox?tab=all&thread=t1");
+    // ADR-0121 amendment: REGULAIT_PUBLIC_URL only — a stored/forged origin is never used
+    const prior = process.env.REGULAIT_PUBLIC_URL;
+    try {
+      process.env.REGULAIT_PUBLIC_URL = "https://gw.example.com/";
+      expect(threadLink("t1", "https://forged.evil.example")).toBe("https://gw.example.com/ui/builder/inbox?tab=all&thread=t1");
+      delete process.env.REGULAIT_PUBLIC_URL;
+      expect(threadLink("t1", "https://forged.evil.example")).toBe("open regulAIt to view the thread");
+    } finally {
+      if (prior === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+      else process.env.REGULAIT_PUBLIC_URL = prior;
+    }
   });
 });

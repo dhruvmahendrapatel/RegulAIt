@@ -3144,6 +3144,10 @@ export {
   slackSignature,
   slackSignatureBaseString,
   teamsActivityForCard,
+  // ADR-0121 / ADR-0183 2.6 — the Outlook courier's mail rendering
+  outlookMessageForAlert,
+  outlookMessageForCard,
+  type OutlookMessagePayload,
   teamsSignature,
   verifyChatSignature,
   // ADR-0173 §2 — inbound conversations to builder agents

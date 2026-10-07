@@ -14,7 +14,7 @@
 #                      --tls internal --image-bundle regulait-images-0.1.0.tar
 #
 # WHY THIS EXISTS
-# `docker compose up --build` pulls node:22-slim from Docker Hub and runs
+# `docker compose up --build` pulls node:22-trixie-slim from Docker Hub and runs
 # `pnpm install --frozen-lockfile` against the npm registry. Both are outbound
 # internet. An air-gapped host therefore cannot build; it can only RUN images
 # that were built somewhere else and loaded from a file. That is the whole
@@ -61,7 +61,7 @@ docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
 GATEWAY_IMAGE="regulait/gateway:$VERSION"
 
 if [ "$SKIP_BUILD" = "0" ]; then
-  step "Building $GATEWAY_IMAGE (this pulls node:22-slim and runs pnpm install — internet required)"
+  step "Building $GATEWAY_IMAGE (this pulls node:22-trixie-slim and runs pnpm install — internet required)"
   docker build -t "$GATEWAY_IMAGE" "$REPO_ROOT"
   ok "built $GATEWAY_IMAGE"
 fi

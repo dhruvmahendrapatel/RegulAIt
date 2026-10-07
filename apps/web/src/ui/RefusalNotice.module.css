@@ -1,0 +1,24 @@
+/* ADR-0183 2.3 — a refusal the person can resolve: what happened, what to do, and the link to do it */
+.notice {
+  background: var(--surface-1);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 72ch;
+}
+.message {
+  margin: 0;
+}
+.link {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  align-self: flex-start;
+}
