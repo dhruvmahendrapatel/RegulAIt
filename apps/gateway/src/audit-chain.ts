@@ -74,6 +74,8 @@ import {
   type ChainedAuditRow,
 } from "@regulait/shared";
 
+import { anchorTimestamper as defaultAnchorTimestamper } from "./audit-timestamp.js";
+
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 // --- the WORM sink -----------------------------------------------------------
@@ -659,6 +661,44 @@ export async function readChainHead(db: Db): Promise<ChainHead | null> {
   return { seq: head.seq, rowHash: head.rowHash, headAt: head.at };
 }
 
+// --- ADR-0186 S: the trusted-timestamp seam ----------------------------------
+
+/**
+ * Called after EVERY anchor flush attempt — `captureAnchor` (the admin route
+ * and the boot path) and `flushPendingAnchors` alike — with the anchor's id,
+ * the exact record that was (or would have been) externalised, and how the
+ * flush went. The implementation (slice S, `audit-timestamp.ts`) obtains an
+ * RFC 3161 token over the anchor's canonical bytes and records it on the
+ * anchor's `tsa_*` columns, or records why not.
+ *
+ * Contract: it never changes the anchor's flush outcome. A throw is caught here
+ * and recorded on the anchor (`tsa_last_error`); it does not fail the capture or
+ * the flush. The foundation's implementation does nothing.
+ */
+export interface AnchorTimestamper {
+  afterFlush(
+    db: Db,
+    anchor: { id: string; record: AnchorRecord; flushStatus: "pending" | "flushed" | "failed" },
+  ): Promise<void>;
+}
+
+async function timestampAfterFlush(
+  db: Db,
+  timestamper: AnchorTimestamper,
+  anchor: { id: string; record: AnchorRecord; flushStatus: "pending" | "flushed" | "failed" },
+): Promise<void> {
+  try {
+    await timestamper.afterFlush(db, anchor);
+  } catch (err) {
+    const message = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+    await db
+      .update(auditAnchors)
+      .set({ tsaLastError: message })
+      .where(eq(auditAnchors.id, anchor.id))
+      .catch(() => undefined);
+  }
+}
+
 // --- capturing and flushing anchors -----------------------------------------
 
 export interface CaptureResult {
@@ -692,7 +732,12 @@ function anchorRecordOf(head: ChainHead): AnchorRecord {
  * created — it would not cover its own audit row — and every verification would
  * report one unanchored row forever, training the reader to ignore the number.
  */
-export async function captureAnchor(db: Db, sink: AnchorSink | null, actorUserId: string | null): Promise<CaptureResult | null> {
+export async function captureAnchor(
+  db: Db,
+  sink: AnchorSink | null,
+  actorUserId: string | null,
+  timestamper: AnchorTimestamper = defaultAnchorTimestamper,
+): Promise<CaptureResult | null> {
   await db.insert(auditLog).values({
     userId: actorUserId ?? NIL_UUID,
     objectType: "audit_chain",
@@ -718,7 +763,10 @@ export async function captureAnchor(db: Db, sink: AnchorSink | null, actorUserId
     status: "pending",
   });
 
-  const flushed = await flushAnchorRow(db, sink, { id, record: anchorRecordOf(head) });
+  const record = anchorRecordOf(head);
+  const flushed = await flushAnchorRow(db, sink, { id, record });
+  // ADR-0186 S: a trusted timestamp for this anchor (never changes the flush outcome)
+  await timestampAfterFlush(db, timestamper, { id, record, flushStatus: flushed.status });
   // Observed, not declared — the caller of POST /v1/audit/anchor is being told
   // whether what they just wrote is evidence, and only the medium can answer.
   const observed = sink ? ((await sink.observe?.()) ?? null) : null;
@@ -760,7 +808,11 @@ async function flushAnchorRow(
 
 /** §8.5 buffer-and-flush: push everything still buffered to the sink now that
  * there is a connection. Idempotent — an anchor already `flushed` is skipped. */
-export async function flushPendingAnchors(db: Db, sink: AnchorSink | null): Promise<{ attempted: number; flushed: number; failed: number }> {
+export async function flushPendingAnchors(
+  db: Db,
+  sink: AnchorSink | null,
+  timestamper: AnchorTimestamper = defaultAnchorTimestamper,
+): Promise<{ attempted: number; flushed: number; failed: number }> {
   const pending = await db
     .select()
     .from(auditAnchors)
@@ -769,17 +821,17 @@ export async function flushPendingAnchors(db: Db, sink: AnchorSink | null): Prom
   let flushed = 0;
   let failed = 0;
   for (const row of pending) {
-    const res = await flushAnchorRow(db, sink, {
-      id: row.id,
-      record: {
-        seq: row.seq,
-        rowHash: row.rowHash,
-        headAt: row.headAt.toISOString(),
-        algorithm: row.algorithm,
-        payloadVersion: AUDIT_PAYLOAD_VERSION,
-        capturedAt: row.createdAt.toISOString(),
-      },
-    });
+    const record: AnchorRecord = {
+      seq: row.seq,
+      rowHash: row.rowHash,
+      headAt: row.headAt.toISOString(),
+      algorithm: row.algorithm,
+      payloadVersion: AUDIT_PAYLOAD_VERSION,
+      capturedAt: row.createdAt.toISOString(),
+    };
+    const res = await flushAnchorRow(db, sink, { id: row.id, record });
+    // ADR-0186 S: a trusted timestamp for this anchor (never changes the flush outcome)
+    await timestampAfterFlush(db, timestamper, { id: row.id, record, flushStatus: res.status });
     if (res.status === "flushed") flushed += 1;
     else if (res.status === "failed") failed += 1;
   }
@@ -1132,9 +1184,10 @@ const verifyQuery = z.object({
 export function registerAuditChainRoutes(
   app: FastifyInstance,
   db: Db,
-  opts: { sink?: AnchorSink | null } = {},
+  opts: { sink?: AnchorSink | null; timestamper?: AnchorTimestamper } = {},
 ): void {
   const sink = opts.sink === undefined ? resolveAnchorSink() : opts.sink;
+  const timestamper = opts.timestamper ?? defaultAnchorTimestamper;
 
   app.get("/v1/audit/verify", async (req, reply) => {
     const q = verifyQuery.parse(req.query);
@@ -1150,12 +1203,12 @@ export function registerAuditChainRoutes(
   });
 
   app.post("/v1/audit/anchor", async (req, reply) => {
-    const result = await captureAnchor(db, sink, req.authCtx?.userId ?? null);
+    const result = await captureAnchor(db, sink, req.authCtx?.userId ?? null, timestamper);
     if (!result) return reply.status(409).send({ error: "no_chain", detail: "there is no chained row to anchor" });
     return reply.status(201).send(result);
   });
 
-  app.post("/v1/audit/anchors/flush", async () => flushPendingAnchors(db, sink));
+  app.post("/v1/audit/anchors/flush", async () => flushPendingAnchors(db, sink, timestamper));
 
   app.get("/v1/audit/anchors", async () => {
     const rows = await db.select().from(auditAnchors).orderBy(desc(auditAnchors.seq)).limit(100);

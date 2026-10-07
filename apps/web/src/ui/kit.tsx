@@ -607,7 +607,10 @@ export function Table<T>(props: {
                     onKeyDown={
                       clickable
                         ? (e) => {
-                            if (e.key === "Enter") props.onRowClick!(row);
+                            if (e.target === e.currentTarget && e.key === "Enter") {
+                              e.preventDefault();
+                              props.onRowClick!(row);
+                            }
                           }
                         : undefined
                     }

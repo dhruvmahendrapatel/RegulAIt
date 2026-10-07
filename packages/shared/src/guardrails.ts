@@ -36,6 +36,11 @@
  */
 
 import { detectPII, type PiiHit } from "./pii.js";
+// ADR-0186 V: vendored detection content, applied through the foundation's
+// runner (the data is slice V's; this file only calls the runner)
+import type { VendoredDetectionPack } from "./batch4.js";
+import { VENDORED_INJECTION_RULES, VENDORED_SECRET_RULES } from "./detection-content/index.js";
+import { injectionText, vendoredInjectionHits, vendoredSecretCount } from "./detection-content/match.js";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -109,7 +114,14 @@ export interface GuardrailDetector {
   limits: string;
   /** stable rule ids, so a false positive names a rule */
   ruleIds: readonly string[];
-  detect(text: string, terms?: readonly string[]): GuardrailHit[];
+  detect(text: string, terms?: readonly string[], ctx?: GuardrailDetectContext): GuardrailHit[];
+}
+
+/** ADR-0186 V: the deployment facts a detector may consult. Absent = the
+ * strict default (every vendored pack on). */
+export interface GuardrailDetectContext {
+  /** `org_settings.vendored_detection_packs` */
+  vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,10 +255,19 @@ export const promptInjectionDetector: GuardrailDetector = {
     "Instruction-override, forged role turns, system-prompt exfiltration and tool-hijack phrasings in user-supplied or tool-returned content.",
   limits:
     "Literal English phrasings only. Encoded (base64), translated, homoglyph, leetspeak or novel framings evade it, and text ABOUT prompt injection matches it. Heuristic, not a classifier.",
-  ruleIds: INJECTION_RULES.map((r) => r.id),
-  detect(text, terms) {
+  ruleIds: [...INJECTION_RULES.map((r) => r.id), ...VENDORED_INJECTION_RULES.map((r) => r.id)],
+  detect(text, terms, ctx) {
     if (!text) return [];
-    const hits = runRules(text, INJECTION_RULES, "prompt_injection");
+    // ADR-0186 V: pipelock-normalise first (the identity until slice V), then the
+    // built-in rules and the vendored injection rules on the normalised text
+    const packs = ctx?.vendoredPacks;
+    const normalised = injectionText(text, { packs });
+    const hits = runRules(normalised, INJECTION_RULES, "prompt_injection");
+    for (const v of vendoredInjectionHits(normalised, { packs })) {
+      const same = hits.find((h) => h.category === v.category);
+      if (same) same.count += v.count;
+      else hits.push({ detector: "prompt_injection", category: v.category, count: v.count });
+    }
     const custom = countTerms(text, terms);
     if (custom > 0) hits.push({ detector: "prompt_injection", category: "custom_term", count: custom });
     return hits;
@@ -542,10 +563,17 @@ export const semanticDlpDetector: GuardrailDetector = {
     "Exfiltration signals regex PII misses: declared confidentiality markers, credential/secret material shapes, material-non-public phrasing, and the org's own configured terms.",
   limits:
     "NOT a semantic/embedding classifier and does not score sensitivity. It sees DECLARED markers, secret SHAPES and CONFIGURED terms — an unmarked confidential document with no configured term is invisible to it. The scored model-backed tier is unwired in this deployment.",
-  ruleIds: DLP_RULES.map((r) => r.id),
-  detect(text, terms) {
+  ruleIds: [...DLP_RULES.map((r) => r.id), ...VENDORED_SECRET_RULES.map((r) => r.id)],
+  detect(text, terms, ctx) {
     if (!text) return [];
     const hits = runRules(text, DLP_RULES, "semantic_dlp");
+    // ADR-0186 V: the vendored pipelock-secrets shapes count as credential material
+    const vendored = vendoredSecretCount(text, { packs: ctx?.vendoredPacks });
+    if (vendored > 0) {
+      const same = hits.find((h) => h.category === "credential_material");
+      if (same) same.count += vendored;
+      else hits.push({ detector: "semantic_dlp", category: "credential_material", count: vendored });
+    }
     const custom = countTerms(text, terms);
     if (custom > 0) hits.push({ detector: "semantic_dlp", category: "custom_term", count: custom });
     return hits;
@@ -657,6 +685,8 @@ export function evaluateGuardrails(args: {
   modes: GuardrailModes;
   terms?: GuardrailTerms | undefined;
   exclude?: readonly GuardrailDetectorId[] | undefined;
+  /** ADR-0186 V: `org_settings.vendored_detection_packs`; absent = all on */
+  vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
 }): GuardrailEvaluation {
   const findings: GuardrailFinding[] = [];
   let action: GuardrailEvaluation["action"] = "allow";
@@ -666,7 +696,7 @@ export function evaluateGuardrails(args: {
     if (mode === "off") continue;
     const detector = GUARDRAIL_DETECTORS[id];
     if (!detector.phases.includes(args.phase)) continue;
-    const hits = detector.detect(args.text, args.terms?.[id]);
+    const hits = detector.detect(args.text, args.terms?.[id], { vendoredPacks: args.vendoredPacks });
     if (hits.length === 0) continue;
     // mode -> action is exactly enforcePII's mapping: block blocks, warn
     // warns, log allows-but-records.

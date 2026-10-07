@@ -17,6 +17,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --dir src"
   },
+  "dependencies": {
+    "@regulait/shared": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "26.1.1",
     "vitest": "^4.1.11"
