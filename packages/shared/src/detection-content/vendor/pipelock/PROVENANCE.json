@@ -1,0 +1,27 @@
+{
+  "repo": "https://github.com/luckyPipewrench/pipelock",
+  "commit": "7014542ea14fec82dfbc2ad38caf77bd63e7ad69",
+  "retrievedAt": "2026-10-07T21:28:48.561070Z",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "a129cc8214f5c4bd010af02e3dadccd2fbeb4db434a0159839adeba2f7cba20c",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "54a2fc910774476e1489e33dccf81721d079140d8dd692282c756d706b24256f",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "internal/config/dlp_patterns.go",
+      "sha256": "c514c4f773d58c90ba2da7f08cf14fa116607c9cd60b15bf56bb1ac577364ad5",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "internal/normalize/normalize.go",
+      "sha256": "d161209f92aefb00cd1995b788d32e669bc13de0075921b74a080902f373b99c",
+      "spdx": "Apache-2.0"
+    }
+  ]
+}
