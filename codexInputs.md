@@ -48,6 +48,31 @@ Root-fix coverage is 44+3 separately, rather than a new single 47-case run. The 
 deep-links.spec.ts; that argument selected no tests and is not claimed as coverage. X14 also touches AcknowledgeGate for focus handling;
 merge both the keyed page preservation here and X14's entry/exit focus behavior when reviewing those drafts.
 
+## X17 review-policy fixture isolation — 2026-10-06 UTC (review pending)
+
+The real review-policy spec reused the preceding demo's proposer, so its initial draft GET could see that person's still-pending cleanup. This is separate from X13's navigation/failed-flush guards. Give the spec its own fresh admin identity; arrange the same current AI-policy standing as the seeded personas through the real self-acknowledgement route, without relaxing literacy or MFA. Assert its initial draft is null. Restore the original org policy and deactivate the fixture in teardown, including when policy restoration fails.
+
+Regression evidence: on the real `regulait_x17_demo` scratch database, plant a valid registration draft for the previous seeded admin. Reverting only the proposer login to that shared identity makes the new null-draft assertion fail with the exact earlier title/state (`x17-red-draft.log` and trace). Restoring the fresh identity completes the entire two-review/send-back/resubmit/approval journey: 1/1 passed (`x17-fixed.log`); the preceding admin's draft remains unchanged and every fixture account is deactivated. Initial fixture attempts exposed the fresh account's mandatory literacy gate; that prerequisite is now explicitly arranged, not disabled.
+
+Final integration: prepare a separate empty `regulait_x17_full` database with a local demo export key — `pnpm --filter @regulait/gateway demo:prepare` passes 19/19 readiness checks; `E2E_BASE_URL=http://127.0.0.1:3108 E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts --trace on --output=/workspace/.regulait-onboarding/x17-full-browser` passes both real demo specs (2/2). Web typecheck and production build pass. Screenshot: `x17-full-browser/**/x17-owned-intake-fixture.png`; passing traces are retained there, and the isolated contamination case under `x17-fixed-browser`.
+
+No gateway changes, no test-order retries, and no cleanup of another journey's draft. This closes the spec independence issue; it does not make asynchronous application draft deletion synchronous.
+
+X17 security-gate follow-up (2026-10-07): the original draft's CodeQL job
+[112557122023](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37548075701/job/112557122023)
+reported unallowlisted `js/insecure-randomness`, severity 7.8, at gateway `totp.ts:62`. The newly introduced
+fixture email carried a `Math.random()` identifier into the shared TOTP sign-in helper. Use Node's
+`crypto.randomUUID()` for that fixture identifier; no gateway cryptography or scanner allow-list changes.
+The precise SARIF path remains unavailable (artifact host productionresultssa15.blob.core.windows.net returns
+403); this is a targeted removal of the insecure test source, and closure of the security gate depends on
+CI, not a supposition about a false positive.
+
+On the completed X17 web build, the UUID fixture's real two-review/send-back/resubmission/approval scenario
+passed **1/1** (`x17-secure-fixture-final.log`, full trace and owned-fixture screenshot under
+`/workspace/.regulait-onboarding/x17-secure-fixture-final`). The same isolated database still contains the
+preceding administrator's seeded draft. Web tsc and build passed. Command after sourcing `x17-env.sh`:
+`E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-real.config.ts e2e/demo-review-policy.spec.ts --trace on --output=/workspace/.regulait-onboarding/x17-secure-fixture-final`.
+
 ## Research takeover handoff — 2026-10-04 01:57 UTC
 
 G10–G15 were reassigned by the owner and corrected by Codex in `e9bf0f95c43eb66837da0a5d513e837c58452e07` on `dhruv/active` (baseline `2e89cdc`). See `geminiInputs.md` for per-ID document closures, remaining UNVERIFIED facts and exact checks. Product findings below retain their prior status; this research pass does not close AER-050 or certify runtime behavior.
