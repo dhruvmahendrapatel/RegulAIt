@@ -774,6 +774,12 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.semanticCachePurgeSweep,
         SCHEDULER_JOB_NAMES.conversationRetentionSweep,
         // ===== end ADR-0185 I3 =====
+        // ===== ADR-0186 =====
+        // R signs decision receipts; S timestamps audit anchors. The
+        // foundation ships both processing nothing.
+        SCHEDULER_JOB_NAMES.decisionReceiptSignSweep,
+        SCHEDULER_JOB_NAMES.anchorTimestampSweep,
+        // ===== end ADR-0186 =====
       ].sort(),
     );
     for (const def of registry.values()) {

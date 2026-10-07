@@ -36,7 +36,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([]);
+const DELIBERATELY_API_ONLY = new Map([
+  // ADR-0186 foundation: both routes answer 501 `not_built` until Batch 4 slice A lands its passkey screens
+  // (Account → Passkeys, and the admin user page). Slice A removes these two entries and adds the controls.
+  ["/v1/auth/passkeys/:x", "ADR-0186 foundation stub (501 not_built); slice A adds the Account → Passkeys revoke control"],
+  ["/v1/users/:x/passkeys/:x", "ADR-0186 foundation stub (501 not_built); slice A adds the admin revoke control"],
+]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {

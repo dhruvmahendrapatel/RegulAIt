@@ -143,6 +143,25 @@ semconv version, and a written end date for the `gen_ai.system` transition windo
 
 The HTTP contracts are in AgentCoordination.md §4.9.
 
+### Foundation notes (2026-10-07, commits e256fdc and 7a5df2f)
+- **Passkey attestation (binding on A).** Verifying a certificate-bearing attestation makes `@simplewebauthn/server`
+  fetch revocation-list URLs named in the presented certificate, outside the egress guard. Registration requests
+  `attestationType: "none"`, refuses any other attestation format before verification, and never initialises the
+  library's metadata service.
+- **`canonicalize` admitted.** It is byte-identical to `canonicalJson` on 304 receipt-shaped payloads, edge values and
+  2,000 seeded random values. It differs only by throwing on NaN, ±Infinity and lone surrogates, none of which a
+  receipt payload can contain (numbers are integers or digests, strings are ids and hex).
+- **Secret redaction on the audit path is unconditional.** The ledger write reads no settings, so the
+  `pipelock-secrets` pack always redacts there; `vendored_detection_packs` governs the other surfaces only. Removing it
+  from the audit path would be a relaxation that this ADR does not offer.
+- **Approval rules path.** The rules live at `/v1/rules/approvals` (not `/v1/approval-rules`); A extends that route
+  with `quorum` and `approverRoleId`. §4.9 is corrected to match.
+- **Ranges the ADR left open, chosen strict:** `monitor_mcp_baseline_days` 1–90, `monitor_jailbreak_threshold` 1–100,
+  `monitor_jailbreak_window_hours` 1–168; `step_up_mode` and `audit_anchor_timestamp_mode` are `required | off`,
+  `decision_receipts_mode` is `on | off`.
+- New free-text columns `approval_decisions.reason` and `webauthn_credentials.revoke_reason` (and the passkey label)
+  are registered with the prose scrub.
+
 ## Consequences
 - Approvals become provable: who approved exactly which call, re-checked when it runs; two people for sensitive data.
 - Decisions get offline-verifiable receipts, and anchors a third-party time, without pretending when unconfigured.

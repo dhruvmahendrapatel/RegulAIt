@@ -19,6 +19,7 @@ import type { PropagatedRating, RiskBand } from "./dependency-graph.js";
 import type { TrustDimension } from "./risks.js";
 import { KRI_METRICS, evaluateKri, formatKriValue, type KriComparator, type KriMetric, type KriState } from "./kri.js";
 import type { KriOnBreach, SuggestedHaltAction } from "./accountability.js";
+import { DETECTION_MONITOR_RULE_IDS, type DetectionMonitorRuleId } from "./batch4.js";
 
 /** guardrail detector ids as words for alert titles (`semantic_dlp` → `semantic DLP`) */
 const DETECTOR_LABELS: Record<string, string> = {
@@ -212,6 +213,32 @@ export const MONITOR_RULES = {
     description:
       "Some of the people a published AI policy or training applies to have not acknowledged its current version, " +
       "or their acknowledgement expired (ADR-0182 A14). Observe only.",
+  },
+  // --- ADR-0186 M: detection rules (loader: the gateway's monitor-detection-rules.ts)
+  mcp_server_baseline_drift: {
+    label: "Agent called a new MCP server",
+    severity: "medium",
+    description:
+      "An agent called an MCP server it did not call during the baseline window (monitorMcpBaselineDays, ADR-0186 M).",
+  },
+  sharing_scope_widened: {
+    label: "Sharing scope widened",
+    severity: "medium",
+    description: "Something shared was opened to a wider audience than before (ADR-0186 M).",
+  },
+  instructions_changed_after_approval: {
+    label: "Instructions changed after approval",
+    severity: "high",
+    description:
+      "The active system-prompt version of an agent differs from the one active at its use case's last approving " +
+      "decision (ADR-0186 M). Not evaluated where there is no history to compare.",
+  },
+  jailbreak_correlation: {
+    label: "Jailbreak attempts followed by an allowed tool call",
+    severity: "high",
+    description:
+      "One person reached the jailbreak-finding threshold within the window (monitorJailbreakThreshold, " +
+      "monitorJailbreakWindowHours) and then made a tool call that was allowed (ADR-0186 M).",
   },
 } as const satisfies Record<string, { label: string; severity: MonitorSeverity; description: string }>;
 export type MonitorRuleId = keyof typeof MONITOR_RULES;
@@ -422,6 +449,10 @@ export interface MonitorInput {
   /** ADR-0182 (D4) — the accountability rules, each fed by its slice's
    * loader (same shape as `assurance`); an absent rule key = not evaluated */
   accountability?: Partial<Record<AccountabilityMonitorRuleId, MonitorAssuranceInput>>;
+  /** ADR-0186 M — the four detection rules, fed by the gateway's
+   * `monitor-detection-rules.ts` (same shape as `assurance`); an absent rule key
+   * = not evaluated */
+  detection?: Partial<Record<DetectionMonitorRuleId, MonitorAssuranceInput>>;
 }
 
 /** ADR-0182 (ADR-0175 batch D4) — the four accountability rules. Their
@@ -805,6 +836,12 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   // decides what breached.
   for (const ruleId of ACCOUNTABILITY_MONITOR_RULE_IDS) {
     for (const b of input.accountability?.[ruleId]?.breaches ?? []) {
+      out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
+    }
+  }
+  // ADR-0186 M — the detection rules, the same way
+  for (const ruleId of DETECTION_MONITOR_RULE_IDS) {
+    for (const b of input.detection?.[ruleId]?.breaches ?? []) {
       out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
     }
   }
