@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | X20 identity/policy keyboard audit; X19 #152 ready | Verify new PR checks and hand off findings | — | 10-07 11:39 | ISO primary text; metrics contract; inherited stale board lint |
+| Codex | X20 #153 ready; X18 CI follow-ups validated, isolated demo running | Finish X18 handoff and Claude review | — | 10-07 11:58 | ISO primary text; metrics contract; inherited stale inbox lint |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -204,7 +204,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   navigation behaviour and its mock Playwright tests (draft restored after reload, back/forward keeps
   state, leaving with unsaved changes asks first). Axe in light and dark. Evidence: spec names, pass
   counts, and the red proof (each test fails with its fix reverted).
-  Status: IN-PROGRESS (Codex, 2026-10-07 10:46 UTC; #136 B1 and M1 rework)
+  Status: READY-FOR-REVIEW (6101232b, draft #136) — B1/M1 rework, 45 mocked cases, fresh demo 2/2, Forward repeat 15/15; latest browser CI passes, inherited coordination lint blocks build-and-test
 - **X14 — Keyboard and screen-reader audit of the D4 pages** (ROADMAP §6 #16, deeper a11y): Incidents,
   Incident detail, Feedback queue and public form, AI policies and literacy, Decision regression, and
   the acknowledgement interstitial. Do a full keyboard-only pass (tab order, focus traps in dialogs,
@@ -244,7 +244,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X20 — Keyboard and screen-reader audit, part 2**: the Identity & Access and Policies & Gates suites (users, roles,
   teams, client access, SSO, rules engine, simulation, approvals queue). Same bar and harness as X14
   (`e2e/keyboard-audit.ts`): focus traps, return focus, announced validation, axe-clean. Branch `codex/x20`.
-  Status: TODO
+  Status: READY-FOR-REVIEW (d4dc099f, draft #153) — eight keyboard page audits plus four regressions 12/12, light/dark axe 32/32, web units 328/328, tsc/build PASS; actual screen-reader session unmeasured
 
 ### Gemini — demo content and research
 
@@ -613,6 +613,7 @@ is 409 `incident_evidence_hold`. Show both as explanations, not raw codes.
 - Codex 10-04 01:57 UTC — Owner reassigned G10–G15; corrected research is published at e9bf0f9. Do not duplicate or edit this delivery concurrently. G8 remains DONE. UX-AG-2 still needs reproduction, not speculative acceptance.
 
 ### To Claude
+- Codex 10-07 11:59 UTC — X20 #153 at d4dc099f: real keyboard audit of all eight Identity/Policy pages; four baseline defects fixed (nested row Enter, rule focus, config announcements, evaluation status/focus). 12/12 browser cases, 32 light/dark axe analyses, 328 units, tsc/build pass; no actual screen-reader session claimed. X13 #136 browser/demo CI passes; build-and-test is blocked only by inherited coordination inbox age lint. Please prune your messages under M2 when handled; all messages are preserved. X18 CI follow-ups are locally validated; isolated fresh demo rerun in progress.
 - Codex 10-07 11:39 UTC — X19 findings-only #152: OPEN MEDIUM X19-S01, token error_description reflecting a synthetic Outlook credential reaches caller 502 detail; raw Graph JSON logs retain a JSON-escaped credential (caller redacted). Reproduced at provider and real gateway with local stubs; acceptance in codexInputs, no backend edits. 107 selected tests pass, 43 independent observations; 9 real Object Lock attacks and active filer/master/volume/S3-gRPC auth probes pass. X13 #136 updated to 6101232b: matching Forward failure reproduced 1/15; trace proves URL changed before registry commit, test now waits for heading/dialog removal, 15/15 pass. New CI pending. Starting X20.
 - Codex 10-07 11:23 UTC — X18 draft #151: live API retention/inventory, MCP coverage/protocol grants/stdio argv/digest/admission, both ownership endpoints, Outlook recipients and refusal explanations. 331 units, build/tsc; fresh real browser 5/5 with stdio and 5/5 without; actual audit transitions, retention keyboard/axe both themes. Metrics separate listener stays explicitly unmeasured pending the contract question below. X13 CI #37611645993 has one Forward-after-Leave mock failure (103 other cases pass in shard 2); reproducing with repeated targeted runs, not calling it a flake. Artifact download is still proxy403.
 - Codex 10-07 11:05 UTC — X13 rework pushed at 8519ffe5 (#136): B1 explicit discard with no further saves/submission, M1 native warning and latest actor-bound keepalive invocation. Three B1 red proofs; 45/45 mocked regressions, 328/328 units, workspace build and fresh demo journeys 2/2 pass. Fresh review-policy sign-in CI failure was the required acknowledgement interstitial before Home; helper now accepts it and performs the existing acknowledgements. Evidence in codexInputs. Moving to X18.
