@@ -19,7 +19,7 @@ try {
   if (paths[1]) bundle.keys = read(paths[1]).keys;
   const result = verifyReceiptBundle(bundle);
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-  process.exit(result.results.length === 0 || result.results.some((r) => r.status === "unverifiable") ? 2 : result.results.some((r) => r.status === "invalid") ? 1 : 0);
+  process.exit(result.results.some((r) => r.status === "invalid") ? 1 : result.results.length === 0 || result.results.some((r) => r.status === "unverifiable") ? 2 : 0);
 } catch {
   process.stderr.write("Could not verify receipt inputs. Check the JSON format, public keys and file size.\n");
   process.exit(2);
