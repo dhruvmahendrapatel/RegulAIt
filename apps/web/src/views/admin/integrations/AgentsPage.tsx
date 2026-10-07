@@ -183,6 +183,7 @@ const EMPTY_AGENT = {
   model: "",
   costPerMTokIn: "",
   costPerMTokOut: "",
+  customPricing: "unpriced",
   systemPrompt: "",
 };
 
@@ -200,6 +201,9 @@ function RegisterAgentCard() {
   // a 409 into the catalog.
   const selectable: CustomModelProvider[] = (customProviders.data?.providers ?? []).filter((p) => p.enabled);
   const isCustom = f.provider === "custom";
+  const selectedEndpoint = (customProviders.data?.providers ?? []).find((p) => p.id === f.customProviderId);
+  const endpointUnavailable = isCustom && !!f.customProviderId && !selectedEndpoint?.enabled;
+  const unpriced = isCustom && f.customPricing === "unpriced";
 
   return (
     <Card title="Register an agent">
@@ -207,6 +211,7 @@ function RegisterAgentCard() {
         className={v.stack}
         onSubmit={(e) => {
           e.preventDefault();
+          if (isCustom && !selectedEndpoint?.enabled) return;
           void act
             .run(
               () =>
@@ -219,8 +224,8 @@ function RegisterAgentCard() {
                   // as a discriminated union (a CHECK constraint), so the two
                   // are always sent together or not at all.
                   ...(isCustom ? { customProviderId: f.customProviderId } : {}),
-                  ...(f.costPerMTokIn ? { costPerMTokIn: Number(f.costPerMTokIn) } : {}),
-                  ...(f.costPerMTokOut ? { costPerMTokOut: Number(f.costPerMTokOut) } : {}),
+                  ...(!unpriced && f.costPerMTokIn ? { costPerMTokIn: Number(f.costPerMTokIn) } : {}),
+                  ...(!unpriced && f.costPerMTokOut ? { costPerMTokOut: Number(f.costPerMTokOut) } : {}),
                   ...(f.systemPrompt ? { systemPrompt: f.systemPrompt } : {}),
                 }),
               "Agent registered",
@@ -238,9 +243,14 @@ function RegisterAgentCard() {
             options={REGISTER_PROVIDERS.map((p) => ({ value: p, label: providerLabel(p) }))}
             value={f.provider}
             onChange={(p) => {
-              set("provider", p);
-              // never leave a stale endpoint id behind on a non-custom agent
-              if (p !== "custom") set("customProviderId", "");
+              setF((previous) => ({
+                ...previous,
+                provider: p,
+                customProviderId: p === "custom" ? previous.customProviderId : "",
+                // Preserve already entered prices when switching provider kinds.
+                customPricing: p === "custom" && (previous.costPerMTokIn || previous.costPerMTokOut)
+                  ? "recorded" : previous.customPricing,
+              }));
             }}
           />
           {isCustom && (
@@ -255,6 +265,11 @@ function RegisterAgentCard() {
                   selectable.map((p) => ({ v: p.id, l: `${p.name} · ${p.wireProtocol} · ${p.baseUrl}` })),
                   "— select an endpoint —",
                 )}
+                {endpointUnavailable && (
+                  <option value={f.customProviderId} disabled>
+                    {selectedEndpoint ? `${selectedEndpoint.name} (disabled)` : "Previously selected endpoint (unavailable)"}
+                  </option>
+                )}
               </Select>
             </Field>
           )}
@@ -264,15 +279,29 @@ function RegisterAgentCard() {
           <Field label="Model id (blank = not dispatchable)">
             <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="e.g. claude-opus-5" />
           </Field>
-          <Field label={isCustom ? "$/MTok in — blank = unpriced" : "$/MTok in"}>
-            <Input type="number" step="any" value={f.costPerMTokIn} onChange={(e) => set("costPerMTokIn", e.target.value)} />
+          {isCustom && (
+            <Field label="Pricing for this custom model">
+              <Select value={f.customPricing} onChange={(e) => set("customPricing", e.target.value)}>
+                <option value="unpriced">Unpriced — no recorded token prices</option>
+                <option value="recorded">Record token prices</option>
+              </Select>
+            </Field>
+          )}
+          <Field label="$/MTok in">
+            <Input type="number" min={0} step="any" disabled={unpriced} value={f.costPerMTokIn} onChange={(e) => set("costPerMTokIn", e.target.value)} />
           </Field>
-          <Field label={isCustom ? "$/MTok out — blank = unpriced" : "$/MTok out"}>
-            <Input type="number" step="any" value={f.costPerMTokOut} onChange={(e) => set("costPerMTokOut", e.target.value)} />
+          <Field label="$/MTok out">
+            <Input type="number" min={0} step="any" disabled={unpriced} value={f.costPerMTokOut} onChange={(e) => set("costPerMTokOut", e.target.value)} />
           </Field>
         </div>
         {isCustom && (
           <>
+            {endpointUnavailable && (
+              <p className={v.errLine} role="alert">
+                The selected endpoint is {selectedEndpoint ? "disabled" : "no longer available"}.
+                {" "}Choose an enabled endpoint to register this agent. Your other draft fields are kept.
+              </p>
+            )}
             {selectable.length === 0 && (
               <p className={v.errLine} role="alert" data-testid="no-enabled-endpoints">
                 No custom endpoint is enabled yet. Register one under{" "}
@@ -281,11 +310,10 @@ function RegisterAgentCard() {
               </p>
             )}
             <p className={v.faint}>
-              A self-hosted endpoint has no list price, and <strong>leaving both cost fields blank is the
-              right answer</strong> — null means unpriced, not zero and not unknown-so-guess. Spend is still
-              metered in real tokens, with <span className={v.mono}>costUsd: null</span>; pillar 6's
-              optimizer passes through rather than comparing, never routes toward an unpriced model, and
-              never claims savings against one. Please do not invent a number to fill the box.
+              Choose <strong>Unpriced</strong> when no token prices are recorded; registration ignores
+              the disabled price fields. Unpriced means no dollar-cost measurement, not free or
+              self-hosted. Token usage is still metered. Choose <strong>Record token prices</strong> to
+              enter known rates, including zero when the declared token rate is zero.
             </p>
           </>
         )}
@@ -298,7 +326,7 @@ function RegisterAgentCard() {
           />
         </Field>
         <div className={v.row}>
-          <Button type="submit" variant="primary" disabled={act.busy}>
+          <Button type="submit" variant="primary" disabled={act.busy || (isCustom && !selectedEndpoint?.enabled)}>
             Register agent
           </Button>
           {act.error && (
