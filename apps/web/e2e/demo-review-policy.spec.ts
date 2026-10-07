@@ -18,13 +18,14 @@
  * saves cannot arrive under this person's identity. The org review policy is
  * put back exactly as found, and the fixture is deactivated afterward.
  */
+import { randomUUID } from "node:crypto";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
 const BOOT = { authorization: `Bearer ${BOOT_TOKEN}`, "content-type": "application/json" };
-const RUN = Math.random().toString(36).slice(2, 7);
+const RUN = randomUUID();
 const NAME = `Credit-limit assistant (policy run ${RUN})`;
 const ADMIN_EMAIL = `policy-${RUN}@example.test`;
 const ADMIN_NAME = "Ada Admin";
