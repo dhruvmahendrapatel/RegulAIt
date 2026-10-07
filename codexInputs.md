@@ -4,6 +4,29 @@ Updated: 2026-10-04 15:40 CDT (UTC-05:00). Review target: `dhruv/active`.
 Latest scoped source/test snapshot: `ff7fdbcc635663afd0c855f61eb9a742f472259a` (local = upstream before feedback publication).
 Prior intake acceptance baseline remains `b5e1da5524a3705d1a69094f13cf10db60311298`; the October 4 snapshot is NOT a full review of every intervening product change.
 
+## X19 read-only Batch 2 adversarial review — 2026-10-07 UTC
+
+Target: main `f5bb4736` (Batch 2 #133 and Batch 3 fixes already integrated). Gateway/shared/provider/compose source unchanged. One open finding; independent controls below pass within the stated local scope. Claude owns the fix and verification.
+
+### X19-S01 — MEDIUM — reflected Outlook credentials escape error scrubbing
+
+**Trigger and evidence:** An upstream/proxy error that reflects a submitted credential. `packages/connector-provider/src/index.ts:1206` passes token-service `error_description` through `tokenErrorDetail` (line745) without the known credential scrub; `apps/gateway/src/chatops.ts:890` forwards the resulting provider message as the named 502 detail. A real local gateway post to an owned approval, two allow-listed loopback stubs, synthetic encrypted platform credential: **502 `chatops_post_failed`, `detail` contains the exact synthetic app secret; Graph receives zero calls**. This is a controlled reflected-error attack, not a claim that normal Microsoft responses echo secrets.
+
+A second path is `index.ts:1310`: Graph's raw JSON body is logged after literal `scrubSecrets(text, [appPassword])`. When the synthetic secret contains a quote/backslash, JSON escaping prevents the literal match. Parsing the recorded log JSON recovers the exact credential. The caller's parsed Graph detail is redacted in that case, so the two sinks differ. Both observations reproduced independently at provider level and through the real gateway; no real credentials or external messages used.
+
+**Acceptance:** Before returning or logging upstream error material, scrub known credential/token values consistently, including JSON-escaped representations, without losing the upstream HTTP status and safe error code. Add provider and gateway regressions for reflected OAuth descriptions and escaped Graph messages; assert responses/audit/log strings cannot disclose or reconstruct the credential. Retain the existing egress, recipient and capped-detail guarantees. Do not suppress errors or scanners. Finding remains OPEN pending Claude's source fix and a fresh replay.
+
+Evidence files outside checkout: `/workspace/.regulait-onboarding/x19-provider-probes.{mjs,json}` and `x19-gateway-reflection.{mjs,json}`. The JSON results contain booleans/statuses only. Full requests/responses are not published. Gateway fixture settings restored; its disposable database is local and isolated.
+
+### Controls and coverage
+
+- **Outlook/public URL:** 77/77 targeted gateway tests across seven files (courier, send-only registration, public URL, TOTP, MRM SQL/gates/drift). Existing checks cover forged Host, pinned origin/base path, strict registration, sensitive-summary withholding, cached/revoked tokens, both egress hosts and air-gapped refusals. 13/13 selected provider tests (76 unrelated cases skipped), plus 22 independent provider/URL/TOTP observations: 20 controls pass, two S01 reproductions. Forged To/Cc/Bcc are dropped; read is refused before any fetch. Malformed URLs, query/fragment/credentials/dot segments, non-ASCII TOTP codes and replay are rejected; enrolment label injection does not replace URI parameters.
+- **Refusal guidance:** 8/8 existing frontend tests; messages preserve payload codes and point to the actual MFA/policy Account sections. No new bypass found in this scoped review.
+- **MRM SQL:** 11 independent real-DB, rolled-back fixture scenarios pass: latest reference, null/cross-project separation, scoring-semantics separation, SQL/JSON-null panel equivalence, repetitions, unfinished rows, certification boundary, post-certification reference exclusion, server gate refusal, and manual caller-floor exclusion. Confirms the SQL comparison's intended semantics; no full statistical benchmark or certification claim.
+- **SeaweedFS:** Compose's exact pinned `4.48` image digest `4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d`, isolated tmpfs container and synthetic S3 credential. **9/9 real Object Lock attack tests pass** (60 unrelated audit cases skipped): actual COMPLIANCE delete refusal, overwrite/masking defence, GOVERNANCE/unlocked disclosures and false-alarm handling. `/proc/net/tcp{,6}` and active connection probes confirm master/filer/volume HTTP+gRPC ports 9333/19333, 8888/18888, 8080/18080 bind loopback and cannot be reached at the non-loopback container address. Actual S3 gRPC PutIdentity returns status16 for both missing authorization metadata and a forged token; it does not reach an unimplemented method. Eight independent exposure/auth controls pass. This does not claim protection against host/root access or deletion of the backing volume.
+
+Total existing selected tests: **107 passed**, with skips disclosed above. Independent observations: **43** (39 controls pass; four S01 reproductions across library and gateway). Exact scripts, logs and scope under `/workspace/.regulait-onboarding/`: `x19-existing-tests.log`, `x19-provider-units.log`, `x19-refusal-units.log`, `x19-real-object-lock.log`, `x19-mrm-probes.{mjs,json}`, `x19-seaweed-probes.{mjs,json}`. `docker compose config --format json` supplied the tested command; Compose dollar escaping was resolved before direct container invocation. No production stack or external service altered.
+
 ## X16 key-custody CI investigation — 2026-10-07 UTC
 
 Original CI run [37543718055](https://github.com/dhruvmahendrapatel/RegulAIt/actions/runs/37543718055), job
