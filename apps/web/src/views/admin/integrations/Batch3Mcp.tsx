@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
@@ -73,11 +73,12 @@ function ProtocolGrantForm({ servers }: { servers: McpServer[] }) {
 }
 
 export function StdioArguments({ args, onChange, disabled }: { args: string[]; onChange: (args: string[]) => void; disabled?: boolean }) {
-  return <fieldset disabled={disabled}><legend>Command arguments</legend>
-    <p>Arguments are audited and visible to admins. Never put passwords, API keys or other secrets in them.</p>
+  const warningId = useId();
+  return <fieldset disabled={disabled} aria-describedby={warningId}><legend>Command arguments</legend>
+    <p id={warningId}>Arguments are audited and visible to admins. Never put passwords, API keys or other secrets in them.</p>
     <p>Each argument is one separate string. Spaces stay inside that argument; no shell command line is evaluated.</p>
     {args.map((value, index) => <div key={index} className={v.row}>
-      <Field label={`Argument ${index + 1}`}><Input value={value} onChange={(event) => onChange(args.map((item, position) => position === index ? event.target.value : item))} /></Field>
+      <Field label={`Argument ${index + 1}`}><Input aria-describedby={warningId} value={value} onChange={(event) => onChange(args.map((item, position) => position === index ? event.target.value : item))} /></Field>
       <Button type="button" aria-label={`Remove argument ${index + 1}`} onClick={() => onChange(args.filter((_, position) => position !== index))}>Remove</Button>
     </div>)}
     <Button type="button" onClick={() => onChange([...args, ""])}>Add argument</Button>

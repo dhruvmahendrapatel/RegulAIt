@@ -70,3 +70,15 @@ test("R18-01: session-loss 401 routes back to sign-in without probing metrics", 
   await expect(page).toHaveURL(/\/login/);
   expect(gw.counts().metricsRequests).toBe(0);
 });
+
+
+for (const tokenConfigured of [true, false]) {
+  test(`R18-11: main listener enabled with token configured ${tokenConfigured}`, async ({ page }) => {
+    const gw = await mockPosture(page, 200, { metrics: { separateListener: "off", mainListener: true, tokenConfigured } });
+    await page.goto("/ui/admin/retention");
+    await expect(page.getByText("Main listener: metrics enabled.", { exact: true })).toBeVisible();
+    await expect(page.getByText(`Bearer token configured: ${tokenConfigured ? "yes" : "no"}.`, { exact: true })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "enabled metrics listener without a configured bearer token" })).toHaveCount(tokenConfigured ? 0 : 1);
+    expect(gw.counts()).toEqual({ metricsRequests: 0, postureRequests: 1 });
+  });
+}
