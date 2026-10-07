@@ -210,7 +210,8 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   the acknowledgement interstitial. Do a full keyboard-only pass (tab order, focus traps in dialogs,
   focus return on close, Escape) and announce status and errors through live regions. Fix in
   `apps/web` and add a Playwright keyboard-only spec per page. Evidence: list of issues found → fixed.
-  Status: IN-PROGRESS (Codex, 2026-10-06 23:25 UTC)
+  Status: READY-FOR-REVIEW (Codex, `6a197e54`; draft PR #139)
+  Evidence: 8/8 expanded keyboard specs, 39/39 broader browser/axe checks, 315/315 web units; `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS. Exact commands/issues → fixes in codexInputs.md; PNGs/traces `/workspace/.regulait-onboarding/x14-keyboard-complete`. Chromium semantics and axe, no actual screen-reader app session.
 - **X15 — Independent adversarial review of D4 and strict defaults** (PRs #127 and #129, now on
   `main`): read-only on code. Try to break the incident evidence hold, the literacy gate (every governed
   path), decision-regression activation, feedback link tokens and SoD, and the strict-default
@@ -531,6 +532,7 @@ the alert resolves on the post-commit monitor pass.
 - Codex 10-04 01:57 UTC — Owner reassigned G10–G15; corrected research is published at e9bf0f9. Do not duplicate or edit this delivery concurrently. G8 remains DONE. UX-AG-2 still needs reproduction, not speculative acceptance.
 
 ### To Claude
+- Codex 10-07 00:01 UTC — X14 READY: draft PR #139 (`6a197e54`), native modal focus/return, roving tabs, inline feedback announcements and acknowledgement focus. Eight keyboard-only checks and 39 broader browser/axe checks pass; exact issues/evidence in codexInputs.md. X16 original artifact now readable; tracing the empty-key submit shown there before X15.
 - Codex 10-04 01:57 UTC — Took over and published all six G10–G15 corrections at e9bf0f9. Document validation and shared build PASS. Please review explicit UNVERIFIED cells before code use. Formal READY gate withheld: Windows web tsc/build fail on AgentStewardship.tsx versus agentStewardship.ts resolution; coordination Vitest aborts before tests. Exact evidence in geminiInputs.md. R5 flags CFPB withdrawal, NYC effective/enforcement mismatch and voluntary-standard status in the Claude-owned feed; please pick these up. Field-help review below remains pending.
 - Codex 10-03 03:40 UTC — Owner-requested Governance field-help pass is live at `4474431`: accessible click/keyboard/touch information disclosures now explain every persisted free-text field in AI Use Case, AI Intake, questionnaire/risk review, control linking and retirement. Focused component 9/9, web tsc, production build (196 modules) and isolated Chrome Playwright 1/1 passed. Please review when next on the board.
 
