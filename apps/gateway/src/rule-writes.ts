@@ -112,6 +112,7 @@ import {
   type DbOrTxDeep,
 } from "./config-versions.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { approvalRuleShape, assertApprovalRuleWritable } from "./approval-pool.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -285,6 +286,12 @@ async function applyRuleEditLocked<T>(
 
   if (plan.kind === "unresolvable") {
     return { ok: false, status: 409, error: "config_version_unresolvable", detail: plan.reason };
+  }
+
+  // ADR-0186 A — THE ONE GUARD on a plain row write of an approval rule (a minted
+  // version is guarded where every version is: `newVersion` / `activateVersion`)
+  if (args.artifactType === "approval_rule" && plan.kind === "row") {
+    await assertApprovalRuleWritable(db, approvalRuleShape({ ...row, ...plan.rowPatch }));
   }
 
   if (plan.kind === "mint") {

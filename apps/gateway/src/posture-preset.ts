@@ -34,6 +34,7 @@
 
 import { publicUrlPosture } from "./public-url.js";
 import { metricsPosture } from "./metrics.js";
+import { approvalSigningPosture } from "./approval-signatures.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -355,6 +356,8 @@ export function registerPosturePresetRoutes(
       ...(await buildPostureReport(settings, { sink })),
       publicUrl: publicUrlPosture(),
       metrics: metricsPosture(),
+      // ADR-0186 B: passkey-signed approvals with no relying party fail closed — say so
+      approvalSigning: approvalSigningPosture(settings.approvalSignatureMode),
     };
   });
 

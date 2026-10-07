@@ -93,6 +93,11 @@ describe("batch-4 refusal copy (ADR-0186)", () => {
         "passkey_challenge_used",
         "approval_action_changed",
         "passkey_rp_unconfigured",
+        "caller_cannot_approve",
+        "approval_not_signable",
+        "unknown_role",
+        "approval_quorum_unsatisfiable",
+        "approval_signature_recheck_failed",
         "not_built",
       ]),
     );

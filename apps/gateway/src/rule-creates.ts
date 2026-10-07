@@ -26,6 +26,7 @@ import { approvalRules } from "@regulait/db";
 import type { DbOrTx } from "./config-versions.js";
 import type { z } from "zod";
 import type { createApprovalRuleSchema } from "@regulait/shared";
+import { assertApprovalRuleWritable } from "./approval-pool.js";
 
 export type CreateApprovalRuleInput = z.infer<typeof createApprovalRuleSchema>;
 
@@ -55,7 +56,18 @@ export async function createApprovalRuleRow(
   // proposal applier does), so it must be able to join one.
   db: DbOrTx,
   body: CreateApprovalRuleInput,
+  /** ADR-0186 A: dual control. Omitted -> the column defaults (quorum 1, no role). */
+  dualControl: { quorum?: number | undefined; approverRoleId?: string | null | undefined } = {},
 ): Promise<typeof approvalRules.$inferSelect> {
+  // ADR-0186 A: THE ONE GUARD — a pool that can never reach the quorum is refused here,
+  // for the admin route and the copilot's rule_to_approval applier alike
+  await assertApprovalRuleWritable(db, {
+    approverUserId: body.approverUserId,
+    approverRoleId: dualControl.approverRoleId ?? null,
+    quorum: dualControl.quorum ?? 1,
+    scope: body.scope ?? "user",
+    userId: body.userId ?? null,
+  });
   const [row] = await db
     .insert(approvalRules)
     .values({
@@ -66,6 +78,8 @@ export async function createApprovalRuleRow(
       // rather than defaulted here so the ONE default lives in the DDL.
       ...(body.approvalScope ? { approvalScope: body.approvalScope } : {}),
       approverUserId: body.approverUserId,
+      ...(dualControl.quorum !== undefined ? { quorum: dualControl.quorum } : {}),
+      ...(dualControl.approverRoleId !== undefined ? { approverRoleId: dualControl.approverRoleId } : {}),
     })
     .returning();
   return row!;

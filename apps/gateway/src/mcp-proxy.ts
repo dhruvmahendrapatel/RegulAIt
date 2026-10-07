@@ -33,6 +33,7 @@ import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kern
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import {
+  APPROVAL_SIGNATURE_RECHECK_FAILED_RULE,
   approvalArgumentsPreview,
   setToolPriceSchema,
   guardrailCategoryList,
@@ -100,6 +101,13 @@ import {
   protocolOutcomeResult,
 } from "./mcp-protocol.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import {
+  auditQuorumUnsatisfiableAtQueue,
+  recheckApprovalSignatures,
+  supersedeOnRecheckFailure,
+  toolApprovalRequirements,
+  type CallFacts,
+} from "./approval-signatures.js";
 import {
   assertProjectAttribution,
   enforcePII,
@@ -353,8 +361,21 @@ export type GovernedToolCallOutcome =
    * returns so the two surfaces name the same condition identically. */
   | { kind: "budget_blocked"; status: number; error: string; detail?: string };
 
-/** Consume only if the policy snapshot used to evaluate this call is still current. */
-export async function consumeBoundApproval(
+/** what spending an approved consent came to */
+export type BoundApprovalSpend = "consumed" | "not_consumed" | "signature_recheck_failed";
+
+/**
+ * Consume only if the policy snapshot used to evaluate this call is still
+ * current — and, ADR-0186 B, only if every approving passkey signature still
+ * verifies against the call actually being run. The row is LOCKED, the
+ * signatures are re-verified against digests recomputed from `call` (the
+ * call's own arguments and context digests, target and tool), and only then
+ * is it consumed. A failed recheck supersedes the approval, audits
+ * `approval-signature-recheck-failed` and refuses the call, in the same
+ * transaction. A passkey-mode tool-call approval spent without `call` facts
+ * fails closed.
+ */
+export async function spendBoundApproval(
   db: Db,
   input: {
     approvalId: string;
@@ -362,17 +383,19 @@ export async function consumeBoundApproval(
     approvalScope: "action" | "tool";
     argumentsDigest: string;
     contextDigest: string;
+    /** ADR-0186 B: the target and tool of the call being run (the signed payload's other facts) */
+    call?: { serverId?: string | null; connectorId?: string | null; toolName: string } | undefined;
   },
-): Promise<boolean> {
+): Promise<BoundApprovalSpend> {
   return db.transaction(async (tx) => {
     const [generation] = await tx
       .select({ epoch: governancePolicyEpoch.epoch })
       .from(governancePolicyEpoch)
       .for("share");
-    if (!generation || generation.epoch !== input.policyEpoch) return false;
-    const consumed = await tx
-      .update(approvals)
-      .set({ status: "consumed" })
+    if (!generation || generation.epoch !== input.policyEpoch) return "not_consumed";
+    const [row] = await tx
+      .select()
+      .from(approvals)
       .where(
         and(
           eq(approvals.id, input.approvalId),
@@ -384,9 +407,43 @@ export async function consumeBoundApproval(
           or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`))!,
         ),
       )
+      .for("update");
+    if (!row) return "not_consumed";
+    const call: CallFacts | null = input.call
+      ? { ...input.call, argumentsDigest: input.argumentsDigest, contextDigest: input.contextDigest }
+      : null;
+    const recheck = await recheckApprovalSignatures(tx, row, call);
+    if (!recheck.ok) {
+      await supersedeOnRecheckFailure(tx, row, call, recheck);
+      return "signature_recheck_failed";
+    }
+    const consumed = await tx
+      .update(approvals)
+      .set({ status: "consumed" })
+      .where(and(eq(approvals.id, input.approvalId), eq(approvals.status, "approved")))
       .returning({ id: approvals.id });
-    return consumed.length === 1;
+    return consumed.length === 1 ? "consumed" : "not_consumed";
   });
+}
+
+/** `spendBoundApproval`, answered as "was it consumed?" */
+export async function consumeBoundApproval(
+  db: Db,
+  input: Parameters<typeof spendBoundApproval>[1],
+): Promise<boolean> {
+  return (await spendBoundApproval(db, input)) === "consumed";
+}
+
+/** ADR-0186 B: the refusal of a call whose approval failed the signature recheck */
+export function signatureRecheckDenial(approvalId: string): Decision {
+  return {
+    effect: "deny",
+    ruleId: APPROVAL_SIGNATURE_RECHECK_FAILED_RULE,
+    ruleChain: [],
+    reason:
+      `approval '${approvalId}' was superseded: its approving signatures did not verify against this call, ` +
+      "so nothing ran — re-submit to raise a fresh approval",
+  };
 }
 
 /**
@@ -780,6 +837,7 @@ async function executeGovernedToolCallInner(
       contextDigest,
       policyEpoch,
       retiredApprovals,
+      matchedApprovalRuleIds,
     } = await governedEvaluate(
       db,
       userId,
@@ -960,6 +1018,7 @@ async function executeGovernedToolCallInner(
         argumentsDigest,
         argumentsPreview: preparedPii?.argumentsPreview ?? approvalArgumentsPreview(args.arguments),
         argumentsPreviewKind: preparedPii ? "mcp_redacted_v1" : "arguments_v1",
+        matchedApprovalRuleIds,
       });
     }
 
@@ -1326,8 +1385,12 @@ export async function queueGovernedApproval(
     argumentsDigest: string;
     argumentsPreview: (typeof approvals.$inferInsert)["argumentsPreview"];
     argumentsPreviewKind: "arguments_v1" | "mcp_redacted_v1";
+    /** ADR-0186 A: the approval rules that matched (their max quorum is snapshotted) */
+    matchedApprovalRuleIds?: readonly string[] | undefined;
   },
-): Promise<Extract<GovernedToolCallOutcome, { kind: "approval_required" | "approval_expired" | "approval_context_stale" }>> {
+): Promise<
+  Extract<GovernedToolCallOutcome, { kind: "approval_required" | "approval_expired" | "approval_context_stale" | "denied" }>
+> {
   const {
     userId,
     serverId,
@@ -1370,6 +1433,31 @@ export async function queueGovernedApproval(
   // shipped column default is 72 hours (see migration 0107), so an org that
   // has never touched the dial gets expiry.
   const { approvalTtlHours } = await loadOrgSettings(db);
+
+  // ADR-0186 A — DUAL CONTROL, decided at QUEUE time: the quorum this consent
+  // will need (max of the matched rules' quorums and, for a project carrying an
+  // in-app-only classification, the org's sensitive quorum) and how each
+  // approval must be signed, snapshotted onto the row. A pool that can never
+  // reach the quorum is a DENIED call, audited, not an approval nobody can give.
+  const requirement = await toolApprovalRequirements(db, {
+    callerUserId: userId,
+    approverUserId: decision.approverUserId!,
+    ruleId: decision.ruleId,
+    matchedApprovalRuleIds: q.matchedApprovalRuleIds ?? [],
+    projectId,
+  });
+  if (!requirement.satisfiable) {
+    const reason = await auditQuorumUnsatisfiableAtQueue(db, {
+      userId,
+      req: requirement,
+      projectId,
+      target: { serverId, toolName },
+    });
+    return {
+      kind: "denied",
+      decision: { effect: "deny", ruleId: "approval-quorum-unsatisfiable", ruleChain: decision.ruleChain, reason },
+    };
+  }
 
   // Reuse an existing pending entry rather than piling up duplicates.
   //
@@ -1444,6 +1532,9 @@ export async function queueGovernedApproval(
           ...(approvalTtlHours != null
             ? { expiresAt: new Date(Date.now() + approvalTtlHours * 3_600_000) }
             : {}),
+          // ADR-0186 A/B: snapshotted here, never re-read from a later dial
+          quorum: requirement.quorum,
+          signatureMode: requirement.signatureMode,
         })
         .returning({ id: approvals.id })
     )[0]!.id;
@@ -1491,7 +1582,7 @@ export async function consumeApprovalOrRetire(
   },
 ): Promise<Extract<
   GovernedToolCallOutcome,
-  { kind: "approval_expired" | "approval_context_stale" | "approval_consumed_race" }
+  { kind: "approval_expired" | "approval_context_stale" | "approval_consumed_race" | "denied" }
 > | null> {
   const { approvedApprovalId, policyEpoch, approvalScope, argumentsDigest, contextDigest, userId, serverId, toolName, projectId } = c;
   // Atomically consume the approval; losing the race means another call
@@ -1510,14 +1601,20 @@ export async function consumeApprovalOrRetire(
   //     DATABASE's clock (`now()`), not this process's — the row is being
   //     changed there and the freshness question has to be answered there
   //     too.
-  const consumed = await consumeBoundApproval(db, {
+  const spent = await spendBoundApproval(db, {
     approvalId: approvedApprovalId,
     policyEpoch,
     approvalScope,
     argumentsDigest,
     contextDigest,
+    call: { serverId, toolName },
   });
-  if (!consumed) {
+  // ADR-0186 B: a signature that does not verify against this call refuses it
+  // (the approval was superseded and audited inside the spend)
+  if (spent === "signature_recheck_failed") {
+    return { kind: "denied", decision: signatureRecheckDenial(approvedApprovalId) };
+  }
+  if (spent !== "consumed") {
     // ADR-0105 — CLASSIFY, do not return one opaque failure. Re-read the
     // row and say which of the three actually happened: somebody else spent
     // it, it lapsed, or the policy moved underneath it. The first is a

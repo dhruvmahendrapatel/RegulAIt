@@ -114,6 +114,13 @@ export interface GovernedEvaluation {
   /** DB policy generation read before the evaluation's policy snapshot. */
   policyEpoch: number;
   /**
+   * ADR-0186 A — the ids of the approval rules that MATCHED this call (the
+   * kernel's own predicate, the same set `approvalScope` and `contextDigest`
+   * are computed over). The queue writer snapshots the required quorum as the
+   * max of these rules' quorums. Absent on the indeterminate-config refusal.
+   */
+  matchedApprovalRuleIds?: string[];
+  /**
    * ADR-0105: approved rows that WOULD have satisfied this call on ADR-0104's
    * payload test but were refused on the new ones — an expired consent, or one
    * granted under a policy context that has since moved. Returned as DATA, not
@@ -951,6 +958,7 @@ export async function governedEvaluate(
     contextDigest,
     policyEpoch,
     retiredApprovals,
+    matchedApprovalRuleIds: matchedARules.map((r) => r.id),
     ...(candidateDecision ? { candidateDecision } : {}),
     ...(replayIndeterminate ? { replayIndeterminate } : {}),
   };

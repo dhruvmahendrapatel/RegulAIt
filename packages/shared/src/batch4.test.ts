@@ -14,6 +14,7 @@ import {
   BATCH4_STRICT_DEFAULTS,
   DETECTION_MONITOR_RULE_IDS,
   MONITOR_RULES,
+  APPROVAL_REFUSALS,
   PASSKEY_REFUSALS,
   RECEIPT_OBJECT_TYPES,
   STEP_UP_ACTION_KINDS,
@@ -125,7 +126,14 @@ describe("ADR-0186 vocabularies", () => {
     expect(PASSKEY_REFUSALS.passkey_signature_invalid).toBe(422);
     expect(PASSKEY_REFUSALS.passkey_rp_unconfigured).toBe(409);
     expect(new Set(BATCH4_REFUSAL_CODES).size).toBe(BATCH4_REFUSAL_CODES.length);
-    expect(BATCH4_REFUSAL_CODES).toHaveLength(14);
+    expect(APPROVAL_REFUSALS).toEqual({
+      caller_cannot_approve: 403,
+      approval_not_signable: 409,
+      unknown_role: 422,
+      approval_quorum_unsatisfiable: 403,
+      approval_signature_recheck_failed: 403,
+    });
+    expect(BATCH4_REFUSAL_CODES).toHaveLength(19);
   });
   it("the detection monitor rules exist in the monitor catalogue; receipts cover decisions only", () => {
     for (const id of DETECTION_MONITOR_RULE_IDS) expect(MONITOR_RULES[id].label.length).toBeGreaterThan(0);

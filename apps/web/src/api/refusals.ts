@@ -120,6 +120,15 @@ export const BATCH4_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
   passkey_rp_unconfigured:
     "Passkeys aren't available yet: an administrator has to set this deployment's public address first",
   not_built: "This isn't available yet",
+  // ADR-0186 A2+B: dual control and signed approvals
+  caller_cannot_approve:
+    "This is your own call (or the call of someone you're linked to by delegation), so a different person must decide it",
+  approval_not_signable: "This approval isn't decided with a passkey signature — decide it the usual way",
+  unknown_role: "The approver role you chose no longer exists — pick another role",
+  approval_quorum_unsatisfiable:
+    "This call needs more different approvers than are available besides you, so it was refused rather than queued",
+  approval_signature_recheck_failed:
+    "The approval for this call no longer matches the call (a signature didn't verify), so nothing ran — submit it again for a fresh approval",
   // ADR-0186 A (slice A1): the passkey and step-up ceremonies
   passkey_attestation_refused:
     "That passkey sent manufacturer details RegulAIt doesn't accept — try again, or use a different passkey",
