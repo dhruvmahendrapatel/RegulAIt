@@ -495,7 +495,16 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     // upstream notifications: forwarded only when the org enables logging, and
     // only after the output scans; otherwise dropped
     const relaying = !!args.relay && enabled.includes("logging/setLevel");
-    if (relaying) {
+    // B3S-05: an upstream LOG message is relayed only to a caller whose own
+    // decision on `mcp:logging` allows it — evaluated (and audited) like any
+    // other decision. Before, a caller allowed ANY protocol method received
+    // the upstream's logs once the org enabled logging. Progress for the
+    // caller's own request stays tied to the org setting alone.
+    const relayLogs =
+      relaying &&
+      (method === "logging/setLevel" ||
+        (await loggingRelayAllowed(db, { userId, serverId, serverRow, projectId, forMethod: method, principal: args.principal })));
+    if (relayLogs) {
       upstream.setNotificationHandler(LoggingMessageNotificationSchema, async (n) => {
         const params = await scanForRelay(n.params, { projectId, piiIntl, piiMode, guardrails });
         if (params) await args.relay!({ method: "notifications/message", params: params as never });
@@ -616,6 +625,60 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   } finally {
     if (upstream) await upstream.close();
   }
+}
+
+/**
+ * B3S-05: may upstream `notifications/message` be relayed to this caller? The
+ * kernel decides on the `mcp:logging` protocol grant (the decision a
+ * `logging/setLevel` gets), with no arguments; one audit row, phase
+ * `protocol-relay`. Only a plain allow relays — an approval requirement is not
+ * queued for a log stream and relays nothing.
+ */
+async function loggingRelayAllowed(
+  db: Db,
+  a: {
+    userId: string;
+    serverId: string;
+    serverRow: Parameters<typeof approvalTargetForServer>[1];
+    projectId: string | null;
+    forMethod: string;
+    principal: AbacPrincipalContext | undefined;
+  },
+): Promise<boolean> {
+  const { grant, kind } = MCP_PROTOCOL_METHOD_GRANTS["logging/setLevel"];
+  const ref = { serverId: a.serverId, name: grant, kind, surface: "protocol" as const };
+  const { decision, argumentsDigest, contextDigest } = await governedEvaluate(
+    db,
+    a.userId,
+    a.serverId,
+    ref,
+    {},
+    null,
+    a.projectId,
+    a.principal,
+    undefined,
+    undefined,
+    approvalTargetForServer(a.serverId, a.serverRow),
+  );
+  await db.insert(auditLog).values({
+    userId: a.userId,
+    serverId: a.serverId,
+    toolName: grant,
+    detail: {
+      phase: "protocol-relay",
+      method: "notifications/message",
+      forMethod: methodLabel(a.forMethod),
+      argumentsDigest,
+      contextDigest,
+      projectId: a.projectId,
+    },
+    effect: decision.effect,
+    ruleId: decision.ruleId,
+    ruleChain: decision.ruleChain,
+    reason: decision.effect === "allow" ? decision.reason : `upstream log messages not relayed: ${decision.reason}`,
+  });
+  recordDecision({ surface: "mcp_protocol", effect: decision.effect });
+  return decision.effect === "allow";
 }
 
 /** does a result carry base64 content (`blob`) anywhere? Redaction cannot

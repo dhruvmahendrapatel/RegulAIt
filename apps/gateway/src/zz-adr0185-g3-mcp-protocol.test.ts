@@ -570,13 +570,34 @@ describe("ADR-0185 G3 — notifications", () => {
     expect(received).toEqual([]);
     expect(progress).toEqual([]);
 
+    // B3S-05: the org enabling logging is not enough — the upstream's LOG
+    // messages reach only a caller whose own mcp:logging decision allows it
+    // (audited); progress for the caller's own request is relayed
     await setMethods(["resources/read", "logging/setLevel"]);
+    const ungranted = await clientFor(u, fullId);
+    listen(ungranted);
+    await read(ungranted);
+    await ungranted.close();
+    expect(received, "log messages relayed to a caller with no mcp:logging grant").toEqual([]);
+    expect(progress).toEqual([{ progress: 1, total: 2 }]);
+    const relayDeny = (await auditFor(u)).find(
+      (r) => r.toolName === "mcp:logging" && (r.detail as { phase?: string }).phase === "protocol-relay",
+    );
+    expect(relayDeny).toMatchObject({ effect: "deny", ruleId: "default-deny" });
+    expect(relayDeny!.detail).toMatchObject({ method: "notifications/message", forMethod: "resources/read" });
+
+    await grant(u, fullId, "mcp:logging");
+    progress.length = 0;
     const loud = await clientFor(u, fullId);
     listen(loud);
     await read(loud);
     await loud.close();
     expect(received).toEqual([{ level: "info", data: "readme was read" }]);
     expect(progress).toEqual([{ progress: 1, total: 2 }]);
+    const relayAllow = (await auditFor(u)).filter(
+      (r) => r.toolName === "mcp:logging" && (r.detail as { phase?: string }).phase === "protocol-relay",
+    );
+    expect(relayAllow.map((r) => r.effect)).toEqual(["deny", "allow"]);
   });
 
   it("logging/setLevel is a WRITE decision on mcp:logging", async () => {
