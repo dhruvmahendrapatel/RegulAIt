@@ -218,8 +218,9 @@ export class GenericHttpConnectorProvider implements ConnectorProvider {
           })
         : await this.fetchImpl(url, { method: "GET", headers: this.headers(false) });
     if (res.status < 200 || res.status >= 300) {
+      // X19-S01: the upstream's text, scrubbed of the bearer credential it was sent
       throw new ConnectorProviderError(
-        `${this.kind} ${invocation.operation} ${url} failed: ${await res.text()}`,
+        `${this.kind} ${invocation.operation} ${url} failed: ${scrubSecrets(await res.text(), this.token ? [this.token] : [])}`,
         res.status,
       );
     }
@@ -271,8 +272,9 @@ export class WebhookConnectorProvider implements ConnectorProvider {
     });
     const res = await this.fetchImpl(this.url, { method: "POST", headers, body });
     if (res.status < 200 || res.status >= 300) {
+      // X19-S01: the receiver's text, scrubbed of the bearer credential it was sent
       throw new ConnectorProviderError(
-        `webhook ${invocation.operation} failed: ${await res.text()}`,
+        `webhook ${invocation.operation} failed: ${scrubSecrets(await res.text(), this.token ? [this.token] : [])}`,
         res.status,
       );
     }
@@ -593,7 +595,8 @@ export class SlackConnectorProvider implements ConnectorProvider {
     }
     const text = await res.text();
     if (res.status < 200 || res.status >= 300) {
-      throw new ConnectorProviderError(`slack ${apiCall} failed: ${text}`, res.status);
+      // X19-S01: the upstream's text, scrubbed of the bot token it was sent
+      throw new ConnectorProviderError(`slack ${apiCall} failed: ${scrubSecrets(text, [this.token])}`, res.status);
     }
     // envelope-level failure: HTTP 200 with ok:false
     const decoded = decodeBody(res.status, text);
@@ -608,7 +611,7 @@ export class SlackConnectorProvider implements ConnectorProvider {
         );
       }
       throw new ConnectorProviderError(
-        `slack ${apiCall} failed: ${code}`,
+        `slack ${apiCall} failed: ${scrubSecrets(code, [this.token])}`,
         SLACK_ERROR_STATUS[code] ?? 502,
       );
     }
@@ -737,17 +740,137 @@ export const loginBaseUrlSchema = z
     { message: "must be a plain http(s) URL with a host and at most a path — no credentials, query or fragment" },
   );
 
+// ---------------------------------------------------------------------------
+// X19-S01 — THE ONE SCRUB FOR UPSTREAM ERROR MATERIAL.
+//
+// Every adapter that turns an upstream error into a ConnectorProviderError
+// message (which the gateway returns as a 502 detail) or a log line passes the
+// credentials it put on the wire through `scrubSecrets`. A reflecting upstream
+// or proxy does not echo a secret only verbatim: the token request body is
+// form-encoded, and a JSON body escapes `"` and `\` (and some serializers
+// every non-ASCII or HTML-significant character as \uXXXX). So a known secret
+// is removed in each representation it can take —
+//   raw · JSON-escaped (once and twice) · encodeURIComponent ·
+//   application/x-www-form-urlencoded ('+' for a space), percent-escapes in
+//   either hex case —
+// and a body that IS JSON is also scrubbed at the decoded-string level and
+// re-serialized, so no escaping choice can hide a secret from the match and
+// `JSON.parse` of what we emit cannot reconstruct it.
+// Open-source check (ADR-0176): log redactors (pino's `redact`, fast-redact)
+// remove values by object PATH, not a known value inside arbitrary upstream
+// text in its encoded forms; none fits, so this stays ours.
+// ---------------------------------------------------------------------------
+
+/** a secret shorter than this is not matched (it would shred ordinary text) */
+const SCRUB_MIN_SECRET_LENGTH = 4;
+/** deeper JSON than this is not walked; the subtree is withheld instead */
+const SCRUB_MAX_JSON_DEPTH = 64;
+const REDACTED = "[redacted]";
+
+/** every representation `secret` can take in upstream error material */
+export function secretRepresentations(secret: string): string[] {
+  const json = JSON.stringify(secret).slice(1, -1);
+  const forms = new Set<string>([
+    secret,
+    json,
+    // a JSON string embedded in a JSON string (a logged body inside a JSON log line)
+    JSON.stringify(json).slice(1, -1),
+    encodeURIComponent(secret),
+    // application/x-www-form-urlencoded: what the token request body carries
+    new URLSearchParams([["k", secret]]).toString().slice(2),
+  ]);
+  return [...forms].filter((f) => f.length >= SCRUB_MIN_SECRET_LENGTH);
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** one alternation over every representation of every secret, longest first;
+ * a percent-escape matches in either hex case (%2B and %2b are one octet) */
+function secretMatcher(secrets: readonly string[]): RegExp | null {
+  const forms = new Set<string>();
+  for (const sec of secrets) {
+    if (typeof sec === "string" && sec.length >= SCRUB_MIN_SECRET_LENGTH) {
+      for (const f of secretRepresentations(sec)) forms.add(f);
+    }
+  }
+  if (forms.size === 0) return null;
+  const patterns = [...forms]
+    .sort((a, b) => b.length - a.length)
+    .map((f) =>
+      escapeRegExp(f).replace(/%([0-9A-Fa-f])([0-9A-Fa-f])/g, (_m, a: string, b: string) => {
+        const either = (c: string) => (/[A-Fa-f]/.test(c) ? `[${c.toUpperCase()}${c.toLowerCase()}]` : c);
+        return `%${either(a)}${either(b)}`;
+      }),
+    );
+  return new RegExp(patterns.join("|"), "g");
+}
+
+/** the flat pass: known secrets in every representation, then bearer tokens,
+ * JWT-shaped strings and `client_secret=`-style pairs */
+function scrubFlat(text: string, matcher: RegExp | null): string {
+  const out = matcher ? text.replace(matcher, REDACTED) : text;
+  return out
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g, "[redacted-jwt]")
+    .replace(/((?:client_secret|access_token|password)["'=:\s]+)[^"'&\s,}]+/gi, "$1[redacted]");
+}
+
+/** a JSON body scrubbed at the DECODED level (keys and string values), or
+ * null when the text is not JSON or nothing in it needed scrubbing */
+function scrubJsonDecoded(text: string, matcher: RegExp | null): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  let changed = false;
+  const walk = (v: unknown, depth: number): unknown => {
+    if (typeof v === "string") {
+      const s = scrubFlat(v, matcher);
+      if (s !== v) changed = true;
+      return s;
+    }
+    if (v === null || typeof v !== "object") return v;
+    if (depth >= SCRUB_MAX_JSON_DEPTH) {
+      changed = true;
+      return "[withheld: nested too deep to scrub]";
+    }
+    if (Array.isArray(v)) return v.map((x) => walk(x, depth + 1));
+    return Object.fromEntries(
+      Object.entries(v as Record<string, unknown>).map(([k, x]) => [walk(k, depth + 1) as string, walk(x, depth + 1)]),
+    );
+  };
+  const out = walk(parsed, 0);
+  return changed ? JSON.stringify(out) : null;
+}
+
+/**
+ * Remove every known credential (in each representation above), bearer
+ * tokens, JWT-shaped strings and `client_secret=`-style pairs from upstream
+ * error material BEFORE it is returned, logged or audited. Callers pass every
+ * credential the request put on the wire: the client secret, the minted access
+ * token, the bearer token, the Basic-auth string.
+ */
+export function scrubSecrets(text: string, secrets: readonly string[] = []): string {
+  const matcher = secretMatcher(secrets);
+  return scrubFlat(scrubJsonDecoded(text, matcher) ?? text, matcher);
+}
+
 /** ADR-0167 (SEC-01): what a failed token exchange tells the caller. The
  * login service's own `error` / `error_description` are what an operator
  * needs; the raw body is NEVER echoed — once a typed login host is reachable,
  * the body is whatever that host chose to say, and reflecting it to the
- * (non-admin) invoker would make the connector a read oracle for it. */
-export function tokenErrorDetail(text: string, status: number): string {
+ * (non-admin) invoker would make the connector a read oracle for it.
+ * X19-S01: and what IS relayed is scrubbed of the credentials the request
+ * carried (`secrets`) before it is capped, so a login host or proxy that
+ * reflects the submitted client secret cannot hand it to the caller. */
+export function tokenErrorDetail(text: string, status: number, secrets: readonly string[]): string {
   try {
     const parsed = JSON.parse(text) as { error?: unknown; error_description?: unknown };
     const parts = [parsed.error, parsed.error_description]
       .filter((p): p is string => typeof p === "string" && p.length > 0)
-      .map((p) => p.slice(0, 300));
+      .map((p) => scrubSecrets(p.replace(/[\r\n\t]+/g, " "), secrets).slice(0, 300));
     if (parts.length > 0) return `HTTP ${status}: ${parts.join(" — ")}`;
   } catch {
     /* not JSON: say so, do not echo */
@@ -850,7 +973,7 @@ export class TeamsConnectorProvider implements ConnectorProvider {
       // `error`/`error_description` is what an operator needs — and ONLY
       // those (ADR-0167): the raw body is withheld
       throw new ConnectorProviderError(
-        `teams token request failed: ${tokenErrorDetail(text, res.status)}`,
+        `teams token request failed: ${tokenErrorDetail(text, res.status, [this.cred.appPassword])}`,
         res.status === 400 || res.status === 401 ? 401 : res.status,
       );
     }
@@ -964,7 +1087,7 @@ export class TeamsConnectorProvider implements ConnectorProvider {
         /* a non-JSON body is reported verbatim below */
       }
       throw new ConnectorProviderError(
-        `teams ${label} failed: ${code ?? text}`,
+        `teams ${label} failed: ${scrubSecrets(code ?? text, [this.cred.appPassword, accessToken])}`,
         res.status,
       );
     }
@@ -1124,16 +1247,8 @@ export function clearOutlookTokenCache(): void {
 
 
 export const OUTLOOK_ERROR_DETAIL_MAX = 300;
-/** strip bearer tokens, JWT-shaped strings and the given literal secrets */
-export function scrubSecrets(text: string, secrets: readonly string[] = []): string {
-  let out = text;
-  for (const sec of secrets) if (sec && sec.length >= 4) out = out.split(sec).join("[redacted]");
-  return out
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g, "[redacted-jwt]")
-    .replace(/((?:client_secret|access_token|password)["'=:\s]+)[^"'&\s,}]+/gi, "$1[redacted]");
-}
-/** Graph's `{error:{code,message}}` as one capped, scrubbed line */
+/** Graph's `{error:{code,message}}` as one capped, scrubbed line (the scrub is
+ * the shared `scrubSecrets`, applied before the cap) */
 export function graphErrorDetail(text: string, status: number, secrets: readonly string[] = []): string {
   let line = `HTTP ${status}`;
   try {
@@ -1205,7 +1320,7 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     }
     if (res.status >= 400) {
       throw new ConnectorProviderError(
-        `outlook token request failed: ${tokenErrorDetail(text, res.status)}`,
+        `outlook token request failed: ${tokenErrorDetail(text, res.status, [this.cred.appPassword])}`,
         res.status,
       );
     }
@@ -1286,6 +1401,8 @@ export class OutlookConnectorProvider implements ConnectorProvider {
         body,
       });
     const first = await this.accessToken();
+    // X19-S01: every credential this send put on the wire, for the scrub below
+    const sentTokens = [first.token];
     let res = await send(first.token);
     if (res.status === 401) {
       // the token was refused: it is never reused. A CACHED one refused before
@@ -1295,7 +1412,9 @@ export class OutlookConnectorProvider implements ConnectorProvider {
       outlookTokenCache.delete(this.cacheKey);
       if (first.fromCache) {
         await res.text();
-        res = await send(await this.mintAccessToken());
+        const fresh = await this.mintAccessToken();
+        sentTokens.push(fresh);
+        res = await send(fresh);
         if (res.status === 401) outlookTokenCache.delete(this.cacheKey);
       }
     }
@@ -1306,9 +1425,12 @@ export class OutlookConnectorProvider implements ConnectorProvider {
     }
     if (res.status >= 400) {
       // ADR-0183 batch 2 review (L2): the caller sees Graph's error CODE and a
-      // capped, scrubbed message; the whole body goes to the server log only
-      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, [this.cred.appPassword])}`);
-      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, [this.cred.appPassword])}`, res.status);
+      // capped, scrubbed message; the whole body goes to the server log only.
+      // X19-S01: both sinks use the ONE scrub with the same credentials, so a
+      // JSON-escaped reflection is no more visible in the log than in the detail
+      const secrets = [this.cred.appPassword, ...sentTokens];
+      console.error(`[outlook] sendMail HTTP ${res.status}: ${scrubSecrets(text, secrets)}`);
+      throw new ConnectorProviderError(`outlook sendMail failed: ${graphErrorDetail(text, res.status, secrets)}`, res.status);
     }
     // Graph answers 202 with an EMPTY body on success. Reporting that honestly
     // matters: "accepted for delivery" is not "delivered", and the adapter does
@@ -1492,7 +1614,8 @@ export class GitHubConnectorProvider implements ConnectorProvider {
       } catch {
         /* keep raw text */
       }
-      throw new ConnectorProviderError(`github ${method} ${path} failed: ${detail}`, res.status);
+      // X19-S01: scrubbed of the token the request carried
+      throw new ConnectorProviderError(`github ${method} ${path} failed: ${scrubSecrets(detail, [this.token])}`, res.status);
     }
     return decodeBody(res.status, text);
   }
@@ -1546,6 +1669,7 @@ export class JiraConnectorProvider implements ConnectorProvider {
   readonly kind = "jira" as const;
   private readonly base: string;
   private readonly auth: string;
+  private readonly secrets: string[];
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: JiraAdapterOptions) {
@@ -1556,7 +1680,11 @@ export class JiraConnectorProvider implements ConnectorProvider {
       );
     }
     this.base = opts.baseUrl.replace(/\/$/, "");
-    this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    const encoded = Buffer.from(opts.token).toString("base64");
+    this.auth = `Basic ${encoded}`;
+    // the whole "email:api_token", the API token alone, and the header value
+    // (X19-S01) — the email alone is not a secret and is not scrubbed
+    this.secrets = [opts.token, opts.token.slice(opts.token.indexOf(":") + 1), encoded];
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   }
 
@@ -1692,7 +1820,8 @@ export class JiraConnectorProvider implements ConnectorProvider {
       } catch {
         /* keep raw text */
       }
-      throw new ConnectorProviderError(`jira ${method} ${path} failed: ${detail}`, res.status);
+      // X19-S01: scrubbed of the Basic credential in each form it took
+      throw new ConnectorProviderError(`jira ${method} ${path} failed: ${scrubSecrets(detail, this.secrets)}`, res.status);
     }
     return decodeBody(res.status, text);
   }
@@ -1960,12 +2089,13 @@ export class SnowflakeConnectorProvider implements ConnectorProvider {
     }
 
     const url = `${this.base}/api/v2/statements`;
+    const jwt = buildSnowflakeJwt(this.credential);
     const res = await this.fetchImpl(url, {
       method: "POST",
       headers: {
         accept: "application/json",
         "content-type": "application/json",
-        authorization: `Bearer ${buildSnowflakeJwt(this.credential)}`,
+        authorization: `Bearer ${jwt}`,
         "x-snowflake-authorization-token-type": "KEYPAIR_JWT",
       },
       body: JSON.stringify(body),
@@ -1993,8 +2123,9 @@ export class SnowflakeConnectorProvider implements ConnectorProvider {
       } catch {
         /* not JSON: the coarse line above stands */
       }
+      // X19-S01: scrubbed of the key-pair JWT the request carried
       throw new ConnectorProviderError(
-        `snowflake POST /api/v2/statements failed: ${detail}`,
+        `snowflake POST /api/v2/statements failed: ${scrubSecrets(detail, [jwt])}`,
         res.status,
       );
     }
