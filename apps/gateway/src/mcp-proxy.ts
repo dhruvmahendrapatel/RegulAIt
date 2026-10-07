@@ -193,6 +193,54 @@ export async function preflightUpstream(
   await checkUpstreamDestination(db, serverRow);
 }
 
+/**
+ * B3S-01 (security review of batch 3) — A STDIO UPSTREAM IS NEVER STARTED FOR
+ * A CALLER WITH NO ENTITLEMENT ON IT.
+ *
+ * Two connects happen before any per-user decision: the manifest connect a
+ * `tools/list` needs, and the one-off sync a `tools/call` on a tool missing
+ * from the stored manifest does. Over HTTP/SSE that is a request to an
+ * admin-registered, egress-guarded URL, and an ungranted caller's
+ * `tools/list` refreshing the inventory is pinned product behaviour
+ * (mcp-proxy.test.ts "lists no tools for a user with no grants, but syncs the
+ * inventory"; the OIDC-egress, breaker and retry suites drive the upstream the
+ * same way). Over stdio the same connect SPAWNS A PROCESS on the gateway host
+ * and holds one of its few process slots, so any API-key holder could start
+ * it at will. So for stdio, those pre-decision connects require the caller to
+ * hold at least one entitlement on the server (a tool grant, a read-only-all
+ * server grant, or either through a role; a protocol grant counts). A connect
+ * that follows an allow decision is unaffected.
+ */
+export const MCP_STDIO_NO_ENTITLEMENT_RULE_ID = "mcp-stdio-no-entitlement";
+
+export async function holdsAnyEntitlement(db: Db, userId: string, serverId: string): Promise<boolean> {
+  const e = await loadEntitlements(db, userId, serverId);
+  return e.toolGrants.length + e.serverGrants.length + (e.roleToolGrants?.length ?? 0) + (e.roleServerGrants?.length ?? 0) > 0;
+}
+
+/** the refusal (one deny audit row) for a stdio pre-decision connect by a caller with no entitlement */
+export async function refuseStdioWithoutEntitlement(
+  db: Db,
+  args: { userId: string; serverId: string; toolName?: string | null; projectId?: string | null; phase: "tools/list" | "tools/call" },
+): Promise<Decision> {
+  const decision: Decision = {
+    effect: "deny",
+    ruleId: MCP_STDIO_NO_ENTITLEMENT_RULE_ID,
+    ruleChain: [],
+    reason:
+      `stdio MCP server ${args.serverId}: the caller holds no entitlement on it, so the gateway does not start its ` +
+      `process to ${args.phase === "tools/list" ? "list its tools" : "look up an unknown tool"}`,
+  };
+  await db.insert(auditLog).values({
+    userId: args.userId,
+    serverId: args.serverId,
+    toolName: args.toolName ?? null,
+    detail: { phase: "stdio-entitlement", method: args.phase, projectId: args.projectId ?? null },
+    ...decision,
+  });
+  return decision;
+}
+
 export async function connectUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
@@ -673,6 +721,12 @@ async function executeGovernedToolCallInner(
 
   try {
     if (!kind) {
+      // B3S-01: this sync is a connect BEFORE any decision; for stdio it
+      // starts a process, so it needs an entitlement on the server first
+      if (serverRow.transport === "stdio" && !(await holdsAnyEntitlement(db, userId, serverId))) {
+        const decision = await refuseStdioWithoutEntitlement(db, { userId, serverId, toolName, projectId, phase: "tools/call" });
+        return { kind: "denied", decision };
+      }
       // AER-022: connect + `tools/list` is a real upstream OPERATION, so its
       // outcome belongs to the breaker — this is one of the two paths that used
       // to contact an upstream with no breaker involvement whatsoever.
@@ -1753,6 +1807,29 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // see upstream-retry.ts for why, which is verbatim the breaker's reasoning.
     const connectRetry = newRetryReport();
     const needsManifest = ListToolsRequestSchema.safeParse(req.body).success;
+    // B3S-01: a stdio manifest request starts a process, so it needs an
+    // entitlement on the server first (audited deny, nothing started), and an
+    // entitled caller is served from the STORED manifest when there is one —
+    // the process starts only for a call an allow decision admitted, or for
+    // the first listing of a server whose manifest was never synced.
+    let storedManifest: Tool[] | null = null;
+    if (needsManifest && serverRow.transport === "stdio") {
+      if (!(await holdsAnyEntitlement(db, userId, serverId))) {
+        const decision = await refuseStdioWithoutEntitlement(db, { userId, serverId, projectId, phase: "tools/list" });
+        return reply.status(403).send({ error: "mcp_no_entitlement", detail: decision.reason });
+      }
+      const stored = await db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)).orderBy(asc(mcpTools.name));
+      if (stored.length > 0) {
+        storedManifest = stored.map((t) => ({
+          name: t.name,
+          ...(t.description !== null ? { description: t.description } : {}),
+          inputSchema: (t.inputSchema ?? { type: "object" }) as Tool["inputSchema"],
+          // the stored kind is what the kernel decides on; the annotation
+          // carries it back so `toolKind` reads the same value
+          annotations: { readOnlyHint: t.kind === "read" },
+        }));
+      }
+    }
     /** The two refusals that are OURS, as the route's plain pre-hijack 403. */
     const ownRefusal = (err: unknown) => {
       if (err instanceof McpEgressBlockedError) {
@@ -1791,7 +1868,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         if (refused) return refused;
         throw err;
       }
-      const refusal = await breakerAdmits(db, serverRow);
+      // B3S-01: served from the stored manifest = no upstream contact, so the
+      // breaker (whose half-open election a listing would spend) is not asked
+      const refusal = storedManifest ? null : await breakerAdmits(db, serverRow);
       if (refusal) {
         return reply.status(503)
           .header("retry-after", String(Math.ceil(refusal.refusedUntilMs / 1000)))
@@ -1802,7 +1881,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     try {
       // Tool calls own admission in the shared primitive. Protocol setup is
       // local; only a manifest request needs a connection at this boundary.
-      if (needsManifest) {
+      if (needsManifest && !storedManifest) {
         upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
       }
     } catch (err) {
@@ -1913,17 +1992,25 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // into something dirty is refused HERE — as a real MCP error naming the
       // reason, never a fabricated empty tool list. The dirty manifest was not
       // stored either (syncUpstreamTools scans before it upserts).
-      if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport).catch(async (err: unknown) => {
-        if (err instanceof McpAdmissionHeldError) {
-          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
-        }
-        if (classifyUpstreamError(err).why !== "our_own_refusal") {
-          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
-        }
-        throw err;
-      });
-      await recordUpstreamSuccess(db, serverRow);
+      let upstreamTools: Tool[];
+      if (storedManifest) {
+        // B3S-01: a stdio server's stored manifest (admission scanned it when
+        // it was synced; the preflight above re-checked admission and the
+        // command) — no process is started to answer a listing
+        upstreamTools = storedManifest;
+      } else {
+        if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
+        upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport).catch(async (err: unknown) => {
+          if (err instanceof McpAdmissionHeldError) {
+            throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
+          }
+          if (classifyUpstreamError(err).why !== "our_own_refusal") {
+            await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+          }
+          throw err;
+        });
+        await recordUpstreamSuccess(db, serverRow);
+      }
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools
         // ADR-0185 G3: a reserved `mcp:` name is never offered as a tool
