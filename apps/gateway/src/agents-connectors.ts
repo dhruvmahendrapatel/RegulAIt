@@ -34,7 +34,7 @@ import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocati
 // ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
 import { refuseSodMint } from "./sod.js";
-import { refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
+import { agentUnsuspendStepUp, refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
@@ -148,6 +148,7 @@ import {
   type ConversationContext,
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { requireStepUp } from "./step-up.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -3472,6 +3473,10 @@ export function registerAgentConnectorRoutes(
         detail: `moving an agent to '${body.status}' requires a reason — it becomes part of the governance record`,
       });
     }
+    // ADR-0186 A (B4S-01): lifting a suspension (to any status that dispatches
+    // again) is a relaxation and needs a settings_relax step-up
+    const unsuspend = agentUnsuspendStepUp(agentId, agent.lifecycleStatus, body.status);
+    if (unsuspend && !(await requireStepUp(db, req, reply, unsuspend)).ok) return reply;
     const [row] = await db
       .update(agents)
       .set({

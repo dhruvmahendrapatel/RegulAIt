@@ -459,6 +459,42 @@ export async function requireStepUp(
 }
 
 /**
+ * A request that needs SEVERAL step-ups (a stewardship write that changes the
+ * steward AND lifts a suspension): every one is looked at first without
+ * spending, so one refusal never burns another's grant; then each is spent.
+ * Sends the first refusal itself; true = proceed.
+ */
+export async function requireStepUps(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  list: readonly StepUpCheckArgs[],
+): Promise<boolean> {
+  if (list.length === 1) return (await requireStepUp(db, req, reply, list[0]!)).ok;
+  for (const args of list) {
+    const out = await checkStepUp(db, req, args, { spend: false });
+    if (!out.ok) {
+      await reply.status(out.status).send(out.body);
+      return false;
+    }
+  }
+  for (const args of list) {
+    if (!(await requireStepUp(db, req, reply, args)).ok) return false;
+  }
+  return true;
+}
+
+/**
+ * ADR-0186 A: the `owner_change` step-up for one object and its new owner,
+ * shared by every writer of an accountable owner (the server and connector
+ * owner routes, POST /v1/agents/:id/owner and the agent stewardship PATCH), so
+ * a grant made for one of them is good for the same change through another.
+ */
+export function ownerChangeStepUpArgs(objectType: string, objectId: string, ownerUserId: string | null): StepUpCheckArgs {
+  return { kind: "owner_change", facts: { objectType, objectId, ownerUserId } };
+}
+
+/**
  * The same check for a writer that has no reply in hand (it returns the
  * refusal for its caller to send): null = proceed, the grant (if one was
  * needed) spent.

@@ -95,7 +95,7 @@ describe("the header-carrying request helper", () => {
 });
 
 describe("every step-up-protected write in the app goes through withStepUp (ADR-0186 A)", () => {
-  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped; no screen edits an approval rule or removes a rule unwrapped", async () => {
+  it("no screen writes org settings (the settings PUT or a dedicated setting route) unwrapped; no screen calls an owner change or the hold override unwrapped; no screen edits an approval rule or removes a rule unwrapped; no screen changes agent stewardship unwrapped", async () => {
     const { readdirSync, readFileSync, statSync } = await import("node:fs");
     const path = await import("node:path");
     const root = path.resolve(__dirname, "..");
@@ -132,6 +132,12 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       if (src.includes("outlookRecipientAllowList") && /api\.patch/.test(src) && !src.includes("withStepUp(")) {
         offenders.push(`${f}: outlookRecipientAllowList written without withStepUp`);
       }
+      // B4S-01: the stewardship PATCH changes the accountable owner (owner_change) and can lift a suspension
+      // (settings_relax), as can the agent lifecycle route
+      const stewardship = src.match(
+        /(?<![A-Za-z])api\.(?:patch|post)(?:<[^>]*>)?\(\s*["'`]\/v1\/agents\/\$\{[^}]+\}\/(?:stewardship["'`]|lifecycle)/g,
+      );
+      for (const m of stewardship ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

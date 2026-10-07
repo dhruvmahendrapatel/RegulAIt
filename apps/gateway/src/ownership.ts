@@ -26,7 +26,7 @@ import { z } from "zod";
 import { and, auditLog, connectors, eq, inArray, isNull, mcpServers, users, type Db } from "@regulait/db";
 import { setOwnerSchema, type OwnershipState } from "@regulait/shared";
 import { ownershipFlagFor } from "./inventory.js";
-import { stepUpRefusal } from "./step-up.js";
+import { ownerChangeStepUpArgs, stepUpRefusal } from "./step-up.js";
 
 export type OwnedKind = "mcp_server" | "connector";
 
@@ -186,7 +186,7 @@ export async function changeOwner(
 /** ADR-0186 A: the `owner_change` step-up, bound to the object and the new owner */
 export function ownerChangeGate(db: Db, req: FastifyRequest, objectType: OwnedKind | "agent", objectId: string) {
   return (change: { from: string | null; to: string | null }) =>
-    stepUpRefusal(db, req, { kind: "owner_change", facts: { objectType, objectId, ownerUserId: change.to } });
+    stepUpRefusal(db, req, ownerChangeStepUpArgs(objectType, objectId, change.to));
 }
 
 /**
