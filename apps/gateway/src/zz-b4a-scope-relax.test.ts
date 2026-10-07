@@ -140,9 +140,21 @@ describe("ADR-0186 A: per-scope and halt-lifting relaxations", () => {
         kind: "settings_relax",
         body: { values: { executionMode: "read_only" } },
       });
+      // B4S-08: the grant binds the approver require_approval names — one made for
+      // another approver is refused, so it cannot route every queued call elsewhere
+      const other = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `b4a-approver-${RUN}@example.com`, displayName: "b4a approver" } });
+      expect(other.statusCode, other.body).toBe(201);
+      // the grant the server asks for when the admin names the OTHER approver …
+      const askedForOther = await asAdmin("PUT", "/v1/execution/mode", { mode: "require_approval", reason: "b4a lateral", approverUserId: other.json().id });
+      expect(askedForOther.statusCode, askedForOther.body).toBe(403);
+      const forOther = await grantFor(askedForOther.json().action);
+      // … is not good for naming this one
+      const swapped = await asAdmin("PUT", "/v1/execution/mode", { mode: "require_approval", reason: "b4a lateral", approverUserId: admin.id }, { [STEP_UP_HEADER]: forOther });
+      expect(swapped.statusCode, swapped.body).toBe(403);
+      expect(swapped.json()).toMatchObject({ error: "step_up_required", presentedGrant: "not_valid_for_this_action" });
       await provesStepUp("PUT", "/v1/execution/mode", { mode: "require_approval", reason: "b4a lateral", approverUserId: admin.id }, {
         kind: "settings_relax",
-        body: { values: { executionMode: "require_approval" } },
+        body: { values: { executionMode: "require_approval", approverUserId: admin.id } },
       });
       await provesStepUp("PUT", "/v1/execution/mode", { mode: "normal", reason: "b4a resolved" }, {
         kind: "settings_relax",

@@ -287,8 +287,15 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
     const current = (await loadOrgSettings(db)).executionMode as ExecutionMode;
     // ADR-0186 A: LIFTING a restriction (a move to a less restrictive mode, or
     // across between the two partial restrictions) needs a settings_relax
-    // step-up bound to the new mode; entering a halt or tightening never does
-    const facts = { values: { executionMode: body.mode } };
+    // step-up bound to the new mode; entering a halt or tightening never does.
+    // B4S-08: a move into require_approval binds the approver it names too, so
+    // a grant made for one approver cannot route every queued call to another
+    const facts = {
+      values: {
+        executionMode: body.mode,
+        ...(body.mode === "require_approval" ? { approverUserId: body.approverUserId ?? null } : {}),
+      },
+    };
     let cleared = false;
     if (executionModeLoosens(current, body.mode)) {
       const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts });
