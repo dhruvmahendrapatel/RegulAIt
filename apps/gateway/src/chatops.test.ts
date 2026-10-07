@@ -137,7 +137,16 @@ function signedHeaders(body: string, secondsAgo = 0, secret = SIGNING_SECRET) {
 const callback = (body: string, headers: Record<string, string>) =>
   app.inject({ method: "POST", url: `/v1/chatops/${CONNECTION}/interactions`, headers, payload: body });
 
-async function makeApproval(opts: { approverUserId: string; projectId?: string | null }) {
+// ADR-0186 B: a tool-call approval snapshots its signature mode at queue time,
+// and a chat tap can never sign one (`approval_requires_individual_signature`)
+// or step up for one (`chatops_step_up_required`). This file pins the COURIER,
+// so its approvals are written with signing off (the audited relaxation) unless
+// a test asks for a stricter mode; the strict refusals are asserted below.
+async function makeApproval(opts: {
+  approverUserId: string;
+  projectId?: string | null;
+  signatureMode?: "passkey" | "step_up" | "off";
+}) {
   const [row] = await db
     .insert(approvals)
     .values({
@@ -147,6 +156,7 @@ async function makeApproval(opts: { approverUserId: string; projectId?: string |
       stageId: "prod-signoff",
       approverUserId: opts.approverUserId,
       status: "pending",
+      signatureMode: opts.signatureMode ?? "off",
       ...(opts.projectId ? { projectId: opts.projectId } : {}),
     })
     .returning();
@@ -457,6 +467,26 @@ describe("the chat user id is an assertion, not authorization", () => {
     expect(row.decidedBy).toBe(danaId);
   });
 
+  it("ADR-0186: a chat tap cannot sign a passkey-mode tool-call approval, nor step up for a step_up-mode one", async () => {
+    const signed = await makeApproval({ approverUserId: danaId, signatureMode: "passkey" });
+    const body = slackBody(signed);
+    const res = await callback(body, signedHeaders(body));
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("approval_requires_individual_signature");
+    expect((await approvalRow(signed)).status).toBe("pending");
+    const refused = (await auditRows(CHATOPS_RULE_IDS.decideRefusedByDecidePath)).filter(
+      (r) => String(r.detail?.["approvalId"]) === signed,
+    );
+    expect(refused).toHaveLength(1);
+
+    const stepUp = await makeApproval({ approverUserId: danaId, signatureMode: "step_up" });
+    const body2 = slackBody(stepUp);
+    const res2 = await callback(body2, signedHeaders(body2));
+    expect(res2.statusCode).toBe(403);
+    expect(res2.json().error).toBe("chatops_step_up_required");
+    expect((await approvalRow(stepUp)).status).toBe("pending");
+  });
+
   it("an identity link binds an EXISTING principal and never creates one", async () => {
     const res = await post("/v1/chatops/identity-links", {
       connectionName: CONNECTION,
@@ -523,7 +553,9 @@ describe("a double-click is a no-op", () => {
 
     const other = slackBody(approvalId, "U-MALLORY");
     const res = await callback(other, signedHeaders(other));
-    expect(res.statusCode).toBe(403);
+    // ADR-0186: a tool-call approval's state is checked first (it is decided)
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("already_decided");
     const row = await approvalRow(approvalId);
     expect(row.status).toBe("approved");
     expect(row.decidedBy).toBe(danaId);

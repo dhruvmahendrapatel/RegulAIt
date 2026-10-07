@@ -11,6 +11,11 @@ import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { beginTrace, type TraceContext } from "./tracing.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -46,6 +51,7 @@ async function post(url: string, payload: unknown) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: "mcp-redaction-bootstrap", dataKey: "a".repeat(64) });
   httpServer = http.createServer((req, res) => {
@@ -81,6 +87,7 @@ beforeAll(async () => {
 
 beforeEach(() => { wireCalls = []; response = undefined; upstreamError = undefined; onInitialize = undefined; onCall = undefined; });
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await restoreStrictAdmission?.();
   await app?.close();
   httpServer?.closeAllConnections();

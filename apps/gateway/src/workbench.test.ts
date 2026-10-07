@@ -17,6 +17,11 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -112,6 +117,9 @@ async function makeApproval(over: Partial<typeof approvals.$inferInsert> = {}) {
       serverId,
       toolName: "wb.write",
       status: "pending",
+      // ADR-0186 B: a fixture row written directly, as an unsigned (pre-0186
+      // shape) tool-call approval; bulk refuses a signed one by name (zz-b4ab-*)
+      signatureMode: "off",
       ...over,
     })
     .returning();
@@ -166,6 +174,7 @@ async function backdate(approvalId: string, minutes: number) {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
@@ -210,6 +219,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await restoreStrictAdmission?.();
   // a leaked routing rule would re-route another suite's approvals, and a
   // leaked assignment would change another suite's inbox shape

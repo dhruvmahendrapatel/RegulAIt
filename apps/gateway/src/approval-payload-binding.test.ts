@@ -19,6 +19,11 @@ import { approvalArgumentsDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -200,6 +205,7 @@ async function queueAndApprove(opts: {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "e".repeat(64) });
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -264,6 +270,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await restoreStrictAdmission?.();
   app.server.closeAllConnections();
   await app.close();

@@ -17,6 +17,11 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { resolveToolbox } from "./builder-tools.js";
 import { drainBackgroundWork } from "./background-work.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -48,6 +53,7 @@ const approvalRow = async (id: string) => (await k.db.select().from(approvals).w
 
 beforeAll(async () => {
   k = await builderKit("p2bl-conn");
+  restoreApprovalSigning = await relaxApprovalSigningForTest(k.db);
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   owner = await k.person("owner");
   other = await k.person("other");
@@ -96,6 +102,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await k.req("PUT", "/v1/execution/mode", k.BOOT, { mode: "normal", reason: "adr0173 connector approvals: cleanup" });
   if (allowHostId) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowHostId));
   receiver.closeAllConnections();
