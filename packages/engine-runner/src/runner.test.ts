@@ -38,7 +38,7 @@ describe("the egress probe", () => {
     try {
       expect(await tcpConnect("127.0.0.1", port, 2000)).toBe("connected");
       const r = await probeEgress({ host: "egress-probe.invalid", ip: "127.0.0.1", port, lookup: refuse("ENOTFOUND"), timeoutMs: 2000 });
-      expect(r).toEqual({ host: "egress-probe.invalid", dnsResolved: false, connected: true });
+      expect(r).toEqual({ host: "egress-probe.invalid", dnsResolved: false, connected: false, address: "127.0.0.1", addressConnected: true });
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
@@ -50,7 +50,7 @@ describe("the egress probe", () => {
       lookup: refuse("ENOTFOUND"),
       connect: async () => "denied",
     });
-    expect(r).toEqual({ host: "egress-probe.invalid", dnsResolved: false, connected: false });
+    expect(r).toEqual({ host: "egress-probe.invalid", dnsResolved: false, connected: false, address: null, addressConnected: false });
   });
 });
 
@@ -165,5 +165,26 @@ describe("runOnce", () => {
     expect(out.outcome).toBe("cancelled");
     expect(aborted).toBe(true);
     expect(calls.some((c) => c.path.endsWith("/result"))).toBe(false);
+  });
+});
+
+describe("PR #203 review [4]: the literal-address probe", () => {
+  it("is always made and reported, so a blocked resolver cannot mask routable egress", async () => {
+    const seen: string[] = [];
+    const r = await probeEgress({
+      host: "egress-probe.invalid",
+      ip: "93.184.215.14",
+      lookup: refuse("ENOTFOUND"),
+      connect: async (h) => {
+        seen.push(h);
+        return h === "93.184.215.14" ? "connected" : "denied";
+      },
+    });
+    expect(seen).toContain("93.184.215.14");
+    expect(r).toMatchObject({ dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: true });
+  });
+  it("with no address configured it says so (the gateway then fails the self-test)", async () => {
+    const r = await probeEgress({ host: "egress-probe.invalid", lookup: refuse("ENOTFOUND"), connect: async () => "denied" });
+    expect(r).toMatchObject({ address: null, addressConnected: false });
   });
 });

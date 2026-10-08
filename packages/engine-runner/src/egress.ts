@@ -21,7 +21,7 @@ import { connect as netConnect, type Socket } from "node:net";
 export interface EgressProbeOptions {
   /** an external host name (default: example.com) */
   host?: string;
-  /** a literal external address to connect to without a resolver (optional) */
+  /** a PUBLIC literal address to connect to without a resolver (else REGULAIT_EGRESS_PROBE_ADDRESS; none = the self-test fails) */
   ip?: string | null;
   port?: number;
   timeoutMs?: number;
@@ -34,6 +34,9 @@ export interface EgressProbeResult {
   host: string;
   dnsResolved: boolean;
   connected: boolean;
+  /** the public literal address probed with no resolver, or null when none is configured */
+  address: string | null;
+  addressConnected: boolean;
 }
 
 /** resolver errors that mean "no answer came from outside" */
@@ -96,7 +99,11 @@ export async function probeEgress(opts: EgressProbeOptions = {}): Promise<Egress
   const lookup = opts.lookup ?? ((h: string) => dnsPromises.lookup(h));
   const connect = opts.connect ?? tcpConnect;
   const dnsResolved = await resolves(lookup, host, timeoutMs);
-  let connected = (await connect(host, port, timeoutMs)) === "connected";
-  if (!connected && opts.ip) connected = (await connect(opts.ip, port, timeoutMs)) === "connected";
-  return { host, dnsResolved, connected };
+  const connected = (await connect(host, port, timeoutMs)) === "connected";
+  // PR #203 review [4]: the literal address is ALWAYS probed and reported on its
+  // own, so a blocked resolver never masks routable egress. No address
+  // configured is reported as such, and the gateway fails the self-test.
+  const address = opts.ip ?? process.env.REGULAIT_EGRESS_PROBE_ADDRESS ?? null;
+  const addressConnected = address ? (await connect(address, port, timeoutMs)) === "connected" : false;
+  return { host, dnsResolved, connected, address, addressConnected };
 }
