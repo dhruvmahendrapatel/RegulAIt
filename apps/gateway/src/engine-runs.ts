@@ -419,8 +419,7 @@ export async function finishEngineRun(db: Db, runId: string, from: readonly stri
       .where(eq(engineRuns.id, runId))
       .returning();
     await revokeRunKey(tx, locked, args.cause, args.actorUserId);
-    for (const it of args.normalised.items) {
-      await tx.insert(engineRunItems).values({
+    const itemRows = args.normalised.items.map((it) => ({
         runId,
         key: it.key,
         sourceSystem: it.sourceSystem,
@@ -437,8 +436,8 @@ export async function finishEngineRun(db: Db, runId: string, from: readonly stri
         verdictNote: it.verdictNote,
         notRunReason: it.notRunReason,
         dispatchAuditIds: it.dispatchAuditIds,
-      });
-    }
+      }));
+    for (let i = 0; i < itemRows.length; i += 500) await tx.insert(engineRunItems).values(itemRows.slice(i, i + 500));
     let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
     if (args.status === "completed") {
       const kind = manifestOf(opts)[locked.engineId as EngineId].kind;

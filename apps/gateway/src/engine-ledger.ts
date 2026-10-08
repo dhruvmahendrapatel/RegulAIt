@@ -33,7 +33,7 @@ import {
   type Db,
   type EngineRunRow,
 } from "@regulait/db";
-import { aggregateRedTeamByClass, RED_TEAM_SEVERITIES, type EngineKind, type EngineRunNormalised, type RedTeamSeverity } from "@regulait/shared";
+import { aggregateRedTeamByClass, RED_TEAM_MAX_TRIALS, RED_TEAM_SEVERITIES, type EngineKind, type EngineRunNormalised, type RedTeamSeverity } from "@regulait/shared";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
@@ -113,17 +113,16 @@ export async function writeEngineRunLedgers(
       finishedAt,
     })
     .returning({ id: evalRuns.id });
-  for (const it of scored) {
-    await tx.insert(evalResults).values({
-      runId: ev!.id,
-      caseId: null,
-      scorerKind: it.scorerKind!,
-      score: it.verdict === "pass" ? 1 : 0,
-      passed: it.verdict === "pass",
-      outputText: null,
-      detail: { engineRunId: run.id, engineItemKey: it.key, attempts: it.attempts, defeated: it.defeated },
-    });
-  }
+  const resultRows = scored.map((it) => ({
+    runId: ev!.id,
+    caseId: null,
+    scorerKind: it.scorerKind!,
+    score: it.verdict === "pass" ? 1 : 0,
+    passed: it.verdict === "pass",
+    outputText: null,
+    detail: { engineRunId: run.id, engineItemKey: it.key, attempts: it.attempts, defeated: it.defeated },
+  }));
+  for (let i = 0; i < resultRows.length; i += 500) await tx.insert(evalResults).values(resultRows.slice(i, i + 500));
   if (kind !== "redteam") return { evalRunId: ev!.id, redteamRunId: null };
 
   const measured = normalised.probeStats.filter((p) => p.status === "measured");
@@ -166,11 +165,14 @@ export async function writeEngineRunLedgers(
       finishedAt,
     })
     .returning({ id: redteamRuns.id });
+  // one row per attempt, at most RED_TEAM_MAX_TRIALS per probe (defeats come first, so a cap never hides one)
+  const byKey = new Map(normalised.items.map((i) => [i.key, i]));
+  const trialRows: Array<typeof redteamProbeTrials.$inferInsert> = [];
   for (const p of normalised.probeStats) {
-    const item = normalised.items.find((i) => i.key === p.probeKey);
+    const item = byKey.get(p.probeKey);
     if (!item || !item.attackClass || !isSeverity(item.severity)) continue;
-    for (const o of p.outcomes.slice(0, 1000)) {
-      await tx.insert(redteamProbeTrials).values({
+    for (const o of p.outcomes.slice(0, RED_TEAM_MAX_TRIALS)) {
+      trialRows.push({
         runId: rt!.id,
         probeKey: p.probeKey,
         attackClass: item.attackClass,
@@ -186,5 +188,6 @@ export async function writeEngineRunLedgers(
       });
     }
   }
+  for (let i = 0; i < trialRows.length; i += 500) await tx.insert(redteamProbeTrials).values(trialRows.slice(i, i + 500));
   return { evalRunId: ev!.id, redteamRunId: rt!.id };
 }
