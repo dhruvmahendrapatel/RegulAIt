@@ -72,6 +72,10 @@ afterAll(async () => {
   // database; an admin who can step up would end first-admin setup for later suites
   const ada = await db.select({ id: users.id }).from(users).where(eq(users.email, "admin@regulait.local"));
   await forgetStepUpMethodsForTest(db, ada.map((u) => u.id));
+  // ...and the one-time password the seeder issued with that enrolment, so the next
+  // seeder on this database enrols her again through the real routes (it never
+  // overwrites a password somebody holds)
+  for (const u of ada) await db.update(users).set({ passwordHash: null, mustChangePassword: false }).where(eq(users.id, u.id));
   if (prevKey === undefined) delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
   else process.env.REGULAIT_EXPORT_SIGNING_KEY = prevKey;
   if (prevKeyId === undefined) delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
