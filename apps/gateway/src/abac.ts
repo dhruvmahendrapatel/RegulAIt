@@ -53,6 +53,7 @@ import {
   type AbacPolicyTestCase,
   type Db,
 } from "@regulait/db";
+import { requireStepUp } from "./step-up.js";
 import {
   ABAC_CURRENT_SCHEMA_VERSION,
   ABAC_POLICY_MODES,
@@ -737,6 +738,8 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
     const { policyId } = z.object({ policyId: z.string().uuid() }).parse(req.params);
     const [policy] = await db.select().from(abacPolicies).where(eq(abacPolicies.id, policyId));
     if (!policy) return reply.status(404).send({ error: "unknown_policy" });
+    // ADR-0186 A (Class C): taking a policy out of force can lift a forbid — a settings_relax step-up
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { abacPolicyId: policyId, values: { deactivated: true } } })).ok) return reply;
     await db.update(abacPolicies).set({ enabled: false }).where(eq(abacPolicies.id, policyId));
     await audit(req.authCtx.userId ?? null, policyId, "abac-policy-deactivated",
       `admin deactivated ABAC policy '${policy.name}' — every version is retained and the policy can be re-activated unchanged`,
@@ -748,6 +751,8 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
     const { policyId } = z.object({ policyId: z.string().uuid() }).parse(req.params);
     const [policy] = await db.select().from(abacPolicies).where(eq(abacPolicies.id, policyId));
     if (!policy) return reply.status(404).send({ error: "unknown_policy" });
+    // ADR-0186 A (Class C): deleting a policy can lift a forbid — a settings_relax step-up
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { abacPolicyId: policyId, values: { deleted: true } } })).ok) return reply;
     await db.delete(abacPolicies).where(eq(abacPolicies.id, policyId));
     await audit(req.authCtx.userId ?? null, policyId, "abac-policy-deleted",
       `admin deleted ABAC policy '${policy.name}' and all of its versions — past DECISIONS remain in the audit log, which is the record that matters`,

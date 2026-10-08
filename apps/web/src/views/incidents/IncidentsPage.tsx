@@ -34,6 +34,7 @@ import {
   type IncidentListResponse,
   type IncidentSettings,
 } from "./incidentModel";
+import { putOrgSettings } from "../../stepup/stepUp";
 
 const ROW = { display: "flex", gap: "var(--s2)", alignItems: "center", minHeight: 32 } as const;
 const BOX = { width: 18, height: 18, margin: 0, flex: "none" } as const;
@@ -62,7 +63,7 @@ function IncidentSettingsCard() {
   });
   const s = q.data?.settings;
   const save = (patch: Partial<IncidentSettings>, msg: string) =>
-    void act.run(() => api.put("/v1/org/settings", patch), msg).then(() => void q.refetch());
+    void act.run(() => putOrgSettings(patch), msg).then(() => void q.refetch());
   return (
     <Card title="Incident settings">
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>

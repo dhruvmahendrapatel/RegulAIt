@@ -25,6 +25,7 @@
 import type { FastifyInstance } from "fastify";
 import {
   agents,
+  and,
   auditLog,
   customModelProviders,
   egressAllowHosts,
@@ -32,6 +33,7 @@ import {
   type CustomModelProviderRow,
   type Db,
 } from "@regulait/db";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import {
   createCustomModelProviderSchema,
   createEgressAllowHostSchema,
@@ -643,11 +645,19 @@ export function registerCustomProviderRoutes(
       }
     }
 
+    // ADR-0186 A (Class C): re-enabling a provider lifts a platform-wide stop — a settings_relax step-up
+    if (body.enabled && !row.enabled) {
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { customProviderId: providerId, values: { enabled: true } } })).ok) {
+        return reply;
+      }
+    }
     const [updated] = await db
       .update(customModelProviders)
       .set({ enabled: body.enabled })
-      .where(eq(customModelProviders.id, providerId))
+      // Class A: compare-and-set on the state the step-up was decided on
+      .where(and(eq(customModelProviders.id, providerId), eq(customModelProviders.enabled, row.enabled)))
       .returning();
+    if (!updated) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await audit(
       actor(req),
       providerId,

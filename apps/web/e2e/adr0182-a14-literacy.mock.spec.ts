@@ -13,6 +13,7 @@
 import { activate, escapeToTrigger, expectDialogTrap, selectAt, tabTo, typeAt } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -416,4 +417,18 @@ test("X14 keyboard: postponing acknowledgement focuses the page and announces th
   await expect(gate).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Feedback and appeals", level: 1 })).toBeFocused();
   await expect(page.getByRole("status").filter({ hasText: "to acknowledge" })).toContainText("AI tool calls through regulAIt are refused");
+});
+
+// ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: relaxing the literacy gate asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const cap = await mockApi(page, { admin: true });
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/admin/governance/literacy");
+  const settings = page.locator("section[data-rg-card]").filter({ hasText: "Settings (admin)" }).first();
+  await settings.getByLabel("Gate mode").selectOption("warn");
+  await settings.getByRole("button", { name: "Save literacy settings" }).click();
+  await page.getByRole("dialog", { name: "Relax the AI literacy settings?" }).getByRole("button", { name: "Save relaxed settings" }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(cap.settingsPuts).toEqual([{ literacyGateMode: "warn", literacyDefaultValidityDays: 365 }]);
 });

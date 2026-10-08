@@ -389,7 +389,10 @@ export function promptFromBody(body: Record<string, unknown>): string | null {
  * `id`, `createdAt` are identity, not definition, and are likewise refused.
  */
 export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly string[]>> = {
-  approval_rule: ["toolName", "writeOnly", "approverUserId", "deployMode"],
+  // ADR-0186 A: `quorum` and `approverRoleId` decide WHO may release a matched
+  // call, so they are enforcing — an edit mints a version, which moves the
+  // consent context of every call the rule binds
+  approval_rule: ["toolName", "writeOnly", "approverUserId", "deployMode", "quorum", "approverRoleId"],
   rate_limit: ["toolName", "maxCalls", "windowSeconds", "deployMode"],
   data_scope_rule: ["toolName", "argPath", "allowedValues", "deployMode"],
   /**
@@ -472,6 +475,9 @@ const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
     writeOnly: z.boolean().optional(),
     approverUserId: z.string().uuid().optional(),
     deployMode: deployModeField,
+    // ADR-0186 A (the bounds of APPROVAL_QUORUM_LIMITS and the DB CHECK)
+    quorum: z.number().int().min(1).max(5).optional(),
+    approverRoleId: z.string().uuid().nullish(),
   }),
   rate_limit: z.object({
     toolName: z.string().min(1).nullish(),

@@ -172,8 +172,17 @@ describe("user deactivation (deactivate ≠ delete)", () => {
 describe("promote / demote / rename", () => {
   it("promotes a member to admin, demotes back (audited), and renames display only", async () => {
     const uid = await mkUser("il-flag@example.com", "IL Flag");
-    const up = await app.inject({
+    // B4S-02: granting admin needs a settings_relax step-up, which an admin's API key
+    // can never give — refused by name; the promotion goes through the deploy-time
+    // bootstrap credential (zz-b4s-approver-eligibility proves the stepped-up session)
+    const viaKey = await app.inject({
       method: "POST", headers: admin1Auth, url: `/v1/users/${uid}/admin`,
+      payload: { isAdmin: true, reason: "coverage" },
+    });
+    expect(viaKey.statusCode, viaKey.body).toBe(403);
+    expect(viaKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", methods: [] });
+    const up = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${uid}/admin`,
       payload: { isAdmin: true, reason: "coverage" },
     });
     expect(up.statusCode).toBe(200);

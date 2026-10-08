@@ -35,6 +35,7 @@ import {
 import { QueryGate, optionEls, useAction, useAgents, useConnectors, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 type Mode = "off" | "log" | "warn" | "block";
 const MODES: Mode[] = ["off", "log", "warn", "block"];
@@ -184,10 +185,10 @@ export default function GuardrailsPage() {
                   if (termsDraft !== null) {
                     customTerms = JSON.parse(termsDraft) as Record<string, string[]>;
                   }
-                  await api.put("/v1/guardrails/config", {
+                  await withStepUp((h) => stepUpApi.put("/v1/guardrails/config", {
                     modes: orgModes,
                     ...(customTerms ? { customTerms } : {}),
-                  });
+                  }, h));
                   setOrgDraft(null);
                   setTermsDraft(null);
                   await config.refetch();
@@ -262,7 +263,7 @@ export default function GuardrailsPage() {
               onSubmit={(e) => {
                 e.preventDefault();
                 void act.run(async () => {
-                  await api.put(`/v1/guardrails/config/${ovScope}/${ovTarget}`, { modes: ovModes });
+                  await withStepUp((h) => stepUpApi.put(`/v1/guardrails/config/${ovScope}/${ovTarget}`, { modes: ovModes }, h));
                   setOvTarget("");
                   setOvModes({});
                   await config.refetch();
@@ -342,7 +343,8 @@ export default function GuardrailsPage() {
                         disabled={act.busy}
                         onClick={() =>
                           void act.run(async () => {
-                            await api.del(`/v1/guardrails/config/${r.scope}/${r.scopeId}`);
+                            // removing an override stricter than the org default lowers it: settings_relax (ADR-0186)
+                            await withStepUp((h) => api.delWithHeaders(`/v1/guardrails/config/${r.scope}/${r.scopeId}`, h));
                             await config.refetch();
                           }, "Override removed — the deployment default applies again")
                         }

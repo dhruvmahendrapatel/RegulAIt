@@ -21,6 +21,7 @@ import {
   type AssuranceGateMode,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -55,10 +56,13 @@ export function registerAssuranceSettingsRoutes(app: FastifyInstance, db: Db): v
     return view(org.assuranceGateMode, org.updatedAt);
   });
 
-  app.put(ASSURANCE_GATE_MODE_PATH, async (req) => {
+  app.put(ASSURANCE_GATE_MODE_PATH, async (req, reply) => {
     const body = setAssuranceGateModeSchema.parse(req.body ?? {});
     // make sure the singleton exists before locking it
-    await loadOrgSettings(db);
+    const current = await loadOrgSettings(db);
+    // ADR-0186 A: below `enforce` is a relaxation, and needs a settings_relax step-up here as on the settings PUT
+    const relaxed = relaxedAgainst({ assuranceGateMode: body.mode }, current, { assuranceGateMode: ASSURANCE_DEFAULTS.gateMode });
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
     const actor = req.authCtx.userId ?? NO_IDENTITY;
     const now = new Date();
     const row = await db.transaction(async (tx) => {
@@ -68,6 +72,8 @@ export function registerAssuranceSettingsRoutes(app: FastifyInstance, db: Db): v
         .where(eq(orgSettings.id, ORG_SETTINGS_ID))
         .for("update");
       const from = before!.mode;
+      // the step-up was decided on `current`: a mode that moved since is refused, never overwritten
+      if (from !== current.assuranceGateMode) return null;
       const [after] = await tx
         .update(orgSettings)
         .set({ assuranceGateMode: body.mode, updatedBy: req.authCtx.userId, updatedAt: now })
@@ -97,6 +103,7 @@ export function registerAssuranceSettingsRoutes(app: FastifyInstance, db: Db): v
       });
       return after!;
     });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return view(row.assuranceGateMode, row.updatedAt);
   });
 }

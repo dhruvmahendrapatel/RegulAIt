@@ -59,9 +59,12 @@ To start over, recreate the database (`docker rm -f regulait-demo-pg`, re-run th
 prepared before 2026-10-03 must be recreated** the same way: its seeded pipeline templates predate
 the AER-047 offline opt-in, so their check stages wait for reports even with
 `REGULAIT_OFFLINE_CHECKS=1` set. A full rehearsal of the UI journey, unattended:
-`E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec playwright test -c
-playwright.demo-real.config.ts` (export the gateway's own `REGULAIT_BOOTSTRAP_TOKEN` in that
-terminal; the spec falls back to `e2e-bootstrap-token` only when it is unset).
+`E2E_BASE_URL=http://127.0.0.1:3105 E2E_DEMO_PREPARE_LOG=demo-prepare.log pnpm --filter @regulait/web exec
+playwright test -c playwright.demo-real.config.ts`, where `demo-prepare.log` is the captured output of a
+FRESH `demo:prepare` (`… demo:prepare | tee demo-prepare.log`): the journey signs the personas in with
+the one-time passwords and Ada's authenticator secret printed there, because the bootstrap token can no
+longer re-provision anyone once an admin can step up (B4S-06). Export the gateway's own
+`REGULAIT_BOOTSTRAP_TOKEN` in that terminal too (read-only calls; it falls back to `e2e-bootstrap-token`).
 
 1. `pnpm --filter @regulait/gateway demo:prepare` — seed → demo:setup → demo:intake →
    demo:traffic → demo:check in ~25 s. It must end **19 pass, 0 warn, 0 fail** (a FAIL on

@@ -44,6 +44,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const LADDER: Record<
   string,
@@ -194,7 +195,7 @@ function PostureForm(props: { cur: InterceptionSettings }) {
           // metadata (id/timestamps) the endpoint rightly rejects
           void act.run(
             () =>
-              api.put("/v1/interception/settings", {
+              withStepUp((h) => stepUpApi.put("/v1/interception/settings", {
                 anthropicCompatEnabled: f.anthropicCompatEnabled,
                 openaiCompatEnabled: f.openaiCompatEnabled,
                 mcpInterceptionEnabled: f.mcpInterceptionEnabled,
@@ -205,7 +206,7 @@ function PostureForm(props: { cur: InterceptionSettings }) {
                 keyCustodyEnforced: f.keyCustodyEnforced,
                 streamingOnBlockMode: f.streamingOnBlockMode,
                 strictFieldRejection: f.strictFieldRejection,
-              }),
+              }, h)),
             "Posture saved",
           );
         }}

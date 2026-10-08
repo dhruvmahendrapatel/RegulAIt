@@ -16,6 +16,21 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
+
+/** ADR-0181 strict values of the interception dials whose loosening is a
+ * relaxation (the provider-shaped surfaces are opt-in, so opening one is too).
+ * `mcpInterceptionEnabled`, `resolutionMode` and `enforcementPosture` are
+ * not here: the first closes a governed surface, the others are no loosening. */
+const INTERCEPTION_STRICT = {
+  requireProjectAttribution: true,
+  requireMcpAttribution: true,
+  keyCustodyEnforced: true,
+  streamingOnBlockMode: "reject",
+  strictFieldRejection: true,
+  anthropicCompatEnabled: false,
+  openaiCompatEnabled: false,
+} as const;
 import {
   agentGrants,
   agents,
@@ -1297,15 +1312,37 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
   app.put("/v1/interception/settings", async (req, reply) => {
     const body = updateInterceptionSettingsSchema.parse(req.body);
     const before = await loadInterceptionSettings(db);
-    const [row] = await db
-      .update(interceptionSettings)
-      .set({
-        ...body,
-        updatedBy: req.authCtx.userId,
-        updatedAt: new Date(),
-      })
-      .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID))
-      .returning();
+    // ADR-0186 A: dropping attribution, key custody, strict field rejection or
+    // the streaming refusal, or opening a provider-shaped surface, is a
+    // relaxation: a settings_relax step-up, as on the settings PUT
+    const relaxed = relaxedAgainst(body, before as unknown as Record<string, unknown>, INTERCEPTION_STRICT, "interception.");
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
+    const written = await db.transaction(async (tx) => {
+      // ADR-0186 A (Class A): the step-up was decided on `before`; a key this
+      // write sets that moved since is refused, never overwritten
+      const [locked] = await tx
+        .select()
+        .from(interceptionSettings)
+        .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID))
+        .for("update");
+      if (locked) {
+        const moved = Object.keys(body).some(
+          (k) => JSON.stringify((locked as Record<string, unknown>)[k]) !== JSON.stringify((before as Record<string, unknown>)[k]),
+        );
+        if (moved) return null;
+      }
+      return tx
+        .update(interceptionSettings)
+        .set({
+          ...body,
+          updatedBy: req.authCtx.userId,
+          updatedAt: new Date(),
+        })
+        .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID))
+        .returning();
+    });
+    if (!written) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    const [row] = written;
     const after = row ?? before;
     const changed = Object.fromEntries(
       Object.entries(body).filter(

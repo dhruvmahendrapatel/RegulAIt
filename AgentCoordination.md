@@ -613,7 +613,7 @@ shell line.
 **Conversations (any user)** — an expired conversation is 404 `conversation_expired`; deleting one held by an incident
 is 409 `incident_evidence_hold`. Show both as explanations, not raw codes.
 
-### 4.9 Batch 4 (ADR-0186) — FOUNDATION READY (PR #172, branch `b4-found` 7758fec). Every route below is a 501 `not_built` stub until its slice lands.
+### 4.9 Batch 4 (ADR-0186) — FOUNDATION READY (PR #172, branch `b4-found` 7758fec); A, B and T LIVE on `b4-int` (e315845). The R, S and V routes are 501 `not_built` stubs until their slices land.
 
 Step-up header: `x-regulait-step-up: rgsu_…`. "self" = a signed-in user acting for themselves.
 
@@ -639,6 +639,12 @@ Step-up header: `x-regulait-step-up: rgsu_…`. "self" = a signed-in user acting
 | GET /v1/org/posture (gains) | admin | `metrics:{separateListener:"off"\|"loopback"\|"non_loopback", mainListener, tokenConfigured}` (X18) |
 
 New settings ride `GET/PUT /v1/org/settings` (camelCase of ADR-0186's columns). Refusal codes are listed in ADR-0186.
+
+Added in the build (ADR-0186 "Implementation decisions"):
+- Refusals: 403 `caller_cannot_approve`, 409 `approval_not_signable`, 422 `unknown_role`, 403 `approval_quorum_unsatisfiable`, 403 `approval_signature_recheck_failed`, 403 `approver_not_eligible`, 403 `browser_session_required`, 403 `fresh_sign_in_required`, 422 `passkey_attestation_refused`, 409 `passkey_already_registered`, 404 `unknown_challenge`, 404 `unknown_step_up`, 413 `step_up_action_too_large`.
+- `x-regulait-step-up` may carry two tokens, comma-separated, when one write needs two step-ups. `sso` is offered only over https.
+- The bootstrap credential, once an admin has a step-up method: 403 `{error:"step_up_required", actionKind, methods:[], credential:"bootstrap"}`.
+- GET /v1/org/posture gains `approvalSigning:{mode, rpConfigured, failClosed, finding?}` and `bootstrap:{configured, adminWithStepUpMethod, passesStepUp, findings:[{code:"bootstrap_token_configured", detail}]}`.
 
 ## 5. Message board (append; Claude deletes once handled)
 

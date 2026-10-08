@@ -31,6 +31,8 @@ import {
   type Db,
 } from "@regulait/db";
 import { scimAssertedGroupsFor } from "./group-roles.js";
+import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -103,11 +105,23 @@ export function registerGroupRoleMappingRoutes(app: FastifyInstance, db: Db): vo
     const body = createMappingSchema.parse(req.body);
     const [role] = await db.select().from(roles).where(eq(roles.id, body.roleId));
     if (!role) return reply.status(422).send({ error: "unknown_role" });
-    const [row] = await db
-      .insert(groupRoleMappings)
-      .values(body)
-      .onConflictDoNothing()
-      .returning();
+    // B4S-02 (owner principle): mapping a group to an approver role adds its
+    // holders to that approver pool — the same settings_relax step-up as
+    // assigning the role directly, bound to the group and the role
+    const approverRole = await isApproverRole(db, body.roleId);
+    if (approverRole) {
+      const facts = { values: { approverRoleGroup: { source: body.source, externalGroup: body.externalGroup, roleId: body.roleId } } };
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    }
+    // ADR-0186 A (Class A): decided again under the approver-role lock
+    const written = await db.transaction(async (tx) => {
+      const nowApprover = (await lockApproverRoles(tx as unknown as Db, [body.roleId])).has(body.roleId);
+      if (nowApprover && !approverRole) return { moved: true as const };
+      const [inserted] = await tx.insert(groupRoleMappings).values(body).onConflictDoNothing().returning();
+      return { moved: false as const, row: inserted };
+    });
+    if (written.moved) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    const row = written.row;
     if (!row) {
       const [existing] = await db
         .select()

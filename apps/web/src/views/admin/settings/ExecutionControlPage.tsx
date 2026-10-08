@@ -43,6 +43,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 type Mode = "normal" | "read_only" | "require_approval" | "halted";
 
@@ -155,26 +156,31 @@ export default function ExecutionControlPage() {
     if (!p) return;
     void act.run(async () => {
       if (p.kind === "mode") {
-        await api.put("/v1/execution/mode", {
-          mode: p.mode,
-          reason,
-          // require_approval must name who is attending — the server refuses
-          // it otherwise, so the picker below is not optional decoration
-          ...(p.mode === "require_approval" ? { approverUserId: approver } : {}),
-        });
+        await withStepUp((h) =>
+          stepUpApi.put(
+            "/v1/execution/mode",
+            {
+              mode: p.mode,
+              reason,
+              // require_approval must name who is attending — the server refuses
+              // it otherwise, so the picker below is not optional decoration
+              ...(p.mode === "require_approval" ? { approverUserId: approver } : {}),
+            },
+            h,
+          ),
+        );
       } else if (p.kind === "halt-agent") {
         await api.post(`/v1/agents/${p.agentId}/halt`, { reason });
       } else if (p.kind === "unhalt-agent") {
-        await api.post(`/v1/agents/${p.agentId}/unhalt`, { reason });
+        await withStepUp((h) => stepUpApi.post(`/v1/agents/${p.agentId}/unhalt`, { reason }, h));
       } else if (p.kind === "halt-tool") {
         await api.post(
           `/v1/servers/${p.serverId}/tools/${encodeURIComponent(p.toolName)}/halt`,
           { reason },
         );
       } else {
-        await api.post(
-          `/v1/servers/${p.serverId}/tools/${encodeURIComponent(p.toolName)}/unhalt`,
-          { reason },
+        await withStepUp((h) =>
+          stepUpApi.post(`/v1/servers/${p.serverId}/tools/${encodeURIComponent(p.toolName)}/unhalt`, { reason }, h),
         );
       }
       await refresh();

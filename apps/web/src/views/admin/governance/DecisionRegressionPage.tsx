@@ -21,6 +21,7 @@ import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 import rec from "./record.module.css";
 import { shortDate } from "./useCaseLifecycle";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 // ---------------------------------------------------------------------------
 // The API shapes (packages/shared/src/decision-regression.ts)
@@ -651,7 +652,7 @@ function SettingsSection() {
     setBusy(true);
     setError(null);
     try {
-      await api.put("/v1/org/settings", { decisionRegressionGate: curMode, decisionRegressionMaxAgeMinutes: ageN });
+      await putOrgSettings({ decisionRegressionGate: curMode, decisionRegressionMaxAgeMinutes: ageN });
       toast("Decision regression settings saved", "success");
       setMode(null);
       setAge(null);

@@ -23,6 +23,7 @@ import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:c
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  approvalRules,
   and,
   authSessions,
   auditLog,
@@ -43,6 +44,7 @@ import {
 import { buildApp } from "./app.js";
 import { hashToken, totpCode, totpStep } from "./auth.js";
 import { enrolTotpForTest } from "./testing/identity-posture.js";
+import { forgetStepUpMethodsForTest, relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -287,6 +289,7 @@ const mkProvider = async (payload: Record<string, unknown>) => {
   return row;
 };
 
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -314,9 +317,19 @@ beforeAll(async () => {
   // exactly as it was found (see the SUITE-ORDER ISOLATION note above)
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   orgSettingsSnapshot = settings ?? null;
+  // B4S-06: this suite onboards people through the bootstrap credential after an
+  // admin here has enrolled TOTP, when the bootstrap credential no longer passes
+  // a step-up. It is about sign-in and sessions, not step-up (proved in
+  // zz-b4a-step-up / zz-b4s-round2): step-up is off for its run, restored below
+  // (and by the settings snapshot)
+  restoreStepUp = await relaxStepUpForTest(db);
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
+  // B4S-06 (M-068): the admins this suite enrolled leave no step-up method behind
+  const suiteUsers = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${"%@auth-test.example"}`);
+  await forgetStepUpMethodsForTest(db, suiteUsers.map((u) => u.id));
   // Providers first, settings second: the rows go out through the DB (not the
   // API), so the no-lockout guard can never refuse this file's own cleanup.
   if (createdOidcProviderIds.size > 0) {
@@ -866,6 +879,27 @@ describe("OIDC SSO (fake IdP: discovery + jwks + token)", () => {
     const all = await db.select().from(users).where(eq(users.email, "newcomer@auth-test.example"));
     expect(all).toHaveLength(1);
     await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/auth/oidc-providers/${p.id}` });
+  });
+
+  it("JIT with an approver role as the default: the provisioning audit says the role was WITHHELD (PR #198 round 7)", async () => {
+    const roleRes = await app.inject({ method: "POST", headers: AUTH, url: "/v1/roles", payload: { name: "sso-approvers-r7" } });
+    const roleId = roleRes.json().id as string;
+    const p = await mkProvider({ name: "jit-approver-role", jitProvisioning: true, allowedEmailDomains: ["auth-test.example"], defaultRoleId: roleId });
+    // the role becomes an approver role AFTER the provider names it (a rule names it as its approver role)
+    const namer = await mkUser("r7-namer@auth-test.example", "r7 namer");
+    const [rule] = await db.insert(approvalRules).values({ userId: namer, serverScope: "all", approverUserId: namer, approverRoleId: roleId }).returning({ id: approvalRules.id });
+    try {
+      const { cb } = await oidcRoundTrip(p.id, { email: "r7-jit@auth-test.example", name: "R7 Jit" });
+      expect(cb.statusCode).toBe(302);
+      const [row] = await db.select().from(users).where(eq(users.email, "r7-jit@auth-test.example"));
+      expect(await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, row!.id), eq(roleAssignments.roleId, roleId)))).toHaveLength(0);
+      const audit = await latestAudit("oidc-user-provisioned");
+      expect(audit!.reason).not.toMatch(/with the provider's default role/);
+      expect(audit!.detail).toMatchObject({ defaultRoleGrant: "withheld", defaultRoleId: null, withheldRoleId: roleId });
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, rule!.id));
+      await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/auth/oidc-providers/${p.id}` });
+    }
   });
 });
 

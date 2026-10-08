@@ -148,13 +148,19 @@ export async function enrolAdminTotp(
     if (enrolled.statusCode !== 200) return { status: "refused", reason: `TOTP enrol: ${enrolled.statusCode}` };
     const { secret, otpauthUri } = enrolled.json() as { secret: string; otpauthUri: string };
     // the PREVIOUS step's code, so a sign-in later in the same 30 s window can
-    // still use the current one (the gateway refuses a step it already accepted)
-    const activated = await app.inject({
-      method: "POST",
-      url: "/auth/totp/activate",
-      headers: asPerson,
-      payload: { code: totpCode(secret, totpStep() - 1) },
-    });
+    // still use the current one (the gateway refuses a step it already accepted).
+    // If a 30 s boundary passes between computing the code and the gateway
+    // checking it, that code is two steps old and outside the ±1 window: a
+    // refused activation consumes nothing, so try once more with a fresh step.
+    const activate = () =>
+      app.inject({
+        method: "POST",
+        url: "/auth/totp/activate",
+        headers: asPerson,
+        payload: { code: totpCode(secret, totpStep() - 1) },
+      });
+    let activated = await activate();
+    if (activated.statusCode === 401) activated = await activate();
     if (activated.statusCode !== 200) return { status: "refused", reason: `TOTP activate: ${activated.statusCode}` };
     return { status: "enrolled", password, secret, otpauthUri };
   } finally {

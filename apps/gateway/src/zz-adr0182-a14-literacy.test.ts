@@ -57,6 +57,7 @@ import { routeAuthClass } from "./route-classes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -136,10 +137,13 @@ async function setGate(mode: "off" | "warn" | "enforce") {
   expect(r.statusCode, r.body).toBe(200);
 }
 
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   restoreAdmission = await relaxStrictAdmissionForTest(db);
   const [org] = await db
     .select({ ids: orgSettings.breakGlassUserIds, localSignIn: orgSettings.localSignIn })
@@ -191,6 +195,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   // M-068: documents (acknowledgements cascade), ABAC policies, settings — whatever happened above
   await db.delete(aiPolicyDocuments).where(sql`${aiPolicyDocuments.key} like ${`a14-%-${RUN}`}`);
   for (const id of abacPolicyIds) await db.delete(abacPolicies).where(eq(abacPolicies.id, id));

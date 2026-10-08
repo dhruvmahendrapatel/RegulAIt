@@ -37,10 +37,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 const DELIBERATELY_API_ONLY = new Map([
-  // ADR-0186 foundation: both routes answer 501 `not_built` until Batch 4 slice A lands its passkey screens
-  // (Account → Passkeys, and the admin user page). Slice A removes these two entries and adds the controls.
-  ["/v1/auth/passkeys/:x", "ADR-0186 foundation stub (501 not_built); slice A adds the Account → Passkeys revoke control"],
-  ["/v1/users/:x/passkeys/:x", "ADR-0186 foundation stub (501 not_built); slice A adds the admin revoke control"],
 ]);
 
 const walk = (dir, out = []) => {

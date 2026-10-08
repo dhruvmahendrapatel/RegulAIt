@@ -69,6 +69,7 @@ import { runAlertSlaSweep } from "./alert-ownership.js";
 import { routeAuthClass } from "./route-classes.js";
 import { hashToken } from "./token-hash.js";
 import { decryptSecret } from "./secrets.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -164,10 +165,13 @@ async function submit(useCaseId: string, who: Who, body: Record<string, unknown>
 }
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   limited = buildApp(db, {
     bootstrapToken: BOOT,
@@ -185,6 +189,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await db.execute(sql`UPDATE org_settings SET feedback_signed_links_enabled = false,
     feedback_ack_sla_hours = 72, feedback_resolve_sla_days = 30, feedback_retention_days = 365`);
   await restoreAdminKeyMfa?.();

@@ -6,7 +6,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  GEN_AI_SYSTEM_DUAL_EMIT_UNTIL,
   buildOtlpPayload,
+  genAiSystemDualEmitOverdue,
   isContentAttributeKey,
   otelAttributesForSpan,
   otelProviderName,
@@ -113,6 +115,25 @@ describe("ADR-0177 gap 1 — gen_ai.provider.name, with gen_ai.system kept for t
     const a = otelAttributesForSpan(span({ id: U(1), provider: "google" }), { includeContent: false });
     expect(a["gen_ai.provider.name"]).toBe("gcp.gemini");
     expect(a["gen_ai.system"]).toBe("google");
+  });
+
+  /**
+   * ADR-0186 T: the transition window has a written end. This test FAILS on
+   * and after GEN_AI_SYSTEM_DUAL_EMIT_UNTIL, with the constant's name in the
+   * message, so the removal of `gen_ai.system` cannot be forgotten. It reads
+   * the real clock on purpose: that is the whole point of it.
+   */
+  it(`the gen_ai.system transition window is still open (GEN_AI_SYSTEM_DUAL_EMIT_UNTIL = ${GEN_AI_SYSTEM_DUAL_EMIT_UNTIL})`, () => {
+    const overdue = genAiSystemDualEmitOverdue(new Date());
+    expect(overdue, overdue ?? "").toBeNull();
+  });
+
+  it("the window check trips exactly at the end date and names the constant", () => {
+    expect(GEN_AI_SYSTEM_DUAL_EMIT_UNTIL).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(genAiSystemDualEmitOverdue(new Date("2026-12-31T23:59:59.999Z"))).toBeNull();
+    const msg = genAiSystemDualEmitOverdue(new Date("2027-01-01T00:00:00.000Z"));
+    expect(msg).toContain("GEN_AI_SYSTEM_DUAL_EMIT_UNTIL (2027-01-01) has passed");
+    expect(msg).toContain("gen_ai.system");
   });
 });
 

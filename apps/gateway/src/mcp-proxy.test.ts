@@ -24,6 +24,12 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -152,6 +158,7 @@ afterAll(() => {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false, keyCustodyEnforced: false });
@@ -209,6 +216,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await restoreStrictAdmission?.();
   // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
   // upserts a PLATFORM credential for anthropic, openai, google and xai, each
@@ -7602,6 +7610,9 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
   let signoffId: string;
   let runId: string;
   let runApprovalId: string;
+
+  // B4S-06 (M-068): the loop admin's authenticator does not outlive the suite
+  afterAll(async () => forgetStepUpMethodsForTest(db, [adminId]));
 
   beforeAll(async () => {
     const mkUser = async (email: string, name: string, isAdmin = false) => {

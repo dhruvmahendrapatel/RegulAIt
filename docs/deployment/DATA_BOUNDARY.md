@@ -121,6 +121,25 @@ ADR-0034/0043 egress guard adjudicates it.
 | 11 | **Caddy → Let's Encrypt (ACME)** | only when `REGULAIT_TLS_ISSUER` is empty, i.e. `--tls letsencrypt` | your hostname, and an inbound HTTP-01 challenge on :80 | not applicable (it is not the gateway) |
 | 12 | **Docker image pulls / `pnpm install`** | `docker compose up --build` | nothing of yours; it is a build | install-time only |
 | 13 | **`infra/scripts/pg-backup.sh` → S3** (ADR-0035) | only if you install the backup timer against an S3 bucket | your entire database, as a `pg_dump` | you choose the bucket; it is your account |
+| 14 | **OTLP trace export** (`org_settings.tracingOtlpEndpoint`, ADR-0070) | an admin calls `POST /v1/tracing/export`; nothing is configured by default | span trees, timings, costs, deny reasons; prompt and output content only when trace content capture is on | **Yes** — every export (`tracing.ts`). Wire format: §3.1 |
+
+### 3.1 Trace export wire format (ADR-0186 T, 2026-10-07)
+
+- **Format:** OTLP/HTTP **JSON** only (`content-type: application/json`). Every `ResourceSpans` and `ScopeSpans` carries
+  `schemaUrl: https://opentelemetry.io/schemas/1.43.0`, the semantic-conventions version our keys are pinned to
+  (`OTEL_SCHEMA_URL` in `packages/shared/src/tracing.ts`, derived from the pin).
+- **Open tracing UIs** (ADR-0177 rows 18–19 — export destinations only, never bundled or hosted): the export is
+  checked against hand-written fixtures of each one's documented ingest shape
+  (`packages/shared/src/__fixtures__/otlp-ingest/`). **Langfuse** takes the JSON body directly at
+  `/api/public/otel/v1/traces`; use the `openinference` profile there, because Langfuse's documented mapping reads
+  `input.value`/`output.value` and `user.id`, not the `otel_genai` profile's `gen_ai.input.messages` and `enduser.id`.
+  **Phoenix** accepts only protobuf on OTLP/HTTP, so put an OpenTelemetry Collector between us and it (an `otlp`
+  receiver on HTTP, an `otlphttp` exporter to `http://<phoenix>:6006/v1/traces`). The `openinference` profile is
+  Phoenix's native vocabulary; the `otel_genai` profile needs Phoenix 15.10.0 or later, which converts `gen_ai.*` on
+  ingest.
+- **`gen_ai.system` ends on 2027-01-01.** The deprecated key is still sent beside `gen_ai.provider.name`; the first
+  release on or after `GEN_AI_SYSTEM_DUAL_EMIT_UNTIL` (2027-01-01) stops sending it, and a test fails on that date until
+  it does. Move a dashboard grouping on `gen_ai.system` to `gen_ai.provider.name` before then.
 
 Inbound surfaces (someone calls **you**) are out of scope for a data-boundary claim but are worth
 naming so the list is complete: the HTTPS API itself, SCIM provisioning (`scim.ts`), PM inbound

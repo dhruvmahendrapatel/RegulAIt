@@ -2,6 +2,8 @@
  * exactly once; activate proves the authenticator before the gate opens. */
 import { useState } from "react";
 import { api, ApiError } from "../../api/client";
+import StepUpDialog from "../../stepup/StepUpDialog";
+import { withStepUp } from "../../stepup/stepUp";
 import { useSession } from "../../session/SessionContext";
 import { Button, Field, Input } from "../../ui/kit";
 import { TotpQrCode } from "../../ui/TotpQrCode";
@@ -19,7 +21,8 @@ export default function ForcedMfaEnroll() {
     setError(null);
     setBusy(true);
     try {
-      setSecret(await api.post<{ secret: string; otpauthUri: string }>("/auth/totp/enroll"));
+      // ADR-0186 A: an account that already has a way to step up proves it before adding an authenticator
+      setSecret(await withStepUp(async (h) => (await api.postWithHeaders<{ secret: string; otpauthUri: string }>("/auth/totp/enroll", {}, h)).body));
     } catch (err) {
       setError(
         err instanceof ApiError && err.payload.detail
@@ -54,6 +57,8 @@ export default function ForcedMfaEnroll() {
 
   return (
     <div className={s.gate}>
+      {/* the step-up prompt: an account with a passkey or SSO identity proves it before adding an authenticator */}
+      <StepUpDialog />
       <main className={s.panel}>
         <Brand />
         {/* Same reason as the password gate: an authenticator entry is bound to
