@@ -436,6 +436,26 @@ describe("B4S-02: the writes that can pad an approver pool need settings_relax (
     expect(demote.statusCode, demote.body).toBe(200);
   });
 
+  it("creating an account that is already an admin needs it, bound to the email; a member account does not", async () => {
+    const email = `b4s3-new-admin-${randomBytes(2).toString("hex")}-${RUN}@example.com`;
+    const created = await provesStepUp("POST", "/v1/users", { email, displayName: "b4s3 new admin", isAdmin: true }, { email, values: { isAdmin: true } }, 201);
+    expect(created.json()).toMatchObject({ email, isAdmin: true });
+    // the bootstrap credential is past first-admin setup here (P.adm has a passkey), so it is refused too
+    const boot = await withKey(AUTH, "POST", "/v1/users", { email: `x-${email}`, displayName: "b4s3 boot admin", isAdmin: true });
+    expect(boot.statusCode, boot.body).toBe(403);
+    expect(boot.json()).toMatchObject({ error: "step_up_required", credential: "bootstrap" });
+    // a grant made for one email is refused for another
+    const other = `b4s3-other-${randomBytes(2).toString("hex")}-${RUN}@example.com`;
+    const token = await grantFor(P.adm, { kind: "settings_relax", body: { email, values: { isAdmin: true } } });
+    const swapped = await as(P.adm.s, "POST", "/v1/users", { email: other, displayName: "b4s3 swapped", isAdmin: true }, { [STEP_UP_HEADER]: token });
+    expect(swapped.statusCode, swapped.body).toBe(403);
+    expect(swapped.json()).toMatchObject({ error: "step_up_required" });
+    const member = await as(P.adm.s, "POST", "/v1/users", { email: other, displayName: "b4s3 member", isAdmin: false });
+    expect(member.statusCode, member.body).toBe(201);
+    expect(member.json().isAdmin).toBe(false);
+    expect((await db.select({ n: sql<number>`count(*)::int` }).from(usersTable).where(eq(usersTable.email, `x-${email}`)))[0]!.n).toBe(0);
+  });
+
   it("creating a delegation needs it, bound to who, for whom and when", async () => {
     const u = await person("delegate-route");
     const startsAt = new Date(Date.now() - 60_000).toISOString();

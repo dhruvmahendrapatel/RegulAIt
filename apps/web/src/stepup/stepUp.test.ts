@@ -153,6 +153,9 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       // G2: a team member added to a team that routes or claims approvals joins an approver pool
       const teamWrites = src.match(/(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/v1\/teams\/\$\{[^}]+\}\/members/g);
       for (const m of teamWrites ?? []) offenders.push(`${f}: ${m}`);
+      // B4S round 3: creating a user can create an admin (settings_relax, as the admin grant above)
+      const userCreates = src.match(/(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/v1\/users["'`]/g);
+      for (const m of userCreates ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

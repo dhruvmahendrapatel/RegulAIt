@@ -122,7 +122,7 @@ export default function UsersPage() {
               e.preventDefault();
               void create
                 .run(
-                  () => api.post("/v1/users", { email, displayName, isAdmin: isAdmin === "true" }),
+                  () => withStepUp((h) => api.postWithHeaders("/v1/users", { email, displayName, isAdmin: isAdmin === "true" }, h)),
                   "User created — issue them a one-time password or an API key below",
                 )
                 .then((ok) => {

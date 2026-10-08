@@ -1351,6 +1351,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       email: body.email,
     });
     if (seatRefusal) return reply.status(seatRefusal.status).send(seatRefusal.body);
+    // B4S round 3 (owner principle, as POST /v1/users/:id/admin): creating an
+    // account that is already an admin grants admin, so it needs the same
+    // settings_relax step-up, bound to the new account's email (it has no id
+    // yet); a member account needs none. Asked after the seat gate so a seat
+    // refusal never spends a grant.
+    if (
+      body.isAdmin &&
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { email: body.email, values: { isAdmin: true } } })).ok
+    ) {
+      return reply;
+    }
     const [row] = await db
       .insert(users)
       .values({ email: body.email, displayName: body.displayName, isAdmin: body.isAdmin ?? false })
