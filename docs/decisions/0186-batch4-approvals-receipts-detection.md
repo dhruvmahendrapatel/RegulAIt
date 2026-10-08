@@ -295,10 +295,12 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 - **Test fixtures.** 22 gateway suites that do not test step-up relax it with `relaxStepUpForTest` (17 from slice A;
   5 added in the security round: `auth`, `adr0174-enterprise-sign-in`, `release-age`, `prompt-registry`,
   `zz-adr0175-credential-inventory`).
-- **Round 3 not landed on `b4-int`:** `POST /v1/users` with `isAdmin: true` takes no step-up (granting admin on an
-  existing user does); the non-CI e2e specs (`execution-control`, `mcp-action-review`, `zz-deploy-override`,
-  `zz-zz-sod-rules`, `zz-zz-zz-access-recommendations`, and `reprovisionTotp` in `totp-sign-in.ts`) still use the
-  bootstrap credential; the credential-inventory page-total test depends on the global key count.
+- **Round 3 (landed 2026-10-08, b08f291):** creating a user with `isAdmin: true` (`POST /v1/users`) now needs a
+  `settings_relax` step-up bound to the email (the account has no id yet); the non-CI e2e specs step up the real way
+  (Ada with TOTP) instead of the bootstrap credential; the credential-inventory page-total test walks every page
+  instead of assuming one; `approver_not_eligible` and the seven ceremony codes are in the shared refusal list (27
+  codes) with a web drift guard. Still open: `enrolAdminTotp` (demo-identity.ts) reads only the first page of
+  `GET /v1/users`, the same root cause as the missing user search/cursor route.
 
 ### Codex slices (status 2026-10-08)
 - **R, receipts (X21, #182):** in review, merge after fixes. Majors R21-01 (online verify trusts the bundle's keys),
