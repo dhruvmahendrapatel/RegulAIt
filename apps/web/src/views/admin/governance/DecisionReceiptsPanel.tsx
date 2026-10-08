@@ -4,7 +4,7 @@ import { api } from "../../../api/client";
 import { Button, Card, Field, Input } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
 import v from "../../views.module.css";
-interface ReceiptStatus { state: "signing" | "no_key" | "off"; lastSeq: number; lagRows: number }
+interface ReceiptStatus { state: "signing" | "no_key" | "off" | "stalled"; lastSeq: number; lagRows: number }
 interface Verification { results: Array<{ receiptSeq: number | null; status: "valid" | "invalid" | "unverifiable"; reason: string }>; cannotProve: string[] }
 
 export function DecisionReceiptsPanel() {
@@ -14,12 +14,12 @@ export function DecisionReceiptsPanel() {
   const [reading, setReading] = useState(false);
   const [from, setFrom] = useState("1"); const [to, setTo] = useState("");
   const [bundle, setBundle] = useState<unknown>(null); const [result, setResult] = useState<Verification | null>(null);
-  const measured = status.data && ["signing", "no_key", "off"].includes(status.data.state) && Number.isSafeInteger(status.data.lastSeq) && Number.isSafeInteger(status.data.lagRows) && status.data.lastSeq >= 0 && status.data.lagRows >= 0;
+  const measured = status.data && ["signing", "no_key", "off", "stalled"].includes(status.data.state) && Number.isSafeInteger(status.data.lastSeq) && Number.isSafeInteger(status.data.lagRows) && status.data.lastSeq >= 0 && status.data.lagRows >= 0;
   return <Card title="Signed decision receipts">
-    <p>Receipts sign governed-call and approval decisions without their reason or detail text. Admin configuration stays on the audit hash chain.</p>
+    <p>Receipts sign governed-call and approval decisions without their reason or detail text. Admin configuration stays on the audit hash chain. Oversized tool names and rule IDs are represented by SHA-256 hashes.</p>
     <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>
       {measured ? <>
-        <p>{status.data!.state === "signing" ? "Receipt signing is configured." : status.data!.state === "no_key" ? "Unsigned: no receipt signing key is configured." : "Receipt signing is off."}</p>
+        <p>{status.data!.state === "signing" ? "Receipt signing is configured." : status.data!.state === "stalled" ? "Receipt signing is stalled or its latest sweep failed. Check the scheduler and unsigned decision backlog." : status.data!.state === "no_key" ? "Unsigned: no receipt signing key is configured." : "Receipt signing is off."}</p>
         <p>Last receipt sequence: {status.data!.lastSeq}. Decision rows awaiting signing: {status.data!.lagRows}.</p>
       </> : status.data ? <p>Receipt signing state is not reported by this gateway.</p> : null}
     </QueryGate>
@@ -53,6 +53,7 @@ export function DecisionReceiptsPanel() {
         .finally(() => { if (version === readVersion.current) setReading(false); });
     }} /></Field>
     <Button disabled={act.busy || reading || bundle === null} onClick={() => void act.run(async () => { setResult(await api.post<Verification>("/v1/receipts/verify", bundle)); }, "Receipt bundle checked")}>Verify loaded receipt bundle</Button>
+    <p>Online verification uses this deployment’s recorded public keys, never a key supplied only by the uploaded bundle.</p>
     <p>Offline verification is also available with the receipt verifier CLI. Pin public keys independently; keys supplied by an untrusted bundle do not establish the signer’s identity.</p>
     {act.error && <p role="alert">{act.error}</p>}
     {result && <div role="status" className={v.stack}>

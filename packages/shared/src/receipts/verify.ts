@@ -1,3 +1,4 @@
+import { z } from "zod";
 /** ADR-0186 R: deterministic offline verification; no I/O, clock or key service. */
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, type DecisionReceiptPayload } from "../batch4.js";
@@ -12,37 +13,25 @@ export const RECEIPT_CANNOT_PROVE = [
   "Signing time, unless independently verified anchor timestamp evidence covers these bytes.",
   "Identity or trust of the signing key: bundle-supplied keys require independent pinning.",
 ] as const;
-const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
-const exact = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-const text = (value: unknown, max = 4096): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
-const nullableText = (value: unknown) => value === null || text(value);
-const sequence = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 1;
-const digest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+const digestSchema=z.string().regex(/^[0-9a-f]{64}$/);
+const sequenceSchema=z.number().int().positive().safe();
+const keyIdSchema=z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
+const dateSchema=z.string().max(32).refine(value=>Number.isFinite(Date.parse(value))&&new Date(value).toISOString()===value);
+const nullableTextSchema=z.string().max(4096).nullable();
+const payloadSchema=z.object({
+ v:z.literal(RECEIPT_PAYLOAD_VERSION),receiptSeq:sequenceSchema,prev:digestSchema,keyId:keyIdSchema,
+ audit:z.object({id:z.string().min(1).max(128),seq:sequenceSchema,rowHash:digestSchema,contentHash:digestSchema}).strict(),
+ decision:z.object({at:dateSchema,userId:z.string().min(1).max(512),objectType:z.enum(RECEIPT_OBJECT_TYPES),
+  objectId:nullableTextSchema,serverId:nullableTextSchema,toolName:nullableTextSchema,ruleId:nullableTextSchema,
+  toolNameHash:digestSchema.optional(),ruleIdHash:digestSchema.optional(),effect:z.enum(["allow","deny","require_approval"]),
+ }).strict().refine(value=>(!value.toolNameHash||value.toolName===null)&&(!value.ruleIdHash||value.ruleId===null)),
+}).strict();
+const publicKeySchema=z.object({keyId:keyIdSchema,jwk:z.object({kty:z.literal("OKP"),crv:z.literal("Ed25519"),x:z.string().regex(/^[A-Za-z0-9_-]{43}$/)}).strict(),firstUsedAt:dateSchema.nullable().optional(),retiredAt:dateSchema.nullable().optional()}).strict();
+const envelopeSchema=z.object({receiptSeq:sequenceSchema,payload:payloadSchema,signature:z.string().regex(/^[A-Za-z0-9_-]{86}$/),keyId:keyIdSchema}).strict();
+const bundleSchema=z.object({verifier:z.literal(RECEIPT_PAYLOAD_VERSION),receipts:z.array(envelopeSchema).max(5000),keys:z.array(publicKeySchema).max(1000)}).strict();
 export const receiptPayloadHash = (payload: DecisionReceiptPayload): string => createHash("sha256").update(receiptCanonicalBytes(payload)).digest("hex");
-
-export function isDecisionReceiptPayload(value: unknown): value is DecisionReceiptPayload {
-  if (!record(value) || !exact(value, ["v", "receiptSeq", "audit", "decision", "prev", "keyId"])) return false;
-  const { audit, decision } = value;
-  if (!record(audit) || !exact(audit, ["id", "seq", "rowHash", "contentHash"]) ||
-      !record(decision) || !exact(decision, ["at", "userId", "objectType", "objectId", "serverId", "toolName", "effect", "ruleId"])) return false;
-  return value.v === RECEIPT_PAYLOAD_VERSION && sequence(value.receiptSeq) && digest(value.prev) && text(value.keyId, 128) &&
-    /^[A-Za-z0-9._:-]+$/.test(value.keyId) && text(audit.id, 128) && sequence(audit.seq) && digest(audit.rowHash) && digest(audit.contentHash) &&
-    text(decision.at, 32) && Number.isFinite(Date.parse(decision.at)) && new Date(decision.at).toISOString() === decision.at &&
-    text(decision.userId, 512) && typeof decision.objectType === "string" && (RECEIPT_OBJECT_TYPES as readonly string[]).includes(decision.objectType) &&
-    nullableText(decision.objectId) && nullableText(decision.serverId) && nullableText(decision.toolName) && nullableText(decision.ruleId) &&
-    ["allow", "deny", "require_approval"].includes(String(decision.effect));
-}
-
-/** Input validation is separate so the HTTP route can return a 400, not an empty success. */
-export function isReceiptBundle(value: unknown): value is ReceiptBundle {
-  if (!record(value) || value.verifier !== RECEIPT_PAYLOAD_VERSION || !Array.isArray(value.receipts) || !Array.isArray(value.keys) ||
-      value.receipts.length > 5000 || value.keys.length > 1000) return false;
-  return value.receipts.every((row) => record(row) && sequence(row.receiptSeq) && text(row.keyId, 128) &&
-    typeof row.signature === "string" && /^[A-Za-z0-9_-]{86}$/.test(row.signature) && isDecisionReceiptPayload(row.payload)) &&
-    value.keys.every((key) => record(key) && text(key.keyId, 128) && record(key.jwk) &&
-      exact(key.jwk, ["kty", "crv", "x"]) && key.jwk.kty === "OKP" && key.jwk.crv === "Ed25519" &&
-      typeof key.jwk.x === "string" && /^[A-Za-z0-9_-]{43}$/.test(key.jwk.x));
-}
+export function isDecisionReceiptPayload(value:unknown):value is DecisionReceiptPayload{return payloadSchema.safeParse(value).success;}
+export function isReceiptBundle(value:unknown):value is ReceiptBundle{return bundleSchema.safeParse(value).success;}
 
 export function verifyReceiptBundle(input: unknown): { results: ReceiptVerificationResult[]; cannotProve: readonly string[] } {
   if (!isReceiptBundle(input)) return { results: [{ receiptSeq: null, status: "invalid", reason: "Malformed receipt bundle or non-public signing key." }], cannotProve: RECEIPT_CANNOT_PROVE };

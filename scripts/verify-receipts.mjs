@@ -21,8 +21,9 @@ try {
     if (!isReceiptBundle(bundle)) throw new Error("Malformed pinned public keys");
   }
   const result = verifyReceiptBundle(bundle);
-  process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-  process.exit(result.results.some((r) => r.status === "invalid") ? 1 : result.results.length === 0 || result.results.some((r) => r.status === "unverifiable") ? 2 : 0);
+  if(!paths[1])process.stderr.write("UNPINNED: bundle-supplied keys do not establish signer identity. Supply an independently trusted keys file.\n");
+  process.stdout.write(JSON.stringify({...result,trust:paths[1]?"pinned":"UNPINNED"}, null, 2) + "\n");
+  process.exit(result.results.some((r) => r.status === "invalid") ? 1 : !paths[1] || result.results.length === 0 || result.results.some((r) => r.status === "unverifiable") ? 2 : 0);
 } catch {
   process.stderr.write("Could not verify receipt inputs. Check the JSON format, public keys and file size.\n");
   process.exit(2);

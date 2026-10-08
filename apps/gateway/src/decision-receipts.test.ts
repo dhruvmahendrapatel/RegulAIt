@@ -2,14 +2,14 @@
  * Creates and drops an isolated database from DATABASE_URL. An explicit
  * RECEIPT_TEST_DATABASE_URL scratch fixture is instead owned by its caller. */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, sign, createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { auditLog, createDb, decisionReceipts, desc, eq, orgSettings, receiptSigningKeys, runMigrations, sql, type Db } from "@regulait/db";
-import { verifyReceiptBundle, type ReceiptBundle } from "@regulait/shared";
+import { auditLog, createDb, decisionReceipts, desc, eq, orgSettings, receiptSigningKeys, runMigrations, sql, schedulerJobs, type Db } from "@regulait/db";
+import { verifyReceiptBundle, receiptCanonicalBytes, type ReceiptBundle } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runDecisionReceiptSignSweep } from "./decision-receipts.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -160,12 +160,35 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     const privateKey = structuredClone(value) as any; privateKey.keys[0].jwk.d = "not-public";
     expect((await check(privateKey)).statusCode).toBe(400);
   });
+  it("R21-01: online verification refuses attacker keys labelled with a registered identity",async()=>{
+    const value=await bundle(),forged=structuredClone(value),pair=generateKeyPairSync("ed25519");
+    forged.keys=forged.keys.map(key=>({...key,jwk:pair.publicKey.export({format:"jwk"}) as typeof key.jwk}));
+    for(const row of forged.receipts)row.signature=sign(null,Buffer.from(receiptCanonicalBytes(row.payload)),pair.privateKey).toString("base64url");
+    const result=await app.inject({method:"POST",url:"/v1/receipts/verify",headers:admin,payload:forged});expect(result.statusCode).toBe(200);expect(result.json().results.every((row:{status:string})=>row.status!=="valid")).toBe(true);
+    expect(offline(value).status).toBe(2);
+  });
+  it("R21-04/05: same-object admin changes remain unsigned and listing envelopes is audited",async()=>{
+    for(const [objectType,ruleId] of [["agent","agent-owner-set"],["agent","fallback-chain-configured"],["mcp_tool","mcp-tool-price-set"]] as const)await db.insert(auditLog).values({userId:decisionUserId,objectType,ruleId,effect:"allow",ruleChain:[],reason:"Synthetic config"});
+    expect((await runDecisionReceiptSignSweep(db)).signed).toBe(0);
+    await get("/v1/receipts?limit=500");expect((await db.select().from(auditLog).where(eq(auditLog.ruleId,"decision-receipts-listed"))).length).toBeGreaterThan(0);
+  });
+  it("R21-02: empty/large tool names sign and failures are visible in status",async()=>{
+    const before=(await db.select().from(decisionReceipts)).length;
+    const long="Z".repeat(5000);
+    for(const toolName of ["",long])await db.insert(auditLog).values({userId:decisionUserId,objectType:"mcp_tool",toolName,effect:"deny",ruleId:"synthetic-call-refused",ruleChain:[],reason:"synthetic"});
+    expect((await runDecisionReceiptSignSweep(db)).signed).toBe(2);
+    const value=await bundle();expect(value.receipts[before]!.payload.decision.toolName).toBe("");
+    expect(value.receipts[before+1]!.payload.decision).toMatchObject({toolName:null,toolNameHash:createHash("sha256").update(long).digest("hex")});
+    expect(verifyReceiptBundle(value).results.every(row=>row.status==="valid")).toBe(true);
+    await db.insert(schedulerJobs).values({name:"decision-receipt-sign-sweep",intervalSeconds:60,lastOutcome:"failed",lastError:"synthetic-private-failure",lastFinishedAt:new Date()}).onConflictDoUpdate({target:schedulerJobs.name,set:{lastOutcome:"failed",lastError:"synthetic-private-failure"}});
+    expect((await get("/v1/receipts/status")).json().state).toBe("stalled");expect((await get("/v1/receipts/status")).body).not.toContain("synthetic-private-failure");
+  });
   it("rolls back an entire pass if an audit row was tampered with", async () => {
     const good = await decision("connector");
     const bad = await decision("approval");
     await db.execute(sql`UPDATE audit_log SET effect = 'allow' WHERE id = ${bad.id}`);
     await expect(runDecisionReceiptSignSweep(db)).rejects.toThrow("Audit row failed integrity");
-    expect(await db.select().from(decisionReceipts)).toHaveLength(3);
+    expect(await db.select().from(decisionReceipts)).toHaveLength(5);
     await db.execute(sql`UPDATE audit_log SET effect = 'deny' WHERE id = ${bad.id}`);
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(2);
     expect((await get(`/v1/receipts/${good.id}`)).json().receipts).toHaveLength(1);

@@ -1,8 +1,8 @@
 /** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
-import { createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
-import { and, asc, auditLog, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, lte, receiptSigningKeys, sql, type Db } from "@regulait/db";
+import { and, asc, auditLog, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
 import { auditContentHash, auditRowHash, isDecisionReceiptPayload, isReceiptBundle, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, receiptPayloadHash, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
@@ -35,6 +35,11 @@ const samePublicKey = (a: ReceiptPublicKey["jwk"], b: ReceiptPublicKey["jwk"]) =
 const envelope = (row: typeof decisionReceipts.$inferSelect): SignedDecisionReceipt => ({ receiptSeq: row.receiptSeq, payload: row.payload as DecisionReceiptPayload, signature: row.signature, keyId: row.keyId });
 const publicKeys = async (db: Db): Promise<ReceiptPublicKey[]> => (await db.select().from(receiptSigningKeys).orderBy(asc(receiptSigningKeys.createdAt))).map((key) => ({ keyId: key.keyId, jwk: key.publicJwk, firstUsedAt: key.firstUsedAt?.toISOString() ?? null, retiredAt: key.retiredAt?.toISOString() ?? null }));
 
+// Explicit configuration event ids are outside the decisions/approvals stream.
+// A newly added config writer must extend this list rather than receipt itself.
+const CONFIG_RULE_IDS=["agent-owner-set","agent-owner-cleared","fallback-chain-configured","mcp-tool-price-set", "agent-created","agent-updated","agent-deleted","connector-created","connector-updated","connector-deleted","mcp-server-registered","mcp-server-updated","mcp-server-deleted","agent-lifecycle-changed"];
+const eligibleAfter=(seq:number)=>and(isNotNull(auditLog.seq),gt(auditLog.seq,seq),inArray(auditLog.objectType,[...RECEIPT_OBJECT_TYPES]),sql`(${auditLog.ruleId} IS NULL OR ${auditLog.ruleId} NOT IN (${sql.join(CONFIG_RULE_IDS.map(value=>sql`${value}`),sql`, `)}))`);
+function boundedDecisionField(value:string|null){return value===null||value.length<=4096?{value}:{value:null,hash:createHash("sha256").update(value,"utf8").digest("hex")};}
 export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = { now: new Date() }): Promise<DecisionReceiptSweepResult> {
   if ((await loadOrgSettings(db)).decisionReceiptsMode === "off") return { signed: 0, state: "off" };
   const key = signingKey();
@@ -53,7 +58,7 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
           !isDecisionReceiptPayload(last.payload) || last.payloadHash !== receiptPayloadHash(last.payload) || last.prevHash !== last.payload.prev)
         throw new Error("Receipt chain tip failed integrity verification; no new receipts signed.");
     }
-    const rows = await tx.select().from(auditLog).where(and(isNotNull(auditLog.seq), gt(auditLog.seq, last?.auditSeq ?? 0), inArray(auditLog.objectType, [...RECEIPT_OBJECT_TYPES]))).orderBy(asc(auditLog.seq)).limit(SWEEP_LIMIT);
+    const rows = await tx.select().from(auditLog).where(eligibleAfter(last?.auditSeq ?? 0)).orderBy(asc(auditLog.seq)).limit(SWEEP_LIMIT);
     if (!rows.length) return { signed: 0, state: "signing" as const };
     if (!recorded) await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt: opts.now });
     let receiptSeq = last?.receiptSeq ?? 0;
@@ -63,10 +68,11 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
       if (row.seq === null || !row.contentHash || !row.rowHash || !row.prevHash ||
           row.contentHash !== auditContentHash(row) || row.rowHash !== auditRowHash(row.prevHash, row.contentHash))
         throw new Error("Audit row failed integrity verification; no receipts from this pass committed.");
+      const tool=boundedDecisionField(row.toolName),rule=boundedDecisionField(row.ruleId);
       const payload: DecisionReceiptPayload = {
         v: RECEIPT_PAYLOAD_VERSION, receiptSeq: ++receiptSeq,
         audit: { id: row.id, seq: row.seq, rowHash: row.rowHash, contentHash: row.contentHash },
-        decision: { at: row.at.toISOString(), userId: row.userId, objectType: row.objectType, objectId: row.objectId, serverId: row.serverId, toolName: row.toolName, effect: row.effect, ruleId: row.ruleId },
+        decision: { at: row.at.toISOString(), userId: row.userId, objectType: row.objectType, objectId: row.objectId, serverId: row.serverId, toolName: tool.value, ...(tool.hash?{toolNameHash:tool.hash}:{}), effect: row.effect, ruleId: rule.value, ...(rule.hash?{ruleIdHash:rule.hash}:{}) },
         prev, keyId: key.keyId,
       };
       if (!isDecisionReceiptPayload(payload)) throw new Error("Audit decision cannot be represented by the receipt contract.");
@@ -96,11 +102,13 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     const q = req.query as Record<string, unknown>;
     const from = integer(q.fromSeq, 1), limit = integer(q.limit, 100);
     if (from === null || limit === null || limit > 500) return reply.status(400).send({ error: "invalid_receipt_range" });
-    return { receipts: (await db.select().from(decisionReceipts).where(gte(decisionReceipts.receiptSeq, from)).orderBy(asc(decisionReceipts.receiptSeq)).limit(limit)).map(envelope) };
+    const rows=await db.select().from(decisionReceipts).where(gte(decisionReceipts.receiptSeq,from)).orderBy(asc(decisionReceipts.receiptSeq)).limit(limit);
+    await db.insert(auditLog).values({userId:req.authCtx.userId??"00000000-0000-0000-0000-000000000000",objectType:"decision_receipt",effect:"allow",ruleId:"decision-receipts-listed",ruleChain:[],reason:"Decision receipt envelopes listed",detail:{fromSeq:from,limit,rows:rows.length}});
+    return {receipts:rows.map(envelope)};
   });
   app.get("/v1/receipts/status", async (_req, reply) => {
     const [last] = await db.select().from(decisionReceipts).orderBy(desc(decisionReceipts.receiptSeq)).limit(1);
-    const counts = await db.select({ n: sql<number>`count(*)::int` }).from(auditLog).where(and(isNotNull(auditLog.seq), gt(auditLog.seq, last?.auditSeq ?? 0), inArray(auditLog.objectType, [...RECEIPT_OBJECT_TYPES])));
+    const counts = await db.select({ n: sql<number>`count(*)::int` }).from(auditLog).where(eligibleAfter(last?.auditSeq ?? 0));
     let state: ReceiptSigningState = "off";
     if ((await loadOrgSettings(db)).decisionReceiptsMode !== "off") {
       try {
@@ -113,7 +121,11 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
       }
       catch { return reply.status(503).send({ error: "receipt_signing_key_invalid" }); }
     }
-    return { state, lastSeq: last?.receiptSeq ?? 0, lagRows: counts[0]?.n ?? 0 };
+    const [job]=await db.select().from(schedulerJobs).where(eq(schedulerJobs.name,DECISION_RECEIPT_SIGN_JOB_NAME));
+    const [oldest]=await db.select({at:auditLog.at}).from(auditLog).where(eligibleAfter(last?.auditSeq??0)).orderBy(asc(auditLog.seq)).limit(1);
+    const stalled=state==="signing"&&(job?.lastOutcome==="failed"||job?.enabled===false|| (!!oldest&&oldest.at.getTime()<Date.now()-120000));
+    if(stalled)state="stalled";
+    return { state, lastSweep:job?{at:job.lastFinishedAt?.toISOString()??null,outcome:job.lastOutcome}:null, lastSeq: last?.receiptSeq ?? 0, lagRows: counts[0]?.n ?? 0 };
   });
   app.get("/v1/receipts/keys", async () => ({ keys: await publicKeys(db) }));
   app.get("/v1/receipts/export", async (req, reply) => {
@@ -127,7 +139,9 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
   });
   app.post("/v1/receipts/verify", { bodyLimit: 5 * 1024 * 1024 }, async (req, reply) => {
     if (!isReceiptBundle(req.body)) return reply.status(400).send({ error: "invalid_receipt_bundle" });
-    return verifyReceiptBundle(req.body);
+    const trusted=await publicKeys(db);
+    const mismatched=new Set(req.body.keys.filter(supplied=>trusted.some(key=>key.keyId===supplied.keyId&&!samePublicKey(key.jwk,supplied.jwk))).map(key=>key.keyId));
+    return {...verifyReceiptBundle({...req.body,keys:trusted.filter(key=>!mismatched.has(key.keyId))}),trust:"deployment_registry"};
   });
   app.get("/v1/receipts/:auditId", async (req, reply) => {
     const { auditId } = req.params as { auditId: string };

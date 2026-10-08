@@ -66,3 +66,12 @@ test("upload validation prevents stale bundle verification and rejects malformed
   await expect(page.getByRole("alert")).toHaveText("Choose a receipt JSON file no larger than 5 MiB.");
   expect(calls.verifies).toEqual([]);
 });
+
+test("R21-01/02: stalled signing is explicit and online verification explains registry pinning",async({page},testInfo)=>{
+ await setup(page,{state:"stalled",lastSeq:8,lagRows:12});
+ await expect(page.getByText(/Receipt signing is stalled or its latest sweep failed/)).toBeVisible();
+ await expect(page.getByText("Receipt signing is configured.")).toHaveCount(0);
+ await expect(page.getByText(/Online verification uses this deployment’s recorded public keys/)).toBeVisible();
+ await expect(page.getByRole("button",{name:"Export receipt bundle",exact:true})).toBeEnabled();
+ await page.screenshot({path:testInfo.outputPath("receipt-stalled.png"),fullPage:true});
+});
