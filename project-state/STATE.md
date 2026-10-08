@@ -1,5 +1,5 @@
 ---
-phase: adr0186-batch-4-followup
+phase: adr0187-batch-5-foundation-followup
 last_updated: 2026-10-08
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,21 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-08 - Batch 5 foundation merged (PR #203, 0ad1990); review round 2 in its own PR; engine slices next.**
+- Owner: "merge #203 once round 1 is green". B5-F + B5-E landed with migration 0173 (engines, runners, runs, items,
+  schedules, artifacts, engine virtual keys) and ADR-0187 implementation decisions 1-31; review round 1 fixed 16 findings.
+- Follow-up PR (`b5-followup`, decisions 32-38): runner revocation serialised with lease; result delivery retried;
+  inconsistent fail items read `unknown`; expired leases never renewed by heartbeat; workflow termination cancels its
+  engine runs and supersedes their approvals; abort listener cleanup; audited skip when a scheduled run cannot be created.
+- Requirements carried into B5-P/M/G: each engine image sets `REGULAIT_EGRESS_PROBE_ADDRESS` (public literal address);
+  runners re-register at least every 24h; no engine can be enabled until the manifest carries image digests.
+- Interim detection scrub: engine output goes through `engine-scrub.ts` (default: the scrub on main), failing closed;
+  Codex's vendored ruleset (X23, #185) plugs in when it lands.
+- Migration 0173 was edited in place during review: dev databases that applied it from `b5-foundation` must be rebuilt.
+  Next migration 0174, next ADR 0188.
+- Next: B5-P promptfoo (G19 research questions recorded as open), then B5-M modelscan, B5-G garak. Codex X26-X29 and
+  #182/#184/#185 wait on Codex (no activity since 2026-10-08 02:40 UTC). Owner decisions from Batch 4 still open.
 
 **2026-10-08 - Batch 4 merged (PR #198, 1628248); review follow-up in its own PR; Batch 5 foundation next.**
 - Owner: "merge #198 once round 8 is green". Eight rounds of automated review fixes landed first (ADR-0186 decisions
