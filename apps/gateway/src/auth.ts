@@ -1333,7 +1333,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     // consume: the pending token is single-use, the step is burned forever
     await db.delete(authMfaPending).where(eq(authMfaPending.id, pending.id));
-    await db.update(users).set({ totpLastUsedStep: step }).where(eq(users.id, user.id));
+    // ADR-0186 A (round 5): the step is burned only against the authenticator the code was
+    // verified with, and only forward — a concurrent MFA clear or rotation, or a replay, wins
+    const burned = await db
+      .update(users)
+      .set({ totpLastUsedStep: step })
+      .where(
+        and(
+          eq(users.id, user.id),
+          eq(users.totpEnabled, true),
+          eq(users.totpSecretCiphertext, user.totpSecretCiphertext),
+          sql`(${users.totpLastUsedStep} IS NULL OR ${users.totpLastUsedStep} < ${step})`,
+        ),
+      )
+      .returning({ id: users.id });
+    if (burned.length === 0) return reply.status(401).send({ error: "invalid_code" });
     // ADR-0028: the second factor does not change WHICH credential established
     // the session — a MFA-completed login is still 'password' origin, and a
     // SAML login that stepped up to TOTP is still 'saml' (ADR-0174).
@@ -1678,10 +1692,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "this user already has a password — pass force:true to overwrite it (audited reset)",
       });
     }
-    // B4S-02 (owner principle): issuing someone else's password lets the issuer
-    // sign in as them (and decide as them) — a settings_relax step-up bound to the user
+    // B4S-02 (owner principle): issuing a password lets the issuer sign in as that
+    // account (and decide as it) — a settings_relax step-up bound to the user. Also for
+    // the caller's OWN account (PR #198 round 5): a stolen admin session or key must
+    // not mint itself a password login (and then its own authenticator) unproven
     if (
-      req.authCtx.userId !== userId &&
       !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { password: "issued" } } })).ok
     ) {
       return reply;
@@ -1720,10 +1735,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (!target.totpEnabled && !target.totpSecretCiphertext) {
       return reply.status(409).send({ error: "totp_not_enabled" });
     }
-    // B4S-02 (owner principle): clearing someone else's second factor removes
-    // their proof of identity — a settings_relax step-up bound to the user
+    // B4S-02 (owner principle): clearing a second factor removes that account's proof of
+    // identity — a settings_relax step-up bound to the user, the caller's own account
+    // included (round 5; the self-service path is POST /auth/totp/disable, which re-proves
+    // the password and a current code)
     if (
-      req.authCtx.userId !== userId &&
       !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { mfa: "cleared" } } })).ok
     ) {
       return reply;

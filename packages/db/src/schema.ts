@@ -1746,6 +1746,10 @@ export const approvals = pgTable(
      * call was queued — eligibility and queue visibility read this, never the
      * rule's current role. No FK: a historical fact. */
     approverRoleId: uuid("approver_role_id"),
+    /** ADR-0186 A (migration 0172): the approver NAMED when the call was queued —
+     * the one source of named-approver authority for a tool-call approval (never
+     * reconstructed from prunable audit rows). No FK: a historical fact. */
+    namedApproverUserId: uuid("named_approver_user_id"),
   },
   (t) => [
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
@@ -11423,6 +11427,10 @@ export const webauthnChallenges = pgTable(
     actionDigest: text("action_digest"),
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "cascade" }),
     decision: text("decision", { enum: APPROVAL_DECISION_VALUES }),
+    /** ADR-0186 A (migration 0172): a register ceremony admitted by the
+     * first-passkey rule (no step-up); its completion re-checks under the user's
+     * row lock that the account still has no way to step up */
+    firstPasskey: boolean("first_passkey").notNull().default(false),
     /** approval_sign: the `ApprovalSigningPayload` whose digest is the challenge */
     signedPayload: jsonb("signed_payload"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

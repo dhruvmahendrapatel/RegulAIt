@@ -2,8 +2,9 @@
 -- is SNAPSHOTTED AT QUEUE TIME, like `quorum` and `signature_mode` (0170).
 --
 -- Hand-written (never drizzle-kit generate); journal `when` 1785106000000.
--- It takes the number ADR-0187 had reserved for Batch 5, which moves to 0172
--- (journal `when` 1785107000000): leaving a gap below an applied migration
+-- It takes the number ADR-0187 had reserved for Batch 5, which moves to 0173
+-- (journal `when` 1785108000000; 0172 is the Batch 4 review round 5 fix):
+-- leaving a gap below an applied migration
 -- would make a later 0171 silently never apply (CONTRIBUTING_PARALLEL_SESSIONS §4).
 --
 -- `approvals.approver_role_id`: the approver role of the rule that named the

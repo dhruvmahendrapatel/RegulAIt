@@ -79,7 +79,7 @@ import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connec
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { signatureRecheckDenial, spendBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
-import { auditQuorumUnsatisfiableAtQueue, toolApprovalRequirements } from "./approval-signatures.js";
+import { auditQuorumUnsatisfiableAtQueue, reusePendingToolApproval, toolApprovalRequirements } from "./approval-signatures.js";
 import { loadOrgSettings } from "./org-settings.js";
 import type { RetiredApproval } from "./governed-evaluate.js";
 import {
@@ -533,8 +533,10 @@ export async function executeGovernedConnectorCall(
         )
         .orderBy(asc(approvals.requestedAt))
         .limit(1);
+      // ADR-0186 A: reused only while its queue-time pool can still reach its quorum
+      const reusable = pending && (await reusePendingToolApproval(db, pending.id)) ? pending : undefined;
       const approvalId =
-        pending?.id ??
+        reusable?.id ??
         (
           await db
             .insert(approvals)
@@ -556,6 +558,8 @@ export async function executeGovernedConnectorCall(
               quorum: requirement.quorum,
               signatureMode: requirement.signatureMode,
               approverRoleId: requirement.approverRoleId,
+              // ADR-0186 A (0172): the approver named now, persisted — never reconstructed later
+              namedApproverUserId: decision.approverUserId!,
             })
             .returning({ id: approvals.id })
         )[0]!.id;

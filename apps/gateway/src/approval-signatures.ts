@@ -137,53 +137,29 @@ async function approverRoleOf(db: Q, ruleId: string | null): Promise<string | nu
   return rule?.approverRoleId ?? null;
 }
 
-/** the audit rules whose rows record a move of an approval's named approver (with `previousApproverUserId`) */
-const APPROVER_MOVED_RULES = ["approval-routed", "approval-claimed"] as const;
-
 /**
  * B4S-02: WHO WAS NAMED when the call was queued. `approvals.approver_user_id`
  * can be re-pointed after queue time (a routing rule, a claim, an SLA
  * reassignment), and routing "decides whose queue this shows in, never who is
  * allowed to decide" — so the named-approver standing belongs to the approver
- * of the snapshot, not to whoever the row points at now. Every re-pointing
- * path creates the approval's assignment first, so:
- *  - no assignment → never routed or re-pointed: the stored approver;
- *  - the first routing/claim audit row → the approver it moved away from;
- *  - an assignment with no routing rule → its assignee, which mirrored the
- *    approver when it was made (an SLA reassignment comes after it);
- *  - otherwise (routed, with no record of who was named before) → null: no
- *    one has the named approver's standing (the strictest fallback).
+ * of the snapshot, `approvals.named_approver_user_id`, written when the call is
+ * queued (migration 0172). It is never reconstructed from audit rows, which the
+ * retention prune may delete. Null names nobody (a row queued before 0172 that
+ * the backfill could not attribute): no one has the named approver's standing.
  */
-export async function snapshotNamedApprover(db: Q, row: ApprovalRow): Promise<string | null> {
-  const [hit] = await db
-    .select({ named: namedApproverSnapshotSql() })
-    .from(approvals)
-    .where(eq(approvals.id, row.id));
-  return hit?.named ?? null;
+export async function snapshotNamedApprover(_db: Q, row: ApprovalRow): Promise<string | null> {
+  return row.namedApproverUserId ?? null;
 }
 
 /**
- * The named-approver snapshot (the rules above) as ONE SQL expression over the
- * `approvals` row in scope, so the decide path (`snapshotNamedApprover`), the
- * execution recheck (`poolForApproval`) and queue visibility
- * (`poolVisibilityCondition`) cannot disagree about who was named.
+ * The named-approver snapshot as SQL over the `approvals` row in scope, so the
+ * decide path (`snapshotNamedApprover`), the execution recheck
+ * (`poolForApproval`) and queue visibility (`poolVisibilityCondition`) read the
+ * same persisted column. Table-qualified on purpose (drizzle renders a column of
+ * a single-table select unqualified).
  */
 export function namedApproverSnapshotSql(): SQL<string | null> {
-  // always table-qualified: drizzle renders a column of a single-table select
-  // unqualified, which inside these subqueries would bind to the subquery's own table
-  const id = sql.raw(`"approvals"."id"`);
-  const approver = sql.raw(`"approvals"."approver_user_id"`);
-  const movedRules = sql.join(APPROVER_MOVED_RULES.map((r) => sql`${r}`), sql`, `);
-  const moved = sql`l.rule_id IN (${movedRules}) AND l.detail->>'approvalId' = ${id}::text`;
-  return sql<string | null>`(CASE
-    WHEN NOT EXISTS (SELECT 1 FROM approval_assignments aa WHERE aa.approval_id = ${id})
-      THEN ${approver}
-    WHEN EXISTS (SELECT 1 FROM audit_log l WHERE ${moved})
-      THEN (SELECT CASE WHEN l.detail->>'previousApproverUserId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                        THEN (l.detail->>'previousApproverUserId')::uuid END
-              FROM audit_log l WHERE ${moved} ORDER BY l.seq LIMIT 1)
-    ELSE (SELECT CASE WHEN aa.rule_id IS NULL THEN aa.assignee_id END FROM approval_assignments aa WHERE aa.approval_id = ${id})
-  END)`;
+  return sql<string | null>`${sql.raw(`"approvals"."named_approver_user_id"`)}`;
 }
 
 /**
@@ -976,6 +952,43 @@ async function recheckDeciders(db: Q, row: ApprovalRow, decisions: readonly Appr
     }
   }
   return { ok: true };
+}
+
+/**
+ * ADR-0186 A (PR #198 round 5): may a PENDING tool-call approval be reused for
+ * an identical call? Only while its queue-time pool (`poolForApproval`: the
+ * named approver and approver-role members as of `requested_at`, active now,
+ * never the caller's principal) can still reach its quorum. One that cannot is
+ * superseded (audited) so the call queues a fresh row against today's pool
+ * instead of waiting on an approval nobody can give. Answers whether to reuse.
+ */
+export async function reusePendingToolApproval(db: Q, approvalId: string): Promise<boolean> {
+  const [row] = await db.select().from(approvals).where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")));
+  if (!row) return false;
+  const pool = await poolForApproval(db, row);
+  if (pool.principals >= row.quorum) return true;
+  const superseded = await db
+    .update(approvals)
+    .set({ status: "superseded", decisionReason: "superseded: its approver pool can no longer reach its quorum; the call was queued afresh" })
+    .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+    .returning({ id: approvals.id });
+  if (superseded.length > 0) {
+    await db.insert(auditLog).values({
+      userId: row.userId,
+      objectType: "approval",
+      objectId: row.id,
+      serverId: row.serverId,
+      toolName: row.toolName,
+      detail: { approvalId: row.id, approvalObjectType: row.objectType, why: "pool_unsatisfiable", quorum: row.quorum, eligiblePrincipals: pool.principals },
+      effect: "deny",
+      ruleId: "approval-pool-unsatisfiable",
+      ruleChain: [],
+      reason:
+        `pending approval '${row.id}' superseded: its queue-time approver pool has ${pool.principals} eligible ` +
+        `principal(s) for a quorum of ${row.quorum}; the call is queued afresh`,
+    });
+  }
+  return false;
 }
 
 /**

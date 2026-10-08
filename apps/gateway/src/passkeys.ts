@@ -52,6 +52,7 @@ import { registerPasskeySchema, renamePasskeySchema, WEBAUTHN_TRANSPORTS, type W
 import { z } from "zod";
 import {
   activePasskeys,
+  CHANGED_CONCURRENTLY,
   challengeClaimRefusal,
   consumeWebauthnChallenge,
   FIRST_PASSKEY_FRESH_SESSION_SECONDS,
@@ -158,14 +159,22 @@ async function revokePasskey(
  * The enrolment bootstrap rule (see the header). Sends the refusal itself and
  * answers false; true = this session may create a registration ceremony.
  */
-async function mayEnrol(db: Db, req: FastifyRequest, reply: FastifyReply, userId: string, sessionId: string): Promise<boolean> {
+async function mayEnrol(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  userId: string,
+  sessionId: string,
+): Promise<false | "step_up" | "first_passkey"> {
   const { methods, passkeyCount } = await stepUpMethodsFor(db, userId, req);
   const policy = await loadStepUpPolicy(db);
   // a passkey already exists, or another way to step up does: gated by a passkey_manage step-up
   if (stepUpApplies(policy, "passkey_manage") && (passkeyCount > 0 || methods.length > 0)) {
     const su = await requireStepUp(db, req, reply, { kind: "passkey_manage", facts: { op: "register" } });
-    return su.ok;
+    return su.ok ? "step_up" : false;
   }
+  // the org relaxed passkey_manage (audited): no step-up rule to race
+  if (!stepUpApplies(policy, "passkey_manage")) return "step_up";
   // no way to step up yet (or the org relaxed passkey_manage, audited): a fresh human sign-in
   const fresh = await sessionFreshness(db, sessionId);
   const ageSeconds = fresh ? (Date.now() - fresh.createdAt.getTime()) / 1000 : Infinity;
@@ -181,7 +190,9 @@ async function mayEnrol(db: Db, req: FastifyRequest, reply: FastifyReply, userId
     });
     return false;
   }
-  return true;
+  // admitted by the FIRST-PASSKEY rule: the ceremony is marked, and its completion
+  // re-checks under the user's row lock that the account still has no way to step up
+  return "first_passkey";
 }
 
 export function registerPasskeyRoutes(app: FastifyInstance, db: Db): void {
@@ -200,7 +211,8 @@ export function registerPasskeyRoutes(app: FastifyInstance, db: Db): void {
     if (!caller) return reply.status(403).send(BROWSER_SESSION_REQUIRED);
     const rp = relyingParty();
     if (!rp) return reply.status(409).send(PASSKEY_RP_UNCONFIGURED_BODY);
-    if (!(await mayEnrol(db, req, reply, caller.userId, caller.sessionId))) return reply;
+    const admitted = await mayEnrol(db, req, reply, caller.userId, caller.sessionId);
+    if (!admitted) return reply;
     const [user] = await db.select().from(users).where(eq(users.id, caller.userId));
     if (!user) return reply.status(404).send({ error: "unknown_user" });
     const existing = await activePasskeys(db, caller.userId);
@@ -224,6 +236,7 @@ export function registerPasskeyRoutes(app: FastifyInstance, db: Db): void {
         sessionId: caller.sessionId,
         purpose: "register",
         challenge: options.challenge,
+        firstPasskey: admitted === "first_passkey",
         expiresAt: sql`now() + make_interval(secs => ${STEP_UP_CEREMONY_SECONDS})`,
       })
       .returning({ id: webauthnChallenges.id });
@@ -283,21 +296,35 @@ export function registerPasskeyRoutes(app: FastifyInstance, db: Db): void {
       (WEBAUTHN_TRANSPORTS as readonly string[]).includes(t),
     );
     const aaguid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(info.aaguid) ? info.aaguid : null;
-    const inserted = await db
-      .insert(webauthnCredentials)
-      .values({
-        userId: caller.userId,
-        credentialId: info.credential.id,
-        publicKey: isoBase64URL.fromBuffer(info.credential.publicKey),
-        counter: info.credential.counter,
-        transports,
-        aaguid,
-        backedUp: info.credentialBackedUp,
-        label: body.label,
-      })
-      .onConflictDoNothing()
-      .returning();
-    const row = inserted[0];
+    const stepUpMethodsNow = claim.row.firstPasskey ? (await stepUpMethodsFor(db, caller.userId, req)).methods.filter((m) => m === "sso") : [];
+    const written = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // ADR-0186 A (Class A): a ceremony admitted by the first-passkey rule (no step-up)
+      // completes only while the account STILL has no way to step up, decided under the
+      // user's row lock — two concurrent "first" enrolments cannot both skip the step-up
+      if (claim.row.firstPasskey) {
+        const [locked] = await tx.select({ totpEnabled: users.totpEnabled }).from(users).where(eq(users.id, caller.userId)).for("update");
+        const active = await activePasskeys(tx, caller.userId);
+        if (locked?.totpEnabled || active.length > 0 || stepUpMethodsNow.length > 0) return "moved" as const;
+      }
+      const inserted = await tx
+        .insert(webauthnCredentials)
+        .values({
+          userId: caller.userId,
+          credentialId: info.credential.id,
+          publicKey: isoBase64URL.fromBuffer(info.credential.publicKey),
+          counter: info.credential.counter,
+          transports,
+          aaguid,
+          backedUp: info.credentialBackedUp,
+          label: body.label,
+        })
+        .onConflictDoNothing()
+        .returning();
+      return inserted[0] ?? null;
+    });
+    if (written === "moved") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    const row = written;
     if (!row) return reply.status(409).send({ error: "passkey_already_registered", detail: "this passkey is already registered" });
     await audit(db, caller.userId, caller.userId, "passkey-registered", "allow",
       `user registered passkey '${row.label}' (attestation none, user verification required)`,

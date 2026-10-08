@@ -104,6 +104,7 @@ import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   auditQuorumUnsatisfiableAtQueue,
   recheckApprovalSignatures,
+  reusePendingToolApproval,
   supersedeOnRecheckFailure,
   toolApprovalRequirements,
   type CallFacts,
@@ -1490,8 +1491,10 @@ export async function queueGovernedApproval(
     )
     .orderBy(asc(approvals.requestedAt))
     .limit(1);
+  // ADR-0186 A: reused only while its queue-time pool can still reach its quorum
+  const reusable = pending && (await reusePendingToolApproval(db, pending.id)) ? pending : undefined;
   const approvalId =
-    pending?.id ??
+    reusable?.id ??
     (
       await db
         .insert(approvals)
@@ -1536,6 +1539,8 @@ export async function queueGovernedApproval(
           quorum: requirement.quorum,
           signatureMode: requirement.signatureMode,
           approverRoleId: requirement.approverRoleId,
+          // ADR-0186 A (0172): the approver named now, persisted — never reconstructed later
+          namedApproverUserId: decision.approverUserId!,
         })
         .returning({ id: approvals.id })
     )[0]!.id;

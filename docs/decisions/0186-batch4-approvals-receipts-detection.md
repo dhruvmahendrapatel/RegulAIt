@@ -334,6 +334,33 @@ unless stated.
       §4.1: an applied migration is never re-applied).
     - Four suites that drive these writes through API keys and do not test step-up relax it for their run
       (`sod`, `sod-selectors`, `skill-admission`, `skill-admission-review`).
+25. **PR #198 review fixes, round 5 (2026-10-08)** (`zz-b4c5-review-fixes.test.ts`, each red first on 998a3b8;
+    migration **0172**, journal `when` 1785107000000; Batch 5 moves to 0173 / 1785108000000):
+    - **The queue-time named approver is persisted** (`approvals.named_approver_user_id`, written when a tool call is
+      queued, backfilled for pending and approved rows from the old reconstruction). Eligibility, the execution
+      recheck and queue visibility read it. Nothing authority-bearing is derived from audit rows any more; the
+      remaining audit reads are display (`boundTargetsForApprovals`), idempotence markers (certification expiry),
+      step bookkeeping (builder), rate-limit counts, and pre-0139 SSO-link evidence (fails closed when pruned).
+      Rate-limit counts over a window longer than the audit retention floor are a residual (below).
+    - **Approval-rule writes lock the named approver's user row** (`FOR SHARE`, in the satisfiability guard); the
+      reactivation route holds it `FOR UPDATE` and re-checks the named seat under it.
+    - **First-passkey race closed.** A registration ceremony admitted by the first-passkey rule is flagged
+      (`webauthn_challenges.first_passkey`); its completion re-checks under the user's row lock that the account still
+      has no TOTP, passkey or SSO method (409 `changed_concurrently` otherwise).
+    - `set-initial-password` and `mfa/clear` ask for the step-up for the caller's OWN account too (a stolen admin
+      session or key could otherwise mint itself a password login and its own authenticator). Self-service MFA
+      removal stays `POST /auth/totp/disable`, which re-proves the password and a current code. No other
+      `actor === target` short-circuit guards a step-up in the gateway (the others are ownership checks).
+    - The step-up TOTP burn and the sign-in TOTP burn update only while the authenticator verified against is still
+      the account's (`totp_enabled`, same secret ciphertext); the sign-in burn is forward-only too. Passkey counter
+      updates already require an unrevoked credential.
+    - A pending tool-call approval is reused for an identical call only while its queue-time pool can reach its
+      quorum; otherwise it is superseded (audited `approval-pool-unsatisfiable`) and the call queues afresh.
+    - **Not built, with the trace:** (20) team membership vs a routing rule or SLA escalation naming an unused team, and
+      (25) the bootstrap exemption vs an admin enrolling a method, both end exactly as a legitimate serial order (member
+      added, then the stepped-up rule; bootstrap write, then enrolment), so the interleaving grants nothing a serial
+      order does not. (22) `project_members` has been a policy-epoch source since migration 0122, so a membership
+      write cannot slip between the sensitivity read and consumption.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
@@ -348,9 +375,9 @@ unless stated.
 JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 
 ### Residuals (2026-10-08)
-- **First-passkey enrolment race.** Two concurrent "first" enrolments from one fresh session can both succeed. Low:
-  that session may enrol a first passkey anyway. Closing it needs the register ceremony to record how it was admitted
-  (a column on `webauthn_challenges`, whose shape CHECK allows no action fields for `register`): a migration.
+- **First-passkey enrolment race** — closed in round 5 (migration 0172, decision 25).
+- **Rate-limit counts and the audit prune.** A rate limit whose window is longer than the audit retention floor counts
+  fewer calls once old rows are pruned. Follow-up: refuse a window longer than the floor, or count from usage events.
 - **Reactivation through SCIM** (`scim.ts`) clears `disabled_at` with no step-up: a SCIM token cannot step up, and the
   IdP owns the account lifecycle (ADR-0037). An admin or approver-role holder reactivated by the IdP regains both.
   Follow-up: an owner decision (refuse, hold for an admin, or accept as IdP authority).

@@ -1194,6 +1194,10 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
                 and(
                   eq(users.id, user.id),
                   sql`(${users.totpLastUsedStep} IS NULL OR ${users.totpLastUsedStep} < ${step})`,
+                  // ADR-0186 A (round 5): and the authenticator verified against is still the
+                  // account's — an MFA clear or a rotation since the read wins
+                  eq(users.totpEnabled, true),
+                  eq(users.totpSecretCiphertext, user.totpSecretCiphertext),
                 ),
               )
               .returning({ id: users.id });

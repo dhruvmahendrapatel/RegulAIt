@@ -288,6 +288,13 @@ export async function approvalRuleQuorumRefusal(
   db: Q,
   rule: { approverUserId: string; approverRoleId: string | null; quorum: number; scope?: string | null; userId?: string | null },
 ): Promise<QuorumUnsatisfiable | { status: 422; body: { error: "unknown_role"; detail: string } } | null> {
+  // the named approver's user row is LOCKED (FOR SHARE, inside the writer's
+  // transaction): a reactivation deciding its step-up on "does this account hold
+  // a named seat" holds that row FOR UPDATE, so neither decides on a state the
+  // other is about to change (ADR-0186 A, Class A)
+  if (rule.approverUserId) {
+    await db.select({ id: users.id }).from(users).where(eq(users.id, rule.approverUserId)).for("share");
+  }
   if (rule.approverRoleId) {
     // the role row is LOCKED (inside the writer's transaction): a membership write
     // deciding its step-up on `lockApproverRoles` waits for this rule write, and the
