@@ -260,7 +260,7 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
     };
   }
   const timeoutSeconds = Math.max(60, Math.min(engine.timeoutSeconds, org.engineMaxRunTimeoutMinutes * 60));
-  const sensitive = org.engineSensitiveSetApproval && engineConfigNeedsApproval(input.engineId as EngineId, input.config.sets);
+  const sensitive = org.engineSensitiveSetApproval && engineConfigNeedsApproval(manifest, input.config.sets);
   const overBudget = budgetUsd > org.engineRunApprovalThresholdUsd;
   const needsApproval = sensitive || overBudget;
   const approverUserId = needsApproval ? (input.approverUserId ?? org.infraApproverUserId ?? null) : null;

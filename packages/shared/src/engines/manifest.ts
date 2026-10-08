@@ -107,13 +107,13 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
 });
 
 /** the class of a named set; a set the manifest does not list is `offensive` (fail closed) */
-export function engineSetClass(engineId: EngineId, set: string): EngineSetClass {
-  return ENGINE_MANIFEST[engineId].sets[set] ?? "offensive";
+export function engineSetClass(manifest: EngineManifestEntry, set: string): EngineSetClass {
+  return Object.prototype.hasOwnProperty.call(manifest.sets, set) ? manifest.sets[set]! : "offensive";
 }
 
 /** does this run config use a set that needs approval (agentic, offensive or unclassified)? */
-export function engineConfigNeedsApproval(engineId: EngineId, sets: readonly string[]): boolean {
-  return sets.some((s) => engineSetClass(engineId, s) !== "standard");
+export function engineConfigNeedsApproval(manifest: EngineManifestEntry, sets: readonly string[]): boolean {
+  return sets.some((s) => engineSetClass(manifest, s) !== "standard");
 }
 
 export type SelfTestFailure =
