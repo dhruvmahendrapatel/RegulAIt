@@ -637,7 +637,7 @@ function DetectionMonitorSettings() {
           const changes:Partial<Values>={};
           for(const field of fields){if(draft[field.key]===undefined)continue;const raw=draft[field.key]!.trim();const value=Number(raw);
             if(!raw||!Number.isInteger(value)||value<field.min||value>field.max){setValidation(`${field.label} must be a whole number from ${field.min} to ${field.max}.`);return;}changes[field.key]=value;}
-          void action.run(async()=>{await api.put("/v1/org/settings",changes);setDraft({});await query.refetch();},"Detection monitor thresholds saved");
+          void action.run(async()=>{await putOrgSettings(changes);setDraft({});await query.refetch();},"Detection monitor thresholds saved");
         }}>Save detection thresholds</Button>
       </div>}
     </QueryGate>
