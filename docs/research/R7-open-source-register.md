@@ -181,6 +181,7 @@ Research inventory of product, content and CI dependencies. Licence verification
 | PurpleLlama LlamaFirewall | Rejected stale package; clean-room goal checks use our judge | MIT; [component license](https://github.com/meta-llama/PurpleLlama/blob/main/LlamaFirewall/LICENSE) read 2026-10-07 | E | never | ADR-0177 §2 row4 / clean-room #10 | 2026-11-06 |
 | `asn1js` 3.0.10 | RFC 3161 ASN.1 parsing; declared by the Batch 4 foundation | BSD-3-Clause; npm package LICENSE read 2026-10-07; [artifact metadata](https://registry.npmjs.org/asn1js/3.0.10) | A | in use (declared dependency) | [ADR-0186](../decisions/0186-batch4-approvals-receipts-detection.md) | 2026-11-06 |
 | `@simplewebauthn/browser` 14.0.0 | Passkey browser ceremonies; declared by the Batch 4 foundation | MIT; npm package LICENSE.md read 2026-10-07; [artifact metadata](https://registry.npmjs.org/%40simplewebauthn%2Fbrowser/14.0.0) | A | in use (declared dependency) | [ADR-0186](../decisions/0186-batch4-approvals-receipts-detection.md) | 2026-11-06 |
+| `lean-qr` 2.7.4 | QR code of the TOTP otpauth URI on the MFA enrolment screens, drawn as inline SVG | MIT; npm package LICENSE read 2026-10-08; [artifact metadata](https://registry.npmjs.org/lean-qr/2.7.4) | A | in use | [web manifest](../../apps/web/THIRD_PARTY.md); ADR-0176 | 2026-11-06 |
 
 ## Scope and provenance
 
