@@ -13,6 +13,8 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { steppedUpAs } from "./demo-credentials";
+import { ADMIN_EMAIL } from "./admin-api";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -60,7 +62,8 @@ async function signIn(page: Page, email: string, candidates: string[], settleOn:
 }
 
 test("unused + orphaned grants render with evidence, and the campaign opened from them matches the flagged set", async ({ page }) => {
-  test.setTimeout(120_000);
+  // B4S-06: the sign-in and the step-up each spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(180_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // --- seed via the bootstrap API ------------------------------------------
@@ -108,11 +111,11 @@ test("unused + orphaned grants render with evidence, and the campaign opened fro
   });
   expect(ownerRes.status()).toBe(201);
   const ownerId = (await ownerRes.json()).id as string;
-  const setOwner = await page.request.post(`/v1/agents/${agentOrphan}/owner`, {
-    headers: BOOT,
-    data: { ownerUserId: ownerId },
-  });
-  expect(setOwner.status()).toBe(200);
+  // ADR-0186 A / B4S-06: an owner change is an owner_change step-up, which the
+  // bootstrap credential no longer gives once Ada can step up — Ada (signed in
+  // on this page) makes it, stepped up with her authenticator
+  const setOwner = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", `/v1/agents/${agentOrphan}/owner`, { ownerUserId: ownerId });
+  expect(setOwner.status(), await setOwner.text()).toBe(200);
   const deact = await page.request.post(`/v1/users/${ownerId}/deactivate`, { headers: BOOT, data: {} });
   expect(deact.status()).toBe(200);
 
