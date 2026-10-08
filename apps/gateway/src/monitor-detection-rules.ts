@@ -23,7 +23,7 @@ export async function detectionMonitorInput(db:Db,now:Date):Promise<Partial<Reco
  return db.transaction(async snapshot=>{
   const output:Partial<Record<DetectionMonitorRuleId,MonitorAssuranceInput>>={};
   // Savepoints recover SQL failures without aborting the shared read snapshot.
-  const rule=async(key:DetectionMonitorRuleId,load:(tx:Db)=>Promise<MonitorAssuranceInput>)=>{
+  const rule=async(key:DetectionMonitorRuleId,load:(tx:QueryDb)=>Promise<MonitorAssuranceInput>)=>{
     try{output[key]=await snapshot.transaction(load);}catch{/* Omit this rule only: existing episodes are held. */}
   };
   await rule("mcp_server_baseline_drift",async tx=>{
