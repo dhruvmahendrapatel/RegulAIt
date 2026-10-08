@@ -395,10 +395,12 @@ test("UXJ-02: selecting the lowest alert brings its detail into the viewport", a
   await last.click();
   const detail = page.getByTestId("alert-detail");
   await expect(detail.getByText("Use case 11", { exact: true })).toBeVisible();
-  const box = await detail.boundingBox();
-  expect(box).not.toBeNull();
-  expect(box!.y).toBeGreaterThanOrEqual(0);
-  expect(box!.y).toBeLessThan(768);
+  // Visibility can precede completion of the panel's smooth scroll. Wait for
+  // its top to enter the viewport while retaining the original geometry bounds.
+  await expect.poll(async () => {
+    const box = await detail.boundingBox();
+    return box !== null && box.y >= 0 && box.y < 768;
+  }).toBe(true);
 });
 
 test("UIA-04: a long fingerprint wraps inside its stat tile instead of being clipped", async ({ page }) => {
