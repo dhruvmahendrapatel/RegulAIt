@@ -119,6 +119,20 @@ for (const partial of [false, true]) {
   });
 }
 
+test("R167-11: JavaScript submission guard refuses missing prices with native validation bypassed", async ({page})=>{
+  const st=await fixture(page),card=registration(page);
+  await card.getByLabel("Pricing for this custom model").selectOption("recorded");
+  const form=card.locator("form").first();
+  await form.evaluate(element=>{const target=element as HTMLFormElement;target.noValidate=true;target.requestSubmit();});
+  await expect(page.getByText("Enter both input and output token prices, or choose Unpriced.",{exact:true})).toBeVisible();
+  expect(st.registrations).toHaveLength(0);
+  await card.getByLabel("$/MTok in",{exact:true}).fill("0");
+  await card.getByLabel("$/MTok out",{exact:true}).fill("0");
+  await form.evaluate(element=>(element as HTMLFormElement).requestSubmit());
+  await expect.poll(()=>st.registrations.length).toBe(1);
+  expect(st.registrations[0]).toMatchObject({costPerMTokIn:0,costPerMTokOut:0});
+});
+
 test("R167-02: explicit unpriced choice survives switching away from and back to Custom", async ({ page }) => {
   await fixture(page);
   const card = registration(page);

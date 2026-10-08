@@ -196,6 +196,11 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     userId: auth?.userId ?? null,
     snapshot: dirty ? { kind: "resubmission", version: 1, step, description, businessContext, form, affected, sections } : null,
   });
+  const ownerChanged = useRef(draft.ownerChanged);
+  ownerChanged.current = draft.ownerChanged;
+  const accountChangedDuringSend = useRef(false);
+  if (busy && draft.ownerChanged) accountChangedDuringSend.current = true;
+  const [sentBeforeChange,setSentBeforeChange]=useState(false);
   const resumeDraft = () => {
     const record = draft.resume();
     const saved = record ? readResubmitDraft(record.state) : null;
@@ -252,7 +257,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
   const missing = missingFrom((key) => (key === "affectedPerson" ? affected : form[key as keyof ScreeningForm]));
   const describeComplete = Boolean(description.trim());
   const canContinue = step === DESCRIBE ? describeComplete : step === CLASSIFY ? describeComplete && answers !== null : true;
-  const goTo = (next: number) => setStep(Math.max(0, Math.min(REVIEW, next)));
+  const goTo = (next: number) => { if (!draft.ownerChanged) setStep(Math.max(0, Math.min(REVIEW, next))); };
   const setAnswer = (key: keyof ScreeningForm, value: string | string[]) => setForm((f) => ({ ...f, [key]: value }));
   const editable = sections.filter((section) => !isScreeningSection(section));
   const answersChanged = !sameAnswers(answers, resubmission.screeningAnswers);
@@ -287,13 +292,20 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     setOwnerRefused(false);
     setBusy(true);
     setError(null);
+    accountChangedDuringSend.current=false;
+    const stopAfterChange=()=>{
+      if(!ownerChanged.current&&!accountChangedDuringSend.current)return false;
+      setSentBeforeChange(true);return true;
+    };
     try {
+      if(ownerChanged.current)return;
       const body = resubmitPatch(current, { description, businessContext }, answers);
       const digest = JSON.stringify(body);
       if (patched.current !== digest) {
         await api.patch(`/v1/use-cases/${props.useCaseId}`, body);
         patched.current = digest;
       }
+      if(stopAfterChange())return;
       const content = rebuildQuestionnaire(parsed.current.preamble, sections, answers);
       if (artifactAttempt.current?.content !== content) artifactAttempt.current = { key: newIdempotencyKey(), content };
       const sent = artifactAttempt.current!;
@@ -304,6 +316,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
         if (!outcomeUnknown(error)) artifactAttempt.current = null;
         throw error;
       }
+      if(stopAfterChange())return;
       setDone(true);
       // resubmitted: the draft has done its job
       void draft.discard();
@@ -317,6 +330,17 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
       setBusy(false);
     }
   };
+
+  // R13-20/21: keep the editing state private to its original owner. The
+  // account-change notice replaces all old sections, progress and retry copy.
+  if (draft.ownerChanged || sentBeforeChange || accountChangedDuringSend.current) return <>
+    {leave.dialog}
+    <PageHeader title="Update and resubmit" sub="The account for this editing session changed." />
+    <Card>
+      <p role="alert">{busy || sentBeforeChange || accountChangedDuringSend.current ? "You're now signed in as someone else. A request was sent before the account changed — open the record to check whether it was saved. No further resubmission requests will be sent. Discard to leave." : "You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave."}</p>
+      <Button disabled={busy} onClick={() => { draft.abandon(); setDone(true); }}>Discard and leave</Button>
+    </Card>
+  </>;
 
   const primary =
     step < REVIEW ? (
