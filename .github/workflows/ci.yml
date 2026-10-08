@@ -337,7 +337,12 @@ jobs:
     # 12, down from 20 (ADR-0183 2.4): the serial mocked suite (~11.5 min on
     # 2026-10-05) moved to the sharded `spa-mock` job below, leaving ~4 min of
     # install, build and the four real-gateway journeys. A blast-radius cap.
-    timeout-minutes: 12
+    # 16 since ADR-0186 (Batch 4): the journeys now step up with TOTP before
+    # protected writes, and each step-up waits for a fresh 30 s code (a code is
+    # never replayed), so the 47 journeys take ~9.6 min on the runner and the
+    # job ~12.5 min with install and build. Raised once; a further rise means
+    # something got slower and is a finding.
+    timeout-minutes: 16
 
     services:
       postgres:
