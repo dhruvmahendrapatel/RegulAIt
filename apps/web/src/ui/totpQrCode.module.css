@@ -1,0 +1,48 @@
+/* TOTP enrolment QR code and its manual-entry fallback (ui/TotpQrCode.tsx). */
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s1);
+}
+
+/* Always dark-on-white, also in the dark theme: the white field (and the
+ * four-module quiet zone drawn inside the SVG) is what a scanner locks on to. */
+.code {
+  display: block;
+  width: 200px;
+  height: 200px;
+  max-width: 100%;
+  background: #ffffff;
+  border-radius: var(--radius-md);
+}
+
+.caption {
+  font-weight: 600;
+}
+
+.manual {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding-top: var(--s1);
+  border-top: 1px solid var(--border);
+}
+
+.manualHeading {
+  font-weight: 600;
+}
+
+.secretValue {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  word-break: break-all;
+  user-select: all;
+}
