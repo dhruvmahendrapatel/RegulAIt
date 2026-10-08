@@ -4,7 +4,7 @@
  * and never loops; the prompt store; the header-carrying request helper.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, STEP_UP_HEADER } from "../api/client";
+import { ApiError, STEP_UP_HEADER, setUnauthorizedHandler } from "../api/client";
 import { api, promptStepUp, stepUpRefusalOf, subscribeStepUpPrompt, withStepUp, type StepUpAction } from "./stepUp";
 
 const refusal = (action: StepUpAction, methods = ["passkey"]) =>
@@ -83,6 +83,20 @@ describe("the prompt store", () => {
 });
 
 describe("the header-carrying request helper", () => {
+  it("a PATCH that finds the session gone hands it to the shared session-loss handler (PR #198 round 7)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "unauthenticated" }), { status: 401 })));
+    const lost = vi.fn();
+    setUnauthorizedHandler(lost);
+    try {
+      const err = await api.patch("/v1/rules/approvals/r1", { quorum: 1 }, { [STEP_UP_HEADER]: "rgsu_t" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).status).toBe(401);
+      expect(lost).toHaveBeenCalledTimes(1);
+    } finally {
+      setUnauthorizedHandler(null);
+    }
+  });
+
   it("sends the CSRF and step-up headers and reports a refusal as ApiError", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "step_up_required" }), { status: 403 }));
     vi.stubGlobal("fetch", fetchMock);

@@ -427,8 +427,8 @@ unless stated.
       create now re-reads the switch with the org row `FOR SHARE` while it inserts, so the two serialise.
     - **Queue visibility of the viewer's own decisions is a correlated `EXISTS`** inside the capped query
       (`decidedByViewerCondition`), never the viewer's lifetime of decision ids in one `IN` list (finding 38).
-27. **PR #198 review fixes, round 7 (2026-10-08)** (`zz-b4c7-review-fixes.test.ts`, 8 tests, all red first on
-    1826b6c; no migration):
+27. **PR #198 review fixes, round 7 (2026-10-08)** (`zz-b4c7-review-fixes.test.ts`, 11 tests: 39–40 red first on
+    1826b6c, 41 on b812596; 42 in `auth.test.ts` and `saml.test.ts`, red on b812596; 43 in `stepUp.test.ts`; no migration):
     - **The stored-value rule reaches the exemptions** (finding 39). Decision 26 judged only rules against the stored
       value, and several exemptions were reasoned against the DEFAULT ("opt-in", "the default is already the loosest",
       "only tightens"), which says nothing about a posture an admin tightened. Each such key is now a rule with
@@ -456,6 +456,28 @@ unless stated.
     - **The queue's approvals count is the live principal count** (finding 40): `GET /v1/approvals` computes
       `approvalsCount` with `approvingPrincipals`, the function the decide path and the execution recheck use
       (delegation-linked approvers count once, links as they are now), never raw distinct approver ids.
+    - **"Named by an approval rule" reads the rule as served** (finding 41). `approverRoleId` and `approverUserId` are
+      versioned fields (`approval_rule`: toolName, writeOnly, approverUserId, deployMode, quorum, approverRoleId), so
+      `approverRolesNamed` / `namedApproverSeatExists` (approval-pool.ts) read the base row AND every active or canary
+      version. A draft is not served; activating or promoting it runs the rule writers' guard (role lock, widened-pool
+      step-up). Sweep of every predicate on a versioned approval-rule field:
+
+      | Predicate | Field | Before | After |
+      |---|---|---|---|
+      | `isApproverRole` (role assignment, group mapping, onboarding import) | approverRoleId | base row | served versions |
+      | `lockApproverRoles` (the approver-role lock; JIT default role, reactivation, rule writes) | approverRoleId | base row | served versions, under the role lock |
+      | reactivation's named seat (`POST /v1/users/:id/reactivate`) | approverUserId | base row | served versions |
+      | `governedEvaluate` rule load | scope fields (not versioned) + `applyRuleVersions` | served | unchanged |
+      | queue snapshot / `requiredQuorumNow` | quorum, approverRoleId | `servedApprovalRules` (round 5) | unchanged |
+      | approval-rule writes (`approvalRuleQuorumRefusal` via `approvalRuleShape({...row, ...body})`) | all | merged shape | unchanged |
+      | `GET /v1/rules/approvals` | — | base rows | unchanged (a listing; versions have their own routes) |
+      | `isApprovalTeam` | routing rules and SLA policies | not versioned | unchanged |
+    - **The JIT provisioning audit carries the grant's outcome** (finding 42): OIDC and SAML record `defaultRoleGrant`
+      (`granted` / `withheld` / `none`), `defaultRoleId` only when granted, `withheldRoleId` when withheld, and the reason
+      never says "with the provider's default role" for a withheld one.
+    - **Step-up PATCH goes through the shared client** (finding 43): `api.patchWithHeaders` (api/client.ts) carries the
+      same session-loss (401) handling as every write, and `stepUp.ts` no longer has a raw `fetch` of its own. A web unit
+      test proves the 401 reaches the shared handler. `node scripts/preflight-ui-affordances.mjs`: 0 orphaned.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call

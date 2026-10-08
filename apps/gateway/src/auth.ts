@@ -2389,15 +2389,32 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         .values({ email, displayName, isAdmin: false })
         .returning();
       user = created!;
-      if (provider.defaultRoleId && (await grantJitDefaultRole(db, user.id, provider.defaultRoleId)) === "withheld") {
+      // decision 27 (finding 42): the grant's outcome is carried into the provisioning audit row, so the
+      // chain never says "with the default role" for a role that was withheld
+      const roleGrant = provider.defaultRoleId ? await grantJitDefaultRole(db, user.id, provider.defaultRoleId) : null;
+      if (provider.defaultRoleId && roleGrant === "withheld") {
         await auditAuth(db, null, user.id, "sso-default-role-withheld", "deny",
           `user '${email}' JIT-provisioned via OIDC provider '${provider.name}' WITHOUT its default role: the role is an ` +
           "approver role, and an identity the IdP mints never joins an approver pool silently (an admin may assign it, with a step-up)",
           { phase: "oidc-jit", provider: provider.name, email, roleId: provider.defaultRoleId });
       }
       await auditAuth(db, null, user.id, "oidc-user-provisioned", "allow",
-        `user '${email}' JIT-provisioned via OIDC provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
-        { phase: "oidc-jit", provider: provider.name, email, sub: claims.sub, defaultRoleId: provider.defaultRoleId });
+        `user '${email}' JIT-provisioned via OIDC provider '${provider.name}'` +
+          (roleGrant === "granted"
+            ? " with the provider's default role"
+            : roleGrant === "withheld"
+              ? " WITHOUT the provider's default role (withheld: it is an approver role)"
+              : "") +
+          " (never admin)",
+        {
+          phase: "oidc-jit",
+          provider: provider.name,
+          email, sub: claims.sub,
+          // the role the account actually got (null when none was granted), and what happened to the provider's default
+          defaultRoleId: roleGrant === "granted" ? provider.defaultRoleId : null,
+          defaultRoleGrant: roleGrant ?? "none",
+          ...(roleGrant === "withheld" ? { withheldRoleId: provider.defaultRoleId } : {}),
+        });
       await recordFederatedLink(db, anchor, user.id, "jit");
     }
 

@@ -17,7 +17,7 @@
  * shared client's `api.del` takes no headers). It reports refusals as the
  * shared `ApiError`, so every screen reads them the same way.
  */
-import { ApiError, CSRF_HEADER, STEP_UP_HEADER, api as sharedApi, onStepUpRequired, type ApiErrorPayload, type StepUpRequest } from "../api/client";
+import { ApiError, STEP_UP_HEADER, api as sharedApi, onStepUpRequired, type StepUpRequest } from "../api/client";
 
 export interface StepUpAction {
   kind: string;
@@ -159,38 +159,14 @@ export function installGlobalStepUp(): () => void {
 // requests that carry headers
 // ---------------------------------------------------------------------------
 
-async function send<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    credentials: "include",
-    headers: {
-      [CSRF_HEADER]: "1",
-      ...(body !== undefined ? { "content-type": "application/json" } : {}),
-      ...headers,
-    },
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
-  const text = await res.text();
-  let json: ApiErrorPayload | null = null;
-  if (text) {
-    try {
-      json = JSON.parse(text) as ApiErrorPayload;
-    } catch {
-      json = { raw: text };
-    }
-  }
-  if (!res.ok) throw new ApiError(res.status, json ?? { error: "HTTP " + res.status });
-  return (json ?? {}) as T;
-}
-
 /** the step-up-capable request helper (same CSRF header, same ApiError as the shared client) */
 export const api = {
   get: <T>(path: string) => sharedApi.get<T>(path),
-  // the writes go through the shared client (its session-loss handling, its
-  // refusal reading); only GET and PATCH, which it offers no header form of, are sent here
+  // every write goes through the shared client's header forms: its session-loss
+  // handling and its refusal reading (PR #198 round 7: PATCH too, never a raw fetch)
   post: async <T>(path: string, body: unknown = {}, headers: Record<string, string> = {}) =>
     (await sharedApi.postWithHeaders<T>(path, body, headers)).body,
-  patch: <T>(path: string, body: unknown = {}, headers?: Record<string, string>) => send<T>("PATCH", path, body, headers),
+  patch: <T>(path: string, body: unknown = {}, headers: Record<string, string> = {}) => sharedApi.patchWithHeaders<T>(path, body, headers),
   put: <T>(path: string, body: unknown = {}, headers: Record<string, string> = {}) => sharedApi.putWithHeaders<T>(path, body, headers),
   del: <T>(path: string, body?: unknown, headers: Record<string, string> = {}) => sharedApi.delWithHeaders<T>(path, headers, body),
 };

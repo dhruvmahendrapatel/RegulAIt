@@ -25,6 +25,7 @@ import {
   approvalRules,
   approvals,
   approvalSlaPolicies,
+  configVersions,
   ne,
   eq,
   gt,
@@ -115,8 +116,47 @@ export function requestedAtOf(approvalId: string): SQL {
  * rule's approver pool, so the write needs a `settings_relax` step-up.
  */
 export async function isApproverRole(db: Q, roleId: string): Promise<boolean> {
-  const [hit] = await db.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.approverRoleId, roleId)).limit(1);
-  return !!hit;
+  return (await approverRolesNamed(db, [roleId])).has(roleId);
+}
+
+/**
+ * ADR-0186 decision 27 (PR #198 round 7, finding 41): `approverRoleId` and
+ * `approverUserId` are VERSIONED approval-rule fields (an active or canary
+ * version can name a different role or person than the base row). So "is named
+ * by an approval rule" reads every version that is SERVED — the base row, an
+ * active version, a canary version — never the base row alone. A draft is not
+ * served; activating or promoting it goes through the rule writers' guard,
+ * which locks the roles it names and steps up a widened pool.
+ */
+const servedVersionField = (field: "approverRoleId" | "approverUserId") =>
+  sql<string>`(${configVersions.body} ->> ${field})`;
+const servedVersions = and(eq(configVersions.artifactType, "approval_rule"), inArray(configVersions.status, ["active", "canary"]));
+
+/** which of `roleIds` a rule as served names as its approver role */
+export async function approverRolesNamed(db: Q, roleIds: readonly string[]): Promise<Set<string>> {
+  const ids = [...new Set(roleIds)];
+  if (ids.length === 0) return new Set();
+  const base = await db
+    .select({ roleId: approvalRules.approverRoleId })
+    .from(approvalRules)
+    .where(inArray(approvalRules.approverRoleId, ids));
+  const versioned = await db
+    .select({ roleId: servedVersionField("approverRoleId") })
+    .from(configVersions)
+    .where(and(servedVersions, inArray(servedVersionField("approverRoleId"), ids)));
+  return new Set([...base, ...versioned].map((r) => r.roleId).filter((r): r is string => !!r));
+}
+
+/** does a rule as served (base row, active or canary version) name `userId` as its approver? */
+export async function namedApproverSeatExists(db: Q, userId: string): Promise<boolean> {
+  const [base] = await db.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.approverUserId, userId)).limit(1);
+  if (base) return true;
+  const [versioned] = await db
+    .select({ id: configVersions.id })
+    .from(configVersions)
+    .where(and(servedVersions, eq(servedVersionField("approverUserId"), userId)))
+    .limit(1);
+  return !!versioned;
 }
 
 /**
@@ -133,11 +173,8 @@ export async function lockApproverRoles(tx: Q, roleIds: readonly string[]): Prom
   const ids = [...new Set(roleIds)].sort();
   if (ids.length === 0) return new Set();
   await tx.select({ id: roles.id }).from(roles).where(inArray(roles.id, ids)).orderBy(roles.id).for("update");
-  const named = await tx
-    .select({ roleId: approvalRules.approverRoleId })
-    .from(approvalRules)
-    .where(inArray(approvalRules.approverRoleId, ids));
-  return new Set(named.map((r) => r.roleId).filter((r): r is string => r !== null));
+  // decision 27 (finding 41): the base row AND every served version (active, canary)
+  return approverRolesNamed(tx, ids);
 }
 
 /**

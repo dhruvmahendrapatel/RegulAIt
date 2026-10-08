@@ -8,6 +8,8 @@
  *       tracing preview length) needs settings_relax.
  *  F40  the queue's approvals count is the live principal count the decide
  *       path uses (`approvingPrincipals`), not raw distinct approver ids.
+ *  F41  "named by an approval rule" (approver role, approver seat) reads the
+ *       rule as served — an active or canary version too, not the base row alone.
  *
  * Runs on its OWN scratch database (prefix `b4c7_`), dropped in afterAll, so
  * nothing append-only outlives the run (M-068).
@@ -17,7 +19,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  and,
   approvalDecisions,
+  approvalRules,
+  configVersions,
+  roleAssignments,
+  roles,
+  users as usersTable,
   approvalDelegations,
   approvals,
   authSessions,
@@ -31,6 +39,7 @@ import {
 } from "@regulait/db";
 import { INTERNATIONAL_PII_CATEGORIES, STEP_UP_HEADER } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { grantJitDefaultRole } from "./approval-pool.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
@@ -207,5 +216,46 @@ describe("F40: the queue counts approving principals as the decide path does", (
     const row = (list.json().approvals as Array<{ id: string; approvalsCount?: number }>).find((r) => r.id === ap!.id);
     expect(row, "the approval is listed").toBeTruthy();
     expect(row!.approvalsCount).toBe(2);
+  });
+});
+
+describe("F41: an approver role or seat named only by a served rule version counts", () => {
+  /** a rule whose BASE row names role A / user `baseApprover`, and an ACTIVE version naming `body` instead */
+  async function versionedRule(body: Record<string, unknown>, base: { approverRoleId?: string | null } = {}) {
+    const owner = await mkUser("f41-owner");
+    const [rule] = await db
+      .insert(approvalRules)
+      .values({ userId: owner.id, serverScope: "all", approverUserId: owner.id, approverRoleId: base.approverRoleId ?? null })
+      .returning({ id: approvalRules.id });
+    await db.insert(configVersions).values({ artifactType: "approval_rule", artifactId: rule!.id, version: 1, body, status: "active" });
+    return rule!.id;
+  }
+  const mkRole = async (name: string) =>
+    (await db.insert(roles).values({ name: `b4c7 ${name} ${randomBytes(3).toString("hex")}` }).returning({ id: roles.id }))[0]!.id;
+
+  it("adding a member to a role an ACTIVE version names (the base row names another) needs settings_relax", async () => {
+    const [roleA, roleB] = [await mkRole("A"), await mkRole("B")];
+    await versionedRule({ approverRoleId: roleB }, { approverRoleId: roleA });
+    const member = await mkUser("f41-member");
+    const refused = await as(adm.s, "POST", `/v1/users/${member.id}/roles`, { roleId: roleB });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    expect(await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, member.id), eq(roleAssignments.roleId, roleB)))).toHaveLength(0);
+  });
+
+  it("an SSO JIT login withholds a default role a served version names", async () => {
+    const roleB = await mkRole("jit");
+    await versionedRule({ approverRoleId: roleB });
+    const u = await mkUser("f41-jit");
+    expect(await grantJitDefaultRole(db, u.id, roleB)).toBe("withheld");
+  });
+
+  it("reactivating an account a served version names as its approver needs settings_relax", async () => {
+    const x = await mkUser("f41-seat");
+    await versionedRule({ approverUserId: x.id });
+    await db.update(usersTable).set({ disabledAt: new Date() }).where(eq(usersTable.id, x.id));
+    const refused = await as(adm.s, "POST", `/v1/users/${x.id}/reactivate`, {});
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
   });
 });

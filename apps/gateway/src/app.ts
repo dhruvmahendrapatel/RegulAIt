@@ -435,7 +435,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
 import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
-import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles } from "./approval-pool.js";
+import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles, namedApproverSeatExists } from "./approval-pool.js";
 import {
   decisionView,
   decideToolCallApproval,
@@ -1515,7 +1515,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (!locked.disabledAt) return { status: 409, body: { error: "not_disabled" } } as const;
       const held = await tx.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId));
       const approverRoles = await lockApproverRoles(tx, held.map((h) => h.roleId));
-      const [namedSeat] = await tx.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.approverUserId, userId)).limit(1);
+      // decision 27 (finding 41): a seat named by the base row or by a served (active/canary) version
+      const namedSeat = await namedApproverSeatExists(tx, userId);
       if (locked.isAdmin || approverRoles.size > 0 || namedSeat) {
         const su = await checkStepUp(db, req, { kind: "settings_relax", facts: { userId, values: { reactivated: true } } });
         if (!su.ok) return { status: su.status, body: su.body } as const;
