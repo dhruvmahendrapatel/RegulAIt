@@ -108,7 +108,7 @@ let judgeId: string;
 let otherAgentId: string;
 let projectId: string;
 let otherProjectId: string;
-let pfRunner: { id: string; token: string; auth: { authorization: string } };
+let pfRunner: Awaited<ReturnType<typeof enrol>>;
 
 type Method = "GET" | "PUT" | "POST" | "PATCH" | "DELETE";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
