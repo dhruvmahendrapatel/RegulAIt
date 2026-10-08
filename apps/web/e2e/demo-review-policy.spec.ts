@@ -21,6 +21,7 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
+import { PERSONA_EMAIL, preparedCredentials, signInPrepared, steppedUpAs } from "./demo-credentials";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
@@ -38,13 +39,40 @@ const api = async (path: string, init: RequestInit = {}): Promise<Json> => {
   return body as Json;
 };
 
-async function signIn(page: Page, email: string, password: string) {
+const LANDING = (page: Page) =>
+  page.getByRole("heading", { name: /Welcome back/ }).or(page.getByRole("region", { name: "AI policy acknowledgement" }));
+
+/**
+ * B4S-06: a one-time password for `id`. Issuing someone else's password is a
+ * settings_relax step-up; the bootstrap credential gives it only while no admin
+ * can step up. With demo:prepare's printed credentials, Ada issues it, stepped
+ * up with her authenticator (in a page of her own); without them, the
+ * bootstrap path (first-admin setup only).
+ */
+async function oneTimePassword(browser: Browser | null, id: string): Promise<string> {
+  if (browser && preparedCredentials()) {
+    const ada = await browser.newPage();
+    try {
+      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, "E2e-Demo-Intake!", LANDING(ada)), "Ada signs in").toBe(true);
+      const r = await steppedUpAs(ada.request, PERSONA_EMAIL.admin, "POST", `${BASE}/v1/users/${id}/set-initial-password`, { force: true });
+      expect(r.status(), `one-time password: ${await r.text()}`).toBe(200);
+      return ((await r.json()) as { password: string }).password;
+    } finally {
+      await ada.close();
+    }
+  }
+  return ((await api(`/v1/users/${id}/set-initial-password`, { method: "POST", body: JSON.stringify({ force: true }) })) as { password: string }).password;
+}
+
+async function signIn(page: Page, email: string, password: string, browser: Browser | null = null) {
+  // B4S-06: a seeded persona signs in with the credentials demo:prepare printed
+  if (Object.values(PERSONA_EMAIL).includes(email as never) && (await signInPrepared(page, email, password, LANDING(page)))) return;
   const users = (await api("/v1/users")) as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;
   expect(id, `journey persona ${email} must exist`).toBeTruthy();
   // ADR-0181 (FX2): the seed enrolled the admin's TOTP outside this run; re-provision it
-  await reprovisionTotp(BASE, BOOT, email);
-  const minted = (await api(`/v1/users/${id}/set-initial-password`, { method: "POST", body: JSON.stringify({ force: true }) })) as { password: string };
+  if (!preparedCredentials()) await reprovisionTotp(BASE, BOOT, email);
+  const minted = { password: await oneTimePassword(browser, id!) };
   await page.goto("/ui");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password", { exact: true }).fill(minted.password);
@@ -59,13 +87,12 @@ async function signIn(page: Page, email: string, password: string) {
   // A new fixture has not acknowledged the required AI policy yet. That
   // authenticated interstitial replaces Home; the journey acknowledges it
   // below before entering the governed intake, without relaxing the gate.
-  await passTotp(page, email, page.getByRole("heading", { name: /Welcome back/ })
-    .or(page.getByRole("region", { name: "AI policy acknowledgement" })));
+  await passTotp(page, email, LANDING(page));
 }
 
 async function persona(browser: Browser, email: string, password: string) {
   const page = await browser.newPage();
-  await signIn(page, email, password);
+  await signIn(page, email, password, browser);
   return page;
 }
 
@@ -88,13 +115,32 @@ const reviewsOf = async (id: string) =>
 let originalPolicy: Json | null = null;
 let adminFixtureId: string | null = null;
 
-test.beforeAll(async () => {
+/**
+ * B4S round 3: creating an account that is already an admin is a
+ * settings_relax step-up (as granting admin is). With demo:prepare's printed
+ * credentials, Ada creates the fixture admin, stepped up with her
+ * authenticator (in a page of her own); without them, the bootstrap path
+ * (first-admin setup only).
+ */
+async function createFixtureAdmin(browser: Browser): Promise<string> {
+  const body = { email: ADMIN_EMAIL, displayName: ADMIN_NAME, isAdmin: true };
+  if (preparedCredentials()) {
+    const ada = await browser.newPage();
+    try {
+      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, "E2e-Demo-Intake!", LANDING(ada)), "Ada signs in").toBe(true);
+      const r = await steppedUpAs(ada.request, PERSONA_EMAIL.admin, "POST", `${BASE}/v1/users`, body);
+      expect(r.status(), `fixture admin: ${await r.text()}`).toBe(201);
+      return ((await r.json()) as { id: string }).id;
+    } finally {
+      await ada.close();
+    }
+  }
+  return (await api("/v1/users", { method: "POST", body: JSON.stringify(body) })).id as string;
+}
+
+test.beforeAll(async ({ browser }) => {
   originalPolicy = await api("/v1/governance/review-policy");
-  const created = await api("/v1/users", {
-    method: "POST",
-    body: JSON.stringify({ email: ADMIN_EMAIL, displayName: ADMIN_NAME, isAdmin: true }),
-  });
-  adminFixtureId = created.id;
+  adminFixtureId = await createFixtureAdmin(browser);
 });
 
 test.afterAll(async () => {
@@ -127,7 +173,7 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
   const [averyId, danaId] = [idOf("avery@regulait.local"), idOf("dana@regulait.local")];
 
   // 1. the admin sets the policy on its page
-  await signIn(page, ADMIN_EMAIL, "E2e-Policy-Admin!");
+  await signIn(page, ADMIN_EMAIL, "E2e-Policy-Admin!", browser);
   // Same literacy standing as the seeded personas, without relaxing the gate.
   const literacyResponse = await page.request.get(`${BASE}/v1/me/ai-literacy`);
   expect(literacyResponse.ok()).toBe(true);

@@ -15,8 +15,12 @@ import {
   aiUseCases,
   approvalAssignments,
   apiKeys,
+  approvalDecisions,
   approvalDelegations,
+  orgSettings,
+  ORG_SETTINGS_ID,
   approvalRules,
+  asc,
   approvals,
   auditLog,
   authSessions,
@@ -91,6 +95,8 @@ import {
   createAgentRevocationSchema,
   createApiKeySchema,
   createApprovalRuleSchema,
+  approvalDecidePasskeyField,
+  TOOL_CALL_APPROVAL_OBJECT_TYPES,
   createDataScopeRuleSchema,
   createConnectorRevocationSchema,
   createRateLimitSchema,
@@ -182,7 +188,7 @@ import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
-import { changeOwner, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { changeOwner, ownerChangeGate, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
 import {
@@ -428,8 +434,17 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { registerStepUpRoutes } from "./step-up.js";
-import { registerApprovalSigningRoutes } from "./approval-signatures.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles, namedApproverSeatExists } from "./approval-pool.js";
+import {
+  decisionView,
+  decideToolCallApproval,
+  isToolCallApproval,
+  approvingPrincipals,
+  decidedByViewerCondition,
+  poolVisibilityCondition,
+  registerApprovalSigningRoutes,
+} from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
 import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
@@ -829,6 +844,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (err instanceof ConfigVersionUnresolvableError) {
       return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
     }
+    // ADR-0186 A: an approval-rule write whose pool can never reach its quorum
+    if (err instanceof ApprovalRuleWriteRefusedError) {
+      return reply.status(err.status).send(err.body);
+    }
     if (err instanceof ExternalEffectBlockedError) {
       return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
     }
@@ -1028,6 +1047,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /auth/change-password",
     "POST /auth/totp/enroll",
     "POST /auth/totp/activate",
+    // ADR-0186 A (PR #198 review round 6): adding an authenticator app to an account that
+    // already has a way to step up needs that step-up — so the ceremony is reachable from
+    // the forced-enrolment gate (it only mints a grant for the caller's own session)
+    "POST /v1/auth/step-up/options",
+    "POST /v1/auth/step-up/verify",
+    "GET /v1/auth/step-up/:stepUpId",
   ]);
 
   app.addHook("preHandler", async (req, reply) => {
@@ -1336,6 +1361,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       email: body.email,
     });
     if (seatRefusal) return reply.status(seatRefusal.status).send(seatRefusal.body);
+    // B4S round 3 (owner principle, as POST /v1/users/:id/admin): creating an
+    // account that is already an admin grants admin, so it needs the same
+    // settings_relax step-up, bound to the new account's email (it has no id
+    // yet); a member account needs none. Asked after the seat gate so a seat
+    // refusal never spends a grant.
+    if (
+      body.isAdmin &&
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { email: body.email, values: { isAdmin: true } } })).ok
+    ) {
+      return reply;
+    }
     const [row] = await db
       .insert(users)
       .values({ email: body.email, displayName: body.displayName, isAdmin: body.isAdmin ?? false })
@@ -1468,11 +1504,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const target = await loadUser(userId);
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (!target.disabledAt) return reply.status(409).send({ error: "not_disabled" });
-    const [row] = await db
-      .update(users)
-      .set({ disabledAt: null })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id, disabledAt: users.disabledAt });
+    // ADR-0186 A (Class C): reactivating restores everything the account still holds.
+    // When that is admin, an approver role or a named approver seat, it is the same
+    // restoration as granting it: a settings_relax step-up, decided on the LOCKED user
+    // row and under the approver-role lock (Class A)
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [locked] = await tx.select().from(users).where(eq(users.id, userId)).for("update");
+      if (!locked) return { status: 404, body: { error: "unknown_user" } } as const;
+      if (!locked.disabledAt) return { status: 409, body: { error: "not_disabled" } } as const;
+      const held = await tx.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId));
+      const approverRoles = await lockApproverRoles(tx, held.map((h) => h.roleId));
+      // decision 27 (finding 41): a seat named by the base row or by a served (active/canary) version
+      const namedSeat = await namedApproverSeatExists(tx, userId);
+      if (locked.isAdmin || approverRoles.size > 0 || namedSeat) {
+        const su = await checkStepUp(db, req, { kind: "settings_relax", facts: { userId, values: { reactivated: true } } });
+        if (!su.ok) return { status: su.status, body: su.body } as const;
+      }
+      const [updated] = await tx
+        .update(users)
+        .set({ disabledAt: null })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, disabledAt: users.disabledAt });
+      return { row: updated! } as const;
+    });
+    if (!("row" in out)) return reply.status(out.status).send(out.body);
+    const row = out.row;
     await auditUserAct(req.authCtx.userId, userId, "user-reactivated", `user '${target.email}' reactivated`, {
       phase: "reactivate",
       email: target.email,
@@ -1509,6 +1566,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const target = await loadUser(userId);
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (target.isAdmin === body.isAdmin) return reply.status(409).send({ error: "no_change" });
+    // B4S-02 (owner principle): granting admin widens who may override a
+    // decision and administer every control, so it needs a settings_relax
+    // step-up bound to the user; a demotion tightens and needs none
+    if (body.isAdmin && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { isAdmin: true } } })).ok) {
+      return reply;
+    }
     /** the flag write, the break-glass list clean-up and the audit row */
     const apply = async (x: Pick<Db, "update" | "insert">, email: string) => {
       const [row] = await x
@@ -1989,7 +2052,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // change as PUT …/owner (422 unknown_owner / owner_inactive). It runs after
     // every refusal above, so a refused PATCH changes no owner either.
     if (body.ownerUserId !== undefined) {
-      const owned = await changeOwner(db, { kind: "mcp_server", id: serverId, ownerUserId: body.ownerUserId, actorUserId: req.authCtx.userId });
+      const owned = await changeOwner(db, {
+        kind: "mcp_server",
+        id: serverId,
+        ownerUserId: body.ownerUserId,
+        actorUserId: req.authCtx.userId,
+        gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
+      });
       if (!owned.ok) return reply.status(owned.status).send(owned.body);
       before.ownerUserId = owned.body.ownerUserId;
     }
@@ -2300,10 +2369,25 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleAssignments)
-      .values({ userId, roleId: body.roleId, origin: "direct" })
-      .returning();
+    // B4S-02 (owner principle): a role an approval rule names as its approver
+    // role is an approver pool — adding someone to it needs a settings_relax
+    // step-up bound to the user and the role
+    const approverRole = await isApproverRole(db, body.roleId);
+    if (
+      approverRole &&
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { approverRoleId: body.roleId } } })).ok
+    ) {
+      return reply;
+    }
+    // ADR-0186 A (Class A): decided again under the approver-role lock — a role that
+    // became an approver role since is refused, never joined without the step-up
+    const row = await db.transaction(async (tx) => {
+      const nowApprover = (await lockApproverRoles(tx as unknown as Db, [body.roleId])).has(body.roleId);
+      if (nowApprover && !approverRole) return null;
+      const [inserted] = await tx.insert(roleAssignments).values({ userId, roleId: body.roleId, origin: "direct" }).returning();
+      return inserted;
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.status(201).send(row);
   });
 
@@ -2482,6 +2566,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/revocations/:revocationId", async (req, reply) => {
     const { revocationId } = z.object({ revocationId: z.string().uuid() }).parse(req.params);
+    const [existing] = await db.select({ id: revocations.id }).from(revocations).where(eq(revocations.id, revocationId));
+    if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: lifting a revocation gives an entitlement back — settings_relax
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("mcp", revocationId))).ok) return reply;
     const deleted = await db
       .delete(revocations)
       .where(eq(revocations.id, revocationId))
@@ -2535,6 +2623,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/users/:userId/revocations/agents/:revocationId", async (req, reply) => {
     const { userId, revocationId } = revocationIdParams.parse(req.params);
+    const [existing] = await db
+      .select({ id: agentRevocations.id })
+      .from(agentRevocations)
+      .where(and(eq(agentRevocations.id, revocationId), eq(agentRevocations.userId, userId)));
+    if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: lifting a revocation gives an entitlement back — settings_relax
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("agent", revocationId, userId))).ok) return reply;
     const deleted = await db
       .delete(agentRevocations)
       .where(and(eq(agentRevocations.id, revocationId), eq(agentRevocations.userId, userId)))
@@ -2576,6 +2671,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/users/:userId/revocations/connectors/:revocationId", async (req, reply) => {
     const { userId, revocationId } = revocationIdParams.parse(req.params);
+    const [existing] = await db
+      .select({ id: connectorRevocations.id })
+      .from(connectorRevocations)
+      .where(and(eq(connectorRevocations.id, revocationId), eq(connectorRevocations.userId, userId)));
+    if (!existing) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: lifting a revocation gives an entitlement back — settings_relax
+    if (!(await requireStepUp(db, req, reply, revocationLiftStepUp("connector", revocationId, userId))).ok) return reply;
     const deleted = await db
       .delete(connectorRevocations)
       .where(
@@ -2970,8 +3072,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // DB CHECK always passes. B8c: the approvals create itself moved to
   // `createApprovalRuleRow` so the copilot's `rule_to_approval` applier rides
   // the exact create this route performs — never a parallel insert.
+  // ADR-0186 A: `quorum` (1–5) and `approverRoleId` ride beside the rule; a
+  // pool that can never reach the quorum is 422 `quorum_unsatisfiable`.
   app.post("/v1/rules/approvals", async (req, reply) => {
+    // ADR-0186 A: quorum and approverRoleId are part of the shared create schema
     const body = createApprovalRuleSchema.parse(req.body);
+    // the satisfiability guard runs inside createApprovalRuleRow (every create)
     const row = await createApprovalRuleRow(db, body);
     return reply.status(201).send(row);
   });
@@ -3052,7 +3158,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     const patch = crud.schema.parse(req.body ?? {});
+    // ADR-0186 A: an approval rule's edit is guarded inside applyRuleEdit (the
+    // satisfiability check every approval-rule write runs); ADR-0180: an edit
+    // that loosens dual control (a lower quorum, a wider pool) needs the
+    // settings_relax step-up, asked inside the writer's lock
     const res = await applyRuleEdit(db, {
+      stepUp: approvalRuleStepUp(db, req),
       artifactType: crud.artifactType,
       artifactId: ruleId,
       patch,
@@ -3077,6 +3188,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       artifactId: ruleId,
       actorUserId: req.authCtx.userId ?? null,
       routeLabel: `DELETE /v1/rules/${kind}/:ruleId`,
+      // ADR-0180 / B4S-05: removing any governance rule removes a restriction
+      // (an approval requirement, a rate limit, a data scope): settings_relax
+      stepUp: approvalRuleStepUp(db, req),
     });
     if (!res.ok) return reply.status(res.status).send({ error: res.error, detail: res.detail });
     return reply.send({
@@ -3113,17 +3227,50 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (to?.disabledAt) {
       return reply.status(422).send({ error: "delegate_disabled", detail: "the delegate account is deactivated" });
     }
-    const [row] = await db
-      .insert(approvalDelegations)
-      .values({
-        fromUserId: body.fromUserId,
-        toUserId: body.toUserId,
-        startsAt: body.startsAt,
-        endsAt: body.endsAt,
-        reason: body.reason ?? null,
-        createdBy: req.authCtx.userId,
-      })
-      .returning();
+    // B4S-02 (owner principle): a delegation lets someone decide for an
+    // approver — it needs a settings_relax step-up bound to who, for whom, when
+    const delegationFacts = {
+      values: {
+        delegation: {
+          fromUserId: body.fromUserId,
+          toUserId: body.toUserId,
+          startsAt: body.startsAt.toISOString(),
+          endsAt: body.endsAt.toISOString(),
+        },
+      },
+    };
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: delegationFacts })).ok) return reply;
+    // ADR-0186 decision 26 (finding 37): the switch is re-read with the org row held
+    // FOR SHARE while the link is inserted, so turning delegation off (which locks
+    // that row FOR UPDATE and asks whether a link is live) and creating a link
+    // serialise — neither decides on a state the other is about to change
+    const row = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [orgNow] = await tx
+        .select({ enabled: orgSettings.approvalDelegationEnabled })
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("share");
+      if (!orgNow?.enabled) return null;
+      const [inserted] = await tx
+        .insert(approvalDelegations)
+        .values({
+          fromUserId: body.fromUserId,
+          toUserId: body.toUserId,
+          startsAt: body.startsAt,
+          endsAt: body.endsAt,
+          reason: body.reason ?? null,
+          createdBy: req.authCtx.userId,
+        })
+        .returning();
+      return inserted ?? null;
+    });
+    if (!row) {
+      return reply.status(409).send({
+        error: "delegation_disabled",
+        detail: "approver delegation is disabled for this organization (org settings)",
+      });
+    }
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "approval_delegation",
@@ -3167,10 +3314,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/delegations/:delegationId", async (req, reply) => {
     const { delegationId } = z.object({ delegationId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(approvalDelegations)
-      .where(eq(approvalDelegations.id, delegationId))
-      .returning();
+    // ADR-0186 A (PR #198 round 5): ending a LIVE link can split one principal into two (a
+    // higher distinct-approver count) — a settings_relax step-up bound to the link, decided
+    // on the locked delegation row
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [link] = await tx.select().from(approvalDelegations).where(eq(approvalDelegations.id, delegationId)).for("update");
+      if (!link) return { status: 404, body: { error: "unknown_delegation" } } as const;
+      const now = Date.now();
+      if (link.startsAt.getTime() <= now && link.endsAt.getTime() > now) {
+        const su = await checkStepUp(db, req, { kind: "settings_relax", facts: { values: { delegationEnded: delegationId } } });
+        if (!su.ok) return { status: su.status, body: su.body } as const;
+      }
+      const rows = await tx.delete(approvalDelegations).where(eq(approvalDelegations.id, delegationId)).returning();
+      return { rows } as const;
+    });
+    if (!out.rows) return reply.status(out.status!).send(out.body);
+    const deleted = out.rows;
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_delegation" });
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
@@ -3252,6 +3412,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // the role (any of them may decide it) — never the proposer's — and stays
     // visible to whoever decided it.
     const myReviewRoles = !req.authCtx.isAdmin && me ? reviewRoleIdsFor(await loadReviewPolicy(db), me) : [];
+    // ADR-0186 A: a tool-call approval is in the queue of every member of the
+    // APPROVER ROLE snapshotted when it was queued, and (while pending) of their
+    // active delegates — the people eligibilityOf lets decide it; never the
+    // caller's own. It stays visible to whoever recorded a decision on it.
+    const poolVisible = !req.authCtx.isAdmin && me ? await poolVisibilityCondition(db, me, delegators) : null;
+    // decision 26 (finding 38): a correlated EXISTS in the capped query, never an id list
+    const decidedByMe = !req.authCtx.isAdmin && me ? decidedByViewerCondition(me) : null;
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
       : or(
@@ -3265,6 +3432,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               ? [and(inArray(approvals.reviewRoleId, myReviewRoles), sql`${approvals.userId} <> ${me}`)]
               : []),
             ...(me ? [and(sql`${approvals.reviewRoleId} IS NOT NULL`, eq(approvals.decidedBy, me))] : []),
+            ...(poolVisible ? [poolVisible] : []),
+            ...(decidedByMe ? [decidedByMe] : []),
           ],
         );
     const conditions = [
@@ -3280,6 +3449,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
+    // ADR-0186 A/B: each tool-call row's per-principal decisions (never the assertion)
+    const toolCallRowIds = rows.filter((r) => isToolCallApproval(r)).map((r) => r.id);
+    const decisionRows = toolCallRowIds.length
+      ? await db
+          .select()
+          .from(approvalDecisions)
+          .where(inArray(approvalDecisions.approvalId, toolCallRowIds))
+          .orderBy(asc(approvalDecisions.decidedAt))
+      : [];
+    const decisionsByApproval = new Map<string, typeof decisionRows>();
+    for (const d of decisionRows) {
+      if (!d.approvalId) continue;
+      decisionsByApproval.set(d.approvalId, [...(decisionsByApproval.get(d.approvalId) ?? []), d]);
+    }
+    // ADR-0186 decision 27 (finding 40): the queue's "N of quorum" is the SAME live
+    // principal count the decide path and the execution recheck use
+    // (`approvingPrincipals`: delegation-linked approvers count once, links as they are now)
+    const principalCountFor = new Map<string, number>();
+    for (const [approvalId, ds] of decisionsByApproval) {
+      principalCountFor.set(approvalId, (await approvingPrincipals(db, ds)).length);
+    }
     const assignmentRows = rows.length
       ? await db
           .select()
@@ -3336,7 +3526,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       rows
         .flatMap((r) => [r.userId, r.approverUserId, r.decidedBy])
         .concat(conflictItems.map((i) => i.contributedByUserId))
-        .concat(acceptedCounterparts.map((c) => c.contributedByUserId)),
+        .concat(acceptedCounterparts.map((c) => c.contributedByUserId))
+        .concat(decisionRows.flatMap((d) => [d.principalUserId, d.deciderUserId])),
     );
     const instanceIds = ids(rows.map((r) => r.instanceId));
     const runIds = ids(rows.map((r) => r.runId));
@@ -3592,6 +3783,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
+        // ADR-0186 A/B (§4.9): the dual-control and signature view of a tool-call row
+        ...(isToolCallApproval(r)
+          ? (() => {
+              const ds = decisionsByApproval.get(r.id) ?? [];
+              const mine = ds.find((d) => d.deciderUserId === me) ?? null;
+              return {
+                approvalsCount: principalCountFor.get(r.id) ?? 0,
+                myDecision: mine ? mine.decision : null,
+                decisions: ds.map((d) => ({
+                  ...decisionView(d),
+                  principalName: d.principalUserId ? (nameOf.get(d.principalUserId) ?? null) : null,
+                  deciderName: d.deciderUserId ? (nameOf.get(d.deciderUserId) ?? null) : null,
+                })),
+              };
+            })()
+          : {}),
         serverName: r.serverId ? approvalServerLabel.get(r.serverId) ?? null : null,
         projectName: r.projectId ? projectLabel.get(r.projectId) ?? null : null,
         useCaseId:
@@ -3666,6 +3873,45 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   /**
+   * ADR-0173 §1 / batch 2b — a builder agent's turn paused on an MCP tool or
+   * connector-write approval RESUMES after the decision is final (approved ->
+   * the identical call, which the governed path matches to this approval by
+   * its argument digest; denied -> the model is told who denied it and why),
+   * as the thread's person and AFTER THE RESPONSE, as tracked background work.
+   * A failure is audited.
+   */
+  async function resumeBuilderStepsFor(
+    d: Db,
+    updated: typeof approvals.$inferSelect,
+    binaryDecision: "approved" | "denied",
+    deciderUserId: string,
+  ): Promise<void> {
+    const waiting = await builderStepsAwaitingApproval(d, updated.id);
+    if (!waiting.length) return;
+    scheduleBackgroundWork(d, async () => {
+      try {
+        await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
+      } catch (err) {
+        await d.insert(auditLog).values({
+          userId: deciderUserId,
+          ...(updated.objectType === "connector_call"
+            ? { objectType: "connector" as const, objectId: updated.connectorId }
+            : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
+          detail: { approvalId: updated.id, phase: "builder-resume" },
+          effect: "deny",
+          ruleId: "builder-tool-step-resume-failed",
+          ruleChain: [],
+          reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
+            err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+          }`
+            .replace(/\s+/g, " ")
+            .slice(0, 1000),
+        });
+      }
+    }, app.log);
+  }
+
+  /**
    * THE ONE DECIDE PATH (ADR-0046).
    *
    * Extracted from the route handler so that the BULK endpoint can call the
@@ -3687,6 +3933,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     deciderUserId: string | null;
     isAdmin: boolean;
     body: z.infer<typeof decideApprovalWithMeasuredSchema>;
+    /** ADR-0186 B: the passkey signature of a tool-call decision (the portal route only) */
+    passkey?: { challengeId: string; response: Record<string, unknown> } | undefined;
+    /** ADR-0186 A/B: the request (who signs, which session), and how the decision arrived */
+    req?: FastifyRequest | undefined;
+    channel?: "http" | "chat" | "bulk";
   }): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> {
     const fail = (status: number, payload: Record<string, unknown>) =>
       ({ ok: false as const, status, body: payload });
@@ -3732,6 +3983,50 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         error: "approval_superseded",
         detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
       });
+    }
+    // ADR-0186 A/B — a TOOL-CALL approval is decided by dual control and
+    // (strict default) a passkey signature over the exact call: the eligible
+    // pool (named approver + approver-role members, never the caller, a
+    // delegator and their delegate once), any deny vetoes, approval at the
+    // quorum under the row lock. No admin override: an admin outside the pool
+    // is not an approver of someone's tool call. Intake-only outcomes are
+    // refused by name exactly as below.
+    if (isToolCallApproval(row)) {
+      if (body.decision === "returned") {
+        return fail(422, {
+          error: "returned_only_on_intake_approval",
+          detail: "send back for information applies to an AI use-case intake sign-off only",
+        });
+      }
+      if ((body.conditions ?? []).length > 0) {
+        return fail(422, {
+          error: "conditions_only_on_intake_approval",
+          detail: "conditions are imposed only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      if (body.acceptRisks) {
+        return fail(422, {
+          error: "risk_acceptance_only_on_intake_approval",
+          detail: "risk is accepted only by APPROVING an AI use-case intake sign-off",
+        });
+      }
+      const decided = await decideToolCallApproval(db, {
+        row,
+        deciderUserId,
+        decision: body.decision === "approved" ? "approved" : "denied",
+        reason: body.reason?.trim() ? body.reason : null,
+        passkey: input.passkey,
+        req: input.req,
+        channel: input.channel ?? "http",
+      });
+      if (!decided.ok) return fail(decided.status, decided.body);
+      let pmMirror: Awaited<ReturnType<typeof mirrorApprovalDecision>> | null = null;
+      if (decided.finalized) {
+        const finalDecision = decided.finalized.status === "approved" ? "approved" : "denied";
+        await resumeBuilderStepsFor(db, decided.finalized, finalDecision, deciderUserId);
+        pmMirror = await mirrorApprovalDecision(db, opts.dataKey, decided.finalized, deciderUserId);
+      }
+      return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
     }
     // Only the rule's named approver may decide (§3) — with two sanctioned
     // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from
@@ -4162,77 +4457,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "run") {
         postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
       }
-      // ADR-0173 §1: an MCP tool approval a builder agent's turn is paused on.
-      // Nothing is decided here — the decision is the approval row above. The
-      // turn RESUMES after commit (approved -> the identical call, which the
-      // governed path matches to this approval by its argument digest; denied
-      // -> the model is told who denied it and why), as the thread's person —
-      // and AFTER THE RESPONSE (review): the approver's request never carries
-      // the resumed turn (model steps, tool calls), so the decide answers at
-      // once. Tracked background work: a closing app and a test drain it. A
-      // failure is audited (the resume records its own outcome on the step).
-      if (updated.objectType === "mcp_tool" && !postCommit) {
-        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
-        if (waiting.length) {
-          postCommit = async (d: Db) => {
-            scheduleBackgroundWork(d, async () => {
-              try {
-                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
-              } catch (err) {
-                await d.insert(auditLog).values({
-                  userId: deciderUserId,
-                  objectType: "mcp_tool",
-                  objectId: null,
-                  serverId: updated.serverId,
-                  toolName: updated.toolName,
-                  detail: { approvalId: updated.id, phase: "builder-resume" },
-                  effect: "deny",
-                  ruleId: "builder-tool-step-resume-failed",
-                  ruleChain: [],
-                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
-                  }`
-                    .replace(/\s+/g, " ")
-                    .slice(0, 1000),
-                });
-              }
-            }, app.log);
-          };
-        }
-      }
-      // ADR-0173 batch 2b: a CONNECTOR WRITE approval a builder turn is paused
-      // on — the same resume as the MCP branch above (resumeBuilderAfterApproval
-      // after commit, as tracked background work): approved -> the identical
-      // call, which the connector path matches to this approval by its argument
-      // digest and spends once; denied -> the model is told. A direct (non-
-      // builder) caller has no waiting step: it re-submits the identical call.
-      if (updated.objectType === "connector_call" && !postCommit) {
-        const waiting = await builderStepsAwaitingApproval(tx as unknown as Db, updated.id);
-        if (waiting.length) {
-          postCommit = async (d: Db) => {
-            scheduleBackgroundWork(d, async () => {
-              try {
-                await resumeBuilderAfterApproval(d, opts.dataKey, updated, binaryDecision, deciderUserId);
-              } catch (err) {
-                await d.insert(auditLog).values({
-                  userId: deciderUserId,
-                  objectType: "connector",
-                  objectId: updated.connectorId,
-                  detail: { approvalId: updated.id, phase: "builder-resume" },
-                  effect: "deny",
-                  ruleId: "builder-tool-step-resume-failed",
-                  ruleChain: [],
-                  reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-                    err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
-                  }`
-                    .replace(/\s+/g, " ")
-                    .slice(0, 1000),
-                });
-              }
-            }, app.log);
-          };
-        }
-      }
+      // ADR-0173 §1 / batch 2b: the builder resume after an MCP tool or
+      // connector-write approval now runs in the tool-call branch above
+      // (ADR-0186: those kinds are decided by dual control, never here).
       // Pillar 5 budget escalations + §9 context-conflict resolutions.
       if (updated.objectType === "project") {
         await applyProjectApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -4380,11 +4607,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       throw parsed.error;
     }
     const body = parsed.data;
+    // ADR-0186 B: the passkey signature rides beside the decision
+    const { passkey } = z.object({ passkey: approvalDecidePasskeyField.optional() }).parse({
+      passkey: (req.body as { passkey?: unknown } | null)?.passkey,
+    });
     const outcome = await decideOneApproval({
       approvalId,
       deciderUserId: req.authCtx.userId,
       isAdmin: req.authCtx.isAdmin,
       body,
+      passkey,
+      req,
+      channel: "http",
     });
     if (!outcome.ok) return reply.status(outcome.status).send(outcome.body);
     return outcome.body;
@@ -4542,7 +4776,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // have, claiming, saved views, per-reviewer workload, and BULK. Bulk is
   // handed `decideOneApproval` — the very function the single-decision route
   // calls — so a bulk item cannot take a shortcut around any guard.
-  registerWorkbenchRoutes(app, db, { decideOne: decideOneApproval });
+  // ADR-0186: a bulk item can never be signed or stepped up (channel "bulk").
+  registerWorkbenchRoutes(app, db, { decideOne: (i) => decideOneApproval({ ...i, channel: "bulk" }) });
   // ADR-0061 — CHATOPS APPROVALS. Handed the SAME `decideOneApproval` the
   // portal route and the bulk endpoint use: the chat surface is a courier over
   // the one decide path, never a second authority path. The inbound callback
@@ -4551,7 +4786,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // the same reason: Slack holds no RegulAIt credential); every other route
   // here is admin-only.
   registerChatOpsRoutes(app, db, {
-    decideOne: decideOneApproval,
+    // ADR-0186: a chat tap can never sign or step up (channel "chat")
+    decideOne: (i) => decideOneApproval({ ...i, channel: "chat" }),
     ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
   });
   // ADR-0047 — executive & compliance reporting: report definitions, schedule
@@ -4792,7 +5028,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
-  registerPosturePresetRoutes(app, db, { sink: anchorSink });
+  registerPosturePresetRoutes(app, db, { sink: anchorSink, bootstrapConfigured: Boolean(opts.bootstrapToken) });
   // ADR-0124 — the kill switch and safe modes
   registerExecutionControlRoutes(app, db);
 
@@ -4957,7 +5193,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // R: receipts. S: anchor timestamps. V: detection content. All admin-only
   // unless listed in NON_ADMIN_ROUTES.
   registerPasskeyRoutes(app, db);
-  registerStepUpRoutes(app, db);
+  registerStepUpRoutes(app, db, { dataKey: opts.dataKey });
   registerApprovalSigningRoutes(app, db);
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);

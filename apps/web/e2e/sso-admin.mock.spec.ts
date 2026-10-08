@@ -12,6 +12,7 @@
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -130,4 +131,15 @@ test.describe("ADR-0174 security review: the SSO admin page", () => {
     await expect(page.getByText("Approval 1 of 2 recorded — another administrator must also approve (audited)")).toBeVisible();
     expect(cap.approvals).toEqual([REQ_ID]);
   });
+});
+
+// ADR-0186 A: the sign-in policy (break-glass fields included) goes through withStepUp — the SAME PUT resent once
+test("ADR-0186 A: saving the sign-in policy asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  await mockApi(page);
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "break_glass" });
+  await page.goto("/ui/admin/sso");
+  await page.getByRole("button", { name: "Save sign-in policy" }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(su.attempts[1]!.body).toMatchObject({ localSignIn: "enabled", breakGlassUserIds: [] });
 });

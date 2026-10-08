@@ -1,5 +1,5 @@
 ---
-phase: adr0183-batch-4-next
+phase: adr0186-batch-4-pr
 last_updated: 2026-10-08
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -32,7 +32,21 @@ roadmap: ../docs/product/ROADMAP.md
 - Split: Claude B5-F foundation + B5-E runner core (one PR), then B5-P promptfoo, B5-M modelscan, B5-G garak; Codex X26
   Engines page, X27 run/result views, X28 Model artifacts, X29 cross-review; research G19 (`R10-engine-admission.md`).
 - Batch 5 code starts only after `b4-int` lands on `main` (shared hot files, ADR-0183; needs Batch 4 step-up and the
-  vendored detection scrub). Next migration 0171 (journal when 1785106000000), next ADR 0188.
+  vendored detection scrub). Next migration 0173 (journal when 1785108000000; 0171 and 0172 = Batch 4 review fixes: approver-role snapshot; persisted named approver + first-passkey flag), next ADR 0188.
+
+**2026-10-08 - Batch 4: Claude's half integrated and security-reviewed on `b4-int` (e315845); Codex's half in review.**
+- A (step-up incl. fresh SSO login), A2+B (dual control, passkey-signed approvals) and T (trace residual) are merged
+  on `b4-int`. Security review B4S-01..09 plus G1/G2 fixed with red proofs: approver eligibility fixed at queue time and
+  rechecked at execution; the sensitive quorum decided by the server; one strictness registry for org settings; rule
+  deletes and revocation lifts need a step-up; the bootstrap credential passes step-up only before any admin has a
+  method (posture finding `bootstrap_token_configured`); SSO step-up only over https.
+- ADR-0186 now records the implementation decisions and residuals (no NeMo rules eligible; no TSA revocation checking;
+  drift monitor sees builder-agent calls only; no server/connector-to-project binding; outbound credential-audience
+  check not wired yet).
+- Round 3 landed (b08f291): admin creation via `POST /v1/users` needs a step-up; non-CI e2e specs step up the real way;
+  shared refusal list complete (27 codes). Batch 4 PR (A+B+T) opened for Codex's X25 cross-review.
+- Codex slices in review: R (X21 #182, merge after fixes), S (X22 #184, changes requested), V (X23 #185, changes
+  requested), M (X24 #187). The Batch 4 PR to `main` is pending these. Next migration 0171, next ADR 0187.
 
 **2026-10-07 - Batch 4 decided (ADR-0186), built as equal halves by Claude and Codex with cross-review.**
 - Owner decisions: passkey-signed tool-call approvals re-verified at execution; two approvers for sensitive projects;

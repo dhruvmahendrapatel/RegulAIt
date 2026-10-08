@@ -1,0 +1,154 @@
+{
+  "$comment": [
+    "ADR-0186 T / ADR-0177 row 19. HAND-WRITTEN from Phoenix's public documentation. The Phoenix server is Elastic License 2.0: no Phoenix code is copied, depended on, bundled or hosted. A customer may point our OTLP export at their own Phoenix; that is the only relationship.",
+    "Sources, opened 2026-10-07 (HTTP 200, quoted text confirmed on each published page): https://arize.com/docs/phoenix/tracing/concepts-tracing/otel-openinference/span-kinds, .../otel-openinference/resource, .../otel-openinference/exporter, and https://arize.com/docs/phoenix/release-notes/05-2026/05-15-2026-otel-semconv-conversion; read in full from their docs source, github.com/Arize-ai/phoenix @ 3383f07731f1f26ef758ecf49ee1eae9c7e0ef3d (2026-10-06), docs/phoenix/...",
+    "TRANSPORT is the one rule NOT from a docs page: the docs say the HTTP exporter defaults to http/protobuf but never say JSON is refused. That fact was read (not copied) from the server's own route declaration, src/phoenix/server/api/routers/v1/traces.py at the same commit, whose response description reads: 415 'Unsupported content type (only `application/x-protobuf` is supported)'. Interop fact, VERIFIED at that commit; it is not in the published docs.",
+    "Finding recorded by this fixture: our exporter sends OTLP/HTTP JSON only, so Phoenix cannot take our export directly. It needs an OpenTelemetry Collector between us and it (an otlp receiver on HTTP/JSON, an otlphttp exporter on protobuf). The attribute rules below are what Phoenix keys on once the Collector has re-encoded the same spans; the OTLP JSON and protobuf encodings carry the same data."
+  ],
+  "tool": "phoenix",
+  "verified": true,
+  "transport": {
+    "path": "/v1/traces",
+    "acceptsContentTypes": [
+      "application/x-protobuf"
+    ],
+    "directFromRegulait": false,
+    "via": "an OpenTelemetry Collector: otlp receiver (http, JSON) -> otlphttp exporter (protobuf) to http://<phoenix>:6006/v1/traces",
+    "doc": "Phoenix serves OTLP/HTTP on port `6006` ... Point the exporter at `http://<host>:6006/v1/traces` (exporter.mdx); server route: 415 'only `application/x-protobuf` is supported'"
+  },
+  "span": {
+    "required": {
+      "traceId": "^[0-9a-f]{32}$",
+      "spanId": "^[0-9a-f]{16}$",
+      "name": "^.+$",
+      "startTimeUnixNano": "^[1-9][0-9]{18}$",
+      "endTimeUnixNano": "^[1-9][0-9]{18}$"
+    },
+    "doc": "The OTLP/HTTP JSON encoding the Collector re-encodes (lowercase hex ids, fixed64 nanos as decimal strings). Timestamps are nanoseconds: 19 digits for any date from 2001 to 2286, so a millisecond or second value fails."
+  },
+  "profiles": {
+    "openinference": {
+      "resourceAttributes": {
+        "keys": [
+          "openinference.project.name"
+        ],
+        "doc": "`openinference.project.name` resource attribute | Canonical | The name of the project in Phoenix ... Forgetting to set a project name — ... spans land in the default project"
+      },
+      "everySpan": {
+        "allOf": [
+          "openinference.span.kind"
+        ],
+        "enums": {
+          "openinference.span.kind": [
+            "LLM",
+            "CHAIN",
+            "AGENT",
+            "TOOL",
+            "RETRIEVER",
+            "EMBEDDING",
+            "RERANKER",
+            "GUARDRAIL",
+            "EVALUATOR",
+            "DECISION",
+            "PROMPT",
+            "UNKNOWN"
+          ]
+        },
+        "doc": "Span kind is set via the `openinference.span.kind` attribute. **The value is ALL CAPS** ... A span without that attribute renders with a blank icon."
+      },
+      "everySpanOfASession": {
+        "keys": [
+          "session.id",
+          "user.id"
+        ],
+        "doc": "Common Attributes Across All Kinds: `session.id` Groups traces into a session; `user.id` The user the request belongs to."
+      },
+      "byKind": {
+        "llm": {
+          "allOf": [
+            "llm.model_name",
+            "llm.provider",
+            "llm.token_count.prompt",
+            "llm.token_count.completion"
+          ],
+          "valueTypes": {
+            "openinference.span.kind": "stringValue",
+            "llm.model_name": "stringValue",
+            "llm.token_count.prompt": "intValue",
+            "llm.token_count.completion": "intValue",
+            "llm.cost.total": "doubleValue"
+          },
+          "enums": {
+            "openinference.span.kind": [
+              "LLM"
+            ]
+          },
+          "contentAnyOf": [
+            [
+              "input.value",
+              "llm.input_messages.0.message.content"
+            ],
+            [
+              "output.value",
+              "llm.output_messages.0.message.content"
+            ]
+          ],
+          "doc": "LLM: `llm.model_name`, `llm.provider`, `llm.token_count.prompt`, `llm.token_count.completion`, `llm.cost.total`; common: `input.value`, `output.value`"
+        },
+        "tool": {
+          "enums": {
+            "openinference.span.kind": [
+              "TOOL"
+            ]
+          },
+          "doc": "TOOL: A call to an external tool, API, or function on behalf of an LLM."
+        },
+        "policy": {
+          "enums": {
+            "openinference.span.kind": [
+              "GUARDRAIL"
+            ]
+          },
+          "doc": "GUARDRAIL: A validation of LLM input or output for safety, policy, or compliance."
+        }
+      }
+    },
+    "otel_genai": {
+      "everySpanOfASession": {
+        "keys": [
+          "session.id"
+        ],
+        "doc": "`session.id` Groups traces into a session."
+      },
+      "byKind": {
+        "llm": {
+          "allOf": [
+            "gen_ai.operation.name",
+            "gen_ai.usage.input_tokens",
+            "gen_ai.usage.output_tokens"
+          ],
+          "anyOf": [
+            [
+              "gen_ai.request.model",
+              "gen_ai.response.model"
+            ],
+            [
+              "gen_ai.provider.name",
+              "gen_ai.system"
+            ]
+          ],
+          "valueTypes": {
+            "gen_ai.usage.input_tokens": "intValue",
+            "gen_ai.usage.output_tokens": "intValue"
+          },
+          "contentAnyOf": [
+            [
+              "gen_ai.input.messages"
+            ]
+          ],
+          "doc": "Release note 2026-05-15 (arize-phoenix 15.10.0+): `gen_ai.input.messages` -> `llm.input_messages.*`; `gen_ai.usage.*` -> `llm.token_count.prompt`, `llm.token_count.completion`; `gen_ai.system` / `gen_ai.request.model` -> `llm.provider`, `llm.model_name`; `gen_ai.operation.name` -> `llm.invocation_parameters`. The note names `gen_ai.system`; the provider rule also accepts `gen_ai.provider.name` because the converter reads it first (seen in the same commit, src/phoenix/trace/gen_ai/conversion.py, `_resolve_provider_and_system`: `gen_ai.system` is read only when `gen_ai.provider.name` is absent)."
+        }
+      }
+    }
+  }
+}

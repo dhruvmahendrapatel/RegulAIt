@@ -55,6 +55,17 @@ import {
 import { EXECUTION_MODES, type ExecutionMode } from "@regulait/policy-kernel";
 import { loadOrgSettings } from "./org-settings.js";
 import { EXECUTION_MODE_NOTES } from "./execution-posture.js";
+import { checkStepUp, requireStepUp } from "./step-up.js";
+
+/** how restrictive each mode is: normal < the two partial restrictions < halted */
+const EXECUTION_MODE_RANK: Record<ExecutionMode, number> = { normal: 0, read_only: 1, require_approval: 1, halted: 2 };
+
+/** ADR-0186 A: does moving from `from` to `to` lift any restriction? (a lateral move between the partial
+ * restrictions lets through what the other refused, so it counts; entering a halt never does) */
+export function executionModeLoosens(from: ExecutionMode, to: ExecutionMode): boolean {
+  if (from === to || to === "halted") return false;
+  return EXECUTION_MODE_RANK[to] <= EXECUTION_MODE_RANK[from];
+}
 
 /** Distinct rule ids per event: an operator alerts on each separately. */
 export const EXECUTION_CONTROL_RULE_IDS = {
@@ -273,11 +284,34 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
       }
     }
 
-    await loadOrgSettings(db);
+    const current = (await loadOrgSettings(db)).executionMode as ExecutionMode;
+    // ADR-0186 A: LIFTING a restriction (a move to a less restrictive mode, or
+    // across between the two partial restrictions) needs a settings_relax
+    // step-up bound to the new mode; entering a halt or tightening never does.
+    // B4S-08: a move into require_approval binds the approver it names too, so
+    // a grant made for one approver cannot route every queued call to another
+    const facts = {
+      values: {
+        executionMode: body.mode,
+        ...(body.mode === "require_approval" ? { approverUserId: body.approverUserId ?? null } : {}),
+      },
+    };
+    let cleared = false;
+    if (executionModeLoosens(current, body.mode)) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts });
+      if (!su.ok) return reply;
+      cleared = true;
+    }
     return db.transaction(async (tx) => {
       const [before] = await tx.select().from(orgSettings)
         .where(eq(orgSettings.id, ORG_SETTINGS_ID)).for("update");
       const wasMode = before!.executionMode as ExecutionMode;
+      // the step-up was decided against `current`: when the mode changed meanwhile so
+      // that this write now lifts a restriction, it is decided again on the mode it replaces
+      if (!cleared && executionModeLoosens(wasMode, body.mode)) {
+        const again = await checkStepUp(db, req, { kind: "settings_relax", facts });
+        if (!again.ok) return reply.status(again.status).send(again.body);
+      }
       if (wasMode === body.mode) {
         return {
           mode: wasMode,
@@ -337,11 +371,26 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/agents/:agentId/unhalt", async (req, reply) => {
     const { agentId } = agentParam.parse(req.params);
     const body = haltSchema.parse(req.body);
+    // ADR-0186 A: lifting a halt loosens a protection: a settings_relax step-up bound to this agent
+    const stepUp = { kind: "settings_relax" as const, facts: { agentId, values: { halted: false } } };
+    const [held] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
+    let cleared = false;
+    if (held?.haltedAt) {
+      const su = await requireStepUp(db, req, reply, stepUp);
+      if (!su.ok) return reply;
+      cleared = true;
+    }
     const result = await db.transaction(async (tx) => {
       const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
       if (!before) return null;
       if (!before.haltedAt) {
         return { agentId, halted: false, changed: false, note: "not halted — nothing was written" };
+      }
+      // the step-up was decided on the unlocked read: a halt that landed before the lock is decided
+      // again on the locked row, so a halt is never lifted without one
+      if (!cleared) {
+        const again = await checkStepUp(db, req, stepUp);
+        if (!again.ok) return { refused: again };
       }
       await tx.update(agents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
         .where(eq(agents.id, agentId));
@@ -359,6 +408,7 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
             "decision, and lifting a halt deliberately does not reverse it",
       };
     });
+    if (result && "refused" in result && result.refused) return reply.status(result.refused.status).send(result.refused.body);
     return result ?? reply.status(404).send({ error: "unknown_agent" });
   });
 
@@ -406,12 +456,29 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/servers/:serverId/tools/:toolName/unhalt", async (req, reply) => {
     const { serverId, toolName } = toolParam.parse(req.params);
     const body = haltSchema.parse(req.body);
+    // ADR-0186 A: lifting a halt loosens a protection: a settings_relax step-up bound to this tool
+    const [held] = await db
+      .select({ haltedAt: mcpTools.haltedAt })
+      .from(mcpTools)
+      .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
+    const stepUp = { kind: "settings_relax" as const, facts: { serverId, toolName, values: { halted: false } } };
+    let cleared = false;
+    if (held?.haltedAt) {
+      const su = await requireStepUp(db, req, reply, stepUp);
+      if (!su.ok) return reply;
+      cleared = true;
+    }
     const result = await db.transaction(async (tx) => {
       const [before] = await tx.select().from(mcpTools)
         .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName))).for("update");
       if (!before) return null;
       if (!before.haltedAt) {
         return { serverId, toolName, halted: false, changed: false, note: "not halted — nothing was written" };
+      }
+      // decided again on the locked row (see the agent unhalt above)
+      if (!cleared) {
+        const again = await checkStepUp(db, req, stepUp);
+        if (!again.ok) return { refused: again };
       }
       await tx.update(mcpTools).set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
         .where(eq(mcpTools.id, before.id));
@@ -426,6 +493,7 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
         note: `'${toolName}' is callable again by anyone already granted it`,
       };
     });
+    if (result && "refused" in result && result.refused) return reply.status(result.refused.status).send(result.refused.body);
     return result ?? reply.status(404).send({ error: "unknown_tool" });
   });
 }

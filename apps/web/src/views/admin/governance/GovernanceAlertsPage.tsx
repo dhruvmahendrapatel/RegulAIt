@@ -10,6 +10,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, T
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 type AlertStatus = "open" | "acknowledged" | "resolved";
 interface GovernanceAlert {
@@ -387,12 +388,12 @@ function AlertSettingsCard() {
             </Field>
           ))}
           <Button size="sm" disabled={action.busy || !valid || !changed} onClick={() => void action.run(async () => {
-            await api.put("/v1/org/settings", { alertSlaHours: next });
+            await putOrgSettings({ alertSlaHours: next });
             setDraft({});
             await settings.refetch();
           }, "Alert SLA saved (audited)")}>Save SLA</Button>
           <Button size="sm" variant="ghost" disabled={action.busy || SEVERITIES.every((sev) => hours[sev] === ALERT_SLA_STRICT[sev])} onClick={() => void action.run(async () => {
-            await api.put("/v1/org/settings", { alertSlaHours: { ...ALERT_SLA_STRICT } });
+            await putOrgSettings({ alertSlaHours: { ...ALERT_SLA_STRICT } });
             setDraft({});
             await settings.refetch();
           }, "Alert SLA back to the strict default")}>Restore strict</Button>
@@ -416,7 +417,7 @@ function AlertSettingsCard() {
               setPickedConnection(id ?? "");
               if (current.alertTicketMode === "auto_high" && id) {
                 void action.run(async () => {
-                  await api.put("/v1/org/settings", { alertTicketConnectionId: id });
+                  await putOrgSettings({ alertTicketConnectionId: id });
                   setPickedConnection(null);
                   await settings.refetch();
                 }, "Automatic tickets now go to the chosen connection (audited)");
@@ -434,7 +435,7 @@ function AlertSettingsCard() {
                 return;
               }
               void action.run(async () => {
-                await api.put("/v1/org/settings", mode === "auto_high" ? { alertTicketMode: mode, alertTicketConnectionId: connection } : { alertTicketMode: mode });
+                await putOrgSettings(mode === "auto_high" ? { alertTicketMode: mode, alertTicketConnectionId: connection } : { alertTicketMode: mode });
                 setPickedConnection(null);
                 await settings.refetch();
               }, mode === "manual" ? "Alert tickets: manual (strict default)" : "Alert tickets: automatic for high alerts (relaxed, audited)");
@@ -636,7 +637,7 @@ function DetectionMonitorSettings() {
           const changes:Partial<Values>={};
           for(const field of fields){if(draft[field.key]===undefined)continue;const raw=draft[field.key]!.trim();const value=Number(raw);
             if(!raw||!Number.isInteger(value)||value<field.min||value>field.max){setValidation(`${field.label} must be a whole number from ${field.min} to ${field.max}.`);return;}changes[field.key]=value;}
-          void action.run(async()=>{await api.put("/v1/org/settings",changes);setDraft({});await query.refetch();},"Detection monitor thresholds saved");
+          void action.run(async()=>{await putOrgSettings(changes);setDraft({});await query.refetch();},"Detection monitor thresholds saved");
         }}>Save detection thresholds</Button>
       </div>}
     </QueryGate>

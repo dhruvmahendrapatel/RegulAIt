@@ -1,5 +1,6 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
+import { signInPrepared } from "./demo-credentials";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,10 @@ const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token"
 mkdirSync(SHOTS, { recursive: true });
 
 async function freshUser(page: Page, email: string, password: string) {
+  // B4S-06: with demo:prepare's printed credentials (E2E_DEMO_PREPARE_LOG) the
+  // persona signs in with them; the bootstrap re-provisioning below works only
+  // while no admin can step up (it is refused once the seed enrolled Ada)
+  if (await signInPrepared(page, email, password, page.getByRole("heading", { name: /Welcome back/ }))) return;
   const headers = { authorization: `Bearer ${BOOT_TOKEN}`, "content-type": "application/json" };
   const users = await (await fetch(`${state.baseUrl}/v1/users`, { headers })).json() as { users: Array<{ id: string; email: string }> };
   const id = users.users.find((user) => user.email === email)?.id;

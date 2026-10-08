@@ -1742,6 +1742,14 @@ export const approvals = pgTable(
     /** how each approval must be proven: passkey signature over the call,
      * a step-up, or nothing (an audited relaxation) */
     signatureMode: text("signature_mode", { enum: APPROVAL_SIGNATURE_MODES }).notNull().default("passkey"),
+    /** ADR-0186 A (migration 0172): the approver role of the naming rule when the
+     * call was queued — eligibility and queue visibility read this, never the
+     * rule's current role. No FK: a historical fact. */
+    approverRoleId: uuid("approver_role_id"),
+    /** ADR-0186 A (migration 0172): the approver NAMED when the call was queued —
+     * the one source of named-approver authority for a tool-call approval (never
+     * reconstructed from prunable audit rows). No FK: a historical fact. */
+    namedApproverUserId: uuid("named_approver_user_id"),
   },
   (t) => [
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
@@ -11419,6 +11427,10 @@ export const webauthnChallenges = pgTable(
     actionDigest: text("action_digest"),
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "cascade" }),
     decision: text("decision", { enum: APPROVAL_DECISION_VALUES }),
+    /** ADR-0186 A (migration 0172): a register ceremony admitted by the
+     * first-passkey rule (no step-up); its completion re-checks under the user's
+     * row lock that the account still has no way to step up */
+    firstPasskey: boolean("first_passkey").notNull().default(false),
     /** approval_sign: the `ApprovalSigningPayload` whose digest is the challenge */
     signedPayload: jsonb("signed_payload"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -11544,7 +11556,8 @@ export const ssoReauthRequests = pgTable(
     ),
     check(
       "sso_reauth_requests_verified_check",
-      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND ${t.authTime} > ${t.requestedAt})`,
+      // migration 0171: a whole-second auth time (OIDC) may equal the request's second
+      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND (${t.authTime} > ${t.requestedAt} OR (date_trunc('second', ${t.authTime}) = ${t.authTime} AND ${t.authTime} >= date_trunc('second', ${t.requestedAt}))))`,
     ),
     check("sso_reauth_requests_used_check", sql`${t.usedAt} IS NULL OR ${t.verifiedAt} IS NOT NULL`),
     index("sso_reauth_requests_step_up_idx").on(t.stepUpId),

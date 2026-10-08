@@ -52,8 +52,10 @@ import {
   eq,
   mcpServers,
   ne,
+  sql,
   type Db,
 } from "@regulait/db";
+import { requireStepUp } from "./step-up.js";
 import {
   admissionFindingSummary,
   clearMcpAdmissionSchema,
@@ -627,6 +629,13 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
           `cleared; the upstream must rename the tool, and the next scan re-adjudicates it. Nothing was changed.`,
       });
     }
+    // ADR-0186 A (Class C): clearing a held server lifts a quarantine — a settings_relax
+    // step-up bound to the server and the manifest digest that was scanned
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { serverId, values: { admissionCleared: before.admissionManifestDigest ?? null } },
+    });
+    if (!su.ok) return reply;
     const [row] = await db
       .update(mcpServers)
       .set({
@@ -635,7 +644,14 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
         admissionClearedAt: new Date(),
         admissionClearReason: body.reason,
       })
-      .where(and(eq(mcpServers.id, serverId), eq(mcpServers.admissionState, "held")))
+      // and on the digest the step-up names (Class A)
+      .where(
+        and(
+          eq(mcpServers.id, serverId),
+          eq(mcpServers.admissionState, "held"),
+          sql`${mcpServers.admissionManifestDigest} IS NOT DISTINCT FROM ${before.admissionManifestDigest}`,
+        ),
+      )
       .returning();
     if (!row) return reply.status(409).send({ error: "not_held" });
     await db.insert(auditLog).values({

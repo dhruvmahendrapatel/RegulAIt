@@ -27,7 +27,10 @@ import { dataKeyFormatError } from "./secrets.js";
 import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
 import { enrolAdminTotp, type AdminTotpEnrolment } from "./demo-identity.js"; // ADR-0181 (FX2): seedAdminMfa
 import { ensureDemoModelCards } from "./demo-strict-governance.js";
-import { seedStrictData } from "./seed-strict-data.js";
+import { openAssuranceGuardrailWindow, seedStrictData } from "./seed-strict-data.js";
+import { assuranceAgentNames } from "./demo-intake-seed-lib.js"; // B4S-06: --open-assurance-window
+import * as sharedForFixtures from "@regulait/shared";
+import type { DemoIntakeFixtures } from "@regulait/shared";
 import { demoSeedRefusal, demoSeedSignal, realAdminEmails } from "./seed-demo-guard.js"; // ADR-0181 FX3
 
 const connectionString =
@@ -151,45 +154,23 @@ for (const [username, id] of [
   await call("PUT", `/v1/users/${id}/username`, { username });
 }
 
-// ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
-// un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
-const adminMfa = await seedAdminMfa(adminId);
-
-const keys: Record<string, string> = {};
-const keyIds: Record<string, string> = {};
-for (const [name, id] of [
-  ["admin", adminId],
-  ["dana", danaId],
-  ["avery", averyId],
-] as const) {
-  // ADR-0181 (FX2): an admin who has not enrolled TOTP is issued no key
-  if (name === "admin" && adminMfa.status === "refused") continue;
-  const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
-  keys[name] = minted.token;
-  keyIds[name] = minted.id;
-}
-const danaAuth = { authorization: `Bearer ${keys.dana}` };
-const averyAuth = { authorization: `Bearer ${keys.avery}` };
-
 // --- ADR-0025: ONE-TIME passwords for the personas (browser sign-in) -------
 // Issued only while the account is still passwordless, so a re-seed never
 // overwrites a password a human set for real (the endpoint 409s without
 // force, and call() tolerates 409). Printed exactly once, like the keys;
 // must_change_password forces a real password at first sign-in.
+// B4S-06: issuing another person's password needs a settings_relax step-up,
+// which the bootstrap credential passes only during FIRST-ADMIN SETUP — before
+// any admin can step up. So Dana's and Avery's are issued here, before Ada
+// enrols her authenticator; Ada's comes from her own enrolment below.
 const passwords: Record<string, string> = {};
 {
   const userRows = (await call("GET", "/v1/users")).users ?? [];
   for (const [name, id] of [
-    ["admin", adminId],
     ["dana", danaId],
     ["avery", averyId],
   ] as const) {
     const row = userRows.find((u: Json) => u.id === id);
-    // ADR-0181 (FX2): Ada's one-time password was issued by her TOTP enrolment
-    if (name === "admin" && adminMfa.status === "enrolled") {
-      passwords[name] = adminMfa.password;
-      continue;
-    }
     if (row?.hasPassword) {
       passwords[name] = "(already set — unchanged)";
       continue;
@@ -229,7 +210,13 @@ for (const userId of [adminId, danaId, averyId]) {
   }
 }
 
+/** the agents whose stewardship review Ada records today, once her key exists */
+const reviewToday: string[] = [];
 // --- ADR-0168 item 6: agent stewardship ----------------------------------
+// B4S-06: naming a steward is an owner change (an owner_change step-up), which
+// the bootstrap credential passes only during first-admin setup — so this runs
+// BEFORE Ada enrols her authenticator. The reviews she records today run after
+// her key exists (below).
 // Every seeded agent gets a named steward, a successor and a staggered next
 // review, through the REAL audited routes — except `grok`, deliberately left
 // with NO steward (only a successor) so the inventory shows one "Orphaned"
@@ -249,7 +236,6 @@ for (const userId of [adminId, danaId, averyId]) {
     grok: { steward: null, successor: danaId, reviewInDays: 102 },
   };
   const rows: Json[] = (await call("GET", "/v1/agents")).agents ?? [];
-  const adaAuth = { authorization: `Bearer ${keys.admin}` };
   for (const [name, plan] of Object.entries(STEWARDSHIP)) {
     const row = rows.find((a) => a.name === name);
     if (!row || row.ownerUserId || row.successorUserId || row.nextReviewAt || row.lastReviewedAt) continue;
@@ -260,9 +246,72 @@ for (const userId of [adminId, danaId, averyId]) {
         ? { nextReviewAt: new Date(Date.now() + plan.reviewInDays * DAY).toISOString() }
         : {}),
     });
-    // a review recorded today (by Ada) schedules the next one by the cadence
-    if (plan.reviewInDays === "record" && keys.admin) await call("POST", `/v1/agents/${row.id}/stewardship/review`, {}, adaAuth);
+    if (plan.reviewInDays === "record") reviewToday.push(row.id);
   }
+}
+
+// B4S-06 — `--open-assurance-window` (passed by demo:prepare only): the
+// assurance run demo:intake makes needs the prompt-injection and jailbreak
+// guardrails at `warn` on the agents under test (seed-strict-data.ts), and
+// relaxing a guardrail needs a settings_relax step-up. The bootstrap credential
+// passes that only during FIRST-ADMIN SETUP, which ends the moment Ada enrols
+// her authenticator just below — after it, only Ada could, and she cannot act
+// until the presenter replaces her one-time password. So the deployment
+// operator opens the time-boxed window HERE (audited, expires on the server
+// after ASSURANCE_WINDOW_TTL_MINUTES), and demo:intake keeps it, runs the
+// tests and closes it. A plain `seed` (the e2e harness) opens nothing.
+if (process.argv.includes("--open-assurance-window")) {
+  const fixtures = (sharedForFixtures as unknown as { DEMO_INTAKE_FIXTURES?: DemoIntakeFixtures }).DEMO_INTAKE_FIXTURES;
+  const agentRows: Json[] = (await call("GET", "/v1/agents")).agents ?? [];
+  const ids = fixtures
+    ? assuranceAgentNames(fixtures, new Map(agentRows.map((a) => [a.name as string, a.provider as string])))
+        .map((n) => agentRows.find((a) => a.name === n)?.id as string | undefined)
+        .filter((id): id is string => Boolean(id))
+    : [];
+  const inject = async (method: string, url: string, payload?: unknown, headers: Record<string, string> = AUTH) => {
+    const r = await app.inject({ method: method as "GET", url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
+    let body: Json = {};
+    try {
+      body = r.json();
+    } catch {
+      /* 204 */
+    }
+    return { status: r.statusCode, body };
+  };
+  const window = await openAssuranceGuardrailWindow(inject, AUTH, ids);
+  for (const n of window.notes) console.log(`  ${n}`);
+}
+
+// ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
+// un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
+const adminMfa = await seedAdminMfa(adminId);
+
+const keys: Record<string, string> = {};
+const keyIds: Record<string, string> = {};
+for (const [name, id] of [
+  ["admin", adminId],
+  ["dana", danaId],
+  ["avery", averyId],
+] as const) {
+  // ADR-0181 (FX2): an admin who has not enrolled TOTP is issued no key
+  if (name === "admin" && adminMfa.status === "refused") continue;
+  const minted = await call("POST", `/v1/users/${id}/keys`, { name: "seed", expiresAt: demoKeyExpiresAt(SEED_PERSONA_KEY_TTL_DAYS) });
+  keys[name] = minted.token;
+  keyIds[name] = minted.id;
+}
+const danaAuth = { authorization: `Bearer ${keys.dana}` };
+const averyAuth = { authorization: `Bearer ${keys.avery}` };
+
+// a review recorded today (by Ada) schedules the next one by the cadence
+if (keys.admin) {
+  const adaAuth = { authorization: `Bearer ${keys.admin}` };
+  for (const id of reviewToday) await call("POST", `/v1/agents/${id}/stewardship/review`, {}, adaAuth);
+}
+// ADR-0181 (FX2): Ada's one-time password was issued by her TOTP enrolment
+if (adminMfa.status === "enrolled") passwords.admin = adminMfa.password;
+else {
+  const ada = ((await call("GET", "/v1/users")).users ?? []).find((u: Json) => u.id === adminId);
+  passwords.admin = ada?.hasPassword ? "(already set — unchanged)" : "(not issued — see the admin TOTP line)";
 }
 
 // ADR-0181: that was the last use of Ada's seed key. An admin-owned API key

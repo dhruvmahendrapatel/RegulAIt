@@ -38,6 +38,10 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
+
+/** ADR-0181 strict values of the MRM toggles (the column defaults) */
+const MRM_STRICT = { mrmEnforced: true, mrmStalenessRecertEnabled: true, mrmStalenessRecertThreshold: 1 } as const;
 import {
   agents,
   and,
@@ -1106,6 +1110,21 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       })
       .parse(req.body);
     const org = await loadOrgSettings(db);
+    // ADR-0186 A: turning enforcement or staleness re-certification off, or a
+    // higher staleness threshold, is a relaxation: a settings_relax step-up
+    const relaxed = relaxedAgainst(
+      {
+        mrmEnforced: body.enforced,
+        mrmStalenessRecertEnabled: body.stalenessRecertEnabled,
+        mrmStalenessRecertThreshold:
+          body.stalenessRecertThreshold !== undefined && body.stalenessRecertThreshold > MRM_STRICT.mrmStalenessRecertThreshold
+            ? body.stalenessRecertThreshold
+            : undefined,
+      },
+      org as unknown as Record<string, unknown>,
+      MRM_STRICT,
+    );
+    if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
     const patch = {
       mrmEnforced: body.enforced,
       ...(body.warnDays !== undefined ? { mrmExpiryWarnDays: body.warnDays } : {}),
@@ -1123,8 +1142,17 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         updatedBy: req.authCtx.userId ?? null,
         updatedAt: new Date(),
       })
-      .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+      // ADR-0186 A (Class A): compare-and-set on the dials the step-up was decided on
+      .where(
+        and(
+          eq(orgSettings.id, ORG_SETTINGS_ID),
+          eq(orgSettings.mrmEnforced, org.mrmEnforced),
+          eq(orgSettings.mrmStalenessRecertEnabled, org.mrmStalenessRecertEnabled),
+          eq(orgSettings.mrmStalenessRecertThreshold, org.mrmStalenessRecertThreshold),
+        ),
+      )
       .returning();
+    if (!updated) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "org_settings",

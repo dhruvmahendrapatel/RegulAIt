@@ -18,6 +18,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { asSteppedUpAdmin, signedInContext } from "./admin-api";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -28,10 +29,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
   passwords: { admin: string; dana: string; avery: string };
+  baseUrl: string;
 };
 const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
 const DANA_PASSWORD = "E2e-Rewrite-2026!";
+/** phase2's key-custody journey replaces Avery's one-time password with this */
+const AVERY_PASSWORD = "E2e-Avery-Custody!";
 const CSRF = { "x-regulait-csrf": "1" };
+/** an org-settings write as Ada, stepped up with her authenticator (B4S-06: the
+ * bootstrap credential passes a step-up only until an admin can give one) */
+async function bootSettings(payload: Record<string, unknown>) {
+  const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "PUT", "/v1/org/settings", payload);
+  expect(res.ok(), `PUT /v1/org/settings: ${res.status()} ${res.bodyText}`).toBe(true);
+}
 const RUN = Date.now().toString(36);
 const REPO = `bt-repo-${RUN}`;
 const WAREHOUSE = `bt-wh-${RUN}`;
@@ -93,6 +103,7 @@ let danaTrack: ReturnType<typeof trackConsole>;
 let adminName = "";
 let modelId = "";
 let projectId = "";
+let averyId = "";
 const toolIds = { branches: "", schemas: "" };
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
@@ -127,13 +138,15 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   // These two are the spec's own fixtures, so an admin overrides the cooldown
   // for them through the real, audited route, with a reason (per server, at the
   // registration release; nothing global changes).
+  // Lifting a quarantine asks for the same step-up as a grant (ADR-0186 decision 24).
   for (const id of [repo.id, wh.id]) {
-    await post("/v1/release-quarantine/override", {
+    const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "POST", "/v1/release-quarantine/override", {
       kind: "mcp_server",
       id,
       digest: "registration",
       reason: "e2e: the spec's own local MCP fixture; the cooldown is not what this journey tests",
     });
+    expect(res.status(), `/v1/release-quarantine/override: ${res.bodyText}`).toBe(201);
   }
   const branches = await post(`/v1/servers/${repo.id}/tools`, { name: "list_branches", kind: "read", description: "list branches and their heads" });
   const schemas = await post(`/v1/servers/${wh.id}/tools`, { name: "list_schemas", kind: "read", description: "list schemas" });
@@ -144,7 +157,24 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     const g = await admin.request.post("/v1/grants/tools", { headers: CSRF, data: { userId: d.userId, serverId, toolName } });
     expect(g.status(), await g.text()).toBeLessThan(300);
   }
-  await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId });
+  // B4S-03: Dana works on the seeded hipaa-project (an in-app-only data
+  // classification), so every tool call of hers needs the sensitive quorum — two
+  // different approvers — whatever project it bills to. The rule's pool is Ada
+  // (named) plus an approver role holding Avery. Avery joins the role BEFORE any
+  // rule names it, so the assignment pads no approver pool (no step-up).
+  const directory = (await (await admin.request.get("/v1/users")).json()) as { users: Array<{ id: string; email: string }> };
+  averyId = directory.users.find((u) => u.email === "avery@regulait.local")!.id;
+  const role = await post("/v1/roles", { name: `bt approvers ${RUN}` });
+  const joined = await admin.request.post(`/v1/users/${averyId}/roles`, { headers: CSRF, data: { roleId: role.id } });
+  expect(joined.status(), await joined.text()).toBeLessThan(300);
+  await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId, approverRoleId: role.id });
+  // ADR-0186 B: tool-call approvals are passkey-signed by default, and this
+  // stack has no public URL (no passkey relying party), so the admin's decide
+  // below would fail closed. Signing is not what this journey tests: it is
+  // relaxed through the audited settings route (Ada, stepped up) for the
+  // spec's lifetime and restored in afterAll (M-068). Signing itself is proved
+  // in the gateway suite and adr0186-ab-signed-approvals.mock.spec.ts.
+  await bootSettings({ approvalSignatureMode: "off" });
   // owner rule: every builder agent bills to a project Dana belongs to
   const project = await post("/v1/projects", { name: `Builder tools e2e ${RUN}` });
   projectId = project.id as string;
@@ -159,6 +189,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 });
 
 test.afterAll(async () => {
+  await bootSettings({ approvalSignatureMode: "passkey" });
   await admin?.close();
   await dana?.close();
   if (mcp?.pid) mcp.kill("SIGTERM");
@@ -252,6 +283,15 @@ test("an organisation approval waits for the admin and the thread finishes when 
   // the admin decides in the one approvals queue
   const decided = await admin.request.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved" } });
   expect(decided.status(), await decided.text()).toBe(200);
+  // B4S-03: Dana's call needs a second, different approver (she works on hipaa-project): Avery approves too
+  expect((await decided.json()) as { status?: string }).toMatchObject({ status: "pending" });
+  const averyCtx = await signedInContext(state.baseUrl, "avery@regulait.local", [AVERY_PASSWORD, state.passwords.avery], AVERY_PASSWORD);
+  try {
+    const second = await averyCtx.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved", reason: "second approver" } });
+    expect(second.status(), await second.text()).toBe(200);
+  } finally {
+    await averyCtx.dispose();
+  }
   // the turn resumes AFTER the decide response (ADR-0173 review): wait for it
   // on the API before reading the page
   await expect

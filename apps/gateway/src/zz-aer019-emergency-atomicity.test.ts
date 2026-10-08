@@ -6,6 +6,7 @@ import {
   orgSettings, runMigrations, sql, type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -78,9 +79,12 @@ async function withAuditFailure(run: () => Promise<void>): Promise<void> {
   }
 }
 
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: tag, dataKey: "a".repeat(64) });
   const [a] = await db.insert(agents).values({ name: `${tag}-agent`, provider: "mock", tier: 1 })
     .returning({ id: agents.id });
@@ -95,6 +99,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await db.execute(sql.raw("DROP TRIGGER IF EXISTS aer019_test_reject_audit ON audit_log"));
   await db.execute(sql.raw("DROP FUNCTION IF EXISTS aer019_test_reject_audit()"));
   await mode("normal", "aer019 teardown returned to normal mode");

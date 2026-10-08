@@ -311,8 +311,16 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
 
   // GATE 2 — the kernel, on the protocol surface
   const ref = { serverId, name: grant, kind, surface: "protocol" as const };
-  const { decision, approvedApprovalId, argumentsDigest, approvalScope, contextDigest, policyEpoch, retiredApprovals } =
-    await governedEvaluate(
+  const {
+    decision,
+    approvedApprovalId,
+    argumentsDigest,
+    approvalScope,
+    contextDigest,
+    policyEpoch,
+    retiredApprovals,
+    matchedApprovalRuleIds,
+  } = await governedEvaluate(
       db,
       userId,
       serverId,
@@ -399,6 +407,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       argumentsDigest,
       argumentsPreview: approvalArgumentsPreview(decided),
       argumentsPreviewKind: "arguments_v1",
+      matchedApprovalRuleIds,
     });
   }
 

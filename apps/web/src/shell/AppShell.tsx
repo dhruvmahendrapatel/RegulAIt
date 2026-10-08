@@ -17,6 +17,7 @@ import { InfoButton } from "../ui/kit";
 import { ADMIN_GROUPS, SUITES, WORKSPACE, SuiteGlyph, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import { NavGlyph, RailGlyph } from "./navIcons";
 import { CommandPalette } from "./CommandPalette";
+import StepUpDialog from "../stepup/StepUpDialog";
 // ADR-0182 (D4) A14: the acknowledgement interstitial's slot (A14's file)
 import AcknowledgeGate from "../views/account/AcknowledgeGate";
 import s from "./shell.module.css";
@@ -522,6 +523,8 @@ export default function AppShell(props: { children: ReactNode }) {
         isAdmin={Boolean(auth?.isAdmin)}
         userId={auth?.userId ?? null}
       />
+      {/* ADR-0186 A: the one "confirm it's you" dialog (step-up), for every screen */}
+      <StepUpDialog />
     </div>
   );
 }

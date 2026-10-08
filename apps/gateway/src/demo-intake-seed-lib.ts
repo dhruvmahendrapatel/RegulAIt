@@ -93,6 +93,26 @@ async function seedDemoIntakeRun(
   const fail = (what: string, r: { status: number; body: Json }) =>
     report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
 
+  // B4S-06 — FIRST-ADMIN SETUP. Opening the assurance run's guardrail window
+  // (below) relaxes a guardrail: a settings_relax step-up, which the bootstrap
+  // credential passes only until an admin can step up — and enrolling Ada
+  // (persona() below, on a database the seed has not prepared) ends that. So the
+  // window is opened here, first, while it still can be; the run below keeps it.
+  // demo:prepare's seed already opened it (kept, nothing written); on a database
+  // where an admin can already step up and no window is open, the refusal is
+  // noted by the run below, as before.
+  {
+    const listed: Json[] = (await call("GET", "/v1/agents")).body.agents ?? [];
+    const early = await openAssuranceGuardrailWindow(
+      call,
+      BOOT,
+      assuranceAgentNames(fixtures, new Map(listed.map((a) => [a.name as string, a.provider as string])))
+        .map((n) => listed.find((a) => a.name === n)?.id as string | undefined)
+        .filter((id): id is string => Boolean(id)),
+    );
+    void early; // its notes are the run's below (which keeps these windows and closes them)
+  }
+
   // --- personas ------------------------------------------------------------------
   const users: Json[] = (await call("GET", "/v1/users")).body.users ?? [];
   async function persona(email: string, displayName: string, isAdmin: boolean): Promise<{ id: string; auth: Headers }> {
@@ -357,7 +377,7 @@ async function seedDemoIntakeRun(
   await seedRiskAcceptances(call, ada.auth, useCaseId, report);
 
   // --- required AI tests (ADR-0180 A3): real red-team runs for the agents the story ships ---
-  await seedRequiredTestRuns(call, ada, agentId, fixtures, report);
+  await seedRequiredTestRuns(call, ada, agentId, fixtures, report, BOOT);
 
   // --- accountability records (ADR-0182 D4): one feedback item that became a closed incident ---
   await seedDemoAccountability(call, { ada, dana, avery }, useCaseId, report);
@@ -692,6 +712,16 @@ const DEMO_ASSURANCE_PROBES: Array<Record<string, unknown>> = [
   },
 ];
 
+/** the agents the assurance run tests: every MOCK agent of an approved use case and of the hero */
+export function assuranceAgentNames(fixtures: DemoIntakeFixtures, providerByName: ReadonlyMap<string, string>): string[] {
+  return [
+    ...new Set([
+      ...fixtures.useCases.filter((u) => u.targetStatus === "approved").flatMap((u) => u.intendedAgentNames),
+      ...fixtures.hero.intendedAgentNames,
+    ]),
+  ].filter((n) => providerByName.get(n) === "mock");
+}
+
 /**
  * Seed real, passing evidence for the agents the story ships: every mock agent
  * of an approved use case and of the hero (the only agents a key-less demo can
@@ -705,6 +735,9 @@ async function seedRequiredTestRuns(
   agentId: Map<string, string>,
   fixtures: DemoIntakeFixtures,
   report: DemoSeedReport,
+  /** the deploy-time bootstrap credential: opening the guardrail window is a relaxation that needs a
+   * step-up (ADR-0186 A), which a persona's API key can never give; the seeding operator opens it */
+  operator: Record<string, string>,
 ): Promise<void> {
   const ok = (s: number) => s >= 200 && s < 300;
   const auth = ada.auth;
@@ -715,12 +748,7 @@ async function seedRequiredTestRuns(
     const modes = (agentsList.find((a) => a.name === n)?.modes ?? null) as string[] | null;
     return !modes || modes.length === 0 || modes.includes("execute") ? "execute" : modes[0]!;
   };
-  const names = [
-    ...new Set([
-      ...fixtures.useCases.filter((u) => u.targetStatus === "approved").flatMap((u) => u.intendedAgentNames),
-      ...fixtures.hero.intendedAgentNames,
-    ]),
-  ].filter((n) => provider.get(n) === "mock" && agentId.has(n));
+  const names = assuranceAgentNames(fixtures, provider).filter((n) => agentId.has(n));
   if (names.length === 0) return;
 
   // Every governed dispatch is attributed to a project here. The testing spend
@@ -774,7 +802,9 @@ async function seedRequiredTestRuns(
   }
   // ADR-0181: the strict guardrail default holds injection/jailbreak probes before they reach
   // the agent; open an audited, time-boxed window so the run measures the agent itself
-  const guardrailWindow = await openAssuranceGuardrailWindow(call, auth, names.map((n) => agentId.get(n)!));
+  // B4S-06: once an admin can step up, the bootstrap credential cannot open the
+  // window; demo:prepare's seed opened it during first-admin setup, and it is kept
+  const guardrailWindow = await openAssuranceGuardrailWindow(call, operator, names.map((n) => agentId.get(n)!));
   report.notes.push(...guardrailWindow.notes);
   try {
     for (const name of names) {

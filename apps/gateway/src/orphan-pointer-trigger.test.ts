@@ -64,6 +64,9 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let anaId: string;
+/** ADR-0186 A: the approver of the rule whose SUBJECT is ana — a rule may not
+ * name its own subject as approver (the caller can never approve their own call) */
+let otherApproverId: string;
 let piaId: string;
 let serverId: string;
 /** deleted via RAW SQL USER CASCADE — the path the trigger exists for */
@@ -84,7 +87,7 @@ async function makeUser(email: string) {
   return res.json().id as string;
 }
 
-async function makeApprovalRule(subjectId: string) {
+async function makeApprovalRule(subjectId: string, approverUserId = anaId) {
   const r = await app.inject({
     method: "POST",
     headers: AUTH,
@@ -95,7 +98,7 @@ async function makeApprovalRule(subjectId: string) {
       serverScope: "server",
       serverId,
       toolName: "orph_write",
-      approverUserId: anaId,
+      approverUserId,
     },
   });
   expect(r.statusCode).toBe(201);
@@ -155,6 +158,7 @@ beforeAll(async () => {
 
   anaId = await makeUser("orph-ana@example.com");
   piaId = await makeUser("orph-pia@example.com");
+  otherApproverId = await makeUser("orph-approver@example.com");
 
   const s = await app.inject({
     method: "POST",
@@ -172,7 +176,7 @@ beforeAll(async () => {
   });
 
   cascadeRuleId = await makeApprovalRule(piaId);
-  routeRuleId = await makeApprovalRule(anaId);
+  routeRuleId = await makeApprovalRule(anaId, otherApproverId);
 
   const a = await app.inject({
     method: "POST",
@@ -195,7 +199,7 @@ afterAll(async () => {
     await db.delete(auditLog).where(inArray(auditLog.objectId, artifacts));
   }
   await db.delete(agents).where(eq(agents.name, "orph-agent"));
-  await db.delete(users).where(inArray(users.email, ["orph-ana@example.com", "orph-pia@example.com"]));
+  await db.delete(users).where(inArray(users.email, ["orph-ana@example.com", "orph-pia@example.com", "orph-approver@example.com"]));
 });
 
 // ---------------------------------------------------------------------------

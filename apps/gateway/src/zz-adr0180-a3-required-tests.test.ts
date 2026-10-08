@@ -54,6 +54,7 @@ import { agentConfigHash } from "./evals.js";
 import { requiredTestStatus, requiredTestsMonitorInput } from "./required-tests.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { previewedPut, setDecisionRegressionGateForTest } from "./testing/decision-regression.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -179,6 +180,8 @@ async function clearRuns() {
 }
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -186,6 +189,7 @@ beforeAll(async () => {
   // drives admins through keys and is not about MFA, so it relaxes the dial
   // explicitly and hands the shared database back strict in afterAll (M-068).
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   for (const [k, isAdmin] of [["admin", true], ["member", false]] as const) {
@@ -213,6 +217,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await restoreAdminKeyMfa?.();
   // M-068: leave the strict defaults and the strict gate mode behind
   await db.update(governanceReviewPolicy).set({ requiredTests: {} });

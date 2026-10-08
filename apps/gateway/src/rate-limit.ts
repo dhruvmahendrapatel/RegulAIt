@@ -25,6 +25,15 @@
  *                  credential-accepting endpoints (/auth/login,
  *                  /auth/mfa/verify, /auth/login-with-key), which is what
  *                  actually stops spraying;
+ *   - `auth:stepup:<ip>` the same strict tier on the two step-up ceremony
+ *                  routes (ADR-0186 A: /v1/auth/step-up/options and /verify).
+ *                  They accept a TOTP code or a passkey assertion from a
+ *                  session that already exists, so a stolen session could
+ *                  otherwise mint a ceremony per guess on the general bucket.
+ *                  Its own bucket (never shared with sign-in), and a second,
+ *                  per-USER bucket of the same size (`auth:stepup:user:<id>`)
+ *                  runs once the session has resolved — see
+ *                  `stepUpRateLimitUserKey` and registerStepUpRoutes;
  *   - `sso:<ip>`   a moderate bucket on the two SSO return legs (the SAML ACS
  *                  and the OIDC callback). An ACS failure costs an XML parse, a
  *                  signature check and a hash-chained audit row, so it must not
@@ -123,6 +132,21 @@ export const AUTH_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
   "/auth/oidc/:providerId/login",
 ]);
 
+/**
+ * ADR-0186 A: the step-up ceremony routes — authenticated, but each verify
+ * checks a second factor, so they ride the strict credential tier (per IP
+ * here, per user after the session resolves).
+ */
+export const STEP_UP_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
+  "/v1/auth/step-up/options",
+  "/v1/auth/step-up/verify",
+]);
+
+/** the per-USER step-up bucket (same strict tier), applied once the session has resolved */
+export function stepUpRateLimitUserKey(userId: string): string {
+  return `auth:stepup:user:${userId}`;
+}
+
 /** CFG-06: the SSO return legs — unauthenticated, and expensive to refuse */
 export const SSO_RATE_LIMIT_ROUTES: ReadonlySet<string> = new Set([
   "/auth/saml/:providerId/acs",
@@ -182,6 +206,12 @@ export function isAuthRateLimited(req: FastifyRequest): boolean {
   return AUTH_RATE_LIMIT_ROUTES.has(url);
 }
 
+/** true when this request is a step-up ceremony route (ADR-0186 A) */
+export function isStepUpRateLimited(req: FastifyRequest): boolean {
+  const url = req.routeOptions?.url ?? req.url.split("?")[0]!;
+  return STEP_UP_RATE_LIMIT_ROUTES.has(url);
+}
+
 /** true when this request is an SSO return leg (CFG-06) */
 export function isSsoRateLimited(req: FastifyRequest): boolean {
   const url = req.routeOptions?.url ?? req.url.split("?")[0]!;
@@ -202,6 +232,7 @@ export function carriesBearer(req: FastifyRequest): boolean {
  */
 export function rateLimitKey(req: FastifyRequest): string {
   if (isAuthRateLimited(req)) return `auth:${req.ip}`;
+  if (isStepUpRateLimited(req)) return `auth:stepup:${req.ip}`;
   if (isSsoRateLimited(req)) return `sso:${req.ip}`;
   return carriesBearer(req) ? `ipk:${req.ip}` : `ip:${req.ip}`;
 }

@@ -153,3 +153,17 @@ condition = "AND"
 paths = ['''^apps/gateway/src/totp\.test\.ts$''']
 regexTarget = "secret"
 regexes = ['''^GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ$''']
+
+[[allowlists]]
+description = "Synthetic AWS-key-shaped passkey label: the B4 step-up test proves a secret-shaped label is redacted before storage (never a real key)"
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-b4a-step-up\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^AKIAZ7XQK3NWQOPXR4LT$''']
+
+[[allowlists]]
+description = "Placeholder ciphertext literal in the B4 approver-eligibility test (marks a user as TOTP-enrolled; never decrypted)"
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-b4s-approver-eligibility\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^b4s1-synthetic$''']

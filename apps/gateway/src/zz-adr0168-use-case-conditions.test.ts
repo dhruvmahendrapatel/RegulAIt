@@ -45,6 +45,11 @@ import {
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { setAssuranceGateModeForTest } from "./testing/assurance-mode.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -134,6 +139,7 @@ let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
   // drives admins through keys and is not about MFA, so it relaxes the dial
   // explicitly and hands the shared database back strict in afterAll (M-068).
@@ -150,6 +156,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await restoreAdminKeyMfa?.();
   app.server.closeAllConnections();
   await app.close();
@@ -405,7 +412,8 @@ describe("ADR-0168 validation", () => {
     // a NON-intake approval: neither outcome applies
     const [other] = await db
       .insert(approvals)
-      .values({ userId: users.owner.id, objectType: "mcp_tool", approverUserId: users.admin.id })
+      // ADR-0186: a plain (unsigned, pre-0186 shape) tool-call approval
+      .values({ userId: users.owner.id, objectType: "mcp_tool", approverUserId: users.admin.id, namedApproverUserId: users.admin.id, signatureMode: "off" })
       .returning({ id: approvals.id });
     const ret = await decide(other!.id, { decision: "returned", reason: "more" });
     expect(ret.statusCode).toBe(422);

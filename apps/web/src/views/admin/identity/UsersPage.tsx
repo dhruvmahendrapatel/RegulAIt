@@ -9,8 +9,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { RefusalGuidance } from "../../../api/refusals";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
+import UserPasskeysPanel from "./UserPasskeysPanel";
 import type {
   AdminUser,
   ApiKey,
@@ -78,10 +80,12 @@ export default function UsersPage() {
 
   const issuePassword = async (u: AdminUser, force: boolean) => {
     await act.run(async () => {
-      const issued = await api.post<{ password: string }>(
-        `/v1/users/${u.id}/set-initial-password`,
-        force ? { force: true } : {},
-      );
+      // B4S-02: issuing someone else's password needs the admin to confirm it's them
+      const issued = (
+        await withStepUp((h) =>
+          api.postWithHeaders<{ password: string }>(`/v1/users/${u.id}/set-initial-password`, force ? { force: true } : {}, h),
+        )
+      ).body;
       setReveal({
         title: `One-time password for ${u.email}`,
         secret: issued.password,
@@ -118,7 +122,7 @@ export default function UsersPage() {
               e.preventDefault();
               void create
                 .run(
-                  () => api.post("/v1/users", { email, displayName, isAdmin: isAdmin === "true" }),
+                  () => withStepUp((h) => api.postWithHeaders("/v1/users", { email, displayName, isAdmin: isAdmin === "true" }, h)),
                   "User created — issue them a one-time password or an API key below",
                 )
                 .then((ok) => {
@@ -215,7 +219,8 @@ export default function UsersPage() {
             onIssuePassword={(force) => void issuePassword(selected, force)}
             onPromote={() =>
               void act.run(
-                () => api.post(`/v1/users/${selected.id}/admin`, { isAdmin: true }),
+                // B4S-02: granting admin needs the acting admin to confirm it's them
+                () => withStepUp((h) => api.postWithHeaders(`/v1/users/${selected.id}/admin`, { isAdmin: true }, h)),
                 "Promoted to admin",
               )
             }
@@ -225,7 +230,8 @@ export default function UsersPage() {
                 body: `${selected.displayName || selected.email} loses the admin console and every admin-only endpoint immediately.`,
                 onConfirm: () =>
                   void act.run(
-                    () => api.post(`/v1/users/${selected.id}/admin`, { isAdmin: false }),
+                    // a demotion asks for nothing; the same wrapper keeps every admin-flag write on one path
+                    () => withStepUp((h) => api.postWithHeaders(`/v1/users/${selected.id}/admin`, { isAdmin: false }, h)),
                     "Demoted to member",
                   ),
               })
@@ -244,7 +250,7 @@ export default function UsersPage() {
             }
             onReactivate={() =>
               void act.run(
-                () => api.post(`/v1/users/${selected.id}/reactivate`, {}),
+                () => withStepUp((h) => stepUpApi.post(`/v1/users/${selected.id}/reactivate`, {}, h)),
                 "User reactivated — their existing keys work again",
               )
             }
@@ -283,7 +289,8 @@ export default function UsersPage() {
           setMfaClearFor(null);
           if (u)
             void act.run(
-              () => api.post(`/v1/users/${u.id}/mfa/clear`, { reason }),
+              // B4S-02: clearing someone else's second factor needs the admin to confirm it's them
+              () => withStepUp((h) => api.postWithHeaders(`/v1/users/${u.id}/mfa/clear`, { reason }, h)),
               "MFA cleared — they can sign in with their password and re-enroll",
             );
         }}
@@ -322,6 +329,7 @@ function UserDetail(props: {
         tabs={[
           { id: "lifecycle", label: "Lifecycle" },
           { id: "sessions", label: "Sessions" },
+          { id: "passkeys", label: "Passkeys" },
           { id: "overrides", label: "Overrides" },
         ]}
         active={tab}
@@ -388,6 +396,7 @@ function UserDetail(props: {
           </div>
         )}
         {tab === "sessions" && <SessionsPanel userId={user.id} />}
+        {tab === "passkeys" && <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />}
         {tab === "overrides" && <OverridesPanel userId={user.id} />}
       </div>
     </Card>
@@ -559,8 +568,11 @@ function RevocationScopeCell(props: {
         onChange={(e) => {
           const next = e.target.value as RevocationScope;
           void act.run(
+            // B4S-05: narrowing a revocation to read_only gives reads back (a settings_relax step-up)
             () =>
-              api.patch(`/v1/revocations/${props.kind}/${props.revocationId}/scope`, { scope: next }),
+              withStepUp((h) =>
+                stepUpApi.patch(`/v1/revocations/${props.kind}/${props.revocationId}/scope`, { scope: next }, h),
+              ),
             next === "read_only"
               ? "Narrowed to read_only — writes stay denied, reads are allowed again"
               : "Restored to full — every tool/operation denied",
@@ -676,7 +688,10 @@ function OverridesPanel(props: { userId: string }) {
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => void act.run(() => api.del(`/v1/revocations/${r.id}`), "Revocation lifted")}
+                onClick={() =>
+                  // B4S-05: lifting a revocation gives an entitlement back (a settings_relax step-up)
+                  void act.run(() => withStepUp((h) => api.delWithHeaders(`/v1/revocations/${r.id}`, h)), "Revocation lifted")
+                }
               >
                 lift
               </Button>
@@ -736,7 +751,7 @@ function OverridesPanel(props: { userId: string }) {
                     variant="ghost"
                     onClick={() =>
                       void act.run(
-                        () => api.del(`/v1/users/${props.userId}/revocations/agents/${r.id}`),
+                        () => withStepUp((h) => api.delWithHeaders(`/v1/users/${props.userId}/revocations/agents/${r.id}`, h)),
                         "Agent revocation lifted",
                       )
                     }
@@ -805,7 +820,7 @@ function OverridesPanel(props: { userId: string }) {
                     variant="ghost"
                     onClick={() =>
                       void act.run(
-                        () => api.del(`/v1/users/${props.userId}/revocations/connectors/${r.id}`),
+                        () => withStepUp((h) => api.delWithHeaders(`/v1/users/${props.userId}/revocations/connectors/${r.id}`, h)),
                         "Connector revocation lifted",
                       )
                     }

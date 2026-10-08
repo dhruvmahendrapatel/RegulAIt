@@ -15,6 +15,7 @@
 import { activate, escapeToTrigger, expectDialogTrap, tabTo } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -271,4 +272,17 @@ test("X14 keyboard: decision regression tabs and retirement dialog preserve focu
   await activate(page, dialog.getByRole("button", { name: "Retire case", exact: true }));
   await expect.poll(() => cap.caseDeletes).toEqual([CASE]);
   await expect(page.locator('[aria-live="polite"]')).toContainText("Case retired");
+});
+
+// ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: relaxing the decision regression gate asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const cap = await mockApi(page);
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/admin/governance/decision-regression");
+  await page.getByRole("tab", { name: "Settings" }).click();
+  await page.getByLabel("Decision regression gate").selectOption("warn");
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(cap.settingsPuts).toEqual([{ decisionRegressionGate: "warn", decisionRegressionMaxAgeMinutes: 60 }]);
 });
