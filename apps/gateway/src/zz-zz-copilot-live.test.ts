@@ -631,14 +631,32 @@ describe("L6b — an approved proposal can be APPLIED, and an unapproved one can
     expect(await grantExists(reGranted)).toBe(true);
   });
 
-  it("APPLIES an approved policy_tightening through applyRuleEdit — never a raw table write", async () => {
+  it("REFUSES a 'tightening' that loosens the rule: write-only means reads stop needing approval (ADR-0186 decision 28)", async () => {
     const [before] = await db.select().from(approvalRules).where(eq(approvalRules.id, tightenRuleId));
     expect(before!.writeOnly).toBe(false);
-
     const { proposalId, approvalId } = await proposeThrough("policy_tightening", "l6 make the rule write-only", {
       ruleKind: "approvals",
       ruleId: tightenRuleId,
       patch: { writeOnly: true },
+    });
+    await decide(approvalId, "approved");
+    // the copilot applier cannot step up: a loosening is refused, never applied as a "tightening"
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("step_up_required");
+    const [after] = await db.select().from(approvalRules).where(eq(approvalRules.id, tightenRuleId));
+    expect(after!.writeOnly).toBe(false);
+  });
+
+  it("APPLIES an approved policy_tightening through applyRuleEdit — never a raw table write", async () => {
+    const [before] = await db.select().from(approvalRules).where(eq(approvalRules.id, tightenRuleId));
+    expect(before!.toolName).toBe("l6_write");
+
+    // one tool -> every tool: the rule now covers more calls
+    const { proposalId, approvalId } = await proposeThrough("policy_tightening", "l6 widen the rule to every tool", {
+      ruleKind: "approvals",
+      ruleId: tightenRuleId,
+      patch: { toolName: null },
     });
     await decide(approvalId, "approved");
     const res = await applyProposal(proposalId);
@@ -647,7 +665,7 @@ describe("L6b — an approved proposal can be APPLIED, and an unapproved one can
 
     // THE MUTATION REALLY HAPPENED, through the choke point
     const [after] = await db.select().from(approvalRules).where(eq(approvalRules.id, tightenRuleId));
-    expect(after!.writeOnly).toBe(true);
+    expect(after!.toolName).toBeNull();
 
     // and the choke point wrote ITS own audit row too — the edit is visible as
     // a rule edit, not only as a copilot event

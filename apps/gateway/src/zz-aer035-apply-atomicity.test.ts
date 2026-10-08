@@ -235,14 +235,14 @@ describe("AER-035 — the other three kinds", () => {
     const proposalId = await approvedProposal("policy_tightening", {
       ruleKind: "rate-limits",
       ruleId,
-      patch: { maxCalls: 5 },
+      patch: { windowSeconds: 600 }, // a LONGER window for the same calls: a real tightening (ADR-0186 decision 28: more calls would loosen it)
     });
 
     const { tally } = await stampede(proposalId);
 
     // WHAT THE WORLD HOLDS, for a kind whose write is IDEMPOTENT.
     //
-    // `maxCalls: 5` applied twice leaves the same 5, so the value cannot tell
+    // `windowSeconds: 600` applied twice leaves the same 600, so the value cannot tell
     // one application from two — this is the kind where a count of successes
     // would have been the only evidence, and that is exactly the evidence AER-035
     // says is not enough. `applyRuleEdit` writes one audit row per edit through
@@ -263,7 +263,7 @@ describe("AER-035 — the other three kinds", () => {
     expect(tally.get("409:proposal_already_applied")).toBe(RACERS - 1);
 
     const [after] = await db.select().from(rateLimits).where(eq(rateLimits.id, ruleId));
-    expect(after!.maxCalls).toBe(5);
+    expect(after!.windowSeconds).toBe(600);
     // and no version was minted, which is the unversioned path being taken —
     // asserted rather than assumed, so a future change to versioning shows up
     // here as a failure to think about rather than a silent drift

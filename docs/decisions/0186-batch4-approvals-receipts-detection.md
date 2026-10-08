@@ -520,7 +520,10 @@ unless stated.
       | data scope | `argPath` | compare | any change (the guarded argument becomes unconstrained) |
       | data scope | `allowedValues` | compare | any value not allowed before |
 
-      The deploy-mode route keeps its own step-up (same rule) and tells the writer it was asked. **Not covered:**
+      The deploy-mode route keeps its own step-up (same rule) and tells the writer it was asked. Two existing
+      fixtures called a loosening a "policy_tightening" and are corrected: making an approval rule write-only
+      (`zz-zz-copilot-live`: now refused at apply, and the tightening case widens the rule to every tool) and raising
+      a rate limit's `maxCalls` (`zz-aer035-apply-atomicity`: now a longer window). **Not covered:**
       compliance profiles (`POST /v1/compliance/profiles`, the onboarding pack) — also written through `applyRuleEdit`,
       but their loosening is a cascade question (required templates, PII and MCP modes, retention, guardrail floors)
       that needs its own comparator; recorded as a residual.
