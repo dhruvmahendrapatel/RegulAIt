@@ -223,6 +223,13 @@ async function grantFor(p: Person, action: { kind: string; body: Record<string, 
   return v.json().stepUpToken as string;
 }
 
+/** B4S-06: a protected write once an admin here can step up — the admin's session, stepped up the real way */
+async function asSteppedUpAdmin(method: Method, url: string, payload: unknown) {
+  const first = await as(P.adm.s, method, url, payload);
+  if (first.statusCode !== 403 || first.json().error !== "step_up_required") return first;
+  return as(P.adm.s, method, url, payload, { [STEP_UP_HEADER]: await grantFor(P.adm, first.json().action) });
+}
+
 /** refused from an API key (no methods) and from the admin's session without a grant, with `body`; admitted with a grant for it */
 async function provesStepUp(method: Method, url: string, payload: unknown, body: Record<string, unknown>, okStatus = 200) {
   const key = await withKey(P.adm.key, method, url, payload);
@@ -384,7 +391,7 @@ describe("B4S-02: at decide, only principals and links that existed when the cal
     await rule(tool);
     const id = await queued(tool, { text: "re-pointed" });
     // a routing rule written after the call was queued points matching approvals at the outsider
-    const r = await withKey(AUTH, "POST", "/v1/approvals/assignment-rules", {
+    const r = await asSteppedUpAdmin("POST", "/v1/approvals/assignment-rules", {
       name: `b4s1 route ${RUN}`,
       objectType: "mcp_tool",
       assigneeKind: "user",

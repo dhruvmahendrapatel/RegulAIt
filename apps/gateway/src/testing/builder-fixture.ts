@@ -9,6 +9,7 @@ import type { LightMyRequestResponse } from "fastify";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "../app.js";
 import { enrolAdminTotpForTest } from "./identity-posture.js";
+import { forgetStepUpMethodsForTest } from "./step-up-posture.js";
 
 export interface Person {
   id: string;
@@ -48,6 +49,8 @@ export async function builderKit(prefix: string): Promise<BuilderKit> {
   const req: BuilderKit["req"] = (method, url, headers, payload) =>
     app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
 
+  /** B4S-06: the admins this kit enrolled, whose methods close() forgets (M-068) */
+  const admins: string[] = [];
   const person = async (label: string, opts: { admin?: boolean } = {}): Promise<Person> => {
     const u = await req("POST", "/v1/users", BOOT, { email: `${prefix}-${label}-${RUN}@example.com`, displayName: `${label} ${RUN}` });
     if (u.statusCode >= 300) throw new Error(`user create failed: ${u.body}`);
@@ -58,6 +61,7 @@ export async function builderKit(prefix: string): Promise<BuilderKit> {
       // ADR-0181 (FX2): an admin's key answers to the org MFA requirement, so
       // an admin person enrols TOTP (real routes) before their key is minted
       await enrolAdminTotpForTest(app, bootToken, id);
+      admins.push(id);
     }
     const k = await req("POST", `/v1/users/${id}/keys`, BOOT, { name: "k" });
     const p = await req("POST", "/v1/projects", BOOT, { name: `${prefix}-${label}-${RUN}` });
@@ -88,6 +92,9 @@ export async function builderKit(prefix: string): Promise<BuilderKit> {
   };
 
   const close = async () => {
+    // B4S-06: an admin left with an authenticator would end first-admin setup
+    // for every suite after this one (the bootstrap credential would stop passing step-up)
+    await forgetStepUpMethodsForTest(db, admins);
     app.server.closeAllConnections();
     await app.close();
   };

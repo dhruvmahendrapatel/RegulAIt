@@ -93,6 +93,26 @@ async function seedDemoIntakeRun(
   const fail = (what: string, r: { status: number; body: Json }) =>
     report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
 
+  // B4S-06 — FIRST-ADMIN SETUP. Opening the assurance run's guardrail window
+  // (below) relaxes a guardrail: a settings_relax step-up, which the bootstrap
+  // credential passes only until an admin can step up — and enrolling Ada
+  // (persona() below, on a database the seed has not prepared) ends that. So the
+  // window is opened here, first, while it still can be; the run below keeps it.
+  // demo:prepare's seed already opened it (kept, nothing written); on a database
+  // where an admin can already step up and no window is open, the refusal is
+  // noted by the run below, as before.
+  {
+    const listed: Json[] = (await call("GET", "/v1/agents")).body.agents ?? [];
+    const early = await openAssuranceGuardrailWindow(
+      call,
+      BOOT,
+      assuranceAgentNames(fixtures, new Map(listed.map((a) => [a.name as string, a.provider as string])))
+        .map((n) => listed.find((a) => a.name === n)?.id as string | undefined)
+        .filter((id): id is string => Boolean(id)),
+    );
+    void early; // its notes are the run's below (which keeps these windows and closes them)
+  }
+
   // --- personas ------------------------------------------------------------------
   const users: Json[] = (await call("GET", "/v1/users")).body.users ?? [];
   async function persona(email: string, displayName: string, isAdmin: boolean): Promise<{ id: string; auth: Headers }> {

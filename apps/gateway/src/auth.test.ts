@@ -43,6 +43,7 @@ import {
 import { buildApp } from "./app.js";
 import { hashToken, totpCode, totpStep } from "./auth.js";
 import { enrolTotpForTest } from "./testing/identity-posture.js";
+import { forgetStepUpMethodsForTest, relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -287,6 +288,7 @@ const mkProvider = async (payload: Record<string, unknown>) => {
   return row;
 };
 
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -314,9 +316,19 @@ beforeAll(async () => {
   // exactly as it was found (see the SUITE-ORDER ISOLATION note above)
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   orgSettingsSnapshot = settings ?? null;
+  // B4S-06: this suite onboards people through the bootstrap credential after an
+  // admin here has enrolled TOTP, when the bootstrap credential no longer passes
+  // a step-up. It is about sign-in and sessions, not step-up (proved in
+  // zz-b4a-step-up / zz-b4s-round2): step-up is off for its run, restored below
+  // (and by the settings snapshot)
+  restoreStepUp = await relaxStepUpForTest(db);
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
+  // B4S-06 (M-068): the admins this suite enrolled leave no step-up method behind
+  const suiteUsers = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${"%@auth-test.example"}`);
+  await forgetStepUpMethodsForTest(db, suiteUsers.map((u) => u.id));
   // Providers first, settings second: the rows go out through the DB (not the
   // API), so the no-lockout guard can never refuse this file's own cleanup.
   if (createdOidcProviderIds.size > 0) {

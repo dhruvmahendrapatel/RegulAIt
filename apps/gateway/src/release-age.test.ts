@@ -28,6 +28,7 @@ import { recordSighting } from "./release-age.js";
 import { skillDigest } from "./skill-admission.js";
 import { manifestDigest } from "@regulait/shared";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -79,14 +80,21 @@ const gate = async (serverId: string) => {
 const agentRow = async (id: string) => (await k.db.select().from(builderAgents).where(eq(builderAgents.id, id)))[0]!;
 const tools = (desc: string) => [{ name: "lookup", description: desc, inputSchema: { type: "object" } }];
 
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("rel-age");
   restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db, ["mcpPrivateRangesDefault"]);
   owner = await k.person("owner");
   admin = await k.person("admin", { admin: true });
+  // B4S-06: the bootstrap credential sets the cooldown (shortening it is a
+  // settings_relax step-up) after the kit's admin enrolled TOTP, when it no
+  // longer passes one. This suite is about the release-age gate, not step-up
+  // (proved in zz-b4s-round2): step-up is off for its run, restored below
+  restoreStepUp = await relaxStepUpForTest(k.db);
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await restoreStrictAdmission?.();
   // M-068: global state this file created is removed before it ends
   // ADR-0181: the shipped default is 7, so that is what is handed on

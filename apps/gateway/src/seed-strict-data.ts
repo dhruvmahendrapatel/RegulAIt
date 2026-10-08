@@ -212,14 +212,6 @@ export async function openAssuranceGuardrailWindow(
       continue;
     }
     if (!relaxes && !leftover) continue; // the org default already lets the probes reach the agent
-    // B4S-06: a LIVE window with exactly these modes, opened during first-admin
-    // setup (`seed --open-assurance-window`, before any admin could step up), is
-    // kept as it is — no second relaxation is written — and closed by restore()
-    if (leftover && existing?.expired === false && sameModes(existing.modes ?? {}, modes)) {
-      opened.push(id);
-      kept++;
-      continue;
-    }
     const r = await call(
       "PUT",
       `/v1/guardrails/config/agent/${id}`,
@@ -229,6 +221,19 @@ export async function openAssuranceGuardrailWindow(
     if (r.status === 200) {
       opened.push(id);
       if (leftover) reclaimed++;
+    } else if (
+      // B4S-06: once an admin can step up, the bootstrap credential cannot write
+      // the window again. A LIVE window with exactly these modes, opened during
+      // first-admin setup (`seed --open-assurance-window`), is kept as it is and
+      // closed by restore()
+      r.status === 403 &&
+      r.body.error === "step_up_required" &&
+      leftover &&
+      existing?.expired === false &&
+      sameModes(existing.modes ?? {}, modes)
+    ) {
+      opened.push(id);
+      kept++;
     } else notes.push(`assurance guardrail window: could not open for agent ${id} (${r.status} ${String(r.body.error ?? "")})`);
   }
   if (kept > 0) {

@@ -191,8 +191,14 @@ describe("B4S-01: a steward change through the stewardship PATCH needs owner_cha
 
   it("a non-admin steward handing the agent over must step up too", async () => {
     const id = await mkAgent("b4s1-handover");
-    const set = await app.inject({ method: "PATCH", url: `/v1/agents/${id}/stewardship`, headers: AUTH, payload: { stewardUserId: steward.id } });
-    expect(set.statusCode, set.body).toBe(200); // the deploy-time bootstrap credential is the root of the deployment
+    // B4S-06: the admin (who can step up) names the steward, stepped up; the
+    // bootstrap credential no longer passes a step-up once an admin can give one
+    const named = await as(admin, "PATCH", `/v1/agents/${id}/stewardship`, { stewardUserId: steward.id });
+    expect(named.statusCode, named.body).toBe(403);
+    const set = await as(admin, "PATCH", `/v1/agents/${id}/stewardship`, { stewardUserId: steward.id }, {
+      [STEP_UP_HEADER]: await grantFor(admin, named.json().action),
+    });
+    expect(set.statusCode, set.body).toBe(200);
     await provesStepUp(steward, "PATCH", `/v1/agents/${id}/stewardship`, { stewardUserId: U.z }, {
       kind: "owner_change",
       body: { objectType: "agent", objectId: id, ownerUserId: U.z },

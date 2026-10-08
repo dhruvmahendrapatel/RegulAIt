@@ -54,7 +54,7 @@ let scratch: Db;
 // through a test must never be able to leave the app — and therefore the
 // scratch database — pinned open past teardown.
 let app: ReturnType<typeof buildApp> | undefined;
-const seedRuns: Array<{ status: number | null; stderr: string }> = [];
+const seedRuns: Array<{ status: number | null; stderr: string; stdout: string }> = [];
 
 beforeAll(async () => {
   admin = createDb(DATABASE_URL);
@@ -67,7 +67,7 @@ beforeAll(async () => {
       env: { ...process.env, DATABASE_URL: scratchUrl },
       timeout: 180_000,
     });
-    seedRuns.push({ status: r.status, stderr: r.stderr ?? "" });
+    seedRuns.push({ status: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" });
   }
   scratch = createDb(scratchUrl);
   // buildApp does NOT take ownership of the Db it is handed — it never ends the
@@ -241,23 +241,21 @@ describe("seed script", () => {
       // re-running the seeder must not duplicate or clear it
       expect(row!.username).toBe(username);
     }
-    // and the username is a real credential, not decoration: issue a fresh
-    // one-time password through the API and sign in with the NAME alone. The
-    // app is built in beforeAll and closed in afterAll — closing it here would
-    // be skipped by any assertion above that throws.
+    // and the username is a real credential, not decoration: sign in with the
+    // NAME alone and the one-time password the first seed run printed for her.
+    // (B4S-06: issuing a fresh one with the bootstrap token is refused now —
+    // the seed enrolled her authenticator, so an admin can step up and the
+    // bootstrap credential no longer passes one.) The app is built in
+    // beforeAll and closed in afterAll — closing it here would be skipped by
+    // any assertion above that throws.
     const adminUser = rows.find((u) => u.email === "admin@regulait.local")!;
-    const issued = await app!.inject({
-      method: "POST",
-      headers: { authorization: "Bearer seed-test-boot" },
-      url: `/v1/users/${adminUser.id}/set-initial-password`,
-      payload: { force: true },
-    });
-    expect(issued.statusCode).toBe(200);
+    const printed = /admin\s+admin@regulait\.local\s+(\S+)/.exec(seedRuns[0]!.stdout)?.[1];
+    expect(printed, "the first seed run printed Ada's one-time password").toMatch(/^[^(]/);
     const signIn = await app!.inject({
       method: "POST",
       url: "/auth/login",
       headers: { "x-regulait-csrf": "1" },
-      payload: { identifier: "admin", password: issued.json().password },
+      payload: { identifier: "admin", password: printed },
     });
     expect(signIn.statusCode).toBe(200);
     // ADR-0181 (FX2): the seed enrolled the admin's TOTP (her API key answers

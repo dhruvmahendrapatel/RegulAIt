@@ -482,8 +482,9 @@ describe("step-up grants: single use, bound to kind+digest, session-bound, expir
     const token = await stepUpWithPasskey(admin, auth, refused.json().action);
     const ok = await put({ [STEP_UP_HEADER]: token });
     expect(ok.statusCode, ok.body).toBe(200);
-    // single use: put the owner back (the bootstrap credential), then replay the SAME request with the SAME grant
-    expect((await withKey(AUTH, "PUT", `/v1/servers/${server}/owner`, { ownerUserId: null })).statusCode).toBe(200);
+    // single use: put the owner back (directly — B4S-06: the bootstrap credential no longer passes a
+    // step-up once an admin can give one), then replay the SAME request with the SAME grant
+    await db.update(mcpServers).set({ ownerUserId: null }).where(eq(mcpServers.id, server));
     const back = await put({ [STEP_UP_HEADER]: token });
     expect(back.statusCode).toBe(403);
     expect(back.json().presentedGrant).toBe("not_valid_for_this_action");
@@ -560,9 +561,11 @@ describe("step-up grants: single use, bound to kind+digest, session-bound, expir
     const o = await withKey(people.admin.key, "POST", "/v1/auth/step-up/options", { action: { kind: "owner_change", body: {} } });
     expect(o.statusCode).toBe(403);
     expect(o.json().error).toBe("browser_session_required");
-    // the bootstrap credential is no person: it is not asked (and audited as before)
+    // B4S-06: the bootstrap credential is no person either. An admin here can step up (the admin
+    // enrolled a passkey), so it is refused the same way: no methods, credential "bootstrap"
     const boot = await withKey(AUTH, "PUT", `/v1/servers/${server}/owner`, { ownerUserId: people.member.id });
-    expect(boot.statusCode, boot.body).toBe(200);
+    expect(boot.statusCode, boot.body).toBe(403);
+    expect(boot.json()).toMatchObject({ error: "step_up_required", methods: [], credential: "bootstrap" });
   });
 
   it("a chat tap and a bulk operation can never step up", async () => {

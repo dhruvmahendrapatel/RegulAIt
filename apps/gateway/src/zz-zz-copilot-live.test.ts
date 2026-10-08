@@ -808,11 +808,13 @@ describe("B8c — rule_to_approval applies through POST /v1/rules/approvals' own
       create: createPayload("b8c_gone_tool"),
     });
     await decide(approvalId, "approved");
-    // the source rule is deleted through the ordinary admin DELETE
+    // the source rule is deleted through the ordinary DELETE route. B4S-05: removing a rule is a
+    // settings_relax step-up, which an admin's API key can never give; no admin here can step up,
+    // so the deployment's bootstrap credential (first-admin setup) makes it
     const del = await app.inject({
       method: "DELETE",
       url: `/v1/rules/rate-limits/${sourceId}`,
-      headers: adminAuth,
+      headers: AUTH,
     });
     expect(del.statusCode).toBe(200);
 

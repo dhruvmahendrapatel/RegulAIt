@@ -215,6 +215,26 @@ async function queued(tool: string, args: Record<string, unknown>, projectId?: s
   return (out as { approvalId: string }).approvalId;
 }
 
+/**
+ * B4S-06: once an admin here can step up (P.adm enrolled a passkey in
+ * beforeAll), the bootstrap credential no longer passes a step-up, so a
+ * protected write (a delegation is a settings_relax act) is made by that admin
+ * the real way: refused, a passkey step-up for exactly that action, resent.
+ */
+async function asSteppedUpAdmin(method: Method, url: string, payload?: unknown) {
+  const first = await as(P.adm.s, method, url, payload);
+  if (first.statusCode !== 403 || first.json().error !== "step_up_required") return first;
+  const o = await as(P.adm.s, "POST", "/v1/auth/step-up/options", { action: first.json().action });
+  expect(o.statusCode, o.body).toBe(200);
+  const v = await as(P.adm.s, "POST", "/v1/auth/step-up/verify", {
+    stepUpId: o.json().stepUpId,
+    method: "passkey",
+    response: P.adm.auth.authenticate(o.json().passkey.options),
+  });
+  expect(v.statusCode, v.body).toBe(200);
+  return as(P.adm.s, method, url, payload, { [STEP_UP_HEADER]: v.json().stepUpToken as string });
+}
+
 const row = async (id: string) => (await db.select().from(approvals).where(eq(approvals.id, id)))[0]!;
 
 /** signing options for `p`, signed by `p`'s (or another) authenticator */
@@ -368,7 +388,7 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
     expect((await rule(tool)).statusCode).toBe(201);
     const id = await queued(tool, { text: "linked" });
     await db.update(orgSettings).set({ approvalDelegationEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-    const del = await withKey(AUTH, "POST", "/v1/delegations", {
+    const del = await asSteppedUpAdmin("POST", "/v1/delegations", {
       fromUserId: P.caller.id,
       toUserId: P.d.id,
       startsAt: new Date(Date.now() - 60_000).toISOString(),
@@ -399,7 +419,7 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
     // B4S-02: a delegation counts for a decision only when it existed before the call
     // was queued, so a's delegation to e (outside the pool) is set up first
     await db.update(orgSettings).set({ approvalDelegationEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-    const delAE = await withKey(AUTH, "POST", "/v1/delegations", {
+    const delAE = await asSteppedUpAdmin("POST", "/v1/delegations", {
       fromUserId: P.a.id,
       toUserId: P.e.id,
       startsAt: new Date(Date.now() - 60_000).toISOString(),
@@ -415,7 +435,7 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
     expect((await decide(P.a, id, "approved")).json().error).toBe("duplicate_approver");
 
     // b's delegation to d may come later: it only ever MERGES principals (stricter), live
-    const delBD = await withKey(AUTH, "POST", "/v1/delegations", {
+    const delBD = await asSteppedUpAdmin("POST", "/v1/delegations", {
       fromUserId: P.b.id,
       toUserId: P.d.id,
       startsAt: new Date(Date.now() - 60_000).toISOString(),
@@ -853,7 +873,7 @@ describe("A — the recheck counts principals as the decide does", () => {
     expect((await signAndDecide(P.a, id)).statusCode).toBe(200);
     expect((await signAndDecide(P.b, id)).json()).toMatchObject({ status: "approved", approvals: 2 });
     await db.update(orgSettings).set({ approvalDelegationEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-    const del = await withKey(AUTH, "POST", "/v1/delegations", {
+    const del = await asSteppedUpAdmin("POST", "/v1/delegations", {
       fromUserId: P.a.id,
       toUserId: P.b.id,
       startsAt: new Date(Date.now() - 60_000).toISOString(),
