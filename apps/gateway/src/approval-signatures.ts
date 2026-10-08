@@ -155,20 +155,35 @@ const APPROVER_MOVED_RULES = ["approval-routed", "approval-claimed"] as const;
  *    one has the named approver's standing (the strictest fallback).
  */
 export async function snapshotNamedApprover(db: Q, row: ApprovalRow): Promise<string | null> {
-  const [assignment] = await db
-    .select({ ruleId: approvalAssignments.ruleId, assigneeId: approvalAssignments.assigneeId })
-    .from(approvalAssignments)
-    .where(eq(approvalAssignments.approvalId, row.id));
-  if (!assignment) return row.approverUserId;
-  const [moved] = await db
-    .select({ detail: auditLog.detail })
-    .from(auditLog)
-    .where(and(inArray(auditLog.ruleId, [...APPROVER_MOVED_RULES]), sql`${auditLog.detail}->>'approvalId' = ${row.id}`))
-    .orderBy(auditLog.seq)
-    .limit(1);
-  const previous = (moved?.detail as { previousApproverUserId?: unknown } | undefined)?.previousApproverUserId;
-  if (moved) return typeof previous === "string" && UUID_RE.test(previous) ? previous : null;
-  return assignment.ruleId === null ? assignment.assigneeId : null;
+  const [hit] = await db
+    .select({ named: namedApproverSnapshotSql() })
+    .from(approvals)
+    .where(eq(approvals.id, row.id));
+  return hit?.named ?? null;
+}
+
+/**
+ * The named-approver snapshot (the rules above) as ONE SQL expression over the
+ * `approvals` row in scope, so the decide path (`snapshotNamedApprover`), the
+ * execution recheck (`poolForApproval`) and queue visibility
+ * (`poolVisibilityCondition`) cannot disagree about who was named.
+ */
+export function namedApproverSnapshotSql(): SQL<string | null> {
+  // always table-qualified: drizzle renders a column of a single-table select
+  // unqualified, which inside these subqueries would bind to the subquery's own table
+  const id = sql.raw(`"approvals"."id"`);
+  const approver = sql.raw(`"approvals"."approver_user_id"`);
+  const movedRules = sql.join(APPROVER_MOVED_RULES.map((r) => sql`${r}`), sql`, `);
+  const moved = sql`l.rule_id IN (${movedRules}) AND l.detail->>'approvalId' = ${id}::text`;
+  return sql<string | null>`(CASE
+    WHEN NOT EXISTS (SELECT 1 FROM approval_assignments aa WHERE aa.approval_id = ${id})
+      THEN ${approver}
+    WHEN EXISTS (SELECT 1 FROM audit_log l WHERE ${moved})
+      THEN (SELECT CASE WHEN l.detail->>'previousApproverUserId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                        THEN (l.detail->>'previousApproverUserId')::uuid END
+              FROM audit_log l WHERE ${moved} ORDER BY l.seq LIMIT 1)
+    ELSE (SELECT CASE WHEN aa.rule_id IS NULL THEN aa.assignee_id END FROM approval_assignments aa WHERE aa.approval_id = ${id})
+  END)`;
 }
 
 /**
@@ -194,12 +209,13 @@ export async function poolForApproval(db: Q, row: ApprovalRow): Promise<Approval
  * approver role SNAPSHOTTED on the approval (`poolForApproval`), held by the
  * viewer, or — for a pending approval — by someone the viewer is an active
  * delegate of (`delegators`, the live delegations the queue already uses), as
- * a delegate decides for a pool member. Never the viewer's own calls. Null
- * when the viewer and their delegators hold no role at all. Visibility is the
+ * a delegate decides for a pool member; and the approver NAMED when the call was
+ * queued (`namedApproverSnapshotSql`, the decide path's own snapshot) and
+ * their active delegates. Never the viewer's own calls. Visibility is the
  * superset; the decide path re-checks eligibility in full (queue-time role
  * membership and delegation, account age, the caller's links).
  */
-export async function poolVisibilityCondition(db: Q, viewerUserId: string, delegators: readonly string[]): Promise<SQL | null> {
+export async function poolVisibilityCondition(db: Q, viewerUserId: string, delegators: readonly string[]): Promise<SQL> {
   const people = [...new Set([viewerUserId, ...delegators])];
   const held = await db
     .select({ userId: roleAssignments.userId, roleId: roleAssignments.roleId })
@@ -207,11 +223,16 @@ export async function poolVisibilityCondition(db: Q, viewerUserId: string, deleg
     .where(inArray(roleAssignments.userId, people));
   const mine = [...new Set(held.filter((h) => h.userId === viewerUserId).map((h) => h.roleId))];
   const theirs = [...new Set(held.filter((h) => h.userId !== viewerUserId).map((h) => h.roleId))];
+  // the approver NAMED WHEN QUEUED (never the row's mutable approver_user_id, which routing re-points)
+  const named = namedApproverSnapshotSql();
   const branches = [
+    sql`${named} = ${viewerUserId}::uuid`,
+    ...(delegators.length
+      ? [and(sql`${named} IN (${sql.join(delegators.map((d) => sql`${d}::uuid`), sql`, `)})`, eq(approvals.status, "pending"))!]
+      : []),
     ...(mine.length ? [inArray(approvals.approverRoleId, mine)] : []),
     ...(theirs.length ? [and(inArray(approvals.approverRoleId, theirs), eq(approvals.status, "pending"))!] : []),
   ];
-  if (branches.length === 0) return null;
   return and(
     inArray(approvals.objectType, [...TOOL_CALL_APPROVAL_OBJECT_TYPES]),
     sql`${approvals.userId} <> ${viewerUserId}`,
@@ -477,7 +498,8 @@ async function eligibilityOf(db: Q, row: ApprovalRow, deciderUserId: string, exi
   } else {
     const delegators = priorLinks.filter(([, to]) => to === deciderUserId).map(([from]) => from).filter((f) => pool.members.includes(f));
     if (delegators.length > 0) {
-      principalUserId = delegators.includes(row.approverUserId) ? row.approverUserId : [...delegators].sort()[0]!;
+      const named = await snapshotNamedApprover(db, row);
+      principalUserId = named && delegators.includes(named) ? named : [...delegators].sort()[0]!;
       onBehalfOf = principalUserId;
     }
   }
@@ -964,14 +986,20 @@ async function recheckDeciders(db: Q, row: ApprovalRow, decisions: readonly Appr
  * run. Any mismatch (payload, digest, assertion, credential gone, revoked or
  * enrolled after the call was queued, fewer valid principals than the
  * snapshotted quorum) fails the whole approval. Rows in `step_up` / `off` mode
- * carry no signature to recheck.
+ * carry no signature to recheck, but their approving principals are recounted
+ * against the quorum all the same.
  */
 export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: CallFacts | null): Promise<RecheckOutcome> {
   if (!isToolCallApproval(row)) return { ok: true };
   const decisions = (await decisionsFor(db, row.id)).filter((d) => d.decision === "approved");
   const deciders = await recheckDeciders(db, row, decisions);
   if (!deciders.ok) return deciders;
-  if (row.signatureMode !== "passkey") return { ok: true };
+  // every signature mode: the approving principals are counted again NOW, as the
+  // decide counted them — two approvers delegation-linked since are one principal
+  if (row.signatureMode !== "passkey") {
+    if ((await approvingPrincipals(db, decisions)).length < row.quorum) return { ok: false, why: "below_quorum" };
+    return { ok: true };
+  }
   if (!call) return { ok: false, why: "no_call_facts" };
   const rp = relyingParty();
   if (!rp) return { ok: false, why: "passkey_rp_unconfigured" };

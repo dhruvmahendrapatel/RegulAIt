@@ -35,7 +35,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { and, approvals, asc, auditLog, createDb, desc, eq, inArray, mcpServers, runMigrations, type Db } from "@regulait/db";
+import { and, approvalDecisions, approvals, asc, auditLog, createDb, desc, eq, inArray, mcpServers, runMigrations, sql, type Db } from "@regulait/db";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
@@ -158,6 +159,9 @@ async function approve(approvalId: string) {
     .where(eq(approvals.id, approvalId))
     .returning({ id: approvals.id });
   expect(r).toHaveLength(1);
+  // ADR-0186 A: what the decide path records with the approval (signing is off for this suite);
+  // the execution recheck counts these principals against the quorum in every signature mode
+  await db.insert(approvalDecisions).values({ approvalId, deciderUserId: approverId, principalUserId: approverId, decision: "approved", stepUpMethod: "none" });
 }
 
 /** queue a call against the server's CURRENT target and approve it — the consent under test */
@@ -226,8 +230,17 @@ async function setAdmissionMode(mcpAdmissionMode: string) {
   expect(r.statusCode, r.body).toBe(200);
 }
 
+// ADR-0186 A: approving records an append-only decision, so this suite runs on its OWN database, dropped in afterAll
+const SCRATCH_DB = `aer039_${process.pid}_${Date.now()}`;
+let scratchAdmin: Db;
+
 beforeAll(async () => {
-  db = createDb(DATABASE_URL);
+  scratchAdmin = createDb(DATABASE_URL);
+  await scratchAdmin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`));
+  await scratchAdmin.execute(sql.raw(`CREATE DATABASE ${SCRATCH_DB}`));
+  const scratchUrl = new URL(DATABASE_URL);
+  scratchUrl.pathname = "/" + SCRATCH_DB;
+  db = createDb(scratchUrl.toString());
   await runMigrations(db, migrationsFolder);
   restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
@@ -254,6 +267,11 @@ afterAll(async () => {
   await app.close();
   await upstream.A.close();
   await upstream.B.close();
+  await closeAll([
+    async () => db?.$client.end(),
+    async () => dropScratchDatabase(scratchAdmin, SCRATCH_DB),
+    async () => scratchAdmin?.$client.end(),
+  ]);
 });
 
 describe("AER-039 — a consent names its MCP target", () => {

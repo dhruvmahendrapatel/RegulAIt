@@ -306,6 +306,10 @@ export function effectiveApprovalScope(
 //   * the APPROVAL SCOPE ('action' | 'tool'). Flipping a rule from action to
 //     tool scope changes what a signature MEANS; a consent granted under one
 //     meaning is not consent under the other.
+//   * ADR-0186 A: an UNVERSIONED rule's dual control (quorum, approver role).
+//     A versioned rule's is in its version id; an unversioned rule's is edited
+//     by a plain row write, so it is named here or raising it would move
+//     nothing.
 //
 // WHAT IS DELIBERATELY NOT IN IT: everything else. The compatibility rule is
 // exactly "what is in the digest invalidates, what is not does not", and it is
@@ -326,6 +330,15 @@ export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v3";
 export interface ApprovalRuleVersionRef {
   ruleId: string;
   activeVersionId: string | null;
+  /**
+   * ADR-0186 A: an UNVERSIONED rule's dual control (`activeVersionId` null). A
+   * plain row write of `quorum` / `approverRoleId` mints no version, so without
+   * these the context would not move when dual control is raised and a consent
+   * given under the weaker snapshot would still satisfy the call. A versioned
+   * rule's are already identified by its version. Absent = not part of the
+   * digest (the pre-ADR-0186 shape, byte-identical).
+   */
+  dualControl?: { quorum: number; approverRoleId: string | null } | null;
 }
 
 /**
@@ -410,6 +423,9 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
       ruleVersions: sortApprovalRuleVersions(ref.ruleVersions).map((p) => ({
         ruleId: p.ruleId,
         activeVersionId: p.activeVersionId ?? null,
+        ...(p.dualControl && (p.activeVersionId ?? null) === null
+          ? { dualControl: { quorum: p.dualControl.quorum, approverRoleId: p.dualControl.approverRoleId ?? null } }
+          : {}),
       })),
       abacPolicies: [...(ref.abacPolicies ?? [])]
         .sort((a, b) => a.policyId.localeCompare(b.policyId))

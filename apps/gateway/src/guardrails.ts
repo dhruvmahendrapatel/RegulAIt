@@ -27,7 +27,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { requireRelaxStepUp, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireRelaxStepUp, requireStepUp } from "./step-up.js";
 import {
   agents,
   and,
@@ -151,6 +151,20 @@ export interface GuardrailPolicy {
  * settings (in which case `GUARDRAIL_DEFAULT_MODES` — ADR-0181's strict
  * shipped posture: block prompt injection and jailbreak, warn on the rest —
  * applies). */
+/**
+ * ADR-0186 A (Class A): the org guardrail PUT, whose step-up depends on the
+ * stored org modes it then overwrites, runs under one transaction lock and
+ * re-reads what its decision rested on — the org row may not exist yet, and
+ * `FOR UPDATE` over an empty result locks nothing.
+ */
+const GUARDRAIL_CONFIG_LOCK_KEY = 6_000_000_186;
+async function withGuardrailConfigLock<T>(db: Db, body: (tx: Db) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${GUARDRAIL_CONFIG_LOCK_KEY}::bigint)`);
+    return body(tx as unknown as Db);
+  });
+}
+
 export async function loadOrgGuardrailConfig(db: Db): Promise<GuardrailConfigRow | undefined> {
   const [row] = await db
     .select()
@@ -572,6 +586,7 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
   });
 
   const upsert = async (
+    db: Db,
     scope: "org" | "agent" | "connector",
     scopeId: string | null,
     body: z.infer<typeof putGuardrailConfigSchema>,
@@ -636,7 +651,14 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
       if (GUARDRAIL_MODES.indexOf(mode) < GUARDRAIL_MODES.indexOf(GUARDRAIL_DEFAULT_MODES[id])) relaxed[`guardrails.${d}`] = mode;
     }
     if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
-    const row = await upsert("org", null, body, actor);
+    // ADR-0186 A (Class A): the step-up was decided on `before`; under the
+    // guardrail-config lock, org modes that moved since are refused, never overwritten
+    const row = await withGuardrailConfigLock(db, async (tx) => {
+      const now = previousModes(await loadOrgGuardrailConfig(tx));
+      if (JSON.stringify(now) !== JSON.stringify(before)) return null;
+      return upsert(tx, "org", null, body, actor);
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await audit(
       actor,
       row.id,
@@ -702,7 +724,10 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
         if (!su.ok) return reply;
       }
     }
-    const row = await upsert(scope, scopeId, body, actor, window);
+    // the override's step-up is decided against the org modes, which this write
+    // never overwrites: a concurrent org change is ordered before or after it,
+    // and either order is a sequence of legitimate writes (no lost update)
+    const row = await upsert(db, scope, scopeId, body, actor, window);
     await audit(
       actor,
       row.id,

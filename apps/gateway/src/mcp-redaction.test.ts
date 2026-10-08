@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import { and, approvals, auditLog, createDb, dataScopeRules, eq, mcpTools, orgSettings, runMigrations, sql, traceSpans, usageEvents, type Db } from "@regulait/db";
+import { and, approvalDecisions, approvals, auditLog, createDb, dataScopeRules, eq, mcpTools, orgSettings, runMigrations, sql, traceSpans, usageEvents, type Db } from "@regulait/db";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { approvalArgumentsDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
@@ -24,6 +25,9 @@ let restoreStrictAdmission: (() => Promise<void>) | undefined;
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const RUN = Math.random().toString(36).slice(2, 8);
+// ADR-0186 A: approving records an append-only decision, so this suite runs on its OWN database, dropped in afterAll
+const SCRATCH_DB = `mcp_redact_${process.pid}_${RUN}`;
+let scratchAdmin: Db;
 const AUTH = { authorization: "Bearer mcp-redaction-bootstrap" };
 const RAW = "alice@example.test";
 const SAFE = "[EMAIL]";
@@ -49,7 +53,12 @@ async function post(url: string, payload: unknown) {
 }
 
 beforeAll(async () => {
-  db = createDb(DATABASE_URL);
+  scratchAdmin = createDb(DATABASE_URL);
+  await scratchAdmin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`));
+  await scratchAdmin.execute(sql.raw(`CREATE DATABASE ${SCRATCH_DB}`));
+  const u = new URL(DATABASE_URL);
+  u.pathname = "/" + SCRATCH_DB;
+  db = createDb(u.toString());
   await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"));
   restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
@@ -92,6 +101,11 @@ afterAll(async () => {
   await app?.close();
   httpServer?.closeAllConnections();
   if (httpServer) await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  await closeAll([
+    async () => db?.$client.end(),
+    async () => dropScratchDatabase(scratchAdmin, SCRATCH_DB),
+    async () => scratchAdmin?.$client.end(),
+  ]);
 });
 
 async function fixture(needsApproval = true) {
@@ -118,7 +132,14 @@ async function approve(f: Awaited<ReturnType<typeof fixture>>, args = { text: RA
   expect(queued.kind).toBe("approval_required");
   if (queued.kind !== "approval_required") throw new Error("not queued");
   await db.update(approvals).set({ status: "approved", decidedBy: approverId, decidedAt: new Date() }).where(eq(approvals.id, queued.approvalId));
+  // ADR-0186 A: what the decide path records with the approval (signing is off for this suite);
+  // the execution recheck counts these principals against the quorum in every signature mode
+  await recordDecision(queued.approvalId);
   return queued.approvalId;
+}
+
+async function recordDecision(approvalId: string) {
+  await db.insert(approvalDecisions).values({ approvalId, deciderUserId: approverId, principalUserId: approverId, decision: "approved", stepUpMethod: "none" });
 }
 
 describe("MCP redacted execution, real upstream and database", () => {
@@ -139,6 +160,7 @@ describe("MCP redacted execution, real upstream and database", () => {
     expect(JSON.stringify(row!.argumentsPreview)).not.toContain(RAW);
     expect(row!.argumentsDigest).not.toBe(approvalArgumentsDigest({ projectId: f.projectId, arguments: { text: RAW } }));
     await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, row!.id));
+    await recordDecision(row!.id);
     expect((await f.call({ text: "bob@example.test" })).kind).toBe("approval_required");
     expect(wireCalls).toHaveLength(0);
     response = { content: [{ type: "text", text: "contact bob@example.test" }], structuredContent: { email: RAW } };

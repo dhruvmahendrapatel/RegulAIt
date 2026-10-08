@@ -73,6 +73,7 @@ import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } f
 import { settingTransitions } from "./setting-transitions.js";
 import {
   breakGlassChange,
+  CHANGED_CONCURRENTLY,
   breakGlassStepUpRefusal,
   requireStepUp,
   revocationScopeStepUp,
@@ -814,27 +815,32 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // `settingsRelaxStepUpRefusal` decides whether the request carries a
     // step-up bound to exactly that relaxation. The foundation's hook admits
     // every write.
-    {
+    // the step-ups this write needs against a given stored row (decided here on
+    // the unlocked read, and AGAIN on the locked row inside the transaction)
+    const stepUpsAgainst = (stored: Record<string, unknown>) => {
       const differs = Object.fromEntries(
-        Object.entries(body).filter(
-          ([k, v]) => JSON.stringify((before as Record<string, unknown>)[k]) !== JSON.stringify(v),
-        ),
+        Object.entries(body).filter(([k, v]) => JSON.stringify(stored[k]) !== JSON.stringify(v)),
       );
       const relaxedKeys = relaxedSettingKeys(differs);
+      return {
+        breakGlass: breakGlassChange(differs, stored as { localSignIn?: unknown; breakGlassUserIds?: unknown }),
+        relaxedKeys,
+        relaxedValues: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
+      };
+    };
+    const decided = stepUpsAgainst(before as Record<string, unknown>);
+    {
+      const { relaxedKeys, breakGlass } = decided;
       // ADR-0186 A: changing the break-glass key holders or the local sign-in
       // mode needs its own `break_glass` step-up. Looked at first WITHOUT
       // spending it and spent last, so a write that needs both step-ups never
       // burns one grant on the other's refusal.
-      const breakGlass = breakGlassChange(differs, before as { localSignIn?: unknown; breakGlassUserIds?: unknown });
       if (breakGlass) {
         const refusal = await breakGlassStepUpRefusal(db, req, breakGlass, { spend: false });
         if (refusal) return reply.status(refusal.status).send(refusal.body);
       }
       if (relaxedKeys.length > 0) {
-        const refusal = await settingsRelaxStepUpRefusal(db, req, {
-          relaxedKeys,
-          values: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
-        });
+        const refusal = await settingsRelaxStepUpRefusal(db, req, { relaxedKeys, values: decided.relaxedValues });
         if (refusal) return reply.status(refusal.status).send(refusal.body);
       }
       if (breakGlass) {
@@ -854,7 +860,27 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // transaction under the sign-in invariant lock, so engaging (or
     // re-pointing) break-glass / sso_only cannot race a provider disable, a
     // demotion or a SCIM deactivation that each passed their own count.
-    const out = await withSignInInvariant(db, async (tx, locked) => {
+    const out = await withSignInInvariant(db, async (tx, unlockedOrg) => {
+      // the org row itself, locked: every org-settings writer serialises on it
+      const [locked = unlockedOrg] = await tx
+        .select()
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("update");
+      // ADR-0186 A (Class A): the step-ups were decided on an unlocked read. When
+      // the row moved since, so that this write now changes break-glass or relaxes
+      // a setting it did not before, that step-up is decided (and spent) here, on
+      // the row the write replaces — a stale request never reverts a change
+      // without the proof the change back needs
+      const now = stepUpsAgainst(locked as Record<string, unknown>);
+      if (now.breakGlass && JSON.stringify(now.breakGlass) !== JSON.stringify(decided.breakGlass)) {
+        const again = await breakGlassStepUpRefusal(db, req, now.breakGlass, { spend: true });
+        if (again) return again;
+      }
+      if (now.relaxedKeys.length > 0 && JSON.stringify(now.relaxedValues) !== JSON.stringify(decided.relaxedValues)) {
+        const again = await settingsRelaxStepUpRefusal(db, req, { relaxedKeys: now.relaxedKeys, values: now.relaxedValues });
+        if (again) return again;
+      }
       const refusal = await signInModeRefusal(tx, locked, body);
       if (refusal) return refusal;
       if (touchesSignIn(body)) await signInInvariantChecked("org-settings");
@@ -1014,8 +1040,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     const [row] = await db
       .update(table)
       .set({ scope: body.scope })
-      .where(eq(table.id, revocationId))
+      // ADR-0186 A (Class A): compare-and-set on the scope the step-up was decided on
+      .where(and(eq(table.id, revocationId), eq(table.scope, before.scope)))
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "revocation",

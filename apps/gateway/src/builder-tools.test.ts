@@ -150,7 +150,8 @@ const toolUsage = async (userId: string) =>
 const allSteps = (detail: { messages: Array<{ steps: any[] }> }) => detail.messages.flatMap((m) => m.steps);
 
 beforeAll(async () => {
-  k = await builderKit("bld-tools");
+  // its own database: tool-call approvals here record append-only decisions (ADR-0186 A)
+  k = await builderKit("bld-tools", { scratch: true });
   restoreApprovalSigning = await relaxApprovalSigningForTest(k.db);
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
@@ -420,6 +421,14 @@ describe("an organisation approval rule pauses in the approvals queue and resume
         NEW.status := 'approved'; NEW.decided_by := '${approver.id}'; NEW.decided_at := now();
       END IF; RETURN NEW; END $$ LANGUAGE plpgsql`));
     await k.db.execute(sql.raw(`CREATE TRIGGER ${fn} BEFORE INSERT ON approvals FOR EACH ROW EXECUTE FUNCTION ${fn}()`));
+    // ADR-0186 A: and the decision the decide path records with it — the execution
+    // recheck counts the approving principals against the quorum in every signature mode
+    await k.db.execute(sql.raw(`CREATE OR REPLACE FUNCTION ${fn}_d() RETURNS trigger AS $$ BEGIN
+      IF NEW.server_id = '${serverId}' AND NEW.tool_name = 'early_approval' THEN
+        INSERT INTO approval_decisions (approval_id, decider_user_id, principal_user_id, decision, step_up_method)
+          VALUES (NEW.id, '${approver.id}', '${approver.id}', 'approved', 'none');
+      END IF; RETURN NEW; END $$ LANGUAGE plpgsql`));
+    await k.db.execute(sql.raw(`CREATE TRIGGER ${fn}_d AFTER INSERT ON approvals FOR EACH ROW EXECUTE FUNCTION ${fn}_d()`));
     try {
       const a = await newAgent(owner, [{ tool: "early_approval" }]);
       const before = hits.early_approval ?? 0;
@@ -434,6 +443,8 @@ describe("an organisation approval rule pauses in the approvals queue and resume
     } finally {
       await k.db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${fn} ON approvals`));
       await k.db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}()`));
+      await k.db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${fn}_d ON approvals`));
+      await k.db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}_d()`));
     }
   });
 

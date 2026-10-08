@@ -64,7 +64,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import {
   and,
   approvals,
@@ -86,6 +86,7 @@ import {
   users,
   workflowInstances,
   type Db,
+  sql,
 } from "@regulait/db";
 import {
   CHATOPS_PROVIDERS,
@@ -1129,8 +1130,17 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         ...(body.slackTeamId !== undefined ? { slackTeamId: body.slackTeamId } : {}),
         ...(recipients !== undefined ? { outlookRecipientAllowList: recipients } : {}),
       })
-      .where(eq(chatopsConnections.id, connectionId))
+      // ADR-0186 A (Class A): compare-and-set on the recipient list the step-up was decided on
+      .where(
+        and(
+          eq(chatopsConnections.id, connectionId),
+          ...(recipients !== undefined
+            ? [sql`${chatopsConnections.outlookRecipientAllowList} = ${JSON.stringify(before.outlookRecipientAllowList ?? [])}::jsonb`]
+            : []),
+        ),
+      )
       .returning();
+    if (!after) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     if (recipients !== undefined) {
       const from = before.outlookRecipientAllowList ?? [];
       const added = recipients.filter((m) => !from.includes(m));

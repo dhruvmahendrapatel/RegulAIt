@@ -6,10 +6,11 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LightMyRequestResponse } from "fastify";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { createDb, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "../app.js";
 import { enrolAdminTotpForTest } from "./identity-posture.js";
 import { forgetStepUpMethodsForTest } from "./step-up-posture.js";
+import { closeAll, dropScratchDatabase } from "./scratch-db.js";
 
 export interface Person {
   id: string;
@@ -36,14 +37,29 @@ export interface BuilderKit {
   close: () => Promise<void>;
 }
 
-export async function builderKit(prefix: string): Promise<BuilderKit> {
+/**
+ * `scratch: true` runs the kit on its OWN database, created here and dropped by
+ * `close()` — for a file that writes append-only rows (an approval decision)
+ * which must not outlive the run in the shared database.
+ */
+export async function builderKit(prefix: string, opts: { scratch?: boolean } = {}): Promise<BuilderKit> {
   const DATABASE_URL = process.env.DATABASE_URL;
   if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
   const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../packages/db/migrations");
   const RUN = Math.random().toString(36).slice(2, 8);
   const bootToken = `${prefix}-boot-${RUN}`;
   const BOOT = { authorization: `Bearer ${bootToken}` };
-  const db = createDb(DATABASE_URL);
+  const scratchName = opts.scratch ? `${prefix.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${process.pid}_${RUN}` : null;
+  const scratchAdmin = scratchName ? createDb(DATABASE_URL) : null;
+  let dbUrl = DATABASE_URL;
+  if (scratchAdmin && scratchName) {
+    await scratchAdmin.execute(sql.raw(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`));
+    await scratchAdmin.execute(sql.raw(`CREATE DATABASE ${scratchName}`));
+    const u = new URL(DATABASE_URL);
+    u.pathname = "/" + scratchName;
+    dbUrl = u.toString();
+  }
+  const db = createDb(dbUrl);
   await runMigrations(db, migrationsFolder);
   const app = buildApp(db, { bootstrapToken: bootToken, dataKey: "a".repeat(64) });
   const req: BuilderKit["req"] = (method, url, headers, payload) =>
@@ -97,6 +113,13 @@ export async function builderKit(prefix: string): Promise<BuilderKit> {
     await forgetStepUpMethodsForTest(db, admins);
     app.server.closeAllConnections();
     await app.close();
+    if (scratchAdmin && scratchName) {
+      await closeAll([
+        async () => db.$client.end(),
+        async () => dropScratchDatabase(scratchAdmin, scratchName),
+        async () => scratchAdmin.$client.end(),
+      ]);
+    }
   };
   return { db, app, RUN, BOOT, req, person, model, grantModel, close };
 }

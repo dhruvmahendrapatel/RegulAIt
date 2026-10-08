@@ -23,10 +23,10 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { and, auditLog, connectors, eq, inArray, isNull, mcpServers, users, type Db } from "@regulait/db";
+import { and, auditLog, connectors, eq, inArray, isNull, mcpServers, sql, users, type Db } from "@regulait/db";
 import { setOwnerSchema, type OwnershipState } from "@regulait/shared";
 import { ownershipFlagFor } from "./inventory.js";
-import { ownerChangeStepUpArgs, stepUpRefusal } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, ownerChangeStepUpArgs, stepUpRefusal } from "./step-up.js";
 
 export type OwnedKind = "mcp_server" | "connector";
 
@@ -154,13 +154,15 @@ export async function changeOwner(
       ? await db
           .update(mcpServers)
           .set({ ownerUserId: target.ownerUserId })
-          .where(eq(mcpServers.id, before.id))
+          // ADR-0186 A (Class A): compare-and-set on the owner the step-up was decided on
+          .where(and(eq(mcpServers.id, before.id), sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
           .returning({ id: mcpServers.id, ownerUserId: mcpServers.ownerUserId })
       : await db
           .update(connectors)
           .set({ ownerUserId: target.ownerUserId })
-          .where(eq(connectors.id, before.id))
+          .where(and(eq(connectors.id, before.id), sql`${connectors.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
           .returning({ id: connectors.id, ownerUserId: connectors.ownerUserId });
+  if (!after) return { ok: false, status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } };
   const toOwnership: OwnershipState = after!.ownerUserId ? "owned" : "unowned";
   await db.insert(auditLog).values({
     userId: args.actorUserId ?? NIL,

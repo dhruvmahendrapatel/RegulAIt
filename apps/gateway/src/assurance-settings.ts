@@ -21,7 +21,7 @@ import {
   type AssuranceGateMode,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
-import { relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -72,6 +72,8 @@ export function registerAssuranceSettingsRoutes(app: FastifyInstance, db: Db): v
         .where(eq(orgSettings.id, ORG_SETTINGS_ID))
         .for("update");
       const from = before!.mode;
+      // the step-up was decided on `current`: a mode that moved since is refused, never overwritten
+      if (from !== current.assuranceGateMode) return null;
       const [after] = await tx
         .update(orgSettings)
         .set({ assuranceGateMode: body.mode, updatedBy: req.authCtx.userId, updatedAt: now })
@@ -101,6 +103,7 @@ export function registerAssuranceSettingsRoutes(app: FastifyInstance, db: Db): v
       });
       return after!;
     });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return view(row.assuranceGateMode, row.updatedAt);
   });
 }

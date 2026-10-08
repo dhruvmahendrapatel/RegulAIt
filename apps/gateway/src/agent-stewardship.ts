@@ -350,7 +350,15 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
       })
       // ADR-0170 item 7: compare-and-swap on the status this request read — a
       // concurrent retirement or suspension is never overwritten by a stale read
-      .where(and(eq(agents.id, agentId), eq(agents.lifecycleStatus, agent.lifecycleStatus)))
+      // ADR-0186 A (Class A): and on the steward this request's owner_change step-up
+      // and steward authority were decided on
+      .where(
+        and(
+          eq(agents.id, agentId),
+          eq(agents.lifecycleStatus, agent.lifecycleStatus),
+          sql`${agents.ownerUserId} IS NOT DISTINCT FROM ${agent.ownerUserId}`,
+        ),
+      )
       .returning();
     if (!row) return refuseLifecycleChangedConcurrently(reply, agent.lifecycleStatus);
     const people = await loadUsers(db, [nextSteward, nextSuccessor]);

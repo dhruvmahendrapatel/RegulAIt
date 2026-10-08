@@ -10,15 +10,18 @@ import {
   approvals,
   asc,
   auditLog,
+  approvalDecisions,
   createDb,
   desc,
   eq,
   gte,
   runMigrations,
+  sql,
   type Db,
 } from "@regulait/db";
 import { DEFAULT_APPROVAL_TTL_HOURS } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { consumeBoundApproval, executeGovernedToolCall } from "./mcp-proxy.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -64,6 +67,15 @@ let restoreStrictAdmission: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
+// ADR-0186 A: approving writes an append-only `approval_decisions` row, so this suite runs on its OWN
+// scratch database, dropped in afterAll (nothing undeletable is left in the shared one)
+const SCRATCH_DB = `f14_cc_${process.pid}_${Date.now()}`;
+const scratchUrl = () => {
+  const u = new URL(DATABASE_URL);
+  u.pathname = "/" + SCRATCH_DB;
+  return u.toString();
+};
+let scratchAdmin: Db;
 const migrationsFolder = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/migrations",
@@ -189,6 +201,9 @@ async function approve(approvalId: string, approverUserId: string) {
     .where(eq(approvals.id, approvalId))
     .returning({ id: approvals.id });
   expect(r).toHaveLength(1);
+  // ADR-0186 A: what the decide path records with the approval (signing is off for this suite);
+  // the execution recheck counts these principals against the quorum in every signature mode
+  await db.insert(approvalDecisions).values({ approvalId, deciderUserId: approverUserId, principalUserId: approverUserId, decision: "approved", stepUpMethod: "none" });
 }
 
 /** The precondition every test starts from: an approver has signed THIS payload
@@ -222,7 +237,10 @@ async function activateRuleVersion(ruleId: string, body: Record<string, unknown>
 }
 
 beforeAll(async () => {
-  db = createDb(DATABASE_URL);
+  scratchAdmin = createDb(DATABASE_URL);
+  await scratchAdmin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`));
+  await scratchAdmin.execute(sql.raw(`CREATE DATABASE ${SCRATCH_DB}`));
+  db = createDb(scratchUrl());
   await runMigrations(db, migrationsFolder);
   restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
@@ -286,6 +304,11 @@ afterAll(async () => {
   await restoreSb2Gates();
   await app.close();
   await upstreamClose();
+  await closeAll([
+    async () => db?.$client.end(),
+    async () => dropScratchDatabase(scratchAdmin, SCRATCH_DB),
+    async () => scratchAdmin?.$client.end(),
+  ]);
 });
 
 describe("F14 (a) — a consent does not survive the policy that demanded it", () => {

@@ -584,6 +584,23 @@ export async function requireStepUps(
 }
 
 /**
+ * ADR-0186 A (Class A): a write whose step-up was decided on an UNLOCKED read
+ * writes only if the facts that decision rested on are still what was read
+ * (compare-and-set, or a re-read under the row lock). When they moved, nothing
+ * is written and this is the answer: fail closed — the retry is decided on what
+ * is there now, and asks for the step-up that state needs.
+ */
+export const CHANGED_CONCURRENTLY = Object.freeze({
+  status: 409 as const,
+  body: Object.freeze({
+    error: "changed_concurrently",
+    detail:
+      "this changed while your request was being checked, so nothing was written: load it again and repeat the " +
+      "change (it may now need you to confirm it's you)",
+  }),
+});
+
+/**
  * ADR-0186 A: the `owner_change` step-up for one object and its new owner,
  * shared by every writer of an accountable owner (the server and connector
  * owner routes, POST /v1/agents/:id/owner and the agent stewardship PATCH), so
@@ -873,11 +890,28 @@ export type SsoReauthVerdict =
   | { ok: false; status: 409; error: "sso_reauth_stale" };
 
 /**
+ * Did the provider authenticate the person AFTER the step-up was requested?
+ * OIDC `auth_time` is whole seconds (RFC: NumericDate), `requested_at` is
+ * sub-second: a login in the same second as the request carries the request's
+ * second, so a whole-second auth time is compared against the request's second
+ * (floored) — never against its fraction, which would call a fresh login
+ * stale. A time with a sub-second part (SAML `AuthnInstant` may carry one)
+ * keeps the strict comparison. An earlier second, or no time, is stale.
+ */
+export function ssoAuthTimeFresh(authTime: Date | null, requestedAt: Date): boolean {
+  if (!authTime) return false;
+  const at = authTime.getTime();
+  const req = requestedAt.getTime();
+  if (at % 1000 === 0) return at >= req - (req % 1000);
+  return at > req;
+}
+
+/**
  * Decide a claimed fresh-login callback: the identity the provider returned
  * must be LINKED to the user who asked (`linkedUserId`, from the federated
  * anchor — never an asserted email), and the provider must have
- * authenticated them AFTER the request (`authTime` strictly later than
- * `requested_at`; a missing time is stale). Only then is the request marked
+ * authenticated them AFTER the request (`ssoAuthTimeFresh`: later than
+ * `requested_at`, at the second precision OIDC gives; a missing time is stale). Only then is the request marked
  * verified; the grant is issued when the session collects it. Audited either
  * way.
  */
@@ -900,7 +934,7 @@ export async function finishSsoReauth(
     });
     return { ok: false, status: 403, error: "sso_reauth_identity_mismatch" };
   }
-  if (!returned.authTime || returned.authTime.getTime() <= row.requestedAt.getTime()) {
+  if (!ssoAuthTimeFresh(returned.authTime, row.requestedAt)) {
     await db.insert(auditLog).values({
       userId: row.userId,
       objectType: "user",

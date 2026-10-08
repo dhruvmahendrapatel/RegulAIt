@@ -61,7 +61,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, relaxedAgainst, requireRelaxStepUp } from "./step-up.js";
 import {
   configVersions,
   abacPolicies,
@@ -1645,8 +1645,15 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
         updatedByUserId: req.authCtx.userId ?? null,
         updatedAt: new Date(),
       })
-      .where(eq(policySimulationSettings.id, SINGLETON))
+      // ADR-0186 A (Class A): compare-and-set on the dial the step-up was decided on
+      .where(
+        and(
+          eq(policySimulationSettings.id, SINGLETON),
+          eq(policySimulationSettings.requirePreviewBeforeActivate, before.requirePreviewBeforeActivate),
+        ),
+      )
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NIL_UUID,
       objectType: "abac_policy",

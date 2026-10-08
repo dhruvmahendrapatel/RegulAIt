@@ -732,11 +732,20 @@ export async function governedEvaluate(
   // states: activate a new version of a rule that binds this call and the
   // consent granted under the old one stops satisfying it; edit a rule that
   // does not bind this call and nothing moves.
+  const servedById = new Map(servedARules.map((r) => [r.id, r]));
   const contextDigest = approvalContextDigest({
-    ruleVersions: matchedARules.map((r) => ({
-      ruleId: r.id,
-      activeVersionId: aResolved.activeVersionByArtifact.get(r.id) ?? null,
-    })),
+    ruleVersions: matchedARules.map((r) => {
+      const activeVersionId = aResolved.activeVersionByArtifact.get(r.id) ?? null;
+      const served = servedById.get(r.id);
+      return {
+        ruleId: r.id,
+        activeVersionId,
+        // ADR-0186 A: an unversioned rule's dual control is part of the context
+        ...(activeVersionId === null && served
+          ? { dualControl: { quorum: served.quorum, approverRoleId: served.approverRoleId ?? null } }
+          : {}),
+      };
+    }),
     abacPolicies: abacPolicies.map((p) => ({
       policyId: p.id,
       version: p.version ?? null,
