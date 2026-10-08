@@ -25,6 +25,7 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -7609,6 +7610,9 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
   let signoffId: string;
   let runId: string;
   let runApprovalId: string;
+
+  // B4S-06 (M-068): the loop admin's authenticator does not outlive the suite
+  afterAll(async () => forgetStepUpMethodsForTest(db, [adminId]));
 
   beforeAll(async () => {
     const mkUser = async (email: string, name: string, isAdmin = false) => {

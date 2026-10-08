@@ -28,6 +28,7 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { drainBackgroundWork } from "./background-work.js";
 import { encryptSecret } from "./secrets.js";
 import { newWebhookSecret } from "./outbound-webhooks.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 let k: BuilderKit;
 let owner: Person;
@@ -58,8 +59,15 @@ const tagOf = async (promptId: string, tag: string) => {
 const decide = (who: Person, approvalId: string, decision: "approved" | "denied", reason?: string) =>
   k.req("POST", `/v1/approvals/${approvalId}/decide`, who.auth, { decision, ...(reason ? { reason } : {}) });
 
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("preg");
+  // B4S-06: a SECOND admin person (alice, below) is promoted and given her
+  // one-time password by the bootstrap credential after the first admin enrolled
+  // TOTP, when it no longer passes a step-up. This suite is about the prompt
+  // registry's separation of duties, not step-up (proved in zz-b4s-round2):
+  // step-up is off for its run, restored in afterAll
+  restoreStepUp = await relaxStepUpForTest(k.db);
   owner = await k.person("owner");
   reviewer = await k.person("reviewer");
   outsider = await k.person("outsider");
@@ -80,6 +88,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await drainBackgroundWork(k.db);
   await k.db.delete(webhookSubscriptions).where(eq(webhookSubscriptions.id, subscriptionId));
   await k.close();
