@@ -150,8 +150,8 @@ const stageSchema = z.object({
     .array(
       z.object({
         check: z.string().min(1),
-        /** the engine id (ADR-0187 manifest) */
-        engine: z.enum(["promptfoo", "modelscan", "garak"]),
+        /** the engine id (ADR-0187 manifest); an artifact-only engine (modelscan) cannot bind an agent check (PR #203 review [14]) */
+        engine: z.enum(["promptfoo", "garak"]),
         /** the agent under test, by registry NAME */
         agent: z.string().min(1),
         /** judge agent NAME, behind the gateway */
