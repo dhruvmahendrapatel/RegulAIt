@@ -57,12 +57,17 @@ export function runProcessGroup(cmd: string, args: readonly string[], opts: Proc
       if (opts.signal.aborted) kill();
       else opts.signal.addEventListener("abort", kill, { once: true });
     }
+    // PR #203 review round 2 [22]: once the child is gone its pid may be reused,
+    // so a late abort must not reach killGroup — the listener goes with the child
+    const detach = () => opts.signal?.removeEventListener("abort", kill);
     child.once("error", () => {
       clearTimeout(timer);
+      detach();
       resolve({ exitCode: null, signal: null, killed, stdout, stderr });
     });
     child.once("close", (code, sig) => {
       clearTimeout(timer);
+      detach();
       // the group may still hold grandchildren: they never outlive the run
       killGroup(child.pid);
       resolve({ exitCode: code, signal: sig, killed, stdout, stderr });

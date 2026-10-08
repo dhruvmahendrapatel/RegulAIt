@@ -9,6 +9,7 @@ import {
   desc,
   eq,
   inArray,
+  ne,
   sql,
   workflowArtifacts,
   workflowAssignmentRules,
@@ -311,11 +312,26 @@ async function applyEvent(
     // A re-open stales EVERY outstanding gate downstream, and a terminal
     // denial/abort must leave no live rows in the one inbox — supersede all
     // pending rows for the instance in each of these cases.
+    // An engine run's own approval (ADR-0187) is not a gate of the instance's
+    // stages: it is superseded together with its run, below, and only when the
+    // run is cancelled — never left pending on a run nothing can release.
     if (event.kind === "artifact_submitted" || event.kind === "reopen" || isDenial || isReturn) {
       await tx
         .update(approvals)
         .set({ status: "superseded" })
-        .where(and(eq(approvals.instanceId, instance.id), eq(approvals.status, "pending")));
+        .where(and(eq(approvals.instanceId, instance.id), eq(approvals.status, "pending"), ne(approvals.objectType, "engine_run")));
+    }
+    // ADR-0187 PR #203 review round 2 [21]: an instance that ends takes its
+    // live engine runs with it (cancelled, key revoked, approval superseded);
+    // a re-open cancels those of the rounds it left behind. Same transaction
+    // as the transition, under the instance row lock.
+    const endsInstance = ["completed", "denied", "aborted", "rolled_back"].includes(state.status);
+    if (endsInstance || isReopen) {
+      const { cancelEngineRunsOfInstance } = await import("./engine-runs.js");
+      await cancelEngineRunsOfInstance(tx, instance.id, actorUserId, {
+        ...(endsInstance ? {} : { beforeRound: round }),
+        cause: endsInstance ? `workflow_${state.status}` : "workflow_reopened",
+      });
     }
 
     for (const effect of effects) {
