@@ -191,6 +191,11 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       // round 6 (finding 36 sweep): removing a guardrail override stricter than the org mode lowers it
       const overrideRemovals = src.match(/(?<![A-Za-z])api\.del(?:<[^>]*>)?\(\s*["'`]\/v1\/guardrails\/config\//g);
       for (const m of overrideRemovals ?? []) offenders.push(`${f}: ${m}`);
+      // follow-up (decision 29): a compliance-profile write or a pack re-apply can loosen what a framework forces
+      const profileWrites = src.match(
+        /(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:compliance\/profiles|onboarding\/compliance-pack)["'`]/g,
+      );
+      for (const m of profileWrites ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

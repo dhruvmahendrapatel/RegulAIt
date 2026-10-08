@@ -24,7 +24,7 @@
  *    Every writer refuses them (a new subject is a new rule); a change is
  *    treated as looser anyway, so a writer that ever allowed one fails closed.
  */
-import type { approvalRules, dataScopeRules, rateLimits } from "@regulait/db";
+import type { approvalRules, complianceProfiles, dataScopeRules, rateLimits } from "@regulait/db";
 import { approvalRuleLoosens, approvalRuleShape, requireRuleStepUp, type ApprovalRuleStepUp } from "./approval-pool.js";
 
 type Q = Parameters<typeof approvalRuleLoosens>[0];
@@ -103,10 +103,65 @@ export const DATA_SCOPE_RULE_LOOSENING: Classified<typeof dataScopeRules.$inferS
   },
 };
 
+// ---------------------------------------------------------------------------
+// Compliance profiles (decision 29, finding 52): one profile edit cascades into
+// every project carrying its tag, so each field is judged by what it forces.
+// A null is "this framework has no opinion" — always the loosest value.
+// ---------------------------------------------------------------------------
+const num = (v: unknown) => (typeof v === "number" ? v : null);
+/** a FLOOR that must be at least this much (retention, trials): lower, or none, is looser */
+const floorLowered = (b: unknown, a: unknown) => num(b) !== null && (num(a) === null || num(a)! < num(b)!);
+/** a CEILING that must be at most this much (budget, patch cadence): higher, or none, is looser */
+const ceilingRaised = (b: unknown, a: unknown) => num(b) !== null && (num(a) === null || num(a)! > num(b)!);
+/** a list of things the framework FORCES: dropping one is looser */
+const forcedDropped = (b: unknown, a: unknown) => {
+  const next = new Set((Array.isArray(a) ? a : []).map(String));
+  return Array.isArray(b) && b.some((x) => !next.has(String(x)));
+};
+const rankLowered = (rank: Record<string, number>) => (b: unknown, a: unknown) =>
+  (rank[String(a)] ?? -1) < (rank[String(b)] ?? -1);
+const GUARDRAIL_RANK: Record<string, number> = { off: 0, log: 1, warn: 2, block: 3 };
+
+export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.$inferSelect> = {
+  id: IDENTITY,
+  createdAt: IDENTITY,
+  tag: { kind: "selection", why: "the framework tag the profile is for; an edit never re-tags (a new tag is a new profile)" },
+  requiredTemplateIds: { kind: "compare", looser: forcedDropped, why: "a workflow template the framework no longer forces" },
+  mcpDefaultMode: { kind: "compare", looser: rankLowered({ read_write: 0, read_only: 1 }), why: "read_only -> read_write" },
+  auditRetentionDays: { kind: "compare", looser: floorLowered, why: "a shorter (or no) audit retention floor" },
+  piiMode: { kind: "compare", looser: rankLowered({ log: 0, warn: 1, block: 2 }), why: "block > warn > log" },
+  backupRetentionDays: { kind: "compare", looser: floorLowered, why: "a shorter (or no) backup retention floor" },
+  patchCadenceDays: { kind: "compare", looser: ceilingRaised, why: "a longer (or no) patch cadence" },
+  maxProjectBudgetUsd: { kind: "compare", looser: ceilingRaised, why: "a higher (or no) project budget ceiling" },
+  budgetEnforcement: {
+    kind: "compare",
+    looser: rankLowered({ warn_only: 1, block: 2 }),
+    why: "block > warn_only > no opinion",
+  },
+  guardrailModes: {
+    kind: "compare",
+    looser: (b, a) => {
+      const before = (b ?? {}) as Record<string, string>;
+      const after = (a ?? {}) as Record<string, string>;
+      return Object.entries(before).some(([d, m]) => (GUARDRAIL_RANK[after[d] ?? ""] ?? -1) < (GUARDRAIL_RANK[m] ?? -1));
+    },
+    why: "a guardrail floor lowered or dropped for any detector",
+  },
+  redteamGatingClasses: { kind: "compare", looser: forcedDropped, why: "an attack class the framework no longer gates on" },
+  redteamMinTrials: { kind: "compare", looser: floorLowered, why: "fewer (or no minimum) trials per probe" },
+  redteamFailOnSeverity: {
+    kind: "compare",
+    // a defeat at or above this severity fails its class: a HIGHER threshold fails fewer
+    looser: rankLowered({ critical: 0, high: 1, medium: 2, low: 3 }),
+    why: "a higher (or no) severity at which a defeat fails its class",
+  },
+};
+
 const BY_KIND: Readonly<Record<string, Readonly<Record<string, FieldClass>>>> = {
   approval_rule: APPROVAL_RULE_LOOSENING,
   rate_limit: RATE_LIMIT_LOOSENING,
   data_scope_rule: DATA_SCOPE_RULE_LOOSENING,
+  compliance_profile: COMPLIANCE_PROFILE_LOOSENING,
 };
 
 /** does this comparator cover `artifactType`? */

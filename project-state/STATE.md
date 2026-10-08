@@ -1,5 +1,5 @@
 ---
-phase: adr0186-batch-4-pr
+phase: adr0186-batch-4-followup
 last_updated: 2026-10-08
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -21,7 +21,22 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
-**2026-10-08 - Batch 5 designed (ADR-0187); owner decisions taken 2026-10-08. The foundation waits for Batch 4 to merge.**
+**2026-10-08 - Batch 4 merged (PR #198, 1628248); review follow-up in its own PR; Batch 5 foundation next.**
+- Owner: "merge #198 once round 8 is green". Eight rounds of automated review fixes landed first (ADR-0186 decisions
+  21-28); Codex's X25 cross-review no longer gates the merge and now runs against `main`.
+- Follow-up PR (`b4-followup`, decision 29): IdP group sync never adds anyone to an approver role (withheld and audited,
+  **pending owner confirmation**); linked SSO counts as a step-up method on any transport (plain HTTP refuses rather than
+  admitting a first method); passkey grants die with their credential; tool-scoped consent signs a fixed
+  any-arguments digest; compliance-profile and onboarding-pack loosening needs a step-up.
+- Migrations 0171 and 0172 were edited in place during review: dev databases built from `b4-int` before 2026-10-08
+  16:30 UTC must be rebuilt.
+- Open owner decisions: group-sync approver confirmation (above), SCIM reactivation (recommend hold for admin), SoD
+  override needing an approver-role step-up, a separate step-up rate-limit setting, link-confirm for passkey holders
+  going to admin approval.
+- Next: Batch 5 foundation (B5-F + B5-E) on migration 0173, after the follow-up merges. Codex PRs #182/#184/#185 await
+  Codex's fixes (no Codex activity since 02:40 UTC).
+
+**2026-10-08 - Batch 5 designed (ADR-0187); owner decisions taken 2026-10-08. The foundation is next now that Batch 4 has merged.**
 - Owner decisions: one pinned runner container per engine pulling work from the gateway over an internal-only `engines`
   network (no Docker socket); model calls only through the gateway on a run-scoped virtual key (project pinned, revoked
   at end/cancel/timeout); every engine off until an admin enables it after the runner self-test passes (audited,

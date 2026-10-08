@@ -47,7 +47,7 @@ import {
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { decodeAttestationObject, isoBase64URL } from "@simplewebauthn/server/helpers";
-import { and, asc, auditLog, eq, isNull, sql, users, webauthnChallenges, webauthnCredentials, type Db } from "@regulait/db";
+import { and, asc, auditLog, eq, isNull, sql, stepUpGrants, users, webauthnChallenges, webauthnCredentials, type Db } from "@regulait/db";
 import { registerPasskeySchema, renamePasskeySchema, WEBAUTHN_TRANSPORTS, type WebauthnTransport } from "@regulait/shared";
 import { z } from "zod";
 import {
@@ -127,17 +127,28 @@ async function revokePasskey(
   db: Db,
   args: { ownerUserId: string; passkeyId: string; actorUserId: string; reason: string; byAdmin: boolean },
 ): Promise<{ ok: true; row: typeof webauthnCredentials.$inferSelect } | { ok: false }> {
-  const [row] = await db
-    .update(webauthnCredentials)
-    .set({ revokedAt: sql`now()`, revokedByUserId: args.actorUserId, revokeReason: args.reason })
-    .where(
-      and(
-        eq(webauthnCredentials.id, args.passkeyId),
-        eq(webauthnCredentials.userId, args.ownerUserId),
-        isNull(webauthnCredentials.revokedAt),
-      ),
-    )
-    .returning();
+  const row = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const [revoked] = await tx
+      .update(webauthnCredentials)
+      .set({ revokedAt: sql`now()`, revokedByUserId: args.actorUserId, revokeReason: args.reason })
+      .where(
+        and(
+          eq(webauthnCredentials.id, args.passkeyId),
+          eq(webauthnCredentials.userId, args.ownerUserId),
+          isNull(webauthnCredentials.revokedAt),
+        ),
+      )
+      .returning();
+    if (!revoked) return null;
+    // ADR-0186 decision 29 (finding 50), belt and braces beside the consumption
+    // predicate: every outstanding step-up grant this passkey gave ends with it
+    await tx
+      .update(stepUpGrants)
+      .set({ usedAt: sql`statement_timestamp()` })
+      .where(and(eq(stepUpGrants.credentialId, revoked.id), isNull(stepUpGrants.usedAt)));
+    return revoked;
+  });
   if (!row) return { ok: false };
   await audit(
     db,
