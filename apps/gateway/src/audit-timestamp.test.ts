@@ -52,7 +52,10 @@ describe.skipIf(!base)("X22 real timestamp persistence and guarded transport", (
     await anchorTimestamper.afterFlush(db, { id: row.id, record: anchorRecordFromRow(row), flushStatus: "flushed" });
     expect((await runAnchorTimestampSweep(db)).state).toBe("not_configured");
     expect(transport.requests).toHaveLength(0);
-    expect((await db.select().from(auditAnchors).where(eq(auditAnchors.id, row.id)))[0]!.tsaStatus).toBe("not_configured");
+    const [stored]=await db.select().from(auditAnchors).where(eq(auditAnchors.id,row.id));
+    expect(stored!.tsaStatus).toBe("not_configured");expect(JSON.parse(stored!.tsaToken!).payloadVersion).toBe("regulait.audit.v1");
+    const historic={...stored!,tsaToken:JSON.stringify({format:"regulait.timestamp.v1",payloadVersion:"regulait.audit.fixture-v0",replyDer:null})};
+    expect(anchorRecordFromRow(historic).payloadVersion).toBe("regulait.audit.fixture-v0");
     expect((await app.inject({ method: "GET", url: `/v1/audit/anchors/${row.id}/timestamp.tsr`, headers: auth })).statusCode).toBe(409);
   });
   it("refuses a TSA outside the admin allow list and schedules bounded backoff", async () => {

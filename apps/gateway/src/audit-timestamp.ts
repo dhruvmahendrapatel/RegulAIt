@@ -6,7 +6,7 @@ import { AlgorithmIdentifier, MessageImprint, TimeStampReq } from "pkijs";
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, auditAnchors, auditLog, eq, ne, sql, type Db } from "@regulait/db";
-import { AUDIT_PAYLOAD_VERSION, canonicalJson } from "@regulait/shared";
+import { canonicalJson } from "@regulait/shared";
 import type { AnchorRecord, AnchorTimestamper } from "./audit-chain.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -39,8 +39,17 @@ function configuration() {
 export function anchorCanonicalBytes(record: AnchorRecord): Uint8Array {
   return Buffer.from(canonicalJson(record), "utf8");
 }
+/** The existing text column stores versioned public timestamp metadata.
+ * Legacy bare base64 rows were issued with regulait.audit.v1. */
+function storedTimestamp(value:string|null):{payloadVersion:string;replyDer:string|null}|null{
+ if(!value?.startsWith("{"))return null;
+ const data=JSON.parse(value);
+ if(data.format!=="regulait.timestamp.v1"||typeof data.payloadVersion!=="string"||!(data.replyDer===null||typeof data.replyDer==="string"))throw new TimestampValidationError("timestamp_storage_invalid");
+ return data;
+}
+function timestampStorage(payloadVersion:string,replyDer:string|null){return JSON.stringify({format:"regulait.timestamp.v1",payloadVersion,replyDer});}
 export function anchorRecordFromRow(row: Anchor): AnchorRecord {
-  return { seq: row.seq, rowHash: row.rowHash, headAt: row.headAt.toISOString(), algorithm: row.algorithm, payloadVersion: AUDIT_PAYLOAD_VERSION, capturedAt: row.createdAt.toISOString() };
+  return { seq: row.seq, rowHash: row.rowHash, headAt: row.headAt.toISOString(), algorithm: row.algorithm, payloadVersion: storedTimestamp(row.tsaToken)?.payloadVersion ?? "regulait.audit.v1", capturedAt: row.createdAt.toISOString() };
 }
 export function anchorTimestampSummary(row: Anchor) {
   return { status: row.tsaStatus, genTime: row.tsaGenTime?.toISOString() ?? null, tsaUrl: row.tsaUrl, serial: row.tsaSerial, policyOid: row.tsaPolicyOid, verified: row.tsaStatus === "granted" && !!row.tsaToken && !!row.tsaGenTime && !!row.tsaMessageImprint };
@@ -78,6 +87,9 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
     const [row] = await tx.select().from(auditAnchors).where(eq(auditAnchors.id, id));
     if (!row) return { state: "missing" as const, attempted: 0, granted: 0, failed: 0 };
     if (row.tsaStatus === "granted") return { state: "granted" as const, attempted: 0, granted: 0, failed: 0 };
+    const record=options.record ?? anchorRecordFromRow(row);
+    // Pin the captured record's version even on failures or absent TSA config.
+    await tx.update(auditAnchors).set({tsaToken:timestampStorage(record.payloadVersion,null)}).where(eq(auditAnchors.id,id));
     const org = await loadOrgSettings(tx as unknown as Db);
     if (org.auditAnchorTimestampMode === "off") return { state: "off" as const, attempted: 0, granted: 0, failed: 0 };
     if (!options.force && (row.tsaAttempts >= MAX_ATTEMPTS || (row.tsaNextAttemptAt && row.tsaNextAttemptAt > now))) return { state: "backoff" as const, attempted: 0, granted: 0, failed: 0 };
@@ -94,12 +106,13 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
         await tx.update(auditAnchors).set({ tsaStatus: "pending", tsaLastError: "timestamp_waiting_for_anchor_flush" }).where(eq(auditAnchors.id, id));
         return { state: "pending" as const, attempted: 0, granted: 0, failed: 0 };
       }
-      request = timestampRequest(options.record ?? anchorRecordFromRow(row));
+      request = timestampRequest(record);
       if (config.policyOid) request.request.reqPolicy = config.policyOid;
       const fetch = createGuardedFetch({ allowList: await loadEgressAllowList(tx as unknown as Db), providerAllowsPlaintextHttp: false });
+      const sentAt=new Date();
       const response = await fetch(config.url, { method: "POST", headers: { "content-type": "application/timestamp-query", accept: "application/timestamp-reply" }, body: new Uint8Array(request.request.toSchema().toBER(false)), signal: AbortSignal.timeout(DEADLINE_MS) });
-      const checked = await verifyTimestampResponse(await boundedResponse(response), { bytes: request.bytes, nonceHex: request.nonceHex, trust: config.trust, ...(config.policyOid ? { policyOid: config.policyOid } : {}), now });
-      await tx.update(auditAnchors).set({ tsaStatus: "granted", tsaUrl: config.url, tsaToken: checked.tokenBase64, tsaGenTime: checked.genTime, tsaSerial: checked.serial, tsaPolicyOid: checked.policyOid, tsaMessageImprint: checked.imprint, tsaNonce: request.nonceHex, tsaAttempts: row.tsaAttempts + 1, tsaNextAttemptAt: null, tsaLastError: null }).where(eq(auditAnchors.id, id));
+      const checked = await verifyTimestampResponse(await boundedResponse(response), { bytes: request.bytes, nonceHex: request.nonceHex, trust: config.trust, ...(config.policyOid ? { policyOid: config.policyOid } : {}), now: new Date(), sentAt });
+      await tx.update(auditAnchors).set({ tsaStatus: "granted", tsaUrl: config.url, tsaToken: timestampStorage(record.payloadVersion,checked.tokenBase64), tsaGenTime: checked.genTime, tsaSerial: checked.serial, tsaPolicyOid: checked.policyOid, tsaMessageImprint: checked.imprint, tsaNonce: request.nonceHex, tsaAttempts: row.tsaAttempts + 1, tsaNextAttemptAt: null, tsaLastError: null }).where(eq(auditAnchors.id, id));
       return { state: "granted" as const, attempted: 1, granted: 1, failed: 0 };
     } catch (error) {
       const attempts = row.tsaAttempts + 1;
@@ -145,7 +158,7 @@ export function registerAuditTimestampRoutes(app: FastifyInstance, db: Db): void
     const [row] = await db.select().from(auditAnchors).where(eq(auditAnchors.id, anchorId));
     if (!row) return reply.status(404).send({ error: "anchor_not_found" });
     if (row.tsaStatus !== "granted" || !row.tsaToken) return reply.status(409).send({ error: "anchor_not_timestamped" });
-    try { return reply.type("application/timestamp-reply").header("cache-control", "no-store").send(timestampReplyBytes(row.tsaToken)); }
+    try { return reply.type("application/timestamp-reply").header("cache-control", "no-store").send(timestampReplyBytes(storedTimestamp(row.tsaToken)?.replyDer ?? row.tsaToken)); }
     catch { return reply.status(503).send({ error: "timestamp_token_unreadable" }); }
   });
 }

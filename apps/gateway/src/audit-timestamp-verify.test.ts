@@ -22,14 +22,14 @@ function issue(request: ReturnType<typeof timestampRequest>, extraConfig = "") {
   openssl("ts", "-reply", "-config", file("tsa.cnf"), "-queryfile", file("query.der"), "-out", file("response.der"));
   return readFileSync(file("response.der"));
 }
-async function changedToken(change: (cms: SignedData) => void) {
+async function changedToken(change: (cms: SignedData) => void, generationTime = new Date()) {
   const parsed = new TimeStampResp({ schema: derSchema(response) });
   const cms = new SignedData({ schema: parsed.timeStampToken!.content });
   change(cms);
   // Reissued test certificates can cross a one-second notBefore boundary.
   // Re-sign fresh TSTInfo and its CMS digest so chain tests isolate EKU.
   const info = new TSTInfo({ schema: derSchema(new Uint8Array(cms.encapContentInfo.eContent!.getValue())) });
-  info.genTime = new Date();
+  info.genTime = generationTime;
   const content = new Uint8Array(info.toSchema().toBER(false));
   cms.encapContentInfo.eContent = new asn1.OctetString({ valueHex: content.buffer });
   const digest = cms.signerInfos[0]!.signedAttrs!.attributes.find((attr) => attr.type === "1.2.840.113549.1.9.4")!;
@@ -63,6 +63,16 @@ describe("RFC 3161 independent issuer verification", () => {
     const rebuilt = timestampReplyBytes(result.tokenBase64);
     expect(new TimeStampResp({ schema: derSchema(rebuilt) }).status.status).toBe(0);
     expect((await verifyTimestampResponse(rebuilt, facts)).imprint).toBe(result.imprint);
+  });
+  it("R22-03: refuses a signed response older than the request window",async()=>{
+    const sentAt=new Date(facts.now.getTime()+301000);
+    await expect(verifyTimestampResponse(response,{...facts,now:sentAt,sentAt} as TimestampRequestFacts)).rejects.toThrow("timestamp_generation_time_invalid");
+  });
+  it("R22-06: preserves the original granted-with-modifications reply bytes",async()=>{
+    const parsed=new TimeStampResp({schema:derSchema(response)});parsed.status.status=1;
+    const original=Buffer.from(parsed.toSchema().toBER(false));
+    const checked=await verifyTimestampResponse(original,facts);
+    expect(timestampReplyBytes(checked.tokenBase64)).toEqual(original);
   });
   it("refuses anchor substitution, nonce replay and a different requested policy", async () => {
     await expect(verifyTimestampResponse(response, { ...facts, bytes: anchorCanonicalBytes({ ...record, rowHash: "b".repeat(64) }) })).rejects.toThrow("imprint_mismatch");

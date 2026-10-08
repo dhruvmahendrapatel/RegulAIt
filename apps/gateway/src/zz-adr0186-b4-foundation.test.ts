@@ -729,6 +729,9 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       const member = await inject(m, url, users.member.auth, payload);
       expect(member.statusCode, `${m} ${url} (member): ${member.body}`).toBe(403);
       const admin = await inject(m, url, users.admin.auth, payload);
+      if(url.startsWith("/v1/audit/anchors/")){
+        expect(admin.statusCode,admin.body).toBe(404);expect(admin.json()).toEqual({error:"anchor_not_found"});continue;
+      }
       expect(admin.statusCode, `${m} ${url} (admin): ${admin.body}`).toBe(501);
       expect(admin.json()).toEqual({ error: "not_built" });
     }
@@ -742,7 +745,7 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       expect(def!.adr).toBe("ADR-0186");
       const out = await def!.run({ db, actorUserId: null, now: new Date(), runId: `a186-${RUN}` });
       expect(out.itemsProcessed, name).toBe(0);
-      expect(out.detail, name).toMatchObject({ state: "not_built" });
+      expect(out.detail, name).toMatchObject({ state: name==="anchor-timestamp-sweep"?"not_configured":"not_built" });
     }
   });
 
