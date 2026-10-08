@@ -365,6 +365,51 @@ database), `zz-b5-compose.test.ts` (4), `packages/shared/src/engines/engines.tes
     process groups; `spawn({detached})` plus `kill(-pid)` is the whole need. The Wilson interval, ASR and
     measurement labels reuse `redteam-stats.ts`.
 
+**Review round 1 (PR #203, Codex, 2026-10-08; 16 findings, each red first).** Tests: `zz-b5-engines.test.ts`
+"review round 1" (12), `packages/shared/src/engines/engines.test.ts` "review round 1" (4), the workflow-kernel and
+runner-core cases. **Migration 0173 was edited in place** (unmerged; `engine_runs.workflow_notified_at` and its partial
+index): a dev database that applied 0173 from `b5-foundation` before this round must be rebuilt (§4.1).
+
+16. **A defeat always fails the item** [1], whatever verdict it claims and however the run ended, and it counts in
+    the ASR; a run with any failed item reads `fail` even when it did not complete (a defeat is never hidden). A
+    defeat also clears a contradictory not-run listing (the DB CHECK keeps not-run reasons on not-run verdicts only).
+17. **Every engine-controlled string is scrubbed** [2] before it is mapped, stored or returned: item key, taxonomy
+    system and id, claimed class, reason, not-run keys and the error code (one the scrub changed or could not clear is
+    stored as `engine_error`). Any throw fails the item closed. Enum, numeric and uuid fields are schema-validated.
+18. **Lease decides the self-test now** [3]: the runner's stored report is re-evaluated against the manifest
+    (including its 24-hour freshness) and the engine's recorded self-test must still admit enabling (fresh, same
+    build); otherwise 409 `engine_self_test_required`. No stored boolean is trusted.
+19. **The egress probe always tries a public literal address** [4] with no resolver, reported as
+    `egress.address`/`addressConnected`. The self-test fails `egress_address_missing` when none was probed or it is
+    not globally routable (private, loopback, link-local, CGNAT, multicast, benchmarking and documentation ranges
+    are refused), and `egress_address_connected` when it connected. The runner reads it from
+    `REGULAIT_EGRESS_PROBE_ADDRESS`; a blocked resolver no longer masks routable egress.
+20. **The workflow hand-off is durable** [5]: `workflow_notified_at` is stamped only when the check stage evaluated
+    (or is no longer current); a failure, or another executor holding the stage, leaves it unset and the engine sweep
+    retries every minute.
+21. **Raw-report retention is the setting now** [6]: the sweep deletes a report once `finished_at` + the CURRENT
+    retention has passed (or its stored expiry, whichever is sooner), so lowering the setting shortens reports
+    already stored.
+22. **Attempts are capped at 25 per item** [7] (the governed trial limit, `RED_TEAM_MAX_TRIALS`), so no envelope can
+    expand into more than 125,000 outcomes; aggregates over that bound need no special path.
+23. **A result is accepted only while the run is live** [8], decided under the row lock: after the deadline or the
+    lease (before the sweep has run) the run ends `timeout` (`deadline_passed`/`lease_expired`), the key is revoked,
+    nothing of the envelope counts, and the runner gets 409 `engine_run_timed_out`.
+24. **The workflow engine stage resolves the initiator's current standing** [9] (admin or not, active or not)
+    instead of assuming non-admin.
+25. **Lease re-checks project attribution** [10] in the lease transaction: a run-as person who can no longer bill
+    to the project ends the run `not_run` (`project_not_attributable`) with no key.
+26. **`eval_runs.cases`/`passed_cases` count only measured mapped items** [11] (pass or fail with a class or scorer);
+    unmapped, unknown and not-run items are not cases.
+27. **An envelope for another engine version is refused** [12] (`result_mismatch`, the run fails).
+28. **A schedule is validated by the same function as a run** [13] (`validateEngineRunRequest`: engine on, target
+    kind, project, target AND judge entitlement, attribution, budget ceiling, approver), with nothing written.
+29. **Workflow bindings exclude artifact-only engines** [14]: `stage.engines[].engine` is `promptfoo | garak`
+    (artifact targets come with B5-M).
+30. **One summary shape for every terminal path** [15] (`runSummary`), the approval denial included.
+31. **A workflow with engine-bound checks cannot start without a project** [16]: 422
+    `project_required_for_engine_checks` at instance start (an engine run's calls are project-pinned).
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
