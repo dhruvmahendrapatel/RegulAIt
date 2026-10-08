@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { asSteppedUpAdmin } from "./admin-api";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -30,13 +31,12 @@ const prefix = `review_${Date.now()}`;
 // for the spec's lifetime and restored afterwards (M-068).
 let savedMinReleaseAgeDays: number | null = null;
 
+/** B4S-06: relaxing a setting is a settings_relax step-up, which the bootstrap
+ * credential no longer gives once Ada can step up — Ada makes the write, stepped
+ * up with her authenticator (restoring needs none, and goes the same way) */
 async function putSettings(payload: Record<string, unknown>) {
-  const response = await fetch(`${base}/v1/org/settings`, {
-    method: "PUT",
-    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  expect(response.ok, `PUT /v1/org/settings: ${response.status}`).toBe(true);
+  const response = await asSteppedUpAdmin(base, state.passwords.admin, "PUT", "/v1/org/settings", payload);
+  expect(response.ok(), `PUT /v1/org/settings: ${response.status()} ${response.bodyText}`).toBe(true);
 }
 
 async function api(route: string, payload?: unknown) {
@@ -72,6 +72,8 @@ async function signIn(page: Page) {
 }
 
 test.beforeAll(async () => {
+  // Ada's API sign-in and the step-up each spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(120_000);
   savedMinReleaseAgeDays = (await api("/v1/org/settings")).settings.minReleaseAgeDays as number;
   // ADR-0186 B: tool-call approvals are passkey-signed by default, and this
   // stack has no public URL (so no passkey relying party). This journey is about
@@ -104,6 +106,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  test.setTimeout(120_000);
   if (savedMinReleaseAgeDays !== null) await putSettings({ minReleaseAgeDays: savedMinReleaseAgeDays });
   await putSettings({ approvalSignatureMode: "passkey" });
   upstream?.closeAllConnections();
