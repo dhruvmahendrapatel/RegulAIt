@@ -157,7 +157,8 @@ function selfTest(digest: string, version: string, over: Partial<{ dnsResolved: 
   return {
     imageDigest: digest,
     engineVersion: version,
-    usageDataEnv: over.env ?? { PROMPTFOO_DISABLE_TELEMETRY: true, PROMPTFOO_DISABLE_UPDATE: true, HF_HUB_OFFLINE: true, TRANSFORMERS_OFFLINE: true, HF_HUB_DISABLE_TELEMETRY: true },
+    // every switch any engine's manifest names, each at its required value
+    usageDataEnv: over.env ?? Object.fromEntries(Object.values(MANIFEST).flatMap((m) => Object.keys(m.usageDataEnv)).map((k) => [k, true])),
     egress: {
       host: "registry.example.invalid",
       dnsResolved: over.dnsResolved ?? false,

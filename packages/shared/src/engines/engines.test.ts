@@ -139,7 +139,7 @@ describe("the self-test verdict", () => {
   const ok = {
     imageDigest: m.imageDigest,
     engineVersion: m.version,
-    usageDataEnv: { PROMPTFOO_DISABLE_TELEMETRY: true, PROMPTFOO_DISABLE_UPDATE: true },
+    usageDataEnv: Object.fromEntries(Object.keys(m.usageDataEnv).map((k) => [k, true])),
     egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false },
     at: new Date().toISOString(),
   };

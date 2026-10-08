@@ -14,6 +14,7 @@
  * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
  * them per engine, and network denial stays the real control either way.
  */
+import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
 /** how a named plugin/probe set is classed for the approvals rule (owner decision 4) */
@@ -59,17 +60,27 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     kind: "redteam",
     displayName: "promptfoo",
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
-    version: "0.123.1",
+    version: PROMPTFOO_ENGINE_VERSION,
+    // B5-P: the image (engines/promptfoo/Dockerfile) has not been built anywhere that could
+    // report a real digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "MIT",
     maintainerCount: null,
-    usageDataEnv: { PROMPTFOO_DISABLE_TELEMETRY: "1", PROMPTFOO_DISABLE_UPDATE: "1" },
+    usageDataEnv: PROMPTFOO_USAGE_DATA_ENV,
     needsModelAccess: true,
-    sets: {},
-    airGappedReducedSet: [],
+    // every set that runs here, by class; a set not listed is offensive (fail closed)
+    sets: promptfooManifestSets(),
+    // remote generation is off on every install, not only air-gapped ones: this never runs
+    airGappedReducedSet: promptfooReducedSet(),
     lastVerified: "2026-10-08",
     reCheckBy: "2027-01-08",
-    unverified: [...UNVERIFIED_COMMON, "whether the disabled-telemetry path still attempts a request"],
+    unverified: [
+      "image digest and signature (the image is not built yet)",
+      "maintainer count",
+      "transitive licences: four permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0, AFL-2.1 OR BSD-3-Clause) await an owner decision",
+      "runtime behaviour inside the built image (egress test, air-gapped run)",
+      "the disabled-telemetry path still attempts a request in 0.123.1: the image patches it, and network denial stays the control",
+    ],
   },
   modelscan: {
     id: "modelscan",

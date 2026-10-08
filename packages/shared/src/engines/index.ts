@@ -6,3 +6,4 @@ export * from "./settings.js";
 export * from "./taxonomy.js";
 export * from "./manifest.js";
 export * from "./normalise.js";
+export * from "./promptfoo.js";
