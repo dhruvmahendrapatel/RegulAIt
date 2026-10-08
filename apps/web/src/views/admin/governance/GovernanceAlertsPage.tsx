@@ -1,3 +1,4 @@
+import { batch4SettingRelaxed, BATCH4_SETTING_COPY, BATCH4_STRICT_DEFAULTS } from "./monitorThresholds";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -218,6 +219,7 @@ export default function GovernanceAlertsPage() {
             </div>
           )}
         </QueryGate>
+        <DetectionMonitorSettings />
         <AlertSettingsCard />
       </div>
     </>
@@ -599,4 +601,45 @@ export function GovernanceAlertsSnapshot() {
       )}
     </Card>
   );
+}
+
+/** ADR-0186 M: actual saved thresholds; missing settings stay unreported. */
+function DetectionMonitorSettings() {
+  const action=useAction();
+  type Values={monitorMcpBaselineDays?:number;monitorJailbreakThreshold?:number;monitorJailbreakWindowHours?:number};
+  const query=useQuery({queryKey:["org","settings"],retry:false,queryFn:()=>api.get<{settings:Values}>("/v1/org/settings")});
+  const [draft,setDraft]=useState<Partial<Record<keyof Values,string>>>({});
+  const [validation,setValidation]=useState<string|null>(null);
+  const fields=[
+    {key:"monitorMcpBaselineDays" as const,label:"MCP baseline days",min:1,max:90},
+    {key:"monitorJailbreakThreshold" as const,label:"Jailbreak finding threshold",min:1,max:100},
+    {key:"monitorJailbreakWindowHours" as const,label:"Jailbreak observation hours",min:1,max:168},
+  ];
+  const current=query.data?.settings;
+  const reported=fields.every(field=>typeof current?.[field.key]==="number"&&Number.isInteger(current[field.key])&&current[field.key]!>=field.min&&current[field.key]!<=field.max);
+  return <Card title="Detection monitor rules and thresholds">
+    <p>These rules observe retained governance records; they do not block calls or prove a jailbreak succeeded.</p>
+    <ul>
+      <li>New MCP servers: compare attributed calls in the last 24 hours with the separate baseline window immediately before those hours.</li>
+      <li>Sharing widened: observe wider scopes or additional selected recipients in the last 24 hours. An edit with no earlier recipient snapshot remains unmeasured.</li>
+      <li>Instructions changed after approval: compare the current active prompt version with activation history at the latest approving decision. Missing or ambiguous history holds an existing alert.</li>
+      <li>Jailbreak correlation: findings must reach the threshold before an allowed tool call by the same person within the observation window. Correlation does not establish cause or successful execution.</li>
+    </ul>
+    <QueryGate loading={query.isLoading} error={query.error} onRetry={()=>void query.refetch()}>
+      {!reported?<p>Detection monitor thresholds are not reported by this gateway.</p>:<div className={v.stack}>
+        {fields.map(field=><Field key={field.key} label={field.label} help={`Whole number from ${field.min} to ${field.max}. Saved value: ${current![field.key]}. ${BATCH4_SETTING_COPY[field.key].strict} ${BATCH4_SETTING_COPY[field.key].relaxed}`}>
+          <Input type="number" min={field.min} max={field.max} step={1} disabled={action.busy} value={draft[field.key]??String(current![field.key])} onChange={event=>{setDraft(old=>({...old,[field.key]:event.target.value}));setValidation(null);}} />
+        </Field>)}
+        {fields.map(field=><p key={field.key}>{field.label}: <Badge tone={batch4SettingRelaxed(field.key,current![field.key]!)?"warn":"ok"}>{batch4SettingRelaxed(field.key,current![field.key]!)?"Relaxed":"Strict"}</Badge> <Button disabled={action.busy} onClick={()=>setDraft(old=>({...old,[field.key]:String(BATCH4_STRICT_DEFAULTS[field.key])}))}>Restore strict {field.label.toLowerCase()}</Button></p>)}
+        <p>Relaxing these thresholds is audited and requires step-up authentication when the deployment enforces it.</p>
+        {validation&&<p role="alert">{validation}</p>}
+        <Button disabled={action.busy||!Object.keys(draft).length} onClick={()=>{
+          const changes:Partial<Values>={};
+          for(const field of fields){if(draft[field.key]===undefined)continue;const raw=draft[field.key]!.trim();const value=Number(raw);
+            if(!raw||!Number.isInteger(value)||value<field.min||value>field.max){setValidation(`${field.label} must be a whole number from ${field.min} to ${field.max}.`);return;}changes[field.key]=value;}
+          void action.run(async()=>{await api.put("/v1/org/settings",changes);setDraft({});await query.refetch();},"Detection monitor thresholds saved");
+        }}>Save detection thresholds</Button>
+      </div>}
+    </QueryGate>
+  </Card>;
 }
