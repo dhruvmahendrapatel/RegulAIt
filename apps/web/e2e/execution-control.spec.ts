@@ -23,7 +23,7 @@
  * Every step asserts ZERO console errors, like every other spec here.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { passTotp } from "./totp-sign-in";
+import { settleWithStepUp, signInAdminFresh } from "./admin-api";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,8 +35,6 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 };
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
-
-const ADMIN_PASSWORD = "E2e-Admin-Execution!";
 
 function trackConsole(page: Page) {
   const errors: string[] = [];
@@ -67,31 +65,10 @@ test.beforeAll(async ({ browser }) => {
   track = trackConsole(page);
 
   // own our sign-in rather than borrowing the seeded one-time password, which
-  // whichever spec runs first consumes
-  const boot = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
-  const users = (await (await fetch(`${state.baseUrl}/v1/users`, { headers: boot })).json()) as {
-    users: Array<{ id: string; email: string }>;
-  };
-  const adminId = users.users.find((u) => u.email === "admin@regulait.local")!.id;
-  const minted = (await (
-    await fetch(`${state.baseUrl}/v1/users/${adminId}/set-initial-password`, {
-      method: "POST",
-      headers: boot,
-      body: JSON.stringify({ force: true }),
-    })
-  ).json()) as { password: string };
-
-  await page.goto("/ui");
-  await page.getByLabel("Email").fill("admin@regulait.local");
-  await page.getByLabel("Password", { exact: true }).fill(minted.password);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  // ADR-0181: the admin answers the TOTP challenge (or enrols, below)
-  await passTotp(page, "admin@regulait.local", page.getByLabel("Current (one-time) password"));
-  await page.getByLabel("Current (one-time) password").fill(minted.password);
-  await page.getByLabel("New password", { exact: true }).fill(ADMIN_PASSWORD);
-  await page.getByLabel("Confirm new password").fill(ADMIN_PASSWORD);
-  await page.getByRole("button", { name: "Set password & continue" }).click();
-  await passTotp(page, "admin@regulait.local", page.getByRole("heading", { name: /Welcome back/ }));
+  // whichever spec runs first consumes. B4S-06: the bootstrap credential no
+  // longer issues it once Ada can step up — she issues her own (self-service)
+  test.setTimeout(180_000);
+  await signInAdminFresh(page, state.baseUrl, state.passwords.admin);
 });
 
 test.afterAll(async () => {
@@ -174,6 +151,8 @@ test("4: the deployment dial halts, and the control surface still works", async 
 });
 
 test("5: both are lifted, and the page returns to nothing stopped", async () => {
+  // each confirmation spends a TOTP step; the harness may wait for the next 30 s window
+  test.setTimeout(120_000);
   await openExecutionControl();
 
   await page.getByRole("row", { name: /Normal/ }).getByRole("button", { name: "Resume" }).click();
@@ -182,10 +161,14 @@ test("5: both are lifted, and the page returns to nothing stopped", async () => 
   ).toBeVisible();
   await page.getByLabel("Reason").fill("campaign contained, upstream patched, resuming service");
   await page.getByRole("button", { name: "Resume" }).last().click();
+  // B4S: resuming from a halt is a relaxation — the app asks Ada to confirm it's her
+  await settleWithStepUp(page, page.getByRole("row", { name: /Normal/ }).getByRole("button", { name: "current" }));
 
   await page.getByRole("row", { name: /write_file/ }).getByRole("button", { name: "Lift" }).click();
   await page.getByLabel("Reason").fill("advisory withdrawn, tool retested clean");
   await page.getByRole("button", { name: "Lift halt" }).last().click();
+  // lifting a tool halt is a relaxation too
+  await settleWithStepUp(page, page.getByText("Nothing is stopped."));
 
   await expect(page.getByText("Nothing is stopped.")).toBeVisible();
   await shot(page, "execution-control-restored");

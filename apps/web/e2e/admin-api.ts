@@ -16,7 +16,7 @@
  * "Confirm it's you" dialog a protected button opens).
  */
 import { expect, request, type APIRequestContext, type APIResponse, type Locator, type Page } from "@playwright/test";
-import { nextCode } from "./totp-sign-in";
+import { nextCode, passTotp } from "./totp-sign-in";
 import { steppedUpAs } from "./demo-credentials";
 
 export const ADMIN_EMAIL = "admin@regulait.local";
@@ -97,4 +97,36 @@ export async function settleWithStepUp(page: Page, done: Locator, email: string 
   const dialog = page.getByTestId("step-up-dialog");
   await expect(done.or(dialog).first()).toBeVisible();
   if (await dialog.isVisible()) await confirmStepUp(page, email);
+}
+
+/**
+ * B4S round 3: Ada signs in on `page` with a one-time password she issues
+ * HERSELF (a self-service write, no step-up — the bootstrap credential no longer
+ * issues one once she can step up), replaces it with the suite's admin password
+ * and answers her TOTP challenge. For a spec that owns its sign-in instead of
+ * borrowing the seed's one-time password. The API sign-in, the UI sign-in and
+ * the forced change each spend a TOTP step, so the caller allows ~90 s.
+ */
+export async function signInAdminFresh(page: Page, baseURL: string, seededOneTime: string): Promise<void> {
+  const ctx = await adminContext(baseURL, seededOneTime);
+  let password: string;
+  try {
+    const users = (await (await ctx.get("/v1/users")).json()) as { users: Array<{ id: string; email: string }> };
+    const adminId = users.users.find((u) => u.email === ADMIN_EMAIL)!.id;
+    const issued = await steppedUpAs(ctx, ADMIN_EMAIL, "POST", `/v1/users/${adminId}/set-initial-password`, { force: true });
+    expect(issued.status(), `Ada's own one-time password: ${await issued.text()}`).toBe(200);
+    password = ((await issued.json()) as { password: string }).password;
+  } finally {
+    await ctx.dispose();
+  }
+  await page.goto("/ui");
+  await page.getByLabel("Email").fill(ADMIN_EMAIL);
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await passTotp(page, ADMIN_EMAIL, page.getByLabel("Current (one-time) password"));
+  await page.getByLabel("Current (one-time) password").fill(password);
+  await page.getByLabel("New password", { exact: true }).fill(E2E_ADMIN_PASSWORD);
+  await page.getByLabel("Confirm new password").fill(E2E_ADMIN_PASSWORD);
+  await page.getByRole("button", { name: "Set password & continue" }).click();
+  await passTotp(page, ADMIN_EMAIL, page.getByRole("heading", { name: /Welcome back/ }));
 }
