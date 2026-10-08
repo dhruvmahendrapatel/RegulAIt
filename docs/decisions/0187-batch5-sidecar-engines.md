@@ -410,6 +410,36 @@ index): a dev database that applied 0173 from `b5-foundation` before this round 
 31. **A workflow with engine-bound checks cannot start without a project** [16]: 422
     `project_required_for_engine_checks` at instance start (an engine run's calls are project-pinned).
 
+**Review round 2 (PR #203, Codex, 2026-10-08; 7 findings, each red first; branch `b5-followup`, its own PR after #203).**
+Tests: `zz-b5-engines.test.ts` "review round 2" (4), `packages/shared/src/engines/engines.test.ts` "review round 2" (1),
+`packages/engine-runner/src/runner.test.ts` (3). No migration change.
+
+32. **A lease re-reads the runner's revocation under its row lock** [17]: the lease transaction first takes the runner
+    row `FOR SHARE` and refuses a revoked runner with 401 `engine_runner_revoked` (nothing leased, no key). Revocation
+    UPDATEs that same row, so it either waits for an in-flight lease to commit (and then ends the run that lease
+    took) or the lease waits for it and sees it.
+33. **The runner retries its result until the gateway answers definitively** [18]: a network error, 5xx, 408 or 429
+    is retried with exponential backoff (doubling from 1 s, capped at 30 s, at most 8 attempts, never past the run's
+    deadline); a 2xx or any other 4xx (409 finished/timed out, 401 revoked, 422 invalid) ends it. The heartbeat keeps
+    running through the retries, and the work directory is kept (outcome `undelivered`) when nothing definitive
+    arrived — the gateway's sweep then times the run out.
+34. **A mapped item that says `fail` with zero defeats is inconsistent and reads `unknown`** [19] (noted on the
+    item); it contributes neither a failure nor clean trials.
+35. **A heartbeat never renews an expired lease** [20]: decided under the run's row lock, a lease that has expired or
+    a deadline that has passed ends the run `timeout` (`lease_expired`/`deadline_passed`, key revoked) and the
+    heartbeat answers 409 `engine_run_timed_out`.
+36. **A workflow that ends takes its engine runs with it** [21]: when an instance becomes completed, denied, aborted
+    or rolled back, every live run it started (awaiting approval, queued or leased) is cancelled (`workflow_ended`),
+    its key revoked and its pending approval superseded — in the transition's own transaction, under the instance
+    row lock. A re-open does the same for the runs of the rounds it left behind. The engine-run approval now carries
+    `approvals.instance_id`; the blanket "supersede the instance's pending gates" step skips `engine_run` approvals
+    (they end only with their run), and the decision-regression baseline reads only `workflow` sign-offs.
+37. **The process runner detaches its abort listener** [22] on both `error` and `close`, so a long-lived signal does
+    not accumulate listeners.
+38. **A due schedule whose run creation throws is an audited skip** [23]: the claim (the advanced `next_run_at`) is
+    already committed, so the error is caught and stored as `last_skip` ("the run could not be created: …") with an
+    `engine-schedule-skipped` audit row; a due run is never lost silently.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
