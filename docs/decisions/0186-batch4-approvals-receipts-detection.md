@@ -318,6 +318,22 @@ unless stated.
     - **409 `changed_concurrently`** (`CHANGED_CONCURRENTLY`, step-up.ts) means: the state a step-up decision rested
       on moved before the write took its lock, so nothing was written. The client reloads and repeats the change,
       which is decided again and may now ask for a step-up.
+24. **PR #198 review fixes, round 4 (2026-10-08)** (`zz-b4c4-review-fixes.test.ts`, each red first on d28ab09):
+    - **The quorum a call needs is checked again when it runs.** The execution recheck (MCP and connector spend paths)
+      computes `requiredQuorumNow`: the naming rule's quorum and, when the call is sensitive NOW (a project classified,
+      or the caller joining a sensitive project, after the consent), the org's sensitive quorum. Above the snapshotted
+      quorum, the approval is superseded and the call refused (`quorum_raised`).
+    - **Restoring a privilege needs the step-up granting it needs (Class C).** `settings_relax` is now asked for:
+      reactivating an account that still holds admin, an approver role or a named approver seat (decided on the locked
+      user row and under the approver-role lock); re-enabling a disabled agent or custom model provider; clearing a
+      held MCP server from admission quarantine; admitting a held skill; overriding the release quarantine; disabling
+      or deleting a SoD rule; deactivating or deleting an ABAC policy. Each compare-and-sets the state it decided on.
+    - Migration 0171 replaces `sso_reauth_requests_verified_check`: a whole-second `auth_time` may equal the request's
+      second (OIDC precision), anything else stays strictly after it — the CHECK now matches `ssoAuthTimeFresh`. 0171 is
+      unmerged; a database that already applied it must be dropped and re-migrated (CONTRIBUTING_PARALLEL_SESSIONS
+      §4.1: an applied migration is never re-applied).
+    - Four suites that drive these writes through API keys and do not test step-up relax it for their run
+      (`sod`, `sod-selectors`, `skill-admission`, `skill-admission-review`).
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
@@ -335,6 +351,13 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 - **First-passkey enrolment race.** Two concurrent "first" enrolments from one fresh session can both succeed. Low:
   that session may enrol a first passkey anyway. Closing it needs the register ceremony to record how it was admitted
   (a column on `webauthn_challenges`, whose shape CHECK allows no action fields for `register`): a migration.
+- **Reactivation through SCIM** (`scim.ts`) clears `disabled_at` with no step-up: a SCIM token cannot step up, and the
+  IdP owns the account lifecycle (ADR-0037). An admin or approver-role holder reactivated by the IdP regains both.
+  Follow-up: an owner decision (refuse, hold for an admin, or accept as IdP authority).
+- **ABAC policy activation** of a new version is not classified as loosening or tightening, so it asks for no step-up
+  (deactivation and deletion now do). Needs a policy-diff classifier.
+- **OIDC/SAML provider enable** asks for nothing, matching their creation (Class C rule: the same step-up as the
+  matching grant).
 - **409 `changed_concurrently` in the web client** is shown through the generic error display; a dedicated
   "this changed while you were deciding, reload" message is a follow-up.
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
