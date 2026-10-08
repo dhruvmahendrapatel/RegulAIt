@@ -45,9 +45,13 @@ export function preparedCredentials(): PreparedCredentials | null {
   if (!file) return null;
   const out = readFileSync(file, "utf8");
   const oneTime: Partial<Record<string, string>> = {};
+  // the seed prints `<persona> <email> <one-time password>`; match whole
+  // tokens rather than build a pattern from the email
+  const tokens = out.split(/\s+/);
   for (const [name, email] of Object.entries(PERSONA_EMAIL)) {
-    const m = new RegExp(`${name}\\s+${email.replace(/\./g, "\\.")}\\s+(\\S+)`).exec(out);
-    if (m?.[1] && !m[1].startsWith("(")) oneTime[email] = m[1];
+    const i = tokens.findIndex((t, k) => t === name && tokens[k + 1] === email);
+    const value = i >= 0 ? tokens[i + 2] : undefined;
+    if (value && !value.startsWith("(")) oneTime[email] = value;
   }
   const uri = /admin TOTP \(shown ONCE[^)]*\): (otpauth:\/\/totp\/\S+)/.exec(out)?.[1];
   return { oneTime, adminTotpSecret: uri ? new URL(uri).searchParams.get("secret") : null };
