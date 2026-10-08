@@ -188,3 +188,63 @@ describe("PR #203 review [4]: the literal-address probe", () => {
     expect(r).toMatchObject({ address: null, addressConnected: false });
   });
 });
+
+describe("PR #203 review round 2", () => {
+  const lease2: EngineLease = {
+    runId: "22222222-2222-4222-8222-222222222222",
+    engineId: "promptfoo",
+    engineVersion: "0.123.1",
+    spec: { config: { sets: ["basic"], params: {} }, trials: 3 },
+    target: null,
+    judge: null,
+    artifacts: [],
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    budgetUsd: null,
+  };
+  function gateway(resultReplies: Array<number | "throw">) {
+    const calls: string[] = [];
+    let workDirSeenDuringRetry: boolean | null = null;
+    let dir = "";
+    const http: RunnerHttp = async (url) => {
+      const p = new URL(url).pathname;
+      if (p.endsWith("/lease")) return { status: 200, json: async () => lease2 };
+      if (p.endsWith("/heartbeat")) return { status: 200, json: async () => ({ cancel: false }) };
+      calls.push(p);
+      if (calls.length > 1 && dir) workDirSeenDuringRetry = existsSync(dir);
+      const r = resultReplies.shift() ?? 200;
+      if (r === "throw") throw new Error("ECONNRESET");
+      return { status: r, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    client.useToken("rge_test");
+    return { client, calls, setDir: (d: string) => (dir = d), seen: () => workDirSeenDuringRetry };
+  }
+  const adapter = (g: { setDir: (d: string) => void }) => async (_l: EngineLease, ctx: { workDir: string }) => {
+    g.setDir(ctx.workDir);
+    return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+  };
+
+  it("[18] a transient failure or 5xx on the result is retried, keeping the work dir, until a 2xx", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
+    const g = gateway(["throw", 503, 200]);
+    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, retryBaseMs: 1 });
+    expect(out).toMatchObject({ outcome: "posted", status: 200 });
+    expect(g.calls).toHaveLength(3);
+    expect(g.seen()).toBe(true);
+  });
+
+  it("[18] a definitive 4xx stops the retries", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
+    const g = gateway([409, 200]);
+    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, retryBaseMs: 1 });
+    expect(out).toMatchObject({ status: 409 });
+    expect(g.calls).toHaveLength(1);
+  });
+
+  it("[22] the abort listener is removed when the process ends", async () => {
+    const { getEventListeners } = await import("node:events");
+    const ac = new AbortController();
+    await runProcessGroup("/bin/sh", ["-c", "true"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, signal: ac.signal, timeoutMs: 5000 });
+    expect(getEventListeners(ac.signal, "abort")).toHaveLength(0);
+  });
+});

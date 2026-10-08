@@ -122,6 +122,40 @@ export interface RunOnceOptions {
   engineVersion: string;
   workRoot: string;
   heartbeatMs?: number;
+  /** first retry delay for the result POST (doubles each time, capped at 30 s) */
+  retryBaseMs?: number;
+  /** result POST attempts before giving up (the lease then expires at the gateway) */
+  maxResultAttempts?: number;
+}
+
+/**
+ * PR #203 review round 2 [18]: post the result until the gateway gives a
+ * definitive answer — a 2xx, or a 4xx that will not change on retry (409 the
+ * run ended or timed out, 401 the runner is revoked, 422 the envelope is
+ * invalid, …). A network error, a 5xx, a 408 or a 429 is retried with
+ * exponential backoff, never past the run's deadline. Returns the last status,
+ * or null when nothing definitive arrived.
+ */
+export async function postResultWithRetry(
+  client: RunnerClient,
+  runId: string,
+  envelope: EngineResultEnvelope,
+  opts: { deadlineAt: string; retryBaseMs?: number; maxAttempts?: number },
+): Promise<number | null> {
+  const base = opts.retryBaseMs ?? 1000;
+  const max = opts.maxAttempts ?? 8;
+  for (let attempt = 1; attempt <= max; attempt++) {
+    let status: number | null = null;
+    try {
+      status = await client.result(runId, envelope);
+    } catch {
+      status = null;
+    }
+    if (status !== null && status < 500 && status !== 408 && status !== 429) return status;
+    if (attempt === max || Date.now() >= Date.parse(opts.deadlineAt)) return status;
+    await new Promise((r) => setTimeout(r, Math.min(30_000, base * 2 ** (attempt - 1))));
+  }
+  return null;
 }
 
 /** an envelope that reports a run that produced nothing usable */
@@ -147,14 +181,15 @@ export function sha256Hex(bytes: Buffer): string {
  * Lease and run at most one job. Returns what happened, for the shim's log.
  * The engine is aborted on a `cancel` heartbeat or at the deadline; an engine
  * that throws is reported `failed` (engine_error) with no items; a cancelled
- * run posts nothing (the gateway already ended it). The work directory is
- * wiped whatever happens.
+ * run posts nothing (the gateway already ended it). The result POST is
+ * retried until the gateway answers definitively; the work directory is wiped
+ * then, and kept when nothing definitive arrived (outcome `undelivered`).
  */
 export async function runOnce(
   client: RunnerClient,
   adapter: EngineAdapter,
   opts: RunOnceOptions,
-): Promise<{ outcome: "idle" | "posted" | "cancelled" | "failed"; runId?: string; status?: number }> {
+): Promise<{ outcome: "idle" | "posted" | "cancelled" | "failed" | "undelivered"; runId?: string; status?: number }> {
   const lease = await client.lease();
   if (!lease) return { outcome: "idle" };
   const workDir = `${opts.workRoot.replace(/\/$/, "")}/${lease.runId}`;
@@ -162,6 +197,7 @@ export async function runOnce(
   const abort = new AbortController();
   let progress = 0;
   let cancelled = false;
+  let keepWorkDir = false;
   const beat = async () => {
     try {
       const hb = await client.heartbeat(lease.runId, "running", progress);
@@ -194,11 +230,22 @@ export async function runOnce(
         : failedEnvelope(lease, opts.engineVersion, "failed", "engine_error");
     }
     if (cancelled) return { outcome: "cancelled", runId: lease.runId };
-    const status = await client.result(lease.runId, envelope);
+    // the heartbeat keeps running through the retries so the lease stays live
+    // across a brief gateway outage; the work dir is kept until the gateway
+    // gave a definitive answer
+    const status = await postResultWithRetry(client, lease.runId, envelope, {
+      deadlineAt: lease.deadlineAt,
+      ...(opts.retryBaseMs !== undefined ? { retryBaseMs: opts.retryBaseMs } : {}),
+      ...(opts.maxResultAttempts !== undefined ? { maxAttempts: opts.maxResultAttempts } : {}),
+    });
+    if (status === null || status >= 500 || status === 408 || status === 429) {
+      keepWorkDir = true;
+      return { outcome: "undelivered", runId: lease.runId };
+    }
     return { outcome: envelope.status === "failed" ? "failed" : "posted", runId: lease.runId, status };
   } finally {
     clearInterval(interval);
     clearTimeout(deadline);
-    await rm(workDir, { recursive: true, force: true });
+    if (!keepWorkDir) await rm(workDir, { recursive: true, force: true });
   }
 }

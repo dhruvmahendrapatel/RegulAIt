@@ -1093,6 +1093,122 @@ describe("review round 1", () => {
   });
 });
 
+// ===========================================================================
+// PR #203 review round 2 (Codex) — each red first
+// ===========================================================================
+describe("review round 2", () => {
+  it("[17] a runner revoked while its lease is being decided gets nothing (checked under the runner row lock)", async () => {
+    const second = await enrol("promptfoo", PF_DIGEST, MANIFEST.promptfoo.version);
+    const s = await startRun({});
+    expect(s.statusCode, s.body).toBe(202);
+    engineRunTestHooks.beforeLeaseTx = async (runnerId) => {
+      if (runnerId === second.id) await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'revoked mid-lease' WHERE id = ${second.id}`);
+    };
+    try {
+      const l = await inject("POST", "/v1/engine-runner/lease", second.auth);
+      expect(l.statusCode, l.body).toBe(401);
+      expect(l.json().error).toBe("engine_runner_revoked");
+    } finally {
+      engineRunTestHooks.beforeLeaseTx = undefined;
+    }
+    expect(await runRow(s.json().run.id)).toMatchObject({ status: "queued", virtualKeyId: null, runnerId: null });
+    await inject("POST", `/v1/engine-runs/${s.json().run.id}/cancel`, alice.key, {});
+  });
+
+  it("[20] a heartbeat after the lease expired ends the run instead of renewing it", async () => {
+    const l = await startAndLease();
+    await db.execute(sql`UPDATE engine_runs SET lease_expires_at = now() - interval '1 second' WHERE id = ${l.runId}`);
+    const hb = await inject("POST", `/v1/engine-runner/runs/${l.runId}/heartbeat`, pfRunner.auth, { phase: "running", progress: 0.9 });
+    expect(hb.statusCode, hb.body).toBe(409);
+    expect(hb.json().error).toBe("engine_run_timed_out");
+    expect(await runRow(l.runId)).toMatchObject({ status: "timeout", errorCode: "lease_expired" });
+    expect((await chatOn(l.target.apiKey, l.target.headers)).statusCode).toBe(401);
+  });
+
+  it("[21] aborting a workflow cancels its engine runs, revokes keys and supersedes the run's approval", async () => {
+    const name = `b5-agentic-flow-${RUN}`;
+    const tpl = await inject("POST", "/v1/workflows/templates", AUTH, {
+      name,
+      definition: {
+        workflow: name,
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "gate", type: "human_approval", approvers: [approver.id] },
+          {
+            id: "checks",
+            type: "automated_check",
+            checks: ["basic_check", "agentic_check"],
+            engines: [
+              { check: "basic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["basic"], budgetUsd: 1 },
+              { check: "agentic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["agentic"], budgetUsd: 1 },
+            ],
+          },
+          { id: "done", type: "human_approval", approvers: [approver.id] },
+        ],
+      },
+    });
+    expect(tpl.statusCode, tpl.body).toBe(201);
+    const rule = await inject("POST", "/v1/workflows/assignment-rules", AUTH, { templateId: tpl.json().id, changeType: `b5-agentic-${RUN}` });
+    expect(rule.statusCode, rule.body).toBe(201);
+    await db.update(orgSettings).set({ infraApproverUserId: approver.id }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    try {
+      const started = await inject("POST", "/v1/workflows/instances", alice.key, {
+        projectId,
+        change: { description: "b5 agentic", paths: ["src/x.ts"], changeType: `b5-agentic-${RUN}`, environment: "staging" },
+      });
+      expect(started.statusCode, started.body).toBe(201);
+      const id = started.json().id as string;
+      const q = await inject("GET", "/v1/approvals?status=pending", approver.key);
+      const gate = (q.json().approvals ?? []).find((r: { instanceId: string; stageId: string }) => r.instanceId === id && r.stageId === "gate");
+      expect((await inject("POST", `/v1/approvals/${gate.id}/decide`, approver.key, { decision: "approved" })).statusCode).toBe(200);
+      const v = (await inject("GET", `/v1/workflows/instances/${id}`, alice.key)).json().instance;
+      const checks = v.context["checks:checks"] as Array<{ check: string; engine: { runId: string } }>;
+      const basicRun = checks.find((c) => c.check === "basic_check")!.engine.runId;
+      const agenticRun = checks.find((c) => c.check === "agentic_check")!.engine.runId;
+      const agentic = await runRow(agenticRun);
+      expect(agentic.status).toBe("awaiting_approval");
+      const [appr] = await db.execute(sql`SELECT instance_id FROM approvals WHERE id = ${agentic.approvalId}`).then((r) => (r as unknown as { rows: Array<{ instance_id: string | null }> }).rows);
+      expect(appr!.instance_id).toBe(id);
+      const l = await lease();
+      expect(l.json().runId).toBe(basicRun);
+      const key = l.json().target.apiKey as string;
+      const abort = await inject("POST", `/v1/workflows/instances/${id}/abort`, alice.key, {});
+      expect(abort.statusCode, abort.body).toBe(200);
+      expect(await runRow(basicRun)).toMatchObject({ status: "cancelled" });
+      expect(await runRow(agenticRun)).toMatchObject({ status: "cancelled" });
+      expect((await chatOn(key, l.json().target.headers)).statusCode).toBe(401);
+      const [after] = await db.execute(sql`SELECT status FROM approvals WHERE id = ${agentic.approvalId}`).then((r) => (r as unknown as { rows: Array<{ status: string }> }).rows);
+      expect(after!.status).toBe("superseded");
+    } finally {
+      await db.update(orgSettings).set({ infraApproverUserId: null }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+  });
+
+  it("[23] a scheduled run whose creation throws is recorded as an audited skip, not lost", async () => {
+    const c = await inject("POST", "/v1/engine-schedules", alice.key, {
+      request: { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
+      intervalHours: 24,
+    });
+    expect(c.statusCode, c.body).toBe(201);
+    const id = c.json().schedule.id as string;
+    await db.update(engineSchedules).set({ nextRunAt: new Date(Date.now() - 1000) }).where(eq(engineSchedules.id, id));
+    engineRunTestHooks.beforeScheduledCreate = () => {
+      throw new Error("database hiccup");
+    };
+    try {
+      const out = await runEngineScheduleSweep(db);
+      expect(out.skipped).toBeGreaterThanOrEqual(1);
+    } finally {
+      engineRunTestHooks.beforeScheduledCreate = undefined;
+      await inject("PATCH", `/v1/engine-schedules/${id}`, alice.key, { enabled: false });
+    }
+    const [s] = await db.select().from(engineSchedules).where(eq(engineSchedules.id, id));
+    expect(s!.lastSkip).toMatch(/could not be created/);
+    const audits = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "engine-schedule-skipped"), eq(auditLog.objectId, id)));
+    expect(audits).toHaveLength(1);
+  });
+});
+
 describe("route classes", () => {
   it("the runner routes are their own trust path; the run routes are any user's", async () => {
     const { routeAuthClass } = await import("./route-classes.js");
