@@ -40,6 +40,8 @@ import {
   engineSchedules,
   eq,
   evalRuns,
+  interceptionSettings,
+  INTERCEPTION_SETTINGS_ID,
   orgSettings,
   ORG_SETTINGS_ID,
   redteamProbeTrials,
@@ -64,6 +66,7 @@ import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
 import { setEngineDetectionScrub } from "./engine-scrub.js";
 
@@ -100,6 +103,7 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let restoreGates: (() => Promise<void>) | undefined;
+let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 let alice: { id: string; key: { authorization: string } };
 let approver: { id: string; key: { authorization: string } };
@@ -281,6 +285,8 @@ beforeAll(async () => {
     engines: { manifest: MANIFEST, taxonomy: TAXONOMY, gatewayBaseUrl: "http://gateway.test/v1" },
   });
   await app.ready();
+  const [prior] = await db.select().from(interceptionSettings).where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
+  priorInterception = prior ? { anthropicCompatEnabled: prior.anthropicCompatEnabled, openaiCompatEnabled: prior.openaiCompatEnabled } : null;
   const s = await inject("PUT", "/v1/interception/settings", AUTH, { anthropicCompatEnabled: true, openaiCompatEnabled: true });
   expect(s.statusCode, s.body).toBe(200);
 
@@ -320,6 +326,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   setEngineDetectionScrub((await import("@regulait/shared")).scrubAuditText);
+  // M-068 / B4S-06: global state goes back before the suite ends — the compat
+  // surfaces, the admin's passkey (an admin with a step-up method changes what
+  // the bootstrap credential may do in every later suite), and the engines.
+  if (priorInterception) {
+    await db.update(interceptionSettings).set(priorInterception).where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
+  }
+  await forgetStepUpMethodsForTest(db, [admin?.id]);
+  await db.execute(sql`UPDATE engines SET enabled = false, self_test = NULL, self_test_passed_at = NULL, max_budget_usd = 5, timeout_seconds = 1800, max_concurrent = 1`);
+  await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test suite finished' WHERE revoked_at IS NULL`);
+  await db.update(orgSettings).set({ ...BATCH5_STRICT_DEFAULTS }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   await restoreGates?.();
   await restoreIdentity?.();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
