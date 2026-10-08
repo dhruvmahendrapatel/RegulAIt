@@ -150,9 +150,15 @@ async function mkSession(userId: string): Promise<string> {
 /** a person with a browser session and an API key; no step-up method until one is enrolled */
 async function mkPerson(label: string, isAdmin: boolean): Promise<Person> {
   const email = `b4s2-${label}-${RUN}@example.com`;
-  const u = await boot("POST", "/v1/users", { email, displayName: `b4s2 ${label}`, isAdmin });
+  // B4S round 3: creating an account that is already an admin is a settings_relax step-up; the bootstrap
+  // credential gives it only during first-admin setup. Once an admin here can step up (this file enrols
+  // passkeys), the fixture creates a member and sets the flag directly — the API path with a real step-up is
+  // covered by zz-b4s-approver-eligibility
+  const first = await boot("POST", "/v1/users", { email, displayName: `b4s2 ${label}`, isAdmin });
+  const u = isAdmin && first.statusCode === 403 && first.json().credential === "bootstrap" ? await boot("POST", "/v1/users", { email, displayName: `b4s2 ${label}` }) : first;
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
+  if (isAdmin && !u.json().isAdmin) await db.execute(sql`UPDATE users SET is_admin = true WHERE id = ${id}`);
   const key = await boot("POST", `/v1/users/${id}/keys`, { name: "b4s2" });
   expect(key.statusCode, key.body).toBe(201);
   return { id, email, key: { authorization: `Bearer ${key.json().token}` }, token: await mkSession(id), auth: new SoftAuthenticator({ origin: ORIGIN }) };

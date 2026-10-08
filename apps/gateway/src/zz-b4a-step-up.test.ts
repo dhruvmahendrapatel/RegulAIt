@@ -144,9 +144,15 @@ const withKey = (key: { authorization: string }, method: Method, url: string, pa
 
 async function mkUser(label: string, isAdmin: boolean): Promise<Who> {
   const email = `b4a-${label}-${RUN}@example.com`;
-  const u = await withKey(AUTH, "POST", "/v1/users", { email, displayName: `b4a ${label}`, isAdmin });
+  // B4S round 3: creating an account that is already an admin is a settings_relax step-up; the bootstrap
+  // credential gives it only during first-admin setup. Once an admin here can step up (this file enrols
+  // authenticators), the fixture creates a member and sets the flag directly — the API path with a real step-up is
+  // covered by zz-b4s-approver-eligibility
+  const first = await withKey(AUTH, "POST", "/v1/users", { email, displayName: `b4a ${label}`, isAdmin });
+  const u = isAdmin && first.statusCode === 403 && first.json().credential === "bootstrap" ? await withKey(AUTH, "POST", "/v1/users", { email, displayName: `b4a ${label}` }) : first;
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
+  if (isAdmin && !u.json().isAdmin) await db.update(usersTable).set({ isAdmin: true }).where(eq(usersTable.id, id));
   created.users.push(id);
   const key = await withKey(AUTH, "POST", `/v1/users/${id}/keys`, { name: "b4a" });
   expect(key.statusCode, key.body).toBe(201);
