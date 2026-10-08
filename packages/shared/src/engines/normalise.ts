@@ -151,6 +151,12 @@ export function normaliseEngineResult(input: {
         if (raw.attempts === 0) {
           verdict = "unknown";
           note = "no attempt reached the target";
+        } else if (verdict === "fail") {
+          // PR #203 review round 2 [19]: a fail with no recorded defeat cannot be turned
+          // into trial evidence (its trials would read as resisted), so it is rejected
+          // as inconsistent — unknown, outside every denominator, never a pass
+          verdict = "unknown";
+          note = "the engine said fail but reported no defeat; an inconsistent item does not count";
         }
       }
       const nr = verdict === "not_run" ? listedNotRun : null;

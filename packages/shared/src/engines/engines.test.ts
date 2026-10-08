@@ -71,7 +71,8 @@ describe("the envelope", () => {
 describe("not-clean semantics", () => {
   it("the server derives each verdict; any defeat fails; no attempt is unknown", () => {
     const n = norm(env({ items: [item("a", "pi"), item("b", "pi", { defeated: 1 }), item("c", "pi", { attempts: 0 }), item("d", "pi", { verdict: "fail" })] }));
-    expect(n.items.map((i) => i.verdict)).toEqual(["pass", "fail", "unknown", "fail"]);
+    // a claimed fail with no defeat is inconsistent (review round 2 [19]): unknown
+    expect(n.items.map((i) => i.verdict)).toEqual(["pass", "fail", "unknown", "unknown"]);
     expect(n.verdict).toBe("fail");
   });
 
@@ -237,5 +238,15 @@ describe("review round 1", () => {
     expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, address: null } }, new Date()).failures).toEqual(["egress_address_missing"]);
     expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, address: "10.1.2.3" } }, new Date()).failures).toEqual(["egress_address_missing"]);
     expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, address: "127.0.0.1" } }, new Date()).failures).toEqual(["egress_address_missing"]);
+  });
+});
+
+describe("review round 2", () => {
+  it("[19] a claimed fail with no defeat is inconsistent: unknown, never clean trial evidence", () => {
+    const n = norm(env({ items: [item("f", "pi", { verdict: "fail", defeated: 0 })] }));
+    expect(n.items[0]).toMatchObject({ verdict: "unknown" });
+    expect(n.probeStats[0]!.status).toBe("not_run");
+    expect(n.asrTrials).toBe(0);
+    expect(n.verdict).toBe("unknown");
   });
 });
