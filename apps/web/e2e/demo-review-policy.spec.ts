@@ -115,13 +115,32 @@ const reviewsOf = async (id: string) =>
 let originalPolicy: Json | null = null;
 let adminFixtureId: string | null = null;
 
-test.beforeAll(async () => {
+/**
+ * B4S round 3: creating an account that is already an admin is a
+ * settings_relax step-up (as granting admin is). With demo:prepare's printed
+ * credentials, Ada creates the fixture admin, stepped up with her
+ * authenticator (in a page of her own); without them, the bootstrap path
+ * (first-admin setup only).
+ */
+async function createFixtureAdmin(browser: Browser): Promise<string> {
+  const body = { email: ADMIN_EMAIL, displayName: ADMIN_NAME, isAdmin: true };
+  if (preparedCredentials()) {
+    const ada = await browser.newPage();
+    try {
+      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, "E2e-Demo-Intake!", LANDING(ada)), "Ada signs in").toBe(true);
+      const r = await steppedUpAs(ada.request, PERSONA_EMAIL.admin, "POST", `${BASE}/v1/users`, body);
+      expect(r.status(), `fixture admin: ${await r.text()}`).toBe(201);
+      return ((await r.json()) as { id: string }).id;
+    } finally {
+      await ada.close();
+    }
+  }
+  return (await api("/v1/users", { method: "POST", body: JSON.stringify(body) })).id as string;
+}
+
+test.beforeAll(async ({ browser }) => {
   originalPolicy = await api("/v1/governance/review-policy");
-  const created = await api("/v1/users", {
-    method: "POST",
-    body: JSON.stringify({ email: ADMIN_EMAIL, displayName: ADMIN_NAME, isAdmin: true }),
-  });
-  adminFixtureId = created.id;
+  adminFixtureId = await createFixtureAdmin(browser);
 });
 
 test.afterAll(async () => {
