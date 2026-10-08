@@ -440,6 +440,7 @@ import {
   decisionView,
   decideToolCallApproval,
   isToolCallApproval,
+  approvingPrincipals,
   decidedByViewerCondition,
   poolVisibilityCondition,
   registerApprovalSigningRoutes,
@@ -3461,6 +3462,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (!d.approvalId) continue;
       decisionsByApproval.set(d.approvalId, [...(decisionsByApproval.get(d.approvalId) ?? []), d]);
     }
+    // ADR-0186 decision 27 (finding 40): the queue's "N of quorum" is the SAME live
+    // principal count the decide path and the execution recheck use
+    // (`approvingPrincipals`: delegation-linked approvers count once, links as they are now)
+    const principalCountFor = new Map<string, number>();
+    for (const [approvalId, ds] of decisionsByApproval) {
+      principalCountFor.set(approvalId, (await approvingPrincipals(db, ds)).length);
+    }
     const assignmentRows = rows.length
       ? await db
           .select()
@@ -3780,7 +3788,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               const ds = decisionsByApproval.get(r.id) ?? [];
               const mine = ds.find((d) => d.deciderUserId === me) ?? null;
               return {
-                approvalsCount: new Set(ds.filter((d) => d.decision === "approved").map((d) => d.principalUserId)).size,
+                approvalsCount: principalCountFor.get(r.id) ?? 0,
                 myDecision: mine ? mine.decision : null,
                 decisions: ds.map((d) => ({
                   ...decisionView(d),

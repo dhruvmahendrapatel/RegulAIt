@@ -33,6 +33,15 @@
  * default without the step-up. Ordered rules carry `looser(value, base)`; a rule
  * without one is a two-state or unordered setting whose every non-strict value
  * is already looser than the strict default, so the stored value adds nothing.
+ *
+ * Decision 27 (round 7, finding 39): the stored-value rule applies to the
+ * EXEMPTIONS too. An exemption reasoned "the default is already the loosest
+ * value" or "it only tightens" holds against the default, not against a stored
+ * posture an admin tightened (sso-only on, an IP envelope enforced, a PII
+ * category added, a retention override lengthened). Each such key is now a rule
+ * with `relaxed` never true (no value is looser than its default) and a
+ * `looser(value, stored)` comparator. An exemption that remains has a reason
+ * that holds against the stored value as well.
  */
 import {
   accountabilitySettingRelaxed,
@@ -79,6 +88,30 @@ const largerLooser = (v: unknown, b: unknown) =>
 const smallerLooser = (v: unknown, b: unknown) => typeof v === "number" && typeof b === "number" && v < b;
 const rankLooser = (rank: Record<string, number>) => (v: unknown, b: unknown) =>
   (rank[String(v)] ?? -1) < (rank[String(b)] ?? -1);
+/** a list of PROTECTIONS (each entry adds a check): dropping a stored entry is looser */
+const dropsAny = (v: unknown, b: unknown) => {
+  const next = new Set(Array.isArray(v) ? v.map(String) : []);
+  return Array.isArray(b) && b.some((x) => !next.has(String(x)));
+};
+/** a list of PERMISSIONS (each entry widens what is allowed): an entry not stored is looser */
+const addsAny = (v: unknown, b: unknown) => {
+  const before = new Set(Array.isArray(b) ? b.map(String) : []);
+  return Array.isArray(v) && v.some((x) => !before.has(String(x)));
+};
+/** a stored-only rule: nothing is looser than the default, but leaving a stricter stored posture is */
+const fromStored = (strict: unknown, looser: (value: unknown, base: unknown) => boolean) => rule(strict, () => false, looser);
+const IP_POLICY_RANK: Record<string, number> = { off: 0, enforce_at_login: 1, enforce_continuous: 2 };
+/**
+ * an IP allowlist: null or [] admits every address (net-policy.ts), so emptying a
+ * non-empty list is looser, and any entry not stored (a new or wider CIDR) is
+ * looser; dropping entries narrows it
+ */
+const allowlistLooser = (v: unknown, b: unknown) => {
+  const stored = Array.isArray(b) ? b : [];
+  const next = Array.isArray(v) ? v : [];
+  if (stored.length === 0) return false;
+  return next.length === 0 || addsAny(next, stored);
+};
 const exempt = (reason: string): StrictnessExemption => ({ kind: "exempt", reason });
 
 /** anything other than the strict value is looser (an enum whose strict value is its strictest member) */
@@ -180,13 +213,13 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
 
   // --- governance / data ----------------------------------------------------
   defaultPiiMode: notEqual("block"),
-  piiInternationalCategories: exempt(
-    "the strict default is the empty list (ADR-0117 leaves the choice to the admin); each entry only ADDS detection",
-  ),
+  // decision 27: each entry ADDS detection; the default is the empty list (ADR-0117), so only removing a
+  // category the org turned on loosens it
+  piiInternationalCategories: fromStored([], dropsAny),
   envKeyFallbackEnabled: notEqual(false),
-  envFallbackProviders: exempt(
-    "acts only while envKeyFallbackEnabled is relaxed (a rule), and its default is already every provider",
-  ),
+  // decision 27: acts while envKeyFallbackEnabled is relaxed (a rule); the default is every provider, so only
+  // adding back a provider the org had removed loosens it
+  envFallbackProviders: fromStored(["anthropic", "openai", "google", "xai"], addsAny),
   customModelProvidersEnabled: notEqual(false),
   mcpPrivateRangesDefault: notEqual(false),
   mcpAdmissionMode: notEqual("enforce"),
@@ -218,7 +251,13 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   pruneIntervalHours: exempt("how often the prune runs; what it may delete is decided by the retention settings"),
   // null (the default) keeps every row; a number lets older rows be pruned
   defaultAuditRetentionDays: rule(null, (v) => v !== null),
-  modeAuditRetention: exempt("MAX-only overrides of the retention floor: they can only lengthen retention, never shorten it"),
+  // decision 27: MAX-only overrides lengthen retention past the floor; removing or lowering a stored
+  // override shortens it again
+  modeAuditRetention: fromStored({}, (v, b) => {
+    const next = (v ?? {}) as Record<string, number>;
+    const stored = (b ?? {}) as Record<string, number>;
+    return Object.entries(stored).some(([mode, days]) => !(mode in next) || next[mode]! < days);
+  }),
   canaryObservationRetentionDays: atLeast(90),
   backupVerifyEnabled: notEqual(true),
   backupVerifyIntervalHours: atMost(24),
@@ -240,7 +279,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   tracingEnabled: exempt("span observability; every decision and refusal is in the audit chain whether or not spans are kept"),
   // ADR-0181: spans keep no prompt or output unless an admin turns this on
   tracingCaptureContent: notEqual(false),
-  tracingPreviewMaxChars: exempt("bounds a preview's length; whether content is kept at all is tracingCaptureContent, a rule"),
+  // decision 27: while content capture is on (a rule), a longer preview exports more prompt and output text
+  tracingPreviewMaxChars: fromStored(4000, largerLooser),
   tracingOtlpEndpoint: exempt("adjudicated by the egress guard at write time and on every export (ADR-0070)"),
   tracingOtlpHeaders: exempt("the collector's credential, stored enveloped; where it may go is the egress guard's decision"),
   tracingOtlpServiceName: exempt("a label on exported spans"),
@@ -251,16 +291,21 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   sessionLifetimeHours: atMost(24),
   sessionIdleMinutes: atMost(IDENTITY.sessionIdleMinutes),
   mfaRequired: rule(IDENTITY.mfaRequired, (v) => (MFA_RANK[String(v)] ?? -1) < MFA_RANK[IDENTITY.mfaRequired]!, rankLooser(MFA_RANK)),
-  ssoOnly: exempt("the strict default is off; turning it on only narrows how people sign in"),
-  localSignIn: exempt("changing it needs its own break_glass step-up (breakGlassChange)"),
-  breakGlassUserIds: exempt("changing who holds the break-glass key needs its own break_glass step-up (breakGlassChange)"),
+  // decision 27: off by default; turning a stored sso-only OFF re-opens password sign-in
+  ssoOnly: fromStored(false, (v, b) => b === true && v === false),
+  localSignIn: exempt("ANY change from the stored value needs its own break_glass step-up (breakGlassChange)"),
+  breakGlassUserIds: exempt(
+    "ANY change from the stored list (compared as a set) needs its own break_glass step-up (breakGlassChange)",
+  ),
   loginLockoutThreshold: atMost(5),
   loginLockoutWindowMinutes: atLeast(15),
   loginLockoutMinutes: atLeast(15),
   usernameSelfService: notEqual(false),
-  sessionIpAllowlist: exempt("the ADR-0039 envelope ships off and is opt-in: no value is looser than the default"),
-  sessionIpPolicy: exempt("the ADR-0039 envelope ships off and is opt-in: no value is looser than the default"),
-  apiKeyIpPolicy: exempt("the ADR-0039 envelope ships off and is opt-in: no value is looser than the default"),
+  // decision 27: the ADR-0039 envelope ships off (nothing is looser than the default), but leaving a stored
+  // envelope is: a policy turned down, a list emptied or given a new or wider entry
+  sessionIpAllowlist: fromStored(null, allowlistLooser),
+  sessionIpPolicy: fromStored("off", rankLooser(IP_POLICY_RANK)),
+  apiKeyIpPolicy: fromStored("off", rankLooser(IP_POLICY_RANK)),
   apiKeyDefaultTtlDays: atMost(IDENTITY.apiKeyDefaultTtlDays),
   apiKeyMaxTtlDays: atMost(IDENTITY.apiKeyMaxTtlDays),
 };

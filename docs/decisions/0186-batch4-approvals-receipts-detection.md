@@ -427,6 +427,35 @@ unless stated.
       create now re-reads the switch with the org row `FOR SHARE` while it inserts, so the two serialise.
     - **Queue visibility of the viewer's own decisions is a correlated `EXISTS`** inside the capped query
       (`decidedByViewerCondition`), never the viewer's lifetime of decision ids in one `IN` list (finding 38).
+27. **PR #198 review fixes, round 7 (2026-10-08)** (`zz-b4c7-review-fixes.test.ts`, 8 tests, all red first on
+    1826b6c; no migration):
+    - **The stored-value rule reaches the exemptions** (finding 39). Decision 26 judged only rules against the stored
+      value, and several exemptions were reasoned against the DEFAULT ("opt-in", "the default is already the loosest",
+      "only tightens"), which says nothing about a posture an admin tightened. Each such key is now a rule with
+      `relaxed` never true and a `looser(value, stored)` comparator (`fromStored`); every exemption kept has a reason
+      that holds against the stored value too. The registry stays typed over every writable key.
+
+      | Key | Before (exempt reason) | After |
+      |---|---|---|
+      | `ssoOnly` | default off; on only narrows | **rule**: stored on -> off re-opens password sign-in |
+      | `sessionIpPolicy`, `apiKeyIpPolicy` | envelope ships off, opt-in | **rule**: a lower level than stored (`off` < `enforce_at_login` < `enforce_continuous`) |
+      | `sessionIpAllowlist` | envelope ships off, opt-in | **rule**: emptying a stored list (empty admits every address) or any entry not stored (a new or wider CIDR); dropping entries narrows |
+      | `piiInternationalCategories` | default empty; entries only add detection | **rule**: dropping a stored category |
+      | `envFallbackProviders` | acts only while the fallback is on; default is every provider | **rule**: adding a provider not stored (while the fallback is on it widens which env keys are used) |
+      | `modeAuditRetention` | MAX-only overrides only lengthen | **rule**: removing or lowering a stored override shortens retention again |
+      | `tracingPreviewMaxChars` | bounds a preview; capture itself is a rule | **rule**: longer than stored exports more prompt and output text while capture is on |
+      | `localSignIn`, `breakGlassUserIds` | own `break_glass` step-up | **exempt, kept**: `breakGlassChange` asks for `break_glass` on ANY change from the stored value (the list as a set) |
+      | 17 pillar-6 optimisation dials | refuse nothing | **exempt, kept**: they change cost and answers, never what is refused, whatever was stored |
+      | 7 capacity ceilings | bounded work, not a protection | **exempt, kept**: same against the stored value |
+      | `alertTicketConnectionId` | acts only while `alertTicketMode` is relaxed | **exempt, kept**: names which admin-registered PM connection receives tickets; the mode is the rule |
+      | `energyRegion` | reporting only | **exempt, kept** |
+      | `recommendationJudgeEnabled`, `recommendationJudgeAgentId` | annotation only | **exempt, kept**: refuses and allows nothing |
+      | `autoPruneEnabled`, `pruneIntervalHours` | schedule only | **exempt, kept**: what may be deleted is the retention settings (rules, now also against the stored value) |
+      | `tracingEnabled` | spans only | **exempt, kept**: no content without `tracingCaptureContent` (a rule) |
+      | `tracingOtlpEndpoint`, `tracingOtlpHeaders`, `tracingOtlpServiceName` | egress guard / label | **exempt, kept**: the egress guard adjudicates every write and export |
+    - **The queue's approvals count is the live principal count** (finding 40): `GET /v1/approvals` computes
+      `approvalsCount` with `approvingPrincipals`, the function the decide path and the execution recheck use
+      (delegation-linked approvers count once, links as they are now), never raw distinct approver ids.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
