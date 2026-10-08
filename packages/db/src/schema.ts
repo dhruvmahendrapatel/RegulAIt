@@ -11548,7 +11548,8 @@ export const ssoReauthRequests = pgTable(
     ),
     check(
       "sso_reauth_requests_verified_check",
-      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND ${t.authTime} > ${t.requestedAt})`,
+      // migration 0171: a whole-second auth time (OIDC) may equal the request's second
+      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND (${t.authTime} > ${t.requestedAt} OR (date_trunc('second', ${t.authTime}) = ${t.authTime} AND ${t.authTime} >= date_trunc('second', ${t.requestedAt}))))`,
     ),
     check("sso_reauth_requests_used_check", sql`${t.usedAt} IS NULL OR ${t.verifiedAt} IS NOT NULL`),
     index("sso_reauth_requests_step_up_idx").on(t.stepUpId),

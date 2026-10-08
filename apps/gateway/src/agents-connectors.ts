@@ -3341,12 +3341,18 @@ export function registerAgentConnectorRoutes(
     const [before] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!before) return reply.status(404).send({ error: "unknown_agent" });
     if (before.enabled === body.enabled) return before;
+    // ADR-0186 A (Class C): re-enabling lifts a platform-wide stop — a settings_relax step-up
+    if (body.enabled && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { agentId, values: { enabled: true } } })).ok) {
+      return reply;
+    }
 
     const [row] = await db
       .update(agents)
       .set({ enabled: body.enabled })
-      .where(eq(agents.id, agentId))
+      // Class A: compare-and-set on the state the step-up was decided on
+      .where(and(eq(agents.id, agentId), eq(agents.enabled, before.enabled)))
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
 
     /**
      * THIS WRITE USED TO BE SILENT, three lines above a comment promising

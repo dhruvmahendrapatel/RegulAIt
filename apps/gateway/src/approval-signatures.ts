@@ -979,6 +979,22 @@ async function recheckDeciders(db: Q, row: ApprovalRow, decisions: readonly Appr
 }
 
 /**
+ * The quorum a queued tool-call approval's call would need if it were queued
+ * NOW: max(its naming rule's current quorum, the org's sensitive quorum when the
+ * call is sensitive now — `callSensitivity`, the same server-side test the queue
+ * uses). Compared by the recheck against the quorum snapshotted at queue time.
+ */
+export async function requiredQuorumNow(db: Q, row: ApprovalRow): Promise<number> {
+  const [rule] =
+    row.ruleId && UUID_RE.test(row.ruleId)
+      ? await db.select({ quorum: approvalRules.quorum }).from(approvalRules).where(eq(approvalRules.id, row.ruleId))
+      : [];
+  const sensitive = (await callSensitivity(db, { projectId: row.projectId, callerUserId: row.userId })).length > 0;
+  const org = sensitive ? await loadOrgSettings(db as Db) : null;
+  return Math.max(rule?.quorum ?? 1, org ? org.toolApprovalSensitiveQuorum : 1);
+}
+
+/**
  * THE EXECUTION RECHECK of a tool-call approval, under the consuming row lock.
  * B4S-09: every approving decider is still eligible (`recheckDeciders`), in
  * every signature mode. Then, in passkey mode, EVERY approving signature is
@@ -994,6 +1010,10 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
   const decisions = (await decisionsFor(db, row.id)).filter((d) => d.decision === "approved");
   const deciders = await recheckDeciders(db, row, decisions);
   if (!deciders.ok) return deciders;
+  // ADR-0186 A: the quorum this call needs NOW (its rule's, and the org's sensitive
+  // quorum when the call is sensitive now — a project newly classified, the caller
+  // newly on a sensitive project) is never more than the one it was approved under
+  if ((await requiredQuorumNow(db, row)) > row.quorum) return { ok: false, why: "quorum_raised" };
   // every signature mode: the approving principals are counted again NOW, as the
   // decide counted them — two approvers delegation-linked since are one principal
   if (row.signatureMode !== "passkey") {
@@ -1055,14 +1075,17 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
 
 /** supersede an approval whose signatures failed the recheck, and audit it (inside the consuming transaction) */
 export async function supersedeOnRecheckFailure(db: Q, row: ApprovalRow, call: CallFacts | null, outcome: Extract<RecheckOutcome, { ok: false }>) {
-  const signatureFailure = !/ineligible|unknown|linked_to_caller/.test(outcome.why);
+  const quorumRaised = outcome.why === "quorum_raised";
+  const signatureFailure = !quorumRaised && !/ineligible|unknown|linked_to_caller/.test(outcome.why);
   await db
     .update(approvals)
     .set({
       status: "superseded",
-      decisionReason: signatureFailure
-        ? "superseded: an approving signature did not verify against the call that tried to run"
-        : "superseded: someone who approved is no longer eligible to approve it",
+      decisionReason: quorumRaised
+        ? "superseded: the call now needs more approvers than it was approved by"
+        : signatureFailure
+          ? "superseded: an approving signature did not verify against the call that tried to run"
+          : "superseded: someone who approved is no longer eligible to approve it",
     })
     .where(and(eq(approvals.id, row.id), eq(approvals.status, "approved")));
   await db.insert(auditLog).values({
@@ -1082,7 +1105,10 @@ export async function supersedeOnRecheckFailure(db: Q, row: ApprovalRow, call: C
     effect: "deny",
     ruleId: APPROVAL_SIGNATURE_RECHECK_FAILED_RULE,
     ruleChain: [],
-    reason: signatureFailure
+    reason: quorumRaised
+      ? `approval '${row.id}' was superseded and the call refused: the call now needs more approvers than the ` +
+        `${row.quorum} it was approved by (its project or caller became sensitive, or its rule's quorum rose)`
+      : signatureFailure
       ? `approval '${row.id}' was superseded and the call refused: its approving signatures did not verify against ` +
         `the call that tried to run (${outcome.why})`
       : `approval '${row.id}' was superseded and the call refused: an approving decider is no longer eligible ` +

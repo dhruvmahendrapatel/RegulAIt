@@ -432,7 +432,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles } from "./approval-pool.js";
 import {
   decisionView,
@@ -1494,11 +1494,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const target = await loadUser(userId);
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (!target.disabledAt) return reply.status(409).send({ error: "not_disabled" });
-    const [row] = await db
-      .update(users)
-      .set({ disabledAt: null })
-      .where(eq(users.id, userId))
-      .returning({ id: users.id, disabledAt: users.disabledAt });
+    // ADR-0186 A (Class C): reactivating restores everything the account still holds.
+    // When that is admin, an approver role or a named approver seat, it is the same
+    // restoration as granting it: a settings_relax step-up, decided on the LOCKED user
+    // row and under the approver-role lock (Class A)
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [locked] = await tx.select().from(users).where(eq(users.id, userId)).for("update");
+      if (!locked) return { status: 404, body: { error: "unknown_user" } } as const;
+      if (!locked.disabledAt) return { status: 409, body: { error: "not_disabled" } } as const;
+      const held = await tx.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId));
+      const approverRoles = await lockApproverRoles(tx, held.map((h) => h.roleId));
+      const [namedSeat] = await tx.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.approverUserId, userId)).limit(1);
+      if (locked.isAdmin || approverRoles.size > 0 || namedSeat) {
+        const su = await checkStepUp(db, req, { kind: "settings_relax", facts: { userId, values: { reactivated: true } } });
+        if (!su.ok) return { status: su.status, body: su.body } as const;
+      }
+      const [updated] = await tx
+        .update(users)
+        .set({ disabledAt: null })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, disabledAt: users.disabledAt });
+      return { row: updated! } as const;
+    });
+    if (!("row" in out)) return reply.status(out.status).send(out.body);
+    const row = out.row;
     await auditUserAct(req.authCtx.userId, userId, "user-reactivated", `user '${target.email}' reactivated`, {
       phase: "reactivate",
       email: target.email,

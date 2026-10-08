@@ -22,3 +22,21 @@ ALTER TABLE "approvals" ADD COLUMN "approver_role_id" uuid;
 UPDATE "approvals" a SET "approver_role_id" = r."approver_role_id"
   FROM "approval_rules" r
   WHERE r."id" = a."rule_id" AND a."status" = 'pending' AND a."object_type" IN ('mcp_tool', 'connector_call');
+--> statement-breakpoint
+-- ADR-0186 A (PR #198 review round 4): a fresh SSO login's `auth_time` is
+-- compared at the precision the identity provider gives it. OIDC `auth_time`
+-- is whole seconds, so a re-login in the same second as the request carries
+-- the request's second; 0170's strict `auth_time > requested_at` refused that
+-- (a CHECK violation where the gateway, `ssoAuthTimeFresh`, had accepted it).
+-- A whole-second auth time may now equal the request's second; any other
+-- auth time stays strictly after the request. Earlier seconds stay refused.
+ALTER TABLE "sso_reauth_requests" DROP CONSTRAINT "sso_reauth_requests_verified_check";
+--> statement-breakpoint
+ALTER TABLE "sso_reauth_requests" ADD CONSTRAINT "sso_reauth_requests_verified_check" CHECK (
+  "verified_at" IS NULL OR (
+    "auth_time" IS NOT NULL AND (
+      "auth_time" > "requested_at"
+      OR (date_trunc('second', "auth_time") = "auth_time" AND "auth_time" >= date_trunc('second', "requested_at"))
+    )
+  )
+);
