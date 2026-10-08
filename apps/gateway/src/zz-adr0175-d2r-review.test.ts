@@ -241,8 +241,29 @@ describe("review fix 2 — the inventory reads the ledger in a window, on an ind
   it("GET /v1/admin/credentials pages: a default and a maximum, offset, and a total for the filter", async () => {
     const all = await inventory("?limit=500");
     expect(all.page).toMatchObject({ limit: 500, offset: 0 });
-    expect(all.page.total).toBe(all.credentials.length);
-    expect(all.page.total).toBeGreaterThanOrEqual(4);
+    // B4S round 3: the suite shares one database, and earlier files can leave more than one page of
+    // credentials behind (≈650 API keys), so "total = this page's length" held only on a small DB. What
+    // the total means: with no filter it is the whole inventory, a page holds min(limit, total − offset)
+    // rows, and walking every page yields exactly `total` distinct rows, this file's among them.
+    expect(all.page.total).toBe(all.counts.total);
+    expect(all.credentials).toHaveLength(Math.min(500, all.page.total));
+    const walked: string[] = [];
+    for (let offset = 0; offset < all.page.total; offset += 500) {
+      const page = await inventory(`?limit=500&offset=${offset}`);
+      expect(page.page).toEqual({ total: all.page.total, limit: 500, offset });
+      expect(page.credentials).toHaveLength(Math.min(500, all.page.total - offset));
+      walked.push(...page.credentials.map((c: any) => c.id));
+    }
+    expect(walked).toHaveLength(all.page.total);
+    expect(new Set(walked).size).toBe(all.page.total);
+    expect((await inventory(`?limit=500&offset=${all.page.total}`)).credentials).toEqual([]);
+    for (const own of [`connector_credential:${ids.connectorCred}`, `custom_provider_key:${ids.custom}`, `virtual_key:${ids.vk}`, `virtual_key:${ids.otherVk}`]) {
+      expect(walked).toContain(own);
+    }
+    // a filtered total counts what the filter matched across every page, not the page
+    const vks = await inventory("?limit=500&type=virtual_key");
+    expect(vks.page.total).toBe(walked.filter((id) => id.startsWith("virtual_key:")).length);
+    expect(vks.page.total).toBe(vks.types.find((t: any) => t.type === "virtual_key").count);
     const first = await inventory("?limit=2");
     expect(first.credentials).toHaveLength(2);
     expect(first.page).toEqual({ total: all.page.total, limit: 2, offset: 0 });
