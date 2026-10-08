@@ -79,6 +79,7 @@ import {
   engineConfigNeedsApproval,
   engineHeartbeatSchema,
   engineResultEnvelopeSchema,
+  evaluateRunnerSelfTest,
   isTerminalEngineRunStatus,
   normaliseEngineResult,
   updateEngineScheduleSchema,
@@ -90,9 +91,10 @@ import {
   type EngineRunNormalised,
   type EngineTaxonomy,
   type EngineTerminalRunStatus,
+  type RunnerSelfTest,
 } from "@regulait/shared";
 import { z } from "zod";
-import { auditEngine, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
+import { auditEngine, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
@@ -208,8 +210,29 @@ async function entitlementRefusal(db: Db, userId: string, agentId: string, role:
   return a as AgentRow;
 }
 
-/** create a run (every trigger comes through here) */
-export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: CreateRunContext): Promise<CreateRunOutcome> {
+export interface PreparedEngineRun {
+  manifest: EngineManifestEntry;
+  targetAgent: AgentRow | null;
+  judgeAgent: AgentRow | null;
+  budgetUsd: number;
+  timeoutSeconds: number;
+  sensitive: boolean;
+  overBudget: boolean;
+  needsApproval: boolean;
+  approverUserId: string | null;
+}
+
+/**
+ * Every check a run request gets, with nothing written (PR #203 review [13]:
+ * a schedule is validated by exactly this before it is stored): the engine on,
+ * the target kind, the project, entitlement to target AND judge, attribution,
+ * the budget ceiling, and an approver when one is needed.
+ */
+export async function validateEngineRunRequest(
+  db: Db,
+  input: CreateEngineRunInput,
+  ctx: Pick<CreateRunContext, "runAsUserId" | "isAdmin">,
+): Promise<RunRefusal | { ok: true; prepared: PreparedEngineRun }> {
   const opts = runtime;
   const manifest = manifestOf(opts)[input.engineId as EngineId];
   await syncEngineManifest(db, manifestOf(opts));
@@ -281,6 +304,17 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
     const [approver] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
     if (!approver || approver.disabledAt) return { ok: false, status: 404, error: "unknown_approver" };
   }
+  return {
+    ok: true,
+    prepared: { manifest, targetAgent, judgeAgent, budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId },
+  };
+}
+
+/** create a run (every trigger comes through here) */
+export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: CreateRunContext): Promise<CreateRunOutcome> {
+  const checked = await validateEngineRunRequest(db, input, ctx);
+  if (!checked.ok) return checked;
+  const { manifest, targetAgent, judgeAgent, budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } = checked.prepared;
   const now = new Date();
   const configHash = engineRunConfigHash(input);
   const created = await db.transaction(async (tx) => {
@@ -368,6 +402,8 @@ export interface FinishArgs {
   actorUserId: string;
   envelope?: EngineResultEnvelope | null;
   rawReport?: { sha256: string; bytes: number; ciphertext: string | null; expiresAt: Date | null } | null;
+  /** a runner's result: refused (the run times out) when the deadline or lease has passed */
+  requireLive?: boolean;
 }
 
 /**
@@ -376,29 +412,46 @@ export interface FinishArgs {
  * transaction, compare-and-set on the status. Returns null when the run was
  * no longer in `from` (someone else ended it first).
  */
-export async function finishEngineRun(db: Db, runId: string, from: readonly string[], args: FinishArgs): Promise<EngineRunRow | null> {
+/** THE summary every terminal path stores (PR #203 review [15]: one shape, whatever ended the run) */
+export function runSummary(n: EngineRunNormalised, cause: string, envelope: EngineResultEnvelope | null = null): Record<string, unknown> {
+  return {
+    verdict: n.verdict,
+    counts: n.counts,
+    mappedItems: n.mappedItems,
+    unmappedItems: n.unmappedItems,
+    asr: n.asr,
+    asrInterval: n.asrInterval,
+    asrTrials: n.asrTrials,
+    measurementQuality: n.measurementQuality,
+    classes: n.classes,
+    taxonomyVersion: n.taxonomyVersion,
+    explanation: n.explanation,
+    engineReportedStatus: envelope?.status ?? null,
+    engineErrorCode: n.engineErrorCode,
+    cause,
+  };
+}
+
+export async function finishEngineRun(db: Db, runId: string, from: readonly string[], given: FinishArgs): Promise<EngineRunRow | null> {
   const opts = runtime;
   const now = new Date();
   const out = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
     if (!locked || !from.includes(locked.status)) return null;
+    let args = given;
+    // PR #203 review [8]: a result is accepted only while the run is live, decided
+    // under the row lock — after the deadline or the lease the run is timed out
+    // even when the sweep has not run yet; a late envelope never counts
+    if (given.requireLive && locked.status === "leased") {
+      const deadline = locked.deadlineAt !== null && locked.deadlineAt.getTime() <= now.getTime();
+      const leaseGone = locked.leaseExpiresAt !== null && locked.leaseExpiresAt.getTime() <= now.getTime();
+      if (deadline || leaseGone) {
+        const cause = deadline ? "deadline_passed" : "lease_expired";
+        args = { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
+      }
+    }
     const costUsd = await runCostUsd(tx, locked.virtualKeyId);
-    const summary = {
-      verdict: args.normalised.verdict,
-      counts: args.normalised.counts,
-      mappedItems: args.normalised.mappedItems,
-      unmappedItems: args.normalised.unmappedItems,
-      asr: args.normalised.asr,
-      asrInterval: args.normalised.asrInterval,
-      asrTrials: args.normalised.asrTrials,
-      measurementQuality: args.normalised.measurementQuality,
-      classes: args.normalised.classes,
-      taxonomyVersion: args.normalised.taxonomyVersion,
-      explanation: args.normalised.explanation,
-      engineReportedStatus: args.envelope?.status ?? null,
-      engineErrorCode: args.envelope?.errorCode ?? null,
-      cause: args.cause,
-    };
+    const summary = runSummary(args.normalised, args.cause, args.envelope ?? null);
     const [updated] = await tx
       .update(engineRuns)
       .set({
@@ -527,7 +580,7 @@ export async function applyEngineRunApprovalDecision(
   const n = noResult("not_run");
   await tx
     .update(engineRuns)
-    .set({ status: "not_run", errorCode: "approval_denied", finishedAt: now, summary: { verdict: n.verdict, explanation: "approval denied; nothing ran", cause: "approval_denied" } })
+    .set({ status: "not_run", errorCode: "approval_denied", finishedAt: now, summary: runSummary(n, "approval_denied") })
     .where(eq(engineRuns.id, run.id));
   await tx.insert(auditLog).values({
     userId: deciderUserId,
@@ -540,23 +593,37 @@ export async function applyEngineRunApprovalDecision(
     reason: `engine run ${run.id} was refused in the Approvals Queue and never ran`,
   });
   if (!run.workflowInstanceId) return null;
-  const ended = { ...run, status: "not_run" as const };
-  return async (db: Db) => notifyWorkflowOfEngineRun(db, ended);
+  return async (db: Db) => {
+    await notifyWorkflowOfEngineRun(db, run);
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Workflow binding (owner decision 4)
 // ---------------------------------------------------------------------------
 
-/** a workflow-bound run ended: re-evaluate its check stage (lazy import: workflows.ts imports this module) */
-async function notifyWorkflowOfEngineRun(db: Db, run: Pick<EngineRunRow, "workflowInstanceId" | "workflowStageId">): Promise<void> {
-  if (!run.workflowInstanceId || !run.workflowStageId) return;
+/** test seams (code only): a hook that runs before a workflow stage is told a run ended */
+export const engineRunTestHooks: { beforeWorkflowNotify?: (runId: string) => void } = {};
+
+/**
+ * A workflow-bound run ended: re-evaluate its check stage (lazy import:
+ * workflows.ts imports this module). PR #203 review [5]: the hand-off is
+ * DURABLE — `workflow_notified_at` is stamped only once the stage evaluated
+ * (or is no longer the current one); a failure, or another executor holding
+ * the stage, leaves it unset and the engine sweep tries again, so an ended run
+ * can never leave its workflow waiting for ever.
+ */
+async function notifyWorkflowOfEngineRun(db: Db, run: Pick<EngineRunRow, "id" | "workflowInstanceId" | "workflowStageId">): Promise<boolean> {
+  if (!run.workflowInstanceId || !run.workflowStageId) return true;
   try {
+    engineRunTestHooks.beforeWorkflowNotify?.(run.id);
     const wf = await import("./workflows.js");
     await wf.reevaluateCheckStage(db, run.workflowInstanceId, run.workflowStageId, runtime.dataKey);
   } catch {
-    // the stage re-evaluates on its next advance; the run's outcome is already stored
+    return false; // retried by the sweep
   }
+  await db.update(engineRuns).set({ workflowNotifiedAt: new Date() }).where(eq(engineRuns.id, run.id));
+  return true;
 }
 
 export interface EngineCheckOutcome {
@@ -616,9 +683,16 @@ export async function stageEngineCheckOutcomes(
         fail("the engine check could not start: its binding is not a valid run request", null, "not_run");
         continue;
       }
+      // PR #203 review [9]: the initiator's CURRENT standing (an admin attributes
+      // to any project, as on POST /v1/engine-runs); a person gone stays refused
+      const [initiator] = await db.select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt }).from(users).where(eq(users.id, instance.initiatorUserId));
+      if (!initiator || initiator.disabledAt) {
+        fail("the engine check could not start: the person who started this workflow is gone or deactivated", null, "not_run");
+        continue;
+      }
       const created = await createEngineRun(db, parsed.data, {
         runAsUserId: instance.initiatorUserId,
-        isAdmin: false,
+        isAdmin: initiator.isAdmin,
         trigger: "workflow",
         workflow: { instanceId: instance.id, stageId: stage.id, check: b.check, round: instance.round },
       }).catch((e: unknown) => {
@@ -675,7 +749,7 @@ export async function stageEngineCheckOutcomes(
 export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?: string | null } = {}) {
   const now = opts.now ?? new Date();
   const actor = opts.actorUserId ?? NO_IDENTITY;
-  const out = { timedOut: 0, leaseExpired: 0, queueExpired: 0, rawReportsPurged: 0 };
+  const out = { timedOut: 0, leaseExpired: 0, queueExpired: 0, rawReportsPurged: 0, workflowsNotified: 0 };
   const overdue = await db
     .select({ id: engineRuns.id, deadlineAt: engineRuns.deadlineAt, leaseExpiresAt: engineRuns.leaseExpiresAt })
     .from(engineRuns)
@@ -710,10 +784,30 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
     });
     if (done) out.queueExpired += 1;
   }
+  // PR #203 review [5]: workflow hand-offs that did not land are retried
+  const unnotified = await db
+    .select({ id: engineRuns.id, workflowInstanceId: engineRuns.workflowInstanceId, workflowStageId: engineRuns.workflowStageId })
+    .from(engineRuns)
+    .where(and(isNotNull(engineRuns.workflowInstanceId), isNotNull(engineRuns.finishedAt), isNull(engineRuns.workflowNotifiedAt)))
+    .orderBy(asc(engineRuns.finishedAt))
+    .limit(100);
+  for (const r of unnotified) if (await notifyWorkflowOfEngineRun(db, r)) out.workflowsNotified += 1;
+  // PR #203 review [6]: retention is the setting NOW, applied from when the run
+  // ended — lowering it shortens reports already stored (the stored expiry can
+  // only ever end one sooner, never keep one longer)
+  const org = await loadOrgSettings(db);
   const purged = await db
     .update(engineRuns)
     .set({ rawReportCiphertext: null })
-    .where(and(isNotNull(engineRuns.rawReportCiphertext), lt(engineRuns.rawReportExpiresAt, now)))
+    .where(
+      and(
+        isNotNull(engineRuns.rawReportCiphertext),
+        or(
+          lt(engineRuns.rawReportExpiresAt, now),
+          sql`COALESCE(${engineRuns.finishedAt}, ${engineRuns.createdAt}) + make_interval(days => ${org.engineRawReportRetentionDays}) < ${now.toISOString()}::timestamptz`,
+        ),
+      ),
+    )
     .returning({ id: engineRuns.id });
   out.rawReportsPurged = purged.length;
   return out;
@@ -895,13 +989,11 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const body = createEngineScheduleSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_schedule_engine" });
-    // validated now as the person it will run as (the same checks a run gets); nothing is started
-    const [engine] = await db.select().from(engines).where(eq(engines.id, body.request.engineId));
-    if (!engine) return reply.status(404).send({ error: "engine_not_found" });
-    if ("agentId" in body.request.target) {
-      const t = await entitlementRefusal(db, userId, body.request.target.agentId, "target");
-      if ("ok" in t) return reply.status(t.status).send({ error: t.error, ...(t.detail ? { detail: t.detail } : {}) });
-    }
+    // PR #203 review [13]: validated now, as the person it will run as, by the SAME
+    // checks a run gets (engine on, target kind, project, target and judge
+    // entitlement, attribution, budget ceiling, approver); nothing is started
+    const checked = await validateEngineRunRequest(db, body.request, { runAsUserId: userId, isAdmin: req.authCtx.isAdmin });
+    if (!checked.ok) return reply.status(checked.status).send({ error: checked.error, ...(checked.detail ? { detail: checked.detail } : {}) });
     const now = new Date();
     const [row] = await db
       .insert(engineSchedules)
@@ -971,13 +1063,28 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       return reply.status(409).send({ error: "engine_disabled", detail: `engine ${engineId} is off: no work is leased` });
     }
     const m = manifest[engineId];
-    if (!runner || !runner.selfTestPassed || m.imageDigest === null || runner.reportedDigest !== m.imageDigest || runner.reportedVersion !== m.version) {
+    const now = new Date();
+    // PR #203 review [3]: decided NOW, never from a stored boolean — the runner's
+    // own report is re-evaluated against the manifest (digest, version, switches,
+    // egress, and its 24-hour freshness), and the engine's recorded self-test
+    // must still admit it (fresh, same build)
+    const runnerVerdict = runner ? evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now) : null;
+    const engineAdmits = selfTestAdmitsEnable(engine, m, now);
+    if (
+      !runner ||
+      !runnerVerdict?.passed ||
+      runner.reportedDigest !== m.imageDigest ||
+      runner.reportedVersion !== m.version ||
+      !engineAdmits.ok
+    ) {
       return reply.status(409).send({
         error: "engine_self_test_required",
-        detail: "this runner's self-test did not pass against the shipped manifest (digest, version, usage-data switches, egress); re-enrol it from the signed image",
+        detail:
+          !runnerVerdict?.passed
+            ? `this runner's self-test does not pass now (${runnerVerdict?.failures.join(", ") ?? "no runner"}); re-enrol it from the signed image`
+            : `the engine's self-test no longer admits it (${engineAdmits.why ?? "build changed"}); run the self-test again`,
       });
     }
-    const now = new Date();
     const leased = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
       const [{ n } = { n: 0 }] = await tx
@@ -995,7 +1102,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       if (!run) return { kind: "none" as const };
       // the person it runs as, re-checked now: gone or no longer entitled ends it, with the reason stated
       const [person] = run.runAsUserId
-        ? await tx.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, run.runAsUserId))
+        ? await tx.select({ id: users.id, disabledAt: users.disabledAt, isAdmin: users.isAdmin }).from(users).where(eq(users.id, run.runAsUserId))
         : [];
       let refusal: string | null = null;
       let target: AgentRow | null = null;
@@ -1008,6 +1115,12 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         if (!t || decide(t as AgentRow, "execute").effect !== "allow") refusal = "run_as_not_entitled";
         else if (run.judgeAgentId && (!j || decide(j as AgentRow, "execute").effect !== "allow")) refusal = "run_as_not_entitled";
         else if (!run.projectId) refusal = "project_gone";
+        else {
+          // PR #203 review [10]: attribution is re-checked here too (a member removed
+          // since the run was queued no longer bills to the project)
+          const attribution = await assertProjectAttribution(tx as unknown as Db, run.projectId, person.id, person.isAdmin);
+          if (!attribution.ok) refusal = "project_not_attributable";
+        }
         target = (t as AgentRow | undefined) ?? null;
         judge = (j as AgentRow | undefined) ?? null;
       }
@@ -1159,7 +1272,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       let problem: string | null = null;
       let envelope: EngineResultEnvelope | null = null;
       if (!parsed.success) problem = "result_invalid";
-      else if (parsed.data.runId !== run.id || parsed.data.engineId !== run.engineId) problem = "result_mismatch";
+      // PR #203 review [12]: the envelope must be for this run, this engine AND the version it was leased at
+      else if (parsed.data.runId !== run.id || parsed.data.engineId !== run.engineId || parsed.data.engineVersion !== run.engineVersion) {
+        problem = "result_mismatch";
+      }
       else envelope = parsed.data;
       let rawReport: FinishArgs["rawReport"] = null;
       if (envelope?.rawReport) {
@@ -1182,13 +1298,15 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       }
       if (problem) {
         // an invalid or mismatched result: the run failed and every reading is unknown
-        await finishEngineRun(db, run.id, ["leased"], {
+        const failed = await finishEngineRun(db, run.id, ["leased"], {
           status: "failed",
           errorCode: problem,
           normalised: noResult("failed"),
           cause: problem,
           actorUserId: run.runAsUserId ?? NO_IDENTITY,
+          requireLive: true,
         });
+        if (failed?.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
         return reply.status(422).send({
           error: "engine_result_invalid",
           detail: problem,
@@ -1198,14 +1316,18 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const normalised = normaliseEngineResult({ envelope: envelope!, status: envelope!.status, taxonomy: taxonomyOf(opts), scrub: engineDetectionScrub });
       const done = await finishEngineRun(db, run.id, ["leased"], {
         status: envelope!.status,
-        errorCode: envelope!.status === "completed" ? null : (envelope!.errorCode ?? "engine_error"),
+        errorCode: envelope!.status === "completed" ? null : (normalised.engineErrorCode ?? "engine_error"),
         normalised,
         cause: "result",
         actorUserId: run.runAsUserId ?? NO_IDENTITY,
         envelope,
         rawReport,
+        requireLive: true,
       });
       if (!done) return reply.status(409).send({ error: "engine_run_finished" });
+      if (done.status === "timeout" && envelope!.status !== "timeout") {
+        return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout", detail: "the result arrived after the run's deadline or lease; it was not ingested" });
+      }
       return reply.send({ runId: run.id, status: done.status, verdict: normalised.verdict, counts: normalised.counts });
     },
   );

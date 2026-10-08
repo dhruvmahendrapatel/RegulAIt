@@ -67,7 +67,7 @@ import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
-import { runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
+import { engineRunTestHooks, runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
 import { setEngineDetectionScrub } from "./engine-scrub.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -153,12 +153,19 @@ async function makeAgent(name: string, model: string) {
   return r.json().id as string;
 }
 
-function selfTest(digest: string, version: string, over: Partial<{ dnsResolved: boolean; connected: boolean; env: Record<string, boolean> }> = {}) {
+function selfTest(digest: string, version: string, over: Partial<{ dnsResolved: boolean; connected: boolean; addressConnected: boolean; env: Record<string, boolean> }> = {}) {
   return {
     imageDigest: digest,
     engineVersion: version,
     usageDataEnv: over.env ?? { PROMPTFOO_DISABLE_TELEMETRY: true, PROMPTFOO_DISABLE_UPDATE: true, HF_HUB_OFFLINE: true, TRANSFORMERS_OFFLINE: true, HF_HUB_DISABLE_TELEMETRY: true },
-    egress: { host: "registry.example.invalid", dnsResolved: over.dnsResolved ?? false, connected: over.connected ?? false },
+    egress: {
+      host: "registry.example.invalid",
+      dnsResolved: over.dnsResolved ?? false,
+      connected: over.connected ?? false,
+      // a public literal address (IANA's example.com), probed with no resolver
+      address: "93.184.215.14",
+      addressConnected: over.addressConnected ?? false,
+    },
     at: new Date().toISOString(),
   };
 }
@@ -885,6 +892,207 @@ describe("approvals, schedules and the workflow binding", () => {
 });
 
 // ===========================================================================
+// ===========================================================================
+// PR #203 review round 1 (Codex) — each red first
+// ===========================================================================
+describe("review round 1", () => {
+  const SECRET = "AKIA" + "IOSFODNN7EXAMPLE";
+
+  async function startInstanceOn(who: { authorization: string }, project: string | null) {
+    return inject("POST", "/v1/workflows/instances", who, {
+      ...(project ? { projectId: project } : {}),
+      change: { description: "b5 review", paths: ["src/x.ts"], changeType: `b5-change-${RUN}`, environment: "staging" },
+    });
+  }
+  async function approveGate(instanceId: string) {
+    const q = await inject("GET", "/v1/approvals?status=pending", approver.key);
+    const a = (q.json().approvals ?? []).find((r: { instanceId: string; stageId: string }) => r.instanceId === instanceId && r.stageId === "gate");
+    const d = await inject("POST", `/v1/approvals/${a.id}/decide`, approver.key, { decision: "approved" });
+    expect(d.statusCode, d.body).toBe(200);
+  }
+  const view = async (id: string) => (await inject("GET", `/v1/workflows/instances/${id}`, alice.key)).json().instance;
+
+  it("[3] lease re-checks the runner's self-test freshness and the engine's", async () => {
+    const s = await startRun({});
+    expect(s.statusCode, s.body).toBe(202);
+    const [runner] = await db.execute(sql`SELECT self_test FROM engine_runners WHERE id = ${pfRunner.id}`).then((r) => (r as unknown as { rows: Array<{ self_test: Record<string, unknown> }> }).rows);
+    const stale = { ...runner!.self_test, at: new Date(Date.now() - 2 * 86_400_000).toISOString() };
+    await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(stale)}::jsonb WHERE id = ${pfRunner.id}`);
+    try {
+      const l = await lease();
+      expect(l.statusCode, l.body).toBe(409);
+      expect(l.json().error).toBe("engine_self_test_required");
+    } finally {
+      await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(runner!.self_test)}::jsonb WHERE id = ${pfRunner.id}`);
+    }
+    const [eng] = await db.execute(sql`SELECT self_test_passed_at FROM engines WHERE id = 'promptfoo'`).then((r) => (r as unknown as { rows: Array<{ self_test_passed_at: string }> }).rows);
+    await db.execute(sql`UPDATE engines SET self_test_passed_at = now() - interval '2 days' WHERE id = 'promptfoo'`);
+    try {
+      const l = await lease();
+      expect(l.statusCode, l.body).toBe(409);
+      expect(l.json().error).toBe("engine_self_test_required");
+    } finally {
+      await db.execute(sql`UPDATE engines SET self_test_passed_at = ${eng!.self_test_passed_at} WHERE id = 'promptfoo'`);
+    }
+    await inject("POST", `/v1/engine-runs/${s.json().run.id}/cancel`, alice.key, {});
+  });
+
+  it("[8] a result after the deadline or the lease, before the sweep, ends the run timed out", async () => {
+    for (const col of ["deadline_at", "lease_expires_at"] as const) {
+      const l = await startAndLease();
+      await db.execute(sql`UPDATE engine_runs SET ${sql.raw(col)} = now() - interval '1 second' WHERE id = ${l.runId}`);
+      const res = await postResult(l.runId, envelope(l.runId, { items: [item("late", "prompt-injection")] }));
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("engine_run_timed_out");
+      const run = await runRow(l.runId);
+      expect(run.status).toBe("timeout");
+      expect(run.redteamRunId).toBeNull();
+      expect((await keyOf(l.runId)).revokedAt).not.toBeNull();
+    }
+  });
+
+  it("[12] an envelope for another engine version is refused and fails the run", async () => {
+    const l = await startAndLease();
+    const res = await postResult(l.runId, envelope(l.runId, { engineVersion: "9.9.9", items: [item("v", "prompt-injection")] }));
+    expect(res.statusCode, res.body).toBe(422);
+    expect(await runRow(l.runId)).toMatchObject({ status: "failed", errorCode: "result_mismatch", redteamRunId: null });
+  });
+
+  it("[11] eval_runs cases count only mapped items that were measured", async () => {
+    const l = await startAndLease();
+    const res = await postResult(
+      l.runId,
+      envelope(l.runId, { items: [item("m", "prompt-injection"), item("u", "unmapped-thing"), item("n", "pii")], notRun: [{ key: "n", reason: "egress_denied" }] }),
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const [ev] = await db.select().from(evalRuns).where(eq(evalRuns.id, (await runRow(l.runId)).evalRunId!));
+    expect(ev).toMatchObject({ cases: 1, passedCases: 1, passRate: 1 });
+  });
+
+  it("[2] the taxonomy system and the claimed class are scrubbed too", async () => {
+    const l = await startAndLease();
+    const res = await postResult(
+      l.runId,
+      envelope(l.runId, { items: [item("s", "prompt-injection", { sourceTaxonomy: { system: `sys-${SECRET}`, id: "x" }, mappedClass: `cls-${SECRET}` })] }),
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const items = await db.select().from(engineRunItems).where(eq(engineRunItems.runId, l.runId));
+    expect(JSON.stringify(items)).not.toContain(SECRET);
+    expect(items[0]!.sourceSystem).toMatch(/\[redacted:/);
+  });
+
+  it("[6] lowering raw-report retention shortens reports already stored", async () => {
+    const l = await startAndLease();
+    const content = Buffer.from("raw report body");
+    const res = await postResult(
+      l.runId,
+      envelope(l.runId, {
+        items: [item("r", "prompt-injection")],
+        rawReport: { sha256: createHash("sha256").update(content).digest("hex"), bytes: content.length, contentBase64: content.toString("base64") },
+      }),
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await runRow(l.runId)).rawReportCiphertext).not.toBeNull();
+    await db.execute(sql`UPDATE engine_runs SET finished_at = now() - interval '10 days' WHERE id = ${l.runId}`);
+    const shorter = await asAdmin("PUT", "/v1/org/settings", { engineRawReportRetentionDays: 5 });
+    expect(shorter.statusCode, shorter.body).toBe(200);
+    try {
+      await runEngineRunSweep(db);
+      expect((await runRow(l.runId)).rawReportCiphertext).toBeNull();
+    } finally {
+      await db.update(orgSettings).set({ engineRawReportRetentionDays: 90 }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+  });
+
+  it("[10] lease re-checks project attribution: a run-as person no longer a member ends not_run", async () => {
+    const p = await inject("POST", "/v1/projects", AUTH, { name: `b5-members-${RUN}` });
+    const pid = p.json().id as string;
+    for (const userId of [alice.id, approver.id]) {
+      const m = await inject("POST", `/v1/projects/${pid}/members`, AUTH, { userId, role: userId === approver.id ? "owner" : "contributor" });
+      expect(m.statusCode, m.body).toBeLessThan(300);
+    }
+    const s = await startRun({ projectId: pid });
+    expect(s.statusCode, s.body).toBe(202);
+    await db.execute(sql`DELETE FROM project_members WHERE project_id = ${pid} AND user_id = ${alice.id}`);
+    const l = await lease();
+    expect(l.statusCode, l.body).toBe(204);
+    expect(await runRow(s.json().run.id)).toMatchObject({ status: "not_run", errorCode: "project_not_attributable", virtualKeyId: null });
+  });
+
+  it("[13] a schedule is validated like a run (judge, project, budget) and starts nothing", async () => {
+    const before = await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs`).then((r) => (r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n);
+    const base = { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 };
+    const noProject = await inject("POST", "/v1/engine-schedules", alice.key, { request: { ...base, projectId: undefined }, intervalHours: 24 });
+    expect(noProject.statusCode, noProject.body).toBe(422);
+    expect(noProject.json().error).toBe("project_required");
+    const overBudget = await inject("POST", "/v1/engine-schedules", alice.key, { request: { ...base, budgetUsd: 100 }, intervalHours: 24 });
+    expect(overBudget.json().error).toBe("engine_budget_exceeds_ceiling");
+    const g = await db.execute(sql`DELETE FROM agent_grants WHERE user_id = ${alice.id} AND agent_id = ${judgeId} RETURNING id`);
+    try {
+      const judge = await inject("POST", "/v1/engine-schedules", alice.key, { request: { ...base, target: { agentId: targetId, judgeAgentId: judgeId } }, intervalHours: 24 });
+      expect(judge.statusCode, judge.body).toBe(403);
+      expect(judge.json().error).toBe("judge_not_entitled");
+    } finally {
+      expect((g as unknown as { rows: unknown[] }).rows.length).toBe(1);
+      const back = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId: judgeId });
+      expect(back.statusCode).toBe(201);
+    }
+    const after = await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs`).then((r) => (r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n);
+    expect(after).toBe(before);
+  });
+
+  it("[15] an approval denial stores the same normalised summary as every other end", async () => {
+    const s = await startRun({ config: { sets: ["agentic"] }, approverUserId: approver.id });
+    const d = await inject("POST", `/v1/approvals/${s.json().approvalId}/decide`, approver.key, { decision: "denied", reason: "no" });
+    expect(d.statusCode, d.body).toBe(200);
+    const run = await runRow(s.json().run.id);
+    expect(run.summary).toMatchObject({ verdict: "not_run", counts: { pass: 0, fail: 0, unknown: 0, not_run: 0 }, taxonomyVersion: 7, cause: "approval_denied", mappedItems: 0 });
+  });
+
+  it("[16] a workflow with engine-bound checks cannot start without a project", async () => {
+    const r = await startInstanceOn(alice.key, null);
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().error).toBe("project_required_for_engine_checks");
+  });
+
+  it("[9] the workflow engine stage resolves the initiator's admin standing", async () => {
+    // a project with members the admin is not one of: only admin standing attributes to it
+    const p = await inject("POST", "/v1/projects", AUTH, { name: `b5-admin-only-${RUN}` });
+    const pid = p.json().id as string;
+    await inject("POST", `/v1/projects/${pid}/members`, AUTH, { userId: approver.id, role: "owner" });
+    const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: admin.id, agentId: targetId });
+    expect(g.statusCode, g.body).toBe(201);
+    const started = await startInstanceOn(admin.key, pid);
+    expect(started.statusCode, started.body).toBe(201);
+    await approveGate(started.json().id);
+    const v = await (await inject("GET", `/v1/workflows/instances/${started.json().id}`, admin.key)).json().instance;
+    const check = (v.context["checks:checks"] as Array<{ status: string; detail: string; engine: { runId: string | null } }>)[0]!;
+    expect(check.status, check.detail).toBe("pending");
+    await inject("POST", `/v1/engine-runs/${check.engine.runId}/cancel`, admin.key, {});
+  });
+
+  it("[5] a workflow re-evaluation that fails after a run ends is retried by the sweep", async () => {
+    const started = await startInstanceOn(alice.key, projectId);
+    expect(started.statusCode, started.body).toBe(201);
+    const id = started.json().id as string;
+    await approveGate(id);
+    const runId = ((await view(id)).context["checks:checks"] as Array<{ engine: { runId: string } }>)[0]!.engine.runId;
+    expect((await lease()).json().runId).toBe(runId);
+    engineRunTestHooks.beforeWorkflowNotify = () => {
+      throw new Error("re-evaluation lost");
+    };
+    try {
+      const ok = await postResult(runId, envelope(runId, { items: [item("wf", "prompt-injection")] }));
+      expect(ok.statusCode, ok.body).toBe(200);
+    } finally {
+      engineRunTestHooks.beforeWorkflowNotify = undefined;
+    }
+    expect((await view(id)).status).toBe("awaiting_execution");
+    await runEngineRunSweep(db);
+    expect((await view(id)).status).toBe("blocked_on_approval");
+  });
+});
+
 describe("route classes", () => {
   it("the runner routes are their own trust path; the run routes are any user's", async () => {
     const { routeAuthClass } = await import("./route-classes.js");

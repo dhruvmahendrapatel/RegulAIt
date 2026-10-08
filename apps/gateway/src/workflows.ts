@@ -713,7 +713,11 @@ export async function reevaluateCheckStage(db: Db, instanceId: string, stageId: 
   try {
     await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId }], null, dataKey);
   } catch (err) {
-    if (err instanceof StageClaimHeldError || err instanceof WorkflowStateError) return;
+    // another executor holds the stage: it may have read the run as pending, so
+    // this is NOT done — the caller retries (PR #203 review [5])
+    if (err instanceof StageClaimHeldError) throw err;
+    // the stage is no longer the current one (re-opened, moved on): nothing to do
+    if (err instanceof WorkflowStateError) return;
     throw err;
   }
 }
@@ -2298,6 +2302,20 @@ export async function startWorkflowInstanceWithTemplates(
   // merge in matched order (deterministic: matchTemplates preserves rule order)
   const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
   const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
+
+  // ADR-0187 (PR #203 review [16]): an engine run's model calls are pinned to a
+  // project, so a workflow whose checks run engines cannot start without one —
+  // refused here rather than failing its check later, permanently
+  if (!input.projectId && merged.stages.some((st) => (st.engines?.length ?? 0) > 0)) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "project_required_for_engine_checks",
+        detail: "this change's workflow runs engine checks, whose model calls bill to a project: start it with a projectId",
+      },
+    };
+  }
 
   if (input.projectId) {
     // ADR-0011: the initiator must be allowed to bill this project

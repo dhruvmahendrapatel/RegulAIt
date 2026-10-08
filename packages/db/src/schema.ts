@@ -11920,6 +11920,8 @@ export const engineRuns = pgTable(
     rawReportExpiresAt: timestamp("raw_report_expires_at", { withTimezone: true }),
     redteamRunId: uuid("redteam_run_id").references(() => redteamRuns.id, { onDelete: "set null" }),
     evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    /** PR #203 review [5]: when the run's end reached its workflow stage (the sweep retries until it does) */
+    workflowNotifiedAt: timestamp("workflow_notified_at", { withTimezone: true }),
   },
   (t) => [
     check(

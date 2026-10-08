@@ -78,8 +78,13 @@ export async function writeEngineRunLedgers(
   const anchors = await ensureEngineAnchors(tx, run.engineId, run.engineVersion);
   const promptHash = agent.systemPrompt ? createHash("sha256").update(agent.systemPrompt).digest("hex").slice(0, 16) : null;
   const scored = normalised.items.filter((i) => i.scorerKind !== null && (i.verdict === "pass" || i.verdict === "fail"));
-  const cases = normalised.items.length;
-  const passedCases = normalised.counts.pass;
+  // PR #203 review [11]: the eval run's cases are what was MEASURED against a
+  // mapped class or scorer — never an unmapped, unknown or not-run item
+  const measuredItems = normalised.items.filter(
+    (i) => (i.attackClass !== null || i.scorerKind !== null) && (i.verdict === "pass" || i.verdict === "fail"),
+  );
+  const cases = measuredItems.length;
+  const passedCases = measuredItems.filter((i) => i.verdict === "pass").length;
   const [ev] = await tx
     .insert(evalRuns)
     .values({

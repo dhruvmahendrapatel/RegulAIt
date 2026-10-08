@@ -175,6 +175,9 @@ CREATE TABLE "engine_runs" (
   "raw_report_expires_at" timestamp with time zone,
   "redteam_run_id" uuid REFERENCES "redteam_runs"("id") ON DELETE SET NULL,
   "eval_run_id" uuid REFERENCES "eval_runs"("id") ON DELETE SET NULL,
+  -- PR #203 review [5]: when the run's end was handed to its workflow stage;
+  -- a terminal workflow run with none is retried by the sweep
+  "workflow_notified_at" timestamp with time zone,
   CONSTRAINT "engine_runs_status_check" CHECK (
     "status" IN ('awaiting_approval', 'queued', 'leased', 'completed', 'failed', 'timeout', 'cancelled', 'not_run')
   ),
@@ -210,6 +213,9 @@ CREATE TABLE "engine_runs" (
 CREATE INDEX "engine_runs_lease_idx" ON "engine_runs" ("engine_id", "status", "created_at");
 --> statement-breakpoint
 CREATE INDEX "engine_runs_user_idx" ON "engine_runs" ("run_as_user_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX "engine_runs_workflow_pending_idx" ON "engine_runs" ("finished_at")
+  WHERE "workflow_instance_id" IS NOT NULL AND "finished_at" IS NOT NULL AND "workflow_notified_at" IS NULL;
 --> statement-breakpoint
 CREATE UNIQUE INDEX "engine_runs_workflow_uq" ON "engine_runs" ("workflow_instance_id", "workflow_stage_id", "workflow_check_name", "workflow_round")
   WHERE "workflow_instance_id" IS NOT NULL;
