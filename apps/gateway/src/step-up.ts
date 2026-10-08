@@ -1330,6 +1330,77 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
 export const FIRST_PASSKEY_FRESH_SESSION_SECONDS = 600;
 
 /** when the session behind this request was created, and how (for the first-passkey rule) */
+/** the sign-in origins that mean a human proved themselves just now (never an exchanged API key) */
+const HUMAN_SIGN_IN_ORIGINS = new Set(["password", "oidc", "saml"]);
+
+/**
+ * ADR-0186 A — THE ONE ADMISSION RULE for adding a credential a step-up can be
+ * proven with (a passkey, an authenticator app). An account that already has a
+ * way to step up needs a `passkey_manage` step-up; one that has none yet needs a
+ * FRESH human sign-in (password or SSO, within FIRST_PASSKEY_FRESH_SESSION_SECONDS,
+ * never an API-key session). The second answer, "first_method", is recorded on
+ * the ceremony so its completion can re-check, under the user's row lock
+ * (`accountHasStepUpMethodLocked`), that the account STILL has no way to step
+ * up. Sends the refusal itself; false = refused.
+ */
+export async function admitAuthenticatorEnrolment(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  userId: string,
+  sessionId: string,
+  what: "passkey" | "totp",
+): Promise<false | "step_up" | "first_method"> {
+  const { methods, passkeyCount } = await stepUpMethodsFor(db, userId, req);
+  const policy = await loadStepUpPolicy(db);
+  if (stepUpApplies(policy, "passkey_manage") && (passkeyCount > 0 || methods.length > 0)) {
+    const su = await requireStepUp(db, req, reply, {
+      kind: "passkey_manage",
+      facts: what === "passkey" ? { op: "register" } : { op: "totp_enroll" },
+    });
+    return su.ok ? "step_up" : false;
+  }
+  // the org relaxed passkey_manage (audited): no step-up rule to race
+  if (!stepUpApplies(policy, "passkey_manage")) return "step_up";
+  const fresh = await sessionFreshness(db, sessionId);
+  const ageSeconds = fresh ? (Date.now() - fresh.createdAt.getTime()) / 1000 : Infinity;
+  if (!fresh || !HUMAN_SIGN_IN_ORIGINS.has(fresh.origin) || ageSeconds > FIRST_PASSKEY_FRESH_SESSION_SECONDS) {
+    const label = what === "passkey" ? "passkey" : "authenticator app";
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "user",
+      objectId: userId,
+      detail: { subsystem: "step-up", why: "session_not_fresh", what, origin: fresh?.origin ?? null, ageSeconds: Number.isFinite(ageSeconds) ? Math.round(ageSeconds) : null },
+      effect: "deny",
+      ruleId: what === "passkey" ? "passkey-enrol-refused" : "totp-enrol-refused",
+      ruleChain: [],
+      reason: `${label} enrolment refused: the session is not a fresh human sign-in (sign out and in again, then add it)`,
+    });
+    await reply.status(403).send({
+      error: "fresh_sign_in_required",
+      detail:
+        `adding your first ${label} needs a fresh sign-in: sign out, sign in again with your password or single ` +
+        `sign-on, and add it within ${FIRST_PASSKEY_FRESH_SESSION_SECONDS / 60} minutes`,
+    });
+    return false;
+  }
+  return "first_method";
+}
+
+/**
+ * Does the account have a way to step up NOW? Locks the user's row (`FOR
+ * UPDATE`) and reads every method on the caller's transaction — an enabled
+ * authenticator app, an unrevoked passkey, a linked identity at an enabled SSO
+ * provider — so a credential admitted by the first-method rule completes only
+ * while none exists. An SSO link or provider enable committed after this read is
+ * ordered after the enrolment (a legitimate serial order).
+ */
+export async function accountHasStepUpMethodLocked(tx: Db, userId: string, req?: FastifyRequest): Promise<boolean> {
+  await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("update");
+  const { methods, passkeyCount } = await stepUpMethodsFor(tx, userId, req);
+  return passkeyCount > 0 || methods.length > 0;
+}
+
 export async function sessionFreshness(db: Db, sessionId: string): Promise<{ createdAt: Date; origin: string } | null> {
   const [row] = await db
     .select({ createdAt: authSessions.createdAt, origin: authSessions.origin })

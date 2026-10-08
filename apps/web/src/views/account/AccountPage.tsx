@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
+import { withStepUp } from "../../stepup/stepUp";
 import type { OwnSession } from "../../api/adminTypes";
 import { ago } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
@@ -445,8 +446,12 @@ function MfaCard(props: { totpEnabled: boolean; onChanged: () => void }) {
             disabled={busy}
             onClick={() =>
               void run(async () => {
+                // ADR-0186 A: adding an authenticator app is a passkey_manage step-up once a method exists
                 setSecret(
-                  await api.post<{ secret: string; otpauthUri: string }>("/auth/totp/enroll"),
+                  await withStepUp(
+                    async (h) =>
+                      (await api.postWithHeaders<{ secret: string; otpauthUri: string }>("/auth/totp/enroll", {}, h)).body,
+                  ),
                 );
               })
             }

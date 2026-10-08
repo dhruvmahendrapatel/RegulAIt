@@ -263,10 +263,15 @@ export async function loadApprovalPool(
     callerUserId: string | null;
     asOf?: Date | SQL | null;
     /**
-     * ADR-0186 B (PR #198 round 5): passkey mode. Count only principals who can
-     * SIGN: someone in the principal's delegation component holds an unrevoked
-     * passkey enrolled before this instant (a later enrolment is refused at
-     * decide). Members are unchanged; `principals` counts signable ones.
+     * ADR-0186 B (PR #198 rounds 5–6): passkey mode. Count only principals who
+     * can SIGN, by the decide path's own rule (`eligibilityOf` +
+     * `credentialPredates`): a pool member signs themselves with an unrevoked
+     * passkey enrolled before this instant, or a DIRECT delegate of theirs signs
+     * for them — the delegation created before this instant and live now, the
+     * delegate an active account created before this instant holding such a
+     * passkey. Anyone else in the delegation component (the member's own
+     * delegator, a chain two links away) cannot sign for them and never makes
+     * them countable. Members are unchanged; `principals` counts signable ones.
      */
     signableBefore?: Date | SQL | null;
   },
@@ -304,22 +309,47 @@ export async function loadApprovalPool(
     members = members.filter((m) => m !== input.callerUserId && roots.get(m) !== callerRoot);
   }
   let countable = members;
-  if (input.signableBefore) {
-    const component = [...roots.keys()];
-    const holders = component.length
-      ? await db
+  if (input.signableBefore && members.length > 0) {
+    const memberSet = new Set(members);
+    // the decide path's delegation rule: a link FROM a pool member TO the decider, created before
+    const priorLinks = await activeDelegationLinks(db, members, { createdBefore: input.signableBefore });
+    const delegatesOf = new Map<string, string[]>();
+    for (const [from, to] of priorLinks) {
+      if (!memberSet.has(from) || to === input.callerUserId) continue;
+      delegatesOf.set(from, [...(delegatesOf.get(from) ?? []), to]);
+    }
+    const outsideDelegates = [...new Set([...delegatesOf.values()].flat())].filter((d) => !memberSet.has(d));
+    // a delegate who is not a member must be an active account that existed by then (the decider check)
+    const eligibleDelegates = new Set(
+      outsideDelegates.length
+        ? (
+            await db
+              .select({ id: users.id })
+              .from(users)
+              .where(and(inArray(users.id, outsideDelegates), isNull(users.disabledAt), lt(users.createdAt, input.signableBefore)))
+          ).map((u) => u.id)
+        : [],
+    );
+    const signers = [...members, ...eligibleDelegates];
+    const holders = new Set(
+      (
+        await db
           .select({ userId: webauthnCredentials.userId })
           .from(webauthnCredentials)
           .where(
             and(
-              inArray(webauthnCredentials.userId, component),
+              inArray(webauthnCredentials.userId, signers),
               isNull(webauthnCredentials.revokedAt),
               lt(webauthnCredentials.createdAt, input.signableBefore),
             ),
           )
-      : [];
-    const signableRoots = new Set(holders.map((h) => roots.get(h.userId)));
-    countable = members.filter((m) => signableRoots.has(roots.get(m)));
+      ).map((h) => h.userId),
+    );
+    countable = members.filter(
+      (m) =>
+        holders.has(m) ||
+        (delegatesOf.get(m) ?? []).some((d) => (memberSet.has(d) || eligibleDelegates.has(d)) && holders.has(d)),
+    );
   }
   return { members: members.sort(), principals: new Set(countable.map((m) => roots.get(m))).size };
 }

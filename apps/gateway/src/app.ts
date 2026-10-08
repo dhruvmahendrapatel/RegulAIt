@@ -1043,6 +1043,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /auth/change-password",
     "POST /auth/totp/enroll",
     "POST /auth/totp/activate",
+    // ADR-0186 A (PR #198 review round 6): adding an authenticator app to an account that
+    // already has a way to step up needs that step-up — so the ceremony is reachable from
+    // the forced-enrolment gate (it only mints a grant for the caller's own session)
+    "POST /v1/auth/step-up/options",
+    "POST /v1/auth/step-up/verify",
+    "GET /v1/auth/step-up/:stepUpId",
   ]);
 
   app.addHook("preHandler", async (req, reply) => {

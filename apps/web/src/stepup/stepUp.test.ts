@@ -169,6 +169,11 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
         /(?<![A-Za-z])api\.(?:post|del)(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:auth\/(?:oidc|saml)-providers["'`]|delegations\/\$\{)/g,
       );
       for (const m of round5 ?? []) offenders.push(`${f}: ${m}`);
+      // PR #198 review round 6: adding an authenticator app (like a passkey) needs passkey_manage once a method exists
+      const credentialAdds = src.match(
+        /(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/auth\/totp\/enroll["'`]/g,
+      );
+      for (const m of credentialAdds ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

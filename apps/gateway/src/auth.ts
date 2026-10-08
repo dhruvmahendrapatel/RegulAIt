@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   randomBytes,
   scryptSync,
@@ -32,6 +33,8 @@ import {
   type IpPolicy,
   type OrgSettingsRow,
   type SessionOrigin,
+  webauthnChallenges,
+  webauthnCredentials,
 } from "@regulait/db";
 import {
   BROKER_IDP_VALUES,
@@ -54,6 +57,10 @@ import {
 } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
 import {
+  accountHasStepUpMethodLocked,
+  admitAuthenticatorEnrolment,
+  CHANGED_CONCURRENTLY,
+  stepUpCallerOf,
   claimSsoReauthByState,
   finishSsoReauth,
   isSsoReauthState,
@@ -1606,6 +1613,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
   });
 
   // ---- TOTP self-service ---------------------------------------------------
+  // ADR-0186 A (PR #198 review round 6): an authenticator app is a way to step
+  // up, so adding one is admitted by THE SAME rule as adding a passkey
+  // (`admitAuthenticatorEnrolment`): a `passkey_manage` step-up when the account
+  // already has a way to step up, else a FRESH human sign-in. Enrolment issues a
+  // single-use ticket (a `register` ceremony row whose challenge is derived from
+  // THIS secret's ciphertext) bound to the enrolling session; activation must
+  // present the same session, the same secret, an unexpired unused ticket, and —
+  // for a ticket admitted as the account's first method — re-checks under the
+  // user's row lock that the account still has no way to step up.
+  const TOTP_SESSION_REQUIRED = {
+    error: "browser_session_required",
+    detail: "only a person signed in to RegulAIt in a browser can set up an authenticator app — an API key or the bootstrap token cannot",
+  } as const;
+  /** the ticket's challenge: names THIS secret (its ciphertext carries a random IV), never the secret itself */
+  const totpTicketOf = (ciphertext: string) => `totp-${createHash("sha256").update(ciphertext).digest("base64url")}`;
+
   app.post("/auth/totp/enroll", async (req, reply) => {
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "no_user_identity" });
@@ -1615,14 +1638,36 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "TOTP secrets are stored encrypted — set REGULAIT_DATA_KEY on the gateway first",
       });
     }
+    const caller = stepUpCallerOf(req);
+    if (caller.kind !== "session" || caller.userId !== userId) return reply.status(403).send(TOTP_SESSION_REQUIRED);
     const [user] = await db.select().from(users).where(eq(users.id, userId));
     if (!user) return reply.status(404).send({ error: "unknown_user" });
     if (user.totpEnabled) return reply.status(409).send({ error: "totp_already_enabled" });
+    const admitted = await admitAuthenticatorEnrolment(db, req, reply, userId, caller.sessionId, "totp");
+    if (!admitted) return reply;
     const secret = generateTotpSecret();
-    await db
-      .update(users)
-      .set({ totpSecretCiphertext: encryptSecret(opts.dataKey, secret), totpEnabled: false, totpLastUsedStep: null })
-      .where(eq(users.id, userId));
+    const ciphertext = encryptSecret(opts.dataKey, secret);
+    const written = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [locked] = await tx.select({ totpEnabled: users.totpEnabled }).from(users).where(eq(users.id, userId)).for("update");
+      if (!locked) return "gone" as const;
+      if (locked.totpEnabled) return "enabled" as const;
+      await tx
+        .update(users)
+        .set({ totpSecretCiphertext: ciphertext, totpEnabled: false, totpLastUsedStep: null })
+        .where(eq(users.id, userId));
+      await tx.insert(webauthnChallenges).values({
+        userId,
+        sessionId: caller.sessionId,
+        purpose: "register",
+        challenge: totpTicketOf(ciphertext),
+        firstPasskey: admitted === "first_method",
+        expiresAt: sql`now() + make_interval(secs => ${STEP_UP_CEREMONY_SECONDS})`,
+      });
+      return "ok" as const;
+    });
+    if (written === "gone") return reply.status(404).send({ error: "unknown_user" });
+    if (written === "enabled") return reply.status(409).send({ error: "totp_already_enabled" });
     // the secret + URI are shown exactly ONCE, like every secret in the product
     return { secret, otpauthUri: otpauthUri(user.email, secret) };
   });
@@ -1632,16 +1677,57 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "no_user_identity" });
     if (!opts.dataKey) return reply.status(409).send({ error: "data_key_required" });
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
-    if (!user?.totpSecretCiphertext) return reply.status(409).send({ error: "not_enrolled" });
-    if (user.totpEnabled) return reply.status(409).send({ error: "totp_already_enabled" });
-    const secret = decryptSecret(opts.dataKey, user.totpSecretCiphertext);
-    const step = verifyTotp(secret, body.code, user.totpLastUsedStep);
-    if (step === null) return reply.status(401).send({ error: "invalid_code" });
-    await db.update(users).set({ totpEnabled: true, totpLastUsedStep: step }).where(eq(users.id, userId));
+    const caller = stepUpCallerOf(req);
+    if (caller.kind !== "session" || caller.userId !== userId) return reply.status(403).send(TOTP_SESSION_REQUIRED);
+    const dataKey = opts.dataKey;
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [user] = await tx.select().from(users).where(eq(users.id, userId)).for("update");
+      if (!user?.totpSecretCiphertext) return { status: 409, body: { error: "not_enrolled" } } as const;
+      if (user.totpEnabled) return { status: 409, body: { error: "totp_already_enabled" } } as const;
+      const [ticket] = await tx
+        .select({ id: webauthnChallenges.id, firstPasskey: webauthnChallenges.firstPasskey })
+        .from(webauthnChallenges)
+        .where(
+          and(
+            eq(webauthnChallenges.userId, userId),
+            eq(webauthnChallenges.sessionId, caller.sessionId),
+            eq(webauthnChallenges.purpose, "register"),
+            eq(webauthnChallenges.challenge, totpTicketOf(user.totpSecretCiphertext)),
+            isNull(webauthnChallenges.usedAt),
+            gt(webauthnChallenges.expiresAt, sql`now()`),
+          ),
+        )
+        .for("update");
+      if (!ticket) {
+        return {
+          status: 409,
+          body: {
+            error: "totp_enrolment_not_found",
+            detail:
+              "no authenticator setup is waiting for this sign-in (it expires after 5 minutes and belongs to the " +
+              "session that started it) — start the setup again",
+          },
+        } as const;
+      }
+      // a first-method ticket: the account must STILL have no way to step up
+      if (ticket.firstPasskey && (await accountHasStepUpMethodLocked(tx, userId, req))) {
+        return { status: CHANGED_CONCURRENTLY.status, body: CHANGED_CONCURRENTLY.body } as const;
+      }
+      const secret = decryptSecret(dataKey, user.totpSecretCiphertext);
+      const step = verifyTotp(secret, body.code, user.totpLastUsedStep);
+      if (step === null) return { status: 401, body: { error: "invalid_code" } } as const;
+      await tx.update(webauthnChallenges).set({ usedAt: sql`now()` }).where(eq(webauthnChallenges.id, ticket.id));
+      await tx
+        .update(users)
+        .set({ totpEnabled: true, totpLastUsedStep: step })
+        .where(and(eq(users.id, userId), eq(users.totpSecretCiphertext, user.totpSecretCiphertext)));
+      return { status: 200, email: user.email } as const;
+    });
+    if (out.status !== 200) return reply.status(out.status).send(out.body);
     await auditAuth(db, userId, userId, "mfa-enabled", "allow",
-      `user '${user.email}' enabled TOTP MFA`,
-      { phase: "mfa-enabled", email: user.email });
+      `user '${out.email}' enabled TOTP MFA`,
+      { phase: "mfa-enabled", email: out.email });
     return { ok: true, totpEnabled: true };
   });
 
@@ -2428,6 +2514,27 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       const step = verifyTotp(decryptSecret(opts.dataKey, user.totpSecretCiphertext), body.code, user.totpLastUsedStep);
       if (step === null) return failProof("wrong_code");
       totpStepUsed = step;
+    }
+    // ADR-0186 A (PR #198 review round 6): a linked identity is a way to step up, so
+    // adding one is a credential admission. This proof checks the password and the
+    // authenticator app; an account that also holds a passkey has a factor this
+    // form cannot check, so it is linked only by an administrator's approval —
+    // never by the password alone. Decided after the proof (nothing leaks to a guesser).
+    const [passkey] = await db
+      .select({ id: webauthnCredentials.id })
+      .from(webauthnCredentials)
+      .where(and(eq(webauthnCredentials.userId, user.id), isNull(webauthnCredentials.revokedAt)))
+      .limit(1);
+    if (passkey) {
+      await auditAuth(db, null, user.id, "federated-link-proof-refused", "deny",
+        `link proof for '${user.email}' refused: the account holds a passkey, which this proof cannot check — request left pending for an administrator`,
+        { phase: "link-confirm", linkRequestId: pending.id, provider: providerName, sub: pending.subject, why: "passkey_holder" });
+      return reply.status(403).send({
+        error: "link_needs_admin_approval",
+        detail:
+          "this account is protected by a passkey, so linking a single sign-on identity to it needs an administrator's " +
+          "approval — ask an administrator to approve the pending link request",
+      });
     }
     // ADR-0174 (finding 12): the identity-already-linked refusal comes BEFORE
     // the request is spent, so a refused confirm leaves it pending (an admin

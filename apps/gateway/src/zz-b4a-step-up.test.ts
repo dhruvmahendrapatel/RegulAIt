@@ -173,6 +173,9 @@ async function enrolPasskey(s: Session, label = "laptop", headers: Record<string
   return { auth, passkeyId: reg.json().id as string };
 }
 
+/** the member's first passkey (enrolled by the passkey suite below; later suites step up with it) */
+let memberAuth: SoftAuthenticator | undefined;
+
 /** run a whole passkey step-up for `action` (what a 403 handed back); returns the grant token */
 async function stepUpWithPasskey(s: Session, auth: SoftAuthenticator, action: { kind: string; body: Record<string, unknown> }) {
   const o = await as(s, "POST", "/v1/auth/step-up/options", { action });
@@ -455,6 +458,7 @@ describe("passkey enrolment (attestation none only; the bootstrap rule)", () => 
   it("a SECOND passkey needs a passkey_manage step-up, even from a fresh session", async () => {
     const s = await mkSession(people.member.id);
     const { auth } = await enrolPasskey(s, "first");
+    memberAuth = auth;
     const s2 = await mkSession(people.member.id);
     const refused = await as(s2, "POST", "/v1/auth/passkeys/registration-options", {});
     expect(refused.statusCode, refused.body).toBe(403);
@@ -726,7 +730,13 @@ describe("step-up grants: single use, bound to kind+digest, session-bound, expir
 describe("TOTP step-up and step_up_unavailable", () => {
   it("a TOTP code steps up once; the same code is refused on a new ceremony (replay); a wrong code burns the ceremony", async () => {
     const s = await mkSession(people.member.id);
-    const enrolled = await as(s, "POST", "/auth/totp/enroll");
+    // PR #198 review round 6: the member already holds a passkey, so adding an authenticator app needs passkey_manage
+    const refused = await as(s, "POST", "/auth/totp/enroll");
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "passkey_manage" });
+    const enrolled = await as(s, "POST", "/auth/totp/enroll", undefined, {
+      [STEP_UP_HEADER]: await stepUpWithPasskey(s, memberAuth!, refused.json().action),
+    });
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;
     expect((await as(s, "POST", "/auth/totp/activate", { code: totpCode(secret, totpStep() - 1) })).statusCode).toBe(200);
