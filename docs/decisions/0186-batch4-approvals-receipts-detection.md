@@ -281,6 +281,24 @@ unless stated.
     - The two step-up ceremony routes ride the strict credential tier (10 per 5 minutes), per IP and per user, in
       buckets separate from sign-in. That caps a person at about five step-ups per five minutes; a deployment that
       needs more raises `REGULAIT_AUTH_RATE_LIMIT_MAX` (which also moves the sign-in tier). Secure by default.
+22. **PR #198 review fixes, round 2 (2026-10-08)** (`zz-b4c2-review-fixes.test.ts`, each red first):
+    - The execution recheck recounts approving principals against the quorum in every signature mode, not only
+      passkey, so approvers who become delegation-linked after quorum no longer release a quorum-2 call.
+    - The queue-time named approver is one SQL expression (`namedApproverSnapshotSql`) read by eligibility, the
+      recheck and queue visibility, so a routing rule that re-points a pending row cannot strand it.
+    - An unversioned rule's `quorum` and `approverRoleId` are part of the consent context digest
+      (`ApprovalRuleVersionRef.dualControl`); raising either retires older consents. Versioned rules and the pinned
+      digest vectors keep their shape.
+    - **A security decision is never taken on an unlocked read and then written blind.** The org-settings PUT decides
+      break-glass and relax step-ups on the row it holds locked. Nine other step-up writes (assurance gate mode,
+      interception settings, MRM enforcement, the policy-simulation dial, org guardrail defaults, revocation scope,
+      server and connector owner, agent steward, Outlook recipients) re-read under a lock or compare-and-set and
+      answer **409 `changed_concurrently`** when the value moved since the decision. Org guardrail defaults take
+      advisory lock `6_000_000_186`.
+    - OIDC `auth_time` is compared at its own (whole-second) precision, so a fresh re-login in the same second as
+      the request is no longer stale; an earlier second still is.
+    - Test fixtures that approved tool calls with a raw row update now also write the `approval_decisions` row the
+      real decide path writes, on their own scratch databases.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
@@ -295,6 +313,13 @@ unless stated.
 JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 
 ### Residuals (2026-10-08)
+- **Org-level signature mode and sensitive quorum are not in the consent context.** Round 2 put an unversioned
+  rule's own quorum and role in the digest; tightening the ORG-wide signature mode or sensitive quorum still does
+  not retire consents approved under the looser setting. Follow-up: add both to the context identity.
+- **First-passkey enrolment race.** Two concurrent "first" enrolments from one fresh session can both succeed. Low:
+  that session may enrol a first passkey anyway.
+- **409 `changed_concurrently` in the web client** is shown through the generic error display; a dedicated
+  "this changed while you were deciding, reload" message is a follow-up.
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
   need position semantics that `any`/`N of them` conditions cannot express. Importing them would need a hand-written
   evaluator, which ADR-0176 bars. The pack stays empty; revisit only through a new ADR.
