@@ -383,6 +383,50 @@ unless stated.
       added, then the stepped-up rule; bootstrap write, then enrolment), so the interleaving grants nothing a serial
       order does not. (22) `project_members` has been a policy-epoch source since migration 0122, so a membership
       write cannot slip between the sensitivity read and consumption.
+26. **PR #198 review fixes, round 6 (2026-10-08)** (`zz-b4c6-review-fixes.test.ts`, 16 tests: 32–34 red first on
+    bff14bf, 35–38 red first on 151c880; no migration):
+    - **One admission rule for every credential a step-up can be proven with** (`admitAuthenticatorEnrolment`,
+      step-up.ts). An account that already has a way to step up needs `passkey_manage`; one with none needs a fresh
+      human sign-in (password or SSO, under 10 minutes, never an API-key session). The credential-admission sweep:
+
+      | Route | Adds | Admission | Completion |
+      |---|---|---|---|
+      | `POST /v1/auth/passkeys/registration-options` + `POST /v1/auth/passkeys` | passkey | the rule above | first-method ceremony re-checked under the user's row lock (`accountHasStepUpMethodLocked`, every method incl. SSO, recomputed inside the lock — finding 34) |
+      | `POST /auth/totp/enroll` + `/auth/totp/activate` | authenticator app | the rule above, session callers only (was: any caller, no step-up — finding 32) | a single-use ticket (a `register` row in `webauthn_challenges`, challenge `totp-` + sha256 of THIS secret's ciphertext, 5 minutes) bound to the enrolling session and secret; activation consumes it under the user's row lock and re-checks a first-method ticket. A passkey completion refuses a `totp-` ticket. |
+      | `POST /auth/link/confirm` | SSO identity (by proof) | password, plus the code when TOTP is on; an account holding a passkey (a factor this form cannot check) is refused 403 `link_needs_admin_approval` and the request stays pending (new) | — |
+      | `POST /v1/auth/link-requests/:id/approve` | SSO identity (by an admin) | ADR-0174: never the account's own admin, two distinct approvers for an admin account | — |
+      | OIDC/SAML callback, `link` resolution (pre-provisioned never-used account, pre-0139 SSO user) | SSO identity | the account has never signed in, or already used that provider | — |
+      | Recovery codes | — | none exist in the product | — |
+
+      The web routes AccountPage's and ForcedMfaEnroll's enrolment through `withStepUp` (census extended), and the
+      step-up ceremony routes join the forced-enrolment allow-list so an account with a passkey or SSO identity can
+      prove it there.
+    - **Passkey-mode signability follows the decide path** (finding 33). A member counts as signable only through their
+      own unrevoked passkey enrolled before the call, or a DIRECT delegate's (link from the member, created before the
+      call, live now; the delegate an active account created before the call). A passkey elsewhere in the delegation
+      component (the member's own delegator, a chain) no longer makes them countable. Queue time and pending-row reuse.
+    - **Amendment to B4S-04: relaxation is judged against the strict default AND the stored value** (finding 35, owner
+      decision). An org that tightened beyond the default (`sessionIdleMinutes` 5, `passwordMinLength` 30) needs
+      `settings_relax` to loosen back to it. Ordered rules carry `looser(value, base)` (numbers either way, `null` =
+      unbounded, `mfaRequired` by rank, `alertSlaHours` per severity, and the ordered batch-3/4 and accountability
+      numbers); every other rule is two-state or has its strict value as its strictest member, so the strict-default
+      predicate already decides it. Decided on the unlocked read and again on the locked org row, as since round 2.
+    - **Guardrail modes** (finding 36): an org mode or an override below the mode in force now is a relaxation, as well as
+      one below the shipped default (org) or the org mode (override); toxicity `block` -> `warn` was free. PII is not set
+      on this route (its mode is the cascade's `piiMode` and the registry's `defaultPiiMode` rule). The override write
+      now runs under the guardrail-config lock and refuses an override that moved since (409); removing an override
+      that holds a detector above the org mode needs the same step-up (Class C; the web wraps it).
+      Sweep of the other "relaxed vs default" comparisons: `relaxedAgainst` (assurance gate mode, MRM enforcement,
+      interception settings, the policy-simulation preview dial) is equality-defined and every value it guards has its
+      strict value as its strictest member (the MRM threshold's strict value is its schema minimum), so there is no
+      tighter-than-default value to loosen back from; the execution mode is already judged against the stored mode
+      (`executionModeLoosens`); retention is in the registry (`defaultAuditRetentionDays`, `canaryObservationRetentionDays`)
+      and `modeAuditRetention` only lengthens.
+    - **Turning delegation off while a delegation is live needs `settings_relax`** (finding 37): it splits each linked
+      pair back into two principals, the widening finding 31 steps up for. Decided on the locked org row; a delegation
+      create now re-reads the switch with the org row `FOR SHARE` while it inserts, so the two serialise.
+    - **Queue visibility of the viewer's own decisions is a correlated `EXISTS`** inside the capped query
+      (`decidedByViewerCondition`), never the viewer's lifetime of decision ids in one `IN` list (finding 38).
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call

@@ -24,6 +24,15 @@
  * Strictness is ordered where the setting is ordered (a shorter session idle
  * window is stricter, so tightening asks for nothing), and a value of `null`
  * that means "never expires" / "no ceiling" is always a relaxation.
+ *
+ * ADR-0186 decision 26 (PR #198 review round 6, amending B4S-04's "judge
+ * against the strict default"): a change is a relaxation when the new value is
+ * looser than the strict default OR looser than the value STORED now (the
+ * locked row). An org that tightened a control beyond the default (an idle
+ * window of 5 minutes, passwords of 30 characters) cannot loosen it back to the
+ * default without the step-up. Ordered rules carry `looser(value, base)`; a rule
+ * without one is a two-state or unordered setting whose every non-strict value
+ * is already looser than the strict default, so the stored value adds nothing.
  */
 import {
   accountabilitySettingRelaxed,
@@ -48,6 +57,8 @@ export interface StrictnessRule {
   readonly strict: unknown;
   /** is `value` looser than `strict`? */
   readonly relaxed: (value: unknown) => boolean;
+  /** an ordered setting: is `value` looser than `base` (the stored value)? */
+  readonly looser?: (value: unknown, base: unknown) => boolean;
 }
 export interface StrictnessExemption {
   readonly kind: "exempt";
@@ -56,15 +67,26 @@ export interface StrictnessExemption {
 }
 export type StrictnessEntry = StrictnessRule | StrictnessExemption;
 
-const rule = (strict: unknown, relaxed: (value: unknown) => boolean): StrictnessRule => ({ kind: "rule", strict, relaxed });
+const rule = (
+  strict: unknown,
+  relaxed: (value: unknown) => boolean,
+  looser?: (value: unknown, base: unknown) => boolean,
+): StrictnessRule => ({ kind: "rule", strict, relaxed, ...(looser ? { looser } : {}) });
+
+/** ordered comparators: a larger number (null = unbounded) is looser; a smaller number is looser; a lower rank is looser */
+const largerLooser = (v: unknown, b: unknown) =>
+  v !== b && (v === null || (typeof v === "number" && typeof b === "number" && v > b));
+const smallerLooser = (v: unknown, b: unknown) => typeof v === "number" && typeof b === "number" && v < b;
+const rankLooser = (rank: Record<string, number>) => (v: unknown, b: unknown) =>
+  (rank[String(v)] ?? -1) < (rank[String(b)] ?? -1);
 const exempt = (reason: string): StrictnessExemption => ({ kind: "exempt", reason });
 
 /** anything other than the strict value is looser (an enum whose strict value is its strictest member) */
 const notEqual = (strict: unknown) => rule(strict, (v) => v !== strict);
 /** a larger number (or null = unbounded) is looser */
-const atMost = (strict: number) => rule(strict, (v) => v === null || (typeof v === "number" && v > strict));
+const atMost = (strict: number) => rule(strict, (v) => v === null || (typeof v === "number" && v > strict), largerLooser);
 /** a smaller number is looser */
-const atLeast = (strict: number) => rule(strict, (v) => typeof v === "number" && v < strict);
+const atLeast = (strict: number) => rule(strict, (v) => typeof v === "number" && v < strict, smallerLooser);
 
 const OPTIMISATION =
   "a pillar-6 optimisation dial: it changes what the gateway spends and how it answers, and refuses nothing";
@@ -75,14 +97,48 @@ const MFA_RANK: Record<string, number> = { off: 0, admins: 1, all: 2 };
 
 const IDENTITY = STRICT_IDENTITY_DEFAULTS;
 
+/**
+ * The ORDERED batch settings' comparators against the stored value (decision
+ * 26). Every other batch key is two-state, an enum whose strict value is its
+ * strictest member, or a set whose every looser value is already looser than
+ * the strict default (a protection list missing a member, a permission list
+ * with an extra one) — so the strict-default predicate decides it alone.
+ */
+const BATCH_LOOSER: Readonly<Record<string, (value: unknown, base: unknown) => boolean>> = {
+  // accountability (ADR-0182): longer windows / SLAs are looser
+  decisionRegressionMaxAgeMinutes: largerLooser,
+  feedbackAckSlaHours: largerLooser,
+  feedbackResolveSlaDays: largerLooser,
+  literacyDefaultValidityDays: largerLooser,
+  // per-severity: any severity's SLA longer than it is now
+  alertSlaHours: (v, b) => {
+    const nv = v as Record<string, number> | null;
+    const nb = b as Record<string, number> | null;
+    return !!nv && !!nb && Object.keys(nb).some((s) => typeof nv[s] === "number" && nv[s]! > nb[s]!);
+  },
+  // batch 3 (ADR-0185): longer lifetimes are looser
+  semanticCacheTtlSeconds: largerLooser,
+  conversationRetentionDays: largerLooser,
+  // batch 4 (ADR-0186)
+  stepUpMaxAgeSeconds: largerLooser,
+  monitorMcpBaselineDays: largerLooser,
+  monitorJailbreakThreshold: largerLooser,
+  toolApprovalSensitiveQuorum: smallerLooser,
+  monitorJailbreakWindowHours: smallerLooser,
+};
+
 /** the per-batch registries keep their own predicates (ADR-0182 / 0185 / 0186) */
 function fromBatches(): Record<string, StrictnessRule> {
   const out: Record<string, StrictnessRule> = {};
   for (const k of ACCOUNTABILITY_SETTING_KEYS) {
-    out[k] = rule(ACCOUNTABILITY_STRICT_DEFAULTS[k], (v) => accountabilitySettingRelaxed(k, v as never));
+    out[k] = rule(ACCOUNTABILITY_STRICT_DEFAULTS[k], (v) => accountabilitySettingRelaxed(k, v as never), BATCH_LOOSER[k]);
   }
-  for (const k of BATCH3_SETTING_KEYS) out[k] = rule(BATCH3_STRICT_DEFAULTS[k], (v) => batch3SettingRelaxed(k, v as never));
-  for (const k of BATCH4_SETTING_KEYS) out[k] = rule(BATCH4_STRICT_DEFAULTS[k], (v) => batch4SettingRelaxed(k, v as never));
+  for (const k of BATCH3_SETTING_KEYS) {
+    out[k] = rule(BATCH3_STRICT_DEFAULTS[k], (v) => batch3SettingRelaxed(k, v as never), BATCH_LOOSER[k]);
+  }
+  for (const k of BATCH4_SETTING_KEYS) {
+    out[k] = rule(BATCH4_STRICT_DEFAULTS[k], (v) => batch4SettingRelaxed(k, v as never), BATCH_LOOSER[k]);
+  }
   return out;
 }
 
@@ -194,7 +250,7 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   passwordRequireClasses: atLeast(IDENTITY.passwordRequireClasses),
   sessionLifetimeHours: atMost(24),
   sessionIdleMinutes: atMost(IDENTITY.sessionIdleMinutes),
-  mfaRequired: rule(IDENTITY.mfaRequired, (v) => (MFA_RANK[String(v)] ?? -1) < MFA_RANK[IDENTITY.mfaRequired]!),
+  mfaRequired: rule(IDENTITY.mfaRequired, (v) => (MFA_RANK[String(v)] ?? -1) < MFA_RANK[IDENTITY.mfaRequired]!, rankLooser(MFA_RANK)),
   ssoOnly: exempt("the strict default is off; turning it on only narrows how people sign in"),
   localSignIn: exempt("changing it needs its own break_glass step-up (breakGlassChange)"),
   breakGlassUserIds: exempt("changing who holds the break-glass key needs its own break_glass step-up (breakGlassChange)"),
@@ -209,15 +265,36 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   apiKeyMaxTtlDays: atMost(IDENTITY.apiKeyMaxTtlDays),
 };
 
+/** facts about the rest of the database a relaxation can depend on (read on the writer's transaction) */
+export interface RelaxationFacts {
+  /**
+   * ADR-0186 decision 26 (PR #198 round 6, finding 37): a delegation is live
+   * now. Turning delegation OFF then splits each delegator and delegate back
+   * into two principals — the same approver-pool widening as ending the link
+   * (finding 31) — so it is a relaxation while any delegation is live.
+   */
+  liveDelegation?: boolean;
+}
+
 /**
- * Every changed key now looser than its strict default — named in the audit
+ * Every changed key now looser than its strict default OR than the value
+ * stored now (`stored`, the locked row; decision 26) — named in the audit
  * row's `detail.relaxed`, and the facts the `settings_relax` step-up is bound
- * to. Derived from `ORG_SETTING_STRICTNESS` only.
+ * to. Derived from `ORG_SETTING_STRICTNESS` (plus `facts`) only.
  */
-export function relaxedOrgSettingKeys(changed: Record<string, unknown>): WritableOrgSettingKey[] {
+export function relaxedOrgSettingKeys(
+  changed: Record<string, unknown>,
+  stored?: Record<string, unknown>,
+  facts: RelaxationFacts = {},
+): WritableOrgSettingKey[] {
   // registry order (the batch registries first, as before), so the audit's list reads the same for the same write
   return (Object.keys(ORG_SETTING_STRICTNESS) as WritableOrgSettingKey[]).filter((k) => {
     const entry = ORG_SETTING_STRICTNESS[k];
-    return entry.kind === "rule" && k in changed && changed[k] !== undefined && entry.relaxed(changed[k]);
+    if (entry.kind !== "rule" || !(k in changed) || changed[k] === undefined) return false;
+    const v = changed[k];
+    if (entry.relaxed(v)) return true;
+    if (stored && k in stored && entry.looser && entry.looser(v, stored[k])) return true;
+    if (k === "approvalDelegationEnabled" && v === false && facts.liveDelegation && stored?.approvalDelegationEnabled !== false) return true;
+    return false;
   });
 }

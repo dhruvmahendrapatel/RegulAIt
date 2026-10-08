@@ -13,6 +13,13 @@
  *       anyone else in their delegation component.
  *  F34  a first-passkey completion decides "the account still has no way to step
  *       up" — SSO included — under the user's row lock, never on a read before it.
+ *  F35  an org setting is relaxed when looser than the strict default OR than
+ *       the value stored now (an org that tightened beyond the default).
+ *  F36  a guardrail mode below the mode in force now is a relaxation (org and
+ *       override), and removing an override stricter than the org mode is one.
+ *  F37  turning delegation off while a delegation is live needs settings_relax.
+ *  F38  "the viewer decided it" is a correlated EXISTS in the capped queue
+ *       query, never an IN list of every decision the viewer ever made.
  *
  * Runs on its OWN scratch database (prefix `b4c6_`), dropped in afterAll, so
  * nothing append-only outlives the run (M-068).
@@ -26,6 +33,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import {
+  agents,
+  approvalDecisions,
+  approvals,
   approvalDelegations,
   authSessions,
   createDb,
@@ -42,7 +52,7 @@ import {
   webauthnCredentials,
   type Db,
 } from "@regulait/db";
-import { STEP_UP_HEADER } from "@regulait/shared";
+import { STEP_UP_HEADER, STRICT_IDENTITY_DEFAULTS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { hashPassword } from "./auth.js";
 import { LINK_COOKIE, raiseLinkRequest } from "./federated-identity.js";
@@ -86,7 +96,7 @@ let samlProviderId: string;
 type Session = { token: string; sessionId: string };
 type User = { id: string; key: { authorization: string }; s: Session };
 type Person = User & { auth: SoftAuthenticator };
-const P = {} as Record<"caller" | "a", Person>;
+const P = {} as Record<"caller" | "a" | "adm", Person>;
 
 const TOOLS = Array.from({ length: 4 }, (_, i) => `b4c6_t${i}_${RUN}`);
 let toolCursor = 0;
@@ -131,16 +141,16 @@ async function enrol(s: Session): Promise<SoftAuthenticator> {
   return auth;
 }
 
-async function mkUser(label: string): Promise<User> {
-  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c6-${label}-${randomBytes(2).toString("hex")}-${RUN}@example.com`, displayName: `b4c6 ${label}` });
+async function mkUser(label: string, isAdmin = false): Promise<User> {
+  const u = await withKey(AUTH, "POST", "/v1/users", { email: `b4c6-${label}-${randomBytes(2).toString("hex")}-${RUN}@example.com`, displayName: `b4c6 ${label}`, isAdmin });
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
   const key = await withKey(AUTH, "POST", `/v1/users/${id}/keys`, { name: "b4c6" });
   expect(key.statusCode, key.body).toBe(201);
   return { id, key: { authorization: `Bearer ${key.json().token}` }, s: await mkSession(id) };
 }
-async function mkPerson(label: string): Promise<Person> {
-  const u = await mkUser(label);
+async function mkPerson(label: string, isAdmin = false): Promise<Person> {
+  const u = await mkUser(label, isAdmin);
   return { ...u, auth: await enrol(u.s) };
 }
 
@@ -232,6 +242,7 @@ beforeAll(async () => {
   serverId = s.json().id;
   P.caller = await mkPerson("caller");
   P.a = await mkPerson("approver-a");
+  P.adm = await mkPerson("admin", true);
   for (const name of TOOLS) {
     const t = await withKey(AUTH, "POST", `/v1/servers/${serverId}/tools`, { name, kind: "write" });
     expect([200, 201]).toContain(t.statusCode);
@@ -422,5 +433,81 @@ describe("F34: a first-passkey completion counts an SSO link committed while it 
     expect(res!.statusCode, res!.body).toBe(409);
     expect(res!.json().error).toBe("changed_concurrently");
     expect(await db.select().from(webauthnCredentials).where(eq(webauthnCredentials.userId, u.id))).toHaveLength(0);
+  });
+});
+
+/** refused without a grant (403 settings_relax), admitted with one */
+async function provesRelax(method: Method, url: string, payload: unknown, okStatus = 200) {
+  const refused = await as(P.adm.s, method, url, payload);
+  expect(refused.statusCode, refused.body).toBe(403);
+  expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+  const ok = await as(P.adm.s, method, url, payload, { [STEP_UP_HEADER]: await grantFor(P.adm, refused.json().action) });
+  expect(ok.statusCode, ok.body).toBe(okStatus);
+}
+/** a tightening asks for nothing */
+async function tightens(method: Method, url: string, payload: unknown) {
+  const r = await as(P.adm.s, method, url, payload);
+  expect(r.statusCode, r.body).toBe(200);
+}
+
+describe("F35: loosening a setting an org tightened beyond the default is a relaxation", () => {
+  it("the session idle window: 5 minutes back to the default", async () => {
+    await tightens("PUT", "/v1/org/settings", { sessionIdleMinutes: 5 });
+    await provesRelax("PUT", "/v1/org/settings", { sessionIdleMinutes: STRICT_IDENTITY_DEFAULTS.sessionIdleMinutes });
+  });
+  it("the password length: 30 back to 12", async () => {
+    await tightens("PUT", "/v1/org/settings", { passwordMinLength: 30 });
+    await provesRelax("PUT", "/v1/org/settings", { passwordMinLength: 12 });
+  });
+});
+
+describe("F36: a guardrail mode below the mode in force now is a relaxation", () => {
+  it("the org toxicity mode: block back to its shipped warn (PII is not set here: its mode is the cascade piiMode)", async () => {
+    await tightens("PUT", "/v1/guardrails/config", { modes: { toxicity: "block" } });
+    await provesRelax("PUT", "/v1/guardrails/config", { modes: { toxicity: "warn" } });
+  });
+  it("an override lowered below its own mode (still above the org's), and an override stricter than the org removed", async () => {
+    const [ag] = await db.insert(agents).values({ name: `b4c6-gr-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+    const url = `/v1/guardrails/config/agent/${ag!.id}`;
+    await tightens("PUT", url, { modes: { toxicity: "block" } });
+    await provesRelax("PUT", url, { modes: { toxicity: "warn" } });
+    await tightens("PUT", url, { modes: { toxicity: "block" } });
+    await provesRelax("DELETE", url, undefined);
+  });
+});
+
+describe("F37: turning delegation off while a delegation is live splits principals", () => {
+  it("needs settings_relax while a delegation is live; nothing once none is", async () => {
+    const x = await mkUser("f37-x");
+    const y = await mkUser("f37-y");
+    await delegate(x.id, y.id);
+    await provesRelax("PUT", "/v1/org/settings", { approvalDelegationEnabled: false });
+    // control: no live delegation — turning it off (from on) is a tightening
+    await db.execute(sql`UPDATE org_settings SET approval_delegation_enabled = true WHERE id = ${ORG_SETTINGS_ID}`);
+    await db.update(approvalDelegations).set({ endsAt: new Date(Date.now() - 1_000) });
+    await tightens("PUT", "/v1/org/settings", { approvalDelegationEnabled: false });
+  });
+});
+
+describe("F38: the viewer's decided approvals are found by EXISTS, not an id list", () => {
+  it("the condition is one correlated EXISTS with one bound parameter", async () => {
+    const mod = (await import("./approval-signatures.js")) as Record<string, unknown>;
+    expect(typeof mod.decidedByViewerCondition, "decidedByViewerCondition is exported").toBe("function");
+    const cond = (mod.decidedByViewerCondition as (id: string) => ReturnType<typeof sql>)(P.a.id);
+    const q = db.select({ id: approvals.id }).from(approvals).where(cond).toSQL();
+    expect(q.sql).toMatch(/EXISTS \(SELECT 1 FROM "approval_decisions" ad WHERE ad\.approval_id = "approvals"\."id"/);
+    expect(q.sql).not.toMatch(/ in \(/i);
+    expect(q.params).toEqual([P.a.id]);
+  });
+  it("a viewer still sees an approval they decided, through the queue", async () => {
+    const viewer = await mkUser("f38-viewer");
+    const [ap] = await db
+      .insert(approvals)
+      .values({ objectType: "tool_call", userId: P.caller.id, approverUserId: P.a.id, status: "pending", requestPayload: {} } as never)
+      .returning({ id: approvals.id });
+    await db.insert(approvalDecisions).values({ approvalId: ap!.id, deciderUserId: viewer.id, principalUserId: viewer.id, decision: "approved", stepUpMethod: "none" });
+    const list = await as(viewer.s, "GET", "/v1/approvals");
+    expect(list.statusCode, list.body).toBe(200);
+    expect((list.json().approvals as Array<{ id: string }>).map((r) => r.id)).toContain(ap!.id);
   });
 });

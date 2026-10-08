@@ -21,6 +21,9 @@ import type { FastifyInstance } from "fastify";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   and,
+  approvalDelegations,
+  gt,
+  lte,
   auditLog,
   complianceProfiles,
   connectorRevocations,
@@ -44,7 +47,7 @@ import {
   type OrgSettingsRow,
   type SQL,
 } from "@regulait/db";
-import { relaxedOrgSettingKeys, type WritableOrgSettingKey } from "./org-setting-strictness.js";
+import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
   ACCOUNTABILITY_SETTING_KEYS,
   accountabilitySettingRelaxed,
@@ -674,8 +677,23 @@ async function signInModeRefusal(
  * registry over every writable key (`ORG_SETTING_STRICTNESS`), so the identity
  * defaults, the approval TTL, the API-key lifetimes and every other strict
  * default are covered, not only the three batch registries. */
-export function relaxedSettingKeys(changed: Record<string, unknown>): WritableOrgSettingKey[] {
-  return relaxedOrgSettingKeys(changed);
+export function relaxedSettingKeys(
+  changed: Record<string, unknown>,
+  stored?: Record<string, unknown>,
+  facts: RelaxationFacts = {},
+): WritableOrgSettingKey[] {
+  return relaxedOrgSettingKeys(changed, stored, facts);
+}
+
+/** is any approval delegation live now (finding 37)? Read on the caller's transaction */
+export async function liveDelegationExists(q: Pick<Db, "select">): Promise<boolean> {
+  const now = new Date();
+  const [hit] = await q
+    .select({ id: approvalDelegations.id })
+    .from(approvalDelegations)
+    .where(and(lte(approvalDelegations.startsAt, now), gt(approvalDelegations.endsAt, now)))
+    .limit(1);
+  return Boolean(hit);
 }
 
 /** ADR-0182 (D4): which of the changed keys are accountability settings now
@@ -818,18 +836,23 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // every write.
     // the step-ups this write needs against a given stored row (decided here on
     // the unlocked read, and AGAIN on the locked row inside the transaction)
-    const stepUpsAgainst = (stored: Record<string, unknown>) => {
+    // ADR-0186 decision 26: judged against the strict default AND the stored value,
+    // plus the live-delegation fact for turning delegation off (finding 37)
+    const stepUpsAgainst = (stored: Record<string, unknown>, facts: RelaxationFacts) => {
       const differs = Object.fromEntries(
         Object.entries(body).filter(([k, v]) => JSON.stringify(stored[k]) !== JSON.stringify(v)),
       );
-      const relaxedKeys = relaxedSettingKeys(differs);
+      const relaxedKeys = relaxedSettingKeys(differs, stored, facts);
       return {
         breakGlass: breakGlassChange(differs, stored as { localSignIn?: unknown; breakGlassUserIds?: unknown }),
         relaxedKeys,
         relaxedValues: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
       };
     };
-    const decided = stepUpsAgainst(before as Record<string, unknown>);
+    const disablesDelegation = body.approvalDelegationEnabled === false;
+    const decided = stepUpsAgainst(before as Record<string, unknown>, {
+      liveDelegation: disablesDelegation && (await liveDelegationExists(db)),
+    });
     {
       const { relaxedKeys, breakGlass } = decided;
       // ADR-0186 A: changing the break-glass key holders or the local sign-in
@@ -873,7 +896,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // a setting it did not before, that step-up is decided (and spent) here, on
       // the row the write replaces — a stale request never reverts a change
       // without the proof the change back needs
-      const now = stepUpsAgainst(locked as Record<string, unknown>);
+      // the delegation fact is read on this transaction, after the org row lock: a
+      // delegation create holds that row FOR SHARE while it inserts (app.ts)
+      const lockedFacts = { liveDelegation: disablesDelegation && (await liveDelegationExists(tx as unknown as Db)) };
+      const now = stepUpsAgainst(locked as Record<string, unknown>, lockedFacts);
       if (now.breakGlass && JSON.stringify(now.breakGlass) !== JSON.stringify(decided.breakGlass)) {
         const again = await breakGlassStepUpRefusal(db, req, now.breakGlass, { spend: true });
         if (again) return again;
@@ -914,7 +940,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // ADR-0182 (D4): the accountability settings this write leaves RELAXED
       // from their strict default, named in the detail and the reason;
       // ADR-0185 (batch 3) and ADR-0186 (batch 4) settings the same way
-      const relaxed = relaxedSettingKeys(changed);
+      const relaxed = relaxedSettingKeys(changed, locked as Record<string, unknown>, lockedFacts);
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.

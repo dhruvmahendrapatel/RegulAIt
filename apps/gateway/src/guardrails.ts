@@ -643,12 +643,18 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     const actor = req.authCtx.userId ?? null;
     const before = previousModes(await loadOrgGuardrailConfig(db));
     // ADR-0186 A: an org default mode below its shipped default (off < log < warn < block) is a
-    // relaxation: a settings_relax step-up, bound to each lowered detector and its new mode
+    // relaxation: a settings_relax step-up, bound to each lowered detector and its new mode.
+    // Decision 26 (PR #198 round 6, finding 36): below the mode IN FORCE now is one too — PII
+    // ships `off`, so block -> off was otherwise free. `before` is re-checked under the lock below.
     const relaxed: Record<string, unknown> = {};
     for (const [d, mode] of Object.entries(body.modes ?? {})) {
       const id = d as keyof typeof GUARDRAIL_DEFAULT_MODES;
       if (!mode || mode === before[id] || !(id in GUARDRAIL_DEFAULT_MODES)) continue;
-      if (GUARDRAIL_MODES.indexOf(mode) < GUARDRAIL_MODES.indexOf(GUARDRAIL_DEFAULT_MODES[id])) relaxed[`guardrails.${d}`] = mode;
+      const rank = GUARDRAIL_MODES.indexOf(mode);
+      const current = before[id];
+      if (rank < GUARDRAIL_MODES.indexOf(GUARDRAIL_DEFAULT_MODES[id]) || (current && rank < GUARDRAIL_MODES.indexOf(current))) {
+        relaxed[`guardrails.${d}`] = mode;
+      }
     }
     if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
     // ADR-0186 A (Class A): the step-up was decided on `before`; under the
@@ -716,7 +722,12 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
         const id = d as keyof typeof orgModes;
         const org = orgModes[id];
         if (!mode || !org) continue;
-        if (GUARDRAIL_MODES.indexOf(mode) < GUARDRAIL_MODES.indexOf(org)) lowered[d] = mode;
+        // decision 26 (finding 36): below the org mode, OR below the override's own mode in force now
+        const current = before[id];
+        const rank = GUARDRAIL_MODES.indexOf(mode);
+        if (rank < GUARDRAIL_MODES.indexOf(org) || (current && mode !== current && rank < GUARDRAIL_MODES.indexOf(current))) {
+          lowered[d] = mode;
+        }
       }
       if (body.assuranceWindow) lowered.assuranceWindowMinutes = body.assuranceWindow.ttlMinutes;
       if (Object.keys(lowered).length > 0) {
@@ -726,8 +737,20 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
     }
     // the override's step-up is decided against the org modes, which this write
     // never overwrites: a concurrent org change is ordered before or after it,
-    // and either order is a sequence of legitimate writes (no lost update)
-    const row = await upsert(db, scope, scopeId, body, actor, window);
+    // and either order is a sequence of legitimate writes (no lost update).
+    // Decision 26: it is ALSO decided against the override's own modes, so under the
+    // guardrail-config lock an override that moved since is refused, never overwritten
+    const row = await withGuardrailConfigLock(db, async (tx) => {
+      const [again] = await tx
+        .select()
+        .from(guardrailConfigs)
+        .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)));
+      const inForceAgain = again && (again.expiresAt === null || again.expiresAt > new Date()) ? again : undefined;
+      if (inForceAgain && JSON.stringify(previousModes(inForceAgain)) !== JSON.stringify(previousModes(existingInForce))) return null;
+      if (!inForceAgain && existingInForce) return null;
+      return upsert(tx, scope, scopeId, body, actor, window);
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await audit(
       actor,
       row.id,
@@ -749,11 +772,43 @@ export function registerGuardrailRoutes(app: FastifyInstance, db: Db): void {
 
   app.delete("/v1/guardrails/config/:scope/:scopeId", async (req, reply) => {
     const { scope, scopeId } = scopeParam.parse(req.params);
-    const [row] = await db
-      .delete(guardrailConfigs)
-      .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)))
-      .returning();
-    if (!row) return reply.status(404).send({ error: "unknown_override" });
+    // decision 26 (finding 36 sweep, Class C): removing an override that holds any
+    // detector ABOVE the org mode lowers it for that object — the same settings_relax
+    // step-up as lowering it in place, bound to the object and the modes it falls to
+    const loweredBy = (o: GuardrailConfigRow | undefined, org: Partial<GuardrailModes>) => {
+      const out: Record<string, unknown> = {};
+      if (!o || !(o.expiresAt === null || o.expiresAt > new Date())) return out;
+      const modes = rowModes(o);
+      for (const id of CONFIGURABLE_DETECTORS) {
+        const was = modes[id];
+        const to = org[id];
+        if (was && to && GUARDRAIL_MODES.indexOf(to) < GUARDRAIL_MODES.indexOf(was)) out[id] = to;
+      }
+      return out;
+    };
+    const [current] = await db
+      .select()
+      .from(guardrailConfigs)
+      .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)));
+    if (!current) return reply.status(404).send({ error: "unknown_override" });
+    const decidedLowered = loweredBy(current, previousModes(await loadOrgGuardrailConfig(db)));
+    if (Object.keys(decidedLowered).length > 0) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { scope, scopeId, values: { removed: true, ...decidedLowered } } });
+      if (!su.ok) return reply;
+    }
+    const row = await withGuardrailConfigLock(db, async (tx) => {
+      const [again] = await tx
+        .select()
+        .from(guardrailConfigs)
+        .where(and(eq(guardrailConfigs.scope, scope), eq(guardrailConfigs.scopeId, scopeId)));
+      if (!again) return "gone" as const;
+      const lowered = loweredBy(again, previousModes(await loadOrgGuardrailConfig(tx)));
+      if (JSON.stringify(lowered) !== JSON.stringify(decidedLowered)) return null;
+      const [deleted] = await tx.delete(guardrailConfigs).where(eq(guardrailConfigs.id, again.id)).returning();
+      return deleted ?? ("gone" as const);
+    });
+    if (row === "gone") return reply.status(404).send({ error: "unknown_override" });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     // ADR-0181 FX3 (11b): old -> new, the override's modes to the org default
     // that applies again. An already-expired row was not in force, so nothing
     // changed in force by removing it.

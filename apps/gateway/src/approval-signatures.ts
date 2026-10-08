@@ -230,6 +230,19 @@ export async function poolVisibilityCondition(db: Q, viewerUserId: string, deleg
   )!;
 }
 
+/**
+ * ADR-0186 decision 26 (PR #198 round 6, finding 38): "the viewer recorded a
+ * decision on this approval", as a correlated EXISTS inside the capped queue
+ * query — never the viewer's whole lifetime of decision ids loaded and expanded
+ * into one IN list (unbounded memory, and Postgres's bind-parameter ceiling).
+ * The approval's id is named by its table: drizzle renders a single-table
+ * select's own columns unqualified, which inside this subquery would bind to
+ * `approval_decisions`.
+ */
+export function decidedByViewerCondition(viewerUserId: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM ${approvalDecisions} ad WHERE ad.approval_id = ${sql.raw('"approvals"."id"')} AND ad.decider_user_id = ${viewerUserId}::uuid)`;
+}
+
 // ---------------------------------------------------------------------------
 // Queue time: the snapshot
 // ---------------------------------------------------------------------------

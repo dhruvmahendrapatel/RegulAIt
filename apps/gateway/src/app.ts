@@ -17,6 +17,8 @@ import {
   apiKeys,
   approvalDecisions,
   approvalDelegations,
+  orgSettings,
+  ORG_SETTINGS_ID,
   approvalRules,
   asc,
   approvals,
@@ -438,6 +440,7 @@ import {
   decisionView,
   decideToolCallApproval,
   isToolCallApproval,
+  decidedByViewerCondition,
   poolVisibilityCondition,
   registerApprovalSigningRoutes,
 } from "./approval-signatures.js";
@@ -3235,17 +3238,37 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       },
     };
     if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: delegationFacts })).ok) return reply;
-    const [row] = await db
-      .insert(approvalDelegations)
-      .values({
-        fromUserId: body.fromUserId,
-        toUserId: body.toUserId,
-        startsAt: body.startsAt,
-        endsAt: body.endsAt,
-        reason: body.reason ?? null,
-        createdBy: req.authCtx.userId,
-      })
-      .returning();
+    // ADR-0186 decision 26 (finding 37): the switch is re-read with the org row held
+    // FOR SHARE while the link is inserted, so turning delegation off (which locks
+    // that row FOR UPDATE and asks whether a link is live) and creating a link
+    // serialise — neither decides on a state the other is about to change
+    const row = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [orgNow] = await tx
+        .select({ enabled: orgSettings.approvalDelegationEnabled })
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("share");
+      if (!orgNow?.enabled) return null;
+      const [inserted] = await tx
+        .insert(approvalDelegations)
+        .values({
+          fromUserId: body.fromUserId,
+          toUserId: body.toUserId,
+          startsAt: body.startsAt,
+          endsAt: body.endsAt,
+          reason: body.reason ?? null,
+          createdBy: req.authCtx.userId,
+        })
+        .returning();
+      return inserted ?? null;
+    });
+    if (!row) {
+      return reply.status(409).send({
+        error: "delegation_disabled",
+        detail: "approver delegation is disabled for this organization (org settings)",
+      });
+    }
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "approval_delegation",
@@ -3392,17 +3415,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // active delegates — the people eligibilityOf lets decide it; never the
     // caller's own. It stays visible to whoever recorded a decision on it.
     const poolVisible = !req.authCtx.isAdmin && me ? await poolVisibilityCondition(db, me, delegators) : null;
-    const myDecidedIds =
-      !req.authCtx.isAdmin && me
-        ? (
-            await db
-              .select({ id: approvalDecisions.approvalId })
-              .from(approvalDecisions)
-              .where(eq(approvalDecisions.deciderUserId, me))
-          )
-            .map((r) => r.id)
-            .filter((x): x is string => x !== null)
-        : [];
+    // decision 26 (finding 38): a correlated EXISTS in the capped query, never an id list
+    const decidedByMe = !req.authCtx.isAdmin && me ? decidedByViewerCondition(me) : null;
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
       : or(
@@ -3417,7 +3431,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               : []),
             ...(me ? [and(sql`${approvals.reviewRoleId} IS NOT NULL`, eq(approvals.decidedBy, me))] : []),
             ...(poolVisible ? [poolVisible] : []),
-            ...(myDecidedIds.length ? [inArray(approvals.id, [...new Set(myDecidedIds)])] : []),
+            ...(decidedByMe ? [decidedByMe] : []),
           ],
         );
     const conditions = [
