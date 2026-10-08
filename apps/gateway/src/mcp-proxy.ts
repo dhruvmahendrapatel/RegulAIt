@@ -1535,6 +1535,7 @@ export async function queueGovernedApproval(
           // ADR-0186 A/B: snapshotted here, never re-read from a later dial
           quorum: requirement.quorum,
           signatureMode: requirement.signatureMode,
+          approverRoleId: requirement.approverRoleId,
         })
         .returning({ id: approvals.id })
     )[0]!.id;

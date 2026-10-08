@@ -55,10 +55,11 @@ export async function createApprovalRuleRow(
   // AER-035: a caller may run this inside its own transaction (the copilot's
   // proposal applier does), so it must be able to join one.
   db: DbOrTx,
+  /** ADR-0186 A: `quorum` and `approverRoleId` ride in the body (the shared create schema carries them);
+   *  omitted -> the column defaults (quorum 1, no role) */
   body: CreateApprovalRuleInput,
-  /** ADR-0186 A: dual control. Omitted -> the column defaults (quorum 1, no role). */
-  dualControl: { quorum?: number | undefined; approverRoleId?: string | null | undefined } = {},
 ): Promise<typeof approvalRules.$inferSelect> {
+  const dualControl = { quorum: body.quorum, approverRoleId: body.approverRoleId };
   // ADR-0186 A: THE ONE GUARD — a pool that can never reach the quorum is refused here,
   // for the admin route and the copilot's rule_to_approval applier alike
   await assertApprovalRuleWritable(db, {

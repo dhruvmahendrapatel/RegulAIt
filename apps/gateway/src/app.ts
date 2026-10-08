@@ -94,7 +94,6 @@ import {
   createApiKeySchema,
   createApprovalRuleSchema,
   approvalDecidePasskeyField,
-  approvalRuleQuorumFields,
   TOOL_CALL_APPROVAL_OBJECT_TYPES,
   createDataScopeRuleSchema,
   createConnectorRevocationSchema,
@@ -439,6 +438,7 @@ import {
   decisionView,
   decideToolCallApproval,
   isToolCallApproval,
+  poolVisibilityCondition,
   registerApprovalSigningRoutes,
 } from "./approval-signatures.js";
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
@@ -3038,13 +3038,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0186 A: `quorum` (1–5) and `approverRoleId` ride beside the rule; a
   // pool that can never reach the quorum is 422 `quorum_unsatisfiable`.
   app.post("/v1/rules/approvals", async (req, reply) => {
+    // ADR-0186 A: quorum and approverRoleId are part of the shared create schema
     const body = createApprovalRuleSchema.parse(req.body);
-    const raw = (req.body ?? {}) as Record<string, unknown>;
-    const dual = z
-      .object(approvalRuleQuorumFields)
-      .parse({ quorum: raw.quorum, approverRoleId: raw.approverRoleId });
     // the satisfiability guard runs inside createApprovalRuleRow (every create)
-    const row = await createApprovalRuleRow(db, body, dual);
+    const row = await createApprovalRuleRow(db, body);
     return reply.status(201).send(row);
   });
 
@@ -3345,19 +3342,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // the role (any of them may decide it) — never the proposer's — and stays
     // visible to whoever decided it.
     const myReviewRoles = !req.authCtx.isAdmin && me ? reviewRoleIdsFor(await loadReviewPolicy(db), me) : [];
-    // ADR-0186 A: a tool-call approval is in the queue of every member of its
-    // rule's APPROVER ROLE (the eligible pool; never the caller's own), and
-    // stays visible to whoever recorded a decision on it.
-    const myPoolRuleIds =
-      !req.authCtx.isAdmin && me
-        ? (
-            await db
-              .select({ id: approvalRules.id })
-              .from(approvalRules)
-              .innerJoin(roleAssignments, eq(roleAssignments.roleId, approvalRules.approverRoleId))
-              .where(eq(roleAssignments.userId, me))
-          ).map((r) => r.id)
-        : [];
+    // ADR-0186 A: a tool-call approval is in the queue of every member of the
+    // APPROVER ROLE snapshotted when it was queued, and (while pending) of their
+    // active delegates — the people eligibilityOf lets decide it; never the
+    // caller's own. It stays visible to whoever recorded a decision on it.
+    const poolVisible = !req.authCtx.isAdmin && me ? await poolVisibilityCondition(db, me, delegators) : null;
     const myDecidedIds =
       !req.authCtx.isAdmin && me
         ? (
@@ -3382,15 +3371,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               ? [and(inArray(approvals.reviewRoleId, myReviewRoles), sql`${approvals.userId} <> ${me}`)]
               : []),
             ...(me ? [and(sql`${approvals.reviewRoleId} IS NOT NULL`, eq(approvals.decidedBy, me))] : []),
-            ...(myPoolRuleIds.length
-              ? [
-                  and(
-                    inArray(approvals.ruleId, [...new Set(myPoolRuleIds)]),
-                    inArray(approvals.objectType, [...TOOL_CALL_APPROVAL_OBJECT_TYPES]),
-                    sql`${approvals.userId} <> ${me}`,
-                  ),
-                ]
-              : []),
+            ...(poolVisible ? [poolVisible] : []),
             ...(myDecidedIds.length ? [inArray(approvals.id, [...new Set(myDecidedIds)])] : []),
           ],
         );

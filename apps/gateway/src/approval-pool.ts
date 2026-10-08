@@ -46,9 +46,14 @@ import {
 type Q = Pick<Db, "select">;
 
 /**
- * Active delegation links touching any of `ids` (none when the org turned
- * delegation off). `createdBefore` keeps only links that already existed then
- * (B4S-02: a delegation used to decide a queued approval must predate it).
+ * Active delegation links in the CONNECTED COMPONENT of `ids` (none when the
+ * org turned delegation off): every link reachable from one of `ids` through
+ * other active links, so a chain through people outside `ids` (caller → B →
+ * C → approver) still joins its ends — `principalRoots` unions over exactly
+ * this set. Walked breadth-first; a person is expanded once, so cycles end.
+ * `createdBefore` keeps only links that already existed then (B4S-02: a
+ * delegation used to decide a queued approval must predate it), and applies
+ * to every link of the walk.
  */
 export async function activeDelegationLinks(
   db: Q,
@@ -65,18 +70,34 @@ export async function activeDelegationLinks(
     .where(eq(orgSettings.id, ORG_SETTINGS_ID));
   if (!org?.enabled) return [];
   const now = new Date();
-  const rows = await db
-    .select({ from: approvalDelegations.fromUserId, to: approvalDelegations.toUserId })
-    .from(approvalDelegations)
-    .where(
-      and(
-        or(inArray(approvalDelegations.fromUserId, uniq), inArray(approvalDelegations.toUserId, uniq)),
-        lte(approvalDelegations.startsAt, now),
-        gt(approvalDelegations.endsAt, now),
-        ...(opts.createdBefore ? [lt(approvalDelegations.createdAt, opts.createdBefore)] : []),
-      ),
-    );
-  return rows.map((r) => [r.from, r.to]);
+  const live = and(
+    lte(approvalDelegations.startsAt, now),
+    gt(approvalDelegations.endsAt, now),
+    ...(opts.createdBefore ? [lt(approvalDelegations.createdAt, opts.createdBefore)] : []),
+  );
+  // breadth-first over the links: each round reads the links touching the
+  // people reached so far and not yet expanded, until no one new is reached
+  const reached = new Set(uniq);
+  const links = new Map<string, [string, string]>();
+  let frontier = uniq;
+  while (frontier.length > 0) {
+    const rows = await db
+      .select({ id: approvalDelegations.id, from: approvalDelegations.fromUserId, to: approvalDelegations.toUserId })
+      .from(approvalDelegations)
+      .where(and(or(inArray(approvalDelegations.fromUserId, frontier), inArray(approvalDelegations.toUserId, frontier)), live));
+    const next: string[] = [];
+    for (const r of rows) {
+      links.set(r.id, [r.from, r.to]);
+      for (const p of [r.from, r.to]) {
+        if (!reached.has(p)) {
+          reached.add(p);
+          next.push(p);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return [...links.values()];
 }
 
 /**

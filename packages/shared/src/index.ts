@@ -877,6 +877,9 @@ export const createApprovalRuleSchema = z
      *  looser semantics, so it is never what you get by saying nothing. */
     approvalScope: z.enum(APPROVAL_SCOPES).optional(),
     approverUserId: z.string().uuid(),
+    // ADR-0186 A: dual control rides the ONE create schema, so every caller of
+    // the create (the admin route, the copilot's rule_to_approval applier) keeps it
+    ...approvalRuleQuorumFields,
   })
   .superRefine(refineRuleScope);
 

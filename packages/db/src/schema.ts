@@ -1742,6 +1742,10 @@ export const approvals = pgTable(
     /** how each approval must be proven: passkey signature over the call,
      * a step-up, or nothing (an audited relaxation) */
     signatureMode: text("signature_mode", { enum: APPROVAL_SIGNATURE_MODES }).notNull().default("passkey"),
+    /** ADR-0186 A (migration 0172): the approver role of the naming rule when the
+     * call was queued — eligibility and queue visibility read this, never the
+     * rule's current role. No FK: a historical fact. */
+    approverRoleId: uuid("approver_role_id"),
   },
   (t) => [
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),

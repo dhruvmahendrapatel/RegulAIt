@@ -72,6 +72,7 @@ import {
   webauthnChallenges,
   webauthnCredentials,
   type ApprovalDecisionRow,
+  type SQL,
   type Db,
 } from "@regulait/db";
 import {
@@ -172,7 +173,8 @@ export async function snapshotNamedApprover(db: Q, row: ApprovalRow): Promise<st
 
 /**
  * The pool of a QUEUED approval row (B4S-02): the approver named when it was
- * queued plus the members of the rule's approver role, counted as of
+ * queued plus the members of the approver role SNAPSHOTTED when it was queued
+ * (`approvals.approver_role_id`, never the rule's current role), counted as of
  * `requested_at` — an account, or a role assignment, created after the call
  * was queued does not count — and active now. Delegations are read live (they
  * only ever merge principals or exclude the caller's links here).
@@ -180,10 +182,41 @@ export async function snapshotNamedApprover(db: Q, row: ApprovalRow): Promise<st
 export async function poolForApproval(db: Q, row: ApprovalRow): Promise<ApprovalPool> {
   return loadApprovalPool(db, {
     namedApproverUserId: await snapshotNamedApprover(db, row),
-    approverRoleId: await approverRoleOf(db, row.ruleId),
+    approverRoleId: row.approverRoleId,
     callerUserId: row.userId,
     asOf: requestedAtOf(row.id),
   });
+}
+
+/**
+ * ADR-0186 A — WHICH TOOL-CALL APPROVALS a non-admin sees because of the
+ * approver pool, built from the same facts `eligibilityOf` decides on: the
+ * approver role SNAPSHOTTED on the approval (`poolForApproval`), held by the
+ * viewer, or — for a pending approval — by someone the viewer is an active
+ * delegate of (`delegators`, the live delegations the queue already uses), as
+ * a delegate decides for a pool member. Never the viewer's own calls. Null
+ * when the viewer and their delegators hold no role at all. Visibility is the
+ * superset; the decide path re-checks eligibility in full (queue-time role
+ * membership and delegation, account age, the caller's links).
+ */
+export async function poolVisibilityCondition(db: Q, viewerUserId: string, delegators: readonly string[]): Promise<SQL | null> {
+  const people = [...new Set([viewerUserId, ...delegators])];
+  const held = await db
+    .select({ userId: roleAssignments.userId, roleId: roleAssignments.roleId })
+    .from(roleAssignments)
+    .where(inArray(roleAssignments.userId, people));
+  const mine = [...new Set(held.filter((h) => h.userId === viewerUserId).map((h) => h.roleId))];
+  const theirs = [...new Set(held.filter((h) => h.userId !== viewerUserId).map((h) => h.roleId))];
+  const branches = [
+    ...(mine.length ? [inArray(approvals.approverRoleId, mine)] : []),
+    ...(theirs.length ? [and(inArray(approvals.approverRoleId, theirs), eq(approvals.status, "pending"))!] : []),
+  ];
+  if (branches.length === 0) return null;
+  return and(
+    inArray(approvals.objectType, [...TOOL_CALL_APPROVAL_OBJECT_TYPES]),
+    sql`${approvals.userId} <> ${viewerUserId}`,
+    or(...branches),
+  )!;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +290,8 @@ export interface ToolApprovalRequirements {
   /** what made it sensitive (B4S-03) */
   sensitiveBecause: SensitivitySource[];
   ruleQuorum: number;
+  /** the naming rule's approver role, snapshotted onto the approval (`approvals.approver_role_id`) */
+  approverRoleId: string | null;
   pool: ApprovalPool;
   satisfiable: boolean;
 }
@@ -282,9 +317,10 @@ export async function toolApprovalRequirements(
   const sensitiveBecause = await callSensitivity(db, input);
   const sensitive = sensitiveBecause.length > 0;
   const quorum = Math.max(ruleQuorum, sensitive ? org.toolApprovalSensitiveQuorum : 1);
+  const approverRoleId = await approverRoleOf(db, input.ruleId);
   const pool = await loadApprovalPool(db, {
     namedApproverUserId: input.approverUserId,
-    approverRoleId: await approverRoleOf(db, input.ruleId),
+    approverRoleId,
     callerUserId: input.callerUserId,
   });
   return {
@@ -293,6 +329,7 @@ export async function toolApprovalRequirements(
     sensitive,
     sensitiveBecause,
     ruleQuorum,
+    approverRoleId,
     pool,
     satisfiable: pool.principals >= quorum,
   };
@@ -422,11 +459,10 @@ async function eligibilityOf(db: Q, row: ApprovalRow, deciderUserId: string, exi
   const links = await activeDelegationLinks(db, [deciderUserId]);
   // (d): a delegation lets the decider act for a pool member only when it already existed when the call was queued
   const priorLinks = await activeDelegationLinks(db, [deciderUserId], { createdBefore: requestedAtOf(row.id) });
-  const identity = new Set<string>([deciderUserId]);
-  for (const [from, to] of links) {
-    if (from === deciderUserId) identity.add(to);
-    if (to === deciderUserId) identity.add(from);
-  }
+  // the decider's identity is their whole delegation component (a chain counts, not only a direct link)
+  const roots = principalRoots([deciderUserId], links);
+  const myRoot = roots.get(deciderUserId);
+  const identity = new Set<string>([deciderUserId, ...[...roots].filter(([, r]) => r === myRoot).map(([id]) => id)]);
   if (identity.has(row.userId)) {
     return refuse(403, {
       error: "caller_cannot_approve",

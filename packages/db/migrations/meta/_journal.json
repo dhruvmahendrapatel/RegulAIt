@@ -1149,6 +1149,13 @@
       "when": 1785105000000,
       "tag": "0170_batch4_approvals_receipts_detection",
       "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1785107000000,
+      "tag": "0172_approval_role_snapshot",
+      "breakpoints": true
     }
   ]
 }

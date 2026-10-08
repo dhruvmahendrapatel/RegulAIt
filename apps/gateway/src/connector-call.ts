@@ -549,6 +549,7 @@ export async function executeGovernedConnectorCall(
               // ADR-0186 A/B: snapshotted here
               quorum: requirement.quorum,
               signatureMode: requirement.signatureMode,
+              approverRoleId: requirement.approverRoleId,
             })
             .returning({ id: approvals.id })
         )[0]!.id;

@@ -104,6 +104,7 @@ import {
 } from "@regulait/shared";
 import { hashToken } from "./token-hash.js";
 import { verifyTotp } from "./totp.js";
+import { stepUpRateLimitUserKey } from "./rate-limit.js";
 import { decryptSecret } from "./secrets.js";
 import { resolvePublicUrl } from "./public-url.js";
 import { ApprovalRuleWriteRefusedError, type ApprovalRuleStepUp } from "./approval-pool.js";
@@ -1001,11 +1002,23 @@ const stepUpIdParam = (params: unknown) => {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
 };
 
+/**
+ * ADR-0186 A: the per-USER half of the step-up rate limit (the per-IP half is
+ * the `auth:stepup:<ip>` pre-auth bucket, rate-limit.ts). A stolen session
+ * rotating addresses still meets this one. True = refused (429 sent). A no-op
+ * when the limiter is off (the decorator is absent).
+ */
+async function stepUpRateLimited(app: FastifyInstance, req: FastifyRequest, reply: FastifyReply, userId: string): Promise<boolean> {
+  if (!app.rateLimitCredential) return false;
+  return app.rateLimitCredential(req, reply, stepUpRateLimitUserKey(userId));
+}
+
 export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}): void {
   // ---- POST /v1/auth/step-up/options -------------------------------------
   app.post("/v1/auth/step-up/options", async (req, reply) => {
     const caller = stepUpCallerOf(req);
     if (caller.kind !== "session") return reply.status(403).send(BROWSER_SESSION_REQUIRED);
+    if (await stepUpRateLimited(app, req, reply, caller.userId)) return reply;
     const body = stepUpOptionsSchema.parse(req.body ?? {});
     const kind = body.action.kind;
     const facts = body.action.body;
@@ -1110,6 +1123,7 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
   app.post("/v1/auth/step-up/verify", async (req, reply) => {
     const caller = stepUpCallerOf(req);
     if (caller.kind !== "session") return reply.status(403).send(BROWSER_SESSION_REQUIRED);
+    if (await stepUpRateLimited(app, req, reply, caller.userId)) return reply;
     const body = stepUpVerifySchema.parse(req.body ?? {});
     // ONE attempt per ceremony: claimed before the proof is checked, so a
     // wrong code cannot be retried against the same stepUpId (start again)
