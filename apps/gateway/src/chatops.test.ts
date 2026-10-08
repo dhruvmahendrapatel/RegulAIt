@@ -155,6 +155,8 @@ async function makeApproval(opts: {
       toolName: "patients.read",
       stageId: "prod-signoff",
       approverUserId: opts.approverUserId,
+      // ADR-0186 A (0172): the queue persists the approver it names
+      namedApproverUserId: opts.approverUserId,
       status: "pending",
       signatureMode: opts.signatureMode ?? "off",
       ...(opts.projectId ? { projectId: opts.projectId } : {}),

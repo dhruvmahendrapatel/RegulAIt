@@ -114,6 +114,9 @@ async function makeApproval(over: Partial<typeof approvals.$inferInsert> = {}) {
       userId: ownerId,
       objectType: "mcp_tool",
       approverUserId: over.approverUserId ?? alexId,
+      // ADR-0186 A (migration 0172): the queue writes the approver it names as the
+      // persisted named approver, so a fixture standing in for it does too
+      namedApproverUserId: over.namedApproverUserId ?? over.approverUserId ?? alexId,
       serverId,
       toolName: "wb.write",
       status: "pending",

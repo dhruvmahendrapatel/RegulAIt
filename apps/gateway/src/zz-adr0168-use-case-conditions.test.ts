@@ -413,7 +413,7 @@ describe("ADR-0168 validation", () => {
     const [other] = await db
       .insert(approvals)
       // ADR-0186: a plain (unsigned, pre-0186 shape) tool-call approval
-      .values({ userId: users.owner.id, objectType: "mcp_tool", approverUserId: users.admin.id, signatureMode: "off" })
+      .values({ userId: users.owner.id, objectType: "mcp_tool", approverUserId: users.admin.id, namedApproverUserId: users.admin.id, signatureMode: "off" })
       .returning({ id: approvals.id });
     const ret = await decide(other!.id, { decision: "returned", reason: "more" });
     expect(ret.statusCode).toBe(422);
