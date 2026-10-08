@@ -8,6 +8,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { ComplianceProfile, ProjectCompliance, WorkflowTemplate } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
@@ -114,16 +115,23 @@ function UpsertProfileCard(props: { templates: WorkflowTemplate[] }) {
         onSubmit={(e) => {
           e.preventDefault();
           void act.run(
+            // ADR-0186 decision 29: loosening a stored profile needs a settings_relax step-up
             () =>
-              api.post("/v1/compliance/profiles", {
-                tag: f.tag,
-                ...(f.requiredTemplateIds.length ? { requiredTemplateIds: f.requiredTemplateIds } : {}),
-                mcpDefaultMode: f.mcpDefaultMode,
-                piiMode: f.piiMode,
-                auditRetentionDays: f.auditRetentionDays ? Number(f.auditRetentionDays) : null,
-                backupRetentionDays: f.backupRetentionDays ? Number(f.backupRetentionDays) : null,
-                patchCadenceDays: f.patchCadenceDays ? Number(f.patchCadenceDays) : null,
-              }),
+              withStepUp((h) =>
+                api.postWithHeaders(
+                  "/v1/compliance/profiles",
+                  {
+                    tag: f.tag,
+                    ...(f.requiredTemplateIds.length ? { requiredTemplateIds: f.requiredTemplateIds } : {}),
+                    mcpDefaultMode: f.mcpDefaultMode,
+                    piiMode: f.piiMode,
+                    auditRetentionDays: f.auditRetentionDays ? Number(f.auditRetentionDays) : null,
+                    backupRetentionDays: f.backupRetentionDays ? Number(f.backupRetentionDays) : null,
+                    patchCadenceDays: f.patchCadenceDays ? Number(f.patchCadenceDays) : null,
+                  },
+                  h,
+                ),
+              ),
             "Profile saved — re-posting the same tag updates it in place",
           );
         }}

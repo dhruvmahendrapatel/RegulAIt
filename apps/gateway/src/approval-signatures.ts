@@ -82,6 +82,7 @@ import {
   approvalSigningDigest,
   approvalSigningOptionsSchema,
   approvalSigningPayload,
+  signedArgumentsDigest,
   canonicalJson,
   chatContentFenced,
   type ApprovalDecisionMethod,
@@ -409,14 +410,15 @@ export async function auditQuorumUnsatisfiableAtQueue(
 
 /** the payload an approver signs for `row` (throws when the row cannot be bound: a legacy row) */
 export function signingPayloadForRow(
-  row: Pick<ApprovalRow, "id" | "argumentsDigest" | "contextDigest" | "serverId" | "connectorId" | "toolName" | "objectType">,
+  row: Pick<ApprovalRow, "id" | "argumentsDigest" | "contextDigest" | "serverId" | "connectorId" | "toolName" | "objectType" | "approvalScope">,
   decision: "approved" | "denied",
   nonce: string,
 ): ApprovalSigningPayload {
   return approvalSigningPayload({
     approvalId: row.id,
     decision,
-    argumentsDigest: row.argumentsDigest ?? "",
+    // decision 29 (finding 51): a tool-scoped consent signs the wildcard, not the queueing call's arguments
+    argumentsDigest: row.argumentsDigest ? signedArgumentsDigest(row.approvalScope, row.argumentsDigest) : "",
     contextDigest: row.contextDigest ?? "",
     ...(row.objectType === "connector_call" ? { connectorId: row.connectorId } : { serverId: row.serverId }),
     toolName: row.toolName ?? "",
@@ -1116,7 +1118,9 @@ export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: C
       expected = approvalSigningPayload({
         approvalId: row.id,
         decision: "approved",
-        argumentsDigest: call.argumentsDigest,
+        // decision 29 (finding 51): tool scope — the signature covers any arguments for this
+        // tool (the wildcard); the scope itself is bound by the context digest just below
+        argumentsDigest: signedArgumentsDigest(row.approvalScope, call.argumentsDigest),
         contextDigest: call.contextDigest,
         ...(row.objectType === "connector_call" ? { connectorId: call.connectorId ?? null } : { serverId: call.serverId ?? null }),
         toolName: call.toolName,

@@ -26,6 +26,7 @@ import {
   approvals,
   approvalSlaPolicies,
   configVersions,
+  groupRoleMappings,
   ne,
   eq,
   gt,
@@ -510,6 +511,17 @@ export type ApprovalRuleStepUp = (facts: { ruleId: string; values: Record<string
 export async function approvalRuleLoosens(db: Q, before: ApprovalRuleShape, after: ApprovalRuleShape | null): Promise<boolean> {
   if (!after) return true;
   if ((after.quorum ?? 1) < (before.quorum ?? 1)) return true;
+  // ADR-0186 decision 29 (finding 48): naming a role that IdP groups are mapped to
+  // widens the pool by every member those groups may bring, whatever the role
+  // holds today — its materialised membership would understate the widening
+  if (after.approverRoleId && after.approverRoleId !== before.approverRoleId) {
+    const [mapped] = await db
+      .select({ id: groupRoleMappings.id })
+      .from(groupRoleMappings)
+      .where(eq(groupRoleMappings.roleId, after.approverRoleId))
+      .limit(1);
+    if (mapped) return true;
+  }
   const poolOf = (r: ApprovalRuleShape) =>
     loadApprovalPool(db, {
       namedApproverUserId: r.approverUserId,

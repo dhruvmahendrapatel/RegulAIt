@@ -490,6 +490,14 @@ export async function checkStepUp(
       isNull(stepUpGrants.usedAt),
       // statement time, not transaction time: a protected write may check inside a transaction begun before the grant
       gt(stepUpGrants.expiresAt, sql`statement_timestamp()`),
+      // ADR-0186 decision 29 (PR #198 follow-up, finding 50): a passkey-backed grant is
+      // usable only while the passkey that gave it is unrevoked. The credential row is
+      // read FOR SHARE in the same statement, so a revocation in flight is waited for
+      // and then seen (a deleted credential leaves the grant's credential_id null: unusable)
+      sql`(${stepUpGrants.method} <> 'passkey' OR EXISTS (
+        SELECT 1 FROM ${webauthnCredentials} wc
+        WHERE wc.id = ${sql.raw('"step_up_grants"."credential_id"')} AND wc.revoked_at IS NULL
+        FOR SHARE OF wc))`,
     );
     const [hit] = spend
       ? await db.update(stepUpGrants).set({ usedAt: sql`statement_timestamp()` }).where(where).returning({ method: stepUpGrants.method })
@@ -1352,8 +1360,14 @@ export async function admitAuthenticatorEnrolment(
   what: "passkey" | "totp",
 ): Promise<false | "step_up" | "first_method"> {
   const { methods, passkeyCount } = await stepUpMethodsFor(db, userId, req);
+  // ADR-0186 decision 29 (PR #198 follow-up, finding 49): a linked identity at an
+  // enabled SSO provider IS a way to step up, whatever this request's transport.
+  // On plain HTTP it cannot be used, so the account is asked for a step-up it
+  // cannot give here (`step_up_unavailable`, naming HTTPS) — never admitted as an
+  // account with no method
+  const linkedSso = (await ssoTargetFor(db, userId)) !== null;
   const policy = await loadStepUpPolicy(db);
-  if (stepUpApplies(policy, "passkey_manage") && (passkeyCount > 0 || methods.length > 0)) {
+  if (stepUpApplies(policy, "passkey_manage") && (passkeyCount > 0 || methods.length > 0 || linkedSso)) {
     const su = await requireStepUp(db, req, reply, {
       kind: "passkey_manage",
       facts: what === "passkey" ? { op: "register" } : { op: "totp_enroll" },
@@ -1395,9 +1409,10 @@ export async function admitAuthenticatorEnrolment(
  * while none exists. An SSO link or provider enable committed after this read is
  * ordered after the enrolment (a legitimate serial order).
  */
-export async function accountHasStepUpMethodLocked(tx: Db, userId: string, req?: FastifyRequest): Promise<boolean> {
+export async function accountHasStepUpMethodLocked(tx: Db, userId: string, _req?: FastifyRequest): Promise<boolean> {
   await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("update");
-  const { methods, passkeyCount } = await stepUpMethodsFor(tx, userId, req);
+  // decision 29 (finding 49): transport-independent — a linked SSO identity counts on plain HTTP too
+  const { methods, passkeyCount } = await stepUpMethodsFor(tx, userId);
   return passkeyCount > 0 || methods.length > 0;
 }
 
