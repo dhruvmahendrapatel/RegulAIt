@@ -22,6 +22,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { asSteppedUpAdmin } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,12 +124,18 @@ async function danaSession(browser: Browser) {
  * audited admin route for its lifetime and restores what it found (M-068). */
 let savedMinReleaseAgeDays: number | null = null;
 async function orgSettings(baseURL: string, payload?: Record<string, unknown>) {
+  if (payload) {
+    // B4S-06: shortening the cooldown is a settings_relax step-up, which the
+    // bootstrap credential no longer gives once an admin can step up — Ada makes
+    // it, stepped up with her authenticator
+    const res = await asSteppedUpAdmin(baseURL, state.passwords.admin, "PUT", "/v1/org/settings", payload);
+    expect(res.ok(), `org settings PUT: ${res.status()} ${res.bodyText}`).toBe(true);
+    return JSON.parse(res.bodyText) as { settings: { minReleaseAgeDays: number } };
+  }
   const res = await fetch(`${baseURL}/v1/org/settings`, {
-    method: payload ? "PUT" : "GET",
     headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
-    ...(payload ? { body: JSON.stringify(payload) } : {}),
   });
-  expect(res.ok, `org settings ${payload ? "PUT" : "GET"}: ${res.status}`).toBe(true);
+  expect(res.ok, `org settings GET: ${res.status}`).toBe(true);
   return (await res.json()) as { settings: { minReleaseAgeDays: number } };
 }
 

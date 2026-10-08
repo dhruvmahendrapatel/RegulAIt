@@ -18,6 +18,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { asSteppedUpAdmin, signedInContext } from "./admin-api";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -32,15 +33,14 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 };
 const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
 const DANA_PASSWORD = "E2e-Rewrite-2026!";
+/** phase2's key-custody journey replaces Avery's one-time password with this */
+const AVERY_PASSWORD = "E2e-Avery-Custody!";
 const CSRF = { "x-regulait-csrf": "1" };
-/** an org-settings write as the deployment's bootstrap credential (it needs no step-up) */
+/** an org-settings write as Ada, stepped up with her authenticator (B4S-06: the
+ * bootstrap credential passes a step-up only until an admin can give one) */
 async function bootSettings(payload: Record<string, unknown>) {
-  const res = await fetch(`${state.baseUrl}/v1/org/settings`, {
-    method: "PUT",
-    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  expect(res.ok, `PUT /v1/org/settings: ${res.status} ${await res.text()}`).toBe(true);
+  const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "PUT", "/v1/org/settings", payload);
+  expect(res.ok(), `PUT /v1/org/settings: ${res.status()} ${res.bodyText}`).toBe(true);
 }
 const RUN = Date.now().toString(36);
 const REPO = `bt-repo-${RUN}`;
@@ -103,6 +103,7 @@ let danaTrack: ReturnType<typeof trackConsole>;
 let adminName = "";
 let modelId = "";
 let projectId = "";
+let averyId = "";
 const toolIds = { branches: "", schemas: "" };
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
@@ -154,11 +155,21 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     const g = await admin.request.post("/v1/grants/tools", { headers: CSRF, data: { userId: d.userId, serverId, toolName } });
     expect(g.status(), await g.text()).toBeLessThan(300);
   }
-  await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId });
+  // B4S-03: Dana works on the seeded hipaa-project (an in-app-only data
+  // classification), so every tool call of hers needs the sensitive quorum — two
+  // different approvers — whatever project it bills to. The rule's pool is Ada
+  // (named) plus an approver role holding Avery. Avery joins the role BEFORE any
+  // rule names it, so the assignment pads no approver pool (no step-up).
+  const directory = (await (await admin.request.get("/v1/users")).json()) as { users: Array<{ id: string; email: string }> };
+  averyId = directory.users.find((u) => u.email === "avery@regulait.local")!.id;
+  const role = await post("/v1/roles", { name: `bt approvers ${RUN}` });
+  const joined = await admin.request.post(`/v1/users/${averyId}/roles`, { headers: CSRF, data: { roleId: role.id } });
+  expect(joined.status(), await joined.text()).toBeLessThan(300);
+  await post("/v1/rules/approvals", { userId: d.userId, serverId: wh.id, toolName: "list_schemas", approverUserId: a.userId, approverRoleId: role.id });
   // ADR-0186 B: tool-call approvals are passkey-signed by default, and this
   // stack has no public URL (no passkey relying party), so the admin's decide
   // below would fail closed. Signing is not what this journey tests: it is
-  // relaxed through the audited settings route (bootstrap credential) for the
+  // relaxed through the audited settings route (Ada, stepped up) for the
   // spec's lifetime and restored in afterAll (M-068). Signing itself is proved
   // in the gateway suite and adr0186-ab-signed-approvals.mock.spec.ts.
   await bootSettings({ approvalSignatureMode: "off" });
@@ -270,6 +281,15 @@ test("an organisation approval waits for the admin and the thread finishes when 
   // the admin decides in the one approvals queue
   const decided = await admin.request.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved" } });
   expect(decided.status(), await decided.text()).toBe(200);
+  // B4S-03: Dana's call needs a second, different approver (she works on hipaa-project): Avery approves too
+  expect((await decided.json()) as { status?: string }).toMatchObject({ status: "pending" });
+  const averyCtx = await signedInContext(state.baseUrl, "avery@regulait.local", [AVERY_PASSWORD, state.passwords.avery], AVERY_PASSWORD);
+  try {
+    const second = await averyCtx.post(`/v1/approvals/${approvalId}/decide`, { headers: CSRF, data: { decision: "approved", reason: "second approver" } });
+    expect(second.status(), await second.text()).toBe(200);
+  } finally {
+    await averyCtx.dispose();
+  }
   // the turn resumes AFTER the decide response (ADR-0173 review): wait for it
   // on the API before reading the page
   await expect
