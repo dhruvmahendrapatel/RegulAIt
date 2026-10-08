@@ -320,6 +320,10 @@ export interface BuildAppOptions {
    * recommendation judge instead of the real, governed, org-configured one.
    * Absent = the real path, which still requires the org knob to be ON. */
   recommendationJudge?: RecommendationJudge | null;
+  /** ADR-0187 TEST SEAM: the shipped engine manifest and taxonomy table (a test
+   * passes a manifest with a built digest, and taxonomy rows), and the gateway
+   * base a runner is told to call. Code-only: never env or admin input. */
+  engines?: Pick<EngineOptions, "manifest" | "taxonomy" | "gatewayBaseUrl">;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -448,6 +452,10 @@ import {
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
 import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
+// ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
+import { registerEngineRoutes, type EngineOptions } from "./engines.js";
+import { applyEngineRunApprovalDecision, registerEngineRunRoutes } from "./engine-runs.js";
+import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -1269,6 +1277,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     req.authCtx = ctx;
   });
 
+  // ADR-0187 — THE ENGINE RUNNER CEILING, both directions: a runner or
+  // enrolment token reaches only its allow-list, and the runner routes refuse
+  // every other credential. Before the admin gate, like the virtual-key one.
+  registerEngineRunnerScopeHook(app);
+
   // ADR-0066 — THE VIRTUAL-KEY ROUTE CEILING. Runs BEFORE the admin gate,
   // because it is a stricter statement than "is this caller an admin": a
   // virtual key reaches the dispatch surfaces and nothing else, whatever its
@@ -1315,7 +1328,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // endpoint plainly non-admin instead would have let ANY authenticated user
     // ask authorization questions about anyone, which is worse than the problem.
     const scopedKeyMayReach =
-      req.authCtx.via === "virtual-key" && routesForPurpose(req.authCtx.virtualKeyPurpose).has(route);
+      (req.authCtx.via === "virtual-key" && routesForPurpose(req.authCtx.virtualKeyPurpose).has(route)) ||
+      // ADR-0187: a runner credential on its own allow-list (the hook above refused it everywhere else)
+      (engineCredentialRoutes(req.authCtx)?.has(route) ?? false);
     if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin && !scopedKeyMayReach) {
       return reply.status(403).send({ error: "admin_only" });
     }
@@ -4491,6 +4506,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // network call on a remote backend, and holding the approvals
       // transaction open across it would lock the one queue every other
       // governed action shares.
+      // ADR-0187: a sensitive or over-threshold engine run waits here; approved =
+      // queued for a runner, denied = not_run (a workflow-bound run then fails
+      // its check, post-commit).
+      if (updated.objectType === "engine_run") {
+        postCommit = await applyEngineRunApprovalDecision(tx as unknown as Parameters<typeof applyEngineRunApprovalDecision>[0], updated, binaryDecision, deciderUserId);
+      }
       if (updated.objectType === "training_job") {
         postCommit = await applyTrainingJobApprovalDecision(
           tx as unknown as Db,
@@ -5198,6 +5219,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
+  // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
+  // user), engine runs and schedules (any user, own runs), and the runner routes
+  // (runner token only: registerEngineRunnerScopeHook).
+  registerEngineRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
+  registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

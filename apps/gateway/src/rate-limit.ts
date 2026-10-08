@@ -251,6 +251,8 @@ export function rateLimitCredentialKey(ctx: AuthContext): string | null {
       return ctx.apiKeyId ? `cred:key:${ctx.apiKeyId}` : null;
     case "virtual-key":
       return ctx.virtualKeyId ? `cred:vkey:${ctx.virtualKeyId}` : null;
+    case "engine-runner":
+      return ctx.engineRunnerId ? `cred:runner:${ctx.engineRunnerId}` : null;
     default:
       return null;
   }

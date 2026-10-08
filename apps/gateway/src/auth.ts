@@ -82,6 +82,7 @@ import { loadEgressAllowList } from "./custom-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 import { hashToken } from "./token-hash.js";
 import { isVirtualKeyToken, resolveVirtualKey, touchVirtualKey } from "./virtual-keys.js";
+import { resolveEngineCredential } from "./engine-runner-auth.js";
 import {
   anchorLinkedUser,
   anchorOfRequest,
@@ -123,11 +124,19 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
    *  ADR-0066's model surfaces; 'pdp' is `POST /v1/authz/check` and nothing
-   *  else. Set only when `via === "virtual-key"`. */
-  virtualKeyPurpose?: "dispatch" | "pdp";
+   *  else; ADR-0187 'engine' is the compat model routes, pinned to one project.
+   *  Set only when `via === "virtual-key"`. */
+  virtualKeyPurpose?: "dispatch" | "pdp" | "engine";
+  /** ADR-0187: the runner (`via === "engine-runner"`) or enrolment token
+   * (`via === "engine-enrollment"`) a sidecar runner presented, and its engine.
+   * Neither is a user: `userId` is null and `isAdmin` false, and each reaches
+   * only its own route allow-list (`ENGINE_RUNNER_ROUTES`). */
+  engineRunnerId?: string;
+  engineEnrollmentTokenId?: string;
+  engineId?: string;
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */
   virtualKeyId?: string;
@@ -160,6 +169,10 @@ export interface AuthContext {
  */
 export const AUTH_REFUSALS = [
   "disabled",
+  // ADR-0187: a revoked runner token, and an enrolment token that is unknown,
+  // used or expired (only its holder ever sees either)
+  "engine_runner_revoked",
+  "engine_enrollment_invalid",
   "virtual_key_revoked",
   "virtual_key_expired",
   "api_key_expired",
@@ -176,6 +189,9 @@ export function isAuthRefusal(x: AuthContext | null | AuthRefusal): x is AuthRef
  * same credential. */
 export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
   disabled: "this account has been deactivated — an admin can reactivate it",
+  engine_runner_revoked: "this engine runner has been revoked and authenticates nothing — enrol it again",
+  engine_enrollment_invalid:
+    "this enrolment token is unknown, already used or expired — mint a new one on the Engines page",
   virtual_key_revoked: "this virtual key has been revoked and authenticates nothing",
   virtual_key_expired: "this virtual key has expired — its issuer can mint a new one",
   api_key_expired:
@@ -222,6 +238,13 @@ export async function authenticate(
   // silently carried admin would be the exact opposite of what it is for. Its
   // `userId` IS the owner, so every downstream entitlement check evaluates the
   // owner's grants, which is what makes the key a CEILING rather than a bypass.
+  // ADR-0187 — SIDECAR ENGINE RUNNERS. The `rge_` (runner) and `rgee_`
+  // (one-time enrolment) prefixes are disjoint from `rgl_`/`rglv_`, so this
+  // branch changes no other credential's path. Neither resolves to a user and
+  // neither is admin; the route hook then confines each to its allow-list.
+  const engineCred = await resolveEngineCredential(db, token);
+  if (engineCred !== null) return engineCred;
+
   if (isVirtualKeyToken(token)) {
     const resolved = await resolveVirtualKey(db, token);
     if (!resolved.ok) {

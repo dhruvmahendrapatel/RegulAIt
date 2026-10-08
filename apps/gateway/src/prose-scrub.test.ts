@@ -483,6 +483,10 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    // ADR-0187: engine item text and runner revocation
+    "engine_run_items.reason",
+    "engine_run_items.verdict_note",
+    "engine_runners.revoke_reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",

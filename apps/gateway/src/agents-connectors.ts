@@ -200,6 +200,7 @@ import {
 // inherits both without a check of its own.
 import {
   loadVirtualKeyContext,
+  engineUsageDetail,
   recordVirtualKeySpend,
   virtualKeyAllowListRefusal,
   virtualKeyBudgetRefusal,
@@ -2310,6 +2311,8 @@ async function dispatchAttempt(
     virtualKeyId: vk?.id ?? null,
     detail: {
       credentialSource,
+      // ADR-0187 pillar 5: an engine run's calls carry the engine and the run
+      ...(vk ? engineUsageDetail(vk) : {}),
       ...(promptVersion
         ? {
             promptVersion: {

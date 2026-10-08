@@ -86,13 +86,27 @@ export const VIRTUAL_KEY_ALLOWED_ROUTES: ReadonlySet<string> = new Set([
  */
 export const PDP_KEY_ALLOWED_ROUTES: ReadonlySet<string> = new Set(["POST /v1/authz/check"]);
 
-export type VirtualKeyPurpose = "dispatch" | "pdp";
+/**
+ * ADR-0187 — A RUN-SCOPED ENGINE KEY'S ENTIRE WORLD: the compat model routes
+ * and nothing else (not the native invoke route, not even `GET /v1/me`). The
+ * key is minted for one engine run, owned by the person the run executes as,
+ * pinned to the run's project, allowed only the target and judge agents,
+ * budgeted, expiring at the run deadline, and revoked when the run ends.
+ */
+export const ENGINE_KEY_ALLOWED_ROUTES: ReadonlySet<string> = new Set([
+  "POST /v1/chat/completions",
+  "POST /v1/messages",
+  COMPAT_MODELS_ROUTE,
+]);
+
+export type VirtualKeyPurpose = "dispatch" | "pdp" | "engine";
 
 /** The allow-list for a key, chosen by its purpose. Unknown purposes get the
  *  EMPTY set rather than a default — a credential whose purpose this build does
  *  not understand reaches nothing, which is the only safe reading of it. */
 export function routesForPurpose(purpose: string | null | undefined): ReadonlySet<string> {
   if (purpose === "pdp") return PDP_KEY_ALLOWED_ROUTES;
+  if (purpose === "engine") return ENGINE_KEY_ALLOWED_ROUTES;
   if (purpose === "dispatch" || purpose == null) return VIRTUAL_KEY_ALLOWED_ROUTES;
   return new Set<string>();
 }
@@ -107,6 +121,10 @@ export interface VirtualKeyContext {
   budgetUsd: number | null;
   spentUsd: number;
   upstreamCredentialId: string | null;
+  /** ADR-0187: the key's purpose; an `engine` key carries its project pin and run */
+  purpose: VirtualKeyPurpose;
+  projectId: string | null;
+  engineRunId: string | null;
 }
 
 export function toVirtualKeyContext(row: VirtualKeyRow): VirtualKeyContext {
@@ -118,7 +136,41 @@ export function toVirtualKeyContext(row: VirtualKeyRow): VirtualKeyContext {
     budgetUsd: row.budgetUsd ?? null,
     spentUsd: row.spentUsd ?? 0,
     upstreamCredentialId: row.upstreamCredentialId ?? null,
+    purpose: (row.purpose ?? "dispatch") as VirtualKeyPurpose,
+    projectId: row.projectId ?? null,
+    engineRunId: row.engineRunId ?? null,
   };
+}
+
+/** the name an engine run's key is minted with: `engine:<engineId> run <runId>` */
+export function engineKeyName(engineId: string, runId: string): string {
+  return `engine:${engineId} run ${runId}`;
+}
+
+/** ADR-0187 pillar 5: what an engine key's usage row carries (`detail.purpose`, `detail.engineRunId`) */
+export function engineUsageDetail(vk: VirtualKeyContext): { purpose?: string; engineRunId?: string } {
+  if (vk.purpose !== "engine" || !vk.engineRunId) return {};
+  const m = /^engine:([a-z0-9_-]+) run /.exec(vk.name);
+  return { purpose: `engine:${m?.[1] ?? "unknown"}`, engineRunId: vk.engineRunId };
+}
+
+/**
+ * ADR-0187 — THE PROJECT PIN of an `engine` key. A call on such a key is
+ * attributed to the key's project; a call that names another project in
+ * `x-regulait-project-id` is refused (403 `virtual_key_project_mismatch`)
+ * rather than billed elsewhere. Returns null for every other credential.
+ */
+export async function engineKeyProjectPin(
+  db: Db,
+  req: { authCtx: { via: string; virtualKeyId?: string; virtualKeyPurpose?: string } },
+): Promise<string | null> {
+  if (req.authCtx.via !== "virtual-key" || req.authCtx.virtualKeyPurpose !== "engine" || !req.authCtx.virtualKeyId) return null;
+  const [row] = await db
+    .select({ projectId: virtualKeys.projectId })
+    .from(virtualKeys)
+    .where(eq(virtualKeys.id, req.authCtx.virtualKeyId));
+  // an engine key always has a project (DB CHECK); a missing row cannot be attributed anywhere
+  return row?.projectId ?? "00000000-0000-0000-0000-000000000000";
 }
 
 /** Same 24-byte entropy and the same sha256 as `generateToken()` in auth.ts —
@@ -271,10 +323,54 @@ export async function recordVirtualKeySpend(
   costUsd: number | null,
 ): Promise<void> {
   if (costUsd === null || costUsd === 0) return;
-  await db
+  const [after] = await db
     .update(virtualKeys)
     .set({ spentUsd: sql`${virtualKeys.spentUsd} + ${costUsd}` })
-    .where(eq(virtualKeys.id, virtualKeyId));
+    .where(eq(virtualKeys.id, virtualKeyId))
+    .returning({
+      id: virtualKeys.id,
+      purpose: virtualKeys.purpose,
+      userId: virtualKeys.userId,
+      engineRunId: virtualKeys.engineRunId,
+      budgetUsd: virtualKeys.budgetUsd,
+      spentUsd: virtualKeys.spentUsd,
+      revokedAt: virtualKeys.revokedAt,
+    });
+  // ADR-0187 — A SPENT ENGINE BUDGET ENDS THE KEY. The crossing call is billed
+  // (measured cost arrives after it), and the key is revoked at once, so every
+  // later call of the run gets 401 `virtual_key_revoked` mid-run whether or not
+  // the runner stops; the run then reports what it measured.
+  if (
+    after &&
+    after.purpose === "engine" &&
+    after.revokedAt === null &&
+    after.budgetUsd !== null &&
+    after.spentUsd >= after.budgetUsd
+  ) {
+    const revoked = await db
+      .update(virtualKeys)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(virtualKeys.id, after.id), isNull(virtualKeys.revokedAt)))
+      .returning({ id: virtualKeys.id });
+    if (revoked.length > 0) {
+      await db.insert(auditLog).values({
+        userId: after.userId,
+        objectType: "virtual_key",
+        objectId: after.id,
+        detail: {
+          phase: "revoke",
+          cause: "budget_exhausted",
+          engineRunId: after.engineRunId,
+          budgetUsd: after.budgetUsd,
+          spentUsd: after.spentUsd,
+        },
+        effect: "deny",
+        ruleId: "engine-run-key-revoked",
+        ruleChain: [],
+        reason: `engine run key revoked: its $${after.budgetUsd.toFixed(2)} budget is spent, so every later call of the run is refused`,
+      });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +589,14 @@ export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
     if (!row) return reply.status(404).send({ error: "virtual_key_not_found" });
     if (!req.authCtx.isAdmin && row.userId !== req.authCtx.userId) {
       return reply.status(404).send({ error: "virtual_key_not_found" });
+    }
+    // ADR-0187: a run-scoped engine key is the run's ceiling, fixed when the run
+    // was leased. Nobody edits it (not even an admin); revoking it stays open.
+    if (row.purpose === "engine") {
+      return reply.status(409).send({
+        error: "engine_key_immutable",
+        detail: "an engine run's key is fixed for the run it was minted for; cancel the run or revoke the key instead",
+      });
     }
     // THE ONE PLACE A "NARROWING" CREDENTIAL COULD WIDEN ITSELF. Being the
     // OWNER is not enough to raise a budget or extend an allow-list: an admin

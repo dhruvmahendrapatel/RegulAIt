@@ -322,6 +322,8 @@ function securityFor(auth: RouteAuthClass): Array<Record<string, string[]>> {
       return [];
     case "scim-token":
       return [{ scimToken: [] }];
+    case "engine-runner":
+      return [{ engineRunnerToken: [] }];
     default:
       return [{ apiKey: [] }];
   }
@@ -476,6 +478,13 @@ export function buildOpenApiDocument(
             "A SCIM provisioning token (ADR-0037) — a SEPARATE TRUST PATH. These routes " +
             "authenticate ONLY against `scim_tokens`; a human session or a user's API key is " +
             "refused here, and a SCIM token is refused everywhere else.",
+        },
+        engineRunnerToken: {
+          type: "http",
+          scheme: "bearer",
+          description:
+            "An ADR-0187 engine runner token (`rge_...`), or on the register route a one-time enrolment token " +
+            "(`rgee_...`). A separate trust path: it reaches only the runner routes, and they refuse every other credential.",
         },
       },
     },

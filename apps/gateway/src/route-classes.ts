@@ -24,6 +24,10 @@ import {
   PROTECTED_RESOURCE_METADATA_PATH,
 } from "./mcp-auth-metadata.js";
 import { WEB_UI_ROUTES } from "./web-serving.js";
+import { ENGINE_ENROLLMENT_ROUTES, ENGINE_RUNNER_ROUTES } from "@regulait/shared";
+
+/** ADR-0187: the routes only an engine runner credential reaches */
+const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
 
 export const AUTH_EXEMPT_ROUTES = new Set([
   "/v1/pm/webhooks/:connectionName",
@@ -702,6 +706,25 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/auth/step-up/verify",
   "GET /v1/auth/step-up/:stepUpId",
   "POST /v1/approvals/:approvalId/signing-options",
+
+  // ADR-0187 (batch 5) — engines. Reading the engine list is any signed-in
+  // user's (the Red-teaming and Evaluations pages offer the engine choice; no
+  // secret is in it). A run, its cancel and a schedule are the caller's own,
+  // checked in-handler (the run-as person must be entitled to the target, as
+  // for POST /v1/redteam/runs; an admin sees every run). Enabling, the dials,
+  // the self-test, enrolment tokens and runner revocation stay admin-only.
+  // The runner routes are not here: they take a runner token only
+  // (engine-runner-auth.ts), whose own gate admits them.
+  "GET /v1/engines",
+  "GET /v1/engines/:engineId",
+  "POST /v1/engine-runs",
+  "GET /v1/engine-runs",
+  "GET /v1/engine-runs/:runId",
+  "POST /v1/engine-runs/:runId/cancel",
+  "POST /v1/engine-schedules",
+  "GET /v1/engine-schedules",
+  "PATCH /v1/engine-schedules/:scheduleId",
+  "POST /v1/model-artifacts",
 ]);
 
 /**
@@ -719,16 +742,20 @@ export const NON_ADMIN_ROUTES = new Set([
  *  - `user`        any authenticated identity (API key, bootstrap token or
  *                  session cookie); admin-ness is not the gate, though the
  *                  handler still applies the caller's own entitlement;
+ *  - `engine-runner` ADR-0187: a runner token (or, to register, a one-time
+ *                  enrolment token) and nothing else — engine-runner-auth.ts;
  *  - `admin`       the DEFAULT. `users.is_admin` is required by the preHandler
  *                  before the handler is ever reached.
  */
-export type RouteAuthClass = "public" | "scim-token" | "user" | "admin";
+export type RouteAuthClass = "public" | "scim-token" | "engine-runner" | "user" | "admin";
 
 const SCIM_ROUTE_SET: ReadonlySet<string> = new Set<string>(SCIM_ROUTES);
 
 export function routeAuthClass(method: string, url: string): RouteAuthClass {
   if (SCIM_ROUTE_SET.has(url)) return "scim-token";
   const key = `${method.toUpperCase()} ${url}`;
+  // ADR-0187: a separate trust path, like SCIM — a runner or enrolment token only
+  if (RUNNER_ROUTE_KEYS.has(key)) return "engine-runner";
   const nonAdmin = NON_ADMIN_ROUTES.has(key);
   const exempt = AUTH_EXEMPT_ROUTES.has(url);
   // A route must be BOTH auth-exempt and non-admin to be reachable with no
