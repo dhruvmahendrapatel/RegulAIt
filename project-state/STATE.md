@@ -1,6 +1,6 @@
 ---
 phase: adr0183-batch-4-next
-last_updated: 2026-10-07
+last_updated: 2026-10-08
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,19 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-08 - Batch 5 designed (ADR-0187); owner decisions taken 2026-10-08. The foundation waits for Batch 4 to merge.**
+- Owner decisions: one pinned runner container per engine pulling work from the gateway over an internal-only `engines`
+  network (no Docker socket); model calls only through the gateway on a run-scoped virtual key (project pinned, revoked
+  at end/cancel/timeout); every engine off until an admin enables it after the runner self-test passes (audited,
+  step-up); all three triggers (on demand, workflow `automated_check`, scheduled — scheduled runs as the person who
+  configured them; agentic/offensive sets and over-threshold budgets go to the approvals queue).
+- Defaults taken, owner may revisit: raw engine reports encrypted 90 days (sha256 kept, normalised results follow the
+  audit-retention cascade); we build and sign our own engine images and may carry a minimal promptfoo telemetry patch.
+- Split: Claude B5-F foundation + B5-E runner core (one PR), then B5-P promptfoo, B5-M modelscan, B5-G garak; Codex X26
+  Engines page, X27 run/result views, X28 Model artifacts, X29 cross-review; research G19 (`R10-engine-admission.md`).
+- Batch 5 code starts only after `b4-int` lands on `main` (shared hot files, ADR-0183; needs Batch 4 step-up and the
+  vendored detection scrub). Next migration 0171 (journal when 1785106000000), next ADR 0188.
 
 **2026-10-07 - Batch 4 decided (ADR-0186), built as equal halves by Claude and Codex with cross-review.**
 - Owner decisions: passkey-signed tool-call approvals re-verified at execution; two approvers for sensitive projects;
