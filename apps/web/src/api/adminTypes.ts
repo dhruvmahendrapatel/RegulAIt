@@ -377,6 +377,8 @@ export interface Connector {
   baseUrl?: string | null;
   pricePerCallUsd?: number | null;
   createdAt?: string;
+  ownerUserId?: string | null;
+  ownership?: "owned" | "unowned" | "orphaned";
 }
 
 export interface ConnectorCredentialInfo {
@@ -394,6 +396,12 @@ export interface McpServer {
    * null = inherit the org default (mcpPrivateRangesDefault). IMDS/link-local
    * is never opened by this flag. */
   allowPrivateRanges?: boolean | null;
+  transport?: "streamable_http" | "sse" | "stdio";
+  stdio?: { command: string; args: string[] } | null;
+  stdioCommandDigest?: string | null;
+  admissionState?: string;
+  ownerUserId?: string | null;
+  ownership?: "owned" | "unowned" | "orphaned";
   createdAt?: string;
 }
 

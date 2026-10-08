@@ -875,3 +875,53 @@ describe("G4 SSE", () => {
     expect(inner).toBe(1);
   });
 });
+
+describe("PR #181 review: every registration and every direct tool grant is on the trail", () => {
+  it("a streamable HTTP registration is audited like a stdio one, with its url and owner", async () => {
+    const r = await inject("POST", "/v1/servers", users.admin.auth, {
+      name: `g4-http-audit-${RUN}`,
+      url: "http://127.0.0.1:9/mcp",
+      allowPrivateRanges: true,
+    });
+    expect(r.statusCode, r.body).toBe(201);
+    const serverId = r.json().id as string;
+    createdServers.push(serverId);
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, serverId), eq(auditLog.ruleId, "mcp-server-registered")));
+    expect(rows, "a streamable_http registration is audited").toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      userId: users.admin.id,
+      objectType: "mcp_server",
+      serverId,
+      effect: "allow",
+      detail: expect.objectContaining({ phase: "registration", transport: "streamable_http", url: "http://127.0.0.1:9/mcp", allowPrivateRanges: true }),
+    });
+  });
+
+  it("a successful POST /v1/grants/tools names the actor, the grantee, the server and the grant", async () => {
+    const r = await inject("POST", "/v1/servers", users.admin.auth, {
+      name: `g4-grant-audit-${RUN}`,
+      url: "http://127.0.0.1:9/mcp",
+      allowPrivateRanges: true,
+    });
+    expect(r.statusCode, r.body).toBe(201);
+    const serverId = r.json().id as string;
+    createdServers.push(serverId);
+    const g = await inject("POST", "/v1/grants/tools", users.admin.auth, { userId: users.member.id, serverId, toolName: "mcp:resources" });
+    expect(g.statusCode, g.body).toBe(201);
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.serverId, serverId), eq(auditLog.ruleId, "mcp-tool-grant-created")));
+    expect(rows, "a minted tool grant is audited").toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      userId: users.admin.id,
+      objectType: "user",
+      objectId: users.member.id,
+      effect: "allow",
+      detail: { grantId: g.json().id, granteeUserId: users.member.id, serverId, toolName: "mcp:resources" },
+    });
+  });
+});

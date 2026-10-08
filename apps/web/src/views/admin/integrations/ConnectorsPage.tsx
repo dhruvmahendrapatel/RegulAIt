@@ -5,6 +5,7 @@
  * (mode + data scope), and the per-user entitlement view.
  */
 import { useState } from "react";
+import { IntegrationOwnership } from "./IntegrationOwnership";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { Connector, ConnectorCredentialInfo } from "../../../api/adminTypes";
@@ -84,6 +85,7 @@ export default function ConnectorsPage() {
         info={<p>The catalog is decoupled from entitlement. kind is the display category; providerKind is the execution adapter (absent = governance-only). Per-call price feeds pillar 5.</p>}
       />
       <div className={v.stack}>
+        <IntegrationOwnership kind="connectors" rows={connectors.data?.connectors ?? []} />
         <Card flush title="Catalog">
           <Table<Connector>
             columns={[
@@ -102,6 +104,7 @@ export default function ConnectorsPage() {
                 render: (c) => (c.pricePerCallUsd == null ? "—" : fmtUsd(c.pricePerCallUsd)),
               },
               { key: "baseUrl", header: "Base URL", render: (c) => c.baseUrl ?? "—" },
+              { key: "ownership", header: "Ownership", render: (c) => c.ownership ?? "Not reported" },
             ]}
             rows={connectors.data?.connectors ?? []}
             rowKey={(c) => c.id}

@@ -9,7 +9,10 @@ import {
   CHATOPS_OUTBOUND_PROVIDERS,
   CHATOPS_PROVIDERS,
   CHATOPS_SEND_ONLY_PROVIDERS,
+  OUTLOOK_RECIPIENT_ALLOW_LIST_MAX,
+  canonicalOutlookRecipients,
   chatOpsConnectionBody,
+  outlookRecipientChange,
   chatOpsProviderLabel,
   chatOpsProviderRegistrable,
   chatOpsProviderUnavailableReason,
@@ -109,5 +112,71 @@ describe("ChatOpsPage — ADR-0183 2.6: the outlook app registration", () => {
     expect(outlookCredentialToken({ tenantId: "", clientId: "", clientSecret: "", senderMailbox: "" })).toEqual({ token: null });
     const partial = outlookCredentialToken({ ...four, clientSecret: "" });
     expect("error" in partial && partial.error).toMatch(/all four/);
+  });
+});
+
+describe("ChatOpsPage — Outlook recipients are counted in their canonical form (PR #181 review)", () => {
+  // 51 non-blank lines that canonicalise to 50 distinct mailboxes: the gateway
+  // accepts this list, so the page must not refuse it before sending.
+  const fiftyOneLines = [
+    ...Array.from({ length: 50 }, (_, i) => `  Person${i}@Example.test `),
+    "person0@example.test",
+    "",
+  ].join("\n");
+
+  it("trims, lower-cases and de-duplicates before the limit is applied", () => {
+    const canonical = canonicalOutlookRecipients(fiftyOneLines);
+    expect(canonical).toHaveLength(OUTLOOK_RECIPIENT_ALLOW_LIST_MAX);
+    expect(canonical[0]).toBe("person0@example.test");
+    expect(canonicalOutlookRecipients("A@x.test\r\n a@x.test\n\nb@x.test")).toEqual(["a@x.test", "b@x.test"]);
+  });
+
+  it("matches the gateway's shared canonicaliser on the same inputs", async () => {
+    // runtime-only import: the SPA does not depend on @regulait/shared
+    const sharedPath = new URL("../../../../../../packages/shared/src/batch3.ts", import.meta.url).pathname;
+    const shared = (await import(/* @vite-ignore */ sharedPath)) as {
+      OUTLOOK_RECIPIENT_ALLOW_LIST_MAX: number;
+      outlookRecipientAllowListProblem: (provider: string, list: readonly string[]) => { ok: boolean; value?: string[] };
+    };
+    expect(OUTLOOK_RECIPIENT_ALLOW_LIST_MAX).toBe(shared.OUTLOOK_RECIPIENT_ALLOW_LIST_MAX);
+    for (const text of [fiftyOneLines, "A@x.test\r\n a@x.test\n\nb@x.test", " Cab@Example.test "]) {
+      const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
+      const verdict = shared.outlookRecipientAllowListProblem("outlook", lines);
+      expect(verdict.ok, text).toBe(true);
+      expect(canonicalOutlookRecipients(text)).toEqual(verdict.value);
+    }
+  });
+});
+
+describe("ChatOpsPage — an Outlook save sends only a real change, classified against the stored list (PR #181 review)", () => {
+  it("an unchanged canonical list is not sent", () => {
+    const loaded = ["cab@example.test", "security@example.test"];
+    expect(outlookRecipientChange(loaded, " CAB@example.test\nsecurity@example.test\n", loaded)).toEqual({ kind: "unchanged" });
+    expect(outlookRecipientChange(loaded, "security@example.test\ncab@example.test", loaded)).toEqual({ kind: "unchanged" });
+  });
+
+  it("a concurrent removal stays removed; only this admin's own additions count", () => {
+    const loaded = ["cab@example.test", "security@example.test"];
+    const now = ["security@example.test"];
+    expect(outlookRecipientChange(loaded, "cab@example.test\nsecurity@example.test\nnew@example.test", now))
+      .toEqual({ kind: "save", recipients: ["security@example.test", "new@example.test"], adds: true, added: ["new@example.test"] });
+    // this admin also removed cab: the stored list already says so
+    expect(outlookRecipientChange(loaded, "security@example.test", now)).toEqual({ kind: "unchanged" });
+    // a removal this admin made is a tightening against what is stored now
+    expect(outlookRecipientChange(loaded, "cab@example.test", ["cab@example.test", "security@example.test"]))
+      .toEqual({ kind: "save", recipients: ["cab@example.test"], adds: false, added: [] });
+  });
+});
+
+describe("ChatOpsPage — an Outlook save merges this admin's delta into the re-read list (PR #181 review round 4)", () => {
+  it("keeps a recipient another admin added meanwhile", () => {
+    // loaded [a], this admin +b, another admin +c meanwhile → a, b, c
+    const change = outlookRecipientChange(["a@x.test"], "a@x.test\nb@x.test", ["a@x.test", "c@x.test"]);
+    expect(change).toMatchObject({ kind: "save", adds: true });
+    expect([...(change as { recipients: string[] }).recipients].sort()).toEqual(["a@x.test", "b@x.test", "c@x.test"]);
+  });
+
+  it("refuses rather than send a stale full list when the re-read failed", () => {
+    expect(outlookRecipientChange(["a@x.test"], "a@x.test\nb@x.test", null)).toMatchObject({ kind: "error" });
   });
 });
