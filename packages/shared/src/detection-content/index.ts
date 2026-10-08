@@ -18,19 +18,24 @@ function characters(text: string, map: (char: string, code: number) => string): 
   for (const char of text) out.push(map(char, char.codePointAt(0)!));
   return out.join("");
 }
+function boundMarkRuns(text:string):string{
+ return text.replace(/\p{M}+/gu,run=>{
+   let end=0;for(let n=0;n<30&&end<run.length;n++)end+=run.codePointAt(end)!>0xffff?2:1;
+   return run.slice(0,end);
+ });
+}
 /** Pipelock ForMatching: strip invisibles, NFKC, confusable fold, NFD/Mn
  * stripping, NFC, explicit whitespace fold. Fixed linear passes, no decoding
  * loops or arbitrary execution; preserves the original text for audit output. */
 export function normaliseForInjection(text: string): string {
-  const visible = characters(text, (char, code) => NORMALISE_INVISIBLE_RANGES.some(([lo, hi]) => code >= lo && code <= hi) ? "" : char);
+  const visible = characters(boundMarkRuns(text), (char, code) => NORMALISE_INVISIBLE_RANGES.some(([lo, hi]) => code >= lo && code <= hi) ? "" : char);
   // Remove the marks this pipeline discards before ICU reorders them: an
   // adversarial alternating-CCC run otherwise incurs quadratic normalization.
   // Bound every Unicode mark run before ICU, including Mc/Me spacing marks.
   // This fixed Unicode property scan is linear and never executes vendor regex.
-  const streamSafe=visible.replace(/\p{M}+/gu,run=>{
-    let end=0;for(let n=0;n<30&&end<run.length;n++)end+=run.codePointAt(end)!>0xffff?2:1;
-    return run.slice(0,end);
-  });
+  // Cap before per-character tables too, avoiding needless work under the
+  // audit lock. Cap again after invisible removal can join previously bounded runs.
+  const streamSafe=boundMarkRuns(visible);
   const withoutMarks = combining.matcher(streamSafe).replaceAll("");
   const folded = characters(withoutMarks.normalize("NFKC"), (char, code) => confusables.get(code) ?? char);
   const stripped = combining.matcher(folded.normalize("NFD")).replaceAll("").normalize("NFC");
