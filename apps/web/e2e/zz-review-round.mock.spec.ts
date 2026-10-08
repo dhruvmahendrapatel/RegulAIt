@@ -1003,3 +1003,24 @@ for(const recordStatus of [200,403]) for(const startStep of [0,2]) {
   expect(state.patches).toEqual([]);expect(state.artifacts).toEqual([]);expect(state.draftWrites.filter(write=>write.method==="DELETE")).toEqual([]);
  });
 }
+
+for(const heldRequest of ["patch","artifact"]){
+ test(`R24-05: owner change during ${heldRequest} stops subsequent writes and success navigation`,async({page})=>{
+  const state=await mockGateway(page,{status:"needs_info",resubmission:true,reviews:[]});
+  await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
+  await page.getByLabel("What will the system do?").fill("Original owner edit");
+  for(let i=0;i<3;i++)await page.getByRole("button",{name:"Continue",exact:true}).click();
+  let release!:()=>void;const pending=new Promise<void>(resolve=>release=resolve);let started=false;
+  await page.route(heldRequest==="patch"?`**/v1/use-cases/${UC}`:`**/v1/workflows/instances/${INST}/artifacts`,async route=>{
+   if(route.request().method()===(heldRequest==="patch"?"PATCH":"POST")){started=true;await pending;}await route.fallback();
+  });
+  await page.getByRole("button",{name:"Resubmit for review",exact:true}).click();await expect.poll(()=>started).toBe(true);
+  state.persona=SAM;expect(await refreshSessionInPlace(page)).toBe("sam");
+  const notice=page.getByRole("alert").filter({hasText:"You're now signed in as someone else"});
+  await expect(notice).toContainText("sent before the account changed");await expect(notice).not.toContainText("nothing was sent");
+  release();await expect(page.getByRole("button",{name:"Discard and leave",exact:true})).toBeEnabled();
+  await expect(page).toHaveURL(/resubmit=/);if(heldRequest==="patch")expect(state.artifacts).toEqual([]);
+  expect(state.draftWrites.filter(write=>write.method==="DELETE")).toEqual([]);
+  await expect(page.getByText("Resubmitted for review",{exact:true})).toHaveCount(0);
+ });
+}

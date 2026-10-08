@@ -653,3 +653,8 @@ Evidence at b940342e plus the current-main merge 62385555:
 
 Full unrelated gateway suites are not claimed green: foundation seam assertions
 still assume unimplemented slices and require the coordinating owner's updates.
+
+
+### X24 cross-review corrections — 2026-10-08
+R24-01 fixed: latest use-case decision record supplies approval time, tested through the real workflow approval decide route (genuine old-loader red). R24-02/04 fixed: correlation counts/running threshold/order in SQL, only breaching users cross into the process; each rule has a savepoint and omits only its key on failure. A 10,001-call flood leaves all rules measured; malformed findings omit only correlation. R24-03 fixed: subjects without earlier attributed history have no baseline drift. R24-05 fixed: a current owner ref and send-time change latch stop subsequent writes and success/draft cleanup after a change during PATCH or artifact POST; copy reports a prior request rather than promising nothing was sent. R24-06 screenshots use testInfo.outputPath. R24-07 measured Strict/Relaxed badges, Restore strict and step-up/audit copy mirror the shared contract with a parity test.
+Validation: actual PostgreSQL/app/monitor `vitest run src/monitor-detection-rules.test.ts` 11/11; old loader red five regressions plus independent real-decide red; owner-race browser tests 2 genuine reds, restored browser selection 15/15; complete detection-monitor mock 6/6 including refused save and strict restore. Web units 366/366; web build/typecheck and gateway build/typecheck PASS. Screenshot emitted under Playwright test output. Logs `/tmp/x24-review-*`, `/tmp/x24-real-approval-red.log`, `/tmp/x24-owner-review-red.log`.

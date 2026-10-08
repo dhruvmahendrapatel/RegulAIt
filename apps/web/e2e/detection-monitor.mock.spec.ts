@@ -21,14 +21,14 @@ async function setup(page:Page,reported=true,failSave=false){
  await page.goto("/ui/admin/governance/alerts");
  await expect(page.getByText("Detection monitor rules and thresholds",{exact:true})).toBeVisible();return puts;
 }
-test("shows measured defaults and explains observational and missing-history limits",async({page})=>{
+test("shows measured defaults and explains observational and missing-history limits",async({page},testInfo)=>{
  await setup(page);
  await expect(page.getByLabel("MCP baseline days",{exact:true})).toHaveValue("14");
  await expect(page.getByLabel("Jailbreak finding threshold",{exact:true})).toHaveValue("3");
  await expect(page.getByLabel("Jailbreak observation hours",{exact:true})).toHaveValue("24");
  await expect(page.getByText(/Missing or ambiguous history holds an existing alert/)).toBeVisible();
  await expect(page.getByText(/Correlation does not establish cause or successful execution/)).toBeVisible();
- await page.screenshot({path:"/workspace/.regulait-onboarding/x24-monitor.png",fullPage:true});
+ await page.screenshot({path:testInfo.outputPath("x24-monitor.png"),fullPage:true});
 });
 test("saves only changed thresholds through the existing audited settings route",async({page})=>{
  const puts=await setup(page);await page.getByLabel("Jailbreak finding threshold",{exact:true}).fill("5");
@@ -47,4 +47,11 @@ test("missing settings stay unreported without editable invented defaults",async
 test("refused save preserves the draft and does not claim success",async({page})=>{
  const puts=await setup(page,true,true);await page.getByLabel("MCP baseline days",{exact:true}).fill("7");await page.getByRole("button",{name:"Save detection thresholds",exact:true}).click();
  await expect(page.getByRole("button",{name:"Save detection thresholds",exact:true})).toBeEnabled();await expect(page.getByLabel("MCP baseline days",{exact:true})).toHaveValue("7");expect(puts).toEqual([{monitorMcpBaselineDays:7}]);await expect(page.getByText("Detection monitor thresholds saved",{exact:true})).toHaveCount(0);
+});
+
+test("R24-07: measured relaxed settings show their posture and Restore strict changes only that field",async({page})=>{
+ const puts=await setup(page);await page.getByLabel("Jailbreak finding threshold",{exact:true}).fill("5");await page.getByRole("button",{name:"Save detection thresholds",exact:true}).click();
+ await expect(page.getByText("Relaxed",{exact:true})).toBeVisible();await expect(page.getByText(/requires step-up authentication/)).toBeVisible();
+ await page.getByRole("button",{name:"Restore strict jailbreak finding threshold",exact:true}).click();await page.getByRole("button",{name:"Save detection thresholds",exact:true}).click();
+ await expect(page.getByText("Relaxed",{exact:true})).toHaveCount(0);expect(puts).toEqual([{monitorJailbreakThreshold:5},{monitorJailbreakThreshold:3}]);
 });

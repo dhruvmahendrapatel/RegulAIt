@@ -1,3 +1,4 @@
+import { batch4SettingRelaxed, BATCH4_SETTING_COPY, BATCH4_STRICT_DEFAULTS } from "./monitorThresholds";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -625,9 +626,11 @@ function DetectionMonitorSettings() {
     </ul>
     <QueryGate loading={query.isLoading} error={query.error} onRetry={()=>void query.refetch()}>
       {!reported?<p>Detection monitor thresholds are not reported by this gateway.</p>:<div className={v.stack}>
-        {fields.map(field=><Field key={field.key} label={field.label} help={`Whole number from ${field.min} to ${field.max}. Saved value: ${current![field.key]}.`}>
+        {fields.map(field=><Field key={field.key} label={field.label} help={`Whole number from ${field.min} to ${field.max}. Saved value: ${current![field.key]}. ${BATCH4_SETTING_COPY[field.key].strict} ${BATCH4_SETTING_COPY[field.key].relaxed}`}>
           <Input type="number" min={field.min} max={field.max} step={1} disabled={action.busy} value={draft[field.key]??String(current![field.key])} onChange={event=>{setDraft(old=>({...old,[field.key]:event.target.value}));setValidation(null);}} />
         </Field>)}
+        {fields.map(field=><p key={field.key}>{field.label}: <Badge tone={batch4SettingRelaxed(field.key,current![field.key]!)?"warn":"ok"}>{batch4SettingRelaxed(field.key,current![field.key]!)?"Relaxed":"Strict"}</Badge> <Button disabled={action.busy} onClick={()=>setDraft(old=>({...old,[field.key]:String(BATCH4_STRICT_DEFAULTS[field.key])}))}>Restore strict {field.label.toLowerCase()}</Button></p>)}
+        <p>Relaxing these thresholds is audited and requires step-up authentication when the deployment enforces it.</p>
         {validation&&<p role="alert">{validation}</p>}
         <Button disabled={action.busy||!Object.keys(draft).length} onClick={()=>{
           const changes:Partial<Values>={};
