@@ -1,0 +1,159 @@
+/**
+ * ADR-0187 — THE SHIPPED ENGINE MANIFEST, and the self-test verdict.
+ *
+ * The manifest is the only source of an engine's version and image digest: an
+ * admin cannot point an engine at an arbitrary image. The gateway copies it
+ * onto the `engines` rows (`syncEngineManifest`), and a runner is admitted only
+ * when the digest it reports equals the manifest's.
+ *
+ * FOUNDATION STATE (2026-10-08). No engine image is built yet (B5-P, B5-M and
+ * B5-G build and sign them from pinned upstream source). Until then every
+ * `imageDigest` is null, so no runner can pass the self-test and no engine can
+ * be enabled: the secure default holds by construction, not by a flag. The
+ * usage-data switches below are the documented ones from the R9 source review
+ * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
+ * them per engine, and network denial stays the real control either way.
+ */
+import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
+
+/** how a named plugin/probe set is classed for the approvals rule (owner decision 4) */
+export type EngineSetClass = "standard" | "agentic" | "offensive";
+
+export interface EngineManifestEntry {
+  id: EngineId;
+  kind: EngineKind;
+  displayName: string;
+  /** the engine release the image is built from */
+  version: string;
+  /** the signed image's digest, or null until the engine's image is built */
+  imageDigest: string | null;
+  licence: string;
+  /** null until G19 counts them */
+  maintainerCount: number | null;
+  /** the usage-data and remote-fetch switches: env name -> the value the runner must set */
+  usageDataEnv: Readonly<Record<string, string>>;
+  /** does a run need a virtual key (model access through the gateway)? */
+  needsModelAccess: boolean;
+  /** the named sets this build classes; any set not listed counts as offensive (secure default) */
+  sets: Readonly<Record<string, EngineSetClass>>;
+  /** what an air-gapped install cannot run, published as data */
+  airGappedReducedSet: ReadonlyArray<{ key: string; reason: EngineNotRunReason }>;
+  /** ISO date of the last source review, and when it must be re-checked */
+  lastVerified: string;
+  reCheckBy: string;
+  /** what is not verified yet, shown on the Engines page */
+  unverified: readonly string[];
+}
+
+const UNVERIFIED_COMMON = [
+  "image digest and signature (the image is built in the engine's own PR)",
+  "air-gapped runtime behaviour",
+  "maintainer count",
+  "transitive licences inside the image",
+  "exit codes and report schema",
+] as const;
+
+export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = Object.freeze({
+  promptfoo: {
+    id: "promptfoo",
+    kind: "redteam",
+    displayName: "promptfoo",
+    // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
+    version: "0.123.1",
+    imageDigest: null,
+    licence: "MIT",
+    maintainerCount: null,
+    usageDataEnv: { PROMPTFOO_DISABLE_TELEMETRY: "1", PROMPTFOO_DISABLE_UPDATE: "1" },
+    needsModelAccess: true,
+    sets: {},
+    airGappedReducedSet: [],
+    lastVerified: "2026-10-08",
+    reCheckBy: "2027-01-08",
+    unverified: [...UNVERIFIED_COMMON, "whether the disabled-telemetry path still attempts a request"],
+  },
+  modelscan: {
+    id: "modelscan",
+    kind: "model_scan",
+    displayName: "modelscan",
+    version: "0.8.8",
+    imageDigest: null,
+    licence: "Apache-2.0",
+    maintainerCount: null,
+    usageDataEnv: {},
+    needsModelAccess: false,
+    sets: {},
+    airGappedReducedSet: [],
+    lastVerified: "2026-10-08",
+    // maintenance only: the 12-month release rule lapses around 2027-02 (ADR-0187 open question 3)
+    reCheckBy: "2027-02-18",
+    unverified: [...UNVERIFIED_COMMON],
+  },
+  garak: {
+    id: "garak",
+    kind: "redteam",
+    displayName: "garak",
+    version: "0.17.0",
+    imageDigest: null,
+    licence: "Apache-2.0",
+    maintainerCount: null,
+    usageDataEnv: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
+    needsModelAccess: true,
+    sets: {},
+    airGappedReducedSet: [],
+    lastVerified: "2026-10-08",
+    reCheckBy: "2027-01-08",
+    unverified: [...UNVERIFIED_COMMON, "whether the offline environment fully localises the Hugging Face loaders"],
+  },
+});
+
+/** the class of a named set; a set the manifest does not list is `offensive` (fail closed) */
+export function engineSetClass(engineId: EngineId, set: string): EngineSetClass {
+  return ENGINE_MANIFEST[engineId].sets[set] ?? "offensive";
+}
+
+/** does this run config use a set that needs approval (agentic, offensive or unclassified)? */
+export function engineConfigNeedsApproval(engineId: EngineId, sets: readonly string[]): boolean {
+  return sets.some((s) => engineSetClass(engineId, s) !== "standard");
+}
+
+export type SelfTestFailure =
+  | "image_not_built"
+  | "digest_mismatch"
+  | "version_mismatch"
+  | `usage_env_missing:${string}`
+  | "egress_dns_resolved"
+  | "egress_connected"
+  | "stale";
+
+export interface SelfTestVerdict {
+  passed: boolean;
+  failures: SelfTestFailure[];
+}
+
+/**
+ * Does a runner's reported self-test admit enabling its engine? Every check
+ * must hold: the manifest has a built image and the runner runs exactly it,
+ * the version matches, every usage-data switch the manifest names is set, an
+ * external host neither resolved nor connected, and the report is fresh. Any
+ * failure is named; there is no partial pass.
+ */
+export function evaluateRunnerSelfTest(
+  manifest: EngineManifestEntry,
+  report: RunnerSelfTest,
+  now: Date,
+): SelfTestVerdict {
+  const failures: SelfTestFailure[] = [];
+  if (manifest.imageDigest === null) failures.push("image_not_built");
+  else if (report.imageDigest !== manifest.imageDigest) failures.push("digest_mismatch");
+  if (report.engineVersion !== manifest.version) failures.push("version_mismatch");
+  for (const name of Object.keys(manifest.usageDataEnv)) {
+    if (report.usageDataEnv[name] !== true) failures.push(`usage_env_missing:${name}`);
+  }
+  if (report.egress.dnsResolved) failures.push("egress_dns_resolved");
+  if (report.egress.connected) failures.push("egress_connected");
+  const at = Date.parse(report.at);
+  if (!Number.isFinite(at) || now.getTime() - at > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000 || at - now.getTime() > 300_000) {
+    failures.push("stale");
+  }
+  return { passed: failures.length === 0, failures };
+}

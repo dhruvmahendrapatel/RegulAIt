@@ -139,6 +139,31 @@ const stageSchema = z.object({
       }),
     )
     .optional(),
+  /** automated_check (ADR-0187, batch 5): bind a NAMED CHECK to a sidecar
+   * engine run. On stage entry the gateway starts the run as the instance
+   * initiator on the instance's project (the same identity rule as an eval
+   * binding); the check stays PENDING until the run ends, passes only when the
+   * run completed with no failed or unknown item and at least one pass, and
+   * FAILS when the run fails, times out, is cancelled or did not run. Never
+   * reported (POST .../checks refuses it) and never auto-passed. */
+  engines: z
+    .array(
+      z.object({
+        check: z.string().min(1),
+        /** the engine id (ADR-0187 manifest) */
+        engine: z.enum(["promptfoo", "modelscan", "garak"]),
+        /** the agent under test, by registry NAME */
+        agent: z.string().min(1),
+        /** judge agent NAME, behind the gateway */
+        judgeAgent: z.string().min(1).optional(),
+        /** the engine's named plugin/probe sets */
+        sets: z.array(z.string().min(1).max(100)).min(1).max(50),
+        params: z.record(z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
+        trials: z.number().int().min(1).max(25).optional(),
+        budgetUsd: z.number().positive().max(10_000).optional(),
+      }),
+    )
+    .optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
 
@@ -273,6 +298,35 @@ export const workflowDefinitionSchema = z
               ctx.addIssue({
                 code: z.ZodIssueCode.custom,
                 message: `check stage '${s.id}' binds check '${e.check}' to more than one eval dataset`,
+              });
+            }
+            seen.add(e.check);
+          }
+        }
+      }
+      // ADR-0187: engine bindings follow the eval-binding rules, and one check is
+      // decided by one thing (an eval OR an engine run, never both).
+      if (s.engines?.length) {
+        if (s.type !== "automated_check") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `stage '${s.id}' (${s.type}) cannot carry engine bindings — only an automated_check stage can`,
+          });
+        } else {
+          const declared = new Set(s.checks ?? []);
+          const evalBound = new Set((s.evals ?? []).map((e) => e.check));
+          const seen = new Set<string>();
+          for (const e of s.engines) {
+            if (!declared.has(e.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds an engine to check '${e.check}', which the stage does not declare`,
+              });
+            }
+            if (seen.has(e.check) || evalBound.has(e.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds check '${e.check}' more than once (an eval or engine binding each)`,
               });
             }
             seen.add(e.check);
