@@ -173,17 +173,17 @@ The owner asked Codex to review Gemini and finish its pending work. The unmerged
 | G17 | BLOCKED primary verification — [#158](https://github.com/dhruvmahendrapatel/RegulAIt/pull/158), `700081f8` | R8 splits 29 actor/recipient/stage-specific leads. Exact legal bodies returned proxy 403/no body, so all rows are UNVERIFIED and ineligible for encoding; quotes/applicability/exceptions remain open. No invented deadline quotations. |
 | G18 | MERGED — [#159](https://github.com/dhruvmahendrapatel/RegulAIt/pull/159), `6aabb3c3` | Five projects/seven checks each, actual release pages and pinned licence/telemetry source. Empty public advisories are bounded API results. Promptfoo opt-out still attempts a disabled-event HTTP path in source. Runtime air-gap and image digest/signature proof remain UNVERIFIED admission gates. |
 | G10 | Corrected proposals delivered; normative gate BLOCKED — [#162](https://github.com/dhruvmahendrapatel/RegulAIt/pull/162), `60066756` | 35 candidate NIST references with individual rationales; OWASP SSRF/scope correction primary-checked; Art. 50(1)/(2) separated. NIST/EU bodies proxy 403, ISO licensed control text unavailable: no normative completion or code promotion. |
-| G11 | Pricing follow-up BLOCKED — [#163](https://github.com/dhruvmahendrapatel/RegulAIt/pull/163), `1febafba` | Current flagship selection and long-context pricing tiers explicitly UNVERIFIED. Oct4 historical IDs/prices preserved; current vendor model/pricing pages return proxy 403. Stale review prices are not attached to newer selected IDs. |
+| G11 | Pricing follow-up BLOCKED — [#163](https://github.com/dhruvmahendrapatel/RegulAIt/pull/163), `1febafba` | Current flagship selection and long-context pricing tiers explicitly UNVERIFIED. October 4 historical IDs/prices preserved; current vendor model/pricing pages return proxy 403. Stale review prices are not attached to newer selected IDs. |
 | G12 | Primary-source corrections delivered — [#164](https://github.com/dhruvmahendrapatel/RegulAIt/pull/164), `1430c225` | Six rows refreshed from actual vendor GitHub README bodies: Salesforce hosted GA, Atlassian/Bitbucket, Intercom OAuth/bearer, PagerDuty hosted successor. Exact Salesforce first-GA date and PagerDuty hosted endpoint/scopes remain UNVERIFIED; no runtime/account test. |
 | G13 | MERGED — [#165](https://github.com/dhruvmahendrapatel/RegulAIt/pull/165), `0337f032` | All 12 instructions have distinct template-specific Never and approval decisions; max 109 words, five steps/two skills/zero subagents each. Original proposals; no installation/execution claimed. |
-| G14 | Structural/source review delivered; legal gate BLOCKED — [#166](https://github.com/dhruvmahendrapatel/RegulAIt/pull/166), `31c19917` | 24 calendar rows plus current 13-key reconciliation. New legacy/Utah/CA/Canada/Colorado legal leads remain UNVERIFIED. Current feed already fixes old CFPB/NYC/voluntary/Colorado narrative gaps; The former Art. 50 narrative/controlRefs mismatch is fixed by Claude on current main; its old snapshot remains historical. |
+| G14 | Structural/source review delivered; legal gate BLOCKED — [#166](https://github.com/dhruvmahendrapatel/RegulAIt/pull/166), `31c19917` | 24 calendar rows plus current 13-key reconciliation. New legacy/Utah/CA/Canada/Colorado legal leads remain UNVERIFIED. Current feed already fixes old CFPB/NYC/voluntary/Colorado narrative gaps; the former Art. 50 narrative/controlRefs mismatch is fixed by Claude on current main; its old snapshot remains historical. |
 | G15 | Prior VERIFIED scope retained | Unchanged R6 locally rechecked: ten unique kebab-case names, frontmatter and required headings. No starter installation/model run. |
 
 Historical Windows web gate and coordination-runner failure above are not current Linux failures: current shared build, web typecheck/build and 328 web units pass. No Windows execution is newly claimed. Current main coordination lint passes after Claude pruned its stale inbox; historical red results remain preserved.
 
 ### Current UX adjudication
 
-The original Oct3 scan above is historical. Current source/browser review supersedes its open implementation claims:
+The original October 3 scan above is historical. Current source/browser review supersedes its open implementation claims:
 
 | ID | Current state | Source / browser evidence and limits |
 |---|---|---|
@@ -208,3 +208,12 @@ R167-01 requires both input and output rates when Record token prices is selecte
 Three new pricing regressions genuinely fail against the pre-fix source (two missing-rate cases and provider-switch intent). Final registration/fallback/model suite **14/14 PASS**, web units **336/336 PASS**, production build/typecheck PASS. Local evidence, not committed: `/workspace/.regulait-onboarding/gemini-review/ux-pricing-{red.log,red-results,green.log,green-results,units.log,build.log}`. The calendar disclaimer and Utah consolidation are updated in #166; research follow-ups are separate.
 
 Fresh real custom-provider journey **10/10 PASS**, including the updated Unpriced copy and disabled-endpoint behaviour. The isolated fixture now explicitly enables/restores the org feature and borrows/restores only demo-labelled seeded egress rows; otherwise fresh secure-default seeding made the old empty-allow-list/capability-on assumptions fail before the pricing assertion. Restoration was independently checked: org capability false and all three demo-labelled hosts restored. Earlier two fixture-precondition failures are excluded from passing product evidence. Local evidence, not committed: `gemini-review/ux-phase5-review-isolated{.log,-results}`.
+
+Review nits R167-11/12 and R176-11 (2026-10-07): the registration test bypasses
+native form validation with `noValidate` and `requestSubmit`, proves the
+JavaScript missing-price guard refuses all writes, and then accepts two explicit
+zero prices. Removing only that guard produces a genuine failure; restoring it
+passes. Registration suite 7/7 PASS, focused restored guard 1/1 PASS, web build
+(including typecheck) PASS. Evidence: `review-nits-{browser,guard-red,guard-green,build}.log`
+in `/workspace/.regulait-onboarding`. Historical date and R8 provision/citation
+spacing is corrected; legal source-access limitations remain unchanged.
