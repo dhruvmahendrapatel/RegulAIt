@@ -123,6 +123,8 @@ export type SelfTestFailure =
   | `usage_env_missing:${string}`
   | "egress_dns_resolved"
   | "egress_connected"
+  | "egress_address_missing"
+  | "egress_address_connected"
   | "stale";
 
 export interface SelfTestVerdict {
@@ -151,9 +153,46 @@ export function evaluateRunnerSelfTest(
   }
   if (report.egress.dnsResolved) failures.push("egress_dns_resolved");
   if (report.egress.connected) failures.push("egress_connected");
+  // PR #203 review [4]: a blocked resolver must not mask routable egress, so a
+  // PUBLIC literal address is always probed too, with no resolver involved
+  if (!isPublicAddress(report.egress.address)) failures.push("egress_address_missing");
+  else if (report.egress.addressConnected) failures.push("egress_address_connected");
   const at = Date.parse(report.at);
   if (!Number.isFinite(at) || now.getTime() - at > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000 || at - now.getTime() > 300_000) {
     failures.push("stale");
   }
   return { passed: failures.length === 0, failures };
+}
+
+/**
+ * Is `addr` a globally routable literal address (IPv4 dotted quad, or IPv6)?
+ * Loopback, private, link-local, shared (CGNAT), multicast, unspecified,
+ * benchmarking and documentation ranges are not: a probe to one of them fails
+ * on any network and so proves nothing about egress.
+ */
+export function isPublicAddress(addr: string | null | undefined): boolean {
+  if (!addr) return false;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
+  if (v4) {
+    const [a, b, c] = v4.slice(1, 4).map(Number) as [number, number, number];
+    if (v4.slice(1).some((o) => Number(o) > 255)) return false;
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+    if (a === 198 && (b === 18 || b === 19)) return false;
+    if (a === 198 && b === 51 && c === 100) return false;
+    if (a === 203 && b === 0 && c === 113) return false;
+    return true;
+  }
+  if (!/^[0-9a-fA-F:]+$/.test(addr) || !addr.includes(":")) return false;
+  const lower = addr.toLowerCase();
+  if (lower === "::" || lower === "::1") return false;
+  const first = parseInt(lower.split(":")[0] || "0", 16);
+  // global unicast is 2000::/3; documentation 2001:db8::/32 is not
+  if ((first & 0xe000) !== 0x2000) return false;
+  if (lower.startsWith("2001:db8:") || lower.startsWith("2001:0db8:")) return false;
+  return true;
 }

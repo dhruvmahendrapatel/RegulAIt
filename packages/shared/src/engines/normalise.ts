@@ -83,6 +83,8 @@ export interface EngineRunNormalised {
   trialsPerProbe: number;
   measurementQuality: RedTeamMeasurementQuality;
   taxonomyVersion: number;
+  /** the engine's error code after the scrub (null when it sent none) */
+  engineErrorCode: string | null;
   /** a sentence for the run's record */
   explanation: string;
 }
@@ -119,20 +121,27 @@ export function normaliseEngineResult(input: {
     const notRun = new Map(envelope.notRun.map((n) => [n.key, n.reason]));
     const seen = new Set<string>();
     envelope.items.forEach((raw, index) => {
+      // PR #203 review [2]: EVERY engine string that is stored or returned passes the scrub
       const key = safeScrub(scrub, raw.key);
       const sid = safeScrub(scrub, raw.sourceTaxonomy.id);
+      const sys = safeScrub(scrub, raw.sourceTaxonomy.system);
+      const claimed = raw.mappedClass === null ? ({ ok: true, text: null } as const) : safeScrub(scrub, raw.mappedClass);
       const reason = raw.reason === null ? ({ ok: true, text: null } as const) : safeScrub(scrub, raw.reason);
-      const scrubFailed = !key.ok || !sid.ok || !reason.ok;
-      const mapped = scrubFailed ? null : lookupEngineTaxonomy(taxonomy, raw.sourceTaxonomy.system, raw.sourceTaxonomy.id);
+      const scrubFailed = !key.ok || !sid.ok || !sys.ok || !claimed.ok || !reason.ok;
+      const mapped = scrubFailed || !sys.ok || !sid.ok ? null : lookupEngineTaxonomy(taxonomy, sys.text, sid.text);
       let verdict: EngineItemVerdict = raw.verdict;
       let note: string | null = null;
-      const nr = notRun.get(raw.key) ?? null;
-      if (scrubFailed) {
+      const listedNotRun = notRun.get(raw.key) ?? null;
+      if (raw.defeated > 0) {
+        // PR #203 review [1]: a defeat is a failure whatever the item claims and however the run ended
+        verdict = "fail";
+        if (raw.verdict !== "fail") note = `${raw.defeated} of ${raw.attempts} attempts defeated the target (the engine said ${raw.verdict})`;
+      } else if (scrubFailed) {
         verdict = "unknown";
         note = "the detection scrub failed on this item's text, so its text is withheld and it does not count";
-      } else if (nr !== null) {
+      } else if (listedNotRun !== null) {
         verdict = "not_run";
-        note = `listed as not run (${nr})`;
+        note = `listed as not run (${listedNotRun})`;
       } else if (status !== "completed") {
         if (verdict !== "not_run") {
           verdict = "unknown";
@@ -142,21 +151,19 @@ export function normaliseEngineResult(input: {
         if (raw.attempts === 0) {
           verdict = "unknown";
           note = "no attempt reached the target";
-        } else if (raw.defeated > 0) {
-          verdict = "fail";
-          if (raw.verdict !== "fail") note = `${raw.defeated} of ${raw.attempts} attempts defeated the target`;
         }
       }
+      const nr = verdict === "not_run" ? listedNotRun : null;
       if (verdict !== raw.verdict && note === null) note = `the engine said ${raw.verdict}`;
       seen.add(raw.key);
       counts[verdict] += 1;
       items.push({
         key: key.ok ? key.text : `withheld:${index}`,
-        sourceSystem: raw.sourceTaxonomy.system,
+        sourceSystem: sys.ok ? sys.text : `withheld:${index}`,
         sourceId: sid.ok ? sid.text : `withheld:${index}`,
         attackClass: mapped?.attackClass ?? null,
         scorerKind: mapped?.scorerKind ?? null,
-        claimedClass: raw.mappedClass,
+        claimedClass: claimed.ok ? claimed.text : null,
         severity: raw.severity,
         attempts: raw.attempts,
         defeated: raw.defeated,
@@ -227,8 +234,8 @@ export function normaliseEngineResult(input: {
 
   let verdict: EngineRunVerdict;
   if (envelope === null) verdict = status === "not_run" ? "not_run" : "unknown";
+  else if (counts.fail > 0) verdict = "fail"; // a defeat is reported however the run ended
   else if (status !== "completed") verdict = status === "not_run" ? "not_run" : "unknown";
-  else if (counts.fail > 0) verdict = "fail";
   else if (counts.unknown > 0) verdict = "unknown";
   else if (counts.pass > 0) verdict = "pass";
   else verdict = "not_run";
@@ -239,9 +246,16 @@ export function normaliseEngineResult(input: {
       ? `no valid result arrived (run ${status}); nothing it did counts as clean`
       : `run ${status}: ${counts.pass} pass, ${counts.fail} fail, ${counts.unknown} unknown, ${counts.not_run} not run; ` +
         `${mappedItems} of ${items.length} items map to a measured class (taxonomy v${taxonomy.version})`;
+  // the engine's error code, scrubbed; one the scrub changed or could not clear is stored as engine_error
+  let engineErrorCode: string | null = null;
+  if (envelope?.errorCode) {
+    const c = safeScrub(scrub, envelope.errorCode);
+    engineErrorCode = c.ok && c.text === envelope.errorCode ? c.text : "engine_error";
+  }
   return {
     status,
     verdict,
+    engineErrorCode,
     items,
     counts,
     mappedItems,

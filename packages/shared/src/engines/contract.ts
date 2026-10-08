@@ -179,7 +179,8 @@ export const ENGINE_RESULT_LIMITS = {
   maxSourceSystemChars: 64,
   maxSourceIdChars: 200,
   maxReasonChars: 1000,
-  maxAttempts: 1000,
+  /** attempts per item: the governed trial limit (RED_TEAM_MAX_TRIALS), so no envelope can expand into millions of trials */
+  maxAttempts: 25,
   maxDispatchIdsPerItem: 100,
   maxRawReportBytes: 3 * 1024 * 1024,
 } as const;
@@ -272,6 +273,9 @@ export const runnerSelfTestSchema = z
         host: z.string().min(1).max(253).regex(PRINTABLE),
         dnsResolved: z.boolean(),
         connected: z.boolean(),
+        /** the public literal address probed with no resolver (null = none configured: the test fails) */
+        address: z.string().max(45).regex(/^[0-9a-fA-F:.]+$/).nullable(),
+        addressConnected: z.boolean(),
       })
       .strict(),
     at: z.string().datetime(),

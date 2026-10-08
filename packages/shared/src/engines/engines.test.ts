@@ -139,7 +139,7 @@ describe("the self-test verdict", () => {
     imageDigest: m.imageDigest,
     engineVersion: m.version,
     usageDataEnv: { PROMPTFOO_DISABLE_TELEMETRY: true, PROMPTFOO_DISABLE_UPDATE: true },
-    egress: { host: "example.com", dnsResolved: false, connected: false },
+    egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false },
     at: new Date().toISOString(),
   };
   it("passes only when every check holds", () => {
@@ -176,5 +176,66 @@ describe("relaxations", () => {
   it("the shipped taxonomy table has no problems", () => {
     expect(engineTaxonomyProblems(ENGINE_TAXONOMY)).toEqual([]);
     expect(engineTaxonomyProblems({ version: 1, entries: [TAX.entries[0]!, TAX.entries[0]!] })).toEqual(["duplicate entry promptfoo/pi"]);
+  });
+});
+
+// ===========================================================================
+// PR #203 review round 1 (Codex), each red first
+// ===========================================================================
+describe("review round 1", () => {
+  it("[1] a defeat fails the item whatever verdict it claims, and counts in the ASR", () => {
+    const n = norm(env({ items: [item("u", "pi", { verdict: "unknown", defeated: 2 }), item("n", "pi", { verdict: "not_run", defeated: 1 })] }));
+    expect(n.items.map((i) => i.verdict)).toEqual(["fail", "fail"]);
+    expect(n.verdict).toBe("fail");
+    expect(n.asrTrials).toBe(6);
+    const crashed = norm(env({ status: "failed", items: [item("u", "pi", { verdict: "unknown", defeated: 1 })] }));
+    expect(crashed.items[0]!.verdict).toBe("fail");
+    expect(crashed.verdict).toBe("fail");
+  });
+
+  it("[2] every engine string is scrubbed (system, claimed class, error code), and a throw fails closed", () => {
+    const mark = (s: string) => s.replace(/SECRET/g, "[x]");
+    const n = normaliseEngineResult({
+      envelope: env({ status: "failed", errorCode: "boom_secret", items: [item("k", "pi", { mappedClass: "SECRET-class", sourceTaxonomy: { system: "SECRETsys", id: "pi" } })] }),
+      status: "failed",
+      taxonomy: TAX,
+      scrub: (s) => mark(s.replace(/secret/g, "SECRET")),
+    });
+    expect(JSON.stringify(n)).not.toMatch(/SECRET/);
+    expect(n.items[0]!.sourceSystem).toBe("[x]sys");
+    expect(n.items[0]!.claimedClass).toBe("[x]-class");
+    // an error code the scrub changed is not stored as given
+    expect(n.engineErrorCode).toBe("engine_error");
+    const thrown = normaliseEngineResult({
+      envelope: env({ items: [item("k", "pi", { sourceTaxonomy: { system: "boom", id: "pi" } })] }),
+      status: "completed",
+      taxonomy: TAX,
+      scrub: (s) => {
+        if (s === "boom") throw new Error("x");
+        return s;
+      },
+    });
+    expect(thrown.items[0]).toMatchObject({ verdict: "unknown", sourceSystem: "withheld:0", scrubFailed: true });
+  });
+
+  it("[7] attempts are capped at the governed trial limit", () => {
+    expect(engineResultEnvelopeSchema.safeParse(env({ items: [item("a", "pi", { attempts: 25 })] })).success).toBe(true);
+    expect(engineResultEnvelopeSchema.safeParse(env({ items: [item("a", "pi", { attempts: 26 })] })).success).toBe(false);
+  });
+
+  it("[4] the self-test requires a public literal-address probe that did not connect", () => {
+    const m = { ...ENGINE_MANIFEST.garak, imageDigest: `sha256:${"b".repeat(64)}` };
+    const base = {
+      imageDigest: m.imageDigest,
+      engineVersion: m.version,
+      usageDataEnv: { HF_HUB_OFFLINE: true, TRANSFORMERS_OFFLINE: true, HF_HUB_DISABLE_TELEMETRY: true },
+      at: new Date().toISOString(),
+    };
+    const egress = { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false };
+    expect(evaluateRunnerSelfTest(m, { ...base, egress }, new Date())).toEqual({ passed: true, failures: [] });
+    expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, addressConnected: true } }, new Date()).failures).toEqual(["egress_address_connected"]);
+    expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, address: null } }, new Date()).failures).toEqual(["egress_address_missing"]);
+    expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, address: "10.1.2.3" } }, new Date()).failures).toEqual(["egress_address_missing"]);
+    expect(evaluateRunnerSelfTest(m, { ...base, egress: { ...egress, address: "127.0.0.1" } }, new Date()).failures).toEqual(["egress_address_missing"]);
   });
 });
