@@ -483,6 +483,10 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    // ADR-0187: engine item text and runner revocation
+    "engine_run_items.reason",
+    "engine_run_items.verdict_note",
+    "engine_runners.revoke_reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -599,6 +603,8 @@ describe("6. the covered / NOT-covered inventory", () => {
   it("names its exclusions rather than merely omitting them", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
+      // ADR-0187: a CHECK-constrained six-member code
+      "engine_run_items.not_run_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
       "risk_acceptances.compensating_controls",

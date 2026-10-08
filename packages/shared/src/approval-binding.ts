@@ -91,6 +91,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "prompt_promotion",
   // ADR-0173 batch 2b: a connector WRITE held by the execution dial
   "connector_call",
+  // ADR-0187: an engine run that uses an agentic or offensive set, or whose budget is over the org threshold
+  "engine_run",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -109,6 +111,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   remediation: "governance remediation",
   prompt_promotion: "prompt promotion to prod",
   connector_call: "connector write",
+  engine_run: "engine run (sensitive set or large budget)",
 };
 
 /**

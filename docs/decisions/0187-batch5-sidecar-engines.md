@@ -266,6 +266,158 @@ Batch 5 relies on the Batch 4 step-up enforcement and vendored detection scrub. 
 G19 proceed. Each engine PR follows the foundation and needs its G19 findings first. The Engines page merges once two
 engines exist (ADR-0177 §4).
 
+### Implementation decisions (B5-F + B5-E, 2026-10-08, branch `b5-foundation`)
+
+Built in one branch as the ADR splits it: migration 0173 (journal `when` 1785108000000), `schema.ts`, the shared
+contract (`packages/shared/src/engines/`), the gateway (`engines.ts`, `engine-runs.ts`, `engine-ledger.ts`,
+`engine-runner-auth.ts`, `engine-scrub.ts`), the runner core (`packages/engine-runner`), the compose profile and the
+§4.10 contract with mock fixtures (`apps/web/e2e/engines-fixtures.ts`). Tests: `zz-b5-engines.test.ts` (23, real
+database), `zz-b5-compose.test.ts` (4), `packages/shared/src/engines/engines.test.ts` (13),
+`packages/engine-runner/src/runner.test.ts` (8). Each security test was shown red by breaking the guard it pins.
+
+1. **Runner credentials.** `rge_…` (runner) and `rgee_…` (one-time enrolment, at most 60 minutes, spent atomically
+   by register) are stored as sha256, resolve to no user and are never admin. One hook, before the admin gate,
+   confines each to its allow-list (`ENGINE_RUNNER_ROUTES`, `ENGINE_ENROLLMENT_ROUTES`; 403 `engine_runner_scope`)
+   and refuses every other credential on the runner routes (401 `engine_runner_token_required`). The runner routes
+   are their own route auth class, `engine-runner`, like SCIM. A revoked runner gets 401 `engine_runner_revoked`;
+   revoking one ends the runs it holds (`cancelled`, keys revoked).
+2. **Enabling.** `PATCH /v1/engines/:id` needs a fresh (24 h) passing self-test recorded against the manifest as it
+   is now (409 `engine_self_test_required`), and a `settings_relax` step-up bound to `{values: {"engine.<id>.<field>":
+   value}}` for each relaxation: enabling, a longer timeout, a higher budget ceiling, more concurrency (judged against
+   the stored row; tightening asks nothing). Decided on the unlocked read and again on the locked row (409
+   `changed_concurrently`). A failing self-test, or a manifest change of version or digest, switches the engine off.
+   The self-test is the runner's own report from inside its container (digest, version, each usage-data switch at its
+   required value, an egress probe whose name resolution AND TCP connect must both fail); the gateway cannot observe
+   a container, so the digest pin, the image signature (B5-P/M/G) and the internal network are what make the report
+   trustworthy.
+3. **No engine can be enabled yet.** The shipped manifest has no image digest for any engine (images come with
+   B5-P/M/G), so every self-test fails `image_not_built`: the secure default holds by construction. Tests pass a
+   manifest with synthetic digests through a code-only `buildApp({engines})` seam (never env or admin input).
+4. **The run-scoped key is minted at LEASE**, not at creation: a queued or awaiting-approval run holds no key, and
+   the deadline (= the key's expiry) runs from the lease. The key reaches only `POST /v1/chat/completions`,
+   `POST /v1/messages` and `GET /v1/models` (not `GET /v1/me`, not the native invoke route); its allow-list is the
+   target and judge agent ids; it is pinned to the run's project (a call naming another project is 403
+   `virtual_key_project_mismatch`, an unattributed call is attributed to the pin) — so an agent-target run requires a
+   `projectId` (422 `project_required`); nobody can PATCH it (409 `engine_key_immutable`). **A spent budget revokes
+   it at once** (audited `engine-run-key-revoked`, cause `budget_exhausted`): the crossing call is billed, every later
+   call is 401. Entitlement is re-checked at lease; a run-as person gone or no longer entitled ends the run `not_run`
+   (`run_as_gone`, `run_as_not_entitled`) with no key. Usage rows carry `detail.purpose = "engine:<id>"` and
+   `engineRunId`; `engine_runs.cost_usd` is summed from `usage_events` by the run's key.
+5. **Kill switch.** Cancel ends the run at once (`cancelled`) and revokes its key; the runner learns on its next
+   heartbeat (`{cancel: true}`), and a result that arrives after any end is refused 409 `engine_run_finished` and
+   audited (`engine-run-result-late`). The sweep (`engine-run-sweep`, every 60 s) ends a leased run whose deadline
+   passed or whose lease (90 s, extended by heartbeats, never past the deadline) expired as `timeout` and revokes its
+   key; a queued run nobody leased in 24 h ends `not_run` (`no_runner`).
+6. **Not-clean semantics as built.** The pure normaliser re-derives every verdict, strictest wins: a defeat fails;
+   a claimed pass with no attempt is unknown; a run that did not complete has no clean item; an item in `notRun` is
+   `not_run` (a DB CHECK also refuses a not-run reason on any other verdict). Aggregates are recomputed with the
+   in-process red-team functions. Only a COMPLETED agent run is written into `eval_runs`/`redteam_runs`
+   (`redteam_probe_trials` for mapped items only; unknown and not-run items as one errored trial, outside every
+   denominator); A3 and the evaluator catalog additionally ignore any red-team or eval run linked to an engine run
+   that did not complete. `classSummary` is written in the in-process shape so the catalog reads it unchanged. Every
+   item, mapped or not, is kept in `engine_run_items`.
+7. **One detection-scrub interface** (`engine-scrub.ts`, coordinator direction 2026-10-08): every engine string
+   (item key, taxonomy id, reason) passes `engineDetectionScrub` before it is normalised, stored or copied into the
+   ledgers. Its default is the scrub on `main`, ADR-0099's `scrubAuditText`, which already consults the vendored
+   `pipelock-secrets` spans; **when Codex's X23 (ADR-0186 V) lands, its rules apply through that path with no change
+   here**, and a different ruleset can be wired once at boot (`setEngineDetectionScrub`). Fail closed: a scrub that
+   throws makes the item `unknown` with its key and reason withheld. `engine_run_items.reason` and `verdict_note` are
+   also registered with the ADR-0102 prose scrub (belt and braces).
+8. **Raw reports** ride the envelope as an optional `rawReport.contentBase64`; the gateway verifies its sha256 and
+   length (a mismatch fails the run, `raw_report_mismatch`), stores it encrypted under the data key for
+   `engineRawReportRetentionDays` (none stored without a data key; the sha256 is kept either way), and the sweep
+   deletes it after. No route returns it yet.
+9. **Approvals (owner decision 4; open question 5 answered strictly, owner may revisit).** A run needs approval when
+   it uses a set the manifest classes agentic or offensive, **or any set the manifest does not list** (fail closed),
+   or when its budget is over `engineRunApprovalThresholdUsd`. The approver is `approverUserId` or the org's
+   `infraApproverUserId` (422 `engine_approver_required` when neither); the run-as person cannot approve it. Approval
+   is **per run, scheduled runs included** (not once per schedule). New approval kind `engine_run`: approved → queued,
+   denied → `not_run` (`approval_denied`); cancelling supersedes a pending approval.
+10. **Org settings (all strict, in the strictness registry, stored-value rule):** `engineMaxRunTimeoutMinutes` 30
+    (1–120), `engineDefaultRunBudgetUsd` 2, `engineRunApprovalThresholdUsd` 10, `engineRawReportRetentionDays` 90,
+    `engineSensitiveSetApproval` true. Every number is looser when larger. **Default taken, owner may revisit:** a
+    longer raw-report retention is the relaxation (raw output can quote model text; the normalised result and the
+    sha256 stay whatever the setting), so shortening it needs no step-up.
+11. **Schedules** were not in the route list above; added as `POST/GET /v1/engine-schedules` and `PATCH
+    /v1/engine-schedules/:id` (`{enabled}`; only the creator re-enables). A schedule stores the run request and its
+    configuration hash; each due run (`engine-schedule-sweep`, every 5 minutes) is created as the creator through the
+    same path as a manual run, and is skipped with an audited reason when the creator is gone or deactivated, no
+    longer entitled, the engine is off, or the stored request no longer matches its hash.
+12. **Workflow binding.** An `automated_check` stage may carry `engines: [{check, engine, agent, judgeAgent?, sets,
+    params?, trials?, budgetUsd?}]` (agents by registry name, as eval bindings). The run starts on stage entry as the
+    instance initiator on the instance's project, one per (instance, stage, check, round) (unique index); the check
+    is pending until it ends, passes only when the run completed with verdict `pass` (no failed or unknown item, at
+    least one pass), and fails otherwise. A run's end re-evaluates the stage. Reported results for such a check are
+    refused (422 `engine_check_cannot_be_reported`). **Flag:** a `not_run` item (an air-gapped reduced set) does not
+    fail the check on its own; the owner may want a gate that requires every requested item to run.
+13. **Runner core** (`packages/engine-runner`, stdlib + shared): the client for the five routes, the self-test
+    report, the egress probe (fail closed: only no-route, no-resolver and timeout count as denied; a refusal or reset
+    from the far end counts as reached), the engine as a child process group killed whole on cancel or deadline, and
+    `runOnce` (an engine that throws is posted `failed`/`engine_error` with no items; a cancelled run posts nothing;
+    the work directory is wiped). B5-P/M/G build each engine's shim on it.
+14. **Compose.** `engines` network `internal: true`; the gateway joins it, the database and object store do not; it
+    is not in `REGULAIT_TRUSTED_PROXIES`. `x-engine-runner` is the hardened template each engine service merges
+    (profile `engines`, read-only root, tmpfs work dir, `cap_drop: ALL`, `no-new-privileges`, uid 10001, memory/CPU/pids
+    limits, `pull_policy: never` by default, no secret but the enrolment token). No Docker socket anywhere.
+15. **Open-source check (ADR-0176).** No new dependency. pg-boss and graphile-worker (MIT) were considered for the run
+    queue and not taken: the queue is the governed evidence record itself, consumed by an external container over
+    an HTTP lease, and a second copy of each run's state would be the drift risk. execa (MIT) was considered for
+    process groups; `spawn({detached})` plus `kill(-pid)` is the whole need. The Wilson interval, ASR and
+    measurement labels reuse `redteam-stats.ts`.
+
+**Review round 1 (PR #203, Codex, 2026-10-08; 16 findings, each red first).** Tests: `zz-b5-engines.test.ts`
+"review round 1" (12), `packages/shared/src/engines/engines.test.ts` "review round 1" (4), the workflow-kernel and
+runner-core cases. **Migration 0173 was edited in place** (unmerged; `engine_runs.workflow_notified_at` and its partial
+index): a dev database that applied 0173 from `b5-foundation` before this round must be rebuilt (§4.1).
+
+16. **A defeat always fails the item** [1], whatever verdict it claims and however the run ended, and it counts in
+    the ASR; a run with any failed item reads `fail` even when it did not complete (a defeat is never hidden). A
+    defeat also clears a contradictory not-run listing (the DB CHECK keeps not-run reasons on not-run verdicts only).
+17. **Every engine-controlled string is scrubbed** [2] before it is mapped, stored or returned: item key, taxonomy
+    system and id, claimed class, reason, not-run keys and the error code (one the scrub changed or could not clear is
+    stored as `engine_error`). Any throw fails the item closed. Enum, numeric and uuid fields are schema-validated.
+18. **Lease decides the self-test now** [3]: the runner's stored report is re-evaluated against the manifest
+    (including its 24-hour freshness) and the engine's recorded self-test must still admit enabling (fresh, same
+    build); otherwise 409 `engine_self_test_required`. No stored boolean is trusted.
+19. **The egress probe always tries a public literal address** [4] with no resolver, reported as
+    `egress.address`/`addressConnected`. The self-test fails `egress_address_missing` when none was probed or it is
+    not globally routable (private, loopback, link-local, CGNAT, multicast, benchmarking and documentation ranges
+    are refused), and `egress_address_connected` when it connected. The runner reads it from
+    `REGULAIT_EGRESS_PROBE_ADDRESS`; a blocked resolver no longer masks routable egress.
+20. **The workflow hand-off is durable** [5]: `workflow_notified_at` is stamped only when the check stage evaluated
+    (or is no longer current); a failure, or another executor holding the stage, leaves it unset and the engine sweep
+    retries every minute.
+21. **Raw-report retention is the setting now** [6]: the sweep deletes a report once `finished_at` + the CURRENT
+    retention has passed (or its stored expiry, whichever is sooner), so lowering the setting shortens reports
+    already stored.
+22. **Attempts are capped at 25 per item** [7] (the governed trial limit, `RED_TEAM_MAX_TRIALS`), so no envelope can
+    expand into more than 125,000 outcomes; aggregates over that bound need no special path.
+23. **A result is accepted only while the run is live** [8], decided under the row lock: after the deadline or the
+    lease (before the sweep has run) the run ends `timeout` (`deadline_passed`/`lease_expired`), the key is revoked,
+    nothing of the envelope counts, and the runner gets 409 `engine_run_timed_out`.
+24. **The workflow engine stage resolves the initiator's current standing** [9] (admin or not, active or not)
+    instead of assuming non-admin.
+25. **Lease re-checks project attribution** [10] in the lease transaction: a run-as person who can no longer bill
+    to the project ends the run `not_run` (`project_not_attributable`) with no key.
+26. **`eval_runs.cases`/`passed_cases` count only measured mapped items** [11] (pass or fail with a class or scorer);
+    unmapped, unknown and not-run items are not cases.
+27. **An envelope for another engine version is refused** [12] (`result_mismatch`, the run fails).
+28. **A schedule is validated by the same function as a run** [13] (`validateEngineRunRequest`: engine on, target
+    kind, project, target AND judge entitlement, attribution, budget ceiling, approver), with nothing written.
+29. **Workflow bindings exclude artifact-only engines** [14]: `stage.engines[].engine` is `promptfoo | garak`
+    (artifact targets come with B5-M).
+30. **One summary shape for every terminal path** [15] (`runSummary`), the approval denial included.
+31. **A workflow with engine-bound checks cannot start without a project** [16]: 422
+    `project_required_for_engine_checks` at instance start (an engine run's calls are project-pinned).
+
+**Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
+evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
+classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
+views (X26–X28; the runner-revocation route is exempt from the affordance census until X26's button). Residuals:
+`engine_run_items` and engine runs follow no retention cascade yet (only the raw report expires); a result's
+`dispatchAuditIds` are stored as reported, not cross-checked against the run's key; enabling does not check that a
+compat surface is on (a run then fails at its first call); concurrency is per engine, not per runner.
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is

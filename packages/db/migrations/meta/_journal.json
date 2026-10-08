@@ -1163,6 +1163,13 @@
       "when": 1785107000000,
       "tag": "0172_approval_named_approver_first_passkey",
       "breakpoints": true
+    },
+    {
+      "idx": 173,
+      "version": "7",
+      "when": 1785108000000,
+      "tag": "0173_batch5_sidecar_engines",
+      "breakpoints": true
     }
   ]
 }

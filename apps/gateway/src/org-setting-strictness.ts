@@ -54,6 +54,10 @@ import {
   BATCH4_SETTING_KEYS,
   BATCH4_STRICT_DEFAULTS,
   STRICT_IDENTITY_DEFAULTS,
+  batch5SettingLooser,
+  batch5SettingRelaxed,
+  BATCH5_SETTING_KEYS,
+  BATCH5_STRICT_DEFAULTS,
   type UpdateOrgSettings,
 } from "@regulait/shared";
 
@@ -172,13 +176,18 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of BATCH4_SETTING_KEYS) {
     out[k] = rule(BATCH4_STRICT_DEFAULTS[k], (v) => batch4SettingRelaxed(k, v as never), BATCH_LOOSER[k]);
   }
+  // batch 5 (ADR-0187): every engine setting is ordered (a larger number, or approval off, is looser)
+  for (const k of BATCH5_SETTING_KEYS) {
+    out[k] = rule(BATCH5_STRICT_DEFAULTS[k], (v) => batch5SettingRelaxed(k, v as never), (v, b) => batch5SettingLooser(k, v, b));
+  }
   return out;
 }
 
 type BatchKey =
   | (typeof ACCOUNTABILITY_SETTING_KEYS)[number]
   | (typeof BATCH3_SETTING_KEYS)[number]
-  | (typeof BATCH4_SETTING_KEYS)[number];
+  | (typeof BATCH4_SETTING_KEYS)[number]
+  | (typeof BATCH5_SETTING_KEYS)[number];
 
 /** THE REGISTRY (see the header). Typed over every writable key. */
 export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: StrictnessEntry } = {
