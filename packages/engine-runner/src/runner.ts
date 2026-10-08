@@ -42,9 +42,11 @@ export class RunnerClient {
   }
 
   private async call(method: string, path: string, bearer: string, body?: unknown) {
+    // B5-P: a JSON content-type is sent only with a body — the gateway (Fastify) refuses an empty
+    // body declared as JSON with 400, which made every bodiless lease fail against the real app
     const res = await this.http(`${this.opts.gatewayUrl.replace(/\/$/, "")}${path}`, {
       method,
-      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${bearer}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     return res;
