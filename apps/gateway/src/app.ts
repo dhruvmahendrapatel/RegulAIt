@@ -3283,10 +3283,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.delete("/v1/delegations/:delegationId", async (req, reply) => {
     const { delegationId } = z.object({ delegationId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(approvalDelegations)
-      .where(eq(approvalDelegations.id, delegationId))
-      .returning();
+    // ADR-0186 A (PR #198 round 5): ending a LIVE link can split one principal into two (a
+    // higher distinct-approver count) — a settings_relax step-up bound to the link, decided
+    // on the locked delegation row
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [link] = await tx.select().from(approvalDelegations).where(eq(approvalDelegations.id, delegationId)).for("update");
+      if (!link) return { status: 404, body: { error: "unknown_delegation" } } as const;
+      const now = Date.now();
+      if (link.startsAt.getTime() <= now && link.endsAt.getTime() > now) {
+        const su = await checkStepUp(db, req, { kind: "settings_relax", facts: { values: { delegationEnded: delegationId } } });
+        if (!su.ok) return { status: su.status, body: su.body } as const;
+      }
+      const rows = await tx.delete(approvalDelegations).where(eq(approvalDelegations.id, delegationId)).returning();
+      return { rows } as const;
+    });
+    if (!out.rows) return reply.status(out.status!).send(out.body);
+    const deleted = out.rows;
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_delegation" });
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",

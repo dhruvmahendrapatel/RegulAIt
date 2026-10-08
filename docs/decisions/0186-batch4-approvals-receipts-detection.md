@@ -356,6 +356,28 @@ unless stated.
       updates already require an unrevoked credential.
     - A pending tool-call approval is reused for an identical call only while its queue-time pool can reach its
       quorum; otherwise it is superseded (audited `approval-pool-unsatisfiable`) and the call queues afresh.
+    - **SSO default roles never mint identities into an approver pool.** Naming an approver role as an OIDC/SAML
+      provider's `defaultRoleId` needs `settings_relax`; and a JIT login WITHHOLDS a default role that is an approver
+      role (decided under the approver-role lock, `grantJitDefaultRole`; audited `sso-default-role-withheld`) — the
+      secure default: an admin may then assign it, with the step-up a role assignment needs. Role-granting paths:
+      direct assignment, group mapping and onboarding import (step-up + role lock, round 3); IdP group sync and SCIM
+      group membership (only through an admin-created mapping, which carries those protections); JIT default role
+      (withheld when an approver role). Residual: a SoD override (`sod.ts`, arm's-length approval) can mint a direct
+      role assignment without the approver-role step-up.
+    - **One resolver for an approval rule's dual control** (`servedApprovalRules`): the queue-time snapshot and
+      `requiredQuorumNow` read the rule as `governedEvaluate` serves it (active version, or this caller's canary,
+      applied), never the base row alone; a naming rule that no longer resolves fails the recheck closed.
+    - **Every input of the execution recheck serialises with consumption.** `approval_delegations` joins the policy-epoch
+      sources (0172; with `approval_rules`, `config_versions`, `role_assignments`, `projects`, `project_members`,
+      `compliance_profiles`, `org_settings` already there); `approvals` and `approval_decisions` are written under the
+      approval row lock consumption holds. Two inputs stay outside: `users` (deactivation; an epoch trigger would fire
+      on every sign-in's bookkeeping) and `webauthn_credentials` (revocation) — a write that commits after the recheck
+      read is ordered after the consumption, a legitimate serial order.
+    - **Passkey mode counts only principals who can sign.** Queue-time satisfiability and the pending-row reuse check
+      count a principal only if someone in its delegation component holds an unrevoked passkey enrolled before the
+      call; otherwise the call is denied `approval-quorum-unsatisfiable` (the reason says so).
+    - `DELETE /v1/delegations/:id` on a live link needs `settings_relax` (decided on the locked delegation row): ending
+      a link can split one principal into two.
     - **Not built, with the trace:** (20) team membership vs a routing rule or SLA escalation naming an unused team, and
       (25) the bootstrap exemption vs an admin enrolling a method, both end exactly as a legitimate serial order (member
       added, then the stepped-up rule; bootstrap write, then enrolment), so the interleaving grants nothing a serial

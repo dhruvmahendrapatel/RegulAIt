@@ -29,7 +29,7 @@ import {
 import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
-import { putOrgSettings } from "../../../stepup/stepUp";
+import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 
 export default function SsoPage() {
   return (
@@ -80,7 +80,7 @@ function OidcCard() {
           void act
             .run(
               () =>
-                api.post("/v1/auth/oidc-providers", {
+                withStepUp((h) => api.postWithHeaders("/v1/auth/oidc-providers", {
                   name,
                   issuerUrl,
                   clientId,
@@ -94,7 +94,7 @@ function OidcCard() {
                   ...(brokerIdps ? { brokerIdps: csv(brokerIdps).map((x) => x.toLowerCase()) } : {}),
                   ...(acrValues ? { mfaAcrValues: csv(acrValues) } : {}),
                   ...(brokerMfa === "true" ? { brokerEnforcesMfa: true } : {}),
-                }),
+                }, h)),
               "Provider added",
             )
             .then((ok) => {
@@ -344,7 +344,7 @@ function SamlCard() {
           void act
             .run(
               () =>
-                api.post("/v1/auth/saml-providers", {
+                withStepUp((h) => api.postWithHeaders("/v1/auth/saml-providers", {
                   name,
                   entityId,
                   idpSsoUrl,
@@ -361,7 +361,7 @@ function SamlCard() {
                     ? { allowedEmailDomains: domains.split(",").map((x) => x.trim()).filter(Boolean) }
                     : {}),
                   ...(defaultRoleId ? { defaultRoleId } : {}),
-                }),
+                }, h)),
               "SAML provider added",
             )
             .then((ok) => {

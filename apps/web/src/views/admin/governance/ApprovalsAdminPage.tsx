@@ -592,7 +592,7 @@ function DelegationsCard() {
         onConfirm={() => {
           const d = endNow;
           setEndNow(null);
-          if (d) void act.run(() => api.del(`/v1/delegations/${d.id}`), "Delegation ended");
+          if (d) void act.run(() => withStepUp((h) => api.delWithHeaders(`/v1/delegations/${d.id}`, h)), "Delegation ended");
         }}
       />
     </Card>

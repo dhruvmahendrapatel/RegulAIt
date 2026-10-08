@@ -38,3 +38,12 @@ UPDATE "approvals" a SET "named_approver_user_id" = (CASE
 ALTER TABLE "webauthn_challenges" ADD COLUMN "first_passkey" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "webauthn_challenges" ADD CONSTRAINT "webauthn_challenges_first_passkey_check" CHECK (NOT "first_passkey" OR "purpose" = 'register');
+--> statement-breakpoint
+-- 3. `approval_delegations` joins the policy-epoch sources (0119/0120/0122):
+--    the execution recheck reads the live delegation graph (who is one
+--    principal, who is linked to the caller), so a delegation write advances
+--    the epoch an in-flight consumption holds FOR SHARE and a consent evaluated
+--    before it is re-evaluated, never spent across it.
+create trigger approval_delegations_policy_epoch
+  after insert or update or delete on approval_delegations
+  for each statement execute function advance_governance_policy_epoch();

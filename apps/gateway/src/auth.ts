@@ -63,6 +63,7 @@ import {
   type SsoReauthStart,
   type SsoReauthStartArgs,
 } from "./step-up.js";
+import { grantJitDefaultRole, isApproverRole } from "./approval-pool.js";
 import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -2302,11 +2303,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         .values({ email, displayName, isAdmin: false })
         .returning();
       user = created!;
-      if (provider.defaultRoleId) {
-        await db
-          .insert(roleAssignments)
-          .values({ userId: user.id, roleId: provider.defaultRoleId })
-          .onConflictDoNothing();
+      if (provider.defaultRoleId && (await grantJitDefaultRole(db, user.id, provider.defaultRoleId)) === "withheld") {
+        await auditAuth(db, null, user.id, "sso-default-role-withheld", "deny",
+          `user '${email}' JIT-provisioned via OIDC provider '${provider.name}' WITHOUT its default role: the role is an ` +
+          "approver role, and an identity the IdP mints never joins an approver pool silently (an admin may assign it, with a step-up)",
+          { phase: "oidc-jit", provider: provider.name, email, roleId: provider.defaultRoleId });
       }
       await auditAuth(db, null, user.id, "oidc-user-provisioned", "allow",
         `user '${email}' JIT-provisioned via OIDC provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
@@ -2656,6 +2657,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+      // ADR-0186 A (round 5): a default role that is an approver role would mint JIT identities into
+      // an approver pool — naming it needs the settings_relax a role assignment needs (JIT withholds it
+      // anyway, decided under the approver-role lock: grantJitDefaultRole)
+      if (
+        (await isApproverRole(db, body.defaultRoleId)) &&
+        !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ssoDefaultRole: { provider: "oidc", roleId: body.defaultRoleId } } } })).ok
+      ) {
+        return reply;
+      }
     }
     // ADR-0043: WRITE-TIME egress check against the ordinary default-deny
     // allow-list — a non-permitted issuer is an honest 400 before the row is
@@ -2724,6 +2734,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+      // ADR-0186 A (round 5): a default role that is an approver role would mint JIT identities into
+      // an approver pool — naming it needs the settings_relax a role assignment needs (JIT withholds it
+      // anyway, decided under the approver-role lock: grantJitDefaultRole)
+      if (
+        (await isApproverRole(db, body.defaultRoleId)) &&
+        !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ssoDefaultRole: { provider: "oidc", roleId: body.defaultRoleId } } } })).ok
+      ) {
+        return reply;
+      }
     }
     // ADR-0043: moving the issuer re-runs the write-time egress check
     if (body.issuerUrl !== undefined) {

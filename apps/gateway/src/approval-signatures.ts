@@ -111,6 +111,7 @@ export {
   type ApprovalPool,
 } from "./approval-pool.js";
 import { projectPiiMode } from "./projects.js";
+import { applyRuleVersions, loadVersionsForArtifacts } from "./rule-versions.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
 /** what a transaction handle and the pool have in common, for the helpers below */
@@ -127,14 +128,27 @@ export function isToolCallApproval(row: { objectType: string }): boolean {
 // Principals: the pool, delegation links, counting
 // ---------------------------------------------------------------------------
 
-/** the rule's approver role, when the approval names a rule row that has one */
-async function approverRoleOf(db: Q, ruleId: string | null): Promise<string | null> {
-  if (!ruleId || !UUID_RE.test(ruleId)) return null;
-  const [rule] = await db
-    .select({ approverRoleId: approvalRules.approverRoleId })
-    .from(approvalRules)
-    .where(eq(approvalRules.id, ruleId));
-  return rule?.approverRoleId ?? null;
+/**
+ * ADR-0186 A (PR #198 round 5) — THE ONE RESOLVER of an approval rule's dual
+ * control as it is SERVED to a caller: the active version (or this caller's
+ * canary) applied, exactly as `governedEvaluate` resolves it
+ * (`applyRuleVersions`, stable key = the calling user). The queue-time snapshot
+ * and `requiredQuorumNow` both read through it — never the base row alone. A
+ * rule that does not resolve (no active version) is absent.
+ */
+export async function servedApprovalRules(
+  db: Q,
+  ruleIds: readonly (string | null | undefined)[],
+  callerUserId: string,
+): Promise<Map<string, { quorum: number; approverRoleId: string | null }>> {
+  const ids = [...new Set(ruleIds.filter((id): id is string => !!id && UUID_RE.test(id)))];
+  const out = new Map<string, { quorum: number; approverRoleId: string | null }>();
+  if (ids.length === 0) return out;
+  const rows = await db.select().from(approvalRules).where(inArray(approvalRules.id, ids));
+  const versionMap = await loadVersionsForArtifacts(db as Db, ["approval_rule"], ids);
+  const resolved = applyRuleVersions("approval_rule", rows, versionMap, callerUserId);
+  for (const r of resolved.served) out.set(r.id, { quorum: r.quorum, approverRoleId: r.approverRoleId ?? null });
+  return out;
 }
 
 /**
@@ -305,20 +319,21 @@ export async function toolApprovalRequirements(
     projectId: string | null;
   },
 ): Promise<ToolApprovalRequirements> {
-  const ids = [...new Set(input.matchedApprovalRuleIds.filter((id) => UUID_RE.test(id)))];
-  const matched = ids.length
-    ? await db.select({ quorum: approvalRules.quorum }).from(approvalRules).where(inArray(approvalRules.id, ids))
-    : [];
+  // the rules as SERVED to this caller (active version or canary applied) — the shape governedEvaluate decided on
+  const served = await servedApprovalRules(db, [...input.matchedApprovalRuleIds, input.ruleId], input.callerUserId);
+  const matched = input.matchedApprovalRuleIds.map((id) => served.get(id)).filter((r): r is { quorum: number; approverRoleId: string | null } => !!r);
   const ruleQuorum = Math.max(1, ...matched.map((r) => r.quorum));
   const org = await loadOrgSettings(db as Db);
   const sensitiveBecause = await callSensitivity(db, input);
   const sensitive = sensitiveBecause.length > 0;
   const quorum = Math.max(ruleQuorum, sensitive ? org.toolApprovalSensitiveQuorum : 1);
-  const approverRoleId = await approverRoleOf(db, input.ruleId);
+  const approverRoleId = (input.ruleId ? served.get(input.ruleId)?.approverRoleId : null) ?? null;
   const pool = await loadApprovalPool(db, {
     namedApproverUserId: input.approverUserId,
     approverRoleId,
     callerUserId: input.callerUserId,
+    // passkey mode: only principals who can sign with a passkey they already hold count
+    ...(org.approvalSignatureMode === "passkey" ? { signableBefore: new Date() } : {}),
   });
   return {
     quorum,
@@ -349,7 +364,9 @@ export async function auditQuorumUnsatisfiableAtQueue(
       : input.req.sensitive
         ? " (the caller works on a project that carries an in-app-only data classification)"
         : "") +
-    `, but only ${input.req.pool.principals} eligible approver(s) exist besides the caller — denied rather than queued ` +
+    `, but only ${input.req.pool.principals} eligible approver(s) exist besides the caller` +
+    (input.req.signatureMode === "passkey" ? " who can sign with a passkey they already hold" : "") +
+    " — denied rather than queued " +
     "for an approval nobody could give";
   await db.insert(auditLog).values({
     userId: input.userId,
@@ -965,7 +982,17 @@ async function recheckDeciders(db: Q, row: ApprovalRow, decisions: readonly Appr
 export async function reusePendingToolApproval(db: Q, approvalId: string): Promise<boolean> {
   const [row] = await db.select().from(approvals).where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")));
   if (!row) return false;
-  const pool = await poolForApproval(db, row);
+  // passkey mode: only principals who held a passkey when the call was queued can ever sign it
+  const pool =
+    row.signatureMode === "passkey"
+      ? await loadApprovalPool(db, {
+          namedApproverUserId: await snapshotNamedApprover(db, row),
+          approverRoleId: row.approverRoleId,
+          callerUserId: row.userId,
+          asOf: requestedAtOf(row.id),
+          signableBefore: requestedAtOf(row.id),
+        })
+      : await poolForApproval(db, row);
   if (pool.principals >= row.quorum) return true;
   const superseded = await db
     .update(approvals)
@@ -998,10 +1025,10 @@ export async function reusePendingToolApproval(db: Q, approvalId: string): Promi
  * uses). Compared by the recheck against the quorum snapshotted at queue time.
  */
 export async function requiredQuorumNow(db: Q, row: ApprovalRow): Promise<number> {
-  const [rule] =
-    row.ruleId && UUID_RE.test(row.ruleId)
-      ? await db.select({ quorum: approvalRules.quorum }).from(approvalRules).where(eq(approvalRules.id, row.ruleId))
-      : [];
+  const served = await servedApprovalRules(db, [row.ruleId], row.userId);
+  // a naming rule that no longer resolves is not a lower requirement: fail closed
+  if (row.ruleId && UUID_RE.test(row.ruleId) && !served.has(row.ruleId)) return Number.POSITIVE_INFINITY;
+  const rule = row.ruleId ? served.get(row.ruleId) : undefined;
   const sensitive = (await callSensitivity(db, { projectId: row.projectId, callerUserId: row.userId })).length > 0;
   const org = sensitive ? await loadOrgSettings(db as Db) : null;
   return Math.max(rule?.quorum ?? 1, org ? org.toolApprovalSensitiveQuorum : 1);

@@ -93,6 +93,8 @@ import {
   type SsoReauthStart,
   type SsoReauthStartArgs,
 } from "./step-up.js";
+import { requireStepUp } from "./step-up.js";
+import { grantJitDefaultRole, isApproverRole } from "./approval-pool.js";
 
 /** ADR-0181 (FX2, review finding 12): the audited cause, and the holder-facing
  * wording, of a sign-in refused because the IdP did not sign the SAML Response
@@ -1042,11 +1044,11 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           .values({ email, displayName, isAdmin: false })
           .returning();
         user = created!;
-        if (provider.defaultRoleId) {
-          await db
-            .insert(roleAssignments)
-            .values({ userId: user.id, roleId: provider.defaultRoleId })
-            .onConflictDoNothing();
+        if (provider.defaultRoleId && (await grantJitDefaultRole(db, user.id, provider.defaultRoleId)) === "withheld") {
+          await auditAuth(db, null, user.id, "sso-default-role-withheld", "deny",
+            `user '${email}' JIT-provisioned via SAML provider '${provider.name}' WITHOUT its default role: the role is an ` +
+            "approver role, and an identity the IdP mints never joins an approver pool silently (an admin may assign it, with a step-up)",
+            { phase: "saml-jit", provider: provider.name, email, roleId: provider.defaultRoleId });
         }
         await auditAuth(db, null, user.id, "saml-user-provisioned", "allow",
           `user '${email}' JIT-provisioned via SAML provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
@@ -1168,6 +1170,15 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+      // ADR-0186 A (round 5): a default role that is an approver role would mint JIT identities into
+      // an approver pool — naming it needs the settings_relax a role assignment needs (JIT withholds it
+      // anyway, decided under the approver-role lock: grantJitDefaultRole)
+      if (
+        (await isApproverRole(db, body.defaultRoleId)) &&
+        !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ssoDefaultRole: { provider: "saml", roleId: body.defaultRoleId } } } })).ok
+      ) {
+        return reply;
+      }
     }
     const [row] = await db
       .insert(samlProviders)
@@ -1240,6 +1251,15 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+      // ADR-0186 A (round 5): a default role that is an approver role would mint JIT identities into
+      // an approver pool — naming it needs the settings_relax a role assignment needs (JIT withholds it
+      // anyway, decided under the approver-role lock: grantJitDefaultRole)
+      if (
+        (await isApproverRole(db, body.defaultRoleId)) &&
+        !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ssoDefaultRole: { provider: "saml", roleId: body.defaultRoleId } } } })).ok
+      ) {
+        return reply;
+      }
     }
     // the signature posture is checked against the EFFECTIVE pair (stored
     // values + this patch), not against the patch alone — otherwise a

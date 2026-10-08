@@ -507,3 +507,82 @@ describe("F26: a pending approval is reused only while its queue-time pool can r
     expect((await db.select({ s: approvals.status }).from(approvals).where(eq(approvals.id, first)))[0]!.s).toBe("superseded");
   });
 });
+
+describe("F27: an SSO provider's default role never mints identities into an approver pool silently", () => {
+  it("naming an approver role as a provider's default role needs settings_relax", async () => {
+    const r = await as(P.adm.s, "POST", "/v1/auth/oidc-providers", {
+      name: `b4c5-oidc-${RUN}`,
+      issuerUrl: "https://idp.b4c5.example.com",
+      clientId: "b4c5",
+      clientSecret: "b4c5-secret",
+      defaultRoleId: roleId,
+    });
+    expect(r.statusCode, r.body).toBe(403);
+    expect(r.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+  });
+
+  it("a JIT login withholds a default role that is an approver role, and grants one that is not", async () => {
+    const mod = (await import("./approval-pool.js")) as Record<string, unknown>;
+    expect(typeof mod.grantJitDefaultRole, "grantJitDefaultRole").toBe("function");
+    const grant = mod.grantJitDefaultRole as (db: Db, userId: string, roleId: string) => Promise<string>;
+    const u = await mkUser(`jit-${randomBytes(2).toString("hex")}`);
+    expect(await grant(db, u.id, roleId)).toBe("withheld");
+    expect(await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, u.id), eq(roleAssignments.roleId, roleId)))).toHaveLength(0);
+    const [plainRole] = await db.insert(roles).values({ name: `b4c5 plain ${RUN}` }).returning({ id: roles.id });
+    expect(await grant(db, u.id, plainRole!.id)).toBe("granted");
+  });
+});
+
+describe("F28: the queue-time snapshot uses the rule as served (active version applied), not the base row", () => {
+  it("an active version at quorum 2 queues the call at quorum 2 even when the base row says 1", async () => {
+    const tool = nextTool();
+    const ruleId = await rule(tool);
+    const mint = await asSteppedUpAdmin("POST", `/v1/config-versions/approval_rule/${ruleId}`, {
+      body: { toolName: tool, writeOnly: false, approverUserId: P.a.id, deployMode: null, quorum: 2, approverRoleId: roleId },
+      activate: true,
+    });
+    expect(mint.statusCode, mint.body).toBe(201);
+    // the base row is only a read-model; the kernel serves the active version. Drift it.
+    await db.update(approvalRules).set({ quorum: 1 }).where(eq(approvalRules.id, ruleId));
+    const id = await queued(tool, { text: "served quorum" });
+    expect((await db.select({ q: approvals.quorum }).from(approvals).where(eq(approvals.id, id)))[0]!.q).toBe(2);
+  });
+});
+
+describe("F29: delegation writes serialise with consumption through the policy epoch", () => {
+  it("creating a delegation advances the governance policy epoch", async () => {
+    const epoch = async () => Number((await db.execute<{ epoch: number }>(sql`select epoch from governance_policy_epoch`)).rows[0]!.epoch);
+    const before = await epoch();
+    const link = await delegate(P.b.id, P.adm.id);
+    try {
+      expect(await epoch()).toBeGreaterThan(before);
+    } finally {
+      await db.delete(approvalDelegations).where(eq(approvalDelegations.id, link));
+    }
+  });
+});
+
+describe("F30: in passkey mode only principals who can sign count towards satisfiability", () => {
+  it("a quorum-2 pool with one passkey holder is refused at queue time", async () => {
+    const [r6] = await db.insert(roles).values({ name: `b4c5 nokey ${RUN}` }).returning({ id: roles.id });
+    const noKey = await mkUser(`nokey-${randomBytes(2).toString("hex")}`);
+    await db.insert(roleAssignments).values({ userId: noKey.id, roleId: r6!.id, createdAt: new Date(Date.now() - 60_000) });
+    const tool = nextTool();
+    await rule(tool, { approverRoleId: r6!.id, quorum: 2 });
+    const out = await call(tool, { text: "one signer" });
+    expect(out.kind, JSON.stringify(out)).toBe("denied");
+    expect((out as { decision: { ruleId: string } }).decision.ruleId).toBe("approval-quorum-unsatisfiable");
+  });
+});
+
+describe("F31: ending a live delegation needs settings_relax", () => {
+  it("DELETE /v1/delegations/:id on an active link is refused without a step-up", async () => {
+    const link = await delegate(P.a.id, P.adm.id);
+    const del = await as(P.adm.s, "DELETE", `/v1/delegations/${link}`);
+    expect(del.statusCode, del.body).toBe(403);
+    expect(del.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    expect(await db.select().from(approvalDelegations).where(eq(approvalDelegations.id, link))).toHaveLength(1);
+    const ok = await as(P.adm.s, "DELETE", `/v1/delegations/${link}`, undefined, { [STEP_UP_HEADER]: await grantFor(P.adm, del.json().action) });
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+});

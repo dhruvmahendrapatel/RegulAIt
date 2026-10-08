@@ -163,6 +163,12 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       for (const m of unStops ?? []) offenders.push(`${f}: ${m}`);
       const abacDeletes = src.match(/(?<![A-Za-z])api\.del(?:<[^>]*>)?\(\s*["'`]\/v1\/abac\/policies\/\$\{[^}]+\}["'`]/g);
       for (const m of abacDeletes ?? []) offenders.push(`${f}: ${m}`);
+      // PR #198 review round 5: an SSO provider may name an approver role as its JIT default role, and ending a
+      // live delegation can split one principal into two — both ask for settings_relax
+      const round5 = src.match(
+        /(?<![A-Za-z])api\.(?:post|del)(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:auth\/(?:oidc|saml)-providers["'`]|delegations\/\$\{)/g,
+      );
+      for (const m of round5 ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

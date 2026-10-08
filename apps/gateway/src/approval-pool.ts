@@ -39,6 +39,7 @@ import {
   roles,
   sql,
   users,
+  webauthnCredentials,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -140,6 +141,26 @@ export async function lockApproverRoles(tx: Q, roleIds: readonly string[]): Prom
 }
 
 /**
+ * ADR-0186 A (PR #198 round 5) — a JIT-provisioned account's default role.
+ * Granted only when it is NOT an approver role, decided under the approver-role
+ * lock (so a rule edit naming the role cannot interleave): an identity the IdP
+ * mints must never join an approver pool silently. Withheld = the caller audits
+ * it; an admin may then assign the role with the step-up a role assignment needs.
+ */
+export async function grantJitDefaultRole(
+  db: Pick<Db, "transaction">,
+  userId: string,
+  roleId: string,
+): Promise<"granted" | "withheld"> {
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Q & Pick<Db, "insert">;
+    if ((await lockApproverRoles(tx, [roleId])).has(roleId)) return "withheld" as const;
+    await tx.insert(roleAssignments).values({ userId, roleId }).onConflictDoNothing();
+    return "granted" as const;
+  });
+}
+
+/**
  * G2 (B4S-02 owner principle): can membership of this team ROUTE or CLAIM an
  * approval? A team is named by an enabled routing rule, by an SLA policy that
  * escalates to it (reassign / add an assignee), or by the assignment (or
@@ -236,7 +257,19 @@ export interface ApprovalPool {
  */
 export async function loadApprovalPool(
   db: Q,
-  input: { namedApproverUserId: string | null; approverRoleId: string | null; callerUserId: string | null; asOf?: Date | SQL | null },
+  input: {
+    namedApproverUserId: string | null;
+    approverRoleId: string | null;
+    callerUserId: string | null;
+    asOf?: Date | SQL | null;
+    /**
+     * ADR-0186 B (PR #198 round 5): passkey mode. Count only principals who can
+     * SIGN: someone in the principal's delegation component holds an unrevoked
+     * passkey enrolled before this instant (a later enrolment is refused at
+     * decide). Members are unchanged; `principals` counts signable ones.
+     */
+    signableBefore?: Date | SQL | null;
+  },
 ): Promise<ApprovalPool> {
   const candidates = new Set<string>(input.namedApproverUserId ? [input.namedApproverUserId] : []);
   if (input.approverRoleId) {
@@ -270,7 +303,25 @@ export async function loadApprovalPool(
     const callerRoot = roots.get(input.callerUserId);
     members = members.filter((m) => m !== input.callerUserId && roots.get(m) !== callerRoot);
   }
-  return { members: members.sort(), principals: new Set(members.map((m) => roots.get(m))).size };
+  let countable = members;
+  if (input.signableBefore) {
+    const component = [...roots.keys()];
+    const holders = component.length
+      ? await db
+          .select({ userId: webauthnCredentials.userId })
+          .from(webauthnCredentials)
+          .where(
+            and(
+              inArray(webauthnCredentials.userId, component),
+              isNull(webauthnCredentials.revokedAt),
+              lt(webauthnCredentials.createdAt, input.signableBefore),
+            ),
+          )
+      : [];
+    const signableRoots = new Set(holders.map((h) => roots.get(h.userId)));
+    countable = members.filter((m) => signableRoots.has(roots.get(m)));
+  }
+  return { members: members.sort(), principals: new Set(countable.map((m) => roots.get(m))).size };
 }
 
 export interface QuorumUnsatisfiable {
