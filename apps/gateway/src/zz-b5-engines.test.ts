@@ -457,6 +457,16 @@ describe("runner credentials", () => {
     expect(after.json().error).toBe("engine_runner_revoked");
   });
 
+  it("a runner or enrolment token cannot be exchanged for a browser session (no-user = bootstrap admin)", async () => {
+    const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, {});
+    for (const token of [pfRunner.token, t.json().token as string]) {
+      const r = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: token } });
+      expect(r.statusCode, r.body).toBe(403);
+      expect(r.json().error).toBe("credential_not_exchangeable");
+      expect(r.headers["set-cookie"]).toBeUndefined();
+    }
+  });
+
   it("a disabled engine cannot be leased or started", async () => {
     const gk = await enrol("garak", GK_DIGEST, MANIFEST.garak.version);
     expect(gk.selfTest.passed).toBe(true);

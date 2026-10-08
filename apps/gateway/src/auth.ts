@@ -1438,6 +1438,17 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
           "a virtual key is a scoped, budgeted dispatch credential and cannot be exchanged for a browser session — that would hand back the full identity the key exists to narrow",
       });
     }
+    // ADR-0187 — AN ALLOW-LIST, NOT ANOTHER DENY. Only an API key or the
+    // bootstrap token buys a browser session here. An engine runner or
+    // enrolment token resolves to NO user, and a session with no user is the
+    // bootstrap operator's (admin); exchanging one would turn a credential
+    // confined to four runner routes into an administrator.
+    if (ctx.via !== "api-key" && ctx.via !== "bootstrap") {
+      return reply.status(403).send({
+        error: "credential_not_exchangeable",
+        detail: "only a user's API key can be exchanged for a browser session; this credential is confined to its own routes",
+      });
+    }
     const org = await loadOrgSettings(db);
     // ADR-0181 (FX2): an un-enrolled owner's key buys no session either — an
     // exchanged session may reach the TOTP self-service routes, which would
