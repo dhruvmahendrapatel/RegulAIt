@@ -224,8 +224,8 @@ export async function openAssuranceGuardrailWindow(
     } else if (
       // B4S-06: once an admin can step up, the bootstrap credential cannot write
       // the window again. A LIVE window with exactly these modes, opened during
-      // first-admin setup (`seed --open-assurance-window`), is kept as it is and
-      // closed by restore()
+      // first-admin setup (by `seed --open-assurance-window`, or by demo:intake
+      // before it enrolled Ada), is kept as it is and closed by restore()
       r.status === 403 &&
       r.body.error === "step_up_required" &&
       leftover &&
@@ -237,7 +237,7 @@ export async function openAssuranceGuardrailWindow(
     } else notes.push(`assurance guardrail window: could not open for agent ${id} (${r.status} ${String(r.body.error ?? "")})`);
   }
   if (kept > 0) {
-    notes.push(`assurance guardrail window: kept the ${kept} window(s) opened during first-admin setup (seed --open-assurance-window)`);
+    notes.push(`assurance guardrail window: kept the ${kept} window(s) opened during first-admin setup`);
   }
   if (reclaimed > 0) {
     notes.push(`assurance guardrail window: reclaimed ${reclaimed} leftover window override(s) from an earlier run`);
