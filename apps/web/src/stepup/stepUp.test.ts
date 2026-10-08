@@ -156,6 +156,13 @@ describe("every step-up-protected write in the app goes through withStepUp (ADR-
       // B4S round 3: creating a user can create an admin (settings_relax, as the admin grant above)
       const userCreates = src.match(/(?<![A-Za-z])api\.post(?:<[^>]*>)?\(\s*["'`]\/v1\/users["'`]/g);
       for (const m of userCreates ?? []) offenders.push(`${f}: ${m}`);
+      // PR #198 review round 4: lifting a stop or a quarantine asks for the same step-up as the grant
+      const unStops = src.match(
+        /(?<![A-Za-z])api\.(?:post|patch|del)(?:<[^>]*>)?\(\s*["'`]\/v1\/(?:users\/\$\{[^}]+\}\/reactivate|agents\/\$\{[^}]+\}\/enabled|custom-model-providers\/\$\{[^}]+\}\/enabled|admission\/skills\/\$\{[^}]+\}\/admit|servers\/\$\{[^}]+\}\/admission\/clear|release-quarantine\/override|sod\/rules\/\$\{|abac\/policies\/\$\{[^}]+\}\/deactivate)/g,
+      );
+      for (const m of unStops ?? []) offenders.push(`${f}: ${m}`);
+      const abacDeletes = src.match(/(?<![A-Za-z])api\.del(?:<[^>]*>)?\(\s*["'`]\/v1\/abac\/policies\/\$\{[^}]+\}["'`]/g);
+      for (const m of abacDeletes ?? []) offenders.push(`${f}: ${m}`);
       // owner changes and the evidence-hold override have no screen today; one added later must use withStepUp
       for (const re of [/\/v1\/(?:servers|connectors|agents)\/\$\{[^}]+\}\/owner/, /x-regulait-evidence-hold-override/]) {
         if (re.test(src) && !src.includes("withStepUp(")) offenders.push(`${f}: ${re.source}`);

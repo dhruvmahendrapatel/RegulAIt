@@ -47,6 +47,7 @@ import {
 import { QueryGate, optionEls, useAction, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const STARTER = `forbid (
   principal,
@@ -281,7 +282,7 @@ export default function AbacPoliciesPage() {
                           onClick={(e) => {
                             e.stopPropagation();
                             void act.run(
-                              () => api.post(`/v1/abac/policies/${p.id}/deactivate`),
+                              () => withStepUp((h) => stepUpApi.post(`/v1/abac/policies/${p.id}/deactivate`, {}, h)),
                               "Deactivated",
                             );
                           }}
@@ -329,7 +330,7 @@ export default function AbacPoliciesPage() {
           const target = confirmDelete;
           setConfirmDelete(null);
           if (target) {
-            void act.run(() => api.del(`/v1/abac/policies/${target.id}`), "Policy deleted");
+            void act.run(() => withStepUp((h) => stepUpApi.del(`/v1/abac/policies/${target.id}`, undefined, h)), "Policy deleted");
           }
         }}
       />

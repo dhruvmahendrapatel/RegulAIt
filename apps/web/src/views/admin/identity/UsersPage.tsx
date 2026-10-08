@@ -250,7 +250,7 @@ export default function UsersPage() {
             }
             onReactivate={() =>
               void act.run(
-                () => api.post(`/v1/users/${selected.id}/reactivate`, {}),
+                () => withStepUp((h) => stepUpApi.post(`/v1/users/${selected.id}/reactivate`, {}, h)),
                 "User reactivated — their existing keys work again",
               )
             }

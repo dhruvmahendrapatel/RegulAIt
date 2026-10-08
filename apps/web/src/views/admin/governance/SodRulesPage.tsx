@@ -42,6 +42,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 type CapKind = "agent" | "connector" | "mcp_tool" | "mcp_server";
 type MintKind = "agent" | "connector" | "tool" | "server";
@@ -433,7 +434,7 @@ export default function SodRulesPage() {
                           disabled={act.busy}
                           onClick={() =>
                             void act.run(async () => {
-                              await api.patch(`/v1/sod/rules/${r.id}`, { enabled: !r.enabled });
+                              await withStepUp((h) => stepUpApi.patch(`/v1/sod/rules/${r.id}`, { enabled: !r.enabled }, h));
                               await refreshAll();
                             }, r.enabled ? "Rule disabled — the combination is no longer refused at mint time" : "Rule enabled — enforcement resumes; violators surfaced, never auto-revoked")
                           }
@@ -446,7 +447,7 @@ export default function SodRulesPage() {
                           disabled={act.busy}
                           onClick={() =>
                             void act.run(async () => {
-                              await api.del(`/v1/sod/rules/${r.id}`);
+                              await withStepUp((h) => stepUpApi.del(`/v1/sod/rules/${r.id}`, undefined, h));
                               await refreshAll();
                             }, "Rule deleted — the combination is no longer declared toxic")
                           }

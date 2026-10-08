@@ -21,7 +21,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
 import { ReasonModal, useAction } from "../adminKit";
 import v from "../../views.module.css";
-import { putOrgSettings } from "../../../stepup/stepUp";
+import { putOrgSettings, api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 interface ReviewSkill {
   id: string;
@@ -107,7 +107,7 @@ export default function AdmissionReviewPage() {
       // the digest of the content this page SHOWED: if the skill changed since,
       // the gateway refuses (409) instead of admitting text nobody reviewed
       void act.run(
-        () => api.post(`/v1/admission/skills/${p.skill.id}/admit`, { digest: p.skill.contentDigest, reason }),
+        () => withStepUp((h) => stepUpApi.post(`/v1/admission/skills/${p.skill.id}/admit`, { digest: p.skill.contentDigest, reason }, h)),
         `Admitted ${p.skill.name}`,
       );
     } else if (p.kind === "deny-share") {
@@ -115,13 +115,15 @@ export default function AdmissionReviewPage() {
     } else {
       void act.run(
         () =>
-          api.post("/v1/release-quarantine/override", {
-            kind: p.target,
-            id: p.item.id,
-            // the release this page showed (a newer one is refused with 409)
-            digest: (p.target === "mcp_server" ? p.item.release : p.item.digest) ?? "",
-            reason,
-          }),
+          withStepUp((h) =>
+            stepUpApi.post("/v1/release-quarantine/override", {
+              kind: p.target,
+              id: p.item.id,
+              // the release this page showed (a newer one is refused with 409)
+              digest: (p.target === "mcp_server" ? p.item.release : p.item.digest) ?? "",
+              reason,
+            }, h),
+          ),
         `${p.item.name} allowed now`,
       );
     }
