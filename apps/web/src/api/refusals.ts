@@ -129,6 +129,9 @@ export const BATCH4_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
     "This call needs more different approvers than are available besides you, so it was refused rather than queued",
   approval_signature_recheck_failed:
     "The approval for this call no longer matches the call (a signature didn't verify), so nothing ran — submit it again for a fresh approval",
+  // B4S-02: only accounts that existed (and are active) since the call was queued may decide it
+  approver_not_eligible:
+    "You can't decide this call: only an active account that already existed when it was queued can — someone who was an approver then must decide it",
   // ADR-0186 A (slice A1): the passkey and step-up ceremonies
   passkey_attestation_refused:
     "That passkey sent manufacturer details RegulAIt doesn't accept — try again, or use a different passkey",

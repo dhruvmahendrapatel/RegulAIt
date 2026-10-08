@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   APPROVAL_SIGN_VERSION,
   BATCH4_REFUSAL_CODES,
+  CEREMONY_REFUSALS,
   BATCH4_SETTING_COLUMNS,
   BATCH4_SETTING_COPY,
   BATCH4_SETTING_KEYS,
@@ -132,8 +133,19 @@ describe("ADR-0186 vocabularies", () => {
       unknown_role: 422,
       approval_quorum_unsatisfiable: 403,
       approval_signature_recheck_failed: 403,
+      approver_not_eligible: 403,
     });
-    expect(BATCH4_REFUSAL_CODES).toHaveLength(19);
+    expect(CEREMONY_REFUSALS).toEqual({
+      passkey_attestation_refused: 422,
+      passkey_already_registered: 409,
+      fresh_sign_in_required: 403,
+      browser_session_required: 403,
+      unknown_challenge: 404,
+      unknown_step_up: 404,
+      step_up_action_too_large: 413,
+    });
+    expect(BATCH4_REFUSAL_CODES).toHaveLength(27);
+    for (const c of [...Object.keys(APPROVAL_REFUSALS), ...Object.keys(CEREMONY_REFUSALS)]) expect(BATCH4_REFUSAL_CODES).toContain(c);
   });
   it("the detection monitor rules exist in the monitor catalogue; receipts cover decisions only", () => {
     for (const id of DETECTION_MONITOR_RULE_IDS) expect(MONITOR_RULES[id].label.length).toBeGreaterThan(0);
