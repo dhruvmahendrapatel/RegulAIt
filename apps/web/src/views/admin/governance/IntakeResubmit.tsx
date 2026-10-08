@@ -333,11 +333,11 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
 
   // R13-20/21: keep the editing state private to its original owner. The
   // account-change notice replaces all old sections, progress and retry copy.
-  if (draft.ownerChanged || sentBeforeChange) return <>
+  if (draft.ownerChanged || sentBeforeChange || accountChangedDuringSend.current) return <>
     {leave.dialog}
     <PageHeader title="Update and resubmit" sub="The account for this editing session changed." />
     <Card>
-      <p role="alert">{busy || sentBeforeChange ? "You're now signed in as someone else. A request was sent before the account changed — open the record to check whether it was saved. No further resubmission requests will be sent. Discard to leave." : "You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave."}</p>
+      <p role="alert">{busy || sentBeforeChange || accountChangedDuringSend.current ? "You're now signed in as someone else. A request was sent before the account changed — open the record to check whether it was saved. No further resubmission requests will be sent. Discard to leave." : "You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave."}</p>
       <Button disabled={busy} onClick={() => { draft.abandon(); setDone(true); }}>Discard and leave</Button>
     </Card>
   </>;
