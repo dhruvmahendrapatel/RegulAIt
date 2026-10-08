@@ -603,6 +603,8 @@ describe("6. the covered / NOT-covered inventory", () => {
   it("names its exclusions rather than merely omitting them", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
+      // ADR-0187: a CHECK-constrained six-member code
+      "engine_run_items.not_run_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
       "risk_acceptances.compensating_controls",
