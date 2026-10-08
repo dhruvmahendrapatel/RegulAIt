@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { api, ApiError } from "../../api/client";
 import { useSession } from "../../session/SessionContext";
-import { Button, CodeBlock, Field, Input } from "../../ui/kit";
+import { Button, Field, Input } from "../../ui/kit";
+import { TotpQrCode } from "../../ui/TotpQrCode";
 import { Brand } from "./LoginPage";
 import s from "./auth.module.css";
 
@@ -75,10 +76,7 @@ export default function ForcedMfaEnroll() {
           <div className={s.form}>
             <div className={s.secretBox}>
               <strong>Shown exactly once.</strong>
-              <span>Add this secret to your authenticator app (manual entry):</span>
-              <span className={s.secretValue}>{secret.secret}</span>
-              <span>Or paste the full otpauth URI into an app that accepts it:</span>
-              <CodeBlock maxHeight="90px">{secret.otpauthUri}</CodeBlock>
+              <TotpQrCode secret={secret.secret} otpauthUri={secret.otpauthUri} uriMaxHeight="90px" />
             </div>
             <Field label="Code from your authenticator">
               <Input

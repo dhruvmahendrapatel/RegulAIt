@@ -11,7 +11,8 @@ import type { OwnSession } from "../../api/adminTypes";
 import { ago } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
+import { TotpQrCode } from "../../ui/TotpQrCode";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
@@ -448,9 +449,7 @@ function MfaCard(props: { totpEnabled: boolean; onChanged: () => void }) {
         <div className={v.stack}>
           <div className={s.secretBox}>
             <strong>Shown exactly once.</strong>
-            <span>Add this secret to your authenticator app:</span>
-            <span className={s.secretValue}>{secret.secret}</span>
-            <CodeBlock maxHeight="80px">{secret.otpauthUri}</CodeBlock>
+            <TotpQrCode secret={secret.secret} otpauthUri={secret.otpauthUri} uriMaxHeight="80px" />
           </div>
           <div className={v.row} style={{ alignItems: "flex-end" }}>
             <Field label="Code from your authenticator">
