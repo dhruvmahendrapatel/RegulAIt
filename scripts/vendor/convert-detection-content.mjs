@@ -40,6 +40,7 @@ const omittedSecrets = [];
 for (const match of go.matchAll(/^\s*\{Name: "([^"]+)", Regex: (.*?), Severity:([^\n]*)/gm)) {
   const id = `pipelock.secrets.${slug(match[1])}`;
   try {
+    if (match[1] === 'Ethereum Address') throw Error('Preset-only rule, not in the default Pipelock set');
     if (/\bValidator:/.test(match[3])) throw Error('Requires upstream checksum validator outside the regex-only seam');
     let pattern = expression(match[2]);
     const boundary = constants.get('ProviderKeyLeftBoundaryRegex');
@@ -162,7 +163,24 @@ function requiredPrefix(pattern) {
   const required=['?','*','{'].includes(next)?prefix.slice(0,-1):prefix;
   return required.length>=3?required.toLowerCase():null;
 }
-const requiredPrefixes=Object.fromEntries(secrets.map(rule=>[rule.id,requiredPrefix(rule.pattern)]).filter(([,prefix])=>prefix));
+// These gates are admitted only for the exact pinned pattern. Each listed
+// alternative contains a necessary ASCII fragment, including grouped/class
+// prefixes. A changed source receives no gate until its proof is reviewed.
+const provedFragments = {
+  stripe_key:['sk-','rk-','sk_','rk_'], github_token:['ghp_','gho_','ghu_','ghr_','ghs_'],
+  gitlab_service_token:['gl'], aws_secret_key:['secret'], discord_bot_token:['.'],
+  twilio_api_key:['sk'], sendgrid_api_key:['sg.'], vercel_token:['vercel_','vcp_','vci_','vca_','vcr_','vck_'],
+  jwt_token:['.'], extended_private_key:['xprv','yprv','zprv','tprv'], ethereum_private_key:['0x'],
+  social_security_number:['-'],google_oauth_client_id:['.apps.googleusercontent.com'],
+  environment_variable_secret:['secret','password','passwd','token','api']
+};
+// Pin the complete proof inputs, independently of the Go parsing loop.
+const proofPatterns = JSON.parse(readFileSync(path.join(base,'prefix-proofs.json'),'utf8'));
+const requiredPrefixes=Object.fromEntries(secrets.map(rule=>{
+  const short=rule.id.replace('pipelock.secrets.',''), ordinary=requiredPrefix(rule.pattern);
+  const proved=proofPatterns[short]===rule.pattern?provedFragments[short]:undefined;
+  return [rule.id,ordinary?[ordinary]:proved];
+}).filter(([,prefix])=>prefix));
 const spaceRunSafeIds = secrets.filter((rule) => flexibleSpaces(rule.pattern)).map(rule=>rule.id);
 const outputs = { GENERATED_REQUIRED_PREFIXES:requiredPrefixes, GENERATED_SPACE_RUN_SAFE_IDS:spaceRunSafeIds, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
 const result = '// Generated offline by scripts/vendor/convert-detection-content.mjs; do not edit.\n' + Object.entries(outputs).map(([name,value]) => `export const ${name} = ${JSON.stringify(value,null,2)} as const;\n`).join('\n');

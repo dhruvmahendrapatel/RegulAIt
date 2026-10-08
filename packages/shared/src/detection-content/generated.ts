@@ -1,52 +1,207 @@
 // Generated offline by scripts/vendor/convert-detection-content.mjs; do not edit.
 export const GENERATED_REQUIRED_PREFIXES = {
-  "pipelock.secrets.anthropic_api_key": "sk-ant-",
-  "pipelock.secrets.openai_api_key": "sk-proj-",
-  "pipelock.secrets.openai_service_key": "sk-svcacct-",
-  "pipelock.secrets.fireworks_api_key": "fw_",
-  "pipelock.secrets.llm_router_api_key": "sk-or-v1-",
-  "pipelock.secrets.answer_engine_api_key": "pplx-",
-  "pipelock.secrets.web_research_api_key": "tvly-",
-  "pipelock.secrets.google_api_key": "aiza",
-  "pipelock.secrets.google_oauth_client_secret": "gocspx-",
-  "pipelock.secrets.stripe_webhook_secret": "whsec_",
-  "pipelock.secrets.github_fine_grained_pat": "github_pat_",
-  "pipelock.secrets.gitlab_pat": "glpat-",
-  "pipelock.secrets.gitlab_deploy_token": "gldt-",
-  "pipelock.secrets.gitlab_runner_token": "glrt",
-  "pipelock.secrets.gitlab_ci_job_token": "glcbt-",
-  "pipelock.secrets.gitlab_pipeline_trigger_token": "glptt-",
-  "pipelock.secrets.gitlab_oauth_application_secret": "gloas-",
-  "pipelock.secrets.gitlab_scim_token": "glsoat-",
-  "pipelock.secrets.postgresql_connection_string": "postgres",
-  "pipelock.secrets.mysql_connection_string": "mysql:",
-  "pipelock.secrets.mongodb_connection_string": "mongodb",
-  "pipelock.secrets.redis_connection_string": "redis",
-  "pipelock.secrets.google_oauth_token": "ya29",
-  "pipelock.secrets.gcp_service_account_private_key_id": "\"private_key_id\"",
-  "pipelock.secrets.azure_storage_account_key": "accountkey=",
-  "pipelock.secrets.azure_sas_token": "sig=",
-  "pipelock.secrets.slack_token": "xox",
-  "pipelock.secrets.slack_app_token": "xapp-",
-  "pipelock.secrets.mailgun_api_key": "key-",
-  "pipelock.secrets.new_relic_api_key": "nrak-",
-  "pipelock.secrets.hugging_face_token": "hf_",
-  "pipelock.secrets.databricks_token": "dapi",
-  "pipelock.secrets.replicate_api_token": "r8_",
-  "pipelock.secrets.together_ai_key": "tok_",
-  "pipelock.secrets.pinecone_api_key": "pcsk_",
-  "pipelock.secrets.groq_api_key": "gsk_",
-  "pipelock.secrets.xai_api_key": "xai-",
-  "pipelock.secrets.digitalocean_token": "dop_v1_",
-  "pipelock.secrets.hashicorp_vault_token": "hvs",
-  "pipelock.secrets.supabase_service_key": "sb_secret_",
-  "pipelock.secrets.npm_token": "npm_",
-  "pipelock.secrets.pypi_token": "pypi-age",
-  "pipelock.secrets.linear_api_key": "lin_api_",
-  "pipelock.secrets.notion_api_key": "ntn_",
-  "pipelock.secrets.sentry_auth_token": "sntrys_",
-  "pipelock.secrets.private_key_header": "-----begin",
-  "pipelock.secrets.gcp_service_account_key": "\"type\""
+  "pipelock.secrets.anthropic_api_key": [
+    "sk-ant-"
+  ],
+  "pipelock.secrets.openai_api_key": [
+    "sk-proj-"
+  ],
+  "pipelock.secrets.openai_service_key": [
+    "sk-svcacct-"
+  ],
+  "pipelock.secrets.fireworks_api_key": [
+    "fw_"
+  ],
+  "pipelock.secrets.llm_router_api_key": [
+    "sk-or-v1-"
+  ],
+  "pipelock.secrets.answer_engine_api_key": [
+    "pplx-"
+  ],
+  "pipelock.secrets.web_research_api_key": [
+    "tvly-"
+  ],
+  "pipelock.secrets.google_api_key": [
+    "aiza"
+  ],
+  "pipelock.secrets.google_oauth_client_secret": [
+    "gocspx-"
+  ],
+  "pipelock.secrets.stripe_key": [
+    "sk-",
+    "rk-",
+    "sk_",
+    "rk_"
+  ],
+  "pipelock.secrets.stripe_webhook_secret": [
+    "whsec_"
+  ],
+  "pipelock.secrets.github_token": [
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghr_",
+    "ghs_"
+  ],
+  "pipelock.secrets.github_fine_grained_pat": [
+    "github_pat_"
+  ],
+  "pipelock.secrets.gitlab_pat": [
+    "glpat-"
+  ],
+  "pipelock.secrets.gitlab_deploy_token": [
+    "gldt-"
+  ],
+  "pipelock.secrets.gitlab_runner_token": [
+    "glrt"
+  ],
+  "pipelock.secrets.gitlab_ci_job_token": [
+    "glcbt-"
+  ],
+  "pipelock.secrets.gitlab_pipeline_trigger_token": [
+    "glptt-"
+  ],
+  "pipelock.secrets.gitlab_oauth_application_secret": [
+    "gloas-"
+  ],
+  "pipelock.secrets.gitlab_scim_token": [
+    "glsoat-"
+  ],
+  "pipelock.secrets.gitlab_service_token": [
+    "gl"
+  ],
+  "pipelock.secrets.postgresql_connection_string": [
+    "postgres"
+  ],
+  "pipelock.secrets.mysql_connection_string": [
+    "mysql:"
+  ],
+  "pipelock.secrets.mongodb_connection_string": [
+    "mongodb"
+  ],
+  "pipelock.secrets.redis_connection_string": [
+    "redis"
+  ],
+  "pipelock.secrets.aws_secret_key": [
+    "secret"
+  ],
+  "pipelock.secrets.google_oauth_token": [
+    "ya29"
+  ],
+  "pipelock.secrets.gcp_service_account_private_key_id": [
+    "\"private_key_id\""
+  ],
+  "pipelock.secrets.azure_storage_account_key": [
+    "accountkey="
+  ],
+  "pipelock.secrets.azure_sas_token": [
+    "sig="
+  ],
+  "pipelock.secrets.slack_token": [
+    "xox"
+  ],
+  "pipelock.secrets.slack_app_token": [
+    "xapp-"
+  ],
+  "pipelock.secrets.discord_bot_token": [
+    "."
+  ],
+  "pipelock.secrets.twilio_api_key": [
+    "sk"
+  ],
+  "pipelock.secrets.sendgrid_api_key": [
+    "sg."
+  ],
+  "pipelock.secrets.mailgun_api_key": [
+    "key-"
+  ],
+  "pipelock.secrets.new_relic_api_key": [
+    "nrak-"
+  ],
+  "pipelock.secrets.hugging_face_token": [
+    "hf_"
+  ],
+  "pipelock.secrets.databricks_token": [
+    "dapi"
+  ],
+  "pipelock.secrets.replicate_api_token": [
+    "r8_"
+  ],
+  "pipelock.secrets.together_ai_key": [
+    "tok_"
+  ],
+  "pipelock.secrets.pinecone_api_key": [
+    "pcsk_"
+  ],
+  "pipelock.secrets.groq_api_key": [
+    "gsk_"
+  ],
+  "pipelock.secrets.xai_api_key": [
+    "xai-"
+  ],
+  "pipelock.secrets.digitalocean_token": [
+    "dop_v1_"
+  ],
+  "pipelock.secrets.hashicorp_vault_token": [
+    "hvs"
+  ],
+  "pipelock.secrets.vercel_token": [
+    "vercel_",
+    "vcp_",
+    "vci_",
+    "vca_",
+    "vcr_",
+    "vck_"
+  ],
+  "pipelock.secrets.supabase_service_key": [
+    "sb_secret_"
+  ],
+  "pipelock.secrets.npm_token": [
+    "npm_"
+  ],
+  "pipelock.secrets.pypi_token": [
+    "pypi-age"
+  ],
+  "pipelock.secrets.linear_api_key": [
+    "lin_api_"
+  ],
+  "pipelock.secrets.notion_api_key": [
+    "ntn_"
+  ],
+  "pipelock.secrets.sentry_auth_token": [
+    "sntrys_"
+  ],
+  "pipelock.secrets.private_key_header": [
+    "-----begin"
+  ],
+  "pipelock.secrets.jwt_token": [
+    "."
+  ],
+  "pipelock.secrets.extended_private_key": [
+    "xprv",
+    "yprv",
+    "zprv",
+    "tprv"
+  ],
+  "pipelock.secrets.ethereum_private_key": [
+    "0x"
+  ],
+  "pipelock.secrets.social_security_number": [
+    "-"
+  ],
+  "pipelock.secrets.google_oauth_client_id": [
+    ".apps.googleusercontent.com"
+  ],
+  "pipelock.secrets.environment_variable_secret": [
+    "secret",
+    "password",
+    "passwd",
+    "token",
+    "api"
+  ],
+  "pipelock.secrets.gcp_service_account_key": [
+    "\"type\""
+  ]
 } as const;
 
 export const GENERATED_SPACE_RUN_SAFE_IDS = [
@@ -109,7 +264,6 @@ export const GENERATED_SPACE_RUN_SAFE_IDS = [
   "pipelock.secrets.social_security_number",
   "pipelock.secrets.google_oauth_client_id",
   "pipelock.secrets.environment_variable_secret",
-  "pipelock.secrets.ethereum_address",
   "pipelock.secrets.gcp_service_account_key"
 ] as const;
 
@@ -541,12 +695,6 @@ export const GENERATED_SECRET_RULES = [
     "caseInsensitive": true
   },
   {
-    "id": "pipelock.secrets.ethereum_address",
-    "pack": "pipelock-secrets",
-    "pattern": "0x[0-9a-fA-F]{40}\\b",
-    "caseInsensitive": true
-  },
-  {
     "id": "pipelock.secrets.gcp_service_account_key",
     "pack": "pipelock-secrets",
     "pattern": "\"type\"\\s*:\\s*\"service_account\"",
@@ -817,7 +965,7 @@ export const GENERATED_PACK_MANIFESTS = [
     "commit": "7014542ea14fec82dfbc2ad38caf77bd63e7ad69",
     "sha256": "9268c1f7a91567c0c509f61d1e1aaa1c5ff0258a261c38e353b91a14fec4a0dd",
     "licence": "Apache-2.0",
-    "rules": 62,
+    "rules": 61,
     "notImported": [
       {
         "id": "pipelock.secrets.github_token.audience_exemption",
@@ -866,6 +1014,10 @@ export const GENERATED_PACK_MANIFESTS = [
       {
         "id": "pipelock.secrets.iban",
         "reason": "Requires upstream checksum validator outside the regex-only seam"
+      },
+      {
+        "id": "pipelock.secrets.ethereum_address",
+        "reason": "Preset-only rule, not in the default Pipelock set"
       }
     ],
     "retrievedAt": "2026-10-07T21:28:48.561070Z"

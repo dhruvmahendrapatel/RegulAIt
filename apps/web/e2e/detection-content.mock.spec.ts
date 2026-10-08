@@ -18,9 +18,9 @@ async function setup(page: Page, path: string, response: unknown, status=200) {
 }
 const pack=(id:string,rules:number,enabled:boolean)=>({id,rules,enabled,source:"Pinned fixture",repo:"https://example.test/source",commit:"a".repeat(40),sha256:"b".repeat(64),licence:"Apache-2.0",notImported:[{id:"excluded_condition",reason:"Compound upstream condition is outside the admitted grammar"}],auditRedactionAlways:id==="pipelock-secrets"});
 for(const path of ["guardrails","admission"]) test(`${path} reports actual content, disabled packs and coverage limits`, async({page})=>{
-  await setup(page,path,{packs:[pack("pipelock-secrets",62,false),pack("nemo-yara-injection",0,true)],outboundAudienceEnforced:false});
+  await setup(page,path,{packs:[pack("pipelock-secrets",61,false),pack("nemo-yara-injection",0,true)],outboundAudienceEnforced:false});
   await expect(page.getByText("Credential audience restrictions are not installed on outbound requests.")).toBeVisible();
-  await expect(page.getByText(/Disabled; 62 imported rules/)).toBeVisible();
+  await expect(page.getByText(/Disabled; 61 imported rules/)).toBeVisible();
   await expect(page.getByText("This pack has no eligible imported rules and contributes no detections.")).toBeVisible();
   await expect(page.getByText(/Secret redaction on the audit path always applies/)).toBeVisible();
   await page.getByText("Excluded content for nemo-yara-injection").click();

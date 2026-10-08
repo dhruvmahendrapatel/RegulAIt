@@ -203,9 +203,29 @@ interface Span {
  * the over-scrub guard expressed in code: the common path does not rebuild the
  * string, so it cannot accidentally change it.
  */
-export function scrubAuditText(text: string): string {
+export function scrubAuditText(text:string):string{
+ const once=scrubAuditTextPass(text);
+ if(once===text)return once;
+ // A new marker can expose a token boundary in a concatenated fragment.
+ // Scan the remaining fragments once, treating existing markers as opaque.
+ // If one still contains credential material, redact that whole fragment:
+ // replacing only its last token could expose another boundary indefinitely.
+ const markerPattern=/\[redacted:[a-z0-9_.+]+:[0-9]+:[a-f0-9]{12}\]/g;
+ const out:string[]=[];let cursor=0;
+ for(const match of once.matchAll(markerPattern)){
+   const fragment=once.slice(cursor,match.index);
+   out.push(scrubAuditTextPass(fragment)===fragment?fragment:marker([FIELD_RULE_LABEL],fragment),match[0]);
+   cursor=match.index!+match[0].length;
+ }
+ const fragment=once.slice(cursor);
+ out.push(scrubAuditTextPass(fragment)===fragment?fragment:marker([FIELD_RULE_LABEL],fragment));
+ return out.join("");
+}
+function scrubAuditTextPass(text: string): string {
   if (!text) return text;
 
+  const protectedMarkers=[...text.matchAll(/\[redacted:[a-z0-9_.+]+:[0-9]+:[a-f0-9]{12}\]/g)].map(match=>[match.index!,match.index!+match[0].length]);
+  const overlapsMarker=(start:number,end:number)=>protectedMarkers.some(([a,b])=>start>=a!&&end<=b!);
   const spans: Span[] = [];
   for (const rule of CREDENTIAL_MATERIAL_RULES) {
     // The RegExp objects are module constants shared with `runRules`, and every
@@ -222,12 +242,12 @@ export function scrubAuditText(text: string): string {
       let end = start + m[0].length;
       if (rule.id === "dlp.secret.private_key") end = extendPemSpan(text, end);
       if (rule.id === "dlp.secret.assignment") start = narrowAssignmentStart(m[0], start);
-      spans.push({ start, end, rule: shortRuleId(rule.id) });
+      if(!overlapsMarker(start,end))spans.push({ start, end, rule: shortRuleId(rule.id) });
     }
   }
   // ADR-0186 V: vendored credential shapes (empty until slice V fills the pack);
   // the marker names the vendored rule id, merged with any overlapping span below
-  for (const v of vendoredSecretSpans(text)) spans.push({ start: v.start, end: v.end, rule: v.rule });
+  for (const v of vendoredSecretSpans(text)) if(!overlapsMarker(v.start,v.end))spans.push({ start: v.start, end: v.end, rule: v.rule });
   if (spans.length === 0) return text;
 
   // Two rules can match overlapping runs (an `api_key = eyJ…` trips both

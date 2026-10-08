@@ -110,7 +110,7 @@ function secretSet(rules: readonly VendoredSecretRule[]): RE2Set | null {
 const spaceSafeIds = new Set<string>(GENERATED_SPACE_RUN_SAFE_IDS);
 const spaceSafeRules = GENERATED_SECRET_RULES.filter(rule => spaceSafeIds.has(rule.id));
 const spaceUnsafeRules = GENERATED_SECRET_RULES.filter(rule => !spaceSafeIds.has(rule.id));
-const prefixes: Readonly<Record<string,string>> = GENERATED_REQUIRED_PREFIXES;
+const prefixes: Readonly<Record<string,readonly string[]>> = GENERATED_REQUIRED_PREFIXES;
 const prefixlessRules = GENERATED_SECRET_RULES.filter(rule=>!prefixes[rule.id]);
 const prefixlessSet = secretSet(prefixlessRules);
 secretSets.set(GENERATED_SECRET_RULES, secretSet(GENERATED_SECRET_RULES));
@@ -121,19 +121,16 @@ secretSets.set(spaceSafeRules, secretSet(spaceSafeRules));
 export function secretCandidateRules(text: string, rules: readonly VendoredSecretRule[] = VENDORED_SECRET_RULES): readonly VendoredSecretRule[] {
   if (!rules.length) return [];
   if(rules === GENERATED_SECRET_RULES) {
-    let ascii=true;for(let i=0;i<text.length;i++)if(text.charCodeAt(i)>127){ascii=false;break;}
-    if(ascii) {
-      const lower=text.toLowerCase();
-      const selected=rules.filter(rule=>prefixes[rule.id] && lower.includes(prefixes[rule.id]!));
-      // A small candidate cohort is faster than scanning all 62 patterns.
-      // Larger or non-ASCII cohorts retain the general combined matcher.
-      if(selected.length<=8 && prefixlessSet) {
-        try {
-          return [...prefixlessSet.match(text).map(index=>prefixlessRules[index]!),...selected.filter(rule=>{
-            const re=compileVendored(rule.id,rule.pattern,rule.caseInsensitive);return !re||re.test(text);
-          })];
-        } catch { return rules; }
-      }
+    // RE2 simple-fold equivalents of ASCII S/K must participate in gates.
+    // This transforms candidates only; every exact span still uses original.
+    const lower=text.replace(/[ſK]/g,char=>char==='ſ'?'s':'k').toLowerCase();
+    const selected=rules.filter(rule=>prefixes[rule.id]?.some(prefix=>lower.includes(prefix)));
+    if(selected.length<=8 && prefixlessSet) {
+      try {
+        return [...prefixlessSet.match(text).map(index=>prefixlessRules[index]!),...selected.filter(rule=>{
+          const re=compileVendored(rule.id,rule.pattern,rule.caseInsensitive);return !re||re.test(text);
+        })];
+      } catch { return rules; }
     }
   }
   let set = secretSets.get(rules);

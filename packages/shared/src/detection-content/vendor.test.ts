@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { VENDORED_PACK_MANIFESTS, VENDORED_SECRET_RULES, credentialAudienceViolations, normaliseForInjection } from "./index.js";
 import { secretCandidateRules, injectionText, vendoredCompileProblems, vendoredInjectionHits, vendoredSecretSpans } from "./match.js";
 import { vendoredMcpFindings } from "./mcp.js";
+import { GUARDRAIL_DETECTORS } from "../guardrails.js";
 import { scrubAuditText } from "../audit-scrub.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -59,6 +60,35 @@ describe("Vendored detection admission and real consumers", () => {
       for (const rule of secretCandidateRules(text, rawRules)) expect(optimized.has(rule.id), rule.id).toBe(true);
       expect(vendoredSecretSpans(text)).toEqual(vendoredSecretSpans(text, { rules: rawRules }));
     }
+  });
+  it("R23-02: non-ASCII and 400k near misses retain the 100ms budget",()=>{
+    for(const text of ["é".repeat(50000),"é".repeat(400000),"x".repeat(400000)+"ſ", "a".repeat(400000)+"K"]){
+      const start=performance.now();expect(vendoredSecretSpans(text)).toEqual([]);expect(performance.now()-start).toBeLessThan(100);
+    }
+  });
+  it("R23-03: stream-safe spacing marks cannot cause quadratic ICU ordering",()=>{
+    const start=performance.now();normaliseForInjection("\u302e\u1715".repeat(160000));expect(performance.now()-start).toBeLessThan(100);
+  });
+  it("R23-08: synthetic overlapping assignments scrub idempotently",()=>{
+    for(const key of ["sk-ant-"+"A".repeat(30),"ghp_"+"A".repeat(36),synthetic])for(const prefix of ["api_key=","TOKEN=","secret='"]){
+      const once=scrubAuditText(prefix+key+"' trailing");expect(scrubAuditText(once)).toBe(once);
+    }
+  });
+  it("R23-08: seeded synthetic fragments reach a stable scrub result",()=>{
+    let seed=0x231008;const next=()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return seed>>>0;};
+    const chunks=["password=","TOKEN=","secret='","api_key=","aws_secret_access_key=",synthetic,"ghp_"+"A".repeat(36),"sk-ant-"+"B".repeat(30),"A".repeat(40)," ","'",'"',"=",":",";","\n"];
+    for(let i=0;i<20000;i++){
+      const input=Array.from({length:2+next()%7},()=>chunks[next()%chunks.length]).join("");
+      const once=scrubAuditText(input);expect(scrubAuditText(once),`seeded case ${i}: ${input}`).toBe(once);
+    }
+  });
+  it("R23-06/09: default rules omit preset Ethereum addresses and the pack controls runtime DLP",()=>{
+    expect(VENDORED_SECRET_RULES.some(rule=>rule.id==="pipelock.secrets.ethereum_address")).toBe(false);
+    expect(VENDORED_PACK_MANIFESTS.find(pack=>pack.id==="pipelock-secrets")!.notImported.some(entry=>entry.reason.includes("Preset-only"))).toBe(true);
+    const enabled=GUARDRAIL_DETECTORS.semantic_dlp.detect(synthetic,[],{vendoredPacks:["pipelock-secrets"]});
+    const disabled=GUARDRAIL_DETECTORS.semantic_dlp.detect(synthetic,[],{vendoredPacks:[]});
+    expect(enabled.reduce((sum,hit)=>sum+hit.count,0)).toBeGreaterThan(disabled.reduce((sum,hit)=>sum+hit.count,0));
+    expect(scrubAuditText(synthetic)).not.toContain(synthetic);
   });
   it("normalises invisible, compatibility, confusable, accent and whitespace evasion", () => {
     for (const text of ["i\u200bgnore", "ｉｇｎｏｒｅ", "іgnоrе", "igno\u0301re"]) expect(normaliseForInjection(text)).toBe("ignore");

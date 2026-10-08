@@ -14,6 +14,7 @@ export function DetectionContentPanel() {
         {query.data!.packs.map((pack) => <div key={pack.id}>
           <p><strong>{pack.id}</strong>: {pack.enabled ? "Enabled" : "Disabled"}; {pack.rules} imported {pack.rules === 1 ? "rule" : "rules"}; {pack.notImported.length} exclusions.</p>
           {pack.rules === 0 && <p>This pack has no eligible imported rules and contributes no detections.</p>}
+          {pack.id === "pipelock-secrets" && <p>This setting controls credential detections in the runtime DLP detector and caller-content audience checks where installed. Audit redaction always remains on.</p>}
           {pack.auditRedactionAlways && <p>Secret redaction on the audit path always applies, including when this pack is disabled elsewhere.</p>}
           <p>Source: {pack.source}. Licence: {pack.licence}. Commit: <code>{pack.commit}</code>.</p>
           <p>Snapshot SHA-256: <code>{pack.sha256}</code>.</p>
