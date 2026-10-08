@@ -35,6 +35,23 @@ export const STEP_UP_DIGEST_VERSION = "regulait.step-up.v1";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
+/**
+ * ADR-0186 decision 29 (PR #198 follow-up, finding 51): what a TOOL-SCOPED
+ * consent (ADR-0104 `approvalScope: "tool"`) signs in place of the arguments
+ * digest. The approver of a tool-scoped approval consents to other arguments
+ * for the same tool (the review says so), so their signature cannot cover the
+ * arguments of the one call that queued it: it covers this fixed wildcard
+ * instead, and the scope itself stays bound through `contextDigest` (ADR-0105's
+ * fingerprint includes `approvalScope`). An action-scoped approval signs the
+ * exact arguments digest, as before.
+ */
+export const TOOL_SCOPE_ARGUMENTS_DIGEST = sha256Hex(`${APPROVAL_SIGN_VERSION}:tool-scope:any-arguments`);
+
+/** the arguments digest a signature covers: the exact one for action scope, the wildcard for tool scope */
+export function signedArgumentsDigest(approvalScope: string | null | undefined, argumentsDigest: string): string {
+  return approvalScope === "tool" ? TOOL_SCOPE_ARGUMENTS_DIGEST : argumentsDigest;
+}
+
 /** the facts an approver's signature covers */
 export interface ApprovalSigningFacts {
   approvalId: string;

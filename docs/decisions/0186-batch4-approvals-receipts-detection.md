@@ -527,6 +527,52 @@ unless stated.
       compliance profiles (`POST /v1/compliance/profiles`, the onboarding pack) — also written through `applyRuleEdit`,
       but their loosening is a cascade question (required templates, PII and MCP modes, retention, guardrail floors)
       that needs its own comparator; recorded as a residual.
+29. **Follow-up to PR #198 (2026-10-08, branch `b4-followup`)** (`zz-b4f-followup-review-fixes.test.ts`, 7 tests,
+    all red first on a082054; web census extended; no migration):
+    - **IdP groups never join an approver pool silently** (finding 48). `reconcileGroupRoles` (OIDC, SAML and SCIM
+      group sync alike) never inserts a group-derived assignment into an approver role (a rule as served names it,
+      decided per role under the approver-role lock): it withholds it, records it in the reconciliation row and writes
+      a `group-role-withheld` deny row, exactly as the JIT default role does. An admin may assign the role directly,
+      with the step-up a role assignment needs. And `approvalRuleLoosens` counts pointing a rule at a role that any
+      group is mapped to as a pool widening, whatever the role holds today (its materialised members would understate
+      it). Mapping a group to a role that is already an approver role needed `settings_relax` since round 3. Creating a
+      rule that names such a role asks for nothing: the withholding above means no IdP member ever joins through it.
+      **Pending owner confirmation**: this is the coordinator's standing recommendation on the open SCIM question
+      (residual "Reactivation through SCIM" is a separate item).
+    - **A linked SSO identity is a step-up method on plain HTTP too** (finding 49). For admitting a credential and for
+      the completion recheck under the user's row lock, a linked identity at an enabled provider counts whatever the
+      request's transport. On plain HTTP the account is asked for the step-up it cannot give there
+      (`422 step_up_unavailable`, naming HTTPS), never admitted as an account with no method.
+    - **A passkey-backed grant ends with its passkey** (finding 50). The grant consumption (and the non-spending
+      check) requires the passkey that gave a `passkey` grant to be unrevoked, reading its row `FOR SHARE` in the same
+      statement, so a revocation in flight is waited for and then seen; a deleted credential (SET NULL) leaves the
+      grant unusable. Belt and braces: `revokePasskey` ends every outstanding grant of that passkey in the same
+      transaction.
+    - **Tool-scoped consent signs the tool-scope wildcard** (finding 51). For `approvalScope: "tool"` the signed
+      payload's `argumentsDigest` is `TOOL_SCOPE_ARGUMENTS_DIGEST` (a fixed digest meaning "any arguments for this
+      tool"), at signing-options, decide and the execution recheck alike; the scope stays bound through
+      `contextDigest`, whose ADR-0105 fingerprint includes `approvalScope`. The review screen already tells the
+      approver "Other arguments for this tool are permitted". Action scope signs and rechecks the exact arguments
+      digest as before. A tool-scoped decision signed before this change no longer verifies (it fails closed and is
+      superseded); nothing is live.
+    - **Compliance-profile loosening** (finding 52, round 8's residual). `COMPLIANCE_PROFILE_LOOSENING` in
+      `rule-loosening.ts`, typed over every column of `compliance_profiles`, judged against the profile as enforced now
+      and applied by the same two choke points (`applyRuleEdit` for `POST /v1/compliance/profiles` and the onboarding
+      pack, `activateVersion` for its versions). A null is "no opinion", always the loosest value.
+
+      | Field | Looser when |
+      |---|---|
+      | `requiredTemplateIds`, `redteamGatingClasses` | a forced entry dropped |
+      | `mcpDefaultMode` | read_only -> read_write |
+      | `piiMode` | below the stored mode (block > warn > log) |
+      | `auditRetentionDays`, `backupRetentionDays`, `redteamMinTrials` | lower, or none |
+      | `patchCadenceDays`, `maxProjectBudgetUsd` | higher, or none |
+      | `budgetEnforcement` | block -> warn_only -> no opinion |
+      | `guardrailModes` | any detector's floor lowered or dropped |
+      | `redteamFailOnSeverity` | a higher severity (fails fewer defeats), or none |
+      | `tag`, `id`, `createdAt` | any change (never written by an edit) |
+
+      Both web writers (the profiles page, the first-run pack) go through `withStepUp` and the census covers them.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
@@ -551,8 +597,7 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
   (deactivation and deletion now do). Needs a policy-diff classifier.
 - **OIDC/SAML provider enable** asks for nothing, matching their creation (Class C rule: the same step-up as the
   matching grant).
-- **Compliance-profile loosening** (round 8): editing a profile (`POST /v1/compliance/profiles`, the onboarding
-  pack) is not yet judged by a loosening comparator; it needs one over the profile's cascade fields.
+- **Compliance-profile loosening** (round 8): closed in the follow-up (decision 29).
 - **409 `changed_concurrently` in the web client** is shown through the generic error display; a dedicated
   "this changed while you were deciding, reload" message is a follow-up.
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which

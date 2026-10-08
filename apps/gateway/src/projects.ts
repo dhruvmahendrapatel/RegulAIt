@@ -75,7 +75,7 @@ import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-vers
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { isApprovalTeam } from "./approval-pool.js";
-import { requireStepUp } from "./step-up.js";
+import { approvalRuleStepUp, requireStepUp } from "./step-up.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -2152,6 +2152,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // a version keeps it visible and rollback-able instead of changing it.
     const { tag: _tag, ...versioned } = values;
     const res = await applyRuleEdit<ComplianceProfileRow>(db, {
+      // ADR-0186 decision 29 (finding 52): an edit that loosens what the framework forces
+      // (rule-loosening.ts) needs the settings_relax step-up
+      stepUp: approvalRuleStepUp(db, req),
       artifactType: "compliance_profile",
       artifactId: existing.id,
       patch: versioned,

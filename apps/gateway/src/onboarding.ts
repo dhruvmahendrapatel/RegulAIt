@@ -105,7 +105,7 @@ import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
 import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
 // versioned fields, so it goes through the one choke point.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -517,6 +517,9 @@ export function registerOnboardingRoutes(
       if (!row) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
       const { tag: _tag, ...versioned } = values;
       const edit = await applyRuleEdit<ComplianceProfileRow>(db, {
+        // ADR-0186 decision 29 (finding 52): re-applying a pack over a profile an admin tightened
+        // is judged like any profile edit
+        stepUp: approvalRuleStepUp(db, req),
         artifactType: "compliance_profile",
         artifactId: row.id,
         patch: versioned,
