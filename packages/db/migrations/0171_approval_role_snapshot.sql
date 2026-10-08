@@ -15,14 +15,36 @@
 -- foreign key: it is a historical fact; a deleted role's assignments go with
 -- it, which only narrows the pool.
 --
--- Existing PENDING tool-call approvals take their rule's role as it stands
--- now (the role they are judged against today); decided rows are history and
--- are left alone.
+-- Existing LIVE tool-call approvals — pending, and approved but not yet
+-- consumed (a consent issued before this migration still releases its call) —
+-- take their rule's role AS SERVED now: the rule's ACTIVE version when it has
+-- one (`approverRoleId` in the version body, an explicit null included),
+-- otherwise the base row. This is `servedApprovalRules`' resolution. A canary
+-- version is never enforced for an approval rule (approval rules are a
+-- shadow-canary artifact type, ADR-0073: the canary is evaluated and recorded,
+-- the active version decides), so it never names the pool. A rule whose
+-- versions have no active one is enforced as its base row until it is refused
+-- (`applyRuleVersions`), so it takes the base row too. Decided and consumed
+-- rows are history and are left alone.
+--
+-- Edited in place on PR #198 (review round 8, findings 44–45; unmerged): a dev
+-- database that applied 0171 before round 8 ran the older
+-- backfill (base row, pending only) and must be rebuilt (drizzle never re-runs an applied migration).
 ALTER TABLE "approvals" ADD COLUMN "approver_role_id" uuid;
 --> statement-breakpoint
-UPDATE "approvals" a SET "approver_role_id" = r."approver_role_id"
-  FROM "approval_rules" r
-  WHERE r."id" = a."rule_id" AND a."status" = 'pending' AND a."object_type" IN ('mcp_tool', 'connector_call');
+UPDATE "approvals" a SET "approver_role_id" = (
+    SELECT CASE
+        WHEN v."id" IS NOT NULL AND v."body" ? 'approverRoleId' THEN NULLIF(v."body" ->> 'approverRoleId', '')::uuid
+        ELSE r."approver_role_id"
+      END
+      FROM "approval_rules" r
+      LEFT JOIN "config_versions" v
+        ON v."artifact_type" = 'approval_rule' AND v."artifact_id" = r."id" AND v."status" = 'active'
+      WHERE r."id" = a."rule_id"
+  )
+  WHERE a."rule_id" IS NOT NULL
+    AND a."status" IN ('pending', 'approved')
+    AND a."object_type" IN ('mcp_tool', 'connector_call');
 --> statement-breakpoint
 -- ADR-0186 A (PR #198 review round 4): a fresh SSO login's `auth_time` is
 -- compared at the precision the identity provider gives it. OIDC `auth_time`

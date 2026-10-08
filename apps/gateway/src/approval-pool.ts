@@ -567,7 +567,7 @@ export async function assertRuleRemovalStepUp(
 }
 
 /** the step-up a rule write that loosens a protection carries: the route's (`stepUp`), or a fail-closed refusal */
-async function requireRuleStepUp(
+export async function requireRuleStepUp(
   db: Q,
   facts: { ruleId: string; values: Record<string, unknown> },
   stepUp: ApprovalRuleStepUp | null | undefined,

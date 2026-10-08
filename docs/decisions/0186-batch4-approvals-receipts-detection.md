@@ -478,6 +478,52 @@ unless stated.
     - **Step-up PATCH goes through the shared client** (finding 43): `api.patchWithHeaders` (api/client.ts) carries the
       same session-loss (401) handling as every write, and `stepUp.ts` no longer has a raw `fetch` of its own. A web unit
       test proves the 401 reaches the shared handler. `node scripts/preflight-ui-affordances.mjs`: 0 orphaned.
+28. **PR #198 review fixes, round 8 (2026-10-08)** (`zz-b4c8-review-fixes.test.ts` and
+    `zz-b4c8-migration-0171.test.ts`, 10 tests, all red first on 9f644e3; migration 0171 edited in place, no new
+    migration):
+    - **0171's role backfill takes the rule AS SERVED, for every live approval** (findings 44–45). Pending and
+      approved-but-unconsumed tool-call approvals take the ACTIVE version's `approverRoleId` (an explicit null
+      included), else the base row — `servedApprovalRules`' resolution. A canary version never names the pool:
+      approval rules are a shadow-canary type (ADR-0073), so the canary is evaluated and recorded and the active
+      version decides; there is nothing to reproduce in SQL and no row to supersede. Decided and consumed rows stay
+      null. The migration test seeds a 0170 database with base-only, active-version, canary and cleared-role rules,
+      each with pending, approved and consumed approvals. **Dev databases that applied 0171 before this round must be
+      rebuilt** (drizzle never re-runs an applied migration); 0173 stays reserved for Batch 5.
+    - **The consume-time recheck read-locks what it decides on** (finding 46, option b). Inside the consuming
+      transaction, before any recheck read, `lockRecheckFacts` takes `FOR SHARE` (in id order) on every approving
+      decider's and principal's `users` row and every signing `webauthn_credentials` row. A deactivation, a passkey
+      revocation or a deletion is an UPDATE/DELETE of exactly that row, which takes the row's write lock, so the two
+      serialise without any change to those paths: one in flight is waited for and then seen (the call is refused and
+      the approval superseded); one that starts later waits for the consumption — a legitimate serial order (consumed,
+      then revoked). Chosen over (a) because (a) needs a new migration (an epoch trigger on two hot tables whose
+      sign-in bookkeeping would advance the epoch on every login) and 0173 is reserved. The race tests use two
+      connections and also show the pre-fix harm: the call ran.
+    - **One loosening comparator per rule kind, over every field** (finding 47, `rule-loosening.ts`). Typed over every
+      column of `approval_rules`, `rate_limits` and `data_scope_rules` (`{ [K in keyof Row]-?: FieldClass }`), so a new
+      column fails typecheck until it is classified. Judged against the rule as enforced now (active body over the
+      row). Applied by `applyRuleEdit` (every row PATCH, the deploy-mode route, the copilot applier) to what the write
+      stores, and by `activateVersion` (mint-and-activate, activate, rollback, canary promotion) to the version it
+      makes enforcing. A draft version enforces nothing, so creating one asks for nothing; activating it is the
+      guarded moment. A writer with no request to step up (the copilot applier) is refused while the policy asks for
+      one.
+
+      | Kind | Field | Class | Looser when |
+      |---|---|---|---|
+      | all three | `toolName`, `deployMode` | match | narrowed: null (every tool / mode) -> one, or one -> another |
+      | all three | `userId`, `serverId`, `roleId`, `teamId`, `scope`, `serverScope` | selection | any change (every writer refuses it; fail closed) |
+      | all three | `id`, `createdAt` | identity | any change (never written) |
+      | approval rule | `approverUserId`, `approverRoleId`, `quorum` | pool | `approvalRuleLoosens` (lower quorum, wider pool, more principals) |
+      | approval rule | `writeOnly` | compare | false -> true (only writes then need approval) |
+      | approval rule | `approvalScope` | compare | action -> tool (one consent releases other arguments) |
+      | rate limit | `maxCalls` | compare | higher |
+      | rate limit | `windowSeconds` | compare | shorter |
+      | data scope | `argPath` | compare | any change (the guarded argument becomes unconstrained) |
+      | data scope | `allowedValues` | compare | any value not allowed before |
+
+      The deploy-mode route keeps its own step-up (same rule) and tells the writer it was asked. **Not covered:**
+      compliance profiles (`POST /v1/compliance/profiles`, the onboarding pack) — also written through `applyRuleEdit`,
+      but their loosening is a cascade question (required templates, PII and MCP modes, retention, guardrail floors)
+      that needs its own comparator; recorded as a residual.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
@@ -502,6 +548,8 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
   (deactivation and deletion now do). Needs a policy-diff classifier.
 - **OIDC/SAML provider enable** asks for nothing, matching their creation (Class C rule: the same step-up as the
   matching grant).
+- **Compliance-profile loosening** (round 8): editing a profile (`POST /v1/compliance/profiles`, the onboarding
+  pack) is not yet judged by a loosening comparator; it needs one over the profile's cascade fields.
 - **409 `changed_concurrently` in the web client** is shown through the generic error display; a dedicated
   "this changed while you were deciding, reload" message is a follow-up.
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which

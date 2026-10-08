@@ -1026,6 +1026,10 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       const lockedMode = ((await currentEffectiveBody(tx, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
       if (lockedMode !== beforeMode) return null;
       return applyRuleEdit<{ id: string; deployMode: string | null }>(tx, {
+      // this route asked its own settings_relax step-up for a narrowing above (the
+      // same rule as the edit guard's deploy-mode comparator), decided again on the
+      // locked scope just now — the guard inside the writer is satisfied by it
+      stepUp: async () => {},
       artifactType: RULE_ARTIFACT_TYPES[kind],
       artifactId: ruleId,
       patch: { deployMode: body.deployMode ?? null },

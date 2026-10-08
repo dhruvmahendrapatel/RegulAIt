@@ -120,6 +120,7 @@ import {
   assertApprovalRuleWritable,
   type ApprovalRuleStepUp,
 } from "./approval-pool.js";
+import { assertRuleLooseningStepUp, ruleLooseningCovers } from "./rule-loosening.js";
 import { approvalRuleStepUp } from "./step-up.js";
 
 /**
@@ -575,19 +576,23 @@ export async function activateVersion(
     const previous = versions.find((v) => v.status === "active") ?? null;
     if (args.artifactType === "approval_rule") {
       const ruleRow = await loadRuleRow(tx, args.artifactType, args.artifactId);
+      if (ruleRow) await assertApprovalRuleWritable(tx, approvalRuleShape({ ...ruleRow, ...(target.body as Record<string, unknown>) }));
+    }
+    // ADR-0180 / ADR-0186 decision 28 (finding 47): activating (or rolling back to, or
+    // promoting) a version that loosens what the rule enforces NOW — a lower quorum, a
+    // wider pool, fewer calls matched, a higher limit, a wider scope — needs the
+    // settings_relax step-up, for every rule kind the comparator covers
+    if (ruleLooseningCovers(args.artifactType) && previous?.id !== target.id) {
+      const ruleRow = await loadRuleRow(tx, args.artifactType, args.artifactId);
       if (ruleRow) {
-        const after = approvalRuleShape({ ...ruleRow, ...(target.body as Record<string, unknown>) });
-        await assertApprovalRuleWritable(tx, after);
-        // ADR-0180: activating (or rolling back to, or promoting) a version with a lower quorum or a
-        // wider pool than what enforces now needs the settings_relax step-up
-        if (previous?.id !== target.id) {
-          await assertApprovalRuleLooseningStepUp(tx, {
-            ruleId: args.artifactId,
-            before: approvalRuleShape({ ...ruleRow, ...((previous?.body ?? {}) as Record<string, unknown>) }),
-            after,
-            stepUp: args.stepUp,
-          });
-        }
+        const base = ruleRow as Record<string, unknown>;
+        await assertRuleLooseningStepUp(tx, {
+          artifactType: args.artifactType,
+          ruleId: args.artifactId,
+          before: { ...base, ...((previous?.body ?? {}) as Record<string, unknown>) },
+          after: { ...base, ...(target.body as Record<string, unknown>) },
+          stepUp: args.stepUp,
+        });
       }
     }
     const rollback = previous != null && previous.version > target.version;

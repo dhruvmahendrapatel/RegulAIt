@@ -112,9 +112,9 @@ import {
   type DbOrTxDeep,
 } from "./config-versions.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { assertRuleLooseningStepUp, ruleLooseningCovers } from "./rule-loosening.js";
 import {
   approvalRuleShape,
-  assertApprovalRuleLooseningStepUp,
   assertApprovalRuleWritable,
   type ApprovalRuleStepUp,
 } from "./approval-pool.js";
@@ -301,13 +301,22 @@ async function applyRuleEditLocked<T>(
   // ADR-0186 A — THE ONE GUARD on a plain row write of an approval rule (a minted
   // version is guarded where every version is: `newVersion` / `activateVersion`)
   if (args.artifactType === "approval_rule" && plan.kind === "row") {
-    const after = approvalRuleShape({ ...row, ...plan.rowPatch });
-    await assertApprovalRuleWritable(db, after);
-    // ADR-0180: a lower quorum or a wider pool needs the settings_relax step-up
-    await assertApprovalRuleLooseningStepUp(db, {
+    await assertApprovalRuleWritable(db, approvalRuleShape({ ...row, ...plan.rowPatch }));
+  }
+  // ADR-0186 decision 28 (finding 47) — THE RULE-EDIT LOOSENING GUARD, over every
+  // field of the rule kind, judged against the rule as enforced now (the active
+  // body over the row). What this write itself stores is `rowPatch` (on a `row`
+  // plan, every patched field; on `mint`/`no_change`, the non-enforcing columns);
+  // the enforcing half of a mint is guarded by `activateVersion`, like every
+  // activation
+  if (ruleLooseningCovers(args.artifactType) && Object.keys(plan.rowPatch).length > 0) {
+    const active = versions.find((v) => v.status === "active");
+    const before = { ...(row as Record<string, unknown>), ...((active?.body ?? {}) as Record<string, unknown>) };
+    await assertRuleLooseningStepUp(db, {
+      artifactType: args.artifactType,
       ruleId: args.artifactId,
-      before: approvalRuleShape(row),
-      after,
+      before,
+      after: { ...before, ...plan.rowPatch },
       stepUp: args.stepUp,
     });
   }

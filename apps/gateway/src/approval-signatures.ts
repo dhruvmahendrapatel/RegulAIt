@@ -1032,6 +1032,35 @@ export async function reusePendingToolApproval(db: Q, approvalId: string): Promi
 }
 
 /**
+ * ADR-0186 decision 28 (PR #198 round 8, finding 46): the account and passkey
+ * rows the execution recheck decides on — every approving decider and
+ * principal, every signing credential — are read-locked (`FOR SHARE`, in id
+ * order) on the consuming transaction BEFORE the recheck reads them. Neither
+ * table is a policy-epoch source, so without the lock a deactivation or a
+ * passkey revocation committing during the recheck could be read as its old
+ * state and the call consumed anyway. With it, a deactivation or revocation
+ * (an UPDATE, which takes the row's write lock) that is in flight is waited for
+ * and then seen; one that starts later waits for the consumption to commit — a
+ * legitimate serial order (consumed, then revoked). Call inside the consuming
+ * transaction.
+ */
+async function lockRecheckFacts(db: Q, decisions: readonly ApprovalDecisionRow[]): Promise<void> {
+  const userIds = [...new Set(decisions.flatMap((d) => [d.deciderUserId, d.principalUserId]).filter((x): x is string => !!x))].sort();
+  if (userIds.length > 0) {
+    await db.select({ id: users.id }).from(users).where(inArray(users.id, userIds)).orderBy(users.id).for("share");
+  }
+  const credentialIds = [...new Set(decisions.map((d) => d.credentialId).filter((x): x is string => !!x))].sort();
+  if (credentialIds.length > 0) {
+    await db
+      .select({ id: webauthnCredentials.id })
+      .from(webauthnCredentials)
+      .where(inArray(webauthnCredentials.id, credentialIds))
+      .orderBy(webauthnCredentials.id)
+      .for("share");
+  }
+}
+
+/**
  * The quorum a queued tool-call approval's call would need if it were queued
  * NOW: max(its naming rule's current quorum, the org's sensitive quorum when the
  * call is sensitive now — `callSensitivity`, the same server-side test the queue
@@ -1061,6 +1090,7 @@ export async function requiredQuorumNow(db: Q, row: ApprovalRow): Promise<number
 export async function recheckApprovalSignatures(db: Q, row: ApprovalRow, call: CallFacts | null): Promise<RecheckOutcome> {
   if (!isToolCallApproval(row)) return { ok: true };
   const decisions = (await decisionsFor(db, row.id)).filter((d) => d.decision === "approved");
+  await lockRecheckFacts(db, decisions);
   const deciders = await recheckDeciders(db, row, decisions);
   if (!deciders.ok) return deciders;
   // ADR-0186 A: the quorum this call needs NOW (its rule's, and the org's sensitive
