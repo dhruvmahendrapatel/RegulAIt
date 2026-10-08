@@ -77,7 +77,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     unverified: [
       "image digest and signature (the image is not built yet)",
       "maintainer count",
-      "transitive licences: four permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0, AFL-2.1 OR BSD-3-Clause) await an owner decision",
+      "transitive licences: 11 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
       "runtime behaviour inside the built image (egress test, air-gapped run)",
       "the disabled-telemetry path still attempts a request in 0.123.1: the image patches it, and network denial stays the control",
     ],

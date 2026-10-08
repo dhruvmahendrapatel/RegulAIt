@@ -453,6 +453,30 @@ services:
     # the ONLY thing a sidecar engine runner can reach (see x-engine-runner).
     networks: [regulait, engines]
 
+  # --- promptfoo engine runner (profile: engines) — ADR-0187 B5-P ------------
+  #
+  # OFF unless the `engines` profile is up, and the engine stays disabled in the
+  # product until an admin enables it after this runner's self-test passes.
+  # Build the image from the repository root (engines/promptfoo/Dockerfile),
+  # then pin it BY DIGEST:
+  #
+  #   REGULAIT_ENGINE_PROMPTFOO_IMAGE=regulait/engine-promptfoo@sha256:<digest>
+  #   REGULAIT_ENGINE_PROMPTFOO_DIGEST=sha256:<the same digest>
+  #
+  # The digest must equal the one in the shipped manifest; until a build is
+  # recorded there the self-test fails `image_not_built` and nothing can be
+  # enabled. The default reference below names no digest on purpose: with
+  # pull_policy never it starts only from an image loaded locally, and its
+  # self-test cannot pass. Only the template's hardening applies (no ports, no
+  # volumes, no network but `engines`).
+  engine-promptfoo:
+    <<: *engine-runner
+    image: ${REGULAIT_ENGINE_PROMPTFOO_IMAGE:-regulait/engine-promptfoo:0.123.1}
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-}
+
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
   # OFF by default. Keycloak brokers Microsoft Entra ID, Google and GitHub and

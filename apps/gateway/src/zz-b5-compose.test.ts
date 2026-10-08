@@ -61,4 +61,22 @@ describe("ADR-0187: the engines network and the runner template", () => {
     const env = t.slice(t.indexOf("  environment:"), t.indexOf("  restart:"));
     expect(env.match(/\n {4}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_GATEWAY_URL:", "REGULAIT_ENGINE_ENROLLMENT_TOKEN:"]);
   });
+
+  it("B5-P: the promptfoo runner merges the template and overrides nothing but its image and its three non-secret-or-enrolment variables", () => {
+    const svc = block("engine-promptfoo");
+    expect(svc).toMatch(/\n {4}<<: \*engine-runner\n/);
+    // nothing that would widen the template: no ports, volumes, networks, privileges, profiles or user
+    for (const key of ["ports", "volumes", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode"]) {
+      expect(svc, key).not.toMatch(new RegExp(`\\n {4}${key}:`));
+    }
+    // the image reference is configurable for a digest pin and never a floating tag
+    expect(svc).toMatch(/\n {4}image: \$\{REGULAIT_ENGINE_PROMPTFOO_IMAGE:-regulait\/engine-promptfoo:0\.123\.1\}\n/);
+    expect(svc).not.toMatch(/:latest/);
+    const env = svc.slice(svc.indexOf("    environment:"));
+    expect(env.match(/\n {6}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual([
+      "REGULAIT_GATEWAY_URL:",
+      "REGULAIT_ENGINE_ENROLLMENT_TOKEN:",
+      "REGULAIT_ENGINE_IMAGE_DIGEST:",
+    ]);
+  });
 });
