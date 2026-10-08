@@ -440,6 +440,68 @@ Tests: `zz-b5-engines.test.ts` "review round 2" (4), `packages/shared/src/engine
     already committed, so the error is caught and stored as `last_skip` ("the run could not be created: …") with an
     `engine-schedule-skipped` audit row; a due run is never lost silently.
 
+### Implementation decisions (B5-P promptfoo, 2026-10-08, branch `b5-promptfoo`)
+
+Built without the G19 research (not started): every fact the ADR expected from G19 for promptfoo was read from the
+pinned package itself and recorded with its method in `docs/research/R10-engine-admission.md` §promptfoo; what could
+not be established fails closed and is listed under open questions 6–9. No migration. Tests:
+`packages/engine-promptfoo/src/promptfoo.test.ts` (10), `image.test.ts` (4), `promptfoo-real.test.ts` (3, opt-in: the
+real promptfoo 0.123.1 against a fake gateway), `apps/gateway/src/zz-b5-promptfoo.test.ts` (5, the real gateway),
+`zz-b5-compose.test.ts` (+1). Each guard was shown red by breaking it.
+
+39. **One shared catalogue decides what runs** (`packages/shared/src/engines/promptfoo.ts`, pinned to 0.123.1, the
+    vendored OWASP tables' release): each plugin and strategy is `local`, `cloud_only` (upstream returns nothing or
+    throws with remote generation off), `missing_preseed` (dataset plugins that download at run time) or
+    `excluded_licence` (`pliny`); anything unlisted is not run (`engine_error`) and never reaches promptfoo. The
+    manifest's `sets` are generated from it (only sets that run are classed; the rest stay offensive by default), as
+    are the reduced set and the usage-data switches. A run-config set is a plugin id or `strategy:<id>`.
+40. **Taxonomy v2.** Items are (plugin, strategy) pairs keyed `<plugin>/<strategy>`; a `basic` item maps by its plugin
+    id, a strategy item by `strategy:<id>` (what it measures is the evasion technique): prompt-extraction →
+    system_prompt_extraction; pii:* and harmful:privacy → pii_leak; cross-session-leak, divergent-repetition →
+    data_exfiltration; the encodings → encoding_evasion; jailbreak-templates, jailbreak:tree, crescendo → jailbreak.
+    **Deliberately unmapped (reported, never counted):** the agentic-named plugins (excessive-agency, shell-injection,
+    sql-injection, rbac, debug-access, tool-discovery) — a promptfoo run reaches the agent over the chat compat route
+    and cannot show whether a tool call was made, so claiming ADR-0068's agentic classes from it would overstate
+    coverage; and the content-quality plugins, which have no class here.
+41. **The config generator never leaves the gateway, and an invariant re-checks it** (`assertGatewayOnly`, before
+    anything is written): exactly three providers (target, `redteam.provider` generator, `defaultTest.options.provider`
+    grader — unset, promptfoo grades with a vendor default), each `openai:chat:<model>` at the lease's base URL with
+    `apiKeyEnvar` set to the one run-key variable and `useDefaultApiKey: false`; no URL off the gateway anywhere; no
+    inline key; `sharing: false`. The child environment is an allow-list built from nothing (PATH, HOME and the config
+    and cache directories on the run's tmpfs, the switches, the key): a proxy, a vendor key or a remote-URL override is
+    refused. A refused config, a missing judge or nothing runnable ends the run `not_run` without starting promptfoo.
+42. **The mapper decides verdicts from promptfoo's results, never its exit code alone**: a graded failure is a defeat;
+    an error is not an attempt — a 401 (the key revoked: budget, cancel, timeout) or any engine error makes the item
+    `unknown`, and an item whose every attempt failed to connect is `not_run` (`egress_denied`); a planned plugin with no
+    result is `not_run` (`engine_error`); a result for something not planned, or with no plugin, is `unknown` and
+    unmapped. Exit codes 0 and 100 are a completed run; anything else `failed`. promptfoo aborts a scan on a 401 and
+    still exits 0, which is why the 401 rule matters. No model text leaves the runner: every reason is a fixed sentence
+    with counts. The raw output rides as the raw report when it fits (3 MB), else only its sha256.
+43. **The telemetry patch** (`engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs`, the ADR's "minimal
+    patch"): one `if (this.disabled) return;` at the top of each of the four bundled copies of `sendEvent`. It refuses to
+    apply unless it finds exactly four, once each. Measured: unpatched, each promptfoo process made one blocked connect
+    to the vendor's event collector with telemetry disabled; patched, none.
+44. **The image** (`engines/promptfoo/Dockerfile`, built from the repository root): the gateway's digest-pinned base in
+    every stage; the npm closure from its own lockfile (`npm ci --omit=optional --ignore-scripts`; the native sqlite
+    binding pinned as a direct dependency so it survives `--omit=optional`, which makes the image linux/amd64 only);
+    an offline licence gate on the lockfile before install (`licence-gate.mjs`: fails on the GPL family, SSPL, BUSL,
+    EPL, MPL or no licence); npm's own CycloneDX SBOM of the installed closure shipped at `/opt/promptfoo/sbom.cdx.json`;
+    the patch; the shim deployed production-only; npm, npx and corepack removed; uid 10001; every switch and
+    `REGULAIT_EGRESS_PROBE_ADDRESS` in the image env; no port. `image.test.ts` keeps the Dockerfile, the lockfile and the
+    manifest in lockstep. **Not built here** (no Docker daemon): the manifest digest stays null, so the engine still
+    cannot be enabled. Signing and the image-level Trivy scan join `publish-image.yml`/`security.yml` when the image is
+    first built in CI.
+45. **Two lockfile overrides** lift simple-git to 4.0.2 and basic-ftp to 6.2.2 past published critical/high advisories
+    (`npm audit --omit=optional`: 3 critical, 4 high → 0). Both paths are unreachable in the runner (no git command, no
+    proxy); overridden because ADR-0176 admits no unpatched critical advisory. The real-engine tests pass on the
+    overridden closure.
+46. **Compose `engine-promptfoo`** merges the hardened `x-engine-runner` template and overrides only its image (by
+    env, so an operator pins it by digest; no digest is shipped) and its three variables (gateway URL, enrolment token,
+    the image digest it reports).
+47. **Runner core fix found by the real-gateway test:** the runner sent `content-type: application/json` on the
+    bodiless lease POST, which the gateway refuses with 400 — no runner could ever have leased against the real app
+    (the B5-E tests used a fake transport). The content type is now sent only with a body.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
@@ -473,3 +535,17 @@ compat surface is on (a run then fails at its first call); concurrency is per en
    any change re-queues it) or for every run, and exactly which plugin sets count as offensive. promptfoo and garak here
    target only agents and models reachable through our gateway; tools that attack external hosts (Strix, PentestGPT)
    stay import-only under PF-10 and ADR-0177.
+6. **promptfoo's transitive licences outside the ADR-0176 list (B5-P).** 11 npm packages in the image carry Artistic-2.0
+   (5), BlueOak-1.0.0 (5) or Python-2.0 (1): permissive, not copyleft, not on the list. The image is not admissible
+   until the owner admits these licences (or they are replaced); the build does not fail on them, and the manifest
+   lists the question as unverified. The image's OS layer has not been licence-scanned (Trivy, at the first CI build).
+7. **promptfoo facts G19 still owes (B5-P, fail closed meanwhile):** the maintainer count (5 npm publishers is not a
+   maintainer count; the manifest keeps null); the `pliny` source's licence (taken from this ADR as AGPL, not re-read;
+   excluded either way); the base image's Node version (promptfoo needs ≥ 22.22.0; the registry rate-limited the
+   check).
+8. **promptfoo image build, digest, signature and in-image self-test (B5-P).** Pending a Docker-capable build: until
+   then the manifest digest is null and the engine cannot be enabled. Also open: which digest the manifest pins for an
+   air-gapped install loaded with `docker load` (a registry manifest digest needs a push; the image ID does not).
+9. **Agentic-named promptfoo plugins are unmapped (decision 40).** If the owner wants them to count toward the
+   agentic classes, the run must reach the agent through a path where tool calls are governed and visible (ADR-0068
+   adjudication), which a compat-route run is not.
