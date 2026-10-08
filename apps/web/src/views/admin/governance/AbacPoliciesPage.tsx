@@ -330,7 +330,7 @@ export default function AbacPoliciesPage() {
           const target = confirmDelete;
           setConfirmDelete(null);
           if (target) {
-            void act.run(() => withStepUp((h) => stepUpApi.del(`/v1/abac/policies/${target.id}`, undefined, h)), "Policy deleted");
+            void act.run(() => withStepUp((h) => api.delWithHeaders(`/v1/abac/policies/${target.id}`, h)), "Policy deleted");
           }
         }}
       />

@@ -447,7 +447,7 @@ export default function SodRulesPage() {
                           disabled={act.busy}
                           onClick={() =>
                             void act.run(async () => {
-                              await withStepUp((h) => stepUpApi.del(`/v1/sod/rules/${r.id}`, undefined, h));
+                              await withStepUp((h) => api.delWithHeaders(`/v1/sod/rules/${r.id}`, h));
                               await refreshAll();
                             }, "Rule deleted — the combination is no longer declared toxic")
                           }
