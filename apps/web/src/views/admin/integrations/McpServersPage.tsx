@@ -13,6 +13,8 @@
  * takes name+url only), so it is shown rather than pretended to be editable.
  */
 import { useState } from "react";
+import { McpCoverage, StdioArguments } from "./Batch3Mcp";
+import { IntegrationOwnership } from "./IntegrationOwnership";
 import { api } from "../../../api/client";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
@@ -60,7 +62,11 @@ export default function McpServersPage() {
           <Table<McpServer>
             columns={[
               { key: "name", header: "Name", sort: (s) => s.name, render: (s) => s.name },
-              { key: "url", header: "URL", render: (s) => <span className={v.mono}>{s.url}</span> },
+              { key: "url", header: "Endpoint / command", render: (s) => <span className={v.mono}>{s.transport === "stdio" ? s.stdio?.command ?? "Not reported" : s.url}</span> },
+              { key: "transport", header: "Transport", render: (s) => s.transport ?? "Not reported" },
+              { key: "admission", header: "Admission", render: (s) => s.admissionState ?? "Not reported" },
+              { key: "digest", header: "Pinned command digest", render: (s) => s.stdioCommandDigest ? <span className={v.mono}>{s.stdioCommandDigest}</span> : "Not applicable" },
+              { key: "owner", header: "Ownership", render: (s) => s.ownership ?? "Not reported" },
               {
                 key: "flat",
                 header: "Flat rate / call",
@@ -77,7 +83,7 @@ export default function McpServersPage() {
               {
                 key: "privateRanges",
                 header: "Private ranges",
-                render: (s) => <PrivateRangesCell key={s.id} server={s} />,
+                render: (s) => s.transport === "stdio" ? "Not applicable" : <PrivateRangesCell key={s.id} server={s} />,
               },
               { key: "id", header: "Proxy id", render: (s) => <IdChip id={s.id} /> },
             ]}
@@ -91,6 +97,9 @@ export default function McpServersPage() {
             empty={<EmptyState title="No servers registered" body="Register the first MCP server above." />}
           />
         </Card>
+
+        <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
+        <McpCoverage servers={servers.data?.servers ?? []} />
 
         {selectedId && (
           <ToolsCard
@@ -263,6 +272,9 @@ function RegisterServerForm() {
   const act = useAction();
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
+  const [transport, setTransport] = useState("streamable_http");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState<string[]>([]);
   const [privateRanges, setPrivateRanges] = useState("inherit");
   return (
     <form
@@ -275,8 +287,8 @@ function RegisterServerForm() {
             () =>
               api.post("/v1/servers", {
                 name,
-                url,
-                allowPrivateRanges: privateRangeValue(privateRanges),
+                transport,
+                ...(transport === "stdio" ? { stdio: { command, args } } : { url, allowPrivateRanges: privateRangeValue(privateRanges) }),
               }),
             "Server registered",
           )
@@ -284,6 +296,8 @@ function RegisterServerForm() {
             if (ok) {
               setName("");
               setUrl("");
+              setCommand("");
+              setArgs([]);
               setPrivateRanges("inherit");
             }
           });
@@ -292,10 +306,18 @@ function RegisterServerForm() {
       <Field label="Name">
         <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. repo-tools" />
       </Field>
-      <Field label="URL" grow>
+      <Field label="Upstream transport"><Select value={transport} disabled={act.busy} onChange={(event) => setTransport(event.target.value)}>
+        <option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">Stdio</option>
+      </Select></Field>
+      {transport === "stdio" ? <>
+        <Field label="Executable path"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} placeholder="/opt/mcp/bin/server" /></Field>
+        <StdioArguments args={args} onChange={setArgs} disabled={act.busy} />
+        <p>Stdio must be enabled above and allowed by the deployment operator. The command must be an absolute executable path in an allowed directory, with secure file and parent permissions. Registration pins its digest and requires admission approval.</p>
+      </> : <Field label="URL" grow>
         <Input required value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://mcp.internal/repo" />
       </Field>
-      <Field label="Private ranges (ADR-0043)">
+      }
+      {transport !== "stdio" && <Field label="Private ranges (ADR-0043)">
         <Select
           value={privateRanges}
           onChange={(e) => setPrivateRanges(e.target.value)}
@@ -303,7 +325,8 @@ function RegisterServerForm() {
         >
           {PRIVATE_RANGE_OPTS}
         </Select>
-      </Field>
+      </Field>}
+      <p>Registration is audited and grants nobody access. The transport cannot be changed after registration; enable any non-default transport through the audited coverage controls first.</p>
       <Button type="submit" variant="primary" disabled={act.busy}>
         Register
       </Button>
