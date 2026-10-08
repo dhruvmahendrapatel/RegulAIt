@@ -118,7 +118,8 @@ unless an anchor timestamp covers it).
 `REGULAIT_TSA_POLICY_OID`; no default public TSA. Air-gapped: an internal TSA, or unset → honestly "not timestamped".
 After an anchor flushes, a pkijs `TimeStampReq` (sha256 of the anchor's canonical bytes, nonce, certReq) is sent; the
 response must be granted with matching imprint and nonce, the ESS signing-certificate binding, a chain to the trust
-bundle and the timeStamping EKU. Failures retry with backoff (`anchor-timestamp-sweep`).
+bundle and the timeStamping EKU. Failures retry with backoff (`anchor-timestamp-sweep`). The chain check does no
+network revocation checking (no CRL or OCSP fetch); see Residuals.
 
 ### V — vendored detection content (Codex; owner decision: redact on match)
 `packages/shared/src/detection-content/vendor/{pipelock,nemo,agt}/` with `PROVENANCE.json` (repo, commit, path, file
@@ -161,6 +162,155 @@ The HTTP contracts are in AgentCoordination.md §4.9.
   `decision_receipts_mode` is `on | off`.
 - New free-text columns `approval_decisions.reason` and `webauthn_credentials.revoke_reason` (and the passkey label)
   are registered with the prose scrub.
+
+### Implementation decisions (Batch 4 integration, 2026-10-07/08; `b4-int` @ e315845)
+Slices A (step-up), A2+B (dual control and passkey-signed approvals) and T are merged on `b4-int`, followed by the
+security-review fixes B4S-01 to B4S-09 and gaps G1/G2. The code is the authority; paths are under `apps/gateway/src/`
+unless stated.
+
+**A and B: dual control, step-up and passkey-signed approvals**
+1. **New refusal codes.** Beyond the §A/§B lists: 403 `caller_cannot_approve` (the caller, or someone delegation-linked
+   to them, decides their own call), 409 `approval_not_signable` (signing options for an approval that is not a
+   passkey-mode tool-call approval), 422 `unknown_role` (a rule names a role that does not exist), 403
+   `approval_quorum_unsatisfiable` (a connector write denied at queue time because no pool can approve it), 403
+   `approval_signature_recheck_failed` (a connector write whose approval failed the execution recheck); these five are
+   in `APPROVAL_REFUSALS` (`packages/shared/src/batch4.ts`). The ceremonies add 403 `browser_session_required`, 403
+   `fresh_sign_in_required`, 422 `passkey_attestation_refused`, 409 `passkey_already_registered`, 404
+   `unknown_challenge`, 404 `unknown_step_up` and 413 `step_up_action_too_large`. B4S-02 adds 403
+   `approver_not_eligible`. Rationale: each names a different thing the person must do next.
+2. **First passkey.** An account that already has a passkey, or can already step up (authenticator app or linked SSO),
+   adds a passkey only with a `passkey_manage` step-up. With no way to step up (or `passkey_manage` relaxed), the
+   session must come from a human sign-in (password, OIDC or SAML) less than 10 minutes old; a session exchanged from
+   an API key or the bootstrap credential never counts (`passkeys.ts`). Rationale: a stolen session or key must not
+   mint the account's first step-up credential.
+3. **Attestation `none` only**, as the foundation note binds: any other format is refused 422 before the library
+   verifies it, so no URL named in a presented certificate is ever fetched. Rationale: no egress outside the guard.
+4. **Relying party** = hostname of `REGULAIT_PUBLIC_URL`, never the request's Host; unset → 409
+   `passkey_rp_unconfigured`, passkey-mode approvals fail closed, and `GET /v1/org/posture` reports
+   `approvalSigning.failClosed`. Rationale: a forged Host must not choose the origin a passkey is bound to.
+5. **`quorum` and `approverRoleId` are versioned rule fields.** PATCH accepts them; on a versioned rule an edit mints
+   and activates a version, which moves the consent context, so approvals queued under the old version go stale
+   (ADR-0105). The satisfiability guard (`assertApprovalRuleWritable`) runs on every writer: create, the copilot
+   applier, the edit choke point, and version mint, activation, rollback and canary promotion. Rationale: who may
+   release a call is enforcing, so it must be versioned like the rest of the rule.
+6. **Approver pool** = the approver named by the rule the approval records (`approvals.rule_id`) plus the active
+   members of that rule's `approver_role_id`. Other matched rules do not add people; they can only raise the quorum
+   (quorum = max of matched rule quorums and the sensitive quorum). Rationale: one rule decides who, any rule can ask
+   for more.
+7. **Tool-call approvals only.** Quorum, signatures and the `approval_decide` step-up apply to `mcp_tool` and
+   `connector_call` approvals (`decideToolCallApproval`); every other approval kind decides as before. Chat taps and
+   bulk decide can never sign. In `step_up` mode the decide needs an `approval_decide` step-up; `off` records method
+   `none`.
+8. **Queue time.** A pool that cannot reach the quorum denies the call and audits it (MCP: a deny decision; connector:
+   403 `approval_quorum_unsatisfiable`) rather than queuing an approval nobody can release.
+9. **Two step-ups on one request** (for example a settings write that relaxes a value and changes the break-glass
+   admins) send both tokens in `x-regulait-step-up`, comma-separated; `requireStepUps` checks all before spending any.
+   There is no `/sso/start` route: `/options` returns `sso.redirectUrl`.
+10. **Step-up coverage** (which writes need which kind):
+    - `settings_relax`: `PUT /v1/org/settings` for every key the strictness registry marks looser than its strict
+      default (decision 16); the dedicated setting routes (assurance gate mode, `POST /v1/mrm/enforcement`,
+      `PUT /v1/interception/settings`, `PUT /v1/policy-simulations/settings`, `PUT /v1/guardrails/config`); lowering
+      a per-scope guardrail or opening an assurance window; lifting the execution mode (any move to a less
+      restrictive mode, or between `read_only` and `require_approval`), agent and tool unhalt; leaving `suspended`
+      for a dispatching lifecycle status; adding an Outlook recipient; narrowing the deploy modes a rule applies to;
+      narrowing a revocation from `full` to `read_only`; lifting any revocation; deleting any governance rule;
+      approval-rule writes that loosen dual control (decision 11); granting admin; assigning an approver role (directly,
+      by group-role mapping, or by onboarding group-role import); adding a member to an approval team;
+      `POST /v1/delegations`; set-initial-password and MFA clear for another user; routing rules and SLA policies that
+      reassign or add an assignee.
+    - `owner_change`: changing the owner of a server, connector or agent, and an agent's steward.
+    - `break_glass`: changing `localSignIn` or `breakGlassUserIds`.
+    - `evidence_hold_override`: overriding an agent evidence hold, and `POST /v1/retention-holds/release`.
+    - `passkey_manage`: adding a passkey (decision 2), revoking one's own, and an admin revoking another user's.
+    - `approval_decide`: deciding a tool-call approval in `step_up` signature mode.
+
+**Loosening an approval rule needs a step-up**
+11. An approval-rule write that lowers the quorum, widens the eligible pool (anyone new in it, or more principals),
+    deletes the rule, or activates a version (including rollback) that does any of these needs a `settings_relax`
+    step-up bound to `{ruleId, values}` (`assertApprovalRuleLooseningStepUp`). Raising the quorum or narrowing the pool
+    needs none. Replacing the named approver with someone outside the current pool counts as widening. A writer with no
+    request to step up (the copilot applier) is refused 403 `step_up_required` whenever the stored policy requires the
+    step-up. Rationale: ADR-0180, no silent loosening by any path.
+
+**Security-review fixes (B4S, as implemented)**
+12. **Eligibility is fixed at queue time (B4S-02, B4S-09).** A decider counts only if the account was created before
+    the approval's `requested_at` and is active now; a role member only through a role assignment created before then;
+    a passkey only if enrolled before then; a delegation only if created before then and live now. The comparison runs
+    in SQL against `requested_at`. The named approver is the one named at queue time (`snapshotNamedApprover`): the
+    stored approver if never re-pointed, else the approver recorded before the first routing or claim; when that cannot
+    be established nobody has the named approver's standing (strictest fallback). New refusal 403
+    `approver_not_eligible`. Rationale: dual control must not be satisfiable by people or links created after the call
+    was queued.
+13. **Routing does not grant decide on tool calls.** A team claim or routing re-point moves where a tool-call approval
+    shows, not who may decide it; the approver named at queue time still can. Claims still re-point the approver for
+    every other kind (G2).
+14. **Execution recheck of every decider (B4S-09).** In every signature mode, `consumeBoundApproval` re-applies the
+    decision-12 predicate to every approving decision (and, in passkey mode, re-verifies each signature). Any failure
+    supersedes the approval, refuses the call and audits the reason.
+15. **Sensitivity is decided by the server (B4S-03).** A call needs the sensitive quorum when its attributed project
+    carries an in-app-only classification, or when the calling person is a member of any such project. The
+    `x-regulait-project-id` header can only raise this, never lower it.
+16. **One strictness registry (B4S-04).** `org-setting-strictness.ts` is typed over every key `PUT /v1/org/settings`
+    can write (a missing key does not compile); `relaxedOrgSettingKeys` derives from it. It covers the strict identity
+    defaults, `approvalTtlHours`, the API-key lifetimes, `infraApproverUserId` and `defaultAuditRetentionDays`.
+    Exemptions carry a written reason: optimisation dials, capacity ceilings, the opt-in IP envelope, `tracingEnabled`,
+    the prune schedule, reporting-only keys, keys that only tighten, and keys whose change has its own step-up
+    (`localSignIn`, `breakGlassUserIds`).
+17. **Rule deletes and revocation lifts (B4S-05)**: listed in decision 10.
+18. **Bootstrap credential (B4S-06).** It passes a step-up only while no active admin has a usable method (authenticator
+    app, unrevoked passkey with a relying party configured, or a link to an enabled SSO provider). After that a
+    protected action from it gets 403 `step_up_required` with `methods: []` and `credential: "bootstrap"`, and
+    `GET /v1/org/posture` reports `bootstrap.findings` `bootstrap_token_configured` while the token is still set.
+    `demo:prepare` makes its protected writes during first-admin setup. Rationale: the credential has no identity to
+    prove, but a fresh install must still be configurable.
+19. **SSO step-up only over https (B4S-07)**, direct or at a trusted proxy; otherwise `sso` is neither listed nor
+    started. Rationale: the binding cookie cannot be `Secure` and the state would cross in the clear.
+20. **Owner changes (B4S-01):** a stewardship steward change uses the same `owner_change` step-up as an owner change.
+    **Execution mode (B4S-08):** the `require_approval` step-up facts include `approverUserId`.
+
+**Two notes on B4S-09 (no code change)**
+- **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
+  actually run. A tool-scoped approval (ADR-0104) still matches a call with other arguments at the database lookup, but
+  the signature then fails to verify: the approval is superseded and that call refused. In passkey mode a tool-scoped
+  approval therefore releases only the exact call that was signed.
+- **MCP opens the upstream session before the recheck.** `executeGovernedToolCall` connects to the upstream (the MCP
+  `initialize`; for stdio, the process start) before it consumes the approval. A failed recheck refuses the call before
+  `tools/call` and the session is closed, so the tool never runs, but the upstream sees a connection.
+
+**T:** an open tracing UI that accepts only protobuf over OTLP/HTTP needs an OpenTelemetry Collector between it and our
+JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
+
+### Residuals (2026-10-08)
+- **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
+  need position semantics that `any`/`N of them` conditions cannot express. Importing them would need a hand-written
+  evaluator, which ADR-0176 bars. The pack stays empty; revisit only through a new ADR.
+- **V, credential audience.** Outbound enforcement of `pipelock-secrets` audience hosts is not wired yet (no
+  `credential_audience_violation` in the code); Claude owns it.
+- **S:** no network revocation checking on the TSA chain (no CRL or OCSP fetch, which suits air-gapped installs).
+- **M:** `mcp_server_baseline_drift` sees only calls attributed to a builder agent.
+- **B4S-03 target binding.** No table binds a server or connector to a project, so the target of a call cannot make it
+  sensitive. Follow-up needing a migration.
+- **Recheck in `step_up`/`off` mode.** An approved row with no recorded decisions passes the recheck (only test
+  fixtures create such rows). In passkey mode the same row fails, below quorum.
+- **Test fixtures.** 22 gateway suites that do not test step-up relax it with `relaxStepUpForTest` (17 from slice A;
+  5 added in the security round: `auth`, `adr0174-enterprise-sign-in`, `release-age`, `prompt-registry`,
+  `zz-adr0175-credential-inventory`).
+- **Round 3 not landed on `b4-int`:** `POST /v1/users` with `isAdmin: true` takes no step-up (granting admin on an
+  existing user does); the non-CI e2e specs (`execution-control`, `mcp-action-review`, `zz-deploy-override`,
+  `zz-zz-sod-rules`, `zz-zz-zz-access-recommendations`, and `reprovisionTotp` in `totp-sign-in.ts`) still use the
+  bootstrap credential; the credential-inventory page-total test depends on the global key count.
+
+### Codex slices (status 2026-10-08)
+- **R, receipts (X21, #182):** in review, merge after fixes. Majors R21-01 (online verify trusts the bundle's keys),
+  R21-02 (an empty or over-long audit tool name stalls signing), R21-03 (foundation test expectations); minors R21-04
+  (admin configuration rows selected), R21-05 (list route unaudited); nit R21-06.
+- **S, timestamps (X22, #184):** changes requested. Highs R22-01 (retry imprint differs from the WORM record) and R22-02
+  (anchors list ships raw tokens, no timestamp field); mediums R22-03 (backdated `genTime` accepted) and R22-04; lows
+  R22-05 to R22-08; info R22-09.
+- **V, vendored detection (X23, #185):** changes requested; adjudication on `review/x23-adjudication`. The NeMo and
+  credential-audience residuals above come from it.
+- **M, monitor rules (X24, #187):** in review.
+Codex pushed revisions to X21 to X23 before the review was posted; which findings they address is not yet checked.
 
 ## Consequences
 - Approvals become provable: who approved exactly which call, re-checked when it runs; two people for sensitive data.
