@@ -1842,32 +1842,60 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // already were, scanned on their next manifest sync); a row this code
     // creates says what it means, and 'unscanned' is a different fact the
     // review queue shows separately.
-    const [row] = await db
-      .insert(mcpServers)
-      .values({ ...values, admissionState: REGISTRATION_ADMISSION_STATE })
-      .returning();
-    if (row!.transport === "stdio") {
-      // a host command the gateway will start is the widest thing an admin can
-      // register: the fact, the command and its pinned digest are on the trail
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-        serverId: row!.id,
-        objectType: "mcp_server",
-        objectId: row!.id,
-        detail: {
-          phase: "registration",
-          transport: "stdio",
-          command: row!.stdioCommand,
-          args: row!.stdioArgs,
-          digest: row!.stdioCommandDigest,
-        },
-        effect: "allow",
-        ruleId: "mcp-stdio-server-registered",
-        ruleChain: [],
-        reason: `${label} registered as a stdio upstream: ${row!.stdioCommand} (sha256 ${row!.stdioCommandDigest} pinned)`,
-      });
-    }
-    return reply.status(201).send(mcpServerView(row!));
+    // PR #181 review: EVERY registration is on the trail, in the same
+    // transaction as the row — not only stdio. A stdio upstream keeps its own
+    // rule id (the command and its pinned digest); a network upstream records
+    // its url and private-range posture.
+    const row = await db.transaction(async (tx) => {
+      const [inserted] = await tx
+        .insert(mcpServers)
+        .values({ ...values, admissionState: REGISTRATION_ADMISSION_STATE })
+        .returning();
+      const created = inserted!;
+      const actor = req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000";
+      if (created.transport === "stdio") {
+        // a host command the gateway will start is the widest thing an admin can
+        // register: the fact, the command and its pinned digest are on the trail
+        await tx.insert(auditLog).values({
+          userId: actor,
+          serverId: created.id,
+          objectType: "mcp_server",
+          objectId: created.id,
+          detail: {
+            phase: "registration",
+            transport: "stdio",
+            command: created.stdioCommand,
+            args: created.stdioArgs,
+            digest: created.stdioCommandDigest,
+            ownerUserId: created.ownerUserId,
+          },
+          effect: "allow",
+          ruleId: "mcp-stdio-server-registered",
+          ruleChain: [],
+          reason: `${label} registered as a stdio upstream: ${created.stdioCommand} (sha256 ${created.stdioCommandDigest} pinned)`,
+        });
+      } else {
+        await tx.insert(auditLog).values({
+          userId: actor,
+          serverId: created.id,
+          objectType: "mcp_server",
+          objectId: created.id,
+          detail: {
+            phase: "registration",
+            transport: created.transport,
+            url: created.url,
+            allowPrivateRanges: created.allowPrivateRanges,
+            ownerUserId: created.ownerUserId,
+          },
+          effect: "allow",
+          ruleId: "mcp-server-registered",
+          ruleChain: [],
+          reason: `${label} registered as a ${created.transport} upstream at ${created.url}`,
+        });
+      }
+      return created;
+    });
+    return reply.status(201).send(mcpServerView(row));
   });
 
   /** ADR-0043: update an MCP server's destination / private-range posture.
@@ -2036,7 +2064,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db.insert(toolGrants).values(body).returning();
+    // PR #181 review: a minted grant relaxes this person's default deny, so the
+    // success is on the trail (actor, grantee, server, grant name) in the same
+    // transaction as the row — not only the refused SoD mints
+    const row = await db.transaction(async (tx) => {
+      const [inserted] = await tx.insert(toolGrants).values(body).returning();
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        serverId: body.serverId,
+        objectType: "user",
+        objectId: body.userId,
+        detail: { grantId: inserted!.id, granteeUserId: body.userId, serverId: body.serverId, toolName: body.toolName },
+        effect: "allow",
+        ruleId: "mcp-tool-grant-created",
+        ruleChain: [],
+        reason: `direct grant of '${body.toolName}' on MCP server ${body.serverId} to user ${body.userId}`,
+      });
+      return inserted!;
+    });
     return reply.status(201).send(row);
   });
 
