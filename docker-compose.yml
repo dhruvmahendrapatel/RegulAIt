@@ -24,6 +24,49 @@
 # reports what the bucket itself says it enforces, so `/v1/audit/verify` can
 # answer `tamperResistant: true` on a laptop for the same reason it can in a
 # customer's cloud: because the medium was asked, not because a flag was set.
+# --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
+#
+# Each engine (promptfoo, modelscan, garak) runs as ONE long-running runner
+# container that pulls work from the gateway over a lease; the gateway never
+# starts containers and has no Docker socket. Every engine is OFF in the product
+# until an admin enables it after the runner's self-test passes. The per-engine
+# services are added by each engine's own PR (B5-P, B5-M, B5-G), from images we
+# build and sign from pinned upstream source, and each merges this hardening:
+#
+#   services:
+#     engine-promptfoo:
+#       <<: *engine-runner
+#       image: regulait/engine-promptfoo@sha256:<digest from the shipped manifest>
+#
+# The runner reaches ONLY the gateway: its single network is `engines`, which is
+# `internal: true` (no route off the host), which the gateway joins and the
+# database and object store do not, and which is NOT in REGULAIT_TRUSTED_PROXIES
+# (a runner cannot speak for a client through forwarding headers). Its only
+# secret is its runner token, exchanged once from a one-time enrolment token.
+# Kubernetes: the same as a deny-all NetworkPolicy except egress to the gateway.
+x-engine-runner: &engine-runner
+  profiles: ["engines"]
+  depends_on:
+    gateway:
+      condition: service_healthy
+  # air-gapped installs load the signed image from the bundle; nothing is pulled
+  pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
+  read_only: true
+  tmpfs:
+    - /work:size=1g,mode=0700,uid=10001,gid=10001
+    - /tmp:size=256m,mode=1777
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  user: "10001:10001"
+  mem_limit: 2g
+  cpus: 2
+  pids_limit: 256
+  environment:
+    REGULAIT_GATEWAY_URL: http://gateway:3000
+    REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_ENROLLMENT_TOKEN:-}
+  restart: unless-stopped
+  networks: [engines]
+
 services:
   db:
     image: postgres:16
@@ -406,7 +449,9 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-    networks: [regulait]
+    # ADR-0187: the gateway also sits on the internal-only `engines` network,
+    # the ONLY thing a sidecar engine runner can reach (see x-engine-runner).
+    networks: [regulait, engines]
 
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
@@ -578,6 +623,11 @@ services:
 # assigned address well clear of 172.28.0.2, so the only container that can
 # ever hold it is the one that explicitly asks for it.
 networks:
+  # ADR-0187: the sidecar engines' only network. internal: no route off the
+  # host, so a runner reaches the gateway and nothing else (the egress
+  # self-test proves it from inside the runner). Not in REGULAIT_TRUSTED_PROXIES.
+  engines:
+    internal: true
   regulait:
     ipam:
       config:
