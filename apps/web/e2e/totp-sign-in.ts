@@ -60,7 +60,7 @@ export function recordTotpSecret(email: string, secret: string): void {
  * refused code is never retried. The gateway accepts the previous, current and
  * next step; the previous one is skipped near the end of a window, where it
  * would age out before the request lands. */
-async function nextCode(email: string): Promise<string> {
+export async function nextCode(email: string): Promise<string> {
   for (;;) {
     const store = load();
     const entry = store[email.toLowerCase()];

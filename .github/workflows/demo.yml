@@ -107,7 +107,8 @@ jobs:
 
     env:
       DATABASE_URL: postgres://regulait:regulait@localhost:5432/regulait_demo
-      # the spec mints one-time passwords with this token
+      # the gateway's deploy-time token (the journey signs personas in with the
+      # credentials demo:prepare printed, not with this token — B4S-06)
       REGULAIT_BOOTSTRAP_TOKEN: e2e-bootstrap-token
       # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
       REGULAIT_DATA_KEY: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -141,8 +142,14 @@ jobs:
         env:
           REGULAIT_DEMO_KEY_DIR: ${{ runner.temp }}/demo-keys
 
+      # B4S-06: the bootstrap token re-provisions nobody once the seed enrolled Ada's
+      # authenticator; the journey signs the personas in with the one-time
+      # passwords and the authenticator secret demo:prepare prints ONCE (already in
+      # this job's log), read from a copy of that output (E2E_DEMO_PREPARE_LOG)
       - name: demo:prepare (empty database → 19/19 demo:check)
-        run: pnpm --filter @regulait/gateway demo:prepare
+        run: |
+          set -o pipefail
+          pnpm --filter @regulait/gateway demo:prepare | tee "$RUNNER_TEMP/demo-prepare.log"
         env:
           REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
 
@@ -159,6 +166,8 @@ jobs:
 
       - name: Real seeded-database journey
         run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts --reporter=list,github
+        env:
+          E2E_DEMO_PREPARE_LOG: ${{ runner.temp }}/demo-prepare.log
 
       - name: Keep the evidence when it fails
         if: failure()
