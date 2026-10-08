@@ -138,13 +138,15 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   // These two are the spec's own fixtures, so an admin overrides the cooldown
   // for them through the real, audited route, with a reason (per server, at the
   // registration release; nothing global changes).
+  // Lifting a quarantine asks for the same step-up as a grant (ADR-0186 decision 24).
   for (const id of [repo.id, wh.id]) {
-    await post("/v1/release-quarantine/override", {
+    const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "POST", "/v1/release-quarantine/override", {
       kind: "mcp_server",
       id,
       digest: "registration",
       reason: "e2e: the spec's own local MCP fixture; the cooldown is not what this journey tests",
     });
+    expect(res.status(), `/v1/release-quarantine/override: ${res.bodyText}`).toBe(201);
   }
   const branches = await post(`/v1/servers/${repo.id}/tools`, { name: "list_branches", kind: "read", description: "list branches and their heads" });
   const schemas = await post(`/v1/servers/${wh.id}/tools`, { name: "list_schemas", kind: "read", description: "list schemas" });
