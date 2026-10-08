@@ -14,6 +14,8 @@ import {
   inArray,
   mcpServers,
   or,
+  orgSettings,
+  ORG_SETTINGS_ID,
   rateLimits,
   users,
   workflowInstances,
@@ -27,6 +29,7 @@ import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
 import {
+  BATCH4_STRICT_DEFAULTS,
   NOT_ADVISORY_SQL,
   approvalArgumentsDigest,
   approvalContextDigest,
@@ -733,6 +736,16 @@ export async function governedEvaluate(
   // consent granted under the old one stops satisfying it; edit a rule that
   // does not bind this call and nothing moves.
   const servedById = new Map(servedARules.map((r) => [r.id, r]));
+  // read straight off the singleton (governed-evaluate sits under org-settings in the import graph);
+  // a missing row is the strict default, as on a first load
+  const [dualControlRow] = await db
+    .select({ approvalSignatureMode: orgSettings.approvalSignatureMode, toolApprovalSensitiveQuorum: orgSettings.toolApprovalSensitiveQuorum })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const dualControlOrg = dualControlRow ?? {
+    approvalSignatureMode: BATCH4_STRICT_DEFAULTS.approvalSignatureMode,
+    toolApprovalSensitiveQuorum: BATCH4_STRICT_DEFAULTS.toolApprovalSensitiveQuorum,
+  };
   const contextDigest = approvalContextDigest({
     ruleVersions: matchedARules.map((r) => {
       const activeVersionId = aResolved.activeVersionByArtifact.get(r.id) ?? null;
@@ -755,6 +768,11 @@ export async function governedEvaluate(
     approvalScope,
     // AER-039: the consent names WHERE the bytes go, not only what they are
     target: target ?? approvalTargetForServer(serverId, serverRows[0]),
+    // ADR-0186 A: tightening the org's signing or sensitive quorum retires consents given under the looser one
+    orgDualControl: {
+      signatureMode: dualControlOrg.approvalSignatureMode,
+      sensitiveQuorum: dualControlOrg.toolApprovalSensitiveQuorum,
+    },
   });
 
   // WHICH approved row satisfies this call.

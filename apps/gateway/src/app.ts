@@ -432,8 +432,8 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
-import { ApprovalRuleWriteRefusedError, isApproverRole } from "./approval-pool.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles } from "./approval-pool.js";
 import {
   decisionView,
   decideToolCallApproval,
@@ -2341,16 +2341,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // B4S-02 (owner principle): a role an approval rule names as its approver
     // role is an approver pool — adding someone to it needs a settings_relax
     // step-up bound to the user and the role
+    const approverRole = await isApproverRole(db, body.roleId);
     if (
-      (await isApproverRole(db, body.roleId)) &&
+      approverRole &&
       !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { approverRoleId: body.roleId } } })).ok
     ) {
       return reply;
     }
-    const [row] = await db
-      .insert(roleAssignments)
-      .values({ userId, roleId: body.roleId, origin: "direct" })
-      .returning();
+    // ADR-0186 A (Class A): decided again under the approver-role lock — a role that
+    // became an approver role since is refused, never joined without the step-up
+    const row = await db.transaction(async (tx) => {
+      const nowApprover = (await lockApproverRoles(tx as unknown as Db, [body.roleId])).has(body.roleId);
+      if (nowApprover && !approverRole) return null;
+      const [inserted] = await tx.insert(roleAssignments).values({ userId, roleId: body.roleId, origin: "direct" }).returning();
+      return inserted;
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.status(201).send(row);
   });
 

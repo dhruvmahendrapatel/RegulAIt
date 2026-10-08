@@ -23,7 +23,7 @@
  * always carried; see `rule-write-guard.test.ts`).
  */
 import { approvalRules } from "@regulait/db";
-import type { DbOrTx } from "./config-versions.js";
+import type { DbOrTx, DbOrTxDeep } from "./config-versions.js";
 import type { z } from "zod";
 import type { createApprovalRuleSchema } from "@regulait/shared";
 import { assertApprovalRuleWritable } from "./approval-pool.js";
@@ -54,12 +54,22 @@ export const scopedRuleColumns = (body: {
 export async function createApprovalRuleRow(
   // AER-035: a caller may run this inside its own transaction (the copilot's
   // proposal applier does), so it must be able to join one.
-  db: DbOrTx,
+  db: DbOrTxDeep,
   /** ADR-0186 A: `quorum` and `approverRoleId` ride in the body (the shared create schema carries them);
    *  omitted -> the column defaults (quorum 1, no role) */
   body: CreateApprovalRuleInput,
 ): Promise<typeof approvalRules.$inferSelect> {
   const dualControl = { quorum: body.quorum, approverRoleId: body.approverRoleId };
+  // one transaction (a savepoint inside a caller's): the guard locks the approver
+  // role row, and the lock must hold until the rule naming it is written
+  return db.transaction(async (tx) => createApprovalRuleRowLocked(tx as unknown as DbOrTx, body, dualControl));
+}
+
+async function createApprovalRuleRowLocked(
+  db: DbOrTx,
+  body: CreateApprovalRuleInput,
+  dualControl: { quorum?: number | undefined; approverRoleId?: string | null | undefined },
+): Promise<typeof approvalRules.$inferSelect> {
   // ADR-0186 A: THE ONE GUARD — a pool that can never reach the quorum is refused here,
   // for the admin route and the copilot's rule_to_approval applier alike
   await assertApprovalRuleWritable(db, {

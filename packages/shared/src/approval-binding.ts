@@ -306,6 +306,8 @@ export function effectiveApprovalScope(
 //   * the APPROVAL SCOPE ('action' | 'tool'). Flipping a rule from action to
 //     tool scope changes what a signature MEANS; a consent granted under one
 //     meaning is not consent under the other.
+//   * ADR-0186 A: the ORG-WIDE dual control a tool-call consent is judged under
+//     (approval signature mode, sensitive-call quorum), when the caller names it.
 //   * ADR-0186 A: an UNVERSIONED rule's dual control (quorum, approver role).
 //     A versioned rule's is in its version id; an unversioned rule's is edited
 //     by a plain row write, so it is named here or raising it would move
@@ -385,6 +387,16 @@ export interface ApprovalContextRef {
   approvalScope: ApprovalScope;
   /** AER-039 — the upstream the call executes against (v3) */
   target?: ApprovalTargetRef | null;
+  /**
+   * ADR-0186 A — the ORG-WIDE dual-control settings a tool-call consent is
+   * judged under: how each approval must be proven (`approval_signature_mode`)
+   * and the quorum a sensitive call needs (`tool_approval_sensitive_quorum`).
+   * Both are snapshotted on the approval at queue time, so without them here
+   * tightening either (off/step_up -> passkey, a higher sensitive quorum) would
+   * leave a consent given under the weaker setting spendable. Absent = not part
+   * of the digest (the pre-ADR-0186 shape, byte-identical).
+   */
+  orgDualControl?: { signatureMode: string; sensitiveQuorum: number } | null;
 }
 
 /**
@@ -432,6 +444,9 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
         .map((p) => ({ policyId: p.policyId, version: p.version, source: p.source })),
       requiredApproverUserId: ref.requiredApproverUserId ?? null,
       approvalScope: ref.approvalScope,
+      ...(ref.orgDualControl
+        ? { orgDualControl: { signatureMode: ref.orgDualControl.signatureMode, sensitiveQuorum: ref.orgDualControl.sensitiveQuorum } }
+        : {}),
       target: !ref.target
         ? null
         : ref.target.kind === "connector"

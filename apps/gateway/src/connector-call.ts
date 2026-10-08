@@ -214,11 +214,17 @@ async function connectorWriteBinding(
   const argumentsDigest =
     input.preparedPii?.argumentsDigest ??
     approvalArgumentsDigest({ projectId: input.projectId, arguments: input.invocation });
+  const dualControlOrg = await loadOrgSettings(db);
   const contextDigest = approvalContextDigest({
     // the dial's hold is the one "rule" that demanded this consent
     ruleVersions: [{ ruleId: "execution-require-approval", activeVersionId: null }],
     requiredApproverUserId: input.approverUserId,
     approvalScope: "action",
+    // ADR-0186 A: the org's signing and sensitive quorum, as for an MCP consent
+    orgDualControl: {
+      signatureMode: dualControlOrg.approvalSignatureMode,
+      sensitiveQuorum: dualControlOrg.toolApprovalSensitiveQuorum,
+    },
     target: {
       kind: "connector",
       connectorId: connector.id,

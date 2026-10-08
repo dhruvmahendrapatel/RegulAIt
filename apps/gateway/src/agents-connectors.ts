@@ -148,7 +148,7 @@ import {
   type ConversationContext,
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
-import { requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -3423,8 +3423,17 @@ export function registerAgentConnectorRoutes(
     const [row] = await db
       .update(agents)
       .set({ ownerUserId: body.ownerUserId, ...(promotesSuccessor ? { successorUserId: null } : {}) })
-      .where(eq(agents.id, agentId))
+      // ADR-0186 A (Class A): compare-and-set on the owner the owner_change step-up was
+      // decided on (and the successor the promotion was) — a concurrent change is never reverted
+      .where(
+        and(
+          eq(agents.id, agentId),
+          sql`${agents.ownerUserId} IS NOT DISTINCT FROM ${agent.ownerUserId}`,
+          sql`${agents.successorUserId} IS NOT DISTINCT FROM ${agent.successorUserId}`,
+        ),
+      )
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "agent",

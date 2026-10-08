@@ -104,8 +104,8 @@ import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
-import { isApproverRole } from "./approval-pool.js";
-import { requireStepUp } from "./step-up.js";
+import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
 // versioned fields, so it goes through the one choke point.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -899,17 +899,27 @@ export function registerOnboardingRoutes(
       const facts = { values: { approverRoleGroups: approverMappings } };
       if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
     }
-    let created = 0;
-    for (const e of plan.entries) {
-      if (e.action !== "create") continue;
-      const role = roleByName.get(e.roleName.toLowerCase())!;
-      const [row] = await db
-        .insert(groupRoleMappings)
-        .values({ source: e.source as GroupSource, externalGroup: e.externalGroup, roleId: role.id })
-        .onConflictDoNothing()
-        .returning();
-      if (row) created += 1;
-    }
+    // ADR-0186 A (Class A): the mappings are written under the approver-role lock, and a
+    // role that became an approver role since the step-up was decided refuses the import
+    const createIds = plan.entries.filter((e) => e.action === "create").map((e) => roleByName.get(e.roleName.toLowerCase())!.id);
+    const decidedApprover = new Set(approverMappings.map((m) => m.roleId));
+    const created = await db.transaction(async (tx) => {
+      const nowApprover = await lockApproverRoles(tx as unknown as Db, createIds);
+      if ([...nowApprover].some((id) => !decidedApprover.has(id))) return null;
+      let n = 0;
+      for (const e of plan.entries) {
+        if (e.action !== "create") continue;
+        const role = roleByName.get(e.roleName.toLowerCase())!;
+        const [row] = await tx
+          .insert(groupRoleMappings)
+          .values({ source: e.source as GroupSource, externalGroup: e.externalGroup, roleId: role.id })
+          .onConflictDoNothing()
+          .returning();
+        if (row) n += 1;
+      }
+      return n;
+    });
+    if (created === null) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     const [importRow] = await db
       .insert(onboardingImports)
       .values({

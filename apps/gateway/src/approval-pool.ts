@@ -119,6 +119,27 @@ export async function isApproverRole(db: Q, roleId: string): Promise<boolean> {
 }
 
 /**
+ * ADR-0186 A (Class A) — THE APPROVER-ROLE LOCK. A write that adds people to a
+ * role (a direct assignment, a group mapping, an onboarding import) decides
+ * its step-up on `isApproverRole`, and an approval-rule write that names a role
+ * decides ITS step-up on the role's current members. Both lock the role ROW
+ * (`FOR UPDATE`; the rule writers through `approvalRuleQuorumRefusal`, inside
+ * their transaction) so neither can be decided on a state the other is about
+ * to change. Call inside a transaction; returns which of `roleIds` are approver
+ * roles, read under the lock.
+ */
+export async function lockApproverRoles(tx: Q, roleIds: readonly string[]): Promise<Set<string>> {
+  const ids = [...new Set(roleIds)].sort();
+  if (ids.length === 0) return new Set();
+  await tx.select({ id: roles.id }).from(roles).where(inArray(roles.id, ids)).orderBy(roles.id).for("update");
+  const named = await tx
+    .select({ roleId: approvalRules.approverRoleId })
+    .from(approvalRules)
+    .where(inArray(approvalRules.approverRoleId, ids));
+  return new Set(named.map((r) => r.roleId).filter((r): r is string => r !== null));
+}
+
+/**
  * G2 (B4S-02 owner principle): can membership of this team ROUTE or CLAIM an
  * approval? A team is named by an enabled routing rule, by an SLA policy that
  * escalates to it (reassign / add an assignee), or by the assignment (or
@@ -268,7 +289,10 @@ export async function approvalRuleQuorumRefusal(
   rule: { approverUserId: string; approverRoleId: string | null; quorum: number; scope?: string | null; userId?: string | null },
 ): Promise<QuorumUnsatisfiable | { status: 422; body: { error: "unknown_role"; detail: string } } | null> {
   if (rule.approverRoleId) {
-    const [role] = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, rule.approverRoleId));
+    // the role row is LOCKED (inside the writer's transaction): a membership write
+    // deciding its step-up on `lockApproverRoles` waits for this rule write, and the
+    // other way round (ADR-0186 A, Class A)
+    const [role] = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, rule.approverRoleId)).for("update");
     if (!role) return { status: 422, body: { error: "unknown_role", detail: "approverRoleId names no role" } };
   }
   const pool = await loadApprovalPool(db, {

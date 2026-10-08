@@ -66,6 +66,7 @@ import { checkCredentialBaseUrl } from "./credential-egress.js";
 // types, so this PATCH may not write the row directly — it goes through the one
 // choke point, which mints and activates a version when the rule is versioned.
 import { applyRuleEdit, currentEffectiveBody, isRuleEditRefusal } from "./rule-writes.js";
+import { lockRuleArtifact } from "./config-versions.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
@@ -991,7 +992,14 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       });
       if (refusal) return reply.status(refusal.status).send(refusal.body);
     }
-    const res = await applyRuleEdit<{ id: string; deployMode: string | null }>(db, {
+    // ADR-0186 A (Class A): the step-up was decided on `beforeMode`; under the rule's own
+    // row lock a scope that moved since is refused, never overwritten
+    const res = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      await lockRuleArtifact(tx, RULE_ARTIFACT_TYPES[kind], ruleId);
+      const lockedMode = ((await currentEffectiveBody(tx, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
+      if (lockedMode !== beforeMode) return null;
+      return applyRuleEdit<{ id: string; deployMode: string | null }>(tx, {
       artifactType: RULE_ARTIFACT_TYPES[kind],
       artifactId: ruleId,
       patch: { deployMode: body.deployMode ?? null },
@@ -1009,7 +1017,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         before: beforeMode,
         after: body.deployMode ?? null,
       },
+      });
     });
+    if (res === null) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     if (isRuleEditRefusal(res)) {
       return reply.status(res.status).send({ error: res.error, detail: res.detail });
     }

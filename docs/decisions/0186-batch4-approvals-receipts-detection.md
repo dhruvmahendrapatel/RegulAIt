@@ -299,6 +299,25 @@ unless stated.
       the request is no longer stale; an earlier second still is.
     - Test fixtures that approved tool calls with a raw row update now also write the `approval_decisions` row the
       real decide path writes, on their own scratch databases.
+23. **PR #198 review fixes, round 3 (2026-10-08)** (`zz-b4c3-review-fixes.test.ts`, each red first on 33d009c):
+    - The org-wide `approval_signature_mode` and `tool_approval_sensitive_quorum` are part of the consent context of
+      MCP and connector calls (`ApprovalContextRef.orgDualControl`); tightening either retires consents approved under
+      the looser setting (re-queued as `approval_context_stale`). Every live consent digest moved once with this
+      change, which re-queues approvals pending or approved before it (fail closed). The shared pinned vectors do not
+      name the field and keep their shape.
+    - `POST /v1/agents/:agentId/owner` compare-and-sets the owner (and successor) it read: **409
+      `changed_concurrently`** instead of reverting a concurrent owner change without `owner_change`.
+    - **Approver-pool membership and approval-rule writes serialise on the role row** (`FOR UPDATE`): a role
+      assignment, a group mapping and an onboarding group import re-decide `isApproverRole` under the lock
+      (`lockApproverRoles`) and answer 409 `changed_concurrently` if the role became an approver role meanwhile;
+      every approval-rule write that names a role locks it in the satisfiability guard
+      (`approvalRuleQuorumRefusal`) inside its transaction, so its loosening step-up sees committed members. Team
+      membership needs no lock: routing rules and SLA escalations that make a team an approval team always need a
+      step-up, so any interleaving equals a legitimate serial order.
+    - `PATCH /v1/rules/:kind/:ruleId/deploy-mode` re-reads the scope under the rule's row lock (409 on a move).
+    - **409 `changed_concurrently`** (`CHANGED_CONCURRENTLY`, step-up.ts) means: the state a step-up decision rested
+      on moved before the write took its lock, so nothing was written. The client reloads and repeats the change,
+      which is decided again and may now ask for a step-up.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
@@ -313,11 +332,9 @@ unless stated.
 JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 
 ### Residuals (2026-10-08)
-- **Org-level signature mode and sensitive quorum are not in the consent context.** Round 2 put an unversioned
-  rule's own quorum and role in the digest; tightening the ORG-wide signature mode or sensitive quorum still does
-  not retire consents approved under the looser setting. Follow-up: add both to the context identity.
 - **First-passkey enrolment race.** Two concurrent "first" enrolments from one fresh session can both succeed. Low:
-  that session may enrol a first passkey anyway.
+  that session may enrol a first passkey anyway. Closing it needs the register ceremony to record how it was admitted
+  (a column on `webauthn_challenges`, whose shape CHECK allows no action fields for `register`): a migration.
 - **409 `changed_concurrently` in the web client** is shown through the generic error display; a dedicated
   "this changed while you were deciding, reload" message is a follow-up.
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
@@ -329,8 +346,8 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 - **M:** `mcp_server_baseline_drift` sees only calls attributed to a builder agent.
 - **B4S-03 target binding.** No table binds a server or connector to a project, so the target of a call cannot make it
   sensitive. Follow-up needing a migration.
-- **Recheck in `step_up`/`off` mode.** An approved row with no recorded decisions passes the recheck (only test
-  fixtures create such rows). In passkey mode the same row fails, below quorum.
+- **Recheck in `step_up`/`off` mode** (corrected in round 3): since round 2 the recheck recounts principals in every
+  mode, so an approved row with no recorded decisions fails it (`below_quorum`) in every signature mode.
 - **Test fixtures.** 22 gateway suites that do not test step-up relax it with `relaxStepUpForTest` (17 from slice A;
   5 added in the security round: `auth`, `adr0174-enterprise-sign-in`, `release-age`, `prompt-registry`,
   `zz-adr0175-credential-inventory`).
