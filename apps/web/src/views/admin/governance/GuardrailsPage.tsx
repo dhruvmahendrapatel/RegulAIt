@@ -344,7 +344,7 @@ export default function GuardrailsPage() {
                         onClick={() =>
                           void act.run(async () => {
                             // removing an override stricter than the org default lowers it: settings_relax (ADR-0186)
-                            await withStepUp((h) => stepUpApi.del(`/v1/guardrails/config/${r.scope}/${r.scopeId}`, undefined, h));
+                            await withStepUp((h) => api.delWithHeaders(`/v1/guardrails/config/${r.scope}/${r.scopeId}`, h));
                             await config.refetch();
                           }, "Override removed — the deployment default applies again")
                         }
