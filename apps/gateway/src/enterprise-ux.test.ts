@@ -19,7 +19,8 @@ import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
+import {
+  approvalDelegations, and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
@@ -194,7 +195,7 @@ describe("approver delegation (ADR-0022)", () => {
     expect(audit.length).toBe(1);
     expect((audit[0]!.detail as { onBehalfOfUserId: string }).onBehalfOfUserId).toBe(anaId);
     // clean up the window so later tests are unaffected
-    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/delegations/${dg.json().id}` });
+    await db.delete(approvalDelegations).where(eq(approvalDelegations.id, dg.json().id as string));
   });
 
   it("outside the window nothing applies: no inbox row, decide 403s", async () => {
@@ -218,7 +219,7 @@ describe("approver delegation (ADR-0022)", () => {
     });
     expect(dec.statusCode).toBe(403);
     expect(dec.json().error).toBe("not_the_named_approver");
-    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/delegations/${dg.json().id}` });
+    await db.delete(approvalDelegations).where(eq(approvalDelegations.id, dg.json().id as string));
     // an inverted window is refused at creation
     const bad = await app.inject({
       method: "POST", headers: AUTH, url: "/v1/delegations",
@@ -257,7 +258,7 @@ describe("approver delegation (ADR-0022)", () => {
       expect(refused.json().error).toBe("delegation_disabled");
     } finally {
       await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { approvalDelegationEnabled: true } });
-      await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/delegations/${dg.json().id}` });
+      await db.delete(approvalDelegations).where(eq(approvalDelegations.id, dg.json().id as string));
       const anaRow = await pendingGateApproval(id, anaAuth);
       if (anaRow) {
         await app.inject({ method: "POST", headers: anaAuth, url: `/v1/approvals/${anaRow.id}/decide`, payload: { decision: "approved" } });

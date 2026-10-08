@@ -400,7 +400,7 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
       expect(opts.statusCode, opts.body).toBe(403);
       expect(opts.json().error).toBe("caller_cannot_approve");
     } finally {
-      await withKey(AUTH, "DELETE", `/v1/delegations/${del.json().id}`);
+      await asSteppedUpAdmin("DELETE", `/v1/delegations/${del.json().id}`, undefined);
     }
   });
 
@@ -454,8 +454,8 @@ describe("A — the queue-time snapshot and the eligible pool", () => {
       expect(dAsB.json().error).toBe("duplicate_approver");
       expect((await row(id)).status).toBe("pending"); // quorum 3, two principals
     } finally {
-      await withKey(AUTH, "DELETE", `/v1/delegations/${delAE.json().id}`);
-      await withKey(AUTH, "DELETE", `/v1/delegations/${delBD.json().id}`);
+      await asSteppedUpAdmin("DELETE", `/v1/delegations/${delAE.json().id}`, undefined);
+      await asSteppedUpAdmin("DELETE", `/v1/delegations/${delBD.json().id}`, undefined);
     }
   });
 
@@ -888,7 +888,7 @@ describe("A — the recheck counts principals as the decide does", () => {
       const [audited] = await auditFor(APPROVAL_SIGNATURE_RECHECK_FAILED_RULE, id);
       expect(audited!.detail).toMatchObject({ why: "below_quorum" });
     } finally {
-      await withKey(AUTH, "DELETE", `/v1/delegations/${del.json().id}`);
+      await asSteppedUpAdmin("DELETE", `/v1/delegations/${del.json().id}`, undefined);
     }
   });
 });

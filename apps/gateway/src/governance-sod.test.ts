@@ -25,6 +25,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  approvalDelegations,
   and,
   approvalAssignmentRules,
   approvalAssignments,
@@ -332,7 +333,7 @@ describe("§2 role rows are decided by live role members only", () => {
       expect(ok.statusCode, ok.body).toBe(200);
       expect(ok.json()).toMatchObject({ onBehalfOf: users.dual.id, decidedBy: users.stranger.id });
     } finally {
-      for (const id of delegations) await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/delegations/${id}` });
+      for (const id of delegations) await db.delete(approvalDelegations).where(eq(approvalDelegations.id, id));
     }
   });
 });
