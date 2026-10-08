@@ -780,6 +780,13 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.decisionReceiptSignSweep,
         SCHEDULER_JOB_NAMES.anchorTimestampSweep,
         // ===== end ADR-0186 =====
+        // ===== ADR-0187 =====
+        // the engine kill switch's backstop (deadline, lease, queue expiry,
+        // raw-report retention) and the scheduled-run trigger; driven end-to-end
+        // in zz-b5-engines.test.ts
+        SCHEDULER_JOB_NAMES.engineRunSweep,
+        SCHEDULER_JOB_NAMES.engineScheduleSweep,
+        // ===== end ADR-0187 =====
       ].sort(),
     );
     for (const def of registry.values()) {

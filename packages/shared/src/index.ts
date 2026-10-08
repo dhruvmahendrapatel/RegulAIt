@@ -23,6 +23,8 @@ import { accountabilityOrgSettingsFields } from "./accountability.js";
 import { batch3OrgSettingsFields, MCP_UPSTREAM_TRANSPORTS, mcpStdioSpecSchema } from "./batch3.js";
 // ADR-0186 (batch 4): approvals, step-up, receipts, timestamps, detection settings ride updateOrgSettingsSchema.
 import { approvalRuleQuorumFields, batch4OrgSettingsFields } from "./batch4.js";
+// ADR-0187 (batch 5): the engine settings ride the same PUT
+import { batch5OrgSettingsFields } from "./engines/settings.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -2405,6 +2407,9 @@ export const updateOrgSettingsSchema = z
     // ADR-0186 (batch 4): signature mode, step-up, sensitive quorum, receipts,
     // anchor timestamps, vendored packs and the detection monitor's thresholds
     ...batch4OrgSettingsFields,
+    // ADR-0187 (batch 5): engine run timeout, default budget, approval threshold,
+    // raw-report retention and sensitive-set approval
+    ...batch5OrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -4586,6 +4591,8 @@ export {
 export * from "./batch4.js";
 export * from "./approval-signing.js";
 export * from "./detection-content/index.js";
+// ADR-0187 (batch 5): the sidecar engine contract
+export * from "./engines/index.js";
 export {
   injectionText,
   vendoredCompileProblems,

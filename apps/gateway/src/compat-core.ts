@@ -101,6 +101,7 @@ import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.j
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import {
+  engineKeyProjectPin,
   loadVirtualKeyContext,
   virtualKeyAdmits,
   virtualKeyAllowListRefusal,
@@ -560,7 +561,22 @@ export async function prepareCompatCall(
   if (!headerParse.success) {
     return { ok: false, status: 400, error: "invalid_project_id", detail: `${PROJECT_HEADER} must be a uuid` };
   }
-  const projectId = headerParse.data[PROJECT_HEADER] ?? null;
+  let projectId = headerParse.data[PROJECT_HEADER] ?? null;
+  // ADR-0187 — an `engine` key is PINNED to its run's project: a call naming
+  // another project is refused (never billed elsewhere), and an unattributed
+  // call is attributed to the pin.
+  const pinned = await engineKeyProjectPin(db, req);
+  if (pinned !== null) {
+    if (projectId !== null && projectId !== pinned) {
+      return {
+        ok: false,
+        status: 403,
+        error: "virtual_key_project_mismatch",
+        detail: `this engine run's key is pinned to project ${pinned}; a call may not name another project`,
+      };
+    }
+    projectId = pinned;
+  }
   if (!projectId && settings.requireProjectAttribution) {
     // The admin's lever to GUARANTEE pillar-5 coverage: an unattributed compat
     // call is refused rather than run as untracked spend.

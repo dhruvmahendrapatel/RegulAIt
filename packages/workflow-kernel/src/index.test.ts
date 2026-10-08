@@ -6,6 +6,7 @@ import {
   mergeDefinitions,
   transition,
   validateDefinition,
+  workflowDefinitionSchema,
   type AssignmentRule,
   type ChangeDescriptor,
   type InstanceState,
@@ -825,5 +826,20 @@ describe("AER-047: offlineAutoPass is a typed, check-stage-only opt-in", () => {
     expect(() =>
       transition(def, started.state, { kind: "human_trigger", stageId: "checks" }),
     ).toThrow(/cannot be human-triggered/);
+  });
+});
+
+describe("ADR-0187 engine bindings (PR #203 review [14])", () => {
+  const def = (engine: string) => ({
+    workflow: "w",
+    stages: [
+      { id: "t", type: "trigger" },
+      { id: "c", type: "automated_check", checks: ["e"], engines: [{ check: "e", engine, agent: "a", sets: ["basic"] }] },
+    ],
+  });
+  it("binds an agent-target engine, and refuses an artifact-only engine (it can never target an agent)", () => {
+    expect(workflowDefinitionSchema.safeParse(def("promptfoo")).success).toBe(true);
+    expect(workflowDefinitionSchema.safeParse(def("garak")).success).toBe(true);
+    expect(workflowDefinitionSchema.safeParse(def("modelscan")).success).toBe(false);
   });
 });

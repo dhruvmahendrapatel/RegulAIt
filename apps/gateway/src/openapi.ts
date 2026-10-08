@@ -322,6 +322,8 @@ function securityFor(auth: RouteAuthClass): Array<Record<string, string[]>> {
       return [];
     case "scim-token":
       return [{ scimToken: [] }];
+    case "engine-runner":
+      return [{ engineRunnerToken: [] }];
     default:
       return [{ apiKey: [] }];
   }
@@ -347,6 +349,8 @@ export function buildOpenApiDocument(
 ): Record<string, unknown> {
   const paths: Record<string, Record<string, unknown>> = {};
   const tags = new Set<string>();
+  /** ADR-0187: the runner-token scheme is described only when a runner route is in the document */
+  let usesRunnerToken = false;
 
   for (const entry of inventory) {
     const key = routeKey(entry.method, entry.url);
@@ -358,6 +362,7 @@ export function buildOpenApiDocument(
     if (!opts.includeInternal && !PUBLIC_STABILITIES.has(stability)) continue;
 
     const auth = routeAuthClass(entry.method, entry.url);
+    if (auth === "engine-runner") usesRunnerToken = true;
     const doc = ROUTE_DOCS[key];
     const tag = ROUTE_TAGS[key] ?? "misc";
     tags.add(tag);
@@ -477,6 +482,17 @@ export function buildOpenApiDocument(
             "authenticate ONLY against `scim_tokens`; a human session or a user's API key is " +
             "refused here, and a SCIM token is refused everywhere else.",
         },
+        ...(usesRunnerToken
+          ? {
+              engineRunnerToken: {
+                type: "http",
+                scheme: "bearer",
+                description:
+                  "An ADR-0187 engine runner token (`rge_...`), or on the register route a one-time enrolment token " +
+                  "(`rgee_...`). A separate trust path: it reaches only the runner routes, and they refuse every other credential.",
+              },
+            }
+          : {}),
       },
     },
     "x-regulait-versioning": VERSIONING_POLICY,

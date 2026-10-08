@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+// ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
+import type { EngineCheckOutcome } from "./engine-runs.js";
 import {
   and,
   approvals,
@@ -702,6 +704,24 @@ export async function handleNestedRunCompletion(
   }
 }
 
+/**
+ * ADR-0187: a workflow-bound engine run ended — evaluate its check stage again
+ * if it is the one the instance is waiting on. Another executor holding the
+ * stage, or a stage no longer current, is fine: they own it now.
+ */
+export async function reevaluateCheckStage(db: Db, instanceId: string, stageId: string, dataKey: string | undefined): Promise<void> {
+  try {
+    await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId }], null, dataKey);
+  } catch (err) {
+    // another executor holds the stage: it may have read the run as pending, so
+    // this is NOT done — the caller retries (PR #203 review [5])
+    if (err instanceof StageClaimHeldError) throw err;
+    // the stage is no longer the current one (re-opened, moved on): nothing to do
+    if (err instanceof WorkflowStateError) return;
+    throw err;
+  }
+}
+
 /** AER-047: the detail every auto-passed (opt-in, offline) check carries */
 export const CHECK_AUTO_PASSED_DETAIL = "auto-passed — no report (offline mode)";
 /** AER-047: the detail a check with no reported result carries while it waits */
@@ -746,6 +766,8 @@ type EvaluatedCheck = {
   reportedByUserId?: string | null;
   reason?: string | null;
   eval?: Record<string, unknown>;
+  /** ADR-0187: present only for engine-bound checks — the run, its status and verdict */
+  engine?: Record<string, unknown>;
 };
 
 /** the shape one named check resolves to inside the check executor */
@@ -1127,6 +1149,15 @@ async function runGitExecutions(
         declaredEvals.length > 0 && declaredEvals.every((n) => episodeEvals.has(n))
           ? episodeEvals
           : await runStageEvalChecks(db, instance, stage, dataKey);
+      // ADR-0187: engine-bound checks are decided by a sidecar engine run, started
+      // here on first sight as the instance initiator on the instance's project
+      // and read back on every evaluation: pending while it runs, failed when it
+      // ends any way but completed-and-clean (never reported, never auto-passed).
+      const engineBound = new Set((stage.engines ?? []).map((e) => e.check));
+      const engineOutcomes =
+        engineBound.size > 0
+          ? await (await import("./engine-runs.js")).stageEngineCheckOutcomes(db, { ...instance, round: guard.round }, stage)
+          : new Map<string, EngineCheckOutcome>();
 
       // AER-048 — the VERDICT is decided at commit, under the row lock, from
       // the reports stored THEN (not the ones snapshotted at claim time). A
@@ -1149,6 +1180,11 @@ async function runGitExecutions(
           const results: EvaluatedCheck[] = declaredChecks.map((name): EvaluatedCheck => {
             const ev = evalOutcomes.get(name);
             if (ev) return ev;
+            const en = engineOutcomes.get(name);
+            if (en) return { check: name, status: en.status, severity: en.severity, detail: en.detail, engine: en.engine };
+            if (engineBound.has(name)) {
+              return { check: name, status: "failed", severity: "high", detail: "the engine run produced no outcome — the check could not run, so it does not pass" };
+            }
             // ADR-0044 property 3: an eval-bound check that produced no outcome
             // could not run, so it FAILS — never reported, never auto-passed
             if (evalBound.has(name)) {
@@ -2267,6 +2303,20 @@ export async function startWorkflowInstanceWithTemplates(
   const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
   const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
 
+  // ADR-0187 (PR #203 review [16]): an engine run's model calls are pinned to a
+  // project, so a workflow whose checks run engines cannot start without one —
+  // refused here rather than failing its check later, permanently
+  if (!input.projectId && merged.stages.some((st) => (st.engines?.length ?? 0) > 0)) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "project_required_for_engine_checks",
+        detail: "this change's workflow runs engine checks, whose model calls bill to a project: start it with a projectId",
+      },
+    };
+  }
+
   if (input.projectId) {
     // ADR-0011: the initiator must be allowed to bill this project
     const attribution = await assertProjectAttribution(
@@ -2865,6 +2915,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return reply.status(422).send({
         error: "eval_check_cannot_be_reported",
         detail: `check(s) ${usurped.join(", ")} are decided by running their eval dataset; a reported result cannot stand in for one`,
+      });
+    }
+    // ADR-0187: the same for a check bound to a sidecar engine run
+    const engineBoundChecks = new Set((stage.engines ?? []).map((e) => e.check));
+    const usurpedEngine = body.results.filter((r) => engineBoundChecks.has(r.check)).map((r) => r.check);
+    if (usurpedEngine.length > 0) {
+      return reply.status(422).send({
+        error: "engine_check_cannot_be_reported",
+        detail: `check(s) ${usurpedEngine.join(", ")} are decided by an engine run; a reported result cannot stand in for one`,
       });
     }
     const accepted = body.results.filter((r) => declared.has(r.check));
