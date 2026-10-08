@@ -267,6 +267,20 @@ unless stated.
     started. Rationale: the binding cookie cannot be `Secure` and the state would cross in the clear.
 20. **Owner changes (B4S-01):** a stewardship steward change uses the same `owner_change` step-up as an owner change.
     **Execution mode (B4S-08):** the `require_approval` step-up facts include `approverUserId`.
+21. **PR #198 review fixes (2026-10-08).** Six findings from the automated review, each with a real-DB test that failed
+    first (`zz-b4c-review-fixes.test.ts`):
+    - Lifting an agent or tool halt decides the step-up again on the locked row, so a halt that lands between the
+      first read and the lock is never lifted without one.
+    - Delegation links are followed through the whole chain (caller → B → C → approver counts as one person) for
+      both self-approval and quorum.
+    - The copilot's `rule_to_approval` keeps `quorum` and `approverRoleId`: they are part of the shared create schema.
+    - The approver role is snapshotted on the approval at queue time (`approvals.approver_role_id`, migration 0171;
+      Batch 5 moves to 0172). Eligibility and queue visibility read the snapshot, never the rule's current role.
+    - An active delegate of an approver-role member sees the approval in the queue. Visibility is a little wider
+      than eligibility (it does not check queue-time ages); deciding still checks everything.
+    - The two step-up ceremony routes ride the strict credential tier (10 per 5 minutes), per IP and per user, in
+      buckets separate from sign-in. That caps a person at about five step-ups per five minutes; a deployment that
+      needs more raises `REGULAIT_AUTH_RATE_LIMIT_MAX` (which also moves the sign-in tier). Secure by default.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call

@@ -60,7 +60,7 @@ each), then the Engines page.
 - Batch 4: the foundation is on `main` (PR #172, migration 0170, the `settings_relax` step-up action defined in
   `packages/shared/src/batch4.ts`, a 501 stub for `GET /v1/detection-content`). The slices that enforce step-up and
   fill the vendored detection content are still on `b4-int` and not merged. Batch 5 depends on both.
-- Free numbers: ADR 0187; migration 0171 with journal `when` 1785106000000.
+- Free numbers: ADR 0187; migration 0172 with journal `when` 1785107000000 (0171 went to the Batch 4 review fix, the approver-role snapshot).
 
 **Verification status** (`docs/research/R9-engine-reverification.md`, task G18, source review only: no engine was
 installed or run, no image pulled, no signature or isolation experiment done).
@@ -142,7 +142,7 @@ toward A3 or the eval catalog, and a completed run counts only for the classes i
 (promptfoo plugin → OWASP id, garak tag → OWASP id) is a pure, versioned shared table; an unmapped item is reported but
 never counts toward A3. Not-run and unknown are never shown as pass.
 
-**Tables (migration 0171, journal `when` 1785106000000; outline, names final in the foundation).**
+**Tables (migration 0172, journal `when` 1785107000000; outline, names final in the foundation).**
 - `engines`: id, kind `redteam | eval | model_scan`, version, image digest, licence, maintainer count, usage-data
   posture (jsonb), last verified, re-check-by, `enabled` default false, timeout, budget, `max_concurrent` default 1.
   Digest and version are seeded from a shipped manifest; an admin cannot point an engine at an arbitrary image.
@@ -233,7 +233,7 @@ not-run or unknown as pass and never renders raw model text.
 ### Work split and slices
 
 - **Claude:**
-  - **B5-F foundation.** This ADR, migration 0171, `schema.ts`, the shared zod schemas and envelope, the taxonomy
+  - **B5-F foundation.** This ADR, migration 0172, `schema.ts`, the shared zod schemas and envelope, the taxonomy
     interface, settings, runner-token auth and route allow-list, the virtual-key `engine` purpose and project pinning,
     every route as a 501 stub, the compose `engines` profile and internal network, the AgentCoordination §4.10 contract
     table and mock fixtures.

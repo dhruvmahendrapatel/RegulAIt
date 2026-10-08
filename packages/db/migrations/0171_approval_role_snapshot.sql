@@ -1,9 +1,10 @@
 -- ADR-0186 A (Batch 4 review fix) — the approver role of a tool-call approval
 -- is SNAPSHOTTED AT QUEUE TIME, like `quorum` and `signature_mode` (0170).
 --
--- Hand-written (never drizzle-kit generate); journal `when` 1785107000000.
--- 0171 (journal `when` 1785106000000) is reserved for Batch 5 by ADR-0187 and
--- is deliberately not taken here.
+-- Hand-written (never drizzle-kit generate); journal `when` 1785106000000.
+-- It takes the number ADR-0187 had reserved for Batch 5, which moves to 0172
+-- (journal `when` 1785107000000): leaving a gap below an applied migration
+-- would make a later 0171 silently never apply (CONTRIBUTING_PARALLEL_SESSIONS §4).
 --
 -- `approvals.approver_role_id`: the approver role of the rule that named the
 -- approver when the call was queued. Eligibility (decide, signing-options, the

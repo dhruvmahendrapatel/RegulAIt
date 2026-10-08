@@ -32,7 +32,7 @@ roadmap: ../docs/product/ROADMAP.md
 - Split: Claude B5-F foundation + B5-E runner core (one PR), then B5-P promptfoo, B5-M modelscan, B5-G garak; Codex X26
   Engines page, X27 run/result views, X28 Model artifacts, X29 cross-review; research G19 (`R10-engine-admission.md`).
 - Batch 5 code starts only after `b4-int` lands on `main` (shared hot files, ADR-0183; needs Batch 4 step-up and the
-  vendored detection scrub). Next migration 0171 (journal when 1785106000000), next ADR 0188.
+  vendored detection scrub). Next migration 0172 (journal when 1785107000000; 0171 = Batch 4 review fix, approver-role snapshot), next ADR 0188.
 
 **2026-10-08 - Batch 4: Claude's half integrated and security-reviewed on `b4-int` (e315845); Codex's half in review.**
 - A (step-up incl. fresh SSO login), A2+B (dual control, passkey-signed approvals) and T (trace residual) are merged
