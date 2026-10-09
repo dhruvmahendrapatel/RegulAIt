@@ -54,7 +54,7 @@ import { z } from "zod";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { generateEnrollmentToken } from "./engine-runner-auth.js";
-import { endLeasedRunsOfRunner } from "./engine-runs.js";
+import { endLeasedRunsOfRunner, engineRunTestHooks } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -488,7 +488,13 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     }
     const now = new Date();
     const verdict = evaluateRunnerSelfTest(manifest[engineId], selfTest, now);
+    await engineRunTestHooks.beforeSelfTestTx?.(runnerId);
     const out = await db.transaction(async (tx) => {
+      // PR #205 review round 4 [65]: the runner row is LOCKED and its revocation re-read here, like
+      // the lease: a report that lands after a revocation touches neither the runner nor the engine
+      // (revocation UPDATEs this row, so it either waits for this transaction or this one sees it)
+      const [live] = await tx.select({ revokedAt: engineRunners.revokedAt }).from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
+      if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       await tx.update(engineRunners).set({ selfTest, selfTestPassed: verdict.passed, selfTestFailures: verdict.failures }).where(eq(engineRunners.id, runnerId));
       const [engine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       const recorded = engine?.selfTest as { passed?: boolean; imageDigest?: string; version?: string } | null;
@@ -518,21 +524,24 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           .where(eq(engines.id, engineId));
         engineDisabled = true;
       }
-      return { engineRefreshed, engineDisabled };
+      return { kind: "done" as const, engineRefreshed, engineDisabled };
     });
+    if (out.kind === "revoked") {
+      return reply.status(401).send({ error: "engine_runner_revoked", detail: "this runner was revoked: its token authenticates nothing" });
+    }
     await auditEngine(db, {
       userId: NO_IDENTITY,
       objectType: "engine_runner",
       objectId: runnerId,
       ruleId: verdict.passed ? "engine-runner-self-test-refreshed" : "engine-runner-self-test-failed",
       effect: verdict.passed ? "allow" : "deny",
-      detail: { engineId, selfTest: verdict, egress: selfTest.egress, ...out },
+      detail: { engineId, selfTest: verdict, egress: selfTest.egress, engineRefreshed: out.engineRefreshed, engineDisabled: out.engineDisabled },
       reason:
         `engine runner ${runner.name} (${engineId}) submitted a fresh self-test: ` +
         (verdict.passed ? "passed" : `failed (${verdict.failures.join(", ")})`) +
         (out.engineDisabled ? " — the engine is switched off" : out.engineRefreshed ? "; the engine's recorded self-test is refreshed" : ""),
     });
-    return reply.send({ selfTest: verdict, ...out });
+    return reply.send({ selfTest: verdict, engineRefreshed: out.engineRefreshed, engineDisabled: out.engineDisabled });
   });
 }
 

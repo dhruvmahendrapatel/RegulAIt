@@ -17,6 +17,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runProcessGroup, type EngineAdapter, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
+import { PROMPTFOO_STRATEGY_SET_PREFIX } from "@regulait/shared";
 import {
   assertGatewayOnly,
   buildPromptfooConfig,
@@ -60,7 +61,12 @@ class Aborted extends Error {}
 /** every planned pair not run for one reason (PR #205 review round 3 [62]: the mapper's own enumeration) */
 function notRunAll(plan: PromptfooPlan, errorCode: string, status: "not_run" | "failed" = "not_run"): PromptfooEnvelopeBody {
   const pairs = notRunPairs(plannedPairs(plan), "engine_error", `not run: ${errorCode}`);
-  return { status, errorCode, items: pairs.items, notRun: [...plan.notRun, ...pairs.notRun], rawReport: null };
+  // PR #205 review round 4 [66]: with no runnable plugin there are no pairs, so every requested
+  // strategy is recorded on its own. The reason column admits only the migration-0173 vocabulary;
+  // a dedicated `no_runnable_plugin` reason needs migration 0174 (asked, not added): until then it
+  // is `engine_error` and the run's errorCode says `no_runnable_plugin`.
+  const strategies = plan.plugins.length === 0 ? plan.strategies.map((s) => ({ key: `${PROMPTFOO_STRATEGY_SET_PREFIX}${s.id}`, reason: "engine_error" as const })) : [];
+  return { status, errorCode, items: pairs.items, notRun: [...plan.notRun, ...pairs.notRun, ...strategies], rawReport: null };
 }
 
 export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
@@ -68,7 +74,7 @@ export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
   const node = opts.nodeBin ?? process.execPath;
   return async (lease, ctx) => {
     const plan = planPromptfooRun(lease.spec.config.sets);
-    if (plan.plugins.length === 0) return notRunAll(plan, "nothing_runnable");
+    if (plan.plugins.length === 0) return notRunAll(plan, plan.strategies.length > 0 ? "no_runnable_plugin" : "nothing_runnable");
     let config: Record<string, unknown>;
     let env: Record<string, string>;
     try {

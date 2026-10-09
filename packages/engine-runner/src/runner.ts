@@ -52,8 +52,10 @@ export class RunnerHttpError extends Error {
     readonly route: "register" | "lease" | "self-test",
     readonly status: number,
     readonly code: string | null,
+    /** the gateway's `reason` beside the code, when it gave one (PR #205 review round 4 [64]) */
+    readonly reason: string | null = null,
   ) {
-    super(`${route} refused (${status}${code ? ` ${code}` : ""})`);
+    super(`${route} refused (${status}${code ? ` ${code}` : ""}${reason ? `: ${reason}` : ""})`);
   }
 }
 
@@ -113,8 +115,8 @@ export class RunnerClient {
     const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer());
     if (res.status === 204) return null;
     if (res.status !== 200) {
-      const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string };
-      throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null);
+      const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string; reason?: string };
+      throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null, typeof json.reason === "string" ? json.reason : null);
     }
     return (await res.json()) as EngineLease;
   }

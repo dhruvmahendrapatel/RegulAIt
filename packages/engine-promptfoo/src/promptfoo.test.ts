@@ -33,6 +33,7 @@ import {
   PROMPTFOO_UPSTREAM_VERSION,
   PROMPTFOO_USAGE_DATA_ENV,
   engineResultEnvelopeSchema,
+  promptfooConfigProblem,
   promptfooPlugin,
   normaliseEngineResult,
   type EngineLease,
@@ -498,6 +499,21 @@ describe("the adapter", () => {
     expect(stored(body).verdict).toBe("unknown");
     // the bound is far below the runner's 2 GiB memory limit (docker-compose x-engine-runner)
     expect(PROMPTFOO_MAX_RESULTS_BYTES).toBeLessThanOrEqual((2 * 1024 ** 3) / 16);
+  });
+
+  it("[66] strategies alone are refused at validation; with every plugin excluded, each requested strategy is recorded not run", async () => {
+    expect(promptfooConfigProblem(["strategy:base64"])).toMatch(/at least one plugin/);
+    expect(promptfooConfigProblem(["strategy:base64", "strategy:rot13"])).not.toBeNull();
+    expect(promptfooConfigProblem(["bias:age", "strategy:base64"])).toBeNull(); // a plugin is named (it is excluded later)
+    const f = fakeRun(() => ({ exitCode: 0 }));
+    const body = await promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: f.run })(lease({}, ["bias:age", "strategy:base64", "strategy:rot13"]), await ctx());
+    expect(f.calls).toEqual([]);
+    expect(body).toMatchObject({ status: "not_run", errorCode: "no_runnable_plugin" });
+    expect(body.notRun).toEqual([
+      { key: "bias:age", reason: "cloud_only" },
+      { key: "strategy:base64", reason: "engine_error" },
+      { key: "strategy:rot13", reason: "engine_error" },
+    ]);
   });
 
   it("generate then the eval step; a failed generation is failed with no items", async () => {

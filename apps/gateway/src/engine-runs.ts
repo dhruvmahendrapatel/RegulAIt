@@ -82,6 +82,7 @@ import {
   evaluateRunnerSelfTest,
   isTerminalEngineRunStatus,
   normaliseEngineResult,
+  promptfooConfigProblem,
   updateEngineScheduleSchema,
   type CreateEngineRunInput,
   type EngineId,
@@ -238,6 +239,10 @@ export async function validateEngineRunRequest(
   await syncEngineManifest(db, manifestOf(opts));
   const [engine] = await db.select().from(engines).where(eq(engines.id, input.engineId));
   if (!engine) return { ok: false, status: 404, error: "engine_not_found" };
+  // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
+  // plugin's test cases, so a plan of strategies alone would run nothing)
+  const configProblem = input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : null;
+  if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };
   }
@@ -657,6 +662,8 @@ export const engineRunTestHooks: {
   beforeWorkflowNotify?: (runId: string) => void;
   /** runs after the lease route's pre-checks, before its transaction (PR #203 review round 2 [17]) */
   beforeLeaseTx?: (runnerId: string) => Promise<void> | void;
+  /** runs after the self-test route's pre-checks, before its transaction (PR #205 review round 4 [65]) */
+  beforeSelfTestTx?: (runnerId: string) => Promise<void> | void;
   /** runs just before a due schedule creates its run (PR #203 review round 2 [23]) */
   beforeScheduledCreate?: () => void;
 } = {};
@@ -1124,7 +1131,18 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const [runner] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
     const [engine] = await db.select().from(engines).where(eq(engines.id, engineId));
     if (!engine || !engine.enabled) {
-      return reply.status(409).send({ error: "engine_disabled", detail: `engine ${engineId} is off: no work is leased` });
+      // PR #205 review round 4 [64]: say WHY, so a runner whose own last report failed keeps
+      // re-proving itself on a slow cadence, and one that an admin simply switched off just waits.
+      // A passing refresh never re-enables the engine: that stays an audited admin action.
+      const reason = runner && !runner.selfTestPassed ? "runner_self_test_failed" : "disabled";
+      return reply.status(409).send({
+        error: "engine_disabled",
+        reason,
+        detail:
+          reason === "runner_self_test_failed"
+            ? `engine ${engineId} is off and this runner's last self-test failed: submit a fresh one; an admin re-enables the engine`
+            : `engine ${engineId} is off: no work is leased`,
+      });
     }
     const m = manifest[engineId];
     const now = new Date();

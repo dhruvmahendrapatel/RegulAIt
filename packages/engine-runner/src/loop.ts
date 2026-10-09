@@ -90,6 +90,10 @@ export interface RunnerLoopOptions extends RunOnceOptions {
   enrollmentToken: string | null;
   /** what registration reports (built fresh each time: the self-test is current) */
   registration: () => Promise<{ name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest }>;
+  /** round 4 [64]: how often a runner disabled for its own failed report re-proves itself (default 15 min) */
+  failedSelfTestRefreshMs?: number;
+  /** clock seam for tests (ms) */
+  now?: () => number;
   /** register attempts on a transient failure, same secret each time (default 5) */
   registerAttempts?: number;
   /** pause when there is no work (default 5 s) */
@@ -179,6 +183,9 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
   let waitingOn: string | null = null;
   // a fresh self-test is submitted at most once per refusal streak (no tight loop when it fails)
   let refreshedSinceAccepted = false;
+  // round 4 [64]: when this runner last submitted a definitive refresh while disabled for its own failed report
+  let lastFailedRefreshAt: number | null = null;
+  const clock = opts.now ?? Date.now;
   for (let i = 0; opts.maxIterations === undefined || i < opts.maxIterations; i++) {
     try {
       const r = await runOnce(client, adapter, opts);
@@ -215,6 +222,29 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
             continue;
           }
           throw inner;
+        }
+      }
+      // Round 4 [64]: the engine is off BECAUSE this runner's last report failed (the gateway says
+      // so in `reason`). Keep re-proving on a slow cadence — a temporary network-policy problem must
+      // not need a re-enrolment — but never lease harder: a passing report updates only this
+      // runner's stored report; re-enabling the engine stays an audited admin action with step-up.
+      // A transient submission failure does not use up the cadence (it is retried after the backoff).
+      // An engine an admin simply switched off (`reason: disabled`) gets no refreshes at all.
+      if (e instanceof RunnerHttpError && e.code === "engine_disabled" && e.reason === "runner_self_test_failed") {
+        const t = clock();
+        if (lastFailedRefreshAt === null || t - lastFailedRefreshAt >= (opts.failedSelfTestRefreshMs ?? 15 * 60_000)) {
+          try {
+            const outcome = await refreshSelfTest(client, opts);
+            if (outcome !== "transient") lastFailedRefreshAt = t;
+          } catch (inner) {
+            if (inner instanceof RunnerHttpError && inner.status === 401) {
+              if (enrolled) throw new RunnerFatalError(MESSAGE_NO_ENROLMENT);
+              enrolled = true;
+              await enrol(client, opts, sleep);
+              continue;
+            }
+            throw inner;
+          }
         }
       }
       const why = e instanceof RunnerHttpError ? (e.code ?? String(e.status)) : "unreachable";

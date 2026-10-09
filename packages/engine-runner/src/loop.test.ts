@@ -19,7 +19,7 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 interface Script {
   /** register answers, in order (the last repeats); "drop" = the request landed but the response was lost */
   register?: Array<number | "drop">;
-  lease: Array<{ status: number; error?: string }>;
+  lease: Array<{ status: number; error?: string; reason?: string }>;
   /** self-test answers in order (the last repeats); "drop" = a network error */
   selfTest?: Array<number | "drop">;
 }
@@ -46,7 +46,7 @@ function gateway(script: Script) {
       return { status, json: async () => (status === 200 ? { selfTest: { passed: true, failures: [] } } : { error: "engine_self_test_inconsistent" }) };
     }
     const step = script.lease[Math.min(li++, script.lease.length - 1)]!;
-    return { status: step.status, json: async () => (step.error ? { error: step.error } : null) };
+    return { status: step.status, json: async () => (step.error ? { error: step.error, ...(step.reason ? { reason: step.reason } : {}) } : null) };
   };
   return { calls, client: new RunnerClient({ gatewayUrl: "http://gateway.test", http }) };
 }
@@ -133,6 +133,41 @@ describe("PR #205 review round 3 [60]: a transient failure to submit the self-te
     const { o } = await opts({ maxIterations: 4 });
     await runRunnerLoop(g.client, adapter, o);
     expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(1);
+  });
+});
+
+describe("PR #205 review round 4 [64]: a runner disabled for its own failed report keeps re-proving itself, slowly", () => {
+  const disabled = (reason: string) => ({ status: 409, error: "engine_disabled", reason });
+  /** a virtual clock that advances by every sleep */
+  async function clocked(over: Record<string, unknown>) {
+    const base = await opts(over);
+    let t = 0;
+    return { ...base, o: { ...base.o, now: () => t, sleep: async (ms: number) => void (base.waits.push(ms), (t += ms)) } };
+  }
+
+  it("re-runs and submits the self-test on a slow cadence; a pass never makes it lease harder", async () => {
+    const g = gateway({ lease: [disabled("runner_self_test_failed")], selfTest: [200] });
+    const { o, waits, logs } = await clocked({ maxIterations: 6, backoffMs: 100, maxBackoffMs: 400, failedSelfTestRefreshMs: 1000 });
+    await runRunnerLoop(g.client, adapter, o);
+    // at t=0 and again once >= 1000 ms had passed (t=0,100,300,700,1100 → submit at 0 and 1100)
+    expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(2);
+    // still disabled: the normal capped backoff, never an immediate re-lease
+    expect(waits).toEqual([100, 200, 400, 400, 400, 400]);
+    expect(logs.some((l) => /submitted a fresh self-test: passed/.test(l))).toBe(true);
+  });
+
+  it("a transient submission failure does not use up the cadence: it is retried after the backoff", async () => {
+    const g = gateway({ lease: [disabled("runner_self_test_failed")], selfTest: ["drop", 503, 200] });
+    const { o } = await clocked({ maxIterations: 4, backoffMs: 10, maxBackoffMs: 40, failedSelfTestRefreshMs: 60_000 });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(3);
+  });
+
+  it("an engine an admin simply switched off gets no refreshes at all", async () => {
+    const g = gateway({ lease: [disabled("disabled")] });
+    const { o } = await clocked({ maxIterations: 6, backoffMs: 10, maxBackoffMs: 40, failedSelfTestRefreshMs: 1 });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(0);
   });
 });
 

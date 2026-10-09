@@ -189,6 +189,17 @@ export function promptfooStrategy(id: string): PromptfooStrategyEntry | null {
   return STRATEGY_BY_ID.get(id) ?? null;
 }
 
+/**
+ * PR #205 review round 4 [66]: what is wrong with a run's set list for promptfoo, or null. A
+ * strategy only rewrites a plugin's test cases, so a list of strategies alone runs nothing.
+ */
+export function promptfooConfigProblem(sets: readonly string[]): string | null {
+  if (sets.length > 0 && sets.every((s) => s.startsWith(PROMPTFOO_STRATEGY_SET_PREFIX))) {
+    return "a promptfoo strategy rewrites a plugin's test cases: name at least one plugin set (strategies alone run nothing)";
+  }
+  return null;
+}
+
 /** the not-run reason for a catalogue disposition, or null when it runs */
 export function promptfooNotRunReason(d: PromptfooDisposition): EngineNotRunReason | null {
   return d === "local" ? null : d;

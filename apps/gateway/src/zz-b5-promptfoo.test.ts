@@ -55,6 +55,7 @@ import {
 import { buildSelfTest, FileRunnerTokenStore, generateRunnerSecret, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, runnerTokenHash, type RunnerHttp } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
+import { engineRunTestHooks } from "./engine-runs.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -593,5 +594,88 @@ describe("PR #205 review round 2: self-test refresh and lost registration respon
     const enabled = ((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled;
     expect(enabled).toBe(false);
     expect((await audits("engine-runner-self-test-failed", firstRunnerId)).rows.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 4 (Codex), decisions 64, 65 and 66 — each red first
+// (runs after round 2's last case, which left the engine disabled by the first runner's failed report)
+// ===========================================================================
+describe("PR #205 review round 4: disabled for a failed report, the self-test race, strategy-only plans", () => {
+  const passingReport = () =>
+    buildSelfTest({
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "denied" },
+    });
+  const engineRow = async () =>
+    ((await db.execute(sql`SELECT enabled, self_test_passed_at FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean; self_test_passed_at: string | null }> }).rows[0]!;
+  const runnerRow = async (id: string) =>
+    ((await db.execute(sql`SELECT self_test_passed, revoked_at, self_test FROM engine_runners WHERE id = ${id}`)) as unknown as { rows: Array<{ self_test_passed: boolean; revoked_at: string | null; self_test: { at: string } }> }).rows[0]!;
+  const auth = () => ({ authorization: `Bearer ${firstRunnerSecret}` });
+
+  it("[64] the lease says the engine is off because THIS runner's report failed; a passing refresh updates only the runner, never re-enables", async () => {
+    expect((await engineRow()).enabled).toBe(false);
+    const refused = await inject("POST", "/v1/engine-runner/lease", auth());
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ error: "engine_disabled", reason: "runner_self_test_failed" });
+    const ok = await inject("POST", "/v1/engine-runner/self-test", auth(), { selfTest: await passingReport() });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ selfTest: { passed: true }, engineRefreshed: false, engineDisabled: false });
+    expect((await runnerRow(firstRunnerId)).self_test_passed).toBe(true);
+    // the engine stays off: re-enabling is an admin action with a step-up
+    expect((await engineRow()).enabled).toBe(false);
+    const after = await inject("POST", "/v1/engine-runner/lease", auth());
+    expect(after.json()).toMatchObject({ error: "engine_disabled", reason: "disabled" });
+  });
+
+  it("[65] a self-test report that lands after the runner was revoked touches neither the runner nor the engine", async () => {
+    // a fresh runner for the race: its row is revoked between the route's pre-checks and its transaction
+    const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: "race" });
+    const secret = generateRunnerSecret();
+    const racer = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
+    const reg = await racer.register(t.json().token, secret, { name: `race-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await passingReport() });
+    // its stored report is a FAILING one, which (enabled) would switch the engine off
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    const before = await runnerRow(reg.runnerId);
+    engineRunTestHooks.beforeSelfTestTx = async (runnerId) => {
+      if (runnerId === reg.runnerId) await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'revoked mid-self-test' WHERE id = ${reg.runnerId}`);
+    };
+    try {
+      const failing = await buildSelfTest({
+        imageDigest: PF_DIGEST,
+        engineVersion: MANIFEST.promptfoo.version,
+        requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+        env: { ...MANIFEST.promptfoo.usageDataEnv },
+        egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "connected" },
+      });
+      const r = await inject("POST", "/v1/engine-runner/self-test", { authorization: `Bearer ${secret}` }, { selfTest: failing });
+      expect(r.statusCode, r.body).toBe(401);
+      expect(r.json().error).toBe("engine_runner_revoked");
+    } finally {
+      engineRunTestHooks.beforeSelfTestTx = undefined;
+      // leave the engine as the suite's afterAll expects to reset it
+    }
+    expect((await engineRow()).enabled).toBe(true);
+    const afterRow = await runnerRow(reg.runnerId);
+    expect(afterRow.self_test_passed).toBe(true);
+    expect(afterRow.self_test.at).toBe(before.self_test.at);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+
+  it("[66] a strategy-only plan is refused at validation with a clear error", async () => {
+    const r = await inject("POST", "/v1/engine-runs", alice.key, {
+      engineId: "promptfoo",
+      target: { agentId: targetId, judgeAgentId: judgeId },
+      config: { sets: ["strategy:base64"] },
+      projectId,
+      budgetUsd: 1,
+      trials: 2,
+    });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json()).toMatchObject({ error: "engine_config_invalid" });
+    expect(r.json().detail).toMatch(/at least one plugin/);
   });
 });
