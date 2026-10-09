@@ -958,6 +958,78 @@ engine row's stored build with the manifest's (a build change of the engine, not
     the engine's state; only ending its active runs (decision 84) depends on it switching the engine off. A test switches
     the engine off, submits a failing report, and finds re-enabling refused with `engine_self_test_required`.
 
+**Review round 13 (PR #205, Codex, 2026-10-09; 3 findings, each red first) and a sweep of the runner client.** Tests:
+`loop.test.ts` [94] [95] [96], `durable.test.ts` [96], `zz-b5-promptfoo.test.ts` "review round 13" [94] [95].
+**Migration 0174** (`0174_engine_lease_request_and_manifest_generation`, hand-written): `engine_runs.lease_request_id`
+(uuid, unique per runner where set) and `engines.manifest_generation` (integer, default 0, never negative).
+
+**The sweep (round 13), of the runner client, for two classes of bug.**
+- (a) A request whose server side commits state, where a timeout or a lost response leaves the runner unable to learn
+  the outcome:
+  - **the lease**: the only one with no recovery. A lost 200 left a leased run, with a minted key, that no runner ran
+    until its lease expired. Fixed by decision 94.
+  - registration: already idempotent (a same-hash replay returns the same runner, decision 54; a pending secret is
+    probed as a credential, decision 77; a revoked pending secret is replaced, decision 92). No change.
+  - the runner self-test: a resubmitted report overwrites the stored one with the same verdict. Idempotent; no change.
+  - heartbeats: a repeated heartbeat renews the same lease. Idempotent; no change.
+  - the result post: a retry after a lost 2xx gets a definitive 409 `engine_run_finished`, which ends the retries and
+    removes the retained envelope. No change.
+- (b) A persisted file that can be left truncated:
+  - the runner token file and the pending enrolment record were renamed into place atomically but never fsynced (the
+    file or its directory), so a power cut could leave an empty or partial token. Fixed by decision 96.
+  - the retained result envelope was written in place with a plain `writeFile` (neither atomic nor fsynced). Fixed by
+    decision 96.
+  - the engine's own work files live on a tmpfs and are discarded on restart by design. Not persisted; no change.
+
+94. **The lease is idempotent** [4230481439]. The runner now sends a `requestId` (a UUID it generated) with every lease
+    attempt and keeps it while the attempt's outcome is unknown: a timeout, a dropped connection, a 5xx, or a refusal
+    with no `next` signal. It drops the id once the gateway answers definitively (a lease, 204, or a refusal carrying
+    `next`), so its next attempt is a new one. The gateway records the id on the run it leases. A retry with the same
+    id, from the same runner, while that run is still leased to it (not ended, not cancelled, lease and deadline not
+    passed), returns that run again instead of leasing a second one. The lookup is by (runner, request id), under the
+    runner's row lock, and the unique index is per runner: another runner presenting the same id matches nothing of the
+    first runner's and is treated as a fresh lease. A request id whose run is no longer live leases nothing (204).
+    **Credentials are re-issued by ROTATION, not by re-showing the key.** Only the key's hash is stored, so the original
+    key cannot be returned again. In the re-issuing transaction the old key is revoked (audited
+    `engine-run-key-revoked`, cause `lease_reissued`) and a new key is minted with the same models, the same project and
+    the run's deadline. Its budget is the run's budget, and it carries what the run's earlier keys already spent
+    (`spent_usd`), so the run's ceiling holds across keys. At most one key of the run ever works. The run points at the
+    new key, its lease is renewed like a heartbeat, and the re-issue is audited `engine-run-lease-reissued`. Minting a
+    second key alongside the first was rejected: it would leave two working credentials for one run. A run's cost
+    (`runCostUsd`) is now summed over every key the run has held. Tests: a retry gets the same run with a different key
+    and the old key revoked; usage on both keys counts toward the run's cost; a second runner presenting the id never
+    gets the run nor rotates its key; a retry after the run ended gets 204.
+95. **The manifest sync is monotonic** [4230481454]. Each shipped manifest entry carries a `generation` (a positive
+    integer, bumped with every build change), and the engine row records the generation it was written from. The sync
+    compares them under the row's `FOR UPDATE` lock. A replica whose manifest generation is older than the row's (an old
+    replica during a rolling upgrade) writes nothing, cancels nothing and disables nothing. On that replica the engine is
+    unavailable: the lease (no `next` signal, so the runner keeps its state and retries), run validation and creation
+    (both the unlocked check and the one under the row's `FOR SHARE` lock), enabling, the admin self-test, the runner
+    self-test and registration all refuse with 409 `engine_manifest_outdated`. Each decides from the row it reads or
+    locks, so a newer replica that syncs after this one started is seen at once. Switching the engine off and lowering
+    its limits stay available, since they only tighten. The refusal is audited `engine-manifest-outdated` once per
+    replica (per manifest in use, engine and row generation), not once per request. The runner treats this refusal as
+    transient everywhere, and at registration it does not use up the registration attempts. Registration checks the row
+    without a lock, before the enrolment token is spent; a registration that slips past a concurrent upgrade is of an
+    obsolete build, which every later report and lease refuses through the current-build predicate (round 12). An equal
+    generation with different content keeps the earlier behaviour (the build comparison under the lock); bumping the
+    generation with every build change is part of the manifest's contract. Tests: with the row at a newer generation and
+    build, this replica's sync leaves the row, the engine's enabled state and pass, and a waiting run untouched; a lease,
+    a creation, an enable and a runner self-test each get 409 `engine_manifest_outdated`; one audit row covers all of
+    them.
+96. **Persisted runner files are written durably** [4230481447]. Open-source check (ADR-0176): `write-file-atomic`
+    (npm's own, ISC, 8.0.0) writes a temp file beside the target, fsyncs it, sets mode 0600 and renames it over the
+    target. It does not fsync the directory, so `packages/engine-runner/src/durable.ts` adds that one step. The runner
+    token, the pending enrolment record and the retained result envelope all go through it, and clearing the pending
+    record fsyncs the directory too. On startup the retained-result scan acts on the final file name only: a directory
+    with just the temp file of an unfinished write holds no result and is removed as before; a valid result next to a
+    stray temp file is delivered as usual. A result file that exists but cannot be read or parsed is never a reason to
+    delete anything: it is renamed aside to `undelivered-result.json.corrupt-<time>`, logged, and its directory is left
+    alone from then on (not delivered, not counted against the retention cap, never removed) for an operator to
+    inspect. Tests: the file and directory fsyncs are observed for the token, the pending record and an undelivered
+    envelope; a simulated crash before the rename leaves the previous token intact; a truncated result is quarantined
+    and survives a second start.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
