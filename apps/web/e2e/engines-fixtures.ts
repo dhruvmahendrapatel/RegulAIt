@@ -12,6 +12,13 @@
  * queued, awaiting approval, leased, completed (pass and fail), failed with
  * every item unknown, timed out, cancelled, and not run; items that are
  * not_run (egress_denied, cloud_only) and unmapped. None is ever a pass.
+ *
+ * B5-M (ADR-0187 decisions 104 onward): model artifacts and their scans in every
+ * verdict — `clean` (a verified safetensors file, the only admissible one),
+ * `no_known_unsafe` (an executable format: never admissible, carries an
+ * `executable_format` finding), `unsafe`, `unknown` and `not_run` — with the
+ * gateway's chip wording, which never says "safe". The upload mock decides the
+ * format from the first bytes as a stand-in for the gateway's detection.
  */
 import type { Page, Route } from "@playwright/test";
 
@@ -195,9 +202,52 @@ export function itemsOf(runId: string): Json[] {
   ];
 }
 
+/** the chip wording the gateway sends (ARTIFACT_SCAN_CHIP); never "safe" */
+export const ARTIFACT_CHIP: Record<string, string> = {
+  clean: "Non-executable format verified; no finding",
+  no_known_unsafe: "No known-unsafe operator found (executable format)",
+  unsafe: "Unsafe operator found",
+  unknown: "Scan inconclusive",
+  not_run: "Not scanned (unsupported format)",
+};
+
+function artifact(id: string, format: string, executable: boolean, filename: string, sizeBytes: number): Json {
+  return { id, sha256: id.replace(/-/g, "").padEnd(64, "0").slice(0, 64), sizeBytes, format, executable, formatDescription: null, filename, projectId: null, uploadedByUserId: ENGINE_USER, createdAt: iso(90) };
+}
+function scan(artifactId: string, verdict: string, format: string, findings: Json[]): Json {
+  return { id: artifactId.replace(/^99999999-8888/, "99999999-9999"), artifactId, engineRunId: null, sha256: artifactId.replace(/-/g, "").padEnd(64, "0").slice(0, 64), format, verdict, chip: ARTIFACT_CHIP[verdict], admissible: verdict === "clean", findings, scannerVersion: "0.8.8", createdAt: iso(80) };
+}
+
+/** B5-M: one artifact per scan verdict (the format decided from the bytes, the name display only) */
+export const ARTIFACTS = {
+  safetensors: artifact("99999999-8888-4000-8000-000000000001", "safetensors", false, "weights.safetensors", 4096),
+  cleanPickle: artifact("99999999-8888-4000-8000-000000000002", "pickle", true, "model.pkl", 2048),
+  renamedPickle: artifact("99999999-8888-4000-8000-000000000003", "pickle", true, "model.safetensors", 77),
+  truncated: artifact("99999999-8888-4000-8000-000000000004", "pickle", true, "broken.pkl", 40),
+  gguf: artifact("99999999-8888-4000-8000-000000000005", "gguf", false, "model.gguf", 8192),
+} as const;
+export const ARTIFACT_SCANS: Record<string, Json[]> = {
+  [ARTIFACTS.safetensors.id]: [scan(ARTIFACTS.safetensors.id, "clean", "safetensors", [])],
+  [ARTIFACTS.cleanPickle.id]: [scan(ARTIFACTS.cleanPickle.id, "no_known_unsafe", "pickle", [{ kind: "executable_format", id: "pickle", severity: "high" }])],
+  [ARTIFACTS.renamedPickle.id]: [
+    scan(ARTIFACTS.renamedPickle.id, "unsafe", "pickle", [
+      { kind: "unsafe_operator", id: "os.system", severity: "critical" },
+      { kind: "executable_format", id: "pickle", severity: "high" },
+    ]),
+  ],
+  [ARTIFACTS.truncated.id]: [
+    scan(ARTIFACTS.truncated.id, "unknown", "pickle", [
+      { kind: "scan_error", id: "PICKLE_GENOPS", severity: "medium" },
+      { kind: "executable_format", id: "pickle", severity: "high" },
+    ]),
+  ],
+  [ARTIFACTS.gguf.id]: [scan(ARTIFACTS.gguf.id, "not_run", "gguf", [])],
+};
+
 export interface EnginesMockState {
   engines: Json;
   runs: Json[];
+  artifacts: Json[];
   calls: Array<{ method: string; path: string; body: Json; headers: Record<string, string> }>;
 }
 
@@ -215,6 +265,7 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
   const state: EnginesMockState = {
     engines: init.engines ?? enginesList(),
     runs: init.runs ?? Object.values(RUNS).map((r) => ({ ...r })),
+    artifacts: init.artifacts ?? Object.values(ARTIFACTS).map((a) => ({ ...a })),
     calls: [],
   };
   await page.route(/\/v1\/(engines|engine-runs|engine-runners|engine-schedules|model-artifacts)(\/|\?|$)/, async (route) => {
@@ -222,7 +273,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
     const url = new URL(req.url());
     const p = url.pathname;
     const method = req.method();
-    const body = req.postData() ? JSON.parse(req.postData()!) : undefined;
+    const isJson = (req.headers()["content-type"] ?? "").startsWith("application/json");
+    const body = isJson && req.postData() ? JSON.parse(req.postData()!) : undefined;
     const headers = req.headers();
     state.calls.push({ method, path: p, body, headers });
     const engineMatch = /^\/v1\/engines\/([a-z]+)(\/.*)?$/.exec(p);
@@ -289,7 +341,22 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       }
     }
     if (p === "/v1/engine-schedules" && method === "GET") return json(route, 200, { schedules: [] });
-    if (p === "/v1/model-artifacts") return json(route, 501, { error: "not_built" });
+    if (p === "/v1/model-artifacts" && method === "GET") return json(route, 200, { artifacts: state.artifacts });
+    if (p === "/v1/model-artifacts" && method === "POST") {
+      if ((headers["content-type"] ?? "") !== "application/octet-stream") return json(route, 415, { error: "artifact_content_type", detail: "send the artifact's bytes as application/octet-stream" });
+      const bytes = req.postDataBuffer() ?? new Uint8Array(0);
+      // a stand-in for the gateway's content detection: never the file name
+      const format = bytes.length === 0 ? "empty" : bytes[0] === 0x80 ? "pickle" : bytes[8] === 0x7b ? "safetensors" : "unrecognised";
+      const a = artifact(`99999999-8888-4000-8000-${String(state.artifacts.length + 100).padStart(12, "0")}`, format, format !== "safetensors" && format !== "empty", url.searchParams.get("filename") ?? "artifact", bytes.length);
+      state.artifacts.unshift(a);
+      return json(route, 201, { artifact: a });
+    }
+    const artifactMatch = /^\/v1\/model-artifacts\/([0-9a-f-]+)$/.exec(p);
+    if (artifactMatch && method === "GET") {
+      const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
+      if (!a) return json(route, 404, { error: "unknown_artifact" });
+      return json(route, 200, { artifact: a, scans: ARTIFACT_SCANS[a.id] ?? [] });
+    }
     return json(route, 404, { error: "not_found" });
   });
   return state;
