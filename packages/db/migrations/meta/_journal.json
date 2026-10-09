@@ -1177,6 +1177,13 @@
       "when": 1785109000000,
       "tag": "0174_engine_lease_request_and_manifest_generation",
       "breakpoints": true
+    },
+    {
+      "idx": 175,
+      "version": "7",
+      "when": 1785110000000,
+      "tag": "0175_model_artifact_scans",
+      "breakpoints": true
     }
   ]
 }

@@ -78,8 +78,12 @@ export const ENGINE_NOT_RUN_REASONS = [
 ] as const;
 export type EngineNotRunReason = (typeof ENGINE_NOT_RUN_REASONS)[number];
 
-/** a model-artifact scan's verdict (`artifact_scans.verdict`); only `clean` is clean */
-export const ARTIFACT_SCAN_VERDICTS = ["clean", "unsafe", "unknown", "not_run"] as const;
+/**
+ * a model-artifact scan's verdict (`artifact_scans.verdict`); only `clean` is clean. B5-M (migration
+ * 0175, owner decision 1 pending confirmation): `no_known_unsafe` = an executable format in which
+ * modelscan found no known-unsafe operator. It is never clean and never admissible.
+ */
+export const ARTIFACT_SCAN_VERDICTS = ["clean", "no_known_unsafe", "unsafe", "unknown", "not_run"] as const;
 export type ArtifactScanVerdict = (typeof ARTIFACT_SCAN_VERDICTS)[number];
 
 /** what a run targets (`engine_runs.target_kind`) */
@@ -181,6 +185,16 @@ export const ENGINE_REFUSALS = {
   engine_result_invalid: 422,
   /** a virtual-key call whose project header is not the key's project */
   virtual_key_project_mismatch: 403,
+  /** B5-M: an artifact upload over the org's size limit */
+  artifact_too_large: 413,
+  /** B5-M: an artifact upload that is not `application/octet-stream` */
+  artifact_content_type: 415,
+  /** B5-M: no artifact store is configured on this gateway (nothing is accepted) */
+  artifact_store_unavailable: 503,
+  /** B5-M: an artifact the caller did not upload (and is not an admin for) */
+  artifact_not_accessible: 403,
+  /** B5-M: a runner asking for an artifact its leased run does not target */
+  engine_artifact_not_leased: 409,
 } as const;
 export type EngineRefusalCode = keyof typeof ENGINE_REFUSALS;
 
