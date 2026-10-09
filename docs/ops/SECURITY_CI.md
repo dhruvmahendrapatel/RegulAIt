@@ -133,6 +133,21 @@ different failure, such as a network error, fails the job as inconclusive.
   signed image is `publish-image.yml`'s job (ADR-0184 lists the change it needs);
 - release-key signing of update bundles, which stays the owner's offline ceremony (`infra/release-keys/`, PENDING S3).
 
+### 7. Engine images (`engines`, `engine-image` and `engine-sign` jobs; ADR-0187 decision 120)
+
+Every `engines/<name>/Dockerfile` is found by `engines` and becomes one matrix leg. There is no list to keep up to date.
+Each leg gets gates 4–6 above: the same `docker build` (from the repository root, `-f engines/<name>/Dockerfile`), the
+same Trivy gate against its own allow-list (`security/image-allowlist.engine-<name>.json`, empty when absent: the gate fails on stale entries, so one shared file would let an exception for one image break every other image), an image SBOM, and the same unsigned red proof on runs that do not sign. `engine-sign`
+uses `sign`'s condition and identity. The gateway-only runtime-contents check does not apply.
+
+**Also:** the engine's own `licence-gate.mjs` runs inside its build, so a denied licence fails it. The job fails if a
+gate exists but the Dockerfile never calls it. Trivy's licence report of the image, including the OS layer, is kept as
+evidence and is not a gate. `digest.json` records the image ID and the throwaway registry's manifest digest, and on main
+the signed digest. Everything is in the `engine-<name>-scan` and `engine-<name>-signed` artifacts.
+
+**Does not prove:** anything about a published engine image (none is published), or which digest the engine manifest
+should pin (ADR-0187 open question 8).
+
 ## Supply chain of the gates themselves
 
 | Item | Pinned how | Where |
