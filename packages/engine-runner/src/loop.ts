@@ -2,11 +2,13 @@
  * ADR-0187 — THE RUNNER'S LIFE, shared by every engine shim: a runner token that survives a
  * restart, and a loop that is an explicit STATE MACHINE driven by one gateway signal.
  *
- * Token (decisions 49 and 54). The runner generates its own token, persists it on its own volume
- * (`FileRunnerTokenStore`: mode 0600, written atomically, never logged) BEFORE it registers, and
- * sends only its hash, so a lost response loses nothing. At start a stored token is used and the
- * enrolment token is ignored. The state volume is never deleted: a new token replaces the file
- * only when this runner enrols.
+ * Token (decisions 49, 54 and 72). The runner generates its own token, persists it on its own
+ * volume (`FileRunnerTokenStore`: mode 0600, written atomically, never logged) as a PENDING
+ * enrolment, together with the token it supersedes, BEFORE it registers, and sends only its hash,
+ * so a lost response or a crash loses nothing: a restart that finds a pending enrolment resumes it
+ * with the same secret and `supersedes`. The stored token is replaced, and the pending record
+ * dropped, only after the gateway answered 201. At start a stored token is used and the enrolment
+ * token is ignored. The state volume is never deleted.
  *
  * States (PR #205 review round 5, decision 67 — the table is in the ADR and `transition` below):
  *   enrolling    no credential yet: register with the enrolment token
@@ -23,39 +25,91 @@
  * is transient: backed off and retried, never a state change of its own.
  */
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ENGINE_RUNNER_TOKEN_PREFIX, type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
 import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
 
+/**
+ * PR #205 review round 6 [72]: an enrolment under way — the new secret, and the token it supersedes
+ * (a build change) or null. Persisted BEFORE the registration leaves; the stored token is replaced
+ * and this record deleted only after the gateway answered 201. A restart that finds one resumes it
+ * with the same secret and the same `supersedes` (the gateway replays a same-hash registration).
+ */
+export interface PendingEnrolment {
+  secret: string;
+  supersedes: string | null;
+}
+
 export interface RunnerTokenStore {
   load(): Promise<string | null>;
   save(token: string): Promise<void>;
+  loadPending(): Promise<PendingEnrolment | null>;
+  savePending(pending: PendingEnrolment): Promise<void>;
+  clearPending(): Promise<void>;
 }
 
-/** the runner token on the runner's own volume: 0600, atomic replace, nothing else in the file */
+const isRunnerToken = (t: unknown): t is string => typeof t === "string" && t.startsWith(ENGINE_RUNNER_TOKEN_PREFIX) && /^[\x21-\x7e]+$/.test(t);
+
+/** write a file atomically, 0600, in a 0700 directory */
+async function writeAtomic(file: string, content: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(tmp, content, { mode: 0o600, flag: "wx" });
+  await chmod(tmp, 0o600);
+  await rename(tmp, file);
+}
+
+async function readOrNull(file: string): Promise<string | null> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+/**
+ * The runner token on the runner's own volume: 0600, atomic replace, nothing else in the file. The
+ * pending enrolment (round 6 [72]) sits beside it in `<file>.pending`, same mode, same atomic write.
+ */
 export class FileRunnerTokenStore implements RunnerTokenStore {
   constructor(readonly file: string) {}
 
+  get pendingFile(): string {
+    return `${this.file}.pending`;
+  }
+
   async load(): Promise<string | null> {
-    let text: string;
-    try {
-      text = await readFile(this.file, "utf8");
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw e;
-    }
-    const token = text.trim();
+    const text = await readOrNull(this.file);
+    const token = text?.trim() ?? null;
     // a file that does not hold a runner token is not used (and not echoed)
-    return token.startsWith(ENGINE_RUNNER_TOKEN_PREFIX) && /^[\x21-\x7e]+$/.test(token) ? token : null;
+    return isRunnerToken(token) ? token : null;
   }
 
   async save(token: string): Promise<void> {
-    await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-    const tmp = `${this.file}.${randomBytes(6).toString("hex")}.tmp`;
-    await writeFile(tmp, `${token}\n`, { mode: 0o600, flag: "wx" });
-    await chmod(tmp, 0o600);
-    await rename(tmp, this.file);
+    await writeAtomic(this.file, `${token}\n`);
+  }
+
+  async loadPending(): Promise<PendingEnrolment | null> {
+    const text = await readOrNull(this.pendingFile);
+    if (text === null) return null;
+    try {
+      const p = JSON.parse(text) as { secret?: unknown; supersedes?: unknown };
+      if (isRunnerToken(p.secret) && (p.supersedes === null || isRunnerToken(p.supersedes))) return { secret: p.secret, supersedes: p.supersedes };
+    } catch {
+      // unreadable: treated as absent below
+    }
+    // a record that is not a valid pending enrolment is never used (fail closed: nothing is registered from it)
+    return null;
+  }
+
+  async savePending(pending: PendingEnrolment): Promise<void> {
+    await writeAtomic(this.pendingFile, JSON.stringify({ secret: pending.secret, supersedes: pending.supersedes }));
+  }
+
+  async clearPending(): Promise<void> {
+    await rm(this.pendingFile, { force: true });
   }
 }
 
@@ -172,6 +226,9 @@ export interface RunnerLoopOptions extends RunOnceOptions {
 const MESSAGE_FIRST =
   "this runner has no stored token and no enrolment token is set: " +
   "mint an enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner";
+const MESSAGE_INTERRUPTED =
+  "an enrolment was interrupted (its new secret is kept as a pending enrolment) and it could not be completed: " +
+  "set REGULAIT_ENGINE_ENROLLMENT_TOKEN to the token it was started with, or mint a new enrolment token on the Engines page and set that, and restart the runner";
 const MESSAGE_REVOKED =
   "the gateway refused this runner's token (revoked or unknown) and no unused enrolment token is set: " +
   "mint a new enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner";
@@ -205,20 +262,26 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
   const cap = opts.maxRetainedResults ?? 3;
 
   const stored = await opts.store.load();
-  let state: RunnerState = stored ? "leasing" : "enrolling";
-  if (stored) {
+  // round 6 [72]: an enrolment interrupted by a crash or a restart is resumed first, with the same
+  // secret and the same `supersedes`, so the credential it replaces is still revoked
+  const interrupted = await opts.store.loadPending();
+  let state: RunnerState = interrupted ? (interrupted.supersedes ? "reenrolling" : "enrolling") : stored ? "leasing" : "enrolling";
+  if (stored && !interrupted) {
     client.useToken(stored);
     opts.log?.("using the stored runner token");
   }
+  if (interrupted) opts.log?.("resuming an interrupted enrolment");
   /** the credential in use (what a re-enrolment after a build change supersedes) */
   let held: string | null = stored;
   /** the enrolment token is tried at most once per process (it is single-use) */
-  let enrolmentTried = false;
-  /** an enrolment in progress: the same secret and body on every retry */
-  let pending: { secret: string; body: Awaited<ReturnType<RunnerLoopOptions["registration"]>>; supersedes: string | null; attempts: number } | null = null;
+  let enrolmentTried = !!interrupted;
+  /** an enrolment in progress: the same secret, body and `supersedes` on every retry (persisted: round 6 [72]) */
+  let pending: { secret: string; body: Awaited<ReturnType<RunnerLoopOptions["registration"]>> | null; supersedes: string | null; attempts: number } | null = interrupted
+    ? { secret: interrupted.secret, body: null, supersedes: interrupted.supersedes, attempts: 0 }
+    : null;
   /** set when the move to `reenrolling` was for a build change (the held token is then superseded) */
   let supersedeOnReenrol = false;
-  let stopMessage = stored ? MESSAGE_REVOKED : MESSAGE_FIRST;
+  let stopMessage = interrupted ? MESSAGE_INTERRUPTED : stored ? MESSAGE_REVOKED : MESSAGE_FIRST;
   let lastRefreshAt: number | null = null;
   let backoff = base;
   let waitingOn: string | null = null;
@@ -247,21 +310,30 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
     switch (current()) {
       case "enrolling":
       case "reenrolling": {
+        if (!opts.enrollmentToken) {
+          go({ kind: "enrolment_refused" }, "no enrolment token");
+          break;
+        }
         if (!pending) {
-          if (!opts.enrollmentToken || enrolmentTried) {
+          if (enrolmentTried) {
             go({ kind: "enrolment_refused" }, "no unused enrolment token");
             break;
           }
           enrolmentTried = true;
           const supersedes = current() === "reenrolling" && supersedeOnReenrol ? held : null;
-          // decision 54: the new secret is persisted BEFORE the request leaves
+          // decision 54 / round 6 [72]: the new secret, and the token it supersedes, are persisted as a
+          // PENDING enrolment before the request leaves; the stored token is not touched until a 201
           const secret = generateRunnerSecret();
-          await opts.store.save(secret);
-          pending = { secret, body: await opts.registration(), supersedes, attempts: 0 };
+          await opts.store.savePending({ secret, supersedes });
+          pending = { secret, body: null, supersedes, attempts: 0 };
         }
         const p = pending;
         try {
-          const reg = await client.register(opts.enrollmentToken!, p.secret, p.body, p.supersedes ?? undefined);
+          p.body ??= await opts.registration();
+          const reg = await client.register(opts.enrollmentToken, p.secret, p.body, p.supersedes ?? undefined);
+          // definitive: only now is the stored token replaced and the pending record dropped
+          await opts.store.save(p.secret);
+          await opts.store.clearPending();
           opts.log?.(
             `registered runner ${reg.runnerId}${reg.replayed ? " (replayed)" : ""}${reg.supersededRunnerId ? `; the previous registration ${reg.supersededRunnerId} is revoked` : ""}; ` +
               `self-test ${reg.selfTest.passed ? "passed" : `failed: ${reg.selfTest.failures.join(", ")}`}`,

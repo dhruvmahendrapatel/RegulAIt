@@ -107,21 +107,26 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
       row.reCheckBy === m.reCheckBy &&
       JSON.stringify(row.usageDataPosture) === JSON.stringify(posture);
     if (same) continue;
-    await db
-      .update(engines)
-      .set({
-        kind: m.kind,
-        version: m.version,
-        imageDigest: m.imageDigest,
-        licence: m.licence,
-        maintainerCount: m.maintainerCount,
-        lastVerified: m.lastVerified,
-        reCheckBy: m.reCheckBy,
-        usageDataPosture: posture,
-        ...(changedBuild ? { enabled: false, selfTestPassedAt: null, selfTest: null } : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(engines.id, id));
+    // PR #205 review round 6 [71]: a build change switches the engine off under the engine row's
+    // FOR UPDATE lock, so it serialises with a lease deciding under FOR SHARE
+    await db.transaction(async (tx) => {
+      await tx.select({ id: engines.id }).from(engines).where(eq(engines.id, id)).for("update");
+      await tx
+        .update(engines)
+        .set({
+          kind: m.kind,
+          version: m.version,
+          imageDigest: m.imageDigest,
+          licence: m.licence,
+          maintainerCount: m.maintainerCount,
+          lastVerified: m.lastVerified,
+          reCheckBy: m.reCheckBy,
+          usageDataPosture: posture,
+          ...(changedBuild ? { enabled: false, selfTestPassedAt: null, selfTest: null } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(engines.id, id));
+    });
     if (changedBuild && row.enabled) {
       await auditEngine(db, {
         userId: NO_IDENTITY,
@@ -313,16 +318,21 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       egress: report?.egress ?? null,
       at: now.toISOString(),
     };
-    const [before] = await db.select().from(engines).where(eq(engines.id, engineId));
-    await db
-      .update(engines)
-      .set({
-        selfTest: record,
-        ...(verdict.passed ? { selfTestPassedAt: now } : { selfTestPassedAt: null, enabled: false }),
-        updatedAt: now,
-        updatedByUserId: req.authCtx.userId,
-      })
-      .where(eq(engines.id, engineId));
+    // PR #205 review round 6 [71]: the engine row is taken FOR UPDATE, so a failing verdict that
+    // switches the engine off serialises with a lease deciding under its FOR SHARE lock
+    const before = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
+      await tx
+        .update(engines)
+        .set({
+          selfTest: record,
+          ...(verdict.passed ? { selfTestPassedAt: now } : { selfTestPassedAt: null, enabled: false }),
+          updatedAt: now,
+          updatedByUserId: req.authCtx.userId,
+        })
+        .where(eq(engines.id, engineId));
+      return locked;
+    });
     await auditEngine(db, {
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "engine",

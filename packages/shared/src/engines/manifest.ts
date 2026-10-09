@@ -35,6 +35,8 @@ export interface EngineManifestEntry {
   usageDataEnv: Readonly<Record<string, string>>;
   /** does a run need a virtual key (model access through the gateway)? */
   needsModelAccess: boolean;
+  /** PR #205 review round 6 [73]: must an agent run name a judge agent? (run validation refuses one without) */
+  requiresJudge: boolean;
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
   sets: Readonly<Record<string, EngineSetClass>>;
   /** what an air-gapped install cannot run, published as data */
@@ -68,6 +70,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     maintainerCount: null,
     usageDataEnv: PROMPTFOO_USAGE_DATA_ENV,
     needsModelAccess: true,
+    // PR #205 review round 6 [73]: promptfoo grades with a judge behind the gateway (without one it
+    // would fall back to a vendor default, which the config refuses)
+    requiresJudge: true,
     // every set that runs here, by class; a set not listed is offensive (fail closed)
     sets: promptfooManifestSets(),
     // remote generation is off on every install, not only air-gapped ones: this never runs
@@ -92,6 +97,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     maintainerCount: null,
     usageDataEnv: {},
     needsModelAccess: false,
+    requiresJudge: false,
     sets: {},
     airGappedReducedSet: [],
     lastVerified: "2026-10-08",
@@ -109,6 +115,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     maintainerCount: null,
     usageDataEnv: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
     needsModelAccess: true,
+    requiresJudge: false,
     sets: {},
     airGappedReducedSet: [],
     lastVerified: "2026-10-08",

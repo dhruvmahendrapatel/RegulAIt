@@ -812,7 +812,7 @@ describe("approvals, schedules and the workflow binding", () => {
 
   it("a scheduled run executes as its creator, and skips with a reason when that person is gone", async () => {
     const c = await inject("POST", "/v1/engine-schedules", alice.key, {
-      request: { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
+      request: { engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
       intervalHours: 24,
     });
     expect(c.statusCode, c.body).toBe(201);
@@ -852,7 +852,7 @@ describe("approvals, schedules and the workflow binding", () => {
             id: "checks",
             type: "automated_check",
             checks: ["engine_redteam"],
-            engines: [{ check: "engine_redteam", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["basic"], budgetUsd: 1 }],
+            engines: [{ check: "engine_redteam", engine: "promptfoo", agent: `b5-target-${RUN}`, judgeAgent: `b5-judge-${RUN}`, sets: ["basic"], budgetUsd: 1 }],
           },
           { id: "done", type: "human_approval", approvers: [approver.id] },
         ],
@@ -1041,7 +1041,7 @@ describe("review round 1", () => {
 
   it("[13] a schedule is validated like a run (judge, project, budget) and starts nothing", async () => {
     const before = await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs`).then((r) => (r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n);
-    const base = { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 };
+    const base = { engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 };
     const noProject = await inject("POST", "/v1/engine-schedules", alice.key, { request: { ...base, projectId: undefined }, intervalHours: 24 });
     expect(noProject.statusCode, noProject.body).toBe(422);
     expect(noProject.json().error).toBe("project_required");
@@ -1082,6 +1082,9 @@ describe("review round 1", () => {
     await inject("POST", `/v1/projects/${pid}/members`, AUTH, { userId: approver.id, role: "owner" });
     const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: admin.id, agentId: targetId });
     expect(g.statusCode, g.body).toBe(201);
+    // round 6 [73]: promptfoo needs a judge, and the admin must be entitled to it too
+    const gj = await inject("POST", "/v1/grants/agents", AUTH, { userId: admin.id, agentId: judgeId });
+    expect(gj.statusCode, gj.body).toBe(201);
     const started = await startInstanceOn(admin.key, pid);
     expect(started.statusCode, started.body).toBe(201);
     await approveGate(started.json().id);
@@ -1159,8 +1162,8 @@ describe("review round 2", () => {
             type: "automated_check",
             checks: ["basic_check", "agentic_check"],
             engines: [
-              { check: "basic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["basic"], budgetUsd: 1 },
-              { check: "agentic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["agentic"], budgetUsd: 1 },
+              { check: "basic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, judgeAgent: `b5-judge-${RUN}`, sets: ["basic"], budgetUsd: 1 },
+              { check: "agentic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, judgeAgent: `b5-judge-${RUN}`, sets: ["agentic"], budgetUsd: 1 },
             ],
           },
           { id: "done", type: "human_approval", approvers: [approver.id] },
@@ -1206,7 +1209,7 @@ describe("review round 2", () => {
 
   it("[23] a scheduled run whose creation throws is recorded as an audited skip, not lost", async () => {
     const c = await inject("POST", "/v1/engine-schedules", alice.key, {
-      request: { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
+      request: { engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
       intervalHours: 24,
     });
     expect(c.statusCode, c.body).toBe(201);

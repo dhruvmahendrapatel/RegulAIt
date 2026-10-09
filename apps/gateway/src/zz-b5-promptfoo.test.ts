@@ -480,14 +480,19 @@ describe("PR #205 review: the runner's life", () => {
     await expect(runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), adapter, { ...loopOpts(store, null, [], [], 3), workRoot })).rejects.toThrow(
       /mint a new enrolment token/,
     );
-    // with a fresh enrolment token it re-enrols and replaces the stored token
+    // with a fresh enrolment token it re-enrols and replaces the stored token. Round 6 [72]: the
+    // refused attempt above left its pending enrolment, so the restart resumes THAT one (same secret)
+    const pending = (await store.loadPending())!;
+    expect(pending).toMatchObject({ supersedes: null });
+    expect(await store.load()).toBe(token); // a refused enrolment never replaced the stored token
     const fresh = await enrolmentToken();
     const reLogs: string[] = [];
     await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), adapter, { ...loopOpts(store, fresh, reLogs, [], 1), workRoot });
     const replaced = await store.load();
-    expect(replaced).toMatch(/^rge_/);
+    expect(replaced).toBe(pending.secret);
     expect(replaced).not.toBe(token);
-    expect(reLogs.some((l) => /state: leasing -> reenrolling \(revoked\)/.test(l))).toBe(true);
+    expect(await store.loadPending()).toBeNull();
+    expect(reLogs.some((l) => /resuming an interrupted enrolment/.test(l))).toBe(true);
     expect(reLogs.some((l) => /registered runner/.test(l))).toBe(true);
   });
 });
@@ -691,6 +696,8 @@ describe("PR #205 review round 4: disabled for a failed report, the self-test ra
 // machine driven by the gateway's `next` signal (the table is pinned in packages/engine-runner).
 // (runs after round 4, which left the engine off)
 // ===========================================================================
+/** the runner [69] registers with a fresh report: rounds 5 and 6 lease with it */
+let liveSecret = "";
 describe("PR #205 review round 5: the runner state machine against the real gateway; dispatchable agents", () => {
   const report = (digest = PF_DIGEST) =>
     buildSelfTest({
@@ -737,7 +744,6 @@ describe("PR #205 review round 5: the runner state machine against the real gate
     });
     return { run, logs, store };
   };
-  let liveSecret = "";
 
   it("[69] the engine is off and the runner's report went stale: the loop refreshes it anyway, so an admin can enable", async () => {
     expect(await engineOn()).toBe(false);
@@ -840,6 +846,137 @@ describe("PR #205 review round 5: the runner state machine against the real gate
       expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "agent_not_dispatchable", virtualKeyId: null });
     } finally {
       await db.execute(sql`UPDATE agents SET model = ${model} WHERE id = ${targetId}`);
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 6 (Codex), decisions 71 to 73 — each red first (runs after round 5: the
+// engine is off, with a fresh passing record; `liveSecret` is a runner with a fresh report)
+// ===========================================================================
+describe("PR #205 review round 6: admission under locks, interrupted re-enrolment, a judge where the manifest needs one", () => {
+  const report = (digest = PF_DIGEST, connected = false) =>
+    buildSelfTest({
+      imageDigest: digest,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: {
+        host: "egress-probe.invalid",
+        ip: "93.184.215.14",
+        lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })),
+        connect: async () => (connected ? "connected" : "denied"),
+      },
+    });
+  const keysOfRun = async (runId: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM virtual_keys WHERE engine_run_id = ${runId}`)) as unknown as { rows: Array<{ n: number }> }).rows[0]!.n;
+  const enrolmentToken = async (label: string) => (await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label })).json().token as string;
+
+  for (const [what, race, next] of [
+    ["an admin switches the engine off", async () => void (await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`)), "admin_disabled"],
+    [
+      "a failing report of this runner lands",
+      async () => {
+        const failing = await report(PF_DIGEST, true);
+        await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(failing)}::jsonb, self_test_passed = false WHERE token_hash = ${runnerTokenHash(liveSecret)}`);
+      },
+      "self_test_required",
+    ],
+  ] as const) {
+    it(`[71] ${what} between the lease's fast path and its transaction: no key is minted, the run stays queued`, async () => {
+      await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+      const [before] = ((await db.execute(sql`SELECT self_test FROM engine_runners WHERE token_hash = ${runnerTokenHash(liveSecret)}`)) as unknown as { rows: Array<{ self_test: unknown }> }).rows;
+      const runId = await startRun();
+      engineRunTestHooks.beforeLeaseTx = async () => {
+        await race();
+      };
+      try {
+        const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+        expect(l.statusCode, l.body).toBe(409);
+        expect(l.json().next).toBe(next);
+      } finally {
+        engineRunTestHooks.beforeLeaseTx = undefined;
+        await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(before!.self_test)}::jsonb, self_test_passed = true WHERE token_hash = ${runnerTokenHash(liveSecret)}`);
+      }
+      expect(await runRow(runId)).toMatchObject({ status: "queued", virtualKeyId: null, runnerId: null });
+      expect(await keysOfRun(runId)).toBe(0);
+      await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {});
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    });
+  }
+
+  it("[72] a re-enrolment interrupted after it persisted its pending record is resumed on restart, and the old runner is revoked", async () => {
+    const NEW = `sha256:${"f".repeat(64)}`;
+    const oldSecret = generateRunnerSecret();
+    const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(await enrolmentToken("crash-old"), oldSecret, {
+      name: `crash-${RUN}`,
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: await report(),
+    });
+    const dir = await mkdtemp(path.join(tmpdir(), "b5p-r6-"));
+    const store = new FileRunnerTokenStore(path.join(dir, "state", "runner-token"));
+    await store.save(oldSecret);
+    const token = await enrolmentToken("crash-new");
+    const opts = (s: FileRunnerTokenStore) => ({
+      engineId: "promptfoo" as const,
+      engineVersion: MANIFEST.promptfoo.version,
+      imageDigest: NEW,
+      workRoot: path.join(dir, "work"),
+      store: s,
+      enrollmentToken: token,
+      registration: async () => ({ name: `crash-${RUN}`, imageDigest: NEW, engineVersion: MANIFEST.promptfoo.version, selfTest: await report(NEW) }),
+      backoffMs: 1,
+      maxIterations: 1,
+      sleep: async () => {},
+    });
+    // the process dies right after the pending enrolment is on disk
+    const crashing = Object.assign(Object.create(FileRunnerTokenStore.prototype) as FileRunnerTokenStore, store, {
+      savePending: async (p: { secret: string; supersedes: string | null }) => {
+        await store.savePending(p);
+        throw new Error("killed");
+      },
+    });
+    await expect(runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), opts(crashing))).rejects.toThrow("killed");
+    const old = async () =>
+      ((await db.execute(sql`SELECT revoked_at, revoke_reason FROM engine_runners WHERE id = ${reg.runnerId}`)) as unknown as { rows: Array<{ revoked_at: string | null; revoke_reason: string | null }> }).rows[0]!;
+    expect((await old()).revoked_at).toBeNull();
+    expect(await store.load()).toBe(oldSecret);
+    // restart from the same volume
+    await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), opts(store));
+    expect((await old()).revoked_at).not.toBeNull();
+    expect((await old()).revoke_reason).toMatch(/superseded/);
+    const now = (await store.load())!;
+    expect(now).not.toBe(oldSecret);
+    expect(await store.loadPending()).toBeNull();
+    const [fresh] = ((await db.execute(sql`SELECT reported_digest FROM engine_runners WHERE token_hash = ${runnerTokenHash(now)}`)) as unknown as { rows: Array<{ reported_digest: string }> }).rows;
+    expect(fresh).toMatchObject({ reported_digest: NEW });
+  });
+
+  it("[73] a promptfoo run (or schedule) without a judge is refused at validation: 422 judge_required", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    try {
+      const r = await inject("POST", "/v1/engine-runs", alice.key, {
+        engineId: "promptfoo",
+        target: { agentId: targetId },
+        config: { sets: ["prompt-extraction"] },
+        projectId,
+        budgetUsd: 1,
+        trials: 2,
+      });
+      expect(r.statusCode, r.body).toBe(422);
+      expect(r.json()).toMatchObject({ error: "judge_required" });
+      // a schedule is validated by the same function, so it is refused at creation too
+      const s = await inject("POST", "/v1/engine-schedules", alice.key, {
+        request: { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["prompt-extraction"] }, projectId, budgetUsd: 1 },
+        intervalHours: 24,
+      });
+      expect(s.statusCode, s.body).toBe(422);
+      expect(s.json()).toMatchObject({ error: "judge_required" });
+      const queued = ((await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs WHERE engine_id = 'promptfoo' AND status = 'queued'`)) as unknown as { rows: Array<{ n: number }> }).rows[0]!.n;
+      expect(queued).toBe(0);
+    } finally {
       await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
     }
   });

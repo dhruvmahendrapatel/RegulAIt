@@ -155,6 +155,8 @@ export const ENGINE_REFUSALS = {
   engine_runner_reenrol_required: 409,
   /** PR #205 review round 5 [70]: a target or judge agent with no provider model to dispatch to */
   agent_not_dispatchable: 422,
+  /** PR #205 review round 6 [73]: an agent run of an engine whose manifest says `requiresJudge`, with no judge */
+  judge_required: 422,
   /** a run, heartbeat or result for a run this runner does not hold */
   engine_run_not_leased: 409,
   /** a result for a run that already ended (late) */

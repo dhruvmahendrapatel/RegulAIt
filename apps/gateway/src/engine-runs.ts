@@ -263,6 +263,11 @@ export async function validateEngineRunRequest(
     if (!input.projectId) {
       return { ok: false, status: 422, error: "project_required", detail: "an engine run's model calls are pinned to a project; name the project to bill" };
     }
+    // PR #205 review round 6 [73]: an engine that grades with a judge (the manifest says so) is never
+    // queued without one — it would only fail at the runner (`judge_required`)
+    if (manifest.requiresJudge && !input.target.judgeAgentId) {
+      return { ok: false, status: 422, error: "judge_required", detail: `a ${input.engineId} run grades with a judge agent behind the gateway: name judgeAgentId` };
+    }
     const t = await entitlementRefusal(db, ctx.runAsUserId, input.target.agentId, "target");
     if ("ok" in t) return t;
     targetAgent = t;
@@ -995,6 +1000,59 @@ function publicRun(run: EngineRunRow) {
   return { ...rest, rawReportStored: rawReportCiphertext !== null };
 }
 
+interface LeaseRefusal {
+  error: string;
+  next: EngineRunnerNext;
+  detail: string;
+}
+
+/**
+ * PR #205 review round 5 (ADR-0187 decision 67) and round 6 [71]: THE lease admission, decided
+ * from the rows passed in (the lease calls it once as a fast path and again inside its transaction
+ * on locked rows). Every refusal carries the ONE signal the runner's state machine acts on, in order:
+ *   1. a build other than the one this credential registered → `reenrol_required` [67];
+ *   2. this runner's own report does not pass NOW (stale after 24 h, failing, or for a build the
+ *      manifest no longer names) → `self_test_required`, WHATEVER the engine's state [69];
+ *   3. the engine is off (an admin's switch, or a failed report switched it off) → `admin_disabled`;
+ *   4. the engine's recorded self-test no longer admits it → `self_test_required`.
+ * PR #203 review [3] stands: decided now, never from a stored boolean. null = admitted.
+ */
+function leaseAdmission(
+  runner: typeof engineRunners.$inferSelect,
+  engine: typeof engines.$inferSelect | null,
+  build: { imageDigest: string; engineVersion: string },
+  m: EngineManifestEntry,
+  now: Date,
+): LeaseRefusal | null {
+  if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
+    return {
+      next: "reenrol_required",
+      error: "engine_runner_reenrol_required",
+      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+    };
+  }
+  const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);
+  if (!runnerVerdict.passed) {
+    return {
+      next: "self_test_required",
+      error: "engine_self_test_required",
+      detail: `this runner's self-test does not pass now (${runnerVerdict.failures.join(", ")}): run it again and submit it`,
+    };
+  }
+  if (!engine || !engine.enabled) {
+    return { next: "admin_disabled", error: "engine_disabled", detail: `engine ${m.id} is off: no work is leased until an admin enables it` };
+  }
+  const engineAdmits = selfTestAdmitsEnable(engine, m, now);
+  if (!engineAdmits.ok) {
+    return {
+      next: "self_test_required",
+      error: "engine_self_test_required",
+      detail: `the engine's self-test no longer admits it (${engineAdmits.why ?? "build changed"}): submit a fresh runner self-test`,
+    };
+  }
+  return null;
+}
+
 export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: EngineOptions = {}): void {
   setEngineRuntime(opts);
   const manifest = manifestOf(opts);
@@ -1149,57 +1207,30 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const [engine] = await db.select().from(engines).where(eq(engines.id, engineId));
     const m = manifest[engineId];
     const now = new Date();
-    // PR #205 review round 5 (ADR-0187 decision 67): every refusal carries the ONE signal the
-    // runner's state machine acts on, decided in this order:
-    //   1. a build other than the one this credential registered → `reenrol_required` [67];
-    //   2. this runner's own report does not pass NOW (stale after 24 h, failing, or for a build the
-    //      manifest no longer names) → `self_test_required`, WHATEVER the engine's state [69] — so a
-    //      runner keeps its report fresh while the engine is off and an admin can enable it;
-    //   3. the engine is off (an admin's switch, or a failed report switched it off) → `admin_disabled`:
-    //      the runner waits; a passing report never re-enables the engine (round 4 [64]);
-    //   4. the engine's recorded self-test no longer admits it → `self_test_required` (a runner's
-    //      passing report of the enabled build refreshes that record).
-    // PR #203 review [3] stands: decided now, never from a stored boolean.
-    const refuse = (next: EngineRunnerNext, error: string, detail: string) => reply.status(409).send({ error, next, detail });
-    if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
-      return refuse(
-        "reenrol_required",
-        "engine_runner_reenrol_required",
-        "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
-      );
-    }
-    const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);
-    if (!runnerVerdict.passed) {
-      return refuse(
-        "self_test_required",
-        "engine_self_test_required",
-        `this runner's self-test does not pass now (${runnerVerdict.failures.join(", ")}): run it again and submit it`,
-      );
-    }
-    if (!engine || !engine.enabled) {
-      return refuse("admin_disabled", "engine_disabled", `engine ${engineId} is off: no work is leased until an admin enables it`);
-    }
-    const engineAdmits = selfTestAdmitsEnable(engine, m, now);
-    if (!engineAdmits.ok) {
-      return refuse(
-        "self_test_required",
-        "engine_self_test_required",
-        `the engine's self-test no longer admits it (${engineAdmits.why ?? "build changed"}): submit a fresh runner self-test`,
-      );
-    }
+    // the order and meaning of each refusal: `leaseAdmission` (ADR-0187 decisions 67, 69 and 71)
+    const refuse = (r: LeaseRefusal) => reply.status(409).send(r);
+    // PR #205 review round 6 [71]: this first pass is only a FAST PATH (no transaction for a runner
+    // that will be refused anyway); the decision that hands out work is taken again below, under locks
+    const early = leaseAdmission(runner, engine ?? null, build, m, now);
+    if (early) return refuse(early);
     await engineRunTestHooks.beforeLeaseTx?.(runnerId);
     const leased = await db.transaction(async (tx) => {
-      // PR #203 review round 2 [17]: the runner row is locked (shared) and its
-      // revocation re-read inside the transaction that hands out the work.
-      // Revocation UPDATEs that row, so it waits for this lease to commit (and
-      // then ends the run it leased), or this lease waits for the revocation and
-      // sees it — a runner revoked concurrently never walks away with a key.
-      const [live] = await tx
-        .select({ revokedAt: engineRunners.revokedAt })
-        .from(engineRunners)
-        .where(eq(engineRunners.id, runnerId))
-        .for("share");
+      // PR #203 review round 2 [17]: the runner row is locked and its revocation re-read inside the
+      // transaction that hands out the work. Revocation UPDATEs that row, so it waits for this lease
+      // to commit (and then ends the run it leased), or this lease waits for the revocation and sees
+      // it — a runner revoked concurrently never walks away with a key.
+      // PR #205 review round 6 [71]: and the WHOLE admission is decided again here — the runner row
+      // FOR UPDATE (its report and build), then the engine row FOR SHARE (enabled, its recorded
+      // self-test). Every path that switches the engine off or fails a report UPDATEs, or locks FOR
+      // UPDATE, the engine row, so an admin's disable or a concurrent failing self-test either
+      // commits first (and is seen here) or waits for this lease to commit. Lock order: runner, then
+      // engine, as on the self-test route.
+      const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
+      const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
+      if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
+      const engine = lockedEngine!;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
       const [{ n } = { n: 0 }] = await tx
         .select({ n: sql<number>`count(*)::int` })
@@ -1315,6 +1346,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (leased.kind === "revoked") {
       return reply.status(401).send({ error: "engine_runner_revoked", next: "revoked" satisfies EngineRunnerNext, detail: "this runner was revoked: its token authenticates nothing" });
     }
+    if (leased.kind === "not_admitted") return refuse(leased.refusal);
     if (leased.kind === "busy" || leased.kind === "none") return reply.status(204).send();
     if (leased.kind === "refused") {
       await finishEngineRun(db, leased.run.id, ["queued"], {
