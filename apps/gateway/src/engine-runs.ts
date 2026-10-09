@@ -57,6 +57,8 @@ import {
   lt,
   modelArtifacts,
   or,
+  ORG_SETTINGS_ID,
+  orgSettings,
   sql,
   usageEvents,
   users,
@@ -232,6 +234,58 @@ export interface PreparedEngineRun {
 }
 
 /**
+ * PR #205 review round 14 [97]: THE run-policy decision — the budget (the org default when none is
+ * asked), the engine's budget ceiling, the timeout clamp, and whether the run waits for approval
+ * (an agentic, offensive or unclassified set while sensitive-set approval is on, or a budget over the
+ * org's threshold) with a valid approver. Validation calls it on unlocked reads; run creation calls
+ * it AGAIN inside its insert transaction on the org settings row (FOR SHARE) and the engine row (FOR
+ * SHARE), and acts only on that second decision. Every org-settings writer UPDATEs that row (the PUT
+ * route takes it FOR UPDATE first), so a tightening either commits before the creation reads it, or
+ * waits for the creation to commit.
+ */
+async function runPolicyDecision(
+  db: Db | Tx,
+  input: CreateEngineRunInput,
+  manifest: EngineManifestEntry,
+  engine: typeof engines.$inferSelect,
+  org: Awaited<ReturnType<typeof loadOrgSettings>>,
+  runAsUserId: string,
+): Promise<RunRefusal | { ok: true; decided: Pick<PreparedEngineRun, "budgetUsd" | "timeoutSeconds" | "sensitive" | "overBudget" | "needsApproval" | "approverUserId"> }> {
+  const budgetUsd = input.budgetUsd ?? org.engineDefaultRunBudgetUsd;
+  if (budgetUsd > engine.maxBudgetUsd) {
+    return {
+      ok: false,
+      status: 422,
+      error: "engine_budget_exceeds_ceiling",
+      detail: `a ${input.engineId} run may spend at most $${engine.maxBudgetUsd.toFixed(2)}; asked for $${budgetUsd.toFixed(2)}`,
+    };
+  }
+  const timeoutSeconds = Math.max(60, Math.min(engine.timeoutSeconds, org.engineMaxRunTimeoutMinutes * 60));
+  const sensitive = org.engineSensitiveSetApproval && engineConfigNeedsApproval(manifest, input.config.sets);
+  const overBudget = budgetUsd > org.engineRunApprovalThresholdUsd;
+  const needsApproval = sensitive || overBudget;
+  const approverUserId = needsApproval ? (input.approverUserId ?? org.infraApproverUserId ?? null) : null;
+  if (needsApproval) {
+    if (!approverUserId) {
+      return {
+        ok: false,
+        status: 422,
+        error: "engine_approver_required",
+        detail:
+          (sensitive ? "this run uses an agentic, offensive or unclassified set" : `this run's $${budgetUsd.toFixed(2)} budget is over the $${org.engineRunApprovalThresholdUsd.toFixed(2)} approval threshold`) +
+          ", so it waits for approval: name approverUserId, or set a default approver in org settings",
+      };
+    }
+    if (approverUserId === runAsUserId) {
+      return { ok: false, status: 403, error: "caller_cannot_approve", detail: "the person a run executes as cannot approve it" };
+    }
+    const [approver] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
+    if (!approver || approver.disabledAt) return { ok: false, status: 404, error: "unknown_approver" };
+  }
+  return { ok: true, decided: { budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } };
+}
+
+/**
  * Every check a run request gets, with nothing written (PR #203 review [13]:
  * a schedule is validated by exactly this before it is stored): the engine on,
  * the target kind, the project, entitlement to target AND judge, attribution,
@@ -304,38 +358,9 @@ export async function validateEngineRunRequest(
     const attribution = await assertProjectAttribution(db, input.projectId, ctx.runAsUserId, ctx.isAdmin);
     if (!attribution.ok) return { ok: false, status: attribution.status, error: attribution.error };
   }
-  const org = await loadOrgSettings(db);
-  const budgetUsd = input.budgetUsd ?? org.engineDefaultRunBudgetUsd;
-  if (budgetUsd > engine.maxBudgetUsd) {
-    return {
-      ok: false,
-      status: 422,
-      error: "engine_budget_exceeds_ceiling",
-      detail: `a ${input.engineId} run may spend at most $${engine.maxBudgetUsd.toFixed(2)}; asked for $${budgetUsd.toFixed(2)}`,
-    };
-  }
-  const timeoutSeconds = Math.max(60, Math.min(engine.timeoutSeconds, org.engineMaxRunTimeoutMinutes * 60));
-  const sensitive = org.engineSensitiveSetApproval && engineConfigNeedsApproval(manifest, input.config.sets);
-  const overBudget = budgetUsd > org.engineRunApprovalThresholdUsd;
-  const needsApproval = sensitive || overBudget;
-  const approverUserId = needsApproval ? (input.approverUserId ?? org.infraApproverUserId ?? null) : null;
-  if (needsApproval) {
-    if (!approverUserId) {
-      return {
-        ok: false,
-        status: 422,
-        error: "engine_approver_required",
-        detail:
-          (sensitive ? "this run uses an agentic, offensive or unclassified set" : `this run's $${budgetUsd.toFixed(2)} budget is over the $${org.engineRunApprovalThresholdUsd.toFixed(2)} approval threshold`) +
-          ", so it waits for approval: name approverUserId, or set a default approver in org settings",
-      };
-    }
-    if (approverUserId === ctx.runAsUserId) {
-      return { ok: false, status: 403, error: "caller_cannot_approve", detail: "the person a run executes as cannot approve it" };
-    }
-    const [approver] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
-    if (!approver || approver.disabledAt) return { ok: false, status: 404, error: "unknown_approver" };
-  }
+  const policy = await runPolicyDecision(db, input, manifest, engine, await loadOrgSettings(db), ctx.runAsUserId);
+  if (!policy.ok) return policy;
+  const { budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } = policy.decided;
   return {
     ok: true,
     prepared: { manifest, targetAgent, judgeAgent, budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId },
@@ -346,8 +371,7 @@ export async function validateEngineRunRequest(
 export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: CreateRunContext): Promise<CreateRunOutcome> {
   const checked = await validateEngineRunRequest(db, input, ctx);
   if (!checked.ok) return checked;
-  const { manifest, targetAgent, judgeAgent, budgetUsd, sensitive, overBudget, needsApproval, approverUserId } = checked.prepared;
-  let timeoutSeconds = checked.prepared.timeoutSeconds;
+  const { manifest, targetAgent, judgeAgent } = checked.prepared;
   const now = new Date();
   const configHash = engineRunConfigHash(input);
   await engineRunTestHooks.beforeCreateTx?.();
@@ -356,6 +380,11 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
     // UPDATE, decision 84) and the engine's state is decided again HERE: on, its self-test admitting
     // it, and the budget and timeout ceilings as they are now. A concurrent disable or ceiling drop
     // either commits first (and this run is refused) or waits for this insert (and then ends the run).
+    // PR #205 review round 14 [97]: the org settings row FOR SHARE, then the engine row FOR SHARE (the
+    // lock order: org settings, then engine; no path locks them the other way round) — the approval
+    // decision, the default budget and the timeout clamp are decided again HERE, from the rows as they
+    // are now, and only this decision is acted on
+    const [orgRow] = await tx.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID)).for("share");
     const [engine] = await tx.select().from(engines).where(eq(engines.id, input.engineId)).for("share");
     if (engine && engineManifestOutdated(engine, manifest)) {
       return { kind: "refused" as const, refusal: { ok: false as const, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) } };
@@ -366,18 +395,10 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
     if (!selfTestAdmitsEnable(engine, manifest, now).ok) {
       return { kind: "refused" as const, refusal: { ok: false as const, status: 409, error: "engine_self_test_required", detail: `engine ${input.engineId}'s self-test no longer admits it: an admin runs it again` } };
     }
-    if (budgetUsd > engine.maxBudgetUsd) {
-      return {
-        kind: "refused" as const,
-        refusal: {
-          ok: false as const,
-          status: 422,
-          error: "engine_budget_exceeds_ceiling",
-          detail: `a ${input.engineId} run may spend at most $${engine.maxBudgetUsd.toFixed(2)}; asked for $${budgetUsd.toFixed(2)}`,
-        },
-      };
-    }
-    timeoutSeconds = Math.max(60, Math.min(timeoutSeconds, engine.timeoutSeconds));
+    // the org row exists: validation (loadOrgSettings) created it if it was missing
+    const policy = await runPolicyDecision(tx, input, manifest, engine, orgRow ?? (await loadOrgSettings(tx as unknown as Db)), ctx.runAsUserId);
+    if (!policy.ok) return { kind: "refused" as const, refusal: policy };
+    const { budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } = policy.decided;
     const [run] = await tx
       .insert(engineRuns)
       .values({
@@ -1246,6 +1267,32 @@ async function reissueLeaseTx(tx: Tx, run: EngineRunRow, engineId: EngineId, m: 
 }
 
 /**
+ * PR #205 review round 14 [98]: the HARD gates a retried lease (same runner, same request id) must
+ * still pass to get its run back — the build this credential registered, and the engine on. Freshness
+ * (the runner's and the engine's self-test age) is NOT among them: a report that went stale between
+ * the attempt and its retry does not orphan the run the attempt leased. The runner being live and the
+ * manifest not outdated are checked by the caller.
+ */
+function leaseHardGate(
+  runner: typeof engineRunners.$inferSelect,
+  engine: typeof engines.$inferSelect | null,
+  build: { imageDigest: string; engineVersion: string },
+  m: EngineManifestEntry,
+): LeaseRefusal | null {
+  if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
+    return {
+      next: "reenrol_required",
+      error: "engine_runner_reenrol_required",
+      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+    };
+  }
+  if (!engine || !engine.enabled) {
+    return { next: "admin_disabled", error: "engine_disabled", detail: `engine ${m.id} is off: the run this retry leased was ended, and no work is leased until an admin enables it` };
+  }
+  return null;
+}
+
+/**
  * PR #205 review round 5 (ADR-0187 decision 67) and round 6 [71]: THE lease admission, decided
  * from the rows passed in (the lease calls it once as a fast path and again inside its transaction
  * on locked rows). Every refusal carries the ONE signal the runner's state machine acts on, in order:
@@ -1478,7 +1525,16 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const refuse = (r: LeaseRefusal) => reply.status(409).send(r);
     // PR #205 review round 6 [71]: this first pass is only a FAST PATH (no transaction for a runner
     // that will be refused anyway); the decision that hands out work is taken again below, under locks
-    const early = leaseAdmission(runner, engine ?? null, build, m, now);
+    // PR #205 review round 14 [98]: a retry of an attempt that leased a run (same runner, same request
+    // id) is RESOLVED before any freshness admission — a report that went stale between the attempt and
+    // its retry must not orphan the run the attempt leased. The decision is taken under locks below.
+    const [retried] = build.requestId
+      ? await db
+          .select({ id: engineRuns.id })
+          .from(engineRuns)
+          .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
+      : [];
+    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now);
     if (early) return refuse(early);
     await engineRunTestHooks.beforeLeaseTx?.(runnerId);
     const leased = await db.transaction(async (tx) => {
@@ -1495,16 +1551,17 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
-      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
-      if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
-      const engine = lockedEngine!;
       // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
       // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
       // leased — to THIS runner only: the lookup is by (runner, request id), and the unique index is
       // too — is returned again instead of a second run being leased. Its credentials are re-issued by
       // ROTATION: only the key's hash is stored, so the old key cannot be shown again; the old key is
-      // revoked and a new one minted in this one transaction (ADR-0187 decision 94). A run no longer
-      // live under that lease leases nothing (204), and the runner's next attempt uses a new id.
+      // revoked and a new one minted in this one transaction (ADR-0187 decision 94).
+      // PR #205 review round 14 [98]: resolved BEFORE the freshness admission (the runner's and the
+      // engine's self-test age), on the rows this transaction holds. Only the HARD gates apply: the
+      // runner live (checked above), the build it registered, the engine on, the manifest not outdated,
+      // the run still leased. A run whose hard gate fails is ended here (cancelled, key revoked,
+      // audited), never left leased; an outdated replica ends nothing (decision 95) and refuses.
       if (build.requestId) {
         const [prior] = await tx
           .select()
@@ -1513,17 +1570,37 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           .for("update");
         if (prior) {
           const at = new Date();
-          const live =
-            prior.status === "leased" &&
-            prior.cancelRequestedAt === null &&
-            prior.leaseExpiresAt !== null &&
-            prior.leaseExpiresAt > at &&
-            prior.deadlineAt !== null &&
-            prior.deadlineAt > at;
-          if (!live) return { kind: "none" as const };
+          // the run already ended (cancelled, disabled, timed out): nothing to re-issue. The runner is told
+          // why, if the lease would be refused now, else there is no work (its next attempt is a new one)
+          if (prior.status !== "leased") {
+            const why = leaseAdmission(live, lockedEngine ?? null, build, m, at);
+            return why ? { kind: "not_admitted" as const, refusal: why } : { kind: "none" as const };
+          }
+          if (lockedEngine && engineManifestOutdated(lockedEngine, m)) {
+            return { kind: "not_admitted" as const, refusal: engineManifestOutdatedRefusal(m.id, lockedEngine, m) };
+          }
+          const hard = leaseHardGate(live, lockedEngine ?? null, build, m);
+          if (hard) {
+            const ended = await endLockedRun(
+              tx,
+              prior,
+              { status: "cancelled", errorCode: "lease_retry_refused", normalised: noResult("cancelled"), cause: `lease retry refused: ${hard.error}`, actorUserId: NO_IDENTITY },
+              at,
+            );
+            return { kind: "not_admitted" as const, refusal: hard, ended };
+          }
+          const deadlinePassed = prior.deadlineAt !== null && prior.deadlineAt <= at;
+          if (deadlinePassed || (prior.leaseExpiresAt !== null && prior.leaseExpiresAt <= at)) {
+            const cause = deadlinePassed ? "deadline_passed" : "lease_expired";
+            const ended = await endLockedRun(tx, prior, { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: NO_IDENTITY }, at);
+            return { kind: "refused" as const, ended };
+          }
           return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
         }
       }
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
+      if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
+      const engine = lockedEngine!;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
       const [{ n } = { n: 0 }] = await tx
         .select({ n: sql<number>`count(*)::int` })
@@ -1629,7 +1706,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (leased.kind === "revoked") {
       return reply.status(401).send({ error: "engine_runner_revoked", next: "revoked" satisfies EngineRunnerNext, detail: "this runner was revoked: its token authenticates nothing" });
     }
-    if (leased.kind === "not_admitted") return refuse(leased.refusal);
+    if (leased.kind === "not_admitted") {
+      if ("ended" in leased && leased.ended) await notifyWorkflowsOfEndedRuns(db, [leased.ended]);
+      return refuse(leased.refusal);
+    }
     if (leased.kind === "busy" || leased.kind === "none") return reply.status(204).send();
     if (leased.kind === "refused") {
       await notifyWorkflowsOfEndedRuns(db, [leased.ended]);

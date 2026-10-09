@@ -1898,3 +1898,134 @@ describe("PR #205 review round 13: an idempotent lease; a monotonic manifest syn
     }
   });
 });
+
+describe("PR #205 review round 14: run policy decided in the creation transaction; a retried lease is resolved before freshness", () => {
+  const report = () =>
+    buildSelfTest({
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "denied" },
+    });
+  const register = async (label: string) => {
+    const token = (await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label })).json().token as string;
+    const secret = generateRunnerSecret();
+    const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(token, secret, {
+      name: `${label}-${RUN}`,
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: await report(),
+    });
+    return { secret, runnerId: reg.runnerId, bearer: { authorization: `Bearer ${secret}` } };
+  };
+  const switchOn = async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`);
+  };
+  const keyRow = async (id: string) => {
+    const [k] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, id));
+    return k!;
+  };
+  const cleanup = async (runnerId: string) => {
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${runnerId}`);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  };
+  /** a lease whose response is lost: it committed, the runner holds nothing but the request id */
+  const leaseLost = async (bearer: { authorization: string }) => {
+    const requestId = randomUUID();
+    const first = await inject("POST", "/v1/engine-runner/lease", bearer, { ...PF_BUILD, requestId });
+    expect(first.statusCode, first.body).toBe(200);
+    return { requestId, runId: first.json().runId as string, k1: (await runRow(first.json().runId)).virtualKeyId! };
+  };
+
+  it("[97] an approval threshold tightened between validation and insert: the run is created awaiting approval, not queued", async () => {
+    await switchOn();
+    const [{ threshold }] = ((await db.execute(sql`SELECT engine_run_approval_threshold_usd AS threshold FROM org_settings WHERE id = ${ORG_SETTINGS_ID}`)) as unknown as {
+      rows: Array<{ threshold: number }>;
+    }).rows as [{ threshold: number }];
+    expect(threshold).toBeGreaterThan(1); // validation sees a $1 run as under the threshold
+    engineRunTestHooks.beforeCreateTx = async () => {
+      await db.execute(sql`UPDATE org_settings SET engine_run_approval_threshold_usd = 0.5 WHERE id = ${ORG_SETTINGS_ID}`);
+    };
+    try {
+      const r = await inject("POST", "/v1/engine-runs", alice.key, {
+        engineId: "promptfoo",
+        target: { agentId: targetId, judgeAgentId: judgeId },
+        config: { sets: ["prompt-extraction"] },
+        projectId,
+        budgetUsd: 1,
+        trials: 1,
+        approverUserId: admin.id,
+      });
+      expect(r.statusCode, r.body).toBe(202);
+      expect(r.json().approvalId).toBeTruthy();
+      const run = await runRow(r.json().run.id);
+      expect(run.status).toBe("awaiting_approval");
+      expect(run.approvalId).toBe(r.json().approvalId);
+      await db.execute(sql`UPDATE engine_runs SET status = 'cancelled', finished_at = now(), error_code = 'test_cleanup' WHERE id = ${run.id}`);
+    } finally {
+      engineRunTestHooks.beforeCreateTx = undefined;
+      await db.execute(sql`UPDATE org_settings SET engine_run_approval_threshold_usd = ${threshold} WHERE id = ${ORG_SETTINGS_ID}`);
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+
+  it("[98] a retry past the 24 h self-test boundary gets the SAME run back, its key rotated; nothing is orphaned", async () => {
+    await switchOn();
+    const r = await register("retry-past-freshness");
+    await startRun();
+    const { requestId, runId, k1 } = await leaseLost(r.bearer);
+    // time passes the freshness boundary: the runner's report and the engine's pass are both over 24 h old
+    const old = new Date(Date.now() - 25 * 3_600_000).toISOString();
+    await db.execute(sql`UPDATE engine_runners SET self_test = jsonb_set(self_test, '{at}', to_jsonb(${old}::text)) WHERE id = ${r.runnerId}`);
+    await db.execute(sql`UPDATE engines SET self_test_passed_at = ${old}::timestamptz WHERE id = 'promptfoo'`);
+    // a fresh attempt is refused for freshness (the gate still holds for new work)
+    const fresh = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId: randomUUID() });
+    expect(fresh.statusCode, fresh.body).toBe(409);
+    expect(fresh.json().next).toBe("self_test_required");
+    // the retry of the lost attempt is resolved first
+    const retry = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    expect(retry.statusCode, retry.body).toBe(200);
+    expect(retry.json().runId).toBe(runId);
+    const row = await runRow(runId);
+    expect(row.status).toBe("leased");
+    expect(row.virtualKeyId).not.toBe(k1);
+    expect((await keyRow(k1)).revokedAt).not.toBeNull();
+    expect((await keyRow(row.virtualKeyId!)).revokedAt).toBeNull();
+    expect((await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {})).statusCode).toBe(200);
+    await cleanup(r.runnerId);
+  });
+
+  it("[98] the engine switched off (no runs ended) before the retry: the retry is refused and the run is ended, its key revoked", async () => {
+    await switchOn();
+    const r = await register("retry-engine-off");
+    await startRun();
+    const { requestId, runId, k1 } = await leaseLost(r.bearer);
+    // switched off by a path that left the run leased (only the hard gate now stands between it and a key)
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    const retry = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    expect(retry.statusCode, retry.body).toBe(409);
+    expect(retry.json()).toMatchObject({ error: "engine_disabled", next: "admin_disabled" });
+    const row = await runRow(runId);
+    expect(row.status).toBe("cancelled");
+    expect(row.errorCode).toBe("lease_retry_refused");
+    expect((await keyRow(k1)).revokedAt).not.toBeNull();
+    await cleanup(r.runnerId);
+  });
+
+  it("[98] the engine disabled by an admin (its runs ended) before the retry: the retry is told why, and the run stays ended", async () => {
+    await switchOn();
+    const r = await register("retry-admin-off");
+    await startRun();
+    const { requestId, runId, k1 } = await leaseLost(r.bearer);
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false })).statusCode).toBe(200);
+    expect((await runRow(runId)).status).toBe("cancelled");
+    const retry = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    expect(retry.statusCode, retry.body).toBe(409);
+    expect(retry.json()).toMatchObject({ error: "engine_disabled", next: "admin_disabled" });
+    expect((await runRow(runId)).status).toBe("cancelled");
+    expect((await keyRow(k1)).revokedAt).not.toBeNull();
+    await cleanup(r.runnerId);
+  });
+});
