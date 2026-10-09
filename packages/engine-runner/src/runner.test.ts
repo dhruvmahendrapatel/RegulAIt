@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ENGINE_RESULT_VERSION, type EngineLease } from "@regulait/shared";
+import { ENGINE_RESULT_VERSION, type EngineLease, type EngineResultEnvelope } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
 import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
@@ -329,7 +329,7 @@ describe("PR #203 review round 2", () => {
     };
     const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http, requestTimeoutMs: 20 });
     client.useToken("rge_test");
-    const env = { version: ENGINE_RESULT_VERSION, runId: lease2.runId, engineId: "promptfoo" as const, engineVersion: "0.123.1", status: "completed" as const, errorCode: null, items: [], notRun: [], rawReport: null };
+    const env: EngineResultEnvelope = { version: ENGINE_RESULT_VERSION, runId: lease2.runId, engineId: "promptfoo" as const, engineVersion: "0.123.1", status: "completed" as const, errorCode: null, items: [], notRun: [], rawReport: null };
     expect(await postResultWithRetry(client, lease2.runId, env, { deadlineAt: new Date(Date.now() + 60_000).toISOString(), retryBaseMs: 1 })).toBe(200);
     expect(calls).toBe(2);
   });
