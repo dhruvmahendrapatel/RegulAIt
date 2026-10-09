@@ -637,8 +637,9 @@ describe("PR #205 review round 4: disabled for a failed report, the self-test ra
     const secret = generateRunnerSecret();
     const racer = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
     const reg = await racer.register(t.json().token, secret, { name: `race-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await passingReport() });
-    // its stored report is a FAILING one, which (enabled) would switch the engine off
-    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    // its stored report is a FAILING one, which (enabled) would switch the engine off. The engine is
+    // enabled directly here (round 2's failed report cleared its pass, and the check constraint wants one)
+    await db.execute(sql`UPDATE engines SET enabled = true, self_test_passed_at = now() WHERE id = 'promptfoo'`);
     const before = await runnerRow(reg.runnerId);
     engineRunTestHooks.beforeSelfTestTx = async (runnerId) => {
       if (runnerId === reg.runnerId) await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'revoked mid-self-test' WHERE id = ${reg.runnerId}`);
