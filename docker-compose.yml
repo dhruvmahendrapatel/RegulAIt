@@ -390,6 +390,15 @@ services:
       # which is the posture where no long-lived key exists to steal.
       REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID: ${REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID:-regulait}
       REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY: ${REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY:-regulait-dev-objectstore}
+      # ADR-0187 B5-M — WHERE UPLOADED MODEL ARTIFACTS ARE KEPT (content-addressed
+      # by sha256). OFF by default: with neither set, POST /v1/model-artifacts
+      # answers 503 `artifact_store_unavailable` and nothing is accepted. Name a
+      # directory on a volume you mount, or an S3-compatible bucket (read with the
+      # SDK's own credential chain; the bucket verifies each object's sha256).
+      REGULAIT_MODEL_ARTIFACT_DIR: ${REGULAIT_MODEL_ARTIFACT_DIR:-}
+      REGULAIT_MODEL_ARTIFACT_S3_BUCKET: ${REGULAIT_MODEL_ARTIFACT_S3_BUCKET:-}
+      REGULAIT_MODEL_ARTIFACT_S3_ENDPOINT: ${REGULAIT_MODEL_ARTIFACT_S3_ENDPOINT:-}
+      REGULAIT_MODEL_ARTIFACT_S3_REGION: ${REGULAIT_MODEL_ARTIFACT_S3_REGION:-}
       # ADR-0036 (SAML 2.0 SSO) — both OPTIONAL, both bounded:
       #  - REGULAIT_SAML_ENTITY_ID pins the deployment-global SP entity id.
       #    Unset, it is derived from the request host (like the OIDC

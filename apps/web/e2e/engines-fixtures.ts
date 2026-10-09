@@ -84,7 +84,7 @@ export function enginesList(): Json {
         runners: [{ id: RUNNER_PF, name: "promptfoo-runner-1", reportedDigest: DIGEST_PF, reportedVersion: "0.123.1", selfTestPassed: true, selfTestFailures: [], registeredAt: iso(40), lastSeenAt: iso(1) }],
         lastRun: { id: RUNS.completedFail.id, status: "completed", createdAt: iso(20) },
       }),
-      engine({ id: "modelscan", kind: "model_scan", displayName: "modelscan", version: "0.8.8", licence: "Apache-2.0", imageDigest: null, signature: "not_built", needsModelAccess: false, reCheckBy: "2027-02-18" }),
+      engine({ id: "modelscan", kind: "model_scan", displayName: "modelscan", version: "0.8.8", licence: "Apache-2.0", imageDigest: null, signature: "not_built", needsModelAccess: false, reCheckBy: "2027-02-18", switches: { REGULAIT_MODELSCAN_SCANNER_ISOLATED: "1" }, airGappedReducedSet: [{ key: "format", reason: "unsupported_format" }, { key: "modelscan/scan", reason: "unsupported_format" }] }),
       engine({
         id: "garak",
         displayName: "garak",

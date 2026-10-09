@@ -47,6 +47,8 @@ describe("B5-M artifact stores", () => {
 
   it("no store configured means none (uploads are refused)", () => {
     expect(artifactStoreFromEnv({})).toBeNull();
+    // compose passes the variables through empty when unset: still none
+    expect(artifactStoreFromEnv({ REGULAIT_MODEL_ARTIFACT_DIR: "", REGULAIT_MODEL_ARTIFACT_S3_BUCKET: "", REGULAIT_MODEL_ARTIFACT_S3_REGION: "" })).toBeNull();
     expect(artifactStoreFromEnv({ REGULAIT_MODEL_ARTIFACT_DIR: "/x" })?.kind).toBe("filesystem");
     expect(artifactStoreFromEnv({ REGULAIT_MODEL_ARTIFACT_S3_BUCKET: "b" })?.kind).toBe("s3");
   });

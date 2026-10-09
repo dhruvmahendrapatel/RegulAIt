@@ -156,7 +156,7 @@ export class S3ArtifactStore implements ArtifactStore {
 export function artifactStoreFromEnv(env: NodeJS.ProcessEnv = process.env): ArtifactStore | null {
   if (env.REGULAIT_MODEL_ARTIFACT_S3_BUCKET) {
     const client = new S3Client({
-      region: env.REGULAIT_MODEL_ARTIFACT_S3_REGION ?? "us-east-1",
+      region: env.REGULAIT_MODEL_ARTIFACT_S3_REGION || "us-east-1",
       ...(env.REGULAIT_MODEL_ARTIFACT_S3_ENDPOINT ? { endpoint: env.REGULAIT_MODEL_ARTIFACT_S3_ENDPOINT, forcePathStyle: true } : {}),
     });
     return new S3ArtifactStore(env.REGULAIT_MODEL_ARTIFACT_S3_BUCKET, client);
