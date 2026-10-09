@@ -157,6 +157,8 @@ export const ENGINE_REFUSALS = {
   engine_runner_build_obsolete: 409,
   /** PR #205 review round 12 [91]: an admin self-test with no live runner of the current build */
   engine_no_current_build_runner: 409,
+  /** PR #205 review round 13 [95]: this gateway replica's manifest is older than the installed engine row (transient: no `next`) */
+  engine_manifest_outdated: 409,
   /** PR #205 review round 8 [77]: a registration whose token hash is already a runner's credential */
   engine_runner_already_registered: 409,
   /** PR #205 review round 5 [67]: a runner presenting a build other than the one it registered with */
@@ -349,6 +351,12 @@ export const engineRunnerLeaseSchema = z
   .object({
     imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
+    /**
+     * PR #205 review round 13 [94]: a request id the runner generated for this lease attempt, kept
+     * across its retries. A retry with the same id, while the run it leased is still leased to this
+     * runner, returns that run again (with a rotated key) instead of leasing a second one.
+     */
+    requestId: z.string().uuid().optional(),
   })
   .strict();
 export type EngineRunnerLeaseInput = z.infer<typeof engineRunnerLeaseSchema>;

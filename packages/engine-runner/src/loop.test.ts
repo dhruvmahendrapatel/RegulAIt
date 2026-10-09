@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { EngineRunnerNext } from "@regulait/shared";
 import { FileRunnerTokenStore, pinnedImageDigest, RUNNER_STATES, RunnerFatalError, RunnerObsoleteBuildError, runRunnerLoop, transition, type RunnerEvent, type RunnerState } from "./loop.js";
-import { RETAINED_RESULT_FILE, RunnerClient, type RunnerHttp } from "./runner.js";
+import { QUARANTINED_RESULT_PREFIX, RETAINED_RESULT_FILE, RunnerClient, type RunnerHttp } from "./runner.js";
 
 const STORED = `rge_${"7".repeat(64)}`;
 const DIGEST = `sha256:${"a".repeat(64)}`;
@@ -188,7 +188,63 @@ describe("leasing: every lease presents the build the runner is running (round 5
     await o.store.save(STORED);
     await runRunnerLoop(g.client, adapter, o);
     expect(g.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", body: { imageDigest: DIGEST, engineVersion: "1" } });
-    expect(Object.keys(g.calls[0]!.body!).sort()).toEqual(["engineVersion", "imageDigest"]);
+    // round 13 [94]: plus this attempt's request id
+    expect(Object.keys(g.calls[0]!.body!).sort()).toEqual(["engineVersion", "imageDigest", "requestId"]);
+    expect(g.calls[0]!.body!["requestId"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
+
+describe("PR #205 round 13 [94]: a lease attempt keeps its request id until the gateway answers definitively", () => {
+  it("a 5xx, a dropped connection or a transient 409 retries with the SAME id; a definitive answer starts a new attempt", async () => {
+    const g = gateway({ lease: [{ status: 503 }, { status: 409, error: "engine_manifest_outdated" }, { status: 204 }, { status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    let dropped = false;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/lease") && !dropped) {
+        dropped = true;
+        g.calls.push({ path: "/v1/engine-runner/lease", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        throw new Error("socket hang up"); // the response of the first attempt is lost
+      }
+      return http(url, init);
+    };
+    const { o } = await opts({ maxIterations: 5 });
+    await o.store.save(STORED);
+    await runRunnerLoop(g.client, adapter, o);
+    const ids = g.calls.filter((c) => c.path.endsWith("/lease")).map((c) => c.body!["requestId"]);
+    expect(ids).toHaveLength(5);
+    // drop, 503, transient 409: the same attempt; its 204 settles it
+    expect(new Set(ids.slice(0, 4)).size).toBe(1);
+    // the next lease is a new attempt
+    expect(ids[4]).not.toBe(ids[0]);
+  });
+
+  it("a definitive refusal (with a next signal) also ends the attempt", async () => {
+    const g = gateway({ lease: [disabled, { status: 204 }] });
+    const { o } = await opts({ maxIterations: 2 });
+    await o.store.save(STORED);
+    await runRunnerLoop(g.client, adapter, o);
+    const ids = g.calls.filter((c) => c.path.endsWith("/lease")).map((c) => c.body!["requestId"]);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+});
+
+describe("PR #205 round 13 [95]: a replica with an outdated manifest refuses registration — transient, never fatal", () => {
+  it("registration retries past 409 engine_manifest_outdated without using up its attempts, then registers", async () => {
+    const g = gateway({ lease: [{ status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    let outdated = 7; // more than the 5 attempts a real failure gets
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/register") && outdated-- > 0) {
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: null });
+        return { status: 409, json: async () => ({ error: "engine_manifest_outdated" }) };
+      }
+      return http(url, init);
+    };
+    const { o } = await opts({ maxIterations: 1 });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.count("/register")).toBe(8);
+    expect(await o.store.load()).toMatch(/^rge_[0-9a-f]{64}$/);
   });
 });
 
@@ -513,6 +569,36 @@ describe("round 5 [68]: undelivered results are retried before leasing, dropped 
     expect(existsSync(junk)).toBe(false);
     expect(g.count("/result")).toBe(1); // only the live one was sent
     expect((await readdir(o.workRoot)).sort()).toEqual([RUN(1), "not-a-run"].sort()); // only run-id dirs are touched
+  });
+
+  it("round 13 [96]: a temp file of an unfinished write is not a result; a result that cannot be read is kept aside, never deleted", async () => {
+    const g = gateway({ lease: [{ status: 204 }], result: [200] });
+    const { o, logs } = await opts({ maxIterations: 1 });
+    await o.store.save(STORED);
+    // a valid result beside the temp file of a later, interrupted write: delivered, then removed
+    const good = await retain(o.workRoot, 1, future());
+    await writeFile(path.join(good, `${RETAINED_RESULT_FILE}.1a2b3c4d`), '{"runId":"trunc');
+    // only the temp file of an interrupted write: nothing was ever retained, a crash leftover
+    const tmpOnly = path.join(o.workRoot, RUN(2));
+    await mkdir(tmpOnly, { recursive: true });
+    await writeFile(path.join(tmpOnly, `${RETAINED_RESULT_FILE}.5e6f7a8b`), '{"runId":"trunc');
+    // a result file that exists but is truncated: kept aside, the directory untouched
+    const bad = path.join(o.workRoot, RUN(3));
+    await mkdir(bad, { recursive: true });
+    await writeFile(path.join(bad, RETAINED_RESULT_FILE), `{"runId":"${RUN(3)}","deadlineAt":"`);
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.map((c) => c.path)).toEqual([`/v1/engine-runner/runs/${RUN(1)}/result`, "/v1/engine-runner/lease"]);
+    expect(existsSync(good)).toBe(false);
+    expect(existsSync(tmpOnly)).toBe(false);
+    const kept = await readdir(bad);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.startsWith(QUARANTINED_RESULT_PREFIX)).toBe(true);
+    expect(logs.some((l) => /cannot be read; kept aside/.test(l))).toBe(true);
+    // and on the next start the quarantined directory is left alone (not deleted, not counted)
+    const again = gateway({ lease: [{ status: 204 }] });
+    await runRunnerLoop(again.client, adapter, { ...o, maxIterations: 1 });
+    expect(await readdir(bad)).toEqual(kept);
+    expect(again.count("/result")).toBe(0);
   });
 
   it("round 11 [90]: a result retained on the persistent root (the state volume) is delivered after a restart, before any lease", async () => {

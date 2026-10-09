@@ -18,10 +18,12 @@
     "test": "vitest run --dir src"
   },
   "dependencies": {
-    "@regulait/shared": "workspace:*"
+    "@regulait/shared": "workspace:*",
+    "write-file-atomic": "8.0.0"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
+    "@types/write-file-atomic": "4.0.3",
     "vitest": "^4.1.11"
   }
 }

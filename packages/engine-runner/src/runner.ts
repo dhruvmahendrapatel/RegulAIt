@@ -13,7 +13,7 @@
  * a clean result.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm } from "node:fs/promises";
 import {
   ENGINE_RESULT_VERSION,
   ENGINE_RUNNER_NEXT,
@@ -24,6 +24,7 @@ import {
   type EngineRunnerNext,
   type RunnerSelfTest,
 } from "@regulait/shared";
+import { fsyncDir, writeFileDurable } from "./durable.js";
 import { probeEgress, type EgressProbeOptions } from "./egress.js";
 
 export interface RunnerHttp {
@@ -174,9 +175,18 @@ export class RunnerClient {
     return this.token;
   }
 
-  /** a lease, or null when there is no work (204). Round 5 [67]: presents the build it is running. */
-  async lease(build: RunnerBuild): Promise<EngineLease | null> {
-    const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer(), { imageDigest: build.imageDigest, engineVersion: build.engineVersion });
+  /**
+   * a lease, or null when there is no work (204). Round 5 [67]: presents the build it is running.
+   * PR #205 review round 13 [94]: `requestId` names this lease ATTEMPT; the caller keeps it across
+   * retries of an attempt whose outcome it could not learn (a timeout, a lost response, a 5xx), so the
+   * gateway returns the run that attempt leased (key rotated) instead of leasing a second one.
+   */
+  async lease(build: RunnerBuild, requestId?: string): Promise<EngineLease | null> {
+    const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer(), {
+      imageDigest: build.imageDigest,
+      engineVersion: build.engineVersion,
+      ...(requestId ? { requestId } : {}),
+    });
     if (res.status === 204) return null;
     if (res.status !== 200) {
       const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string; next?: unknown };
@@ -248,6 +258,8 @@ export interface RunOnceOptions {
   maxResultAttempts?: number;
   /** round 10 [83]: starting-heartbeat attempts on a transient failure (default 8; never past the deadline) */
   maxStartAttempts?: number;
+  /** round 13 [94]: this lease attempt's request id (the loop keeps it across transient failures) */
+  leaseRequestId?: string;
 }
 
 /**
@@ -289,13 +301,22 @@ export interface RetainedResult {
 }
 const RUN_DIR = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** PR #205 review round 13 [96]: the prefix a retained result that cannot be read is renamed to (kept, never deleted) */
+export const QUARANTINED_RESULT_PREFIX = `${RETAINED_RESULT_FILE}.corrupt-`;
+
 /**
  * PR #205 review round 5 [68]: retry the delivery of every retained result, once each (the loop's
  * backoff spaces the attempts; a network error, a 5xx, a 408 or a 429 is not definitive, exactly
  * as in `postResultWithRetry`). A work directory goes when the gateway answered definitively (a 2xx,
  * or a 4xx such as 409 the run ended or timed out), when the run's deadline has passed (the gateway
- * has ended it), or when it holds no readable result (a crash leftover: nothing to deliver). Only
- * run-id directories are touched. Returns how many are still retained.
+ * has ended it), or when it holds no result file at all (a crash leftover: nothing to deliver; a
+ * temp file of an unfinished write is not a result). Only run-id directories are touched. Returns
+ * how many are still retained.
+ *
+ * PR #205 review round 13 [96]: a result file that EXISTS but cannot be read or parsed is never a
+ * reason to delete anything: it is renamed aside (`undelivered-result.json.corrupt-<time>`), logged,
+ * and its directory is left alone from then on (not counted as retained, never removed), for an
+ * operator to inspect. With durable writes it cannot be truncated by a crash; this is the fail-safe.
  */
 export async function retryRetainedResults(
   client: RunnerClient,
@@ -314,6 +335,21 @@ export async function retryRetainedResults(
   let retained = 0;
   for (const name of names) {
     const dir = `${root}/${name}`;
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    // a directory holding a quarantined result is an operator's to inspect: never touched again
+    if (entries.some((f) => f.startsWith(QUARANTINED_RESULT_PREFIX))) continue;
+    if (!entries.includes(RETAINED_RESULT_FILE)) {
+      // no result file (only engine files, or the temp file of a write that never completed)
+      opts.log?.(`run ${name}: a work directory with no result to deliver was removed`);
+      await rm(dir, { recursive: true, force: true });
+      continue;
+    }
     let r: RetainedResult | null = null;
     try {
       const parsed = JSON.parse(await readFile(`${dir}/${RETAINED_RESULT_FILE}`, "utf8")) as Partial<RetainedResult>;
@@ -322,8 +358,10 @@ export async function retryRetainedResults(
       r = null;
     }
     if (!r) {
-      opts.log?.(`run ${name}: a work directory with no result to deliver was removed`);
-      await rm(dir, { recursive: true, force: true });
+      const aside = `${dir}/${QUARANTINED_RESULT_PREFIX}${new Date(now()).toISOString().replace(/[:.]/g, "-")}`;
+      await rename(`${dir}/${RETAINED_RESULT_FILE}`, aside);
+      await fsyncDir(dir);
+      opts.log?.(`run ${name}: its retained result cannot be read; kept aside as ${aside} for inspection (nothing was deleted)`);
       continue;
     }
     const deadline = Date.parse(r.deadlineAt);
@@ -380,7 +418,7 @@ export async function runOnce(
   adapter: EngineAdapter,
   opts: RunOnceOptions,
 ): Promise<{ outcome: "idle" | "posted" | "cancelled" | "failed" | "undelivered"; runId?: string; status?: number }> {
-  const lease = await client.lease({ imageDigest: opts.imageDigest, engineVersion: opts.engineVersion });
+  const lease = await client.lease({ imageDigest: opts.imageDigest, engineVersion: opts.engineVersion }, opts.leaseRequestId);
   if (!lease) return { outcome: "idle" };
   const workDir = `${opts.workRoot.replace(/\/$/, "")}/${lease.runId}`;
   await mkdir(workDir, { recursive: true, mode: 0o700 });
@@ -454,7 +492,9 @@ export async function runOnce(
       await rm(workDir, { recursive: true, force: true });
       await mkdir(retainDir, { recursive: true, mode: 0o700 });
       const retained: RetainedResult = { runId: lease.runId, deadlineAt: lease.deadlineAt, envelope };
-      await writeFile(`${retainDir}/${RETAINED_RESULT_FILE}`, JSON.stringify(retained), { mode: 0o600 });
+      // PR #205 review round 13 [96]: temp file, fsync, rename, fsync the directory — a crash leaves
+      // the complete envelope or none, never a truncated one
+      await writeFileDurable(`${retainDir}/${RETAINED_RESULT_FILE}`, JSON.stringify(retained));
       keepWorkDir = retainDir === workDir;
       return { outcome: "undelivered", runId: lease.runId };
     }

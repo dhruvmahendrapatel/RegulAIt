@@ -26,6 +26,13 @@ export interface EngineManifestEntry {
   displayName: string;
   /** the engine release the image is built from */
   version: string;
+  /**
+   * PR #205 review round 13 [95]: this manifest entry's generation — a positive integer that MUST be
+   * bumped with every change of build (version or digest). Gateway replicas only ever move the engine
+   * row forward: a replica whose generation is older than the row's writes nothing and treats the
+   * engine as unavailable (ADR-0187 decision 95).
+   */
+  generation: number;
   /** the signed image's digest, or null until the engine's image is built */
   imageDigest: string | null;
   licence: string;
@@ -70,6 +77,8 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     displayName: "promptfoo",
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
     version: PROMPTFOO_ENGINE_VERSION,
+    // round 13 [95]: bump with every build change (version or digest)
+    generation: 1,
     // B5-P: the image (engines/promptfoo/Dockerfile) has not been built anywhere that could
     // report a real digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
@@ -100,6 +109,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     kind: "model_scan",
     displayName: "modelscan",
     version: "0.8.8",
+    generation: 1,
     imageDigest: null,
     licence: "Apache-2.0",
     maintainerCount: null,
@@ -119,6 +129,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     kind: "redteam",
     displayName: "garak",
     version: "0.17.0",
+    generation: 1,
     imageDigest: null,
     licence: "Apache-2.0",
     maintainerCount: null,

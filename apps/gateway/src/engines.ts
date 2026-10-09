@@ -87,9 +87,62 @@ export async function auditEngine(db: Db, row: Omit<AuditValues, "ruleChain" | "
 }
 
 /**
+ * PR #205 review round 13 [95]: is the engine row NEWER than this replica's manifest (written by a
+ * replica that ships a later generation)? Then this replica must not decide anything about the engine
+ * from its own, older manifest: it refuses leases, creation, enabling, self-tests and registration with
+ * 409 `engine_manifest_outdated`. Decided from the row each request reads (or locks), so a newer
+ * replica that syncs AFTER this one started is seen at once.
+ */
+export function engineManifestOutdated(row: { manifestGeneration: number }, m: EngineManifestEntry): boolean {
+  return row.manifestGeneration > m.generation;
+}
+
+/** the 409 body every refusal of an outdated replica sends */
+export function engineManifestOutdatedRefusal(id: EngineId, row: { manifestGeneration: number }, m: EngineManifestEntry) {
+  return {
+    error: "engine_manifest_outdated" as const,
+    detail: `this gateway replica ships manifest generation ${m.generation} of engine ${id}, older than the generation ${row.manifestGeneration} already installed: the engine is unavailable on this replica until it is upgraded`,
+  };
+}
+
+/**
+ * The once-per-replica audit of an outdated manifest: keyed by the manifest object this replica runs
+ * with (a process normally has one), then by engine and the row's generation. Claimed before the
+ * write and released if the write fails, so concurrent requests write it once.
+ */
+const outdatedAudited = new WeakMap<object, Set<string>>();
+async function auditOutdatedOnce(db: Db, manifest: object, id: EngineId, rowGeneration: number, m: EngineManifestEntry): Promise<void> {
+  let seen = outdatedAudited.get(manifest);
+  if (!seen) outdatedAudited.set(manifest, (seen = new Set()));
+  const key = `${id}:${rowGeneration}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  try {
+    await auditEngine(db, {
+      userId: NO_IDENTITY,
+      objectType: "engine",
+      objectId: null,
+      ruleId: "engine-manifest-outdated",
+      effect: "deny",
+      detail: { engineId: id, replicaGeneration: m.generation, rowGeneration, replicaBuild: { version: m.version, digest: m.imageDigest } },
+      reason: `engine ${id} is unavailable on this gateway replica: its manifest (generation ${m.generation}) is older than the installed one (generation ${rowGeneration}); nothing was written and nothing was cancelled`,
+    });
+  } catch (e) {
+    seen.delete(key);
+    throw e;
+  }
+}
+
+/**
  * Copy the shipped manifest onto the rows. A version or digest that changed
  * switches an enabled engine off and clears its self-test: what was tested is
  * no longer what would run. Idempotent; cheap when nothing changed.
+ *
+ * PR #205 review round 13 [95]: MONOTONIC. The row records the manifest generation it was written
+ * from, and a replica only ever moves it forward, compared under the row's FOR UPDATE lock: a replica
+ * whose manifest generation is OLDER than the row's (an old replica during a rolling upgrade) writes
+ * nothing, cancels nothing, disables nothing, and treats the engine as unavailable
+ * (`engineManifestOutdated`), audited once per replica.
  */
 export async function syncEngineManifest(db: Db, manifest: Readonly<Record<EngineId, EngineManifestEntry>>): Promise<void> {
   for (const id of ENGINE_IDS) {
@@ -100,6 +153,7 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
     const changedBuild = row.version !== m.version || row.imageDigest !== m.imageDigest;
     const same =
       !changedBuild &&
+      row.manifestGeneration === m.generation &&
       row.kind === m.kind &&
       row.licence === m.licence &&
       row.maintainerCount === m.maintainerCount &&
@@ -118,6 +172,8 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
     const out = await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(engines).where(eq(engines.id, id)).for("update");
       if (!locked) return null;
+      // round 13 [95]: an older manifest never writes the row (nor cancels, nor disables)
+      if (engineManifestOutdated(locked, m)) return { kind: "outdated" as const, rowGeneration: locked.manifestGeneration };
       const buildChanges = locked.version !== m.version || locked.imageDigest !== m.imageDigest;
       await tx
         .update(engines)
@@ -125,6 +181,7 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
           kind: m.kind,
           version: m.version,
           imageDigest: m.imageDigest,
+          manifestGeneration: m.generation,
           licence: m.licence,
           maintainerCount: m.maintainerCount,
           lastVerified: m.lastVerified,
@@ -150,9 +207,13 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
           reason: `engine ${id} switched off: the shipped build changed, so its self-test no longer describes what would run`,
         });
       }
-      return { cancelled };
+      return { kind: "written" as const, cancelled };
     });
     if (!out) continue;
+    if (out.kind === "outdated") {
+      await auditOutdatedOnce(db, manifest, id, out.rowGeneration, m);
+      continue;
+    }
     await notifyWorkflowsOfEndedRuns(db, out.cancelled);
   }
 }
@@ -277,6 +338,11 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const [current] = await db.select().from(engines).where(eq(engines.id, engineId));
     if (!current) return reply.status(404).send({ error: "engine_not_found" });
     const now = new Date();
+    // PR #205 review round 13 [95]: an outdated replica never enables (its manifest would judge the
+    // self-test against an older build); switching off and lowering dials stay available
+    if (body.enabled === true && engineManifestOutdated(current, manifest[engineId])) {
+      return reply.status(409).send(engineManifestOutdatedRefusal(engineId, current, manifest[engineId]));
+    }
     if (body.enabled === true && !current.enabled) {
       const admit = selfTestAdmitsEnable(current, manifest[engineId], now);
       if (!admit.ok) {
@@ -304,6 +370,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const out = await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       if (!locked) return { kind: "missing" as const };
+      if (body.enabled === true && engineManifestOutdated(locked, manifest[engineId])) return { kind: "outdated" as const, row: locked };
       // the step-up was decided on `current`: anything it rested on that moved is refused, never overwritten
       if (JSON.stringify(engineRowRelaxations(engineId, body, locked)) !== JSON.stringify(relaxed)) return { kind: "moved" as const };
       if (body.enabled === true && !locked.enabled && !selfTestAdmitsEnable(locked, manifest[engineId], now).ok) {
@@ -353,6 +420,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       return { kind: "ok" as const, after: after!, ended };
     });
     if (out.kind === "missing") return reply.status(404).send({ error: "engine_not_found" });
+    if (out.kind === "outdated") return reply.status(409).send(engineManifestOutdatedRefusal(engineId, out.row, manifest[engineId]));
     if (out.kind === "moved") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await notifyWorkflowsOfEndedRuns(db, out.ended);
     return view(engineId);
@@ -407,6 +475,8 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         at: now.toISOString(),
       };
       const [locked] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
+      // PR #205 review round 13 [95]: an outdated replica judges nothing (and so switches nothing off)
+      if (locked && engineManifestOutdated(locked, m)) return { kind: "outdated" as const, row: locked };
       await tx
         .update(engines)
         .set({
@@ -432,6 +502,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       });
       return { kind: "judged" as const, record, ended };
     });
+    if (out.kind === "outdated") return reply.status(409).send(engineManifestOutdatedRefusal(engineId, out.row, m));
     if (out.kind === "no_current_runner") {
       return reply.status(409).send({
         error: "engine_no_current_build_runner",
@@ -513,6 +584,14 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     if (!tokenId || !engineId) return reply.status(401).send({ error: "engine_enrollment_invalid" });
     if (body.selfTest.imageDigest !== body.imageDigest || body.selfTest.engineVersion !== body.engineVersion) {
       return reply.status(422).send({ error: "engine_self_test_inconsistent", detail: "the self-test must describe the image being registered" });
+    }
+    // PR #205 review round 13 [95]: an outdated replica registers nothing for this engine (its idea of
+    // the current build is older than the installed one). Decided on an unlocked read, before the
+    // enrolment token is spent: a registration that slips past a concurrent upgrade is of an obsolete
+    // build, which every later report and lease refuses by the current-build predicate.
+    const [engineRow] = await db.select().from(engines).where(eq(engines.id, engineId));
+    if (engineRow && engineManifestOutdated(engineRow, manifest[engineId])) {
+      return reply.status(409).send(engineManifestOutdatedRefusal(engineId, engineRow, manifest[engineId]));
     }
     // PR #205 review round 12 [91]: a runner of a build that is not the current one is refused
     // outright (decided before the enrolment token is spent), so an old container can never come back
@@ -674,6 +753,12 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     await syncEngineManifest(db, manifest);
     const [runner] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
     if (!runner) return reply.status(401).send({ error: "engine_runner_token_required", next: "revoked" satisfies EngineRunnerNext });
+    // PR #205 review round 13 [95]: an outdated replica takes no report (its older manifest would call
+    // a current runner obsolete, or judge it against the wrong build). No `next`: the runner retries.
+    const [engineNow] = await db.select().from(engines).where(eq(engines.id, engineId));
+    if (engineNow && engineManifestOutdated(engineNow, manifest[engineId])) {
+      return reply.status(409).send(engineManifestOutdatedRefusal(engineId, engineNow, manifest[engineId]));
+    }
     // PR #205 review round 5 [67]: a report of another build means the runner was upgraded under a
     // credential registered for the old one. That is not an inconsistency to wait out: it re-enrols.
     if (selfTest.imageDigest !== runner.reportedDigest || selfTest.engineVersion !== runner.reportedVersion) {
@@ -712,8 +797,11 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       // (revocation UPDATEs this row, so it either waits for this transaction or this one sees it)
       const [live] = await tx.select({ revokedAt: engineRunners.revokedAt }).from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
-      await tx.update(engineRunners).set({ selfTest, selfTestPassed: verdict.passed, selfTestFailures: verdict.failures }).where(eq(engineRunners.id, runnerId));
       const [engine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
+      // PR #205 review round 13 [95]: decided again on the locked row — an outdated replica stores
+      // nothing, neither the runner's report nor anything on the engine
+      if (engine && engineManifestOutdated(engine, m)) return { kind: "outdated" as const, row: engine };
+      await tx.update(engineRunners).set({ selfTest, selfTestPassed: verdict.passed, selfTestFailures: verdict.failures }).where(eq(engineRunners.id, runnerId));
       const recorded = engine?.selfTest as { passed?: boolean; imageDigest?: string; version?: string } | null;
       const sameBuild = !!recorded?.passed && isCurrentBuild(m, { digest: recorded.imageDigest, version: recorded.version });
       let engineRefreshed = false;
@@ -765,6 +853,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       return { kind: "done" as const, engineRefreshed, engineDisabled, engineOn, ended };
     });
     if (out.kind === "done") await notifyWorkflowsOfEndedRuns(db, out.ended);
+    if (out.kind === "outdated") return reply.status(409).send(engineManifestOutdatedRefusal(engineId, out.row, m));
     if (out.kind === "revoked") {
       return reply
         .status(401)

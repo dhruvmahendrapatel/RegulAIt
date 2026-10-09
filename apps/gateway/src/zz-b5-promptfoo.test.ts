@@ -23,7 +23,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
@@ -1742,5 +1742,159 @@ describe("PR #205 review round 12: only current-build runners count; a failing r
     expect(after).toMatchObject({ enabled: true });
     expect(after.self_test_passed_at).toBe(before.self_test_passed_at);
     await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+});
+
+describe("PR #205 review round 13: an idempotent lease; a monotonic manifest sync", () => {
+  const report = () =>
+    buildSelfTest({
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "denied" },
+    });
+  const register = async (label: string) => {
+    const token = (await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label })).json().token as string;
+    const secret = generateRunnerSecret();
+    const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(token, secret, {
+      name: `${label}-${RUN}`,
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: await report(),
+    });
+    return { secret, runnerId: reg.runnerId, bearer: { authorization: `Bearer ${secret}` } };
+  };
+  const switchOn = async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`);
+  };
+  const keyRow = async (id: string) => {
+    const [k] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, id));
+    return k!;
+  };
+  const audits = async (ruleId: string, objectId?: string) =>
+    Number(
+      (
+        (await db.execute(
+          objectId
+            ? sql`SELECT count(*)::int AS n FROM audit_log WHERE rule_id = ${ruleId} AND object_id = ${objectId}`
+            : sql`SELECT count(*)::int AS n FROM audit_log WHERE rule_id = ${ruleId} AND detail->>'engineId' = 'promptfoo'`,
+        )) as unknown as { rows: Array<{ n: number }> }
+      ).rows[0]!.n,
+    );
+
+  it("[94] a retried lease with the same request id returns the SAME run, its key rotated (the old one revoked); the run's cost spans both keys", async () => {
+    await switchOn();
+    const r = await register("idempotent-lease");
+    const runId = await startRun();
+    const requestId = randomUUID();
+    const first = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json().runId).toBe(runId);
+    const k1 = (await runRow(runId)).virtualKeyId!;
+    expect((await runRow(runId)).leaseRequestId).toBe(requestId);
+    // the response was lost: the runner retries with the same id
+    const retry = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    expect(retry.statusCode, retry.body).toBe(200);
+    expect(retry.json().runId).toBe(runId);
+    expect(retry.json().deadlineAt).toBe(first.json().deadlineAt);
+    expect(retry.json().target.apiKey).not.toBe(first.json().target.apiKey);
+    const row = await runRow(runId);
+    expect(row.status).toBe("leased");
+    const k2 = row.virtualKeyId!;
+    expect(k2).not.toBe(k1);
+    // never two working keys: the old one is revoked in the same transaction
+    expect((await keyRow(k1)).revokedAt).not.toBeNull();
+    expect((await keyRow(k2)).revokedAt).toBeNull();
+    expect((await keyRow(k2)).budgetUsd).toBe(row.budgetUsd);
+    expect(await audits("engine-run-lease-reissued", runId)).toBe(1);
+    // exactly one run is leased to this runner
+    const leasedToR = (await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs WHERE runner_id = ${r.runnerId} AND status = 'leased'`)) as unknown as { rows: Array<{ n: number }> };
+    expect(leasedToR.rows[0]!.n).toBe(1);
+    // spend on either key is the run's: cancelling it now records both
+    await db.execute(sql`INSERT INTO usage_events (user_id, virtual_key_id, cost_usd) VALUES (${alice.id}, ${k1}, 0.125), (${alice.id}, ${k2}, 0.25)`);
+    expect((await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {})).statusCode).toBe(200);
+    expect((await runRow(runId)).costUsd).toBeCloseTo(0.375, 9);
+    // the run no longer live under that lease: the same id leases nothing (the runner's next attempt is new)
+    const late = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    expect(late.statusCode, late.body).toBe(204);
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${r.runnerId}`);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+
+  it("[94] another runner presenting the same request id never gets the first runner's run, nor rotates its key", async () => {
+    await switchOn();
+    const a = await register("lease-owner");
+    const b = await register("lease-thief");
+    const runId = await startRun();
+    const requestId = randomUUID();
+    const first = await inject("POST", "/v1/engine-runner/lease", a.bearer, { ...PF_BUILD, requestId });
+    expect(first.json().runId).toBe(runId);
+    const k1 = (await runRow(runId)).virtualKeyId!;
+    const other = await inject("POST", "/v1/engine-runner/lease", b.bearer, { ...PF_BUILD, requestId });
+    expect([200, 204]).toContain(other.statusCode);
+    if (other.statusCode === 200) expect(other.json().runId).not.toBe(runId);
+    const row = await runRow(runId);
+    expect(row.runnerId).toBe(a.runnerId);
+    expect(row.virtualKeyId).toBe(k1);
+    expect((await keyRow(k1)).revokedAt).toBeNull();
+    expect(await audits("engine-run-lease-reissued", runId)).toBe(0);
+    expect((await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {})).statusCode).toBe(200);
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id IN (${a.runnerId}, ${b.runnerId})`);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+
+  it("[95] a replica whose manifest is older than the row writes nothing, cancels nothing, and refuses leases and creation (409, audited once)", async () => {
+    await switchOn();
+    const r = await register("outdated-replica");
+    const runId = await startRun();
+    // a newer replica installed generation 2, a new build, and its admin re-enabled it
+    const NEW_DIGEST = `sha256:${"f".repeat(64)}`;
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: NEW_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(
+      sql`UPDATE engines SET manifest_generation = ${MANIFEST.promptfoo.generation + 1}, image_digest = ${NEW_DIGEST}, self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`,
+    );
+    try {
+      const auditsBefore = await audits("engine-manifest-outdated");
+      // this replica (generation 1) syncs on every route: nothing is written
+      expect((await inject("GET", "/v1/engines", admin.key)).statusCode).toBe(200);
+      const lease = await inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId: randomUUID() });
+      expect(lease.statusCode, lease.body).toBe(409);
+      expect(lease.json().error).toBe("engine_manifest_outdated");
+      expect(lease.json().next).toBeUndefined(); // transient: the runner neither re-enrols nor refreshes
+      const create = await inject("POST", "/v1/engine-runs", alice.key, {
+        engineId: "promptfoo",
+        target: { agentId: targetId, judgeAgentId: judgeId },
+        config: { sets: ["prompt-extraction"] },
+        projectId,
+        budgetUsd: 1,
+        trials: 1,
+      });
+      expect(create.statusCode, create.body).toBe(409);
+      expect(create.json().error).toBe("engine_manifest_outdated");
+      const st = await inject("POST", "/v1/engine-runner/self-test", r.bearer, { selfTest: await report() });
+      expect(st.statusCode, st.body).toBe(409);
+      expect(st.json().error).toBe("engine_manifest_outdated");
+      const [row] = ((await db.execute(sql`SELECT manifest_generation, image_digest, enabled, self_test_passed_at FROM engines WHERE id = 'promptfoo'`)) as unknown as {
+        rows: Array<{ manifest_generation: number; image_digest: string; enabled: boolean; self_test_passed_at: string | null }>;
+      }).rows;
+      expect(row).toMatchObject({ manifest_generation: MANIFEST.promptfoo.generation + 1, image_digest: NEW_DIGEST, enabled: true });
+      expect(row!.self_test_passed_at).not.toBeNull();
+      // the waiting run was not cancelled
+      expect((await runRow(runId)).status).toBe("queued");
+      // audited once for this replica, however many requests it refused
+      expect((await audits("engine-manifest-outdated")) - auditsBefore).toBe(1);
+      // an admin of the newer replica switched it off (its pass kept): this replica will not switch it back on
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+      const enable = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+      expect(enable.statusCode, enable.body).toBe(409);
+      expect(enable.json().error).toBe("engine_manifest_outdated");
+      expect(((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled).toBe(false);
+    } finally {
+      await db.execute(sql`UPDATE engines SET manifest_generation = ${MANIFEST.promptfoo.generation}, image_digest = ${PF_DIGEST}, enabled = false WHERE id = 'promptfoo'`);
+      await db.execute(sql`UPDATE engine_runs SET status = 'cancelled', finished_at = now(), error_code = 'test_cleanup' WHERE id = ${runId} AND status = 'queued'`);
+      await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${r.runnerId}`);
+    }
   });
 });

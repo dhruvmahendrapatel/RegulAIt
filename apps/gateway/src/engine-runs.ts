@@ -97,7 +97,7 @@ import {
   type RunnerSelfTest,
 } from "@regulait/shared";
 import { z } from "zod";
-import { auditEngine, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
+import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
@@ -159,13 +159,19 @@ export async function revokeRunKey(
   return true;
 }
 
-/** the spend of a run, read off the one ledger by the run's key */
-async function runCostUsd(db: Db | Tx, virtualKeyId: string | null): Promise<number> {
-  if (!virtualKeyId) return 0;
+/**
+ * the spend of a run, read off the one ledger by EVERY key the run has held: a re-issued lease
+ * rotates the key (round 13 [94]), so the run's cost is the sum over all of them
+ */
+async function runCostUsd(db: Db | Tx, run: Pick<EngineRunRow, "id" | "virtualKeyId">): Promise<number> {
   const [row] = await db
     .select({ total: sql<number>`COALESCE(SUM(${usageEvents.costUsd}), 0)::float8` })
     .from(usageEvents)
-    .where(eq(usageEvents.virtualKeyId, virtualKeyId));
+    .where(
+      sql`${usageEvents.virtualKeyId} IN (SELECT ${virtualKeys.id} FROM ${virtualKeys} WHERE ${virtualKeys.engineRunId} = ${run.id}${
+        run.virtualKeyId ? sql` OR ${virtualKeys.id} = ${run.virtualKeyId}` : sql``
+      })`,
+    );
   return Number(row?.total ?? 0);
 }
 
@@ -241,6 +247,8 @@ export async function validateEngineRunRequest(
   await syncEngineManifest(db, manifestOf(opts));
   const [engine] = await db.select().from(engines).where(eq(engines.id, input.engineId));
   if (!engine) return { ok: false, status: 404, error: "engine_not_found" };
+  // PR #205 review round 13 [95]: an outdated replica creates (and validates) nothing for this engine
+  if (engineManifestOutdated(engine, manifest)) return { ok: false, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) };
   // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
   // plugin's test cases, so a plan of strategies alone would run nothing)
   const configProblem = input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : null;
@@ -349,6 +357,9 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
     // it, and the budget and timeout ceilings as they are now. A concurrent disable or ceiling drop
     // either commits first (and this run is refused) or waits for this insert (and then ends the run).
     const [engine] = await tx.select().from(engines).where(eq(engines.id, input.engineId)).for("share");
+    if (engine && engineManifestOutdated(engine, manifest)) {
+      return { kind: "refused" as const, refusal: { ok: false as const, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) } };
+    }
     if (!engine || !engine.enabled) {
       return { kind: "refused" as const, refusal: { ok: false as const, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` } };
     }
@@ -526,7 +537,7 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       args = { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
     }
   }
-  const costUsd = await runCostUsd(tx, locked.virtualKeyId);
+  const costUsd = await runCostUsd(tx, locked);
   const summary = runSummary(args.normalised, args.cause, args.envelope ?? null);
   const [updated] = await tx
     .update(engineRuns)
@@ -1132,8 +1143,106 @@ function publicRun(run: EngineRunRow) {
 
 interface LeaseRefusal {
   error: string;
-  next: EngineRunnerNext;
+  /** absent only for `engine_manifest_outdated` (round 13 [95]): a transient refusal the runner waits out */
+  next?: EngineRunnerNext;
   detail: string;
+}
+
+/**
+ * Mint a run's scoped key (the run-as person's ceiling: the run's budget, the run's target and judge,
+ * until the deadline), audited. `carriedSpentUsd` is what the run's earlier keys already spent (a
+ * rotation carries it, so the run's ceiling holds across keys; round 13 [94]).
+ */
+async function mintRunKeyTx(
+  tx: Tx,
+  run: EngineRunRow,
+  engineId: EngineId,
+  target: AgentRow,
+  judge: AgentRow | null,
+  deadlineAt: Date,
+  carriedSpentUsd: number,
+): Promise<{ token: string; keyId: string }> {
+  const { token, tokenHash } = generateVirtualKeyToken();
+  const allowedModels = [target.id, ...(judge ? [judge.id] : [])];
+  const [key] = await tx
+    .insert(virtualKeys)
+    .values({
+      name: engineKeyName(engineId, run.id),
+      userId: run.runAsUserId!,
+      tokenHash,
+      purpose: ENGINE_VIRTUAL_KEY_PURPOSE,
+      allowedModels,
+      budgetUsd: run.budgetUsd,
+      spentUsd: carriedSpentUsd,
+      expiresAt: deadlineAt,
+      projectId: run.projectId,
+      engineRunId: run.id,
+      createdBy: null,
+    })
+    .returning({ id: virtualKeys.id });
+  await tx.insert(auditLog).values({
+    userId: run.runAsUserId!,
+    objectType: "virtual_key",
+    objectId: key!.id,
+    detail: {
+      phase: "issue",
+      purpose: ENGINE_VIRTUAL_KEY_PURPOSE,
+      engineRunId: run.id,
+      engineId,
+      ownerUserId: run.runAsUserId,
+      allowedModels,
+      budgetUsd: run.budgetUsd,
+      carriedSpentUsd,
+      expiresAt: deadlineAt.toISOString(),
+      projectId: run.projectId,
+    },
+    effect: "allow",
+    ruleId: "engine-run-key-minted",
+    ruleChain: [],
+    reason: `run-scoped key minted for ${engineId} run ${run.id}: the run-as person's ceiling, $${run.budgetUsd.toFixed(2)}, until ${deadlineAt.toISOString()}`,
+  });
+  return { token, keyId: key!.id };
+}
+
+/**
+ * PR #205 review round 13 [94]: re-issue a still-live lease to the runner that holds it (a retry
+ * with the attempt's request id). The run, its deadline and its spec are unchanged; the lease is
+ * renewed like a heartbeat; the key is ROTATED — the old one revoked and a new one minted in this
+ * transaction, carrying what the run already spent — so at most one key of the run ever works.
+ */
+async function reissueLeaseTx(tx: Tx, run: EngineRunRow, engineId: EngineId, m: EngineManifestEntry, runnerId: string, now: Date) {
+  const [t] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
+  const [j] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
+  const target = (t as AgentRow | undefined) ?? null;
+  const judge = (j as AgentRow | undefined) ?? null;
+  let apiKey: string | null = null;
+  let keyId: string | null = run.virtualKeyId;
+  if (run.virtualKeyId && run.targetKind === "agent" && m.needsModelAccess && target) {
+    await revokeRunKey(tx, run, "lease_reissued", NO_IDENTITY);
+    const [{ spent } = { spent: 0 }] = await tx
+      .select({ spent: sql<number>`COALESCE(SUM(${virtualKeys.spentUsd}), 0)::float8` })
+      .from(virtualKeys)
+      .where(eq(virtualKeys.engineRunId, run.id));
+    const minted = await mintRunKeyTx(tx, run, engineId, target, judge, run.deadlineAt!, Number(spent));
+    apiKey = minted.token;
+    keyId = minted.keyId;
+  }
+  const [updated] = await tx
+    .update(engineRuns)
+    .set({ virtualKeyId: keyId, leaseExpiresAt: new Date(now.getTime() + ENGINE_LEASE_TTL_SECONDS * 1000), heartbeatAt: now })
+    .where(eq(engineRuns.id, run.id))
+    .returning();
+  await tx.insert(auditLog).values({
+    userId: run.runAsUserId ?? NO_IDENTITY,
+    objectType: "engine_run",
+    objectId: run.id,
+    detail: { phase: "lease_reissue", engineId, runnerId, leaseRequestId: run.leaseRequestId, previousVirtualKeyId: run.virtualKeyId, virtualKeyId: keyId },
+    effect: "allow",
+    ruleId: "engine-run-lease-reissued",
+    ruleChain: [],
+    reason: `${engineId} run ${run.id} re-issued to runner ${runnerId} on a retried lease (same request id)` + (apiKey ? "; its key was rotated, the old one revoked" : ""),
+  });
+  return { run: updated!, apiKey, target, judge };
 }
 
 /**
@@ -1154,6 +1263,10 @@ function leaseAdmission(
   m: EngineManifestEntry,
   now: Date,
 ): LeaseRefusal | null {
+  // PR #205 review round 13 [95]: a replica whose manifest is older than the engine row decides
+  // nothing about this engine (an old replica during a rolling upgrade). No `next` signal: the runner
+  // keeps its state and retries, and reaches a current replica.
+  if (engine && engineManifestOutdated(engine, m)) return engineManifestOutdatedRefusal(m.id, engine, m);
   if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
     return {
       next: "reenrol_required",
@@ -1385,6 +1498,32 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
       if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
       const engine = lockedEngine!;
+      // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
+      // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
+      // leased — to THIS runner only: the lookup is by (runner, request id), and the unique index is
+      // too — is returned again instead of a second run being leased. Its credentials are re-issued by
+      // ROTATION: only the key's hash is stored, so the old key cannot be shown again; the old key is
+      // revoked and a new one minted in this one transaction (ADR-0187 decision 94). A run no longer
+      // live under that lease leases nothing (204), and the runner's next attempt uses a new id.
+      if (build.requestId) {
+        const [prior] = await tx
+          .select()
+          .from(engineRuns)
+          .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
+          .for("update");
+        if (prior) {
+          const at = new Date();
+          const live =
+            prior.status === "leased" &&
+            prior.cancelRequestedAt === null &&
+            prior.leaseExpiresAt !== null &&
+            prior.leaseExpiresAt > at &&
+            prior.deadlineAt !== null &&
+            prior.deadlineAt > at;
+          if (!live) return { kind: "none" as const };
+          return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
+        }
+      }
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
       const [{ n } = { n: 0 }] = await tx
         .select({ n: sql<number>`count(*)::int` })
@@ -1454,44 +1593,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       let apiKey: string | null = null;
       let keyId: string | null = null;
       if (run.targetKind === "agent" && m.needsModelAccess) {
-        const { token, tokenHash } = generateVirtualKeyToken();
-        const [key] = await tx
-          .insert(virtualKeys)
-          .values({
-            name: engineKeyName(engineId, run.id),
-            userId: run.runAsUserId!,
-            tokenHash,
-            purpose: ENGINE_VIRTUAL_KEY_PURPOSE,
-            allowedModels: [target!.id, ...(judge ? [judge.id] : [])],
-            budgetUsd: run.budgetUsd,
-            expiresAt: deadlineAt,
-            projectId: run.projectId,
-            engineRunId: run.id,
-            createdBy: null,
-          })
-          .returning({ id: virtualKeys.id });
-        apiKey = token;
-        keyId = key!.id;
-        await tx.insert(auditLog).values({
-          userId: run.runAsUserId!,
-          objectType: "virtual_key",
-          objectId: keyId,
-          detail: {
-            phase: "issue",
-            purpose: ENGINE_VIRTUAL_KEY_PURPOSE,
-            engineRunId: run.id,
-            engineId,
-            ownerUserId: run.runAsUserId,
-            allowedModels: [target!.id, ...(judge ? [judge.id] : [])],
-            budgetUsd: run.budgetUsd,
-            expiresAt: deadlineAt.toISOString(),
-            projectId: run.projectId,
-          },
-          effect: "allow",
-          ruleId: "engine-run-key-minted",
-          ruleChain: [],
-          reason: `run-scoped key minted for ${engineId} run ${run.id}: the run-as person's ceiling, $${run.budgetUsd.toFixed(2)}, until ${deadlineAt.toISOString()}`,
-        });
+        const minted = await mintRunKeyTx(tx, run, engineId, target!, judge, deadlineAt, 0);
+        apiKey = minted.token;
+        keyId = minted.keyId;
       }
       const agentHash = target ? await agentConfigHash(tx as unknown as Db, target) : null;
       const [updated] = await tx
@@ -1505,6 +1609,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           deadlineAt,
           virtualKeyId: keyId,
           agentConfigHash: agentHash,
+          // round 13 [94]: the attempt's request id, so a retry of it finds this run again
+          leaseRequestId: build.requestId ?? null,
         })
         .where(eq(engineRuns.id, run.id))
         .returning();

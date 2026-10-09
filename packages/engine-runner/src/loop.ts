@@ -24,10 +24,10 @@
  * 401 without one means `revoked`. A network error, a 5xx, a 408, a 429 or a refusal with no signal
  * is transient: backed off and retried, never a state change of its own.
  */
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { ENGINE_RUNNER_TOKEN_PREFIX, type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
+import { removeFileDurable, writeFileDurable } from "./durable.js";
 import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
 
 /**
@@ -51,13 +51,12 @@ export interface RunnerTokenStore {
 
 const isRunnerToken = (t: unknown): t is string => typeof t === "string" && t.startsWith(ENGINE_RUNNER_TOKEN_PREFIX) && /^[\x21-\x7e]+$/.test(t);
 
-/** write a file atomically, 0600, in a 0700 directory */
+/**
+ * write a file atomically AND durably, 0600, in a 0700 directory (PR #205 review round 13 [96]: the
+ * temp file and the directory are fsynced, so a power cut never leaves a truncated token or record)
+ */
 async function writeAtomic(file: string, content: string): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
-  await writeFile(tmp, content, { mode: 0o600, flag: "wx" });
-  await chmod(tmp, 0o600);
-  await rename(tmp, file);
+  await writeFileDurable(file, content);
 }
 
 async function readOrNull(file: string): Promise<string | null> {
@@ -109,7 +108,7 @@ export class FileRunnerTokenStore implements RunnerTokenStore {
   }
 
   async clearPending(): Promise<void> {
-    await rm(this.pendingFile, { force: true });
+    await removeFileDurable(this.pendingFile);
   }
 }
 
@@ -341,6 +340,22 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
     await sleep(backoff);
     backoff = Math.min(max, backoff * 2);
   };
+  // PR #205 review round 13 [94]: the current lease attempt's request id. Kept while the attempt's
+  // outcome is unknown (a timeout, a lost response, a 5xx: transient), so the retry finds the run that
+  // attempt may have leased; dropped once the gateway answered definitively (a lease, no work, or a
+  // refusal), so the next attempt is a new one.
+  let leaseRequestId: string | null = null;
+  const leaseOnce = async () => {
+    leaseRequestId ??= randomUUID();
+    try {
+      const r = await runOnce(client, adapter, { ...opts, leaseRequestId });
+      leaseRequestId = null;
+      return r;
+    } catch (e) {
+      if (eventOf(e).kind !== "transient") leaseRequestId = null;
+      throw e;
+    }
+  };
 
   while (current() !== "stopped") {
     switch (current()) {
@@ -357,7 +372,7 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           let authenticated = false;
           let event: RunnerEvent = { kind: "next", next: "ok" };
           try {
-            const r = await runOnce(client, adapter, opts);
+            const r = await leaseOnce();
             authenticated = true;
             if (r.outcome !== "idle") opts.log?.(`run ${r.runId}: ${r.outcome}${r.status ? ` (${r.status})` : ""}`);
           } catch (e) {
@@ -442,8 +457,12 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
             go({ kind: "enrolment_refused" }, "engine_runner_build_obsolete");
             break;
           }
-          const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
-          p.attempts++;
+          // PR #205 review round 13 [95]: a gateway replica whose engine manifest is older than the
+          // installed one refuses (409 `engine_manifest_outdated`): it is transient — another replica
+          // (or this one, upgraded) takes the registration — and it does not use up the attempts
+          const outdated = e instanceof RunnerHttpError && e.code === "engine_manifest_outdated";
+          const transient = outdated || !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
+          if (!outdated) p.attempts++;
           if (!transient || p.attempts >= (opts.registerAttempts ?? 5)) {
             stopMessage =
               e instanceof RunnerHttpError && e.status === 401
@@ -452,7 +471,8 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
             go({ kind: "enrolment_refused" }, whyOf(e));
             break;
           }
-          await sleep(Math.min(30_000, base * 2 ** (p.attempts - 1)));
+          if (outdated) await backOff();
+          else await sleep(Math.min(30_000, base * 2 ** (p.attempts - 1)));
           go({ kind: "transient" });
         }
         if (!reg) break;
@@ -489,7 +509,7 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           break;
         }
         try {
-          const r = await runOnce(client, adapter, opts);
+          const r = await leaseOnce();
           backoff = base;
           lastRefreshAt = null;
           if (waitingOn) opts.log?.(`lease accepted again (was ${waitingOn})`);
