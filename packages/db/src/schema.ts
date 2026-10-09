@@ -11759,9 +11759,12 @@ export const engines = pgTable(
     enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0187 decision 95 (migration 0174): the manifest generation the row was last written from; only ever moves forward */
+    manifestGeneration: integer("manifest_generation").notNull().default(0),
   },
   (t) => [
     check("engines_enabled_needs_self_test_check", sql`NOT ${t.enabled} OR ${t.selfTestPassedAt} IS NOT NULL`),
+    check("engines_manifest_generation_check", sql`${t.manifestGeneration} >= 0`),
     check("engines_timeout_check", sql`${t.timeoutSeconds} BETWEEN 60 AND 7200`),
     check("engines_budget_check", sql`${t.maxBudgetUsd} >= 0.01 AND ${t.maxBudgetUsd} <= 10000`),
     check("engines_concurrency_check", sql`${t.maxConcurrent} BETWEEN 1 AND 20`),
@@ -11922,6 +11925,8 @@ export const engineRuns = pgTable(
     evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
     /** PR #203 review [5]: when the run's end reached its workflow stage (the sweep retries until it does) */
     workflowNotifiedAt: timestamp("workflow_notified_at", { withTimezone: true }),
+    /** ADR-0187 decision 94 (migration 0174): the runner's own request id for the lease that took this run */
+    leaseRequestId: uuid("lease_request_id"),
   },
   (t) => [
     check(
@@ -11938,6 +11943,7 @@ export const engineRuns = pgTable(
     uniqueIndex("engine_runs_workflow_uq")
       .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
       .where(sql`${t.workflowInstanceId} IS NOT NULL`),
+    uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
   ],
 );
 export type EngineRunRow = typeof engineRuns.$inferSelect;

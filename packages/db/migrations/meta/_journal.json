@@ -1170,6 +1170,13 @@
       "when": 1785108000000,
       "tag": "0173_batch5_sidecar_engines",
       "breakpoints": true
+    },
+    {
+      "idx": 174,
+      "version": "7",
+      "when": 1785109000000,
+      "tag": "0174_engine_lease_request_and_manifest_generation",
+      "breakpoints": true
     }
   ]
 }

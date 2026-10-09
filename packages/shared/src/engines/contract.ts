@@ -117,6 +117,8 @@ export const ENGINE_ENROLLMENT_TOKEN_PREFIX = "rgee_";
  */
 export const ENGINE_RUNNER_ROUTES = [
   "POST /v1/engine-runner/lease",
+  // PR #205 review [53]: a runner refreshes its own self-test report (the lease refuses a stale one)
+  "POST /v1/engine-runner/self-test",
   "POST /v1/engine-runner/runs/:runId/heartbeat",
   "GET /v1/engine-runner/artifacts/:artifactId",
   "POST /v1/engine-runner/runs/:runId/result",
@@ -147,8 +149,24 @@ export const ENGINE_REFUSALS = {
   engine_runner_revoked: 401,
   /** the engine is off: no lease, no run */
   engine_disabled: 409,
-  /** enabling without a passing, fresh self-test */
+  /** enabling without a passing, fresh self-test; or a runner whose own report is stale or failing */
   engine_self_test_required: 409,
+  /** PR #205 review round 9 [79]: enabling a build that does not isolate the runner credential, without accepting that risk */
+  engine_credential_isolation_missing: 409,
+  /** PR #205 review round 12 [91]: a registration of a build that is not the current manifest build */
+  engine_runner_build_obsolete: 409,
+  /** PR #205 review round 12 [91]: an admin self-test with no live runner of the current build */
+  engine_no_current_build_runner: 409,
+  /** PR #205 review round 13 [95]: this gateway replica's manifest is older than the installed engine row (transient: no `next`) */
+  engine_manifest_outdated: 409,
+  /** PR #205 review round 8 [77]: a registration whose token hash is already a runner's credential */
+  engine_runner_already_registered: 409,
+  /** PR #205 review round 5 [67]: a runner presenting a build other than the one it registered with */
+  engine_runner_reenrol_required: 409,
+  /** PR #205 review round 5 [70]: a target or judge agent with no provider model to dispatch to */
+  agent_not_dispatchable: 422,
+  /** PR #205 review round 6 [73]: an agent run of an engine whose manifest says `requiresJudge`, with no judge */
+  judge_required: 422,
   /** a run, heartbeat or result for a run this runner does not hold */
   engine_run_not_leased: 409,
   /** a result for a run that already ended (late) */
@@ -287,15 +305,61 @@ export type RunnerSelfTest = z.infer<typeof runnerSelfTestSchema>;
 // Runner API bodies
 // ---------------------------------------------------------------------------
 
-/** POST /v1/engine-runner/register (enrolment token as the bearer) */
+/**
+ * POST /v1/engine-runner/register (enrolment token as the bearer).
+ *
+ * PR #205 review [54]: the RUNNER generates its own runner token (`rge_` + 256 CSPRNG bits),
+ * persists it before it calls this route, and sends only its sha256 (`tokenHash`). Nothing secret
+ * comes back, so a lost response loses nothing; a retry with the same enrolment token and the same
+ * hash is answered with the same runner (idempotent), a different hash is refused.
+ */
 export const engineRunnerRegisterSchema = z
   .object({
     name: z.string().trim().min(1).max(100).regex(PRINTABLE),
     imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
     selfTest: runnerSelfTestSchema,
+    tokenHash: z.string().regex(SHA256_HEX),
+    /**
+     * PR #205 review round 5 [67]: a runner re-enrolling because its build changed presents the
+     * runner token it held (proof of possession). On a successful registration the gateway revokes
+     * that runner, if it is a live runner of the same engine, in the same transaction (audited).
+     */
+    supersedes: z.string().startsWith(ENGINE_RUNNER_TOKEN_PREFIX).max(200).regex(/^[\x21-\x7e]+$/).optional(),
   })
   .strict();
+
+/** POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] */
+export const engineRunnerSelfTestSchema = z.object({ selfTest: runnerSelfTestSchema }).strict();
+
+/**
+ * PR #205 review round 5: THE ONE SIGNAL a runner acts on. Every lease refusal and every self-test
+ * answer carries `next`; the runner's loop is a state machine driven by it (ADR-0187 decision 67):
+ * - `ok`: lease (a 200 or a 204 lease means the same);
+ * - `admin_disabled`: the engine is off by an admin and this runner's report is fresh: wait;
+ * - `self_test_required`: this runner's report is stale or failing, or the engine's record needs
+ *   it, whatever the engine's state: re-run the self-test and submit it;
+ * - `reenrol_required`: the runner presents a build other than the one its credential registered:
+ *   re-enrol with an enrolment token, or stop and say so;
+ * - `revoked`: the credential authenticates nothing: stop (an admin mints an enrolment token).
+ */
+export const ENGINE_RUNNER_NEXT = ["ok", "admin_disabled", "self_test_required", "reenrol_required", "revoked"] as const;
+export type EngineRunnerNext = (typeof ENGINE_RUNNER_NEXT)[number];
+
+/** POST /v1/engine-runner/lease — round 5 [67]: the build the runner is running now */
+export const engineRunnerLeaseSchema = z
+  .object({
+    imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
+    /**
+     * PR #205 review round 13 [94]: a request id the runner generated for this lease attempt, kept
+     * across its retries. A retry with the same id, while the run it leased is still leased to this
+     * runner, returns that run again (with a rotated key) instead of leasing a second one.
+     */
+    requestId: z.string().uuid().optional(),
+  })
+  .strict();
+export type EngineRunnerLeaseInput = z.infer<typeof engineRunnerLeaseSchema>;
 export type EngineRunnerRegisterInput = z.infer<typeof engineRunnerRegisterSchema>;
 
 /** POST /v1/engine-runner/runs/:runId/heartbeat */
@@ -383,6 +447,13 @@ export const updateEngineSchema = z
     timeoutSeconds: z.number().int().min(ENGINE_ROW_LIMITS.timeoutSeconds.min).max(ENGINE_ROW_LIMITS.timeoutSeconds.max).optional(),
     maxBudgetUsd: z.number().min(ENGINE_ROW_LIMITS.maxBudgetUsd.min).max(ENGINE_ROW_LIMITS.maxBudgetUsd.max).optional(),
     maxConcurrent: z.number().int().min(ENGINE_ROW_LIMITS.maxConcurrent.min).max(ENGINE_ROW_LIMITS.maxConcurrent.max).optional(),
+    /**
+     * PR #205 review round 9 [79]: enabling an engine whose build does not isolate the runner
+     * credential from the engine process (the manifest's `credentialIsolation: false`) is refused
+     * unless the admin accepts that risk explicitly. It is a relaxation: the step-up binds to it,
+     * and it is audited. Only meaningful with `enabled: true`.
+     */
+    acceptCredentialIsolationRisk: z.literal(true).optional(),
   })
   .strict();
 export type UpdateEngineInput = z.infer<typeof updateEngineSchema>;
@@ -401,6 +472,8 @@ export function engineRowRelaxations(
   const out: Record<string, unknown> = {};
   const k = (f: string) => `engine.${engineId}.${f}`;
   if (next.enabled === true && !stored.enabled) out[k("enabled")] = true;
+  // round 9 [79]: accepting the credential-isolation risk is part of what the step-up approves
+  if (next.enabled === true && !stored.enabled && next.acceptCredentialIsolationRisk === true) out[k("acceptCredentialIsolationRisk")] = true;
   if (next.timeoutSeconds !== undefined && next.timeoutSeconds > stored.timeoutSeconds) out[k("timeoutSeconds")] = next.timeoutSeconds;
   if (next.maxBudgetUsd !== undefined && next.maxBudgetUsd > stored.maxBudgetUsd) out[k("maxBudgetUsd")] = next.maxBudgetUsd;
   if (next.maxConcurrent !== undefined && next.maxConcurrent > stored.maxConcurrent) out[k("maxConcurrent")] = next.maxConcurrent;

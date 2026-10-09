@@ -15,6 +15,7 @@
  */
 import type { RedTeamAttackClass } from "../redteam.js";
 import type { EvalScorerKind } from "../evals.js";
+import { promptfooTaxonomyEntries } from "./promptfoo.js";
 
 export interface EngineTaxonomyEntry {
   /** the engine's vocabulary (`sourceTaxonomy.system` in the envelope) */
@@ -33,8 +34,15 @@ export interface EngineTaxonomy {
   entries: readonly EngineTaxonomyEntry[];
 }
 
-/** THE TABLE (empty until an engine PR fills its rows) */
-export const ENGINE_TAXONOMY: EngineTaxonomy = Object.freeze({ version: 1, entries: Object.freeze([]) });
+/**
+ * THE TABLE. Version history: 1 = empty (foundation); 2 = promptfoo 0.123.1 rows (B5-P, from the
+ * catalogue in promptfoo.ts: plugin rows apply to a plugin's `basic` test cases, `strategy:<id>`
+ * rows to the test cases that strategy rewrote). garak's rows come with B5-G.
+ */
+export const ENGINE_TAXONOMY: EngineTaxonomy = Object.freeze({
+  version: 2,
+  entries: Object.freeze(promptfooTaxonomyEntries().map((e) => Object.freeze(e))),
+});
 
 /** the entry for one (system, id), or null when the item is unmapped */
 export function lookupEngineTaxonomy(

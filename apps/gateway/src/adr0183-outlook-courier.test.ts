@@ -448,16 +448,18 @@ describe("5. both hosts go through the egress guard", () => {
     clearOutlookTokenCache();
     await disallow(LOGIN_HOST);
     try {
-      const before = { login: loginHits.length, graph: graphHits.length, audits: (await refusedEgress()).length };
+      // the rows that existed before, by id: Postgres returns rows in no particular order, so "the
+      // last row" is not "the newest" — the new refusal is the one row whose id was not there before
+      const before = { login: loginHits.length, graph: graphHits.length, auditIds: new Set((await refusedEgress()).map((r) => r.id)) };
       const res = await postCard(await makeApproval());
       expect(res.statusCode, res.body).toBe(403);
       expect(res.json().error).toBe("egress_blocked");
       expect(String(res.json().detail)).toMatch(/Entra login host as well as Microsoft Graph/);
       expect(loginHits.length).toBe(before.login);
       expect(graphHits.length).toBe(before.graph);
-      const audits = await refusedEgress();
-      expect(audits.length).toBe(before.audits + 1);
-      expect((audits.at(-1)!.detail as { phase?: string }).phase).toBe("adapter");
+      const added = (await refusedEgress()).filter((r) => !before.auditIds.has(r.id));
+      expect(added).toHaveLength(1);
+      expect((added[0]!.detail as { phase?: string }).phase).toBe("adapter");
     } finally {
       await allow(LOGIN_HOST);
     }
