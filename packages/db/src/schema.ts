@@ -5359,6 +5359,8 @@ export const modelCardEvidence = pgTable(
       sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'engine_scan' AND ${t.artifactScanId} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.externalRef} IS NULL)`,
     ),
     index("model_card_evidence_card_idx").on(t.cardId),
+    // ADR-0187 B5-M (migration 0175, PR #212 review [4234946093]): a scan is cited on a card at most once
+    uniqueIndex("model_card_evidence_card_scan_unique").on(t.cardId, t.artifactScanId).where(sql`${t.artifactScanId} IS NOT NULL`),
     uniqueIndex("model_card_evidence_run_uq")
       .on(t.cardId, t.evalRunId)
       .where(sql`${t.evalRunId} IS NOT NULL`),

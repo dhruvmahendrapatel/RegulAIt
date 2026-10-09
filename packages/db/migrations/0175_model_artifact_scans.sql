@@ -19,6 +19,10 @@ ALTER TABLE "artifact_scans" ADD CONSTRAINT "artifact_scans_clean_format_check" 
 -- one scan record per engine run (the terminal write is idempotent)
 CREATE UNIQUE INDEX "artifact_scans_engine_run_unique" ON "artifact_scans" ("engine_run_id") WHERE "engine_run_id" IS NOT NULL;
 --> statement-breakpoint
+-- PR #212 review [4234946093] (ADR-0187 decision 125; edited in place, unmerged): a scan is cited on a
+-- card at most once, enforced by the database, not by a read before the write
+CREATE UNIQUE INDEX "model_card_evidence_card_scan_unique" ON "model_card_evidence" ("card_id", "artifact_scan_id") WHERE "artifact_scan_id" IS NOT NULL;
+--> statement-breakpoint
 -- 3. The format is decided by the gateway from the bytes, never from the file name. The vocabulary
 --    is ARTIFACT_FORMATS (packages/shared/src/engines/modelscan.ts).
 ALTER TABLE "model_artifacts" ADD CONSTRAINT "model_artifacts_format_check" CHECK ("format" IN (

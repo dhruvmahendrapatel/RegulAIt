@@ -68,6 +68,8 @@ export function modelscanEnv(cwd: string, pathVar: string): Record<string, strin
 }
 
 export async function runModelscan(inv: ModelscanInvocation, opts: ModelscanRunnerOptions = {}): Promise<ModelscanOutcome> {
+  // PR #212 review sweep [4234946096]: an already-aborted signal starts nothing
+  if (inv.signal?.aborted) return { exitCode: null, timedOut: false, cancelled: true, report: null, reportSha256: null, reportTooLarge: false };
   const run = opts.run ?? runProcessGroup;
   const bin = opts.modelscanBin ?? MODELSCAN_IMAGE_PATHS.modelscanBin;
   const settings = opts.settingsFile ?? MODELSCAN_IMAGE_PATHS.settingsFile;

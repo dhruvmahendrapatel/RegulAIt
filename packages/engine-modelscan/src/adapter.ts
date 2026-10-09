@@ -88,6 +88,9 @@ export function modelscanAdapter(opts: ModelscanAdapterOptions): EngineAdapter {
       return { ...failedBody("no_artifact", "the lease named no single artifact to scan"), status: lease.artifacts.length === 0 ? "not_run" : "failed" };
     }
     const artifact = lease.artifacts[0]!;
+    // PR #212 review [4234946104]: before each scan, nothing of any other run stays in the exchange
+    // (a runner that crashed after staging or publishing left it there)
+    await opts.executor.reconcile(lease.runId);
     const dir = await opts.executor.stage(lease.runId);
     try {
       const fetched = path.join(dir, "fetched.bin");

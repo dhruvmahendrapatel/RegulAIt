@@ -71,11 +71,17 @@ export interface ArtifactFormatPlan {
   describe: string;
 }
 
+/**
+ * THE RULE (PR #212 review [4234946089], ADR-0187 decision 123): anything not POSITIVELY proven to be
+ * safetensors (magic and a verified header) is treated as executable, so its scan carries an
+ * `executable_format` finding. Only `safetensors` is non-executable.
+ */
 export const ARTIFACT_FORMAT_PLANS: Readonly<Record<ArtifactFormat, ArtifactFormatPlan>> = Object.freeze({
   safetensors: { scanAs: null, executable: false, ceiling: "clean", describe: "safetensors: a JSON header and raw tensor bytes; it holds no code" },
   safetensors_invalid: {
     scanAs: null,
-    executable: false,
+    // [4234946089]: a safetensors prefix whose header does not verify is NOT proven safetensors
+    executable: true,
     ceiling: "unknown",
     describe: "looks like safetensors but its header does not verify (dtype, shapes or offsets do not account for the data exactly)",
   },
@@ -93,10 +99,10 @@ export const ARTIFACT_FORMAT_PLANS: Readonly<Record<ArtifactFormat, ArtifactForm
   keras_v3: { scanAs: null, executable: true, ceiling: "not_run", describe: "a Keras v3 archive: its scanner needs TensorFlow, which this image does not ship" },
   zip: { scanAs: ".zip", executable: true, ceiling: "unknown", describe: "a zip archive of unrecognised layout: members are scanned by name only" },
   zip_opaque: { scanAs: ".zip", executable: true, ceiling: "unknown", describe: "a zip archive with nested archives or encrypted members, which are not scanned" },
-  gguf: { scanAs: null, executable: false, ceiling: "not_run", describe: "a GGUF file: no scanner for it in this build" },
+  gguf: { scanAs: null, executable: true, ceiling: "not_run", describe: "a GGUF file: no scanner for it in this build" },
   compressed: { scanAs: null, executable: true, ceiling: "not_run", describe: "a compressed stream (gzip, zlib, bz2, xz, zstd, lz4): not decompressed or scanned" },
   tar: { scanAs: null, executable: true, ceiling: "not_run", describe: "a tar archive: not scanned" },
-  empty: { scanAs: null, executable: false, ceiling: "not_run", describe: "an empty file" },
+  empty: { scanAs: null, executable: true, ceiling: "not_run", describe: "an empty file" },
   unrecognised: {
     scanAs: ".pkl",
     executable: true,
@@ -349,6 +355,7 @@ export const MODELSCAN_SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as con
 
 export const modelscanReportSchema = z.object({
   summary: z.object({
+    total_issues_by_severity: z.record(z.string(), z.number().int().min(0)).optional(),
     total_issues: z.number().int().min(0),
     modelscan_version: z.string(),
     scanned: z.object({ total_scanned: z.number().int().min(0), scanned_files: z.array(z.string()).optional() }),
@@ -371,6 +378,28 @@ export const MODELSCAN_EXIT = { clean: 0, issues: 1, errors: 2, nothingScanned: 
 
 /** the largest report the runner reads (a report lists issues and errors, not data) */
 export const MODELSCAN_MAX_REPORT_BYTES = 4 * 1024 * 1024;
+
+/**
+ * PR #212 review [4234946100]: does the report's summary disagree with its own lists? `total_issues`
+ * and the per-severity counts against `issues[]`; `total_scanned` against `scanned_files`;
+ * `total_skipped` against `skipped_files` (always listed: the runner passes --show-skipped). A fixed
+ * sentence naming the disagreement, or null.
+ */
+export function modelscanSummaryProblem(report: ModelscanReport): string | null {
+  const s = report.summary;
+  if (s.total_issues !== report.issues.length) return "total_issues does not match the issues listed";
+  if (s.total_issues_by_severity) {
+    for (const sev of MODELSCAN_SEVERITIES) {
+      const listed = report.issues.filter((i) => i.severity === sev).length;
+      if ((s.total_issues_by_severity[sev] ?? 0) !== listed) return `the ${sev} count does not match the issues listed`;
+    }
+    if (Object.keys(s.total_issues_by_severity).some((k) => !(MODELSCAN_SEVERITIES as readonly string[]).includes(k))) return "an unknown severity is counted";
+  }
+  if (s.scanned.total_scanned !== (s.scanned.scanned_files ?? []).length) return "total_scanned does not match the files listed";
+  if (!s.skipped) return "the skipped files are not listed";
+  if (s.skipped.total_skipped !== (s.skipped.skipped_files ?? []).length) return "total_skipped does not match the files listed";
+  return null;
+}
 
 /** the not-run keys this engine declares before any run (the manifest's reduced set) */
 export const MODELSCAN_FORMAT_ITEM_KEY = "format";
@@ -496,6 +525,10 @@ export function mapModelscanReport(input: {
       `modelscan found an unsafe operator (${iss.severity})${member ? ` in member ${member}` : ""}`,
     );
   });
+  // PR #212 review [4234946100]: the summary must agree with the lists it summarises; a report that
+  // contradicts itself decides nothing (its findings are still kept)
+  const summaryProblem = modelscanSummaryProblem(report);
+  if (summaryProblem) return failed("report_inconsistent", `modelscan's report contradicts itself: ${summaryProblem}`, issueItems);
   if (input.exitCode === null || input.exitCode === MODELSCAN_EXIT.usage || input.exitCode < 0 || input.exitCode > MODELSCAN_EXIT.usage) {
     return failed("engine_error", `modelscan exited ${input.exitCode ?? "without a code"}`, issueItems);
   }

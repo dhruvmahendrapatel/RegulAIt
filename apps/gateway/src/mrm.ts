@@ -1013,7 +1013,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         .where(and(eq(modelCardEvidence.cardId, id), eq(modelCardEvidence.evalRunId, body.evalRunId!)));
       if (dupe) return reply.status(409).send({ error: "evidence_already_attached" });
     }
-    const [row] = await db
+    // PR #212 review [4234946093]: the read above is a fast path; the unique index decides a race
+    const inserted = await db
       .insert(modelCardEvidence)
       .values({
         cardId: id,
@@ -1025,7 +1026,18 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         note: body.note ?? null,
         attachedByUserId: req.authCtx.userId ?? null,
       })
-      .returning();
+      .returning()
+      .then(
+        (rows) => rows,
+        (e: { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } }) => {
+          const code = e?.code ?? e?.cause?.code;
+          const name = e?.constraint ?? e?.cause?.constraint;
+          if (code === "23505" && name === "model_card_evidence_card_scan_unique") return null;
+          throw e;
+        },
+      );
+    if (inserted === null) return reply.status(409).send({ error: "evidence_already_attached" });
+    const [row] = inserted;
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "model_card",

@@ -129,6 +129,9 @@ function answering(a: { exitCode: number | null; report?: unknown; timedOut?: bo
       return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false };
     },
     async release() {},
+    async reconcile() {
+      return [];
+    },
   };
 }
 function report(p: { scanned?: string[]; issues?: Array<{ module: string; operator: string; source: string }>; errors?: Array<{ category: string; source?: string }> }) {
@@ -350,6 +353,10 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     const ev = await inject("POST", `/v1/mrm/cards/${cardId}/evidence`, admin.key, { kind: "engine_scan", artifactScanId: pk.scan.id });
     expect(ev.statusCode, ev.body).toBe(201);
     expect((await inject("POST", `/v1/mrm/cards/${cardId}/evidence`, admin.key, { kind: "engine_scan", artifactScanId: pk.scan.id })).statusCode).toBe(409);
+    // PR #212 review [4234946093]: two CONCURRENT attaches of one scan: the database decides, one 201 and one 409
+    const race = await Promise.all([0, 1].map(() => inject("POST", `/v1/mrm/cards/${cardId}/evidence`, admin.key, { kind: "engine_scan", artifactScanId: st.scan.id })));
+    expect(race.map((r) => r.statusCode).sort()).toEqual([201, 409]);
+    expect(race.find((r) => r.statusCode === 409)!.json().error).toBe("evidence_already_attached");
     const [row] = await db.select().from(modelCardEvidence).where(eq(modelCardEvidence.id, ev.json().evidence.id));
     expect(row).toMatchObject({ kind: "engine_scan", artifactScanId: pk.scan.id });
     const shown = await inject("GET", `/v1/mrm/cards/${cardId}`, admin.key);

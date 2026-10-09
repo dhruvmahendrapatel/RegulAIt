@@ -101,6 +101,9 @@ importers:
       '@regulait/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../../packages/engine-runner
       '@regulait/git-provider':
         specifier: workspace:*
         version: link:../../packages/git-provider
@@ -180,9 +183,6 @@ importers:
       '@regulait/engine-promptfoo':
         specifier: workspace:*
         version: link:../../packages/engine-promptfoo
-      '@regulait/engine-runner':
-        specifier: workspace:*
-        version: link:../../packages/engine-runner
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1

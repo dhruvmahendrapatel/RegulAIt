@@ -45,7 +45,7 @@ function report(p: { scanned?: string[]; issues?: Array<{ module: string; operat
       modelscan_version: "0.8.8",
       timestamp: "2026-10-09T15:47:41.677311",
       scanned: (p.scanned ?? []).length ? { total_scanned: p.scanned!.length, scanned_files: p.scanned } : { total_scanned: 0 },
-      skipped: { total_skipped: p.skipped ?? 0, skipped_files: [] },
+      skipped: { total_skipped: p.skipped ?? 0, skipped_files: Array.from({ length: p.skipped ?? 0 }, () => ({ category: "SCAN_NOT_SUPPORTED", description: "d", source: "artifact.zip" })) },
     },
     issues: (p.issues ?? []).map((i) => ({ description: "Use of unsafe operator", operator: i.operator, module: i.module, source: i.source, scanner: "modelscan.scanners.PickleUnsafeOpScan", severity: i.severity ?? "CRITICAL" })),
     errors: (p.errors ?? []).map((e) => ({ category: e.category, description: "d", ...(e.source ? { source: e.source } : {}) })),
@@ -70,6 +70,9 @@ function replay(answer: (job: ScanJob) => { exitCode: number | null; report?: un
         return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false };
       },
       async release() {},
+      async reconcile() {
+        return [];
+      },
     };
   };
 }
@@ -110,6 +113,10 @@ describe("B5-M format detection: from the bytes, never the name", () => {
     expect(await detect(extraField)).toBe("safetensors_invalid");
     const unknownDtype = safetensorsFile([["w", "F32", [1]]], { header: { w: { dtype: "PICKLE", shape: [1], data_offsets: [0, 4] } } });
     expect(await detect(unknownDtype)).toBe("safetensors_invalid");
+  });
+
+  it("PR #212 review [4234946089]: anything not proven safetensors is executable", () => {
+    expect(ARTIFACT_FORMATS.filter((f) => !ARTIFACT_FORMAT_PLANS[f].executable)).toEqual(["safetensors"]);
   });
 
   it("every format has a plan, and every extension a plan hands modelscan is one its settings scan", () => {
@@ -153,6 +160,26 @@ describe("B5-M mapper: the -o report decides, never stdout or the exit code alon
     expect(map("pickle", 0, { summary: {} }).errorCode).toBe("report_invalid");
     expect(map("pickle", null, null, true).errorCode).toBe("engine_timeout");
     expect(mapModelscanReport({ format: "pickle", exitCode: 0, timedOut: false, report: "too_large" }).errorCode).toBe("report_too_large");
+  });
+
+  it("PR #212 review [4234946100]: a summary that disagrees with its own lists is report_inconsistent, never clean", () => {
+    const lying = report({ scanned: ["artifact.pkl"] });
+    (lying.summary as { total_issues: number }).total_issues = 1;
+    const body = map("pickle", 0, lying);
+    expect(body).toMatchObject({ status: "failed", errorCode: "report_inconsistent" });
+    expect(body.items.some((i) => i.verdict === "pass")).toBe(false);
+    const scannedLie = report({ scanned: ["artifact.pkl"] });
+    (scannedLie.summary.scanned as { total_scanned: number }).total_scanned = 2;
+    expect(map("pickle", 0, scannedLie).errorCode).toBe("report_inconsistent");
+    const skippedLie = report({ scanned: ["artifact.pkl"], skipped: 1 });
+    (skippedLie.summary.skipped as { total_skipped: number }).total_skipped = 3;
+    expect(map("pickle", 0, skippedLie).errorCode).toBe("report_inconsistent");
+    const severityLie = report({ scanned: ["artifact.pkl"], issues: [{ module: "os", operator: "system", source: "artifact.pkl" }] });
+    (severityLie.summary.total_issues_by_severity as Record<string, number>).CRITICAL = 0;
+    const kept = map("pickle", 1, severityLie);
+    expect(kept.errorCode).toBe("report_inconsistent");
+    // the finding is still kept
+    expect(kept.items.some((i) => i.sourceTaxonomy.system === "modelscan-operator" && i.verdict === "fail")).toBe(true);
   });
 
   it("a report about another file is not this artifact's", () => {
@@ -226,6 +253,10 @@ describe("B5-M RED PROOFS (owner decision 1 strict default: executable formats n
     expect(r.normalised.verdict).toBe("pass");
     const bad = await scanAndJudge(safetensorsFile(undefined, { trailing: 8 }), NEVER);
     expect(bad.judged.verdict).toBe("unknown");
+    // PR #212 review [4234946089]: a safetensors prefix whose header does not verify is NOT proven safe:
+    // it carries the executable-format finding, and stays unknown
+    expect(bad.stored).toBe("safetensors_invalid");
+    expect(bad.judged.findings).toContainEqual({ kind: "executable_format", id: "safetensors_invalid", severity: "high" });
   });
 
   it("an unsupported format is not run, never clean", async () => {

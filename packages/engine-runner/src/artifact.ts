@@ -16,7 +16,7 @@ import { open, rm } from "node:fs/promises";
 
 export class ArtifactFetchError extends Error {
   constructor(
-    readonly code: "artifact_http" | "artifact_too_long" | "artifact_short" | "artifact_sha256_mismatch" | "artifact_timeout" | "artifact_no_token",
+    readonly code: "artifact_http" | "artifact_too_long" | "artifact_short" | "artifact_sha256_mismatch" | "artifact_timeout" | "artifact_no_token" | "artifact_aborted",
     message: string,
   ) {
     super(message);
@@ -36,6 +36,9 @@ export interface ArtifactFetchOptions {
 
 export async function downloadArtifact(opts: ArtifactFetchOptions): Promise<{ bytes: number; sha256: string }> {
   if (!opts.token) throw new ArtifactFetchError("artifact_no_token", "the runner holds no token to fetch the artifact with");
+  // PR #212 review [4234946096]: a signal that is ALREADY aborted never fires its event, so it is
+  // checked here: nothing is opened and nothing is fetched
+  if (opts.signal?.aborted) throw new ArtifactFetchError("artifact_aborted", "the run was cancelled before the artifact was fetched");
   const abort = new AbortController();
   const onAbort = () => abort.abort();
   opts.signal?.addEventListener("abort", onAbort, { once: true });

@@ -61,6 +61,12 @@ export interface ScanExecutor {
   scan(job: ScanJob, signal: AbortSignal): Promise<ModelscanOutcome>;
   /** remove everything of this run */
   release(runId: string): Promise<void>;
+  /**
+   * PR #212 review [4234946104]: remove every job (published or staging) that is not `keepRunId`'s —
+   * at runner start (keep nothing) and before each scan (keep the run being scanned). A runner that
+   * crashed after staging or publishing leaves directories nobody else would ever remove.
+   */
+  reconcile(keepRunId: string | null): Promise<string[]>;
 }
 
 async function writeAtomic(file: string, content: string): Promise<void> {
@@ -90,6 +96,22 @@ export class LocalScanExecutor implements ScanExecutor {
   async release(runId: string): Promise<void> {
     if (UUID.test(runId)) await rm(path.join(this.root, runId), { recursive: true, force: true });
   }
+  async reconcile(keepRunId: string | null): Promise<string[]> {
+    const removed: string[] = [];
+    for (const name of await readdir(this.root).catch(() => [] as string[])) {
+      if (UUID.test(name) && name !== keepRunId) {
+        await rm(path.join(this.root, name), { recursive: true, force: true });
+        removed.push(name);
+      }
+    }
+    return removed;
+  }
+}
+
+/** a job directory's run id: `<uuid>` (published) or `<uuid>.staging` (being written); else null */
+export function jobDirRunId(name: string): string | null {
+  const m = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\.staging)?$/.exec(name);
+  return m ? m[1]! : null;
 }
 
 /** the runner's side of the exchange */
@@ -111,6 +133,8 @@ export class ExchangeScanExecutor implements ScanExecutor {
   }
   async scan(job: ScanJob, signal: AbortSignal): Promise<ModelscanOutcome> {
     scanJobSchema.parse(job);
+    // PR #212 review sweep [4234946096]: an already-aborted signal publishes nothing
+    if (signal.aborted) return { exitCode: null, timedOut: false, cancelled: true, report: null, reportSha256: null, reportTooLarge: false };
     const dir = this.staging(job.runId);
     await writeFile(path.join(dir, "job.json"), JSON.stringify(job), { mode: 0o640 });
     const live = path.join(this.jobsRoot, job.runId);
@@ -158,6 +182,22 @@ export class ExchangeScanExecutor implements ScanExecutor {
     if (!UUID.test(runId)) return;
     await rm(this.staging(runId), { recursive: true, force: true });
     await rm(path.join(this.jobsRoot, runId), { recursive: true, force: true });
+  }
+  /**
+   * [4234946104]: drop every published or staging job that is not `keepRunId`'s. The runner cannot
+   * write the result volume (read-only there); the scanner drops every result whose job is gone on its
+   * next pass, so reconciling the jobs reconciles the results too.
+   */
+  async reconcile(keepRunId: string | null): Promise<string[]> {
+    const removed: string[] = [];
+    for (const name of await readdir(this.jobsRoot).catch(() => [] as string[])) {
+      const runId = jobDirRunId(name);
+      if (runId !== null && runId !== keepRunId) {
+        await rm(path.join(this.jobsRoot, name), { recursive: true, force: true });
+        removed.push(name);
+      }
+    }
+    return removed;
   }
 }
 

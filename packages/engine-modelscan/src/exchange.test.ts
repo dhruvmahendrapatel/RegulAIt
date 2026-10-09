@@ -4,13 +4,13 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
 import { ExchangeScanExecutor, scannerTick } from "./exchange.js";
-import { modelscanArgs, modelscanEnv } from "./scan.js";
+import { modelscanArgs, modelscanEnv, runModelscan } from "./scan.js";
 import { judgeScannerSelfTest, SCANNER_SELF_TEST_FILE, writeScannerSelfTest } from "./selftest.js";
 
 async function roots() {
@@ -125,6 +125,79 @@ describe("B5-M runner/scanner exchange", () => {
     const done = JSON.parse(await readFile(path.join(results, runId, "done.json"), "utf8")) as { exitCode: number | null };
     expect(done.exitCode).toBeNull();
     expect(existsSync(path.join(results, "not-a-uuid"))).toBe(false);
+  });
+});
+
+describe("PR #212 review [4234946104]: a restarted runner leaves nothing of an earlier run in the exchange", () => {
+  it("jobs left by a crash after staging and after publishing are removed at start; the scanner never takes a staging job; the next scan works", async () => {
+    const { jobs, results } = await roots();
+    // process 1 crashes after staging run A, and after publishing run B (the scanner had answered B)
+    const first = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
+    const a = randomUUID();
+    const b = randomUUID();
+    const staged = await first.stage(a);
+    await writeFile(path.join(staged, "artifact.pkl"), "x");
+    await writeFile(path.join(staged, "job.json"), JSON.stringify({ runId: a, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }));
+    await mkdir(path.join(jobs, b));
+    await writeFile(path.join(jobs, b, "artifact.pkl"), "y");
+    await writeFile(path.join(jobs, b, "job.json"), JSON.stringify({ runId: b, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }));
+    await mkdir(path.join(results, b));
+    await writeFile(path.join(results, b, "done.json"), "{}");
+    // the scanner never takes the staging directory as a job
+    const seen: Array<{ args: readonly string[]; opts: ProcessGroupOptions }> = [];
+    await scannerTick({ jobsRoot: jobs, resultsRoot: results, modelscan: { run: fakeRun("{}", 0, seen) } });
+    expect(seen).toHaveLength(0);
+    expect(existsSync(path.join(results, a))).toBe(false);
+    // process 2 starts: it holds no run, so nothing of A or B may remain
+    const second = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
+    expect((await second.reconcile(null)).sort()).toEqual([`${a}.staging`, b].sort());
+    expect(await readdir(jobs)).toEqual([]);
+    // the scanner then drops B's result (its job is gone)
+    await scannerTick({ jobsRoot: jobs, resultsRoot: results });
+    expect(existsSync(path.join(results, b))).toBe(false);
+    // and the next scan works
+    const c = randomUUID();
+    await second.reconcile(c);
+    const stage = await second.stage(c);
+    await writeFile(path.join(stage, "artifact.pkl"), "z");
+    const scanning = second.scan({ runId: c, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }, new AbortController().signal);
+    for (let i = 0; i < 50 && !existsSync(path.join(jobs, c)); i++) await new Promise((r) => setTimeout(r, 10));
+    await scannerTick({ jobsRoot: jobs, resultsRoot: results, modelscan: { run: fakeRun('{"ok":2}', 0) } });
+    expect(Buffer.from((await scanning).report!).toString()).toBe('{"ok":2}');
+  });
+
+  it("before a scan only the run being scanned may stay (reconcile keeps it, removes the rest)", async () => {
+    const { jobs, results } = await roots();
+    const ex = new ExchangeScanExecutor(jobs, results);
+    const keep = randomUUID();
+    const other = randomUUID();
+    await mkdir(path.join(jobs, keep));
+    await mkdir(path.join(jobs, `${other}.staging`));
+    await mkdir(path.join(jobs, "lost+found"));
+    expect(await ex.reconcile(keep)).toEqual([`${other}.staging`]);
+    expect((await readdir(jobs)).sort()).toEqual([keep, "lost+found"].sort());
+  });
+});
+
+describe("PR #212 review sweep [4234946096]: an already-aborted signal starts nothing", () => {
+  it("the exchange publishes no job and modelscan is never spawned", async () => {
+    const { jobs, results } = await roots();
+    const ex = new ExchangeScanExecutor(jobs, results, { pollMs: 10 });
+    const runId = randomUUID();
+    await ex.stage(runId);
+    const aborted = new AbortController();
+    aborted.abort();
+    const out = await ex.scan({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 5000 }, aborted.signal);
+    expect(out.cancelled).toBe(true);
+    expect(existsSync(path.join(jobs, runId))).toBe(false);
+    let spawned = 0;
+    const run = async (): Promise<ProcessGroupResult> => {
+      spawned += 1;
+      return { exitCode: 0, signal: null, killed: false, stdout: "", stderr: "" };
+    };
+    const r = await runModelscan({ artifactPath: "/nonexistent/artifact.pkl", outDir: results, timeoutMs: 5000, signal: aborted.signal }, { run });
+    expect(r.cancelled).toBe(true);
+    expect(spawned).toBe(0);
   });
 });
 

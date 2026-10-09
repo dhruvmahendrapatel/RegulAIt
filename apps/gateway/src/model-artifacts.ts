@@ -55,6 +55,7 @@ import {
   type EngineRunNormalised,
   type EngineTerminalRunStatus,
 } from "@regulait/shared";
+import { fsyncDir } from "@regulait/engine-runner";
 import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -79,10 +80,21 @@ export interface ArtifactStore {
 export const artifactStorageKey = (sha256: string) => `sha256/${sha256}`;
 const KEY = /^sha256\/[0-9a-f]{64}$/;
 
-/** a directory on the gateway's own volume: one 0600 file per sha256, written by rename */
+/**
+ * a directory on the gateway's own volume: one 0600 file per sha256, written durably. PR #212 review
+ * [4234946106]: the temp file is fsynced, renamed into place, and the directory holding it is fsynced
+ * (so the rename survives a power cut), and every directory `mkdir` newly created on the way is made
+ * durable by fsyncing its parent — all before `putFile` returns, so before the row's transaction
+ * commits. The directory fsync is the runner core's (`fsyncDir`, packages/engine-runner/src/durable.ts),
+ * not a second copy.
+ */
 export class FileArtifactStore implements ArtifactStore {
   readonly kind = "filesystem" as const;
-  constructor(private readonly dir: string) {}
+  constructor(
+    private readonly dir: string,
+    /** seam for tests: the directory fsync (default: the runner core's `fsyncDir`) */
+    private readonly syncDir: (dir: string) => Promise<void> = fsyncDir,
+  ) {}
   private pathOf(key: string): string {
     if (!KEY.test(key)) throw new Error("invalid artifact key");
     return path.join(this.dir, key);
@@ -95,13 +107,25 @@ export class FileArtifactStore implements ArtifactStore {
   }
   async putFile(key: string, file: string): Promise<void> {
     const target = this.pathOf(key);
-    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    const parent = path.dirname(target);
+    // `mkdir -p` returns the FIRST directory it created (undefined when all existed): each directory
+    // from there down to `parent` is new, and its own parent must be fsynced for it to survive
+    const firstCreated = await mkdir(parent, { recursive: true, mode: 0o700 });
+    if (firstCreated) {
+      const created: string[] = [];
+      for (let d = parent; ; d = path.dirname(d)) {
+        created.unshift(d);
+        if (d === path.resolve(firstCreated) || d === path.dirname(d)) break;
+      }
+      for (const d of created) await this.syncDir(path.dirname(d));
+    }
     const tmp = `${target}.${randomUUID()}.tmp`;
     await pipeline(createReadStream(file), createWriteStream(tmp, { mode: 0o600, flags: "wx" }));
     const fh = await open(tmp, "r");
     await fh.sync();
     await fh.close();
     await rename(tmp, target);
+    await this.syncDir(parent);
   }
   async open(key: string): Promise<{ stream: Readable; size: number }> {
     const file = this.pathOf(key);

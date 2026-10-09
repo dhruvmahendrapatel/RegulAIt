@@ -35,7 +35,11 @@ async function main(): Promise<void> {
   const client = new RunnerClient({ gatewayUrl });
   const stateDir = process.env.REGULAIT_RUNNER_STATE_DIR ?? "/state";
   const store = new FileRunnerTokenStore(path.join(stateDir, "runner-token"));
-  await runRunnerLoop(client, modelscanAdapter({ gatewayUrl, token: () => store.load(), executor: new ExchangeScanExecutor(jobsRoot, resultsRoot) }), {
+  const executor = new ExchangeScanExecutor(jobsRoot, resultsRoot);
+  // PR #212 review [4234946104]: at start this runner holds no run, so no job of any run may remain
+  const stale = await executor.reconcile(null);
+  if (stale.length) console.log(`modelscan runner: removed ${stale.length} job(s) left by an earlier process`);
+  await runRunnerLoop(client, modelscanAdapter({ gatewayUrl, token: () => store.load(), executor }), {
     engineId: "modelscan",
     engineVersion,
     imageDigest,

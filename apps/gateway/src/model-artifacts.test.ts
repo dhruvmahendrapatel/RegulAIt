@@ -32,6 +32,26 @@ describe("B5-M artifact stores", () => {
     await expect(store.has("sha256/../../x")).rejects.toThrow(/invalid artifact key/);
   });
 
+  it("PR #212 review [4234946106]: the directory is fsynced after the rename, and every new directory's parent too, before putFile returns", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5m-fsync-"));
+    const dir = path.join(root, "store");
+    const synced: string[] = [];
+    const store = new FileArtifactStore(dir, async (d) => {
+      synced.push(d);
+    });
+    const src = path.join(root, "src.bin");
+    await writeFile(src, Buffer.from("a"));
+    const key = artifactStorageKey(sha(Buffer.from("a")));
+    await store.putFile(key, src);
+    // `store` and `store/sha256` were created: their parents are fsynced; then the rename's directory
+    expect(synced).toEqual([root, dir, path.join(dir, "sha256")]);
+    // a second object: nothing new to create, only the rename's directory
+    synced.length = 0;
+    await writeFile(src, Buffer.from("b"));
+    await store.putFile(artifactStorageKey(sha(Buffer.from("b"))), src);
+    expect(synced).toEqual([path.join(dir, "sha256")]);
+  });
+
   it("the S3 store sends our sha256 for the bucket to verify, under a fixed prefix", async () => {
     const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
     const client = { send: async (cmd: { constructor: { name: string }; input: Record<string, unknown> }) => (sent.push({ name: cmd.constructor.name, input: cmd.input }), {}) };
