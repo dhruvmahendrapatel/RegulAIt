@@ -1030,6 +1030,74 @@ engine row's stored build with the manifest's (a build change of the engine, not
     envelope; a simulated crash before the rename leaves the previous token intact; a truncated result is quarantined
     and survives a second start.
 
+**Review round 14 (PR #205, Codex, 2026-10-09; 2 findings, each red first) and a sweep of the run-policy reads.**
+Tests: `zz-b5-promptfoo.test.ts` "review round 14" [97] [98]. No migration.
+
+97. **Run creation decides its approval in the insert transaction** (review body). The approval decision (an
+    agentic, offensive or unclassified set while sensitive-set approval is on, or a budget over the org's threshold),
+    the default budget, the timeout clamp and the approver came from org settings read before the transaction. A
+    concurrent tightening could be missed, and the lease does not recompute approval. `runPolicyDecision` is now the
+    one decision. Validation calls it on unlocked reads. Creation calls it again inside its insert transaction, on
+    the org settings row taken `FOR SHARE` and then the engine row `FOR SHARE`, and acts only on that second
+    decision. That decision covers the budget ceiling, the timeout, whether approval is needed, and a valid approver
+    (one exists, is active, and is not the person the run executes as).
+    - **Lock order:** org settings, then engine. No path locks them the other way round: the engine writers never
+      touch org settings, and the org-settings writers never touch an engine row.
+    - **The writer serialises with it.** `PUT /v1/org/settings` takes the org row `FOR UPDATE` before it writes.
+      Every other org-settings writer UPDATEs that row, which conflicts with `FOR SHARE` too. A tightening either
+      commits before the creation reads the row, or waits for the creation to commit.
+    - **Test:** the threshold drops below a run's budget between validation and insert (`beforeCreateTx`). The run
+      is created `awaiting_approval`, with its approval, not `queued`.
+98. **A retried lease is resolved before freshness** [4231351179]. The idempotent-lease lookup ran after the
+    freshness admission (the runner's and the engine's self-test age). A retry just past the 24-hour boundary was
+    therefore refused with `self_test_required`. The runner dropped its request id, and the run the lost attempt
+    leased was orphaned until its lease expired.
+    - **Both paths resolve it first.** The unlocked fast path skips its early admission when the request id names
+      one of this runner's runs. The locked path looks the run up before the admission, under the runner row
+      (`FOR UPDATE`) and the engine row (`FOR SHARE`) it already holds.
+    - **Only the hard gates apply:**
+      - the runner is live (a revoked runner's runs are already ended by its revocation);
+      - the presented build is the one it registered;
+      - the engine is on;
+      - the manifest is not outdated;
+      - the run is still leased (not ended, lease and deadline not passed).
+    - **When a gate fails, the run is ended in that transaction, never left leased.** A failed build or engine gate
+      cancels it (`lease_retry_refused`, key revoked, audited) and returns that gate's refusal with its `next`. A
+      passed lease or deadline ends it as a timeout and returns 204.
+    - **An outdated manifest is the one exception: nothing is ended.** The retry gets 409
+      `engine_manifest_outdated`, and a current replica resolves it (decision 95: an outdated replica cancels
+      nothing).
+    - **A retry of a run that already ended re-issues nothing.** The runner is told why when a lease would be refused
+      now (for example 409 `engine_disabled` after an admin disabled the engine and decision 84 ended its runs), and
+      otherwise gets 204.
+    - **Tests:**
+      - A lease commits and its response is lost. Both self-tests then pass the 24-hour mark: a fresh attempt is
+        refused for freshness, but the retry gets the same run back with its key rotated.
+      - The engine is switched off with the run left leased. The retry gets 409 `engine_disabled`, and the run is
+        ended with its key revoked.
+      - An admin disables the engine, which ends the run. The retry gets 409 `engine_disabled`, and the run stays
+        ended.
+
+**The sweep (round 14): policy values that gate engine runs, and where each is decided.**
+- **Fixed in this round (decision 97), now decided in the creation transaction:**
+  - the org's approval threshold;
+  - sensitive-set approval;
+  - the default run budget;
+  - the maximum run timeout;
+  - the default approver and the approver's validity.
+- **Already decided in the transaction that acts on them (no change):**
+  - the engine's budget, timeout and concurrency ceilings, and its enabled state and recorded self-test (creation
+    transaction, decision 87; lease transaction, decision 71);
+  - target and judge entitlement, each agent's provider model, the manifest's required judge, and project
+    attribution. Creation only queues a run, which needs no key. The lease transaction re-decides all of these before
+    it mints a key, and ends the run `not_run` when one fails (decisions 70 and 81, and PR #203 review [10]). The
+    key's allowed models are derived there, from the run's own target and judge.
+  - an approval's release, which is decided inside the approvals transaction.
+- **Not a gate:**
+  - the raw-report retention days, read when a result is stored and by the purge sweep. This is a retention
+    setting, not a gate on a run.
+  - data sensitivity. Engine runs carry no data-sensitivity classification, so nothing gates on it.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
