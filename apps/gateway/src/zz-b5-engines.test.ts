@@ -382,6 +382,8 @@ describe("secure by default", () => {
       engineRunApprovalThresholdUsd: org!.engineRunApprovalThresholdUsd,
       engineRawReportRetentionDays: org!.engineRawReportRetentionDays,
       engineSensitiveSetApproval: org!.engineSensitiveSetApproval,
+      // B5-M (migration 0175)
+      modelArtifactMaxMegabytes: org!.modelArtifactMaxMegabytes,
     }).toEqual(BATCH5_STRICT_DEFAULTS);
   });
 

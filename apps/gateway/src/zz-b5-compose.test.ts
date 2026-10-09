@@ -92,4 +92,52 @@ describe("ADR-0187: the engines network and the runner template", () => {
       "REGULAIT_ENGINE_IMAGE_DIGEST:",
     ]);
   });
+  it("B5-M: the modelscan runner merges the template; the scanner has no network, no token, no state, the artifact read-only and one writable tmpfs", () => {
+    const REF = "${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const line = (svc: string, k: string) => svc.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
+    const runner = block("engine-modelscan");
+    expect(runner).toMatch(/\n {4}<<: \*engine-runner\n/);
+    for (const key of ["ports", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode", "tmpfs"]) {
+      expect(runner, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&")}:`));
+    }
+    expect(line(runner, "image")).toBe(REF);
+    expect(line(runner, "REGULAIT_ENGINE_IMAGE_REF")).toBe(REF);
+    const rvols = runner.slice(runner.indexOf("    volumes:\n") + 13, runner.indexOf("    environment:"));
+    expect(rvols.trim().split("\n").map((l) => l.trim())).toEqual([
+      "- engine-modelscan-state:/state",
+      "- engine-modelscan-jobs:/jobs",
+      "- engine-modelscan-results:/results:ro",
+    ]);
+
+    const scanner = block("engine-modelscan-scanner");
+    // the same image, by digest only
+    expect(line(scanner, "image")).toBe(REF);
+    expect(scanner).toMatch(/\n {4}command: \["node", "\/app\/dist\/scanner-main\.js"\]\n/);
+    // no network at all, and nothing that could widen it
+    expect(scanner).toMatch(/\n {4}network_mode: none\n/);
+    for (const key of ["networks", "ports", "privileged", "cap_add", "<<", "depends_on", "extra_hosts", "dns"]) {
+      expect(scanner, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&")}:`));
+    }
+    expect(scanner).toMatch(/\n {4}read_only: true\n/);
+    expect(scanner).toMatch(/\n {4}cap_drop: \[ALL\]\n/);
+    expect(scanner).toMatch(/\n {4}security_opt: \["no-new-privileges:true"\]\n/);
+    expect(scanner).toMatch(/\n {4}user: "10001:10001"\n/);
+    expect(scanner).toMatch(/\n {4}pull_policy: \$\{REGULAIT_ENGINE_PULL_POLICY:-never\}\n/);
+    expect(scanner).toMatch(/\n {4}profiles: \["engines"\]\n/);
+    // smaller limits than the runner template
+    expect(line(scanner, "mem_limit")).toBe("1g");
+    expect(line(scanner, "cpus")).toBe("1");
+    expect(line(scanner, "pids_limit")).toBe("64");
+    // the artifact read-only; its one writable volume is /out; no state volume, no token
+    const svols = scanner.slice(scanner.indexOf("    volumes:\n") + 13, scanner.indexOf("    environment:"));
+    expect(svols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-modelscan-jobs:/jobs:ro", "- engine-modelscan-results:/out"]);
+    expect(scanner).not.toMatch(/ENROLLMENT_TOKEN|\/state|GATEWAY_URL/);
+    // both exchange volumes are tmpfs-backed (nothing of an artifact survives the containers)
+    const vols = block("volumes", "");
+    for (const v of ["engine-modelscan-jobs", "engine-modelscan-results"]) {
+      const at = vols.indexOf(`\n  ${v}:\n`);
+      expect(at, v).toBeGreaterThan(-1);
+      expect(vols.slice(at, at + 200), v).toMatch(/type: tmpfs\n\s+device: tmpfs\n/);
+    }
+  });
 });

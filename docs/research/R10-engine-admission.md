@@ -105,6 +105,21 @@ TensorFlow-extra scanners were read, not run.
 9. **Red proofs for the PR:** a renamed pickle, a legacy-layout `.pt`, an `importlib` pickle, a truncated malicious
    pickle and a nested zip each end as a finding, `unknown` or `not_run` — never clean.
 
+**Measured during B5-M (Claude, 2026-10-09; ADR-0187 decisions 104-119).** Same method (a pinned venv, byte-built
+fixtures, never loaded):
+- With ANY `--settings-file`, stock 0.8.8 scans nothing: its scanners call `.value` on each format of the middleware's
+  map, which only the in-code defaults hold as objects; from a file they are strings, and every scan is a `MODEL_SCAN`
+  error (an `os.system` pickle exits 3, seven errors). `create-settings-file` also fails ("Keys must be strings"). The
+  image carries a one-function patch (decision 107).
+- The NumPy scanner fails on numpy 2.x (`np.lib.format._check_version` no longer exists): every `.npy` is a
+  `MODEL_SCAN` error, so `unknown` (decision 108).
+- A legacy-layout `.pt` handed over as `.pkl` IS scanned through all its pickles: `os.system` in the third pickle is a
+  CRITICAL issue (exit 1), against exit 0 as `.pt`. The pickle scanner keeps the globals of every pickle that parsed
+  before trailing raw bytes stop it.
+- With our deny-list additions, `importlib.import_module`, `ctypes.CDLL`, `http.client.HTTPSConnection`,
+  `marshal.loads`, `types.CodeType`, `operator.methodcaller` and `code.InteractiveInterpreter` pickles are findings.
+- modelscan 0.8.8 requires Python < 3.13; the image's closure is pinned for CPython 3.12 (numpy 2.5.3 resolves there).
+
 ## garak 0.17.0 (with CyberSecEval)
 
 Pinned to 0.17.0, still the latest release on 2026-10-09 (PyPI; tag `v0.17.0` = commit

@@ -21,6 +21,8 @@ export const BATCH5_SETTING_LIMITS = {
   engineRunApprovalThresholdUsd: { min: 0, max: 10_000 },
   /** how long an engine's raw report is kept (encrypted), in days */
   engineRawReportRetentionDays: { min: 1, max: 3650 },
+  /** B5-M (migration 0175): the largest model artifact an upload may carry, in MiB */
+  modelArtifactMaxMegabytes: { min: 1, max: 8192 },
 } as const;
 
 /** THE STRICT DEFAULTS. The column defaults of migration 0173 are these values. */
@@ -30,6 +32,7 @@ export const BATCH5_STRICT_DEFAULTS = Object.freeze({
   engineRunApprovalThresholdUsd: 10 as number,
   engineRawReportRetentionDays: 90 as number,
   engineSensitiveSetApproval: true as boolean,
+  modelArtifactMaxMegabytes: 512 as number,
 });
 export type Batch5Settings = {
   -readonly [K in keyof typeof BATCH5_STRICT_DEFAULTS]: (typeof BATCH5_STRICT_DEFAULTS)[K];
@@ -44,6 +47,7 @@ export const BATCH5_SETTING_COLUMNS: Readonly<Record<Batch5SettingKey, string>> 
   engineRunApprovalThresholdUsd: "engine_run_approval_threshold_usd",
   engineRawReportRetentionDays: "engine_raw_report_retention_days",
   engineSensitiveSetApproval: "engine_sensitive_set_approval",
+  modelArtifactMaxMegabytes: "model_artifact_max_megabytes",
 };
 
 /** What the strict default does, and what an admin gives up by relaxing it. */
@@ -74,6 +78,11 @@ export const BATCH5_SETTING_COPY: Readonly<Record<Batch5SettingKey, { label: str
     label: "Approval for agentic and offensive engine sets",
     strict: "On: a run that uses an agentic or offensive set, or a set this build does not classify, needs approval first.",
     relaxed: "Off: such runs start without anyone approving them.",
+  },
+  modelArtifactMaxMegabytes: {
+    label: "Largest model artifact upload (MiB)",
+    strict: "512 MiB: a larger upload is refused before it is stored, and nothing of it is kept.",
+    relaxed: "A larger limit (up to 8192 MiB) lets bigger hostile files into the artifact store and the scanner.",
   },
 };
 
@@ -112,4 +121,6 @@ export const batch5OrgSettingsFields = {
   engineRawReportRetentionDays: boundedInt(BATCH5_SETTING_LIMITS.engineRawReportRetentionDays).optional(),
   /** strict true; false relaxes it */
   engineSensitiveSetApproval: z.boolean().optional(),
+  /** strict 512; larger relaxes it (B5-M) */
+  modelArtifactMaxMegabytes: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactMaxMegabytes).optional(),
 } as const;

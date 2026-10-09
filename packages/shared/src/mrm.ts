@@ -112,17 +112,20 @@ export const requestModelCardSignOffSchema = z
 
 export const attachModelCardEvidenceSchema = z
   .object({
-    kind: z.enum(["eval_run", "external"]),
+    // ADR-0187 B5-M: `engine_scan` cites a model-artifact scan (artifact_scans) as evidence
+    kind: z.enum(["eval_run", "external", "engine_scan"]),
     evalRunId: z.string().uuid().optional(),
     externalRef: z.string().min(1).max(2000).optional(),
+    artifactScanId: z.string().uuid().optional(),
     label: z.string().max(200).nullish(),
     note: z.string().max(4000).nullish(),
   })
   .refine(
     (b) =>
-      (b.kind === "eval_run" && Boolean(b.evalRunId) && !b.externalRef) ||
-      (b.kind === "external" && Boolean(b.externalRef) && !b.evalRunId),
-    { message: "kind 'eval_run' needs evalRunId; kind 'external' needs externalRef" },
+      (b.kind === "eval_run" && Boolean(b.evalRunId) && !b.externalRef && !b.artifactScanId) ||
+      (b.kind === "external" && Boolean(b.externalRef) && !b.evalRunId && !b.artifactScanId) ||
+      (b.kind === "engine_scan" && Boolean(b.artifactScanId) && !b.evalRunId && !b.externalRef),
+    { message: "kind 'eval_run' needs evalRunId; kind 'external' needs externalRef; kind 'engine_scan' needs artifactScanId" },
   );
 
 export const revokeModelCardApprovalSchema = z.object({
