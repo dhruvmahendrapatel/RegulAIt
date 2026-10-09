@@ -1098,6 +1098,66 @@ Tests: `zz-b5-promptfoo.test.ts` "review round 14" [97] [98]. No migration.
     setting, not a gate on a run.
   - data sensitivity. Engine runs carry no data-sensitivity classification, so nothing gates on it.
 
+**Review round 15 (PR #205, Codex, 2026-10-09; 2 findings, each red first; Codex's security review was clean) and a
+sweep of lock orders.** Tests: `loop.test.ts` [99], and `zz-b5-promptfoo.test.ts` "review round 15" [100]. No
+migration.
+
+99. **Nothing after the lease is acquired re-leases the run** [4231888495]. The lease's request id stayed live for the
+    whole of `runOnce`. Any exception after acquisition that was not an HTTP error was treated as transient, for example
+    a failure to persist `undelivered-result.json` on a full volume. The loop then retried with the same id, the gateway
+    re-issued the still-live lease (decision 94), and the evaluation and its paid model calls ran again. `runOnce` now
+    has two explicit phases:
+    - **Phase 1, the lease request.** Its outcome can be ambiguous: a timeout, a lost response or a 5xx. Only an error
+      thrown here reaches the loop, which keeps the request id when the error is transient.
+    - **The id is retired.** As soon as the answer is definitive (a lease parsed, or 204), `onLeaseSettled` retires it,
+      before anything else runs.
+    - **Phase 2, post-acquisition (`runLeased`).** Nothing here surfaces as an error the loop could retry. A failure is
+      reconciled by `reconcileAfterAcquisition`. The envelope, if one is in memory, gets one more delivery attempt; with
+      none, the run is reported `failed` with code `engine_error` (the reason goes to the runner's log, since the
+      envelope schema is strict). If that post is not definitive either, the outcome is `abandoned`: the run is left to
+      time out at the gateway, which ends it and revokes its key. The run is never executed twice.
+    - **Test.** A lease succeeds, the adapter runs, delivery fails and persisting the envelope throws ENOSPC. The
+      adapter ran exactly once. No lease reused the request id: the second lease carried a new id, although the fake
+      gateway re-issues a known one. The envelope in memory was delivered by the reconciliation.
+100. **One lock order for engine state: engine (where taken) → run → approval** [4231888491]. The approval decide path
+     wrote the approval row and then locked its run. Cancel, a workflow ending, and every switch-off lock the run and
+     then supersede its approval, so a cancel racing a decision could deadlock (a 500). The decide route now calls
+     `lockEngineRunOfApprovalTx` inside its transaction before it writes the approval. It locks the run with that
+     approval `FOR UPDATE`, which is the same run → approval order as every other path. The approvals module allowed
+     this: its transaction is ours to order, and the engine-run hook already ran inside it. A test cancels a run awaiting
+     approval and, while the cancel holds the run, starts the decision on another connection. The cancel completes, and
+     the decision waits, then gets a clean 409 `approval_superseded`. Before the fix, Postgres aborted one side as a
+     deadlock.
+
+**The sweep (round 15): every pair of rows the engine code locks, and the order each path takes.** The order is
+**runner → engine → run → approval / key**, with org settings before engine.
+- **Runner ↔ engine.**
+  - The lease: runner `FOR UPDATE`, then engine `FOR SHARE`.
+  - The runner self-test: runner `FOR UPDATE`, then engine `FOR UPDATE`.
+  - The admin self-test: runner `FOR SHARE`, then engine `FOR UPDATE`.
+  - No path locks the engine and then a runner. Registration and revocation lock runners, then runs, and never the
+    engine.
+  - Consistent; no change.
+- **Org settings ↔ engine.** Run creation takes org settings `FOR SHARE`, then engine `FOR SHARE` (decision 97). Nothing
+  else takes both. Consistent.
+- **Engine ↔ run.**
+  - The lease: engine, then the queued run (`SKIP LOCKED`) or the retried run.
+  - Creation: engine, then inserts the run.
+  - The manifest sync, an admin's disable and the self-tests: engine `FOR UPDATE`, then the engine's runs.
+  - No path that holds a run then locks an engine: cancel, heartbeat, result and the sweeps touch only runs, keys,
+    items, ledgers and approvals.
+  - Consistent.
+- **Runner ↔ run.** The lease and revocation lock the runner, then runs. The heartbeat and result paths lock only the
+  run. Consistent.
+- **Run ↔ approval.** Fixed by decision 100.
+  - Every path now takes the run first: cancel, `cancelEngineRunsOfInstance` (whose workflow caller supersedes only the
+    instance's non-engine approvals first), `endActiveRunsOfEngineTx`, and the decide route.
+  - The workflow instance row, where one is held, comes before both.
+- **Run ↔ key.**
+  - Ending a run (`endLockedRun`) and a lease re-issue (decision 94) lock the run, then revoke or mint its key.
+  - The model-call path updates a key's `spent_usd` and never locks a run.
+  - Consistent.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
