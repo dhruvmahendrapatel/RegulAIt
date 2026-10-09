@@ -174,6 +174,12 @@ importers:
         specifier: 3.25.2
         version: 3.25.2(zod@3.25.76)
     devDependencies:
+      '@regulait/engine-promptfoo':
+        specifier: workspace:*
+        version: link:../../packages/engine-promptfoo
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../../packages/engine-runner
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -289,15 +295,40 @@ importers:
         specifier: ^0.31.4
         version: 0.31.11
 
+  packages/engine-promptfoo:
+    dependencies:
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../engine-runner
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.15))
+
   packages/engine-runner:
     dependencies:
       '@regulait/shared':
         specifier: workspace:*
         version: link:../shared
+      write-file-atomic:
+        specifier: 8.0.0
+        version: 8.0.0
     devDependencies:
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
+      '@types/write-file-atomic':
+        specifier: 4.0.3
+        version: 4.0.3
       vitest:
         specifier: ^4.1.11
         version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.15))
@@ -1652,6 +1683,9 @@ packages:
 
   '@types/use-sync-external-store@0.0.6':
     resolution: {integrity: sha512-zFDAD+tlpf2r4asuHEj0XH6pY6i0g5NeAHPn+15wk3BV6JA69eERFXC1gyGThDkVa1zCyKr5jox1+2LbV/AMLg==}
+
+  '@types/write-file-atomic@4.0.3':
+    resolution: {integrity: sha512-qdo+vZRchyJIHNeuI1nrpsLw+hnkgqP/8mlaN6Wle/NKhydHmUN9l4p3ZE8yP90AJNJW4uB8HQhedb4f1vNayQ==}
 
   '@types/xml-encryption@1.2.4':
     resolution: {integrity: sha512-I69K/WW1Dv7j6O3jh13z0X8sLWJRXbu5xnHDl9yHzUNDUBtUoBY058eb5s+x/WG6yZC1h8aKdI2EoyEPjyEh+Q==}
@@ -3415,6 +3449,10 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  write-file-atomic@8.0.0:
+    resolution: {integrity: sha512-dYwyZredl67GyLLIHJnRM3h2PcOmN5SkcgC7eM5DPDEOEl6dLFqVrMg3F1Ea32usj4VSVZtd2H4MtKTNOf6nPg==}
+    engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
+
   ws@8.22.0:
     resolution: {integrity: sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==}
     engines: {node: '>=10.0.0'}
@@ -4883,6 +4921,10 @@ snapshots:
       '@types/node': 26.1.1
 
   '@types/use-sync-external-store@0.0.6': {}
+
+  '@types/write-file-atomic@4.0.3':
+    dependencies:
+      '@types/node': 26.1.1
 
   '@types/xml-encryption@1.2.4':
     dependencies:
@@ -6631,6 +6673,10 @@ snapshots:
       strip-ansi: 7.2.0
 
   wrappy@1.0.2: {}
+
+  write-file-atomic@8.0.0:
+    dependencies:
+      signal-exit: 4.1.0
 
   ws@8.22.0: {}
 

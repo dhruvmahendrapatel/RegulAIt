@@ -136,6 +136,8 @@ export interface AuthContext {
    * only its own route allow-list (`ENGINE_RUNNER_ROUTES`). */
   engineRunnerId?: string;
   engineEnrollmentTokenId?: string;
+  /** PR #205 review [54]: the enrolment token was already spent (it can only replay its registration) */
+  engineEnrollmentSpent?: boolean;
   engineId?: string;
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */

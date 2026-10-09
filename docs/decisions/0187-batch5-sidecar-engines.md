@@ -349,7 +349,10 @@ database), `zz-b5-compose.test.ts` (4), `packages/shared/src/engines/engines.tes
     is pending until it ends, passes only when the run completed with verdict `pass` (no failed or unknown item, at
     least one pass), and fails otherwise. A run's end re-evaluates the stage. Reported results for such a check are
     refused (422 `engine_check_cannot_be_reported`). **Flag:** a `not_run` item (an air-gapped reduced set) does not
-    fail the check on its own; the owner may want a gate that requires every requested item to run.
+    fail the check on its own; the owner may want a gate that requires every requested item to run. **Amended by
+    decision 61 (PR #205 review round 3):** only a DECLARED planning-time exclusion (a key in the manifest's reduced set,
+    with a declarable reason) is excused; any not-run that happens at run time makes the run incomplete, so the check
+    fails.
 13. **Runner core** (`packages/engine-runner`, stdlib + shared): the client for the five routes, the self-test
     report, the egress probe (fail closed: only no-route, no-resolver and timeout count as denied; a refusal or reset
     from the far end counts as reached), the engine as a child process group killed whole on cancel or deadline, and
@@ -440,6 +443,721 @@ Tests: `zz-b5-engines.test.ts` "review round 2" (4), `packages/shared/src/engine
     already committed, so the error is caught and stored as `last_skip` ("the run could not be created: …") with an
     `engine-schedule-skipped` audit row; a due run is never lost silently.
 
+### Implementation decisions (B5-P promptfoo, 2026-10-08, branch `b5-promptfoo`)
+
+Built without the G19 research (not started): every fact the ADR expected from G19 for promptfoo was read from the
+pinned package itself and recorded with its method in `docs/research/R10-engine-admission.md` §promptfoo; what could
+not be established fails closed and is listed under open questions 6–9. No migration. Tests:
+`packages/engine-promptfoo/src/promptfoo.test.ts` (10), `image.test.ts` (4), `promptfoo-real.test.ts` (3, opt-in: the
+real promptfoo 0.123.1 against a fake gateway), `apps/gateway/src/zz-b5-promptfoo.test.ts` (5, the real gateway),
+`zz-b5-compose.test.ts` (+1). Each guard was shown red by breaking it.
+
+39. **One shared catalogue decides what runs** (`packages/shared/src/engines/promptfoo.ts`, pinned to 0.123.1, the
+    vendored OWASP tables' release): each plugin and strategy is `local`, `cloud_only` (upstream returns nothing or
+    throws with remote generation off), `missing_preseed` (dataset plugins that download at run time) or
+    `excluded_licence` (`pliny`); anything unlisted is not run (`engine_error`) and never reaches promptfoo. The
+    manifest's `sets` are generated from it (only sets that run are classed; the rest stay offensive by default), as
+    are the reduced set and the usage-data switches. A run-config set is a plugin id or `strategy:<id>`.
+40. **Taxonomy v2.** Items are (plugin, strategy) pairs keyed `<plugin>/<strategy>`; a `basic` item maps by its plugin
+    id, a strategy item by `strategy:<id>` (what it measures is the evasion technique): prompt-extraction →
+    system_prompt_extraction; pii:* and harmful:privacy → pii_leak; cross-session-leak, divergent-repetition →
+    data_exfiltration; the encodings → encoding_evasion; jailbreak-templates, jailbreak:tree, crescendo → jailbreak.
+    **Deliberately unmapped (reported, never counted):** the agentic-named plugins (excessive-agency, shell-injection,
+    sql-injection, rbac, debug-access, tool-discovery) — a promptfoo run reaches the agent over the chat compat route
+    and cannot show whether a tool call was made, so claiming ADR-0068's agentic classes from it would overstate
+    coverage; and the content-quality plugins, which have no class here.
+41. **The config generator never leaves the gateway, and an invariant re-checks it** (`assertGatewayOnly`, before
+    anything is written): exactly three providers (target, `redteam.provider` generator, `defaultTest.options.provider`
+    grader — unset, promptfoo grades with a vendor default), each `openai:chat:<model>` at the lease's base URL with
+    `apiKeyEnvar` set to the one run-key variable and `useDefaultApiKey: false`; no URL off the gateway anywhere; no
+    inline key; `sharing: false`. The child environment is an allow-list built from nothing (PATH, HOME and the config
+    and cache directories on the run's tmpfs, the switches, the key): a proxy, a vendor key or a remote-URL override is
+    refused. A refused config, a missing judge or nothing runnable ends the run `not_run` without starting promptfoo.
+42. **The mapper decides verdicts from promptfoo's results, never its exit code alone**: a graded failure is a defeat;
+    an error is not an attempt — a 401 (the key revoked: budget, cancel, timeout) or any engine error makes the item
+    `unknown`, and an item whose every attempt failed to connect is `not_run` (`egress_denied`); a planned plugin with no
+    result is `not_run` (`engine_error`); a result for something not planned, or with no plugin, is `unknown` and
+    unmapped. Exit codes 0 and 100 are a completed run; anything else `failed`. promptfoo aborts a scan on a 401 and
+    still exits 0, which is why the 401 rule matters. No model text leaves the runner: every reason is a fixed sentence
+    with counts. The raw output rides as the raw report when it fits (3 MB), else only its sha256.
+43. **The telemetry patch** (`engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs`, the ADR's "minimal
+    patch"): one `if (this.disabled) return;` at the top of each of the four bundled copies of `sendEvent`. It refuses to
+    apply unless it finds exactly four, once each. Measured: unpatched, each promptfoo process made one blocked connect
+    to the vendor's event collector with telemetry disabled; patched, none.
+44. **The image** (`engines/promptfoo/Dockerfile`, built from the repository root): the gateway's digest-pinned base in
+    every stage; the npm closure from its own lockfile (`npm ci --omit=optional --ignore-scripts`; the native sqlite
+    binding pinned as a direct dependency so it survives `--omit=optional`, which makes the image linux/amd64 only);
+    an offline licence gate on the lockfile before install (`licence-gate.mjs`: fails on the GPL family, SSPL, BUSL,
+    EPL, MPL or no licence); npm's own CycloneDX SBOM of the installed closure shipped at `/opt/promptfoo/sbom.cdx.json`;
+    the patch; the shim deployed production-only; npm, npx and corepack removed; uid 10001; every switch and
+    `REGULAIT_EGRESS_PROBE_ADDRESS` in the image env; no port. `image.test.ts` keeps the Dockerfile, the lockfile and the
+    manifest in lockstep. **Not built here** (no Docker daemon): the manifest digest stays null, so the engine still
+    cannot be enabled. Signing and the image-level Trivy scan join `publish-image.yml`/`security.yml` when the image is
+    first built in CI.
+45. **Two lockfile overrides** lift simple-git to 4.0.2 and basic-ftp to 6.2.2 past published critical/high advisories
+    (`npm audit --omit=optional`: 3 critical, 4 high → 0). Both paths are unreachable in the runner (no git command, no
+    proxy); overridden because ADR-0176 admits no unpatched critical advisory. The real-engine tests pass on the
+    overridden closure.
+46. **Compose `engine-promptfoo`** merges the hardened `x-engine-runner` template and overrides only its image (by
+    env, so an operator pins it by digest; no digest is shipped) and its three variables (gateway URL, enrolment token,
+    the image digest it reports).
+47. **Runner core fix found by the real-gateway test:** the runner sent `content-type: application/json` on the
+    bodiless lease POST, which the gateway refuses with 400 — no runner could ever have leased against the real app
+    (the B5-E tests used a fake transport). The content type is now sent only with a body.
+
+**Review (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Tests: `packages/engine-runner/src/loop.test.ts`
+(4), `zz-b5-promptfoo.test.ts` "PR #205 review" (1), `promptfoo.test.ts` [50], `image.test.ts` and
+`zz-b5-compose.test.ts` [51]. No migration.
+
+48. **A runner waits while its engine is off** [4225536095]. The documented flow is register → an admin enables; until
+    then a lease answers 409 `engine_disabled` (or `engine_self_test_required`), and the runner threw and exited. The
+    loop now lives in the shared runner core (`runRunnerLoop`, `packages/engine-runner/src/loop.ts`), so every engine
+    shim inherits it: a refused lease, a network error or a 5xx waits with a doubling backoff (5 s to 5 min); work
+    resumes when the lease is accepted. Only a refused credential that cannot be replaced (decision 49) ends the process.
+49. **The runner token survives a restart** [4225536098]. The enrolment token is single-use, so a token kept only in
+    memory bricked the runner on any restart. Registration's token is written to a file on the runner's own volume
+    (`FileRunnerTokenStore`: 0600, atomic replace, never logged; compose volume `engine-promptfoo-state` on `/state`,
+    created 0700 and owned by uid 10001 in the image). At start a stored token is used and the enrolment token is
+    ignored. A 401 on the stored token (revoked or unknown) falls back to the enrolment token once; with none, or one
+    the gateway refuses (spent, expired), the runner stops with a message naming the admin's next step. The gateway
+    still refuses a second registration with the same enrolment token.
+50. **Every planned (plugin, strategy) pair is accounted for** [4225536103]. Missing-output detection tracked plugins
+    only, so a strategy that rewrote nothing for a plugin vanished silently. The mapper now walks the planned product
+    (each plugin × `basic` and every planned strategy) and reports each pair with no result `not_run` (`engine_error`).
+51. **The image is linux/amd64 only, explicitly** [4225536109]. `@libsql/linux-x64-gnu` is a hard x64 binding on a
+    multi-arch base: every Dockerfile stage names `--platform=linux/amd64` and the compose service
+    `platform: linux/amd64`, so an arm64 host emulates amd64 rather than building an image whose native binding cannot
+    load. arm64 is open question 10.
+
+**Review round 2 (PR #205, Codex, 2026-10-09; 8 findings, each red first).** Tests: `loop.test.ts` [53] [54] [55],
+`promptfoo.test.ts` [52] [56] [57] [58] [59], `promptfoo-real.test.ts` [59] drift (opt-in), `zz-b5-promptfoo.test.ts`
+"review round 2" [53] [54], `zz-b5-engines.test.ts` (register replay), `zz-b5-compose.test.ts` [55]. No migration: the
+runner-generated credential uses the existing `engine_runners.token_hash`, `enrollment_token_id` and
+`engine_enrollment_tokens.used_at` / `runner_id`.
+
+52. **No model text in the raw report** [4225756959]. The envelope carried promptfoo's whole output file (generated
+    prompts, model responses, grader text) as `rawReport.contentBase64`. It now carries only the sha256 of the original
+    bytes with `bytes: 0` (nothing attached); the gateway stores the mapper's own items (ids, verdicts, counts) and the
+    hash. The encrypted raw-report store (decision 8) is unused for promptfoo.
+53. **A runner refreshes its own self-test** [4225756949]. After 24 hours the lease refuses the runner's report
+    (`engine_self_test_required`) and only registration accepted a new one. New runner-token route `POST
+    /v1/engine-runner/self-test` (on the allow-list): the report is evaluated exactly like registration's (manifest,
+    digest, version, switches, egress, freshness), must describe the image the runner registered with (else 422
+    `engine_self_test_inconsistent`), and is audited (`engine-runner-self-test-refreshed` / `-failed`). A passing report
+    also refreshes the engine's recorded self-test, but only for the build an admin enabled (the engine's record passed,
+    for the manifest's digest and version); a failing one switches the engine off. The shared loop re-runs the self-test
+    and submits it on that refusal (once per refusal streak), then leases again. **Default taken, owner may revisit:**
+    the refresh keeps an enabled engine enabled without a new admin action while the build is unchanged; the admin's
+    step-up was for that build.
+54. **The runner brings its own credential** [4225756962]. A registration response lost after the gateway spent the
+    enrolment token left the runner unrecoverable. The runner now generates its own token (`rge_` + 256 CSPRNG bits),
+    persists it (0600) BEFORE calling register, and sends only its sha256 (`tokenHash`), which the gateway stores as the
+    credential; nothing secret is returned. A transient failure is retried with the same secret, and the gateway answers a
+    spent (unexpired) enrolment token presented with the SAME hash with the same runner (`replayed: true`, audited
+    `engine-runner-register-replayed`); any other hash is 401 `engine_enrollment_invalid`, a revoked runner is never
+    replayed, and a spent token never mints a second runner. After a crash, the stored secret either is the credential
+    (the registration landed) or is refused and replaced with a new one. A hash already registered is 409
+    `engine_runner_token_conflict`.
+55. **The reported digest is a consistency check, not proof** [4225756971]. A container cannot prove which image it
+    runs: any digest it reports is a claim. What we can make true: the compose image reference and the digest the runner
+    reports are built from ONE variable (`REGULAIT_ENGINE_PROMPTFOO_DIGEST`; image `<repository>@<digest>`, never a tag;
+    the default is an all-zero digest that names no image), and the runner refuses to start unless the reference it was
+    given is digest-pinned and agrees with the digest (and is not the placeholder). Real admission is verifying the
+    image's signature at deploy time (cosign, ADR-0184), which is not built yet: **open item** (question 11).
+56. **The URL rule covers the transport, not prompt text** [4225756968]. The invariant scanned every string, so a
+    purpose that mentioned a URL was refused. It now checks every string inside the three provider objects (strict as
+    before) and makes the rest of the config's shape an allow-list (top-level keys, `redteam`, plugin and strategy
+    entries, `evaluateOptions`, `defaultTest`), so no other field can carry a transport setting at all.
+57. **Egress is only an off-gateway destination** [4225756975]. Any connection error was classified `egress_denied`,
+    including a refused or reset connection to the gateway itself. A connection error is now egress only when the error
+    names a destination host and none of them is the gateway's; a failure to reach the gateway, or one naming no host, is
+    an engine error (`unknown`).
+58. **An unplanned bucket counts nothing** [4225756965]. A result for a plugin or strategy the run did not plan is now
+    decided first: `unknown` with zero attempts and zero defeats, so it never counts as a pass or a fail.
+59. **The cloud-only list is generated from the pinned package** [4225756981]. `engines/promptfoo/extract-plugin-lists.mjs`
+    parses (does not execute) the pinned package's constants chunk and writes `packages/shared/src/engines/promptfoo-upstream.ts`
+    (source chunk and its sha256 recorded); the catalogue's cloud-only list is `REMOTE_ONLY_PLUGIN_IDS` (now including the
+    coding-agent collections and plugins and the medical, financial, pharmacy, insurance, ecommerce, telecom and realestate
+    lists: 93 ids) ∪ the unaligned harm set ∪ `bias:*`, and its dataset list is upstream's `DATASET_PLUGINS`. A test refuses
+    a local plugin that upstream needs remote generation for, a local id upstream does not have, or a dataset plugin
+    without a not-run disposition; the opt-in drift test re-extracts from an installed package and compares.
+
+**Review round 3 (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Tests: `loop.test.ts` [60],
+`engines.test.ts` [61], `promptfoo.test.ts` [61] [62] [63], `zz-b5-promptfoo.test.ts` [61]. No migration.
+
+60. **A transient failure to submit a self-test is retried** [4226054063]. The refresh-once latch was set before the
+    submission, so one network blip or 5xx left the runner waiting forever. Now only a definitive answer latches (a
+    verdict, or a 4xx refusal with a reason); a network error, 5xx, 408 or 429 goes back into the normal backoff and the
+    refresh is tried again. The latch still opens again when a lease succeeds.
+61. **A run with a runtime not-run never passes** [4226054067]. A completed run with some passes and some not-run items
+    (a refused set, a planned pair with no result, denied egress) read `pass`, so a workflow check passed on a partial
+    run. The shared normaliser (every engine) now distinguishes two kinds of not-run: a **planning-time exclusion**
+    declared before the run — its key is in the manifest's reduced set and its reason is declarable (`cloud_only`,
+    `excluded_licence`, `unsupported_format`, `missing_preseed`) — may be not-run without blocking a pass; **any other
+    not-run** (`engine_error`, `egress_denied`, missing output, a refused config, an undeclared set, or a declared key with
+    a runtime reason) happened at run time and makes the run incomplete: `unknown` (or `not_run` when nothing passed),
+    so the check fails. `runtimeNotRun` is in the normalised result and the run summary. Runtime not-run pairs are
+    reported as items with their taxonomy id, and a standalone not-run key that is itself a mapped id gets its class, so
+    both appear in the probe stats as not measured. **Decision 12's flag is amended accordingly.**
+62. **A refused run reports every planned pair** [4226054072]. The preflight refusal (and a failed generation) reported
+    only `<plugin>/basic`; both now use the mapper's single enumeration (`plannedPairs`: each plugin × `basic` and every
+    planned strategy) to report every pair not run.
+63. **The results file is bounded before it is read** [4226054076]. The runner stats promptfoo's output and refuses one
+    over 64 MiB (`PROMPTFOO_MAX_RESULTS_BYTES`: 1/32 of the runner's 2 GiB `mem_limit`, since JSON.parse costs several
+    times a file's size in heap) without reading or parsing it: the run fails (`results_too_large`, every reading
+    unknown, every planned pair not run) and only the file's sha256 is recorded, computed by streaming.
+
+**Review round 4 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [64],
+`promptfoo.test.ts` [66], `zz-b5-promptfoo.test.ts` "review round 4" [64] [65] [66]. No migration (see [66]).
+
+64. **A runner disabled for its own failed report keeps re-proving itself, slowly** [4226325872]. A failing report
+    switched the engine off; later leases answered `engine_disabled` and the loop refreshed only on
+    `engine_self_test_required`, so after a temporary network-policy problem the runner could not present a passing
+    report without re-enrolling. The lease refusal now carries a `reason`: `runner_self_test_failed` when this runner's
+    own stored report failed, `disabled` otherwise (an admin switched it off, or this runner's report already passes).
+    On `runner_self_test_failed` the shared loop re-runs and submits the self-test every 15 minutes
+    (`failedSelfTestRefreshMs`), and a transient submission failure does not use up that cadence; on `disabled` it
+    submits nothing. A passing refresh updates ONLY the runner's stored report: it never re-enables the engine.
+    Re-enabling after a failure stays an audited admin action with a step-up, whose self-test then evaluates the fresh
+    stored report (secure by default). *Amended by decisions 67 and 69 (round 5):* the `reason` field is replaced by
+    the `next` signal; a runner whose own report fails or is stale is told `self_test_required` whatever the engine's
+    state, and the 15-minute cadence (`selfTestRefreshMs`) applies to every refused report.
+65. **A self-test report never lands after a revocation** [4226325882]. The self-test route read the runner without a
+    lock and updated unconditionally, so a report racing a revocation could still write the runner's report and switch
+    the whole engine off. The transaction now takes the runner row `FOR UPDATE` and re-reads `revoked_at` before touching
+    the runner or the engine (revocation UPDATEs that row, so one waits for the other); revoked → 401
+    `engine_runner_revoked`. A race test revokes the runner between the route's pre-checks and its transaction
+    (`engineRunTestHooks.beforeSelfTestTx`).
+66. **A strategy needs a plugin** [4226325878]. A strategy-only plan produced neither items nor not-run entries. Run
+    creation (and schedule validation, which shares it) now refuses a promptfoo set list made only of `strategy:` sets
+    (422 `engine_config_invalid`). When every requested plugin is excluded at planning time, each requested strategy is
+    recorded not run with reason `engine_error` and the run's error code is `no_runnable_plugin`. **Decided (coordinator,
+    2026-10-09): no migration.** A dedicated `no_runnable_plugin` not-run reason would need migration 0174 (0173's CHECK
+    on `engine_run_items.not_run_reason`); it is not worth one, since strategy-only plans are refused at validation and
+    this path is a residual (every requested plugin excluded at planning time). The error code names the cause.
+
+**Review round 5 (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Three were runner-lifecycle gaps again,
+so the root cause is fixed rather than patched: the loop is now an explicit state machine driven by one gateway
+signal. Tests: `loop.test.ts` (the table row by row, then the driver per transition), `runner.test.ts` [68],
+`zz-b5-promptfoo.test.ts` "review round 5" [67] [69] [70]. No migration.
+
+67. **The runner loop is a state machine driven by one gateway signal; a build change re-enrols** [4226623285]. After
+    an image or version upgrade the stored token authenticated the old-build runner row: the lease said
+    `engine_self_test_required`, the fresh report was refused 422 `engine_self_test_inconsistent`, and the loop
+    waited forever. Every lease refusal and every self-test answer now carries `next`, one of:
+
+    | `next` | when the gateway says it | runner |
+    |---|---|---|
+    | `ok` | a 200/204 lease; a passing report while the engine is on | lease |
+    | `admin_disabled` | the engine is off and this runner's report passes now | wait (capped backoff), lease again |
+    | `self_test_required` | this runner's report is stale (24 h), failing, or for a build the manifest no longer names, *whatever the engine's state*; or the engine's own record no longer admits it | refresh if the cadence allows, else wait |
+    | `reenrol_required` | the build the runner presents differs from the one its credential registered | re-enrol, or stop |
+    | `revoked` | the credential authenticates nothing (also any 401 without a signal) | re-enrol with an unused enrolment token, or stop |
+
+    The lease now carries `{imageDigest, engineVersion}` (the build running now) and decides in this order:
+    reenrol_required, self_test_required (runner), admin_disabled, self_test_required (engine record). The runner's
+    states and transitions (`transition` in `packages/engine-runner/src/loop.ts`, every row pinned by a table test):
+
+    | state | event | next state |
+    |---|---|---|
+    | enrolling, reenrolling | registered | leasing |
+    | enrolling, reenrolling | no unused enrolment token, or it is refused, or retries exhausted | stopped |
+    | enrolling, reenrolling | transient | the same (same secret, backoff) |
+    | leasing | `ok` | leasing |
+    | leasing | `admin_disabled` | waiting |
+    | leasing | `self_test_required` and the cadence allows | refreshing |
+    | leasing | `self_test_required` within the cadence | waiting |
+    | leasing, refreshing | `reenrol_required` or `revoked` with an unused enrolment token | reenrolling |
+    | leasing, refreshing | `reenrol_required` or `revoked` without one | stopped |
+    | leasing | transient | leasing (backoff) |
+    | leasing | too many retained results (decision 68) | waiting |
+    | refreshing | `ok` | leasing (at once) |
+    | refreshing | `admin_disabled` or `self_test_required` | waiting |
+    | refreshing | transient | leasing (backoff; the cadence is not used up) |
+    | waiting | the wait is over | leasing |
+    | stopped | anything | stopped (the process says what the admin must do, and exits) |
+
+    The cadence: after a definitive submission (a verdict, or a refusal with a signal) the next waits 15 minutes
+    (`selfTestRefreshMs`); a lease that succeeds resets it. An enrolment token is tried at most once per process (it is
+    single-use). **Picked for the old registration: it is revoked on a successful re-enrolment**, not left for the
+    admin. The re-enrolling runner presents the token it held as `supersedes` (proof of possession); in the
+    registration's transaction the gateway revokes that runner if it is a live runner of the same engine, then ends
+    the runs it held (and their keys) and audits `engine-runner-superseded`; anything else is ignored. So an upgrade
+    never leaves a live credential behind. Without an enrolment token the runner stops with what to do; the state
+    volume is never deleted (the token file is replaced only when an enrolment is under way, decision 54).
+68. **Undelivered results are retried, then dropped, and capped** [4226623288]. An `undelivered` run's work directory
+    stayed in the 1 GiB tmpfs forever. Now it keeps only `undelivered-result.json` (the envelope, the run id and its
+    deadline; the engine's own files go at once). In `leasing`, before every lease, each retained result is posted once
+    (the same definitive/transient rule as `postResultWithRetry`; the loop's backoff spaces the attempts); the
+    directory is removed on a definitive answer (a 2xx, or a 4xx such as 409 the run ended or timed out), when the
+    run's deadline has passed (the gateway has ended it), or when it holds no readable result. Only run-id directories
+    are touched. With 3 retained (`maxRetainedResults`) the runner leases nothing and waits.
+69. **A runner keeps its report fresh while the engine is off** [4226623293]. While an engine was off for more than
+    24 hours (including a fresh install before its first enable) the runner's report went stale, nothing refreshed it,
+    and the admin's self-test could never pass. The lease now judges the runner's own report before the engine's state
+    (decision 67's order), so the runner refreshes on `self_test_required` whatever the engine's state; with a fresh
+    report and the engine off it just waits (`admin_disabled`). A passing report still never switches the engine on.
+70. **An agent with no provider model is never dispatched** [4226623279]. A target or judge with `agents.model = null`
+    was accepted, and the lease substituted the display name as the model. Run validation (and so schedule
+    validation) now refuses it: 422 `agent_not_dispatchable`, naming the role. The lease no longer falls back to the
+    display name: the lease transaction refuses such an agent and the run ends `not_run` with error code
+    `agent_not_dispatchable`. The promptfoo config already refuses an empty model string (`model_invalid`); the shim
+    cannot tell a display name from a model, so the gateway is where this is enforced.
+
+**Review round 6 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [72],
+`zz-b5-promptfoo.test.ts` "review round 6" [71] [72] [73]; engine-test fixtures that queued a promptfoo run or schedule
+without a judge now name one. No migration.
+
+71. **The lease decides its admission again under locks** [4226962955]. The admission (decision 67's order) was
+    decided before the lease transaction, which re-read only the runner's revocation, so an admin's disable or a
+    concurrent failing report landing in between still let the lease mint a key. The admission is now one function
+    (`leaseAdmission`); the first call is only a fast path, and inside the transaction the lease takes the runner row
+    `FOR UPDATE` (revocation, report, build), then the engine row `FOR SHARE` (enabled, recorded self-test), and
+    decides again on those rows before it reads the queue. Every path that switches the engine off or records a
+    failing verdict holds the engine row `FOR UPDATE`: the admin PATCH (already), the runner self-test route (already,
+    after the runner row: the same lock order), the admin self-test route and the manifest sync on a build change (both
+    now in a transaction that takes it). So each either commits first and is seen, or waits for the lease to commit
+    (and a run it leased is then ended like any other on a disable or a revocation). Race tests switch the engine off,
+    and land a failing report, between the fast path and the transaction (`engineRunTestHooks.beforeLeaseTx`): 409 with
+    the right `next`, no key, the run still queued.
+72. **An interrupted re-enrolment is resumed, so the superseded credential is still revoked** [4226962963]. The loop
+    wrote the new secret over the stored token before registering, so a crash in between lost `supersedes` and the old
+    registration stayed live. Now an enrolment writes a pending record (`<token file>.pending`: the new secret and the
+    token it supersedes, or null; 0600, atomic) before the request leaves, and leaves the stored token alone. Only after
+    a 201 is the stored token replaced and the record deleted. A start that finds a valid pending record resumes that
+    enrolment first, with the same secret and `supersedes` (the gateway replays a same-hash registration, and the
+    revocation was in the original transaction if it landed). A failure to write the token after the 201 is not
+    retried as a registration failure: it propagates, and the next start resumes the record (the gateway test crashes
+    at both points: before anything is sent, and after the registration landed but before the token was stored). A
+    refused enrolment keeps the record; with no enrolment
+    token set the runner stops and says so. An invalid record is never used. This refines decision 54 (the secret is
+    still persisted before the request leaves, as the pending record).
+73. **A judge is required where the manifest says so** [4226962969]. promptfoo needs a judge, but a run or schedule
+    without `judgeAgentId` was accepted and then always failed at the runner (`judge_required`). The manifest now says
+    it per engine (`requiresJudge`: promptfoo true, modelscan and garak false), and run validation, which schedule
+    creation and the workflow stage share, refuses an agent run without a judge with 422 `judge_required`. No engine
+    name is hard-coded in the check.
+
+**Review round 7 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [74],
+`zz-b5-promptfoo.test.ts` "review round 7" [75] [76]. No migration.
+
+74. **A committed enrolment is recognised at start** [4227454987]. A crash after the new token was stored but before
+    the pending record was deleted left both; at the next start the pending record won, the stored (valid) credential
+    was never used, and without an enrolment token the runner stopped. At start, a stored token equal to the pending
+    secret means the enrolment committed: the stored token is used and the stale record deleted (three tries; a failure
+    to delete is logged and never blocks the credential, and the next start finds the same match).
+75. **Leases and queues follow the build** [4227454974]. After a build change, queued runs kept their old engine
+    version, the lease picked by engine id only, and the new build leased a pre-upgrade run that always ended
+    `result_mismatch`. Now (a) the lease takes only a queued run whose `engine_version` is the version the runner
+    presents; and (b) **picked: cancel, not re-version.** When the manifest sync sees a build change (version or
+    digest), in the transaction that holds the engine row `FOR UPDATE` and decided on that locked row, every run of
+    the engine still waiting (queued, or awaiting approval) is cancelled with `engine_build_changed` (its key, if any,
+    revoked; its pending approval superseded; audited `engine-run-cancelled`; a workflow-bound run's workflow told
+    after the commit). A run was requested, and approved, against the old build; carrying that approval to another
+    build silently is not acceptable, and the requester re-runs.
+76. **Supersession ends the old runner's runs in the same transaction** [4227454968]. The superseded runner was
+    revoked inside the registration transaction but its leased runs were ended, and their keys revoked, only after the
+    commit, so a crash or an audit failure in between left usable keys, and a replay never reconciled. Now the
+    registration transaction revokes the runner, ends every run it still leases (cancelled `runner_revoked`, key
+    revoked, audited) and audits `engine-runner-superseded`; only the workflow notification follows the commit. A
+    registration replay reconciles idempotently: any run still leased by a revoked runner of the engine ends, with
+    its key (audited `engine-runner-revoked-runs-reconciled`). The admin revocation route (`DELETE
+    /v1/engine-runners/:id`) had the same post-commit gap and now ends the runs in its own transaction too (and
+    reconciles when called on an already-revoked runner). A test fails the step right after the commit
+    (`engineRunTestHooks.afterRegisterTx`): the run is already cancelled and its key revoked.
+
+**Review round 8 (PR #205, Codex, 2026-10-09; 2 findings, each red first).** Tests: `loop.test.ts` [77],
+`zz-b5-promptfoo.test.ts` "review round 8" [77] [78]. No migration.
+
+77. **A committed registration whose response was lost survives its enrolment token's expiry** [4227906414]. If a
+    registration committed but every response was lost until the enrolment token expired, a replay was refused (the
+    token expired) and a fresh token hit the unique token-hash constraint: the runner was stranded. No gateway
+    relaxation (an expired enrolment token is still refused). Instead, a runner resuming a pending enrolment FIRST tries
+    the pending secret as its credential, with a lease: any answer but a 401 means the registration committed — the
+    secret is stored, the pending record dropped, and the loop carries on (a run that lease handed out is run). Only a
+    401 sends it back to registering, with the same secret. A fresh enrolment token with a hash that is already a
+    runner's credential is now a clear 409 `engine_runner_already_registered`, decided before the token is spent
+    (replacing decision 54's `engine_runner_token_conflict`, which a unique violation still maps to under a race); the
+    loop then tries the secret directly, once — refused there too (the runner was revoked), it stops and says so.
+78. **The manifest sync decides a build change only from the locked row** [4227906421]. `changedBuild` came from an
+    unlocked read, so a second concurrent sync could switch the engine off and clear its self-test after the first had
+    installed the new build and a self-test had been refreshed. The unlocked read now only decides whether to look
+    closer; inside the transaction, on the engine row taken `FOR UPDATE`, the build comparison decides switching off,
+    clearing the self-test, cancelling waiting runs (decision 75) and the audit. When the locked row already carries the
+    new build, the sync changes nothing about the build. A two-connection test installs the new build, a passing
+    self-test and an enable between a sync's unlocked read and its transaction
+    (`engineRunTestHooks.beforeSyncTx`): the engine stays enabled with its self-test, and no disable is audited.
+
+**Review round 9 (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Tests: `promptfoo.test.ts` [80],
+`zz-b5-promptfoo.test.ts` "review round 9" [79] [81] [82]. No migration.
+
+79. **The runner credential is not isolated from the engine process yet: the engine stays off until an admin
+    accepts that, audited** [4228369415]. The promptfoo child runs as the runner's own user (10001), which owns the
+    runner token and its pending record (0600), so a compromised promptfoo process could read the credential from the
+    state volume, or from the runner's memory and environment through `/proc` or ptrace (same user); the environment
+    allow-list does not help. **What the credential can do:** lease this engine's runs (each with a run-scoped virtual
+    key: the run-as person's ceiling, one project, the run's budget, until its deadline), heartbeat them, post their
+    results and refresh this runner's self-test report. **What it cannot do:** reach any other route (the runner-route
+    allow-list), enable an engine, mint keys outside a lease, or register another runner. A different OS identity for
+    the child is not possible under the current posture (non-root, `cap_drop: [ALL]`, `no-new-privileges`): changing
+    user needs CAP_SETUID/SETGID, which a non-root process gets only through file capabilities or a setuid helper, and
+    `no-new-privileges` disables both at exec; user namespaces are blocked by the default seccomp profile.
+    **Rejected:** (A) dropping `no-new-privileges` and giving a dedicated runner binary SETUID/SETGID file capabilities
+    (weakens the whole container: any setuid or file-capability binary in the image becomes usable); (B) a root
+    process with only SETUID/SETGID that spawns the runner and the engine (a root process in the container).
+    **Chosen (coordinator, 2026-10-09, pending owner confirmation):** (C) the two-container split, as the next slice
+    (B5-P2, open question 13); and (D) in this PR, the risk recorded here and enforced fail-closed in code. The manifest
+    says per build whether it isolates the credential (`credentialIsolation`, false for every build today); enabling
+    an engine whose build does not is refused, 409 `engine_credential_isolation_missing` with the reason, unless the
+    request carries `acceptCredentialIsolationRisk: true`. That acceptance is a relaxation bound into the
+    `settings_relax` step-up (`engine.<id>.acceptCredentialIsolationRisk`) and audited on its own
+    (`engine-credential-isolation-risk-accepted`, with the build). Secure by default; the relaxation is explicit and
+    audited (ADR-0180).
+80. **`vlsu` is a planning-time `missing_preseed` exclusion** [4228369423]. It downloads its dataset at run time
+    (R10), but upstream's `DATASET_PLUGINS` omits it, so planning treated it as unknown and a mixed run went unknown.
+    A local supplement to the generated list (`PROMPTFOO_DATASET_PLUGINS_SUPPLEMENT`, with a comment) classifies it as
+    `missing_preseed`; a test fails once upstream lists it, so the supplement can then be dropped.
+81. **The required judge is checked again at lease** [4228369430]. A judge agent deleted after queueing nulls the
+    run's `judge_agent_id`, and the lease skipped the judge check and dispatched a `requiresJudge` run with no judge.
+    The lease transaction now applies the manifest's `requiresJudge` again: such a run ends `not_run` with
+    `judge_required` (audited `engine-run-not-run`) before any key is minted.
+82. **A build change cancels runs in flight on the old build too** [4228369436]. A run leased to the old build was
+    normalised with the current catalogue after an upgrade. **Picked: cancel**, the simpler secure option: the
+    locked-row build change of decisions 75 and 78 now also cancels every leased run of the engine
+    (`engine_build_changed`, key revoked, audited), so its result arrives late and is refused (409), never ingested.
+    Normalising against the catalogue a run was leased under would need that catalogue kept per build on every
+    replica (or stored per run), and a replica still on the old manifest could then judge the same result differently
+    from one on the new; with cancellation no result is ever normalised against a catalogue other than the one in the
+    manifest every replica now has.
+
+**Review round 10 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `runner.test.ts` [83],
+`zz-b5-promptfoo.test.ts` "review round 10" [84] [85]; the engines test of an admin's disable now expects its queued run
+ended. No migration.
+
+83. **A transient failure of the starting heartbeat no longer abandons a leased run** (review body, no thread). The
+    first heartbeat after a lease threw on a transport error, `runOnce` threw, the work directory was deleted and the
+    run was left to time out. The starting heartbeat is now retried on a transient failure (a network error, a 5xx, a
+    408, a 429; the client throws for those) with a bounded backoff (`maxStartAttempts`, default 8, doubling from
+    `retryBaseMs`, capped at 30 s), never past the run's deadline. Only a definitive refusal (401, 404, 409: the
+    gateway no longer knows the lease) or running out of attempts or time abandons it, reported as `cancelled`, not
+    thrown, so the loop does not treat it as a crash. The periodic heartbeat likewise no longer cancels the run on a
+    5xx (it is transient and ignored; the lease's own expiry is the backstop).
+84. **Every path that switches an engine off ends its active runs in the same transaction** [4228874846]. A failing
+    self-test switched the engine off but left other runners' leases and their virtual keys alive, so a run could keep
+    calling models after an egress-policy failure. One helper (`endActiveRunsOfEngineTx`) ends every leased, queued and
+    awaiting-approval run of the engine (cancelled, key revoked, pending approval superseded, audited; workflows told
+    after the commit), inside the transaction that holds the engine row `FOR UPDATE`, with the reason as the error code.
+    **Paths covered:** a failing runner self-test (`engine_self_test_failed`), a failing admin self-test
+    (`engine_self_test_failed`), an admin's disable (`engine_disabled`), and a build change in the manifest sync
+    (`engine_build_changed`, decisions 75 and 82). A runner's revocation (admin, or a supersession) does not switch the
+    engine off; it ends that runner's leased runs in its own transaction (decision 76). Once a run is not leased, its
+    heartbeat answers `cancel: true` and its result is refused (409), as before.
+85. **An obsolete-build runner can never change the current build's engine** [4228874856]. During a rolling upgrade an
+    old runner presenting its own (old) registered build was told `self_test_required`; its old-build report was then
+    accepted and could switch the newly enabled engine off, repeatedly. The lease admission now also compares the
+    runner's registered build with the CURRENT manifest build (a null manifest digest never matches): a mismatch is
+    `reenrol_required`. The runner self-test route refuses any report whose build is not the current manifest build:
+    409 `engine_runner_reenrol_required`, no change to the runner's stored report or to the engine, audited
+    `engine-runner-self-test-obsolete-build`. A two-build test registers a runner of an obsolete build and has it try
+    to switch the upgraded engine off.
+
+**Review round 11 (PR #205, Codex, 2026-10-09; 5 findings, three in the review body; each red first) and a sweep for
+the pattern behind them.** Tests: `runner.test.ts` and `loop.test.ts` [89] [90], `zz-b5-promptfoo.test.ts` "review round
+11" [86] [87] [88] and the sweep's re-check. No migration. **The rule from here on:** an engine state change is decided
+and written in ONE transaction, on rows it holds locked (or with the condition in the write's own predicate), together
+with its audit; work that follows a commit is limited to notifying workflows, which the workflow sweep retries.
+
+86. **Cancellation is one transaction** (review body). The cancel route committed `cancel_requested_at`, then ended the
+    run in a second transaction, so a crash in between left a run marked cancelled but live with its key. The marker,
+    the terminal transition, the key's revocation, the approval's supersession and the audit now commit together on
+    the run row taken `FOR UPDATE`; a test crashes inside it (`engineRunTestHooks.afterCancelMarked`) and finds the
+    run untouched (still leased, no marker, key live), then cancels it in one go.
+87. **Run creation re-validates the engine inside its insert transaction** (review body). The engine's state and limits
+    were checked before the transaction and the run inserted without a lock, so a concurrent disable or ceiling drop
+    could miss it. The insert transaction now takes the engine row `FOR SHARE` (every switch-off takes it `FOR UPDATE`,
+    decision 84) and decides again there: on (409 `engine_disabled`), its recorded self-test admitting it (409
+    `engine_self_test_required`), the budget within the ceiling as it is now (422 `engine_budget_exceeds_ceiling`), and
+    the timeout clamped to the engine's ceiling as it is now; the creation's audit commits with the run. Schedules and
+    workflow stages create runs through the same function. (One test changed order: the round 2 [53] test now queues
+    its run while the engine's record is fresh, since creation itself now needs it to admit the engine.)
+88. **A schedule's claim requires it to be on** (review body). The claim compared only the id and the old `next_run_at`,
+    so a schedule switched off after the sweep's read still started a run. The claim's predicate now includes
+    `enabled = true`; the schedule's outcome (`last_run_id`, `last_skip`) and its skip audit then commit together.
+89. **Every runner request is bounded** [4229319159]. Runner fetches had no timeout. Every request, body included, is
+    now aborted after `requestTimeoutMs` (default 30 s), or at the run's deadline when that is sooner (heartbeats and
+    results carry it). A timeout throws like a network error (`RunnerTimeoutError`), so each caller's existing transient
+    handling applies: the loop backs off and retries, the result post retries, the starting heartbeat retries (decision
+    83). The bound holds even for a transport that ignores the abort signal (the request races the timer).
+90. **Undelivered results survive a restart** [4229319167]. They were kept under the tmpfs `/work` and lost on restart.
+    `runOnce` now writes an undelivered envelope under `retainRoot`, which the promptfoo runner sets to
+    `/state/undelivered` on its persistent state volume (0700, the runner's own), apart from the engine's work dirs;
+    before every lease the loop delivers or drops what is retained there (and anything left in the work root), as in
+    decision 68. No new exposure: per decision 79 the engine process shares the runner's user and could already read the
+    state volume; the retained envelope holds no credential, only the run's own result.
+
+**The sweep (round 11): every other instance found in this PR's engine code, now fixed the same way.**
+- The lease's refused path (run-as gone, not entitled, no project, no model, no judge) ended the run in a second
+  transaction after the lease transaction decided; it now ends on the row the lease transaction holds.
+- An expired heartbeat ended the run in a second transaction; it now ends under the heartbeat's own row lock.
+- The run sweep's timeouts and the queue-expiry sweep read their candidates without a lock and ended them by status
+  alone; each now re-checks its condition (still overdue, still expired) on the locked row, so a lease a heartbeat
+  renewed in between is not timed out (a test renews one between the sweep's read and its end).
+- The admin self-test read the newest runner's report outside its transaction; it now reads it `FOR SHARE` inside,
+  before taking the engine row (the lock order of the lease and the runner self-test).
+- Audit rows written after their state change had committed, now in the same transaction: run creation, schedule
+  creation, a schedule's switch on or off (now also decided under the schedule's row lock), a schedule sweep's skip, the
+  manifest sync's switch-off, the admin self-test, an enrolment token's minting, a runner's registration, revocation
+  and replay reconciliation, and a runner's self-test report. (Audits of refusals that change nothing, such as a late
+  result or an obsolete-build report, stay single writes.)
+- Checked and left as is: the PATCH engines route, the runner self-test route and the lease already decide under their
+  locks; the approval decision runs inside the approvals transaction; the result route ends the run through a
+  status-checked transaction under the run's lock; the schedule sweep's claim is committed before creating the run on
+  purpose (PR #203 review round 2 [23]: a creation that throws is then an audited skip, never lost).
+
+**Review round 12 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [91] [92],
+`zz-b5-promptfoo.test.ts` "review round 12" [91] [92] [93], and the engines test of a wrong-digest registration (now
+refused). No migration. **The root cause, fixed once:** there was no single definition of which runner reports count for
+the current build. There is now one: `isCurrentBuild(manifest, build)` (the manifest's digest, never null, and version)
+and `runnerCountsForCurrentBuild(manifest, runner, report?)` (the runner's registered build is the current build, and so
+is the report it presents, if any), both in `apps/gateway/src/engines.ts`. **Every reader and writer of self-test state
+goes through them:**
+1. the lease's admission (`leaseAdmission`): a runner that does not count is told `reenrol_required`;
+2. the runner self-test route: a report from a runner, or of a build, that does not count changes nothing (409,
+   audited), and its "the engine's record is for the current build" check uses `isCurrentBuild`;
+3. the admin self-test: only a runner that counts is judged (decision 91);
+4. registration: a build that is not the current one is refused (decision 91);
+5. `selfTestAdmitsEnable` (the engine's recorded self-test), which the enable PATCH, the lease and run creation use.
+
+Two checks stay apart on purpose: the shared `evaluateRunnerSelfTest` still reports `digest_mismatch` and
+`version_mismatch` as verdict failures (what a report says, not whose report counts), and the manifest sync compares the
+engine row's stored build with the manifest's (a build change of the engine, not of a runner).
+
+91. **Only current-build runners count, and an obsolete build cannot register** [4229889819]. The admin self-test took the
+    newest live runner whatever its build, so an obsolete runner's report could fail the verdict and switch the current
+    engine off. It now judges the newest live runner whose registered build is the current build (selected by that build
+    and checked with the predicate); with none, it refuses with 409 `engine_no_current_build_runner` and changes nothing.
+    **Decided: registration refuses an obsolete build outright** (secure by default: an old container can never come back
+    as a live runner): 409 `engine_runner_build_obsolete`, decided before the enrolment token is spent, audited
+    `engine-runner-register-obsolete-build`. The runner loop treats that refusal as final: it stops with a
+    `RunnerObsoleteBuildError` saying to deploy the current image, and the promptfoo shim then parks (stays up and idle,
+    repeating the reason once a day) instead of exiting into the restart policy's loop. Tests that need a runner of an
+    earlier build now make one the way an upgrade leaves it: registered while its build was current, its row then naming
+    the old build.
+92. **A lost, then revoked, pending secret is replaced** [4229889826]. A runner that registered, lost the response before
+    storing its credential, and was then revoked was stuck: its pending secret got 401 as a credential, and registering it
+    again with a fresh token got 409 `engine_runner_already_registered` (the revoked row still owns the hash). Now, when the
+    pending secret was refused as a credential AND its hash is registered, the loop discards it, generates a new secret
+    (persisted as the pending enrolment first, with the same `supersedes`), and registers that with the same, still
+    unused, enrolment token (once; a second refusal stops with the reason). On the gateway a revoked runner's hash still
+    blocks reuse of that hash; a new hash registers normally. A gateway test registers a runner, loses every response so
+    nothing is stored, revokes it, and restarts with a fresh token: the runner ends up registered with a new credential
+    and the revoked one stays dead.
+93. **A failing current-build report always clears the engine's pass** [4229889832]. A failing report while the engine
+    was already off left its passing self-test in place, so an admin could re-enable it on contradicted evidence. A
+    failing report from a runner that counts now always records the failure and clears `self_test_passed_at`, whatever
+    the engine's state; only ending its active runs (decision 84) depends on it switching the engine off. A test switches
+    the engine off, submits a failing report, and finds re-enabling refused with `engine_self_test_required`.
+
+**Review round 13 (PR #205, Codex, 2026-10-09; 3 findings, each red first) and a sweep of the runner client.** Tests:
+`loop.test.ts` [94] [95] [96], `durable.test.ts` [96], `zz-b5-promptfoo.test.ts` "review round 13" [94] [95].
+**Migration 0174** (`0174_engine_lease_request_and_manifest_generation`, hand-written): `engine_runs.lease_request_id`
+(uuid, unique per runner where set) and `engines.manifest_generation` (integer, default 0, never negative).
+
+**The sweep (round 13), of the runner client, for two classes of bug.**
+- (a) A request whose server side commits state, where a timeout or a lost response leaves the runner unable to learn
+  the outcome:
+  - **the lease**: the only one with no recovery. A lost 200 left a leased run, with a minted key, that no runner ran
+    until its lease expired. Fixed by decision 94.
+  - registration: already idempotent (a same-hash replay returns the same runner, decision 54; a pending secret is
+    probed as a credential, decision 77; a revoked pending secret is replaced, decision 92). No change.
+  - the runner self-test: a resubmitted report overwrites the stored one with the same verdict. Idempotent; no change.
+  - heartbeats: a repeated heartbeat renews the same lease. Idempotent; no change.
+  - the result post: a retry after a lost 2xx gets a definitive 409 `engine_run_finished`, which ends the retries and
+    removes the retained envelope. No change.
+- (b) A persisted file that can be left truncated:
+  - the runner token file and the pending enrolment record were renamed into place atomically but never fsynced (the
+    file or its directory), so a power cut could leave an empty or partial token. Fixed by decision 96.
+  - the retained result envelope was written in place with a plain `writeFile` (neither atomic nor fsynced). Fixed by
+    decision 96.
+  - the engine's own work files live on a tmpfs and are discarded on restart by design. Not persisted; no change.
+
+94. **The lease is idempotent** [4230481439]. The runner now sends a `requestId` (a UUID it generated) with every lease
+    attempt and keeps it while the attempt's outcome is unknown: a timeout, a dropped connection, a 5xx, or a refusal
+    with no `next` signal. It drops the id once the gateway answers definitively (a lease, 204, or a refusal carrying
+    `next`), so its next attempt is a new one. The gateway records the id on the run it leases. A retry with the same
+    id, from the same runner, while that run is still leased to it (not ended, not cancelled, lease and deadline not
+    passed), returns that run again instead of leasing a second one. The lookup is by (runner, request id), under the
+    runner's row lock, and the unique index is per runner: another runner presenting the same id matches nothing of the
+    first runner's and is treated as a fresh lease. A request id whose run is no longer live leases nothing (204).
+    **Credentials are re-issued by ROTATION, not by re-showing the key.** Only the key's hash is stored, so the original
+    key cannot be returned again. In the re-issuing transaction the old key is revoked (audited
+    `engine-run-key-revoked`, cause `lease_reissued`) and a new key is minted with the same models, the same project and
+    the run's deadline. Its budget is the run's budget, and it carries what the run's earlier keys already spent
+    (`spent_usd`), so the run's ceiling holds across keys. At most one key of the run ever works. The run points at the
+    new key, its lease is renewed like a heartbeat, and the re-issue is audited `engine-run-lease-reissued`. Minting a
+    second key alongside the first was rejected: it would leave two working credentials for one run. A run's cost
+    (`runCostUsd`) is now summed over every key the run has held. Tests: a retry gets the same run with a different key
+    and the old key revoked; usage on both keys counts toward the run's cost; a second runner presenting the id never
+    gets the run nor rotates its key; a retry after the run ended gets 204.
+95. **The manifest sync is monotonic** [4230481454]. Each shipped manifest entry carries a `generation` (a positive
+    integer, bumped with every build change), and the engine row records the generation it was written from. The sync
+    compares them under the row's `FOR UPDATE` lock. A replica whose manifest generation is older than the row's (an old
+    replica during a rolling upgrade) writes nothing, cancels nothing and disables nothing. On that replica the engine is
+    unavailable: the lease (no `next` signal, so the runner keeps its state and retries), run validation and creation
+    (both the unlocked check and the one under the row's `FOR SHARE` lock), enabling, the admin self-test, the runner
+    self-test and registration all refuse with 409 `engine_manifest_outdated`. Each decides from the row it reads or
+    locks, so a newer replica that syncs after this one started is seen at once. Switching the engine off and lowering
+    its limits stay available, since they only tighten. The refusal is audited `engine-manifest-outdated` once per
+    replica (per manifest in use, engine and row generation), not once per request. The runner treats this refusal as
+    transient everywhere, and at registration it does not use up the registration attempts. Registration checks the row
+    without a lock, before the enrolment token is spent; a registration that slips past a concurrent upgrade is of an
+    obsolete build, which every later report and lease refuses through the current-build predicate (round 12). An equal
+    generation with different content keeps the earlier behaviour (the build comparison under the lock); bumping the
+    generation with every build change is part of the manifest's contract. Tests: with the row at a newer generation and
+    build, this replica's sync leaves the row, the engine's enabled state and pass, and a waiting run untouched; a lease,
+    a creation, an enable and a runner self-test each get 409 `engine_manifest_outdated`; one audit row covers all of
+    them.
+96. **Persisted runner files are written durably** [4230481447]. Open-source check (ADR-0176): `write-file-atomic`
+    (npm's own, ISC, 8.0.0) writes a temp file beside the target, fsyncs it, sets mode 0600 and renames it over the
+    target. It does not fsync the directory, so `packages/engine-runner/src/durable.ts` adds that one step. The runner
+    token, the pending enrolment record and the retained result envelope all go through it, and clearing the pending
+    record fsyncs the directory too. On startup the retained-result scan acts on the final file name only: a directory
+    with just the temp file of an unfinished write holds no result and is removed as before; a valid result next to a
+    stray temp file is delivered as usual. A result file that exists but cannot be read or parsed is never a reason to
+    delete anything: it is renamed aside to `undelivered-result.json.corrupt-<time>`, logged, and its directory is left
+    alone from then on (not delivered, not counted against the retention cap, never removed) for an operator to
+    inspect. Tests: the file and directory fsyncs are observed for the token, the pending record and an undelivered
+    envelope; a simulated crash before the rename leaves the previous token intact; a truncated result is quarantined
+    and survives a second start.
+
+**Review round 14 (PR #205, Codex, 2026-10-09; 2 findings, each red first) and a sweep of the run-policy reads.**
+Tests: `zz-b5-promptfoo.test.ts` "review round 14" [97] [98]. No migration.
+
+97. **Run creation decides its approval in the insert transaction** (review body). The approval decision (an
+    agentic, offensive or unclassified set while sensitive-set approval is on, or a budget over the org's threshold),
+    the default budget, the timeout clamp and the approver came from org settings read before the transaction. A
+    concurrent tightening could be missed, and the lease does not recompute approval. `runPolicyDecision` is now the
+    one decision. Validation calls it on unlocked reads. Creation calls it again inside its insert transaction, on
+    the org settings row taken `FOR SHARE` and then the engine row `FOR SHARE`, and acts only on that second
+    decision. That decision covers the budget ceiling, the timeout, whether approval is needed, and a valid approver
+    (one exists, is active, and is not the person the run executes as).
+    - **Lock order:** org settings, then engine. No path locks them the other way round: the engine writers never
+      touch org settings, and the org-settings writers never touch an engine row.
+    - **The writer serialises with it.** `PUT /v1/org/settings` takes the org row `FOR UPDATE` before it writes.
+      Every other org-settings writer UPDATEs that row, which conflicts with `FOR SHARE` too. A tightening either
+      commits before the creation reads the row, or waits for the creation to commit.
+    - **Test:** the threshold drops below a run's budget between validation and insert (`beforeCreateTx`). The run
+      is created `awaiting_approval`, with its approval, not `queued`.
+98. **A retried lease is resolved before freshness** [4231351179]. The idempotent-lease lookup ran after the
+    freshness admission (the runner's and the engine's self-test age). A retry just past the 24-hour boundary was
+    therefore refused with `self_test_required`. The runner dropped its request id, and the run the lost attempt
+    leased was orphaned until its lease expired.
+    - **Both paths resolve it first.** The unlocked fast path skips its early admission when the request id names
+      one of this runner's runs. The locked path looks the run up before the admission, under the runner row
+      (`FOR UPDATE`) and the engine row (`FOR SHARE`) it already holds.
+    - **Only the hard gates apply:**
+      - the runner is live (a revoked runner's runs are already ended by its revocation);
+      - the presented build is the one it registered;
+      - the engine is on;
+      - the manifest is not outdated;
+      - the run is still leased (not ended, lease and deadline not passed).
+    - **When a gate fails, the run is ended in that transaction, never left leased.** A failed build or engine gate
+      cancels it (`lease_retry_refused`, key revoked, audited) and returns that gate's refusal with its `next`. A
+      passed lease or deadline ends it as a timeout and returns 204.
+    - **An outdated manifest is the one exception: nothing is ended.** The retry gets 409
+      `engine_manifest_outdated`, and a current replica resolves it (decision 95: an outdated replica cancels
+      nothing).
+    - **A retry of a run that already ended re-issues nothing.** The runner is told why when a lease would be refused
+      now (for example 409 `engine_disabled` after an admin disabled the engine and decision 84 ended its runs), and
+      otherwise gets 204.
+    - **Tests:**
+      - A lease commits and its response is lost. Both self-tests then pass the 24-hour mark: a fresh attempt is
+        refused for freshness, but the retry gets the same run back with its key rotated.
+      - The engine is switched off with the run left leased. The retry gets 409 `engine_disabled`, and the run is
+        ended with its key revoked.
+      - An admin disables the engine, which ends the run. The retry gets 409 `engine_disabled`, and the run stays
+        ended.
+
+**The sweep (round 14): policy values that gate engine runs, and where each is decided.**
+- **Fixed in this round (decision 97), now decided in the creation transaction:**
+  - the org's approval threshold;
+  - sensitive-set approval;
+  - the default run budget;
+  - the maximum run timeout;
+  - the default approver and the approver's validity.
+- **Already decided in the transaction that acts on them (no change):**
+  - the engine's budget, timeout and concurrency ceilings, and its enabled state and recorded self-test (creation
+    transaction, decision 87; lease transaction, decision 71);
+  - target and judge entitlement, each agent's provider model, the manifest's required judge, and project
+    attribution. Creation only queues a run, which needs no key. The lease transaction re-decides all of these before
+    it mints a key, and ends the run `not_run` when one fails (decisions 70 and 81, and PR #203 review [10]). The
+    key's allowed models are derived there, from the run's own target and judge.
+  - an approval's release, which is decided inside the approvals transaction.
+- **Not a gate:**
+  - the raw-report retention days, read when a result is stored and by the purge sweep. This is a retention
+    setting, not a gate on a run.
+  - data sensitivity. Engine runs carry no data-sensitivity classification, so nothing gates on it.
+
+**Review round 15 (PR #205, Codex, 2026-10-09; 2 findings, each red first; Codex's security review was clean) and a
+sweep of lock orders.** Tests: `loop.test.ts` [99], and `zz-b5-promptfoo.test.ts` "review round 15" [100]. No
+migration.
+
+99. **Nothing after the lease is acquired re-leases the run** [4231888495]. The lease's request id stayed live for the
+    whole of `runOnce`. Any exception after acquisition that was not an HTTP error was treated as transient, for example
+    a failure to persist `undelivered-result.json` on a full volume. The loop then retried with the same id, the gateway
+    re-issued the still-live lease (decision 94), and the evaluation and its paid model calls ran again. `runOnce` now
+    has two explicit phases:
+    - **Phase 1, the lease request.** Its outcome can be ambiguous: a timeout, a lost response or a 5xx. Only an error
+      thrown here reaches the loop, which keeps the request id when the error is transient.
+    - **The id is retired.** As soon as the answer is definitive (a lease parsed, or 204), `onLeaseSettled` retires it,
+      before anything else runs.
+    - **Phase 2, post-acquisition (`runLeased`).** Nothing here surfaces as an error the loop could retry. A failure is
+      reconciled by `reconcileAfterAcquisition`. The envelope, if one is in memory, gets one more delivery attempt; with
+      none, the run is reported `failed` with code `engine_error` (the reason goes to the runner's log, since the
+      envelope schema is strict). If that post is not definitive either, the outcome is `abandoned`: the run is left to
+      time out at the gateway, which ends it and revokes its key. The run is never executed twice.
+    - **Test.** A lease succeeds, the adapter runs, delivery fails and persisting the envelope throws ENOSPC. The
+      adapter ran exactly once. No lease reused the request id: the second lease carried a new id, although the fake
+      gateway re-issues a known one. The envelope in memory was delivered by the reconciliation.
+100. **One lock order for engine state: engine (where taken) → run → approval** [4231888491]. The approval decide path
+     wrote the approval row and then locked its run. Cancel, a workflow ending, and every switch-off lock the run and
+     then supersede its approval, so a cancel racing a decision could deadlock (a 500). The decide route now calls
+     `lockEngineRunOfApprovalTx` inside its transaction before it writes the approval. It locks the run with that
+     approval `FOR UPDATE`, which is the same run → approval order as every other path. The approvals module allowed
+     this: its transaction is ours to order, and the engine-run hook already ran inside it. A test cancels a run awaiting
+     approval and, while the cancel holds the run, starts the decision on another connection. The cancel completes, and
+     the decision waits, then gets a clean 409 `approval_superseded`. Before the fix, Postgres aborted one side as a
+     deadlock.
+
+**The sweep (round 15): every pair of rows the engine code locks, and the order each path takes.** The order is
+**runner → engine → run → approval / key**, with org settings before engine.
+- **Runner ↔ engine.**
+  - The lease: runner `FOR UPDATE`, then engine `FOR SHARE`.
+  - The runner self-test: runner `FOR UPDATE`, then engine `FOR UPDATE`.
+  - The admin self-test: runner `FOR SHARE`, then engine `FOR UPDATE`.
+  - No path locks the engine and then a runner. Registration and revocation lock runners, then runs, and never the
+    engine.
+  - Consistent; no change.
+- **Org settings ↔ engine.** Run creation takes org settings `FOR SHARE`, then engine `FOR SHARE` (decision 97). Nothing
+  else takes both. Consistent.
+- **Engine ↔ run.**
+  - The lease: engine, then the queued run (`SKIP LOCKED`) or the retried run.
+  - Creation: engine, then inserts the run.
+  - The manifest sync, an admin's disable and the self-tests: engine `FOR UPDATE`, then the engine's runs.
+  - No path that holds a run then locks an engine: cancel, heartbeat, result and the sweeps touch only runs, keys,
+    items, ledgers and approvals.
+  - Consistent.
+- **Runner ↔ run.** The lease and revocation lock the runner, then runs. The heartbeat and result paths lock only the
+  run. Consistent.
+- **Run ↔ approval.** Fixed by decision 100.
+  - Every path now takes the run first: cancel, `cancelEngineRunsOfInstance` (whose workflow caller supersedes only the
+    instance's non-engine approvals first), `endActiveRunsOfEngineTx`, and the decide route.
+  - The workflow instance row, where one is held, comes before both.
+- **Run ↔ key.**
+  - Ending a run (`endLockedRun`) and a lease re-issue (decision 94) lock the run, then revoke or mint its key.
+  - The model-call path updates a key's `spent_usd` and never locks a run.
+  - Consistent.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
@@ -473,3 +1191,32 @@ compat surface is on (a run then fails at its first call); concurrency is per en
    any change re-queues it) or for every run, and exactly which plugin sets count as offensive. promptfoo and garak here
    target only agents and models reachable through our gateway; tools that attack external hosts (Strix, PentestGPT)
    stay import-only under PF-10 and ADR-0177.
+6. **promptfoo's transitive licences outside the ADR-0176 list (B5-P).** 11 npm packages in the image carry Artistic-2.0
+   (5), BlueOak-1.0.0 (5) or Python-2.0 (1): permissive, not copyleft, not on the list. The image is not admissible
+   until the owner admits these licences (or they are replaced); the build does not fail on them, and the manifest
+   lists the question as unverified. The image's OS layer has not been licence-scanned (Trivy, at the first CI build).
+7. **promptfoo facts G19 still owes (B5-P, fail closed meanwhile):** the maintainer count (5 npm publishers is not a
+   maintainer count; the manifest keeps null); the `pliny` source's licence (taken from this ADR as AGPL, not re-read;
+   excluded either way); the base image's Node version (promptfoo needs ≥ 22.22.0; the registry rate-limited the
+   check).
+8. **promptfoo image build, digest, signature and in-image self-test (B5-P).** Pending a Docker-capable build: until
+   then the manifest digest is null and the engine cannot be enabled. Also open: which digest the manifest pins for an
+   air-gapped install loaded with `docker load` (a registry manifest digest needs a push; the image ID does not).
+9. **Agentic-named promptfoo plugins are unmapped (decision 40).** If the owner wants them to count toward the
+   agentic classes, the run must reach the agent through a path where tool calls are governed and visible (ADR-0068
+   adjudication), which a compat-route run is not.
+10. **promptfoo on arm64 (decision 51).** The image is amd64 only because libsql's native binding is pinned per
+    architecture. An arm64 image needs the matching binding chosen per build platform (and its licence and advisories
+    checked); not attempted in B5-P.
+11. **Engine image admission at deploy time (decision 55).** The runner's self-reported digest only checks consistency
+    with its deployment. Proof needs the deployer to verify the image signature (cosign, against our signing identity)
+    before the container starts, and the engine images are not signed yet (they are not built). Until then an enabled
+    engine rests on the operator deploying the digest the manifest names.
+12. ~~A `no_runnable_plugin` not-run reason~~ — **decided 2026-10-09 (coordinator), see decision 66: no migration.**
+13. **B5-P2: isolate the runner credential from the engine process (decision 79), the next slice.** Split each
+    engine into two containers: a runner container that holds the token volume and talks to the gateway, and an
+    engine worker (same image, its own entrypoint and user, no state volume) that reaches only the gateway's compat
+    routes; jobs and results pass through a shared work volume (job in, result out, cancellation, deadlines). The
+    container posture stays as it is (non-root, `cap_drop: [ALL]`, `no-new-privileges`, read-only root). When it ships,
+    the manifest's `credentialIsolation` becomes true and the enable gate of decision 79 no longer applies. Chosen by
+    the coordinator 2026-10-09, pending the owner's confirmation.

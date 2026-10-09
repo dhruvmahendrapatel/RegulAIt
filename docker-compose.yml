@@ -36,13 +36,14 @@
 #   services:
 #     engine-promptfoo:
 #       <<: *engine-runner
-#       image: regulait/engine-promptfoo@sha256:<digest from the shipped manifest>
+#       image: regulait/engine-promptfoo@${REGULAIT_ENGINE_PROMPTFOO_DIGEST}  (digest only, never a tag)
 #
 # The runner reaches ONLY the gateway: its single network is `engines`, which is
 # `internal: true` (no route off the host), which the gateway joins and the
 # database and object store do not, and which is NOT in REGULAIT_TRUSTED_PROXIES
 # (a runner cannot speak for a client through forwarding headers). Its only
-# secret is its runner token, exchanged once from a one-time enrolment token.
+# secret is its runner token, which it generates itself and registers (by hash)
+# once with a one-time enrolment token.
 # Kubernetes: the same as a deny-all NetworkPolicy except egress to the gateway.
 x-engine-runner: &engine-runner
   profiles: ["engines"]
@@ -453,6 +454,43 @@ services:
     # the ONLY thing a sidecar engine runner can reach (see x-engine-runner).
     networks: [regulait, engines]
 
+  # --- promptfoo engine runner (profile: engines) — ADR-0187 B5-P ------------
+  #
+  # OFF unless the `engines` profile is up, and the engine stays disabled in the
+  # product until an admin enables it after this runner's self-test passes.
+  # Build the image from the repository root (engines/promptfoo/Dockerfile),
+  # then name its digest ONCE (decision 55):
+  #
+  #   REGULAIT_ENGINE_PROMPTFOO_DIGEST=sha256:<digest>
+  #
+  # The image reference AND the digest the runner reports are both built from
+  # that one variable, so they cannot disagree, and the reference is always
+  # pinned by digest (no tag). The default is an all-zero digest that names no
+  # image: with pull_policy never nothing starts, and a runner given it refuses
+  # to start. The reported digest is a CONSISTENCY check, not proof — a
+  # container cannot prove which image it runs; admission is the signature
+  # verification at deploy time (ADR-0187 decision 55, open item). The digest
+  # must also equal the shipped manifest's, or the self-test fails.
+  # Only the template's hardening applies (no ports, no network but
+  # `engines`), plus:
+  #   - platform linux/amd64: promptfoo's sqlite store needs libsql's native
+  #     x64 binding (decision 51; arm64 is open question 10);
+  #   - ONE volume, the runner's own state (decisions 49 and 54): the runner
+  #     token the runner generated, 0600, so a restart does not need a new
+  #     enrolment token (the enrolment token is single-use and ignored once a
+  #     stored token works). Deleting the volume means re-enrolling.
+  engine-promptfoo:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-promptfoo-state:/state
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
   # OFF by default. Keycloak brokers Microsoft Entra ID, Google and GitHub and
@@ -649,5 +687,7 @@ volumes:
   objectstore_data:
   # ADR-0174 amendment: the demo licence keyring (see the gateway's volumes).
   demo_license_keys:
+  # ADR-0187 decision 49: the promptfoo runner's own state (its runner token only)
+  engine-promptfoo-state:
   caddy_data:
   caddy_config:

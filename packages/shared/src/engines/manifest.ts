@@ -14,6 +14,7 @@
  * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
  * them per engine, and network denial stays the real control either way.
  */
+import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
 /** how a named plugin/probe set is classed for the approvals rule (owner decision 4) */
@@ -25,6 +26,13 @@ export interface EngineManifestEntry {
   displayName: string;
   /** the engine release the image is built from */
   version: string;
+  /**
+   * PR #205 review round 13 [95]: this manifest entry's generation — a positive integer that MUST be
+   * bumped with every change of build (version or digest). Gateway replicas only ever move the engine
+   * row forward: a replica whose generation is older than the row's writes nothing and treats the
+   * engine as unavailable (ADR-0187 decision 95).
+   */
+  generation: number;
   /** the signed image's digest, or null until the engine's image is built */
   imageDigest: string | null;
   licence: string;
@@ -34,6 +42,15 @@ export interface EngineManifestEntry {
   usageDataEnv: Readonly<Record<string, string>>;
   /** does a run need a virtual key (model access through the gateway)? */
   needsModelAccess: boolean;
+  /** PR #205 review round 6 [73]: must an agent run name a judge agent? (run validation refuses one without) */
+  requiresJudge: boolean;
+  /**
+   * PR #205 review round 9 [79]: does this build keep the runner credential out of the engine
+   * process's reach (a distinct OS identity, or a separate container)? false = the engine process
+   * runs as the runner's user and could read the credential; enabling then needs an explicit,
+   * stepped-up, audited acceptance (ADR-0187 decision 79). No build has it yet (B5-P2 splits it).
+   */
+  credentialIsolation: boolean;
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
   sets: Readonly<Record<string, EngineSetClass>>;
   /** what an air-gapped install cannot run, published as data */
@@ -59,28 +76,47 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     kind: "redteam",
     displayName: "promptfoo",
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
-    version: "0.123.1",
+    version: PROMPTFOO_ENGINE_VERSION,
+    // round 13 [95]: bump with every build change (version or digest)
+    generation: 1,
+    // B5-P: the image (engines/promptfoo/Dockerfile) has not been built anywhere that could
+    // report a real digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "MIT",
     maintainerCount: null,
-    usageDataEnv: { PROMPTFOO_DISABLE_TELEMETRY: "1", PROMPTFOO_DISABLE_UPDATE: "1" },
+    usageDataEnv: PROMPTFOO_USAGE_DATA_ENV,
     needsModelAccess: true,
-    sets: {},
-    airGappedReducedSet: [],
+    // PR #205 review round 6 [73]: promptfoo grades with a judge behind the gateway (without one it
+    // would fall back to a vendor default, which the config refuses)
+    requiresJudge: true,
+    credentialIsolation: false,
+    // every set that runs here, by class; a set not listed is offensive (fail closed)
+    sets: promptfooManifestSets(),
+    // remote generation is off on every install, not only air-gapped ones: this never runs
+    airGappedReducedSet: promptfooReducedSet(),
     lastVerified: "2026-10-08",
     reCheckBy: "2027-01-08",
-    unverified: [...UNVERIFIED_COMMON, "whether the disabled-telemetry path still attempts a request"],
+    unverified: [
+      "image digest and signature (the image is not built yet)",
+      "maintainer count",
+      "transitive licences: 11 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
+      "runtime behaviour inside the built image (egress test, air-gapped run)",
+      "the disabled-telemetry path still attempts a request in 0.123.1: the image patches it, and network denial stays the control",
+    ],
   },
   modelscan: {
     id: "modelscan",
     kind: "model_scan",
     displayName: "modelscan",
     version: "0.8.8",
+    generation: 1,
     imageDigest: null,
     licence: "Apache-2.0",
     maintainerCount: null,
     usageDataEnv: {},
     needsModelAccess: false,
+    requiresJudge: false,
+    credentialIsolation: false,
     sets: {},
     airGappedReducedSet: [],
     lastVerified: "2026-10-08",
@@ -93,11 +129,14 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     kind: "redteam",
     displayName: "garak",
     version: "0.17.0",
+    generation: 1,
     imageDigest: null,
     licence: "Apache-2.0",
     maintainerCount: null,
     usageDataEnv: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
     needsModelAccess: true,
+    requiresJudge: false,
+    credentialIsolation: false,
     sets: {},
     airGappedReducedSet: [],
     lastVerified: "2026-10-08",

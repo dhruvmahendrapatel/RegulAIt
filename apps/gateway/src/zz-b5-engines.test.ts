@@ -157,7 +157,8 @@ function selfTest(digest: string, version: string, over: Partial<{ dnsResolved: 
   return {
     imageDigest: digest,
     engineVersion: version,
-    usageDataEnv: over.env ?? { PROMPTFOO_DISABLE_TELEMETRY: true, PROMPTFOO_DISABLE_UPDATE: true, HF_HUB_OFFLINE: true, TRANSFORMERS_OFFLINE: true, HF_HUB_DISABLE_TELEMETRY: true },
+    // every switch any engine's manifest names, each at its required value
+    usageDataEnv: over.env ?? Object.fromEntries(Object.values(MANIFEST).flatMap((m) => Object.keys(m.usageDataEnv)).map((k) => [k, true])),
     egress: {
       host: "registry.example.invalid",
       dnsResolved: over.dnsResolved ?? false,
@@ -174,24 +175,36 @@ async function enrol(engineId: EngineId, digest: string, version: string, over: 
   const t = await inject("POST", `/v1/engines/${engineId}/enrollment-tokens`, admin.key, { label: "test" });
   expect(t.statusCode, t.body).toBe(201);
   const enrolment = { authorization: `Bearer ${t.json().token}` };
+  // PR #205 review [54]: the runner generates its own token and registers only its hash
+  const token = runnerSecret();
   const r = await inject("POST", "/v1/engine-runner/register", enrolment, {
     name: `${engineId}-runner-${randomBytes(2).toString("hex")}`,
     imageDigest: digest,
     engineVersion: version,
     selfTest: selfTest(digest, version, over),
+    tokenHash: sha256Hex(token),
   });
   expect(r.statusCode, r.body).toBe(201);
-  return { id: r.json().runnerId as string, token: r.json().token as string, auth: { authorization: `Bearer ${r.json().token}` }, enrolment, selfTest: r.json().selfTest };
+  expect(r.json().token).toBeUndefined();
+  return { id: r.json().runnerId as string, token, auth: { authorization: `Bearer ${token}` }, enrolment, selfTest: r.json().selfTest };
+}
+
+/** a runner's own token, as the runner core generates it (`rge_` + 256 random bits) */
+function runnerSecret(): string {
+  return `rge_${randomBytes(32).toString("hex")}`;
+}
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
 }
 
 async function enableEngine(engineId: EngineId) {
   const st = await inject("POST", `/v1/engines/${engineId}/self-test`, admin.key);
   expect(st.statusCode, st.body).toBe(200);
   expect(st.json().passed, st.body).toBe(true);
-  const refused = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true });
+  const refused = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true, acceptCredentialIsolationRisk: true });
   expect(refused.statusCode, refused.body).toBe(403);
   const token = await grantFor(refused.json().action);
-  const ok = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true }, { [STEP_UP_HEADER]: token });
+  const ok = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: token });
   expect(ok.statusCode, ok.body).toBe(200);
   expect(ok.json().enabled).toBe(true);
 }
@@ -208,8 +221,9 @@ async function startRun(body: Record<string, unknown>, who = alice.key) {
   });
 }
 
+const PF_BUILD = () => ({ imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version });
 async function lease(runner = pfRunner) {
-  const r = await inject("POST", "/v1/engine-runner/lease", runner.auth);
+  const r = await inject("POST", "/v1/engine-runner/lease", runner.auth, PF_BUILD());
   return r;
 }
 
@@ -401,10 +415,20 @@ describe("secure by default", () => {
     expect(connected.selfTest.failures).toContain("egress_connected");
     const noSwitch = await enrol("promptfoo", PF_DIGEST, MANIFEST.promptfoo.version, { env: { PROMPTFOO_DISABLE_TELEMETRY: true } });
     expect(noSwitch.selfTest.failures).toContain("usage_env_missing:PROMPTFOO_DISABLE_UPDATE");
-    const wrong = await enrol("promptfoo", `sha256:${"c".repeat(64)}`, MANIFEST.promptfoo.version);
-    expect(wrong.selfTest.failures).toContain("digest_mismatch");
+    // PR #205 review round 12 [91]: an image that is not the current build is not registered at all
+    const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: "wrong-build" });
+    const wrongDigest = `sha256:${"c".repeat(64)}`;
+    const wrong = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${t.json().token}` }, {
+      name: "wrong-build",
+      imageDigest: wrongDigest,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: selfTest(wrongDigest, MANIFEST.promptfoo.version, {}),
+      tokenHash: sha256Hex(runnerSecret()),
+    });
+    expect(wrong.statusCode, wrong.body).toBe(409);
+    expect(wrong.json().error).toBe("engine_runner_build_obsolete");
     // a runner whose self-test failed leases nothing (the engine is off anyway; checked again below)
-    for (const r of [leaky, connected, noSwitch, wrong]) {
+    for (const r of [leaky, connected, noSwitch]) {
       const d = await inject("DELETE", `/v1/engine-runners/${r.id}`, admin.key);
       expect(d.statusCode, d.body).toBe(200);
     }
@@ -416,16 +440,16 @@ describe("secure by default", () => {
     const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
     expect(st.json().passed, st.body).toBe(true);
     // an API key can never give a step-up
-    const viaKey = await inject("PATCH", "/v1/engines/promptfoo", admin.key, { enabled: true });
+    const viaKey = await inject("PATCH", "/v1/engines/promptfoo", admin.key, { enabled: true, acceptCredentialIsolationRisk: true });
     expect(viaKey.statusCode, viaKey.body).toBe(403);
     expect(viaKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
     expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { "engine.promptfoo.enabled": true } } });
+    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { "engine.promptfoo.enabled": true, "engine.promptfoo.acceptCredentialIsolationRisk": true } } });
     const [still] = await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`).then((r) => (r as unknown as { rows: Array<{ enabled: boolean }> }).rows);
     expect(still!.enabled).toBe(false);
     const token = await grantFor(refused.json().action);
-    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true }, { [STEP_UP_HEADER]: token });
+    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: token });
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json().enabled).toBe(true);
     const [audit] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "engine-updated")).orderBy(desc(auditLog.seq)).limit(1);
@@ -466,16 +490,22 @@ describe("runner credentials", () => {
     const asLease = await inject("POST", "/v1/engine-runner/lease", enrolment);
     expect(asLease.statusCode).toBe(403);
     expect(asLease.json().error).toBe("engine_runner_scope");
-    const body = { name: "once", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: selfTest(PF_DIGEST, MANIFEST.promptfoo.version) };
+    const secret = runnerSecret();
+    const body = { name: "once", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: selfTest(PF_DIGEST, MANIFEST.promptfoo.version), tokenHash: sha256Hex(secret) };
     const first = await inject("POST", "/v1/engine-runner/register", enrolment, body);
     expect(first.statusCode, first.body).toBe(201);
-    const second = await inject("POST", "/v1/engine-runner/register", enrolment, body);
+    // PR #205 review [54]: a second registration with the spent token mints nothing: the SAME
+    // hash replays the same runner, any other hash is refused
+    const replayed = await inject("POST", "/v1/engine-runner/register", enrolment, body);
+    expect(replayed.statusCode, replayed.body).toBe(201);
+    expect(replayed.json()).toMatchObject({ runnerId: first.json().runnerId, replayed: true });
+    const second = await inject("POST", "/v1/engine-runner/register", enrolment, { ...body, tokenHash: sha256Hex(runnerSecret()) });
     expect(second.statusCode, second.body).toBe(401);
     expect(second.json().error).toBe("engine_enrollment_invalid");
     // a revoked runner token authenticates nothing
     const d = await inject("DELETE", `/v1/engine-runners/${first.json().runnerId}`, admin.key);
     expect(d.statusCode).toBe(200);
-    const after = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${first.json().token}` });
+    const after = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${secret}` });
     expect(after.statusCode).toBe(401);
     expect(after.json().error).toBe("engine_runner_revoked");
   });
@@ -493,23 +523,23 @@ describe("runner credentials", () => {
   it("a disabled engine cannot be leased or started", async () => {
     const gk = await enrol("garak", GK_DIGEST, MANIFEST.garak.version);
     expect(gk.selfTest.passed).toBe(true);
-    const l = await inject("POST", "/v1/engine-runner/lease", gk.auth);
+    const l = await inject("POST", "/v1/engine-runner/lease", gk.auth, { imageDigest: GK_DIGEST, engineVersion: MANIFEST.garak.version });
     expect(l.statusCode, l.body).toBe(409);
     expect(l.json().error).toBe("engine_disabled");
     const s = await inject("POST", "/v1/engine-runs", alice.key, { engineId: "garak", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId });
     expect(s.statusCode, s.body).toBe(409);
     expect(s.json().error).toBe("engine_disabled");
-    // a run queued while promptfoo was on is not leased once it is switched off
+    // a run queued while promptfoo was on is not leased once it is switched off — PR #205 review
+    // round 10 [84]: switching it off ends the run (cancelled `engine_disabled`, audited)
     const queued = await startRun({});
     expect(queued.statusCode, queued.body).toBe(202);
     const off = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false });
     expect(off.statusCode, off.body).toBe(200);
+    expect(await runRow(queued.json().run.id)).toMatchObject({ status: "cancelled", errorCode: "engine_disabled" });
     const blocked = await lease();
     expect(blocked.statusCode, blocked.body).toBe(409);
     expect(blocked.json().error).toBe("engine_disabled");
     await enableEngine("promptfoo");
-    const c = await inject("POST", `/v1/engine-runs/${queued.json().run.id}/cancel`, alice.key, {});
-    expect(c.statusCode, c.body).toBe(200);
   });
 });
 
@@ -792,7 +822,7 @@ describe("approvals, schedules and the workflow binding", () => {
 
   it("a scheduled run executes as its creator, and skips with a reason when that person is gone", async () => {
     const c = await inject("POST", "/v1/engine-schedules", alice.key, {
-      request: { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
+      request: { engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
       intervalHours: 24,
     });
     expect(c.statusCode, c.body).toBe(201);
@@ -832,7 +862,7 @@ describe("approvals, schedules and the workflow binding", () => {
             id: "checks",
             type: "automated_check",
             checks: ["engine_redteam"],
-            engines: [{ check: "engine_redteam", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["basic"], budgetUsd: 1 }],
+            engines: [{ check: "engine_redteam", engine: "promptfoo", agent: `b5-target-${RUN}`, judgeAgent: `b5-judge-${RUN}`, sets: ["basic"], budgetUsd: 1 }],
           },
           { id: "done", type: "human_approval", approvers: [approver.id] },
         ],
@@ -1021,7 +1051,7 @@ describe("review round 1", () => {
 
   it("[13] a schedule is validated like a run (judge, project, budget) and starts nothing", async () => {
     const before = await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs`).then((r) => (r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n);
-    const base = { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 };
+    const base = { engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 };
     const noProject = await inject("POST", "/v1/engine-schedules", alice.key, { request: { ...base, projectId: undefined }, intervalHours: 24 });
     expect(noProject.statusCode, noProject.body).toBe(422);
     expect(noProject.json().error).toBe("project_required");
@@ -1062,6 +1092,9 @@ describe("review round 1", () => {
     await inject("POST", `/v1/projects/${pid}/members`, AUTH, { userId: approver.id, role: "owner" });
     const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: admin.id, agentId: targetId });
     expect(g.statusCode, g.body).toBe(201);
+    // round 6 [73]: promptfoo needs a judge, and the admin must be entitled to it too
+    const gj = await inject("POST", "/v1/grants/agents", AUTH, { userId: admin.id, agentId: judgeId });
+    expect(gj.statusCode, gj.body).toBe(201);
     const started = await startInstanceOn(admin.key, pid);
     expect(started.statusCode, started.body).toBe(201);
     await approveGate(started.json().id);
@@ -1105,7 +1138,7 @@ describe("review round 2", () => {
       if (runnerId === second.id) await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'revoked mid-lease' WHERE id = ${second.id}`);
     };
     try {
-      const l = await inject("POST", "/v1/engine-runner/lease", second.auth);
+      const l = await inject("POST", "/v1/engine-runner/lease", second.auth, PF_BUILD());
       expect(l.statusCode, l.body).toBe(401);
       expect(l.json().error).toBe("engine_runner_revoked");
     } finally {
@@ -1139,8 +1172,8 @@ describe("review round 2", () => {
             type: "automated_check",
             checks: ["basic_check", "agentic_check"],
             engines: [
-              { check: "basic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["basic"], budgetUsd: 1 },
-              { check: "agentic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, sets: ["agentic"], budgetUsd: 1 },
+              { check: "basic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, judgeAgent: `b5-judge-${RUN}`, sets: ["basic"], budgetUsd: 1 },
+              { check: "agentic_check", engine: "promptfoo", agent: `b5-target-${RUN}`, judgeAgent: `b5-judge-${RUN}`, sets: ["agentic"], budgetUsd: 1 },
             ],
           },
           { id: "done", type: "human_approval", approvers: [approver.id] },
@@ -1186,7 +1219,7 @@ describe("review round 2", () => {
 
   it("[23] a scheduled run whose creation throws is recorded as an audited skip, not lost", async () => {
     const c = await inject("POST", "/v1/engine-schedules", alice.key, {
-      request: { engineId: "promptfoo", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
+      request: { engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["basic"] }, projectId, budgetUsd: 1 },
       intervalHours: 24,
     });
     expect(c.statusCode, c.body).toBe(201);
