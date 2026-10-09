@@ -61,7 +61,8 @@ export function licenceTerms(expr) {
 
 function metadataLicence(text) {
   const field = (name) => {
-    const m = new RegExp(`^${name}:\\s*(.+)$`, "m").exec(text);
+    // the field names are fixed constants; escaped anyway so no character of one is read as a pattern
+    const m = new RegExp(`^${name.replace(/[\\^$.*+?()[\]{}|-]/g, "\\$&")}:\\s*(.+)$`, "m").exec(text);
     return m ? m[1].trim() : null;
   };
   const expr = field("License-Expression");

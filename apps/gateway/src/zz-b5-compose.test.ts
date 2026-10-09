@@ -98,7 +98,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     const runner = block("engine-modelscan");
     expect(runner).toMatch(/\n {4}<<: \*engine-runner\n/);
     for (const key of ["ports", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode", "tmpfs"]) {
-      expect(runner, key).not.toMatch(new RegExp(`\\n {4}${key}:`));
+      expect(runner, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&")}:`));
     }
     expect(line(runner, "image")).toBe(REF);
     expect(line(runner, "REGULAIT_ENGINE_IMAGE_REF")).toBe(REF);
