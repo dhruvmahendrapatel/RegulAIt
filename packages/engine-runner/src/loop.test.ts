@@ -20,13 +20,15 @@ interface Script {
   /** register answers, in order (the last repeats); "drop" = the request landed but the response was lost */
   register?: Array<number | "drop">;
   lease: Array<{ status: number; error?: string }>;
-  selfTest?: number;
+  /** self-test answers in order (the last repeats); "drop" = a network error */
+  selfTest?: Array<number | "drop">;
 }
 
 function gateway(script: Script) {
   const calls: Array<{ path: string; bearer: string; body: Record<string, unknown> | null }> = [];
   let li = 0;
   let ri = 0;
+  let si = 0;
   const http: RunnerHttp = async (url, init) => {
     const p = new URL(url).pathname;
     const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : null;
@@ -38,7 +40,9 @@ function gateway(script: Script) {
       return { status: step, json: async () => (step === 201 ? { runnerId: "r1", selfTest: { passed: true, failures: [] } } : { error: "engine_enrollment_invalid" }) };
     }
     if (p.endsWith("/self-test")) {
-      const status = script.selfTest ?? 200;
+      const list = script.selfTest ?? [200];
+      const status = list[Math.min(si++, list.length - 1)]!;
+      if (status === "drop") throw new Error("socket hang up");
       return { status, json: async () => (status === 200 ? { selfTest: { passed: true, failures: [] } } : { error: "engine_self_test_inconsistent" }) };
     }
     const step = script.lease[Math.min(li++, script.lease.length - 1)]!;
@@ -105,11 +109,30 @@ describe("decision 53: a stale self-test is refreshed on the runner-token route"
   });
 
   it("a refreshed report that does not help is submitted once per refusal streak, then the loop backs off", async () => {
-    const g = gateway({ lease: [{ status: 409, error: "engine_self_test_required" }], selfTest: 422 });
+    const g = gateway({ lease: [{ status: 409, error: "engine_self_test_required" }], selfTest: [422] });
     const { o, waits } = await opts({ maxIterations: 4 });
     await runRunnerLoop(g.client, adapter, o);
     expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(1);
     expect(waits).toEqual([10, 20, 40, 40]);
+  });
+});
+
+describe("PR #205 review round 3 [60]: a transient failure to submit the self-test does not latch", () => {
+  it("a network error, then a 503, then a pass: the refresh is retried after the normal backoff and work resumes", async () => {
+    const g = gateway({ lease: [{ status: 409, error: "engine_self_test_required" }, { status: 409, error: "engine_self_test_required" }, { status: 409, error: "engine_self_test_required" }, { status: 204 }], selfTest: ["drop", 503, 200] });
+    const { o, waits, logs } = await opts({ maxIterations: 4 });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(3);
+    // two transient failures back off normally; the third submission passes and the lease is retried at once
+    expect(waits).toEqual([10, 20, 5000]);
+    expect(logs.filter((l) => /will retry/.test(l))).toHaveLength(2);
+  });
+
+  it("a definitive refusal (4xx with a reason) still latches until a lease succeeds", async () => {
+    const g = gateway({ lease: [{ status: 409, error: "engine_self_test_required" }], selfTest: [422] });
+    const { o } = await opts({ maxIterations: 4 });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(1);
   });
 });
 

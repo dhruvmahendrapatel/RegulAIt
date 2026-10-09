@@ -137,15 +137,22 @@ async function enrol(client: RunnerClient, opts: RunnerLoopOptions, sleep: (ms: 
 }
 
 /** PR #205 review [53]: re-run the self-test and submit it; true when the gateway accepted a passing report */
-async function refreshSelfTest(client: RunnerClient, opts: RunnerLoopOptions): Promise<boolean> {
+/**
+ * [53] Re-run the self-test and submit it. PR #205 review round 3 [60]: the outcome says whether
+ * the gateway ANSWERED — `passed` / `refused` (a definitive answer: a verdict, or a 4xx with a
+ * reason) — or nothing definitive happened (`transient`: a network error, a 5xx, a 408 or a 429),
+ * in which case the caller must try again after its normal backoff rather than give up.
+ */
+async function refreshSelfTest(client: RunnerClient, opts: RunnerLoopOptions): Promise<"passed" | "refused" | "transient"> {
   try {
     const verdict = await client.submitSelfTest((await opts.registration()).selfTest);
     opts.log?.(`submitted a fresh self-test: ${verdict.passed ? "passed" : `failed: ${verdict.failures.join(", ")}`}`);
-    return verdict.passed;
+    return verdict.passed ? "passed" : "refused";
   } catch (e) {
     if (e instanceof RunnerHttpError && e.status === 401) throw e;
-    opts.log?.(`could not submit a fresh self-test (${e instanceof RunnerHttpError ? (e.code ?? e.status) : "unreachable"})`);
-    return false;
+    const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
+    opts.log?.(`could not submit a fresh self-test (${e instanceof RunnerHttpError ? (e.code ?? e.status) : "unreachable"})${transient ? "; will retry" : ""}`);
+    return transient ? "transient" : "refused";
   }
 }
 
@@ -193,10 +200,13 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
       }
       if (e instanceof RunnerFatalError) throw e;
       // [53] a stale report: re-run the self-test, submit it, and lease again at once if it passed
+      // Round 3 [60]: only a DEFINITIVE answer latches (a verdict, or a 4xx refusal); a transient
+      // failure leaves the latch open, so the refresh is tried again after the normal backoff
       if (e instanceof RunnerHttpError && e.code === "engine_self_test_required" && !refreshedSinceAccepted) {
-        refreshedSinceAccepted = true;
         try {
-          if (await refreshSelfTest(client, opts)) continue;
+          const outcome = await refreshSelfTest(client, opts);
+          if (outcome !== "transient") refreshedSinceAccepted = true;
+          if (outcome === "passed") continue;
         } catch (inner) {
           if (inner instanceof RunnerHttpError && inner.status === 401) {
             if (enrolled) throw new RunnerFatalError(MESSAGE_NO_ENROLMENT);
