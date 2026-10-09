@@ -619,7 +619,9 @@ runner-generated credential uses the existing `engine_runners.token_hash`, `enro
     (`failedSelfTestRefreshMs`), and a transient submission failure does not use up that cadence; on `disabled` it
     submits nothing. A passing refresh updates ONLY the runner's stored report: it never re-enables the engine.
     Re-enabling after a failure stays an audited admin action with a step-up, whose self-test then evaluates the fresh
-    stored report (secure by default).
+    stored report (secure by default). *Amended by decisions 67 and 69 (round 5):* the `reason` field is replaced by
+    the `next` signal; a runner whose own report fails or is stale is told `self_test_required` whatever the engine's
+    state, and the 15-minute cadence (`selfTestRefreshMs`) applies to every refused report.
 65. **A self-test report never lands after a revocation** [4226325882]. The self-test route read the runner without a
     lock and updated unconditionally, so a report racing a revocation could still write the runner's report and switch
     the whole engine off. The transaction now takes the runner row `FOR UPDATE` and re-reads `revoked_at` before touching
@@ -633,6 +635,74 @@ runner-generated credential uses the existing `engine_runners.token_hash`, `enro
     2026-10-09): no migration.** A dedicated `no_runnable_plugin` not-run reason would need migration 0174 (0173's CHECK
     on `engine_run_items.not_run_reason`); it is not worth one, since strategy-only plans are refused at validation and
     this path is a residual (every requested plugin excluded at planning time). The error code names the cause.
+
+**Review round 5 (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Three were runner-lifecycle gaps again,
+so the root cause is fixed rather than patched: the loop is now an explicit state machine driven by one gateway
+signal. Tests: `loop.test.ts` (the table row by row, then the driver per transition), `runner.test.ts` [68],
+`zz-b5-promptfoo.test.ts` "review round 5" [67] [69] [70]. No migration.
+
+67. **The runner loop is a state machine driven by one gateway signal; a build change re-enrols** [4226623285]. After
+    an image or version upgrade the stored token authenticated the old-build runner row: the lease said
+    `engine_self_test_required`, the fresh report was refused 422 `engine_self_test_inconsistent`, and the loop
+    waited forever. Every lease refusal and every self-test answer now carries `next`, one of:
+
+    | `next` | when the gateway says it | runner |
+    |---|---|---|
+    | `ok` | a 200/204 lease; a passing report while the engine is on | lease |
+    | `admin_disabled` | the engine is off and this runner's report passes now | wait (capped backoff), lease again |
+    | `self_test_required` | this runner's report is stale (24 h), failing, or for a build the manifest no longer names, *whatever the engine's state*; or the engine's own record no longer admits it | refresh if the cadence allows, else wait |
+    | `reenrol_required` | the build the runner presents differs from the one its credential registered | re-enrol, or stop |
+    | `revoked` | the credential authenticates nothing (also any 401 without a signal) | re-enrol with an unused enrolment token, or stop |
+
+    The lease now carries `{imageDigest, engineVersion}` (the build running now) and decides in this order:
+    reenrol_required, self_test_required (runner), admin_disabled, self_test_required (engine record). The runner's
+    states and transitions (`transition` in `packages/engine-runner/src/loop.ts`, every row pinned by a table test):
+
+    | state | event | next state |
+    |---|---|---|
+    | enrolling, reenrolling | registered | leasing |
+    | enrolling, reenrolling | no unused enrolment token, or it is refused, or retries exhausted | stopped |
+    | enrolling, reenrolling | transient | the same (same secret, backoff) |
+    | leasing | `ok` | leasing |
+    | leasing | `admin_disabled` | waiting |
+    | leasing | `self_test_required` and the cadence allows | refreshing |
+    | leasing | `self_test_required` within the cadence | waiting |
+    | leasing, refreshing | `reenrol_required` or `revoked` with an unused enrolment token | reenrolling |
+    | leasing, refreshing | `reenrol_required` or `revoked` without one | stopped |
+    | leasing | transient | leasing (backoff) |
+    | leasing | too many retained results (decision 68) | waiting |
+    | refreshing | `ok` | leasing (at once) |
+    | refreshing | `admin_disabled` or `self_test_required` | waiting |
+    | refreshing | transient | leasing (backoff; the cadence is not used up) |
+    | waiting | the wait is over | leasing |
+    | stopped | anything | stopped (the process says what the admin must do, and exits) |
+
+    The cadence: after a definitive submission (a verdict, or a refusal with a signal) the next waits 15 minutes
+    (`selfTestRefreshMs`); a lease that succeeds resets it. An enrolment token is tried at most once per process (it is
+    single-use). **Picked for the old registration: it is revoked on a successful re-enrolment**, not left for the
+    admin. The re-enrolling runner presents the token it held as `supersedes` (proof of possession); in the
+    registration's transaction the gateway revokes that runner if it is a live runner of the same engine, then ends
+    the runs it held (and their keys) and audits `engine-runner-superseded`; anything else is ignored. So an upgrade
+    never leaves a live credential behind. Without an enrolment token the runner stops with what to do; the state
+    volume is never deleted (the token file is replaced only when an enrolment is under way, decision 54).
+68. **Undelivered results are retried, then dropped, and capped** [4226623288]. An `undelivered` run's work directory
+    stayed in the 1 GiB tmpfs forever. Now it keeps only `undelivered-result.json` (the envelope, the run id and its
+    deadline; the engine's own files go at once). In `leasing`, before every lease, each retained result is posted once
+    (the same definitive/transient rule as `postResultWithRetry`; the loop's backoff spaces the attempts); the
+    directory is removed on a definitive answer (a 2xx, or a 4xx such as 409 the run ended or timed out), when the
+    run's deadline has passed (the gateway has ended it), or when it holds no readable result. Only run-id directories
+    are touched. With 3 retained (`maxRetainedResults`) the runner leases nothing and waits.
+69. **A runner keeps its report fresh while the engine is off** [4226623293]. While an engine was off for more than
+    24 hours (including a fresh install before its first enable) the runner's report went stale, nothing refreshed it,
+    and the admin's self-test could never pass. The lease now judges the runner's own report before the engine's state
+    (decision 67's order), so the runner refreshes on `self_test_required` whatever the engine's state; with a fresh
+    report and the engine off it just waits (`admin_disabled`). A passing report still never switches the engine on.
+70. **An agent with no provider model is never dispatched** [4226623279]. A target or judge with `agents.model = null`
+    was accepted, and the lease substituted the display name as the model. Run validation (and so schedule
+    validation) now refuses it: 422 `agent_not_dispatchable`, naming the role. The lease no longer falls back to the
+    display name: the lease transaction refuses such an agent and the run ends `not_run` with error code
+    `agent_not_dispatchable`. The promptfoo config already refuses an empty model string (`model_invalid`); the shim
+    cannot tell a display name from a model, so the gateway is where this is enforced.
 
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
