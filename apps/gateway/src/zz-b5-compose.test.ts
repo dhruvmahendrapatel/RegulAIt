@@ -62,16 +62,22 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(env.match(/\n {4}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_GATEWAY_URL:", "REGULAIT_ENGINE_ENROLLMENT_TOKEN:"]);
   });
 
-  it("B5-P: the promptfoo runner merges the template and overrides nothing but its image and its three non-secret-or-enrolment variables", () => {
+  it("B5-P: the promptfoo runner merges the template and overrides only its image, platform, state volume and three variables", () => {
     const svc = block("engine-promptfoo");
     expect(svc).toMatch(/\n {4}<<: \*engine-runner\n/);
-    // nothing that would widen the template: no ports, volumes, networks, privileges, profiles or user
-    for (const key of ["ports", "volumes", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode"]) {
+    // nothing that would widen the template: no ports, networks, privileges, profiles or user
+    for (const key of ["ports", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode", "tmpfs"]) {
       expect(svc, key).not.toMatch(new RegExp(`\\n {4}${key}:`));
     }
     // the image reference is configurable for a digest pin and never a floating tag
     expect(svc).toMatch(/\n {4}image: \$\{REGULAIT_ENGINE_PROMPTFOO_IMAGE:-regulait\/engine-promptfoo:0\.123\.1\}\n/);
     expect(svc).not.toMatch(/:latest/);
+    // PR #205 review [51]: amd64 only (libsql's native x64 binding)
+    expect(svc).toMatch(/\n {4}platform: linux\/amd64\n/);
+    // PR #205 review [49]: exactly one volume, the runner's own state, a named volume (no host path)
+    const vols = svc.slice(svc.indexOf("    volumes:\n") + 13, svc.indexOf("    environment:"));
+    expect(vols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-promptfoo-state:/state"]);
+    expect(block("volumes", "")).toMatch(/\n {2}engine-promptfoo-state:\n/);
     const env = svc.slice(svc.indexOf("    environment:"));
     expect(env.match(/\n {6}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual([
       "REGULAIT_GATEWAY_URL:",

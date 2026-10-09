@@ -468,10 +468,19 @@ services:
   # enabled. The default reference below names no digest on purpose: with
   # pull_policy never it starts only from an image loaded locally, and its
   # self-test cannot pass. Only the template's hardening applies (no ports, no
-  # volumes, no network but `engines`).
+  # network but `engines`), plus:
+  #   - platform linux/amd64: promptfoo's sqlite store needs libsql's native
+  #     x64 binding (ADR-0187 decision 51; arm64 is open question 10);
+  #   - ONE volume, the runner's own state (decision 49): the runner token that
+  #     registration returned, 0600, so a restart does not need a new enrolment
+  #     token (the enrolment token is single-use and ignored once a stored
+  #     token works). Deleting the volume means re-enrolling.
   engine-promptfoo:
     <<: *engine-runner
+    platform: linux/amd64
     image: ${REGULAIT_ENGINE_PROMPTFOO_IMAGE:-regulait/engine-promptfoo:0.123.1}
+    volumes:
+      - engine-promptfoo-state:/state
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
@@ -673,5 +682,7 @@ volumes:
   objectstore_data:
   # ADR-0174 amendment: the demo licence keyring (see the gateway's volumes).
   demo_license_keys:
+  # ADR-0187 decision 49: the promptfoo runner's own state (its runner token only)
+  engine-promptfoo-state:
   caddy_data:
   caddy_config:

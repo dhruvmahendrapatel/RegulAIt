@@ -46,12 +46,17 @@ describe("the promptfoo image's inputs", () => {
     expect(lock.packages["node_modules/promptfoo"]!.version).toBe(PROMPTFOO_ENGINE_VERSION);
     expect(dockerfile).toContain(`if (v !== '${PROMPTFOO_ENGINE_VERSION}')`);
     expect(dockerfile).toContain(`org.regulait.engine-version="${PROMPTFOO_ENGINE_VERSION}"`);
-    const bases = [...dockerfile.matchAll(/^FROM (\S+)/gm)].map((m) => m[1]);
+    // PR #205 review [51]: every stage names linux/amd64 (libsql's native x64 binding)
+    expect([...dockerfile.matchAll(/^FROM (\S+)/gm)].map((m) => m[1])).toEqual(["--platform=linux/amd64", "--platform=linux/amd64", "--platform=linux/amd64"]);
+    const bases = [...dockerfile.matchAll(/^FROM --platform=linux\/amd64 (\S+)/gm)].map((m) => m[1]);
     const gatewayBase = /^FROM (\S+) AS runtime/m.exec(readFileSync(path.join(root, "Dockerfile"), "utf8"))![1];
     expect(bases).toHaveLength(3);
     for (const b of bases) expect(b).toBe(gatewayBase);
     expect(gatewayBase).toMatch(/@sha256:[0-9a-f]{64}$/);
     expect(isPublicAddress(env["REGULAIT_EGRESS_PROBE_ADDRESS"])).toBe(true);
+    // PR #205 review [49]: the runner's state dir exists, owned by the runner uid, 0700
+    expect(env["REGULAIT_RUNNER_STATE_DIR"]).toBe("/state");
+    expect(dockerfile).toMatch(/\nRUN mkdir -p \/state && chown 10001:10001 \/state && chmod 0700 \/state\n/);
     expect(dockerfile).toMatch(/\nUSER 10001:10001\n/);
     expect(dockerfile).toMatch(/rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     expect(dockerfile).toMatch(/npm ci --omit=optional --ignore-scripts/);
