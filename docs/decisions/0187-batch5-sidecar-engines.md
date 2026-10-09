@@ -861,6 +861,59 @@ ended. No migration.
     `engine-runner-self-test-obsolete-build`. A two-build test registers a runner of an obsolete build and has it try
     to switch the upgraded engine off.
 
+**Review round 11 (PR #205, Codex, 2026-10-09; 5 findings, three in the review body; each red first) and a sweep for
+the pattern behind them.** Tests: `runner.test.ts` and `loop.test.ts` [89] [90], `zz-b5-promptfoo.test.ts` "review round
+11" [86] [87] [88] and the sweep's re-check. No migration. **The rule from here on:** an engine state change is decided
+and written in ONE transaction, on rows it holds locked (or with the condition in the write's own predicate), together
+with its audit; work that follows a commit is limited to notifying workflows, which the workflow sweep retries.
+
+86. **Cancellation is one transaction** (review body). The cancel route committed `cancel_requested_at`, then ended the
+    run in a second transaction, so a crash in between left a run marked cancelled but live with its key. The marker,
+    the terminal transition, the key's revocation, the approval's supersession and the audit now commit together on
+    the run row taken `FOR UPDATE`; a test crashes inside it (`engineRunTestHooks.afterCancelMarked`) and finds the
+    run untouched (still leased, no marker, key live), then cancels it in one go.
+87. **Run creation re-validates the engine inside its insert transaction** (review body). The engine's state and limits
+    were checked before the transaction and the run inserted without a lock, so a concurrent disable or ceiling drop
+    could miss it. The insert transaction now takes the engine row `FOR SHARE` (every switch-off takes it `FOR UPDATE`,
+    decision 84) and decides again there: on (409 `engine_disabled`), its recorded self-test admitting it (409
+    `engine_self_test_required`), the budget within the ceiling as it is now (422 `engine_budget_exceeds_ceiling`), and
+    the timeout clamped to the engine's ceiling as it is now; the creation's audit commits with the run. Schedules and
+    workflow stages create runs through the same function. (One test changed order: the round 2 [53] test now queues
+    its run while the engine's record is fresh, since creation itself now needs it to admit the engine.)
+88. **A schedule's claim requires it to be on** (review body). The claim compared only the id and the old `next_run_at`,
+    so a schedule switched off after the sweep's read still started a run. The claim's predicate now includes
+    `enabled = true`; the schedule's outcome (`last_run_id`, `last_skip`) and its skip audit then commit together.
+89. **Every runner request is bounded** [4229319159]. Runner fetches had no timeout. Every request, body included, is
+    now aborted after `requestTimeoutMs` (default 30 s), or at the run's deadline when that is sooner (heartbeats and
+    results carry it). A timeout throws like a network error (`RunnerTimeoutError`), so each caller's existing transient
+    handling applies: the loop backs off and retries, the result post retries, the starting heartbeat retries (decision
+    83). The bound holds even for a transport that ignores the abort signal (the request races the timer).
+90. **Undelivered results survive a restart** [4229319167]. They were kept under the tmpfs `/work` and lost on restart.
+    `runOnce` now writes an undelivered envelope under `retainRoot`, which the promptfoo runner sets to
+    `/state/undelivered` on its persistent state volume (0700, the runner's own), apart from the engine's work dirs;
+    before every lease the loop delivers or drops what is retained there (and anything left in the work root), as in
+    decision 68. No new exposure: per decision 79 the engine process shares the runner's user and could already read the
+    state volume; the retained envelope holds no credential, only the run's own result.
+
+**The sweep (round 11): every other instance found in this PR's engine code, now fixed the same way.**
+- The lease's refused path (run-as gone, not entitled, no project, no model, no judge) ended the run in a second
+  transaction after the lease transaction decided; it now ends on the row the lease transaction holds.
+- An expired heartbeat ended the run in a second transaction; it now ends under the heartbeat's own row lock.
+- The run sweep's timeouts and the queue-expiry sweep read their candidates without a lock and ended them by status
+  alone; each now re-checks its condition (still overdue, still expired) on the locked row, so a lease a heartbeat
+  renewed in between is not timed out (a test renews one between the sweep's read and its end).
+- The admin self-test read the newest runner's report outside its transaction; it now reads it `FOR SHARE` inside,
+  before taking the engine row (the lock order of the lease and the runner self-test).
+- Audit rows written after their state change had committed, now in the same transaction: run creation, schedule
+  creation, a schedule's switch on or off (now also decided under the schedule's row lock), a schedule sweep's skip, the
+  manifest sync's switch-off, the admin self-test, an enrolment token's minting, a runner's registration, revocation
+  and replay reconciliation, and a runner's self-test report. (Audits of refusals that change nothing, such as a late
+  result or an obsolete-build report, stay single writes.)
+- Checked and left as is: the PATCH engines route, the runner self-test route and the lease already decide under their
+  locks; the approval decision runs inside the approvals transaction; the result route ends the run through a
+  status-checked transaction under the run's lock; the schedule sweep's claim is committed before creating the run on
+  purpose (PR #203 review round 2 [23]: a creation that throws is then an audited skip, never lost).
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
