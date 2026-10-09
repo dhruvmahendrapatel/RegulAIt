@@ -62,9 +62,9 @@ class Aborted extends Error {}
 function notRunAll(plan: PromptfooPlan, errorCode: string, status: "not_run" | "failed" = "not_run"): PromptfooEnvelopeBody {
   const pairs = notRunPairs(plannedPairs(plan), "engine_error", `not run: ${errorCode}`);
   // PR #205 review round 4 [66]: with no runnable plugin there are no pairs, so every requested
-  // strategy is recorded on its own. The reason column admits only the migration-0173 vocabulary;
-  // a dedicated `no_runnable_plugin` reason needs migration 0174 (asked, not added): until then it
-  // is `engine_error` and the run's errorCode says `no_runnable_plugin`.
+  // strategy is recorded on its own as `engine_error`, and the run's errorCode says
+  // `no_runnable_plugin`. Strategy-only plans are rejected at validation, so this is a residual
+  // path; decided with no new reason and no migration (ADR-0187 decision 66).
   const strategies = plan.plugins.length === 0 ? plan.strategies.map((s) => ({ key: `${PROMPTFOO_STRATEGY_SET_PREFIX}${s.id}`, reason: "engine_error" as const })) : [];
   return { status, errorCode, items: pairs.items, notRun: [...plan.notRun, ...pairs.notRun, ...strategies], rawReport: null };
 }

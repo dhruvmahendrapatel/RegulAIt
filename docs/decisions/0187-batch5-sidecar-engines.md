@@ -629,9 +629,10 @@ runner-generated credential uses the existing `engine_runners.token_hash`, `enro
 66. **A strategy needs a plugin** [4226325878]. A strategy-only plan produced neither items nor not-run entries. Run
     creation (and schedule validation, which shares it) now refuses a promptfoo set list made only of `strategy:` sets
     (422 `engine_config_invalid`). When every requested plugin is excluded at planning time, each requested strategy is
-    recorded not run and the run's error code is `no_runnable_plugin`. **The reason column admits only migration 0173's
-    vocabulary**, so the item's reason is `engine_error` for now; a dedicated `no_runnable_plugin` not-run reason needs
-    migration 0174 and was not added (owner question 12).
+    recorded not run with reason `engine_error` and the run's error code is `no_runnable_plugin`. **Decided (coordinator,
+    2026-10-09): no migration.** A dedicated `no_runnable_plugin` not-run reason would need migration 0174 (0173's CHECK
+    on `engine_run_items.not_run_reason`); it is not worth one, since strategy-only plans are refused at validation and
+    this path is a residual (every requested plugin excluded at planning time). The error code names the cause.
 
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
@@ -687,6 +688,4 @@ compat surface is on (a run then fails at its first call); concurrency is per en
     with its deployment. Proof needs the deployer to verify the image signature (cosign, against our signing identity)
     before the container starts, and the engine images are not signed yet (they are not built). Until then an enabled
     engine rests on the operator deploying the digest the manifest names.
-12. **A `no_runnable_plugin` not-run reason (decision 66).** Adding it to `ENGINE_NOT_RUN_REASONS` needs migration 0174
-    (the `engine_run_items.not_run_reason` CHECK from 0173). Until the owner approves that migration, the strategies of a
-    run whose every plugin is excluded are recorded with `engine_error`, and the run's error code names the cause.
+12. ~~A `no_runnable_plugin` not-run reason~~ — **decided 2026-10-09 (coordinator), see decision 66: no migration.**
