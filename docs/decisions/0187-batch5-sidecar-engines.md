@@ -349,7 +349,10 @@ database), `zz-b5-compose.test.ts` (4), `packages/shared/src/engines/engines.tes
     is pending until it ends, passes only when the run completed with verdict `pass` (no failed or unknown item, at
     least one pass), and fails otherwise. A run's end re-evaluates the stage. Reported results for such a check are
     refused (422 `engine_check_cannot_be_reported`). **Flag:** a `not_run` item (an air-gapped reduced set) does not
-    fail the check on its own; the owner may want a gate that requires every requested item to run.
+    fail the check on its own; the owner may want a gate that requires every requested item to run. **Amended by
+    decision 61 (PR #205 review round 3):** only a DECLARED planning-time exclusion (a key in the manifest's reduced set,
+    with a declarable reason) is excused; any not-run that happens at run time makes the run incomplete, so the check
+    fails.
 13. **Runner core** (`packages/engine-runner`, stdlib + shared): the client for the five routes, the self-test
     report, the egress probe (fail closed: only no-route, no-resolver and timeout count as denied; a refusal or reset
     from the far end counts as reached), the engine as a child process group killed whole on cancel or deadline, and
@@ -578,6 +581,31 @@ runner-generated credential uses the existing `engine_runners.token_hash`, `enro
     lists: 93 ids) ∪ the unaligned harm set ∪ `bias:*`, and its dataset list is upstream's `DATASET_PLUGINS`. A test refuses
     a local plugin that upstream needs remote generation for, a local id upstream does not have, or a dataset plugin
     without a not-run disposition; the opt-in drift test re-extracts from an installed package and compares.
+
+**Review round 3 (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Tests: `loop.test.ts` [60],
+`engines.test.ts` [61], `promptfoo.test.ts` [61] [62] [63], `zz-b5-promptfoo.test.ts` [61]. No migration.
+
+60. **A transient failure to submit a self-test is retried** [4226054063]. The refresh-once latch was set before the
+    submission, so one network blip or 5xx left the runner waiting forever. Now only a definitive answer latches (a
+    verdict, or a 4xx refusal with a reason); a network error, 5xx, 408 or 429 goes back into the normal backoff and the
+    refresh is tried again. The latch still opens again when a lease succeeds.
+61. **A run with a runtime not-run never passes** [4226054067]. A completed run with some passes and some not-run items
+    (a refused set, a planned pair with no result, denied egress) read `pass`, so a workflow check passed on a partial
+    run. The shared normaliser (every engine) now distinguishes two kinds of not-run: a **planning-time exclusion**
+    declared before the run — its key is in the manifest's reduced set and its reason is declarable (`cloud_only`,
+    `excluded_licence`, `unsupported_format`, `missing_preseed`) — may be not-run without blocking a pass; **any other
+    not-run** (`engine_error`, `egress_denied`, missing output, a refused config, an undeclared set, or a declared key with
+    a runtime reason) happened at run time and makes the run incomplete: `unknown` (or `not_run` when nothing passed),
+    so the check fails. `runtimeNotRun` is in the normalised result and the run summary. Runtime not-run pairs are
+    reported as items with their taxonomy id, and a standalone not-run key that is itself a mapped id gets its class, so
+    both appear in the probe stats as not measured. **Decision 12's flag is amended accordingly.**
+62. **A refused run reports every planned pair** [4226054072]. The preflight refusal (and a failed generation) reported
+    only `<plugin>/basic`; both now use the mapper's single enumeration (`plannedPairs`: each plugin × `basic` and every
+    planned strategy) to report every pair not run.
+63. **The results file is bounded before it is read** [4226054076]. The runner stats promptfoo's output and refuses one
+    over 64 MiB (`PROMPTFOO_MAX_RESULTS_BYTES`: 1/32 of the runner's 2 GiB `mem_limit`, since JSON.parse costs several
+    times a file's size in heap) without reading or parsing it: the run fails (`results_too_large`, every reading
+    unknown, every planned pair not run) and only the file's sha256 is recorded, computed by streaming.
 
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
