@@ -18,6 +18,10 @@ name: Security
 #                 REFUSES an unsigned image.
 #   sign          push to main only, after every gate passed: cosign keyless
 #                 signature of the exact scanned image, then verify it.
+#   engines       every engines/*/Dockerfile (ADR-0187 decision 120), as a matrix.
+#   engine-image  per engine: its own licence gate, the same build, Trivy gate,
+#                 image SBOM, recorded digest and unsigned red proof as `image`.
+#   engine-sign   per engine, the `sign` job's condition and steps exactly.
 #
 # Every gate fails CLOSED: a scanner that cannot run, a report that cannot be
 # parsed, a malformed or expired allow-list entry, or a stale one is a failure.
@@ -160,7 +164,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # the gates' own code and configuration (unquoted on purpose: a path list)
-          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile
+          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
         run: |
           set -euo pipefail
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED})"
@@ -445,3 +449,324 @@ jobs:
             echo ""
             echo "Signed keylessly by \`.github/workflows/security.yml@refs/heads/main\`; the Rekor entry is public."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # ADR-0187 decision 120 (open question 16): the sidecar engine images
+  # (engines/<name>/Dockerfile) get the gateway image's treatment: the same
+  # `docker build`, the same pinned Trivy and cosign, the same severity gate and
+  # allow-list, the same signing condition (push to main only, after every gate)
+  # and the same throwaway in-job registry. Nothing is published anywhere. Each
+  # engine's own licence gate runs too, and every digest is recorded.
+  #
+  # Discovery is the filesystem, not a list: every engines/*/Dockerfile is an
+  # engine image, so the PR that adds an engine directory is the PR that first
+  # builds, scans and (once on main) signs it.
+  engines:
+    name: Discover engine images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      engines: ${{ steps.find.outputs.engines }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Find engines/*/Dockerfile
+        id: find
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          names=()
+          for f in engines/*/Dockerfile; do
+            name="${f#engines/}"
+            name="${name%/Dockerfile}"
+            # the name becomes an image tag and an artifact name: refuse anything else
+            if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+              echo "::error file=${f}::engine directory name '${name}' is not lower-case [a-z0-9-]; rename it"
+              exit 1
+            fi
+            names+=("$name")
+          done
+          if [ "${#names[@]}" -eq 0 ]; then
+            json='[]'
+          else
+            json="$(printf '%s\n' "${names[@]}" | jq -R . | jq -cs .)"
+          fi
+          echo "Engine images: ${json}"
+          echo "engines=${json}" >> "$GITHUB_OUTPUT"
+
+  engine-image:
+    name: Engine image scan and SBOM (${{ matrix.engine }})
+    needs: [engines]
+    if: needs.engines.outputs.engines != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # one engine's failure must not hide another engine's result
+      fail-fast: false
+      matrix:
+        engine: ${{ fromJSON(needs.engines.outputs.engines) }}
+    services:
+      # The gateway image job's throwaway local registry: it gives the image a
+      # registry manifest digest and lets verify run, and publishes nothing.
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports:
+          - 5000:5000
+    env:
+      ENGINE: ${{ matrix.engine }}
+      IMAGE: regulait-engine-${{ matrix.engine }}:scan
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install Trivy (pinned SHA-256 AND its Sigstore signature)
+        run: |
+          set -euo pipefail
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tgz="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz" "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL --retry 3 -o "$tgz.sigstore.json" "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz.sigstore.json"
+          echo "${TRIVY_SHA256}  ${tgz}" | sha256sum -c -
+          "$RUNNER_TEMP/bin/cosign" verify-blob --bundle "$tgz.sigstore.json" \
+            --certificate-identity "https://github.com/aquasecurity/trivy/.github/workflows/reusable-release.yaml@refs/tags/v${TRIVY_VERSION}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$tgz"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/bin" trivy
+          "$RUNNER_TEMP/bin/trivy" --version
+
+      # An engine's licence gate judges what its build installs, so it runs
+      # INSIDE the image build, and a denied licence fails `docker build` below.
+      # This step fails a licence-gate.mjs the Dockerfile never calls (it would
+      # prove nothing), and runs an npm-lockfile gate up front from the tree.
+      - name: Gate — the engine's own licence gate
+        run: |
+          set -euo pipefail
+          dir="engines/${ENGINE}"
+          if [ ! -f "${dir}/licence-gate.mjs" ]; then
+            echo "::warning file=${dir}/Dockerfile::engine ${ENGINE} has no licence-gate.mjs; only the Trivy scan covers it"
+            echo "Engine ${ENGINE}: no licence gate in ${dir}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! grep -qE '^[^#]*node[[:space:]]+([^[:space:]]*/)?licence-gate\.mjs' "${dir}/Dockerfile"; then
+            echo "::error file=${dir}/Dockerfile::${dir}/licence-gate.mjs exists but the Dockerfile never runs it"
+            exit 1
+          fi
+          if [ -f "${dir}/package-lock.json" ]; then
+            node "${dir}/licence-gate.mjs" "${dir}/package-lock.json"
+          fi
+          echo "Engine ${ENGINE}: licence gate \`${dir}/licence-gate.mjs\` runs inside the image build (its output is in the build log artifact)" >> "$GITHUB_STEP_SUMMARY"
+
+      # The gateway image job's build command, with the engine's Dockerfile.
+      # Engines build from the repository root (their shims are workspace packages).
+      - name: Build the image
+        id: build
+        run: |
+          set -euo pipefail
+          docker build --progress=plain -f "engines/${ENGINE}/Dockerfile" -t "$IMAGE" . 2>&1 | tee "$RUNNER_TEMP/build.log"
+          echo "image-id=$(docker image inspect --format '{{.Id}}' "$IMAGE")" >> "$GITHUB_OUTPUT"
+          size="$(docker image inspect --format '{{.Size}}' "$IMAGE")"
+          echo "Engine ${ENGINE} image size: $((size / 1048576)) MiB" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Every Trivy step runs from an empty directory, as in the gateway job.
+      - name: SBOM — image (CycloneDX)
+        working-directory: ${{ runner.temp }}
+        run: trivy image --format cyclonedx --output "$RUNNER_TEMP/sbom-image.cdx.json" "$IMAGE"
+
+      - name: Gate — no unlisted fixable HIGH or CRITICAL in the image
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/trivy-image.json"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --format json --output "$report" "$IMAGE"
+          trivy convert --format table "$report" || true
+          # --expect-classes: a scan that saw no OS packages or no language packages proves nothing
+          node "$GITHUB_WORKSPACE/scripts/security-gate.mjs" --kind trivy --report "$report" \
+            --allowlist "$GITHUB_WORKSPACE/security/image-allowlist.json" --expect-classes os-pkgs,lang-pkgs
+
+      # Evidence, not a gate: the licences Trivy finds in the image, OS layer
+      # included, which the engine's own gate does not see (ADR-0187 open
+      # question 6). Judging them is the owner's decision, not this job's.
+      - name: Licence report — image (evidence only)
+        working-directory: ${{ runner.temp }}
+        run: trivy image --scanners license --license-full --format json --output "$RUNNER_TEMP/trivy-licences.json" "$IMAGE"
+
+      # Two identities are recorded: the image ID (what `docker load` reproduces,
+      # the air-gapped case) and the registry manifest digest (what a pull pins),
+      # here from the job's throwaway registry.
+      - name: Record the image digest
+        id: digest
+        env:
+          IMAGE_ID: ${{ steps.build.outputs.image-id }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          local_ref="localhost:5000/regulait-engine-${ENGINE}:${GITHUB_SHA}"
+          docker tag "$IMAGE" "$local_ref"
+          docker push -q "$local_ref"
+          ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$local_ref")"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          jq -n --arg engine "$ENGINE" --arg commit "$GITHUB_SHA" --arg event "$EVENT" \
+            --arg imageId "$IMAGE_ID" --arg manifestDigest "${ref#*@}" \
+            '{engine: $engine, dockerfile: ("engines/" + $engine + "/Dockerfile"), commit: $commit, event: $event,
+              imageId: $imageId, manifestDigest: $manifestDigest, signed: false}' > "$RUNNER_TEMP/digest.json"
+          cat "$RUNNER_TEMP/digest.json"
+          {
+            echo "### Engine image \`${ENGINE}\` built and scanned"
+            echo ""
+            echo "- Image ID: \`${IMAGE_ID}\`"
+            echo "- Manifest digest (the job's throwaway registry): \`${ref#*@}\`"
+            echo "- Commit: \`${GITHUB_SHA}\` (${EVENT})"
+            echo "- Signed: no; the \`engine-sign\` job signs on a push to main only."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the SBOM, the scan, the digest record and the build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-${{ matrix.engine }}-scan
+          path: |
+            ${{ runner.temp }}/sbom-image.cdx.json
+            ${{ runner.temp }}/trivy-image.json
+            ${{ runner.temp }}/trivy-licences.json
+            ${{ runner.temp }}/digest.json
+            ${{ runner.temp }}/build.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      # The gateway's red proof: every run that does not sign requires the
+      # verify command main uses to refuse this unsigned image.
+      - name: Verify REFUSES the unsigned image (red proof)
+        if: github.event_name != 'push'
+        env:
+          REF: ${{ steps.digest.outputs.ref }}
+        run: |
+          set -euo pipefail
+          COSIGN="$RUNNER_TEMP/bin/cosign" scripts/security-cosign-verify.sh "$REF" unsigned
+
+      - name: Hand the scanned image to the signing job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          docker save "$IMAGE" | gzip -1 > "$RUNNER_TEMP/image.tar.gz"
+
+      - name: Upload the scanned image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-${{ matrix.engine }}-image
+          path: ${{ runner.temp }}/image.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  engine-sign:
+    name: Sign and verify the engine image (${{ matrix.engine }})
+    # The gateway sign job's condition exactly: only main, and only an image
+    # that passed every other gate.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.engines.outputs.engines != '[]'
+    needs: [sast, secrets, dependencies, engines, engine-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: ${{ fromJSON(needs.engines.outputs.engines) }}
+    services:
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports:
+          - 5000:5000
+    env:
+      ENGINE: ${{ matrix.engine }}
+      IMAGE: regulait-engine-${{ matrix.engine }}:scan
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: engine-${{ matrix.engine }}-image
+          path: ${{ runner.temp }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: engine-${{ matrix.engine }}-scan
+          path: ${{ runner.temp }}/scan
+
+      # A matrix job has ONE set of outputs for all its legs, so the scanned
+      # image ID comes from this engine's digest record, not a job output.
+      - name: Load the scanned image and check it is the one the gates passed
+        id: ref
+        run: |
+          set -euo pipefail
+          scanned="$(jq -r '.imageId // empty' "$RUNNER_TEMP/scan/digest.json")"
+          gunzip -c "$RUNNER_TEMP/image.tar.gz" | docker load
+          got="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+          if [ -z "$scanned" ] || [ "$got" != "$scanned" ]; then
+            echo "::error::loaded image ${got} is not the scanned image ${scanned}"
+            exit 1
+          fi
+          local_ref="localhost:5000/regulait-engine-${ENGINE}:${GITHUB_SHA}"
+          docker tag "$IMAGE" "$local_ref"
+          docker push -q "$local_ref"
+          echo "ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$local_ref")" >> "$GITHUB_OUTPUT"
+
+      - name: Sign (keyless, this workflow's OIDC identity, logged to Rekor)
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/bin/cosign" sign --yes --allow-http-registry "$REF"
+
+      - name: Verify the signature and record the signed digest
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          COSIGN="$RUNNER_TEMP/bin/cosign" scripts/security-cosign-verify.sh "$REF" signed
+          mkdir -p "$RUNNER_TEMP/signed"
+          jq --arg signedDigest "${REF#*@}" \
+            --arg identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/security.yml@refs/heads/main" \
+            '. + {signed: true, signedDigest: $signedDigest, signerIdentity: $identity}' \
+            "$RUNNER_TEMP/scan/digest.json" > "$RUNNER_TEMP/signed/digest.json"
+          cat "$RUNNER_TEMP/signed/digest.json"
+          {
+            echo "### Engine image \`${ENGINE}\` signed"
+            echo ""
+            echo "Digest: \`${REF#*@}\` (image ID \`$(docker image inspect --format '{{.Id}}' "$IMAGE")\`)"
+            echo ""
+            echo "Signed keylessly by \`.github/workflows/security.yml@refs/heads/main\`; the Rekor entry is public."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the signed digest record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-${{ matrix.engine }}-signed
+          path: ${{ runner.temp }}/signed/digest.json
+          if-no-files-found: error
+          retention-days: 90
