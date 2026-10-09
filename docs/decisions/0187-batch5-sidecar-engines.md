@@ -738,6 +738,34 @@ without a judge now name one. No migration.
     creation and the workflow stage share, refuses an agent run without a judge with 422 `judge_required`. No engine
     name is hard-coded in the check.
 
+**Review round 7 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [74],
+`zz-b5-promptfoo.test.ts` "review round 7" [75] [76]. No migration.
+
+74. **A committed enrolment is recognised at start** [4227454987]. A crash after the new token was stored but before
+    the pending record was deleted left both; at the next start the pending record won, the stored (valid) credential
+    was never used, and without an enrolment token the runner stopped. At start, a stored token equal to the pending
+    secret means the enrolment committed: the stored token is used and the stale record deleted (three tries; a failure
+    to delete is logged and never blocks the credential, and the next start finds the same match).
+75. **Leases and queues follow the build** [4227454974]. After a build change, queued runs kept their old engine
+    version, the lease picked by engine id only, and the new build leased a pre-upgrade run that always ended
+    `result_mismatch`. Now (a) the lease takes only a queued run whose `engine_version` is the version the runner
+    presents; and (b) **picked: cancel, not re-version.** When the manifest sync sees a build change (version or
+    digest), in the transaction that holds the engine row `FOR UPDATE` and decided on that locked row, every run of
+    the engine still waiting (queued, or awaiting approval) is cancelled with `engine_build_changed` (its key, if any,
+    revoked; its pending approval superseded; audited `engine-run-cancelled`; a workflow-bound run's workflow told
+    after the commit). A run was requested, and approved, against the old build; carrying that approval to another
+    build silently is not acceptable, and the requester re-runs.
+76. **Supersession ends the old runner's runs in the same transaction** [4227454968]. The superseded runner was
+    revoked inside the registration transaction but its leased runs were ended, and their keys revoked, only after the
+    commit, so a crash or an audit failure in between left usable keys, and a replay never reconciled. Now the
+    registration transaction revokes the runner, ends every run it still leases (cancelled `runner_revoked`, key
+    revoked, audited) and audits `engine-runner-superseded`; only the workflow notification follows the commit. A
+    registration replay reconciles idempotently: any run still leased by a revoked runner of the engine ends, with
+    its key (audited `engine-runner-revoked-runs-reconciled`). The admin revocation route (`DELETE
+    /v1/engine-runners/:id`) had the same post-commit gap and now ends the runs in its own transaction too (and
+    reconciles when called on an already-revoked runner). A test fails the step right after the commit
+    (`engineRunTestHooks.afterRegisterTx`): the run is already cancelled and its key revoked.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
