@@ -526,6 +526,59 @@ real promptfoo 0.123.1 against a fake gateway), `apps/gateway/src/zz-b5-promptfo
     `platform: linux/amd64`, so an arm64 host emulates amd64 rather than building an image whose native binding cannot
     load. arm64 is open question 10.
 
+**Review round 2 (PR #205, Codex, 2026-10-09; 8 findings, each red first).** Tests: `loop.test.ts` [53] [54] [55],
+`promptfoo.test.ts` [52] [56] [57] [58] [59], `promptfoo-real.test.ts` [59] drift (opt-in), `zz-b5-promptfoo.test.ts`
+"review round 2" [53] [54], `zz-b5-engines.test.ts` (register replay), `zz-b5-compose.test.ts` [55]. No migration: the
+runner-generated credential uses the existing `engine_runners.token_hash`, `enrollment_token_id` and
+`engine_enrollment_tokens.used_at` / `runner_id`.
+
+52. **No model text in the raw report** [4225756959]. The envelope carried promptfoo's whole output file (generated
+    prompts, model responses, grader text) as `rawReport.contentBase64`. It now carries only the sha256 of the original
+    bytes with `bytes: 0` (nothing attached); the gateway stores the mapper's own items (ids, verdicts, counts) and the
+    hash. The encrypted raw-report store (decision 8) is unused for promptfoo.
+53. **A runner refreshes its own self-test** [4225756949]. After 24 hours the lease refuses the runner's report
+    (`engine_self_test_required`) and only registration accepted a new one. New runner-token route `POST
+    /v1/engine-runner/self-test` (on the allow-list): the report is evaluated exactly like registration's (manifest,
+    digest, version, switches, egress, freshness), must describe the image the runner registered with (else 422
+    `engine_self_test_inconsistent`), and is audited (`engine-runner-self-test-refreshed` / `-failed`). A passing report
+    also refreshes the engine's recorded self-test, but only for the build an admin enabled (the engine's record passed,
+    for the manifest's digest and version); a failing one switches the engine off. The shared loop re-runs the self-test
+    and submits it on that refusal (once per refusal streak), then leases again. **Default taken, owner may revisit:**
+    the refresh keeps an enabled engine enabled without a new admin action while the build is unchanged; the admin's
+    step-up was for that build.
+54. **The runner brings its own credential** [4225756962]. A registration response lost after the gateway spent the
+    enrolment token left the runner unrecoverable. The runner now generates its own token (`rge_` + 256 CSPRNG bits),
+    persists it (0600) BEFORE calling register, and sends only its sha256 (`tokenHash`), which the gateway stores as the
+    credential; nothing secret is returned. A transient failure is retried with the same secret, and the gateway answers a
+    spent (unexpired) enrolment token presented with the SAME hash with the same runner (`replayed: true`, audited
+    `engine-runner-register-replayed`); any other hash is 401 `engine_enrollment_invalid`, a revoked runner is never
+    replayed, and a spent token never mints a second runner. After a crash, the stored secret either is the credential
+    (the registration landed) or is refused and replaced with a new one. A hash already registered is 409
+    `engine_runner_token_conflict`.
+55. **The reported digest is a consistency check, not proof** [4225756971]. A container cannot prove which image it
+    runs: any digest it reports is a claim. What we can make true: the compose image reference and the digest the runner
+    reports are built from ONE variable (`REGULAIT_ENGINE_PROMPTFOO_DIGEST`; image `<repository>@<digest>`, never a tag;
+    the default is an all-zero digest that names no image), and the runner refuses to start unless the reference it was
+    given is digest-pinned and agrees with the digest (and is not the placeholder). Real admission is verifying the
+    image's signature at deploy time (cosign, ADR-0184), which is not built yet: **open item** (question 11).
+56. **The URL rule covers the transport, not prompt text** [4225756968]. The invariant scanned every string, so a
+    purpose that mentioned a URL was refused. It now checks every string inside the three provider objects (strict as
+    before) and makes the rest of the config's shape an allow-list (top-level keys, `redteam`, plugin and strategy
+    entries, `evaluateOptions`, `defaultTest`), so no other field can carry a transport setting at all.
+57. **Egress is only an off-gateway destination** [4225756975]. Any connection error was classified `egress_denied`,
+    including a refused or reset connection to the gateway itself. A connection error is now egress only when the error
+    names a destination host and none of them is the gateway's; a failure to reach the gateway, or one naming no host, is
+    an engine error (`unknown`).
+58. **An unplanned bucket counts nothing** [4225756965]. A result for a plugin or strategy the run did not plan is now
+    decided first: `unknown` with zero attempts and zero defeats, so it never counts as a pass or a fail.
+59. **The cloud-only list is generated from the pinned package** [4225756981]. `engines/promptfoo/extract-plugin-lists.mjs`
+    parses (does not execute) the pinned package's constants chunk and writes `packages/shared/src/engines/promptfoo-upstream.ts`
+    (source chunk and its sha256 recorded); the catalogue's cloud-only list is `REMOTE_ONLY_PLUGIN_IDS` (now including the
+    coding-agent collections and plugins and the medical, financial, pharmacy, insurance, ecommerce, telecom and realestate
+    lists: 93 ids) ∪ the unaligned harm set ∪ `bias:*`, and its dataset list is upstream's `DATASET_PLUGINS`. A test refuses
+    a local plugin that upstream needs remote generation for, a local id upstream does not have, or a dataset plugin
+    without a not-run disposition; the opt-in drift test re-extracts from an installed package and compares.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
@@ -576,3 +629,7 @@ compat surface is on (a run then fails at its first call); concurrency is per en
 10. **promptfoo on arm64 (decision 51).** The image is amd64 only because libsql's native binding is pinned per
     architecture. An arm64 image needs the matching binding chosen per build platform (and its licence and advisories
     checked); not attempted in B5-P.
+11. **Engine image admission at deploy time (decision 55).** The runner's self-reported digest only checks consistency
+    with its deployment. Proof needs the deployer to verify the image signature (cosign, against our signing identity)
+    before the container starts, and the engine images are not signed yet (they are not built). Until then an enabled
+    engine rests on the operator deploying the digest the manifest names.
