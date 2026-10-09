@@ -80,7 +80,7 @@ export type EngineNotRunReason = (typeof ENGINE_NOT_RUN_REASONS)[number];
 
 /**
  * a model-artifact scan's verdict (`artifact_scans.verdict`); only `clean` is clean. B5-M (migration
- * 0175, owner decision 1 pending confirmation): `no_known_unsafe` = an executable format in which
+ * 0175; owner decision 2026-10-09, ADR-0187 decision 105): `no_known_unsafe` = an executable format in which
  * modelscan found no known-unsafe operator. It is never clean and never admissible.
  */
 export const ARTIFACT_SCAN_VERDICTS = ["clean", "no_known_unsafe", "unsafe", "unknown", "not_run"] as const;

@@ -14,7 +14,7 @@
  *   record   every terminal write of an artifact run (result, cancel, timeout, not-run) writes one
  *            `artifact_scans` row in the same transaction, with the verdict the GATEWAY derives
  *            (`deriveArtifactScanVerdict`) from the format it detected at upload: an executable
- *            format is never `clean` (owner decision 1, pending confirmation).
+ *            format is never `clean` (safe formats only: owner decision 2026-10-09, ADR-0187 decision 105).
  *
  * No store configured → uploads are refused (503), never kept in the database or memory.
  *

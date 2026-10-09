@@ -11,9 +11,10 @@
  *
  * Each licence term is ALLOWED when it is on the ADR-0176 list (MIT, Apache-2.0, BSD-2-Clause,
  * BSD-3-Clause, ISC, Unlicense, CC0-1.0, 0BSD); otherwise it is admitted only when
- * `licence-allow.json` names that subject and that licence, and EVERY entry of that file must say
- * exactly "pending owner decision" (owner decision 2, pending): nothing outside the list is admitted
- * silently, and the allow file cannot carry a decision the owner has not taken. Anything else is
+ * `licence-allow.json` names that subject and that licence, and EVERY entry of that file says either
+ * exactly "pending owner decision" or a recorded owner acceptance, "accepted by owner <YYYY-MM-DD>
+ * (ADR-NNNN decision N)" (ADR-0187 decision 106, owner 2026-10-09): nothing outside the list is
+ * admitted silently, and the allow file cannot carry a decision in any other form. Anything else is
  * DENIED and the build fails; so is an allow entry that matches nothing (a stale admission).
  *
  * Usage: node licence-gate.mjs <site-packages> <licence-allow.json> [--runtime python=PSF-2.0]
@@ -24,6 +25,12 @@ import path from "node:path";
 
 export const ALLOWED = new Set(["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unlicense", "CC0-1.0", "0BSD"]);
 export const PENDING_TEXT = "pending owner decision";
+/** a recorded owner acceptance names its date and the ADR decision that records it */
+export const ACCEPTED_TEXT = /^accepted by owner \d{4}-\d{2}-\d{2} \(ADR-\d{4} decision \d+\)$/;
+/** the only two forms an allow-file decision may take */
+export function decisionValid(d) {
+  return d === PENDING_TEXT || (typeof d === "string" && ACCEPTED_TEXT.test(d));
+}
 
 /** what each bundled native library is (by the name before its first hyphen), verified from the wheels' licence files */
 export const NATIVE_LIBRARIES = {
@@ -101,7 +108,7 @@ export function allowProblems(allow) {
   allow.forEach((e, i) => {
     if (!e || typeof e !== "object") return out.push(`entry ${i} is not an object`);
     if (typeof e.subject !== "string" || typeof e.licence !== "string") out.push(`entry ${i} needs subject and licence`);
-    if (e.decision !== PENDING_TEXT) out.push(`entry ${i} (${e.subject}) must say decision "${PENDING_TEXT}"; the owner has not decided`);
+    if (!decisionValid(e.decision)) out.push(`entry ${i} (${e.subject}) must say decision "${PENDING_TEXT}" or "accepted by owner <date> (ADR-NNNN decision N)"`);
     if (typeof e.why !== "string" || !e.why.trim()) out.push(`entry ${i} (${e.subject}) must say why it is needed`);
   });
   return out;
@@ -118,7 +125,7 @@ export function judge(rows, allow) {
       allowed.push(r);
       continue;
     }
-    const i = Array.isArray(allow) ? allow.findIndex((e) => e.subject === r.subject && e.licence === r.term && e.decision === PENDING_TEXT) : -1;
+    const i = Array.isArray(allow) ? allow.findIndex((e) => e.subject === r.subject && e.licence === r.term && decisionValid(e.decision)) : -1;
     if (r.term !== null && i >= 0) {
       used.add(i);
       pending.push(r);
@@ -139,8 +146,9 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const allow = JSON.parse(readFileSync(allowFile, "utf8"));
   const problems = allowProblems(allow);
   const res = judge(inventory(site, runtime), allow);
-  console.log(`licence gate: ${res.allowed.length} allowed, ${res.pending.length} admitted pending an owner decision, ${res.denied.length} denied`);
-  for (const r of res.pending) console.log(`  pending  ${r.subject} ${r.version} ${r.term}`);
+  console.log(`licence gate: ${res.allowed.length} allowed, ${res.pending.length} admitted by the allow file, ${res.denied.length} denied`);
+  const decisionOf = (r) => allow.find((e) => e.subject === r.subject && e.licence === r.term)?.decision ?? "?";
+  for (const r of res.pending) console.log(`  admitted ${r.subject} ${r.version} ${r.term}: ${decisionOf(r)}`);
   for (const r of res.denied) console.log(`  DENIED   ${r.subject} ${r.version} ${r.licence}`);
   for (const e of res.stale) console.log(`  STALE    allow entry ${e.subject} ${e.licence} matches nothing installed`);
   for (const p of problems) console.log(`  INVALID  ${p}`);

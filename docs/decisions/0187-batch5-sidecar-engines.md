@@ -1253,8 +1253,9 @@ with each decision).
      **`credentialIsolation` stays false** (coordinator's brief; decision 79's audited, stepped-up acceptance applies):
      this layout does keep the credential out of the scanner, but the flag waits for a built and verified image.
      Red: the compose test fails with the scanner given `networks: [engines]`.
-105. **What clean means — strict default, PENDING OWNER CONFIRMATION (owner decision 1).** modelscan is one signal
-     and a deny-list, so it cannot certify that an executable format is safe to load. The gateway derives the
+105. **What clean means: safe formats only — owner decision, 2026-10-09.** Built strict and confirmed by the owner
+     as built. modelscan is one signal and a deny-list, so it cannot certify that an executable format is safe to
+     load. Rejected: extending the deny-list alone, and our own allow-list of pickle globals (open question 14). The gateway derives the
      artifact's verdict (`deriveArtifactScanVerdict`) from the format IT detected at upload, never from the runner:
      - any unsafe operator → `unsafe`, however the run ended;
      - a run that did not complete → `unknown` (`not_run` when it never ran);
@@ -1273,16 +1274,25 @@ with each decision).
      inconclusive", "Not scanned (unsupported format)". Red: making pickle's ceiling `clean` fails the clean-pickle
      proof; trusting the runner's format claim, or ignoring an error item beside a passing scan, fails the
      consistency proof; a forged runner envelope through the real gateway reads `unknown`.
-106. **The licence gate and its allow file — PENDING OWNER DECISION (owner decision 2).** `engines/modelscan/
-     licence-gate.mjs` runs in the build on the INSTALLED site-packages: every distribution by its METADATA licence,
-     every native library a wheel bundles (`<pkg>.libs/*.so*`) by a fixed table, and the Python runtime. A term on the
-     ADR-0176 list passes; anything else passes only when `licence-allow.json` names that subject and that licence
-     AND the entry says exactly "pending owner decision"; an entry saying anything else, or matching nothing (stale),
-     fails the build. The file holds six entries: numpy's Zlib; numpy's bundled `libgfortran`
-     (GPL-3.0-or-later WITH GCC-exception-3.1) and `libquadmath` (LGPL-2.1-or-later); h5py's bundled HDF5 libraries
-     (the HDF Group's BSD-style licence); CPython (PSF-2.0). Run on the cp312 wheels the lockfile pins: 15 allowed, 6
-     pending, 0 denied. Documented in `engines/modelscan/THIRD_PARTY.md`. The image stays inadmissible until the owner
-     decides; the manifest lists it as unverified.
+106. **The licence gate and its allow file; numpy's runtime code accepted with a recorded exception — owner
+     decision, 2026-10-09.** `engines/modelscan/licence-gate.mjs` runs in the build on the INSTALLED site-packages:
+     every distribution by its METADATA licence, every native library a wheel bundles (`<pkg>.libs/*.so*`) by a fixed
+     table, and the Python runtime. A term on the ADR-0176 list passes; anything else passes only when
+     `licence-allow.json` names that subject and that licence AND the entry's decision is either a recorded owner
+     acceptance, "accepted by owner <YYYY-MM-DD> (ADR-NNNN decision N)", or exactly "pending owner decision"; an entry
+     with any other decision, or matching nothing (stale), fails the build.
+     - **Accepted by the owner, 2026-10-09 (a recorded exception to ADR-0176), covering numpy's bundled runtime code:**
+       numpy's Zlib code (a permissive licence, no copyleft); `libgfortran`, GPL-3.0-or-later WITH
+       GCC-exception-3.1 (a runtime-library exception: independent code may use the GCC runtime without GPL
+       obligations); `libquadmath`, LGPL-2.1-or-later (an unmodified, dynamically linked LGPL library shipped as its
+       own shared object). Each of the three entries reads "accepted by owner 2026-10-09 (ADR-0187 decision 106)"
+       with that reason, in the allow file and in `engines/modelscan/THIRD_PARTY.md`.
+     - **Not put to the owner, still pending:** h5py's bundled HDF5 libraries (the HDF Group's BSD-style licence) and
+       CPython (PSF-2.0); their entries still say "pending owner decision" (open question 15).
+     - **garak reuses this decision** for the same numpy runtime code.
+
+     Run on the cp312 wheels the lockfile pins: 15 allowed, 6 admitted by the allow file (3 accepted, 3 pending), 0
+     denied. The image stays inadmissible while any entry is pending; the manifest lists it as unverified.
 107. **One patch: modelscan 0.8.8 cannot scan anything from a settings file.** Measured: with any `--settings-file`,
      every scanner raises on `format_property.value` (a TOML file can only hold string keys, the in-code defaults hold
      `Property` objects), so an `os.system` pickle exits 3, nothing scanned, seven `MODEL_SCAN` errors (fail closed,
@@ -1443,19 +1453,23 @@ compat surface is on (a run then fails at its first call); concurrency is per en
     container posture stays as it is (non-root, `cap_drop: [ALL]`, `no-new-privileges`, read-only root). When it ships,
     the manifest's `credentialIsolation` becomes true and the enable gate of decision 79 no longer applies. Chosen by
     the coordinator 2026-10-09, pending the owner's confirmation.
-14. **What a clean model-artifact scan means (B5-M, decision 105): PENDING OWNER CONFIRMATION.** Built strict: only a
-    verified safetensors file can be `clean` (admissible); every executable format is at best `no_known_unsafe` with an
-    `executable_format` finding; the chip never says "safe". The owner may instead choose G19's options (a) a longer
-    deny-list only, or (b) our own allow-list of pickle globals (our code; ADR-0176 needs a written exception).
-15. **numpy for the modelscan image (B5-M, decisions 106 and 108): PENDING OWNER DECISION.** (a) Admit, through the
-    allow file, numpy's bundled GCC runtime libraries (GPL-3.0-or-later WITH GCC-exception-3.1, LGPL-2.1-or-later) and
-    its Zlib code, h5py's HDF5 licence and CPython's PSF-2.0 (each entry says "pending owner decision" today), or build
-    numpy without the GCC runtime; (b) modelscan 0.8.8's NumPy scanner fails on numpy 2.x, so every `.npy` is
-    `unknown`: pin numpy 1.26 for the image, or strip the header in the runner and scan the object payload as a pickle.
+14. ~~What a clean model-artifact scan means (B5-M, decision 105)~~ — **decided by the owner 2026-10-09: safe formats
+    only**, as built (only a verified safetensors file can be `clean`; an executable format is at best
+    `no_known_unsafe`, with an `executable_format` finding; the chip never says "safe"). Rejected: extending the
+    deny-list alone, and our own allow-list of pickle globals.
+15. **The modelscan image's licences and numpy (B5-M, decisions 106 and 108).** numpy's bundled runtime code (Zlib,
+    `libgfortran`, `libquadmath`) was **accepted by the owner 2026-10-09** (decision 106). **Still open:** (a) h5py's
+    bundled HDF5 libraries (LicenseRef-HDF5) and CPython's PSF-2.0, not yet put to the owner (their allow-file entries
+    say "pending owner decision", so the image is not admissible yet); (b) modelscan 0.8.8's NumPy scanner fails on
+    numpy 2.x, so every `.npy` reads `unknown` (fail safe, kept): pin numpy 1.26 for the image, or strip the header in
+    the runner and scan the object payload as a pickle.
 16. **Building the engine images in CI (B5-P and B5-M).** CI's `docker-build` job builds only the gateway image. Until a
     job builds `engines/promptfoo` and `engines/modelscan` (and signs, scans and records their digests), no engine
-    image exists anywhere and no engine can be enabled. Also open for modelscan: whether `credentialIsolation` becomes
-    true for the two-container build once it is built and verified (decision 104).
+    image exists anywhere and no engine can be enabled.
 17. **TensorFlow for `.keras` and SavedModel files (B5-M, decision 109).** Not installed: those formats are `not_run`.
     Adding it is a separate decision (a large native parser of hostile protobuf; its saved-metadata import path is
     unverified for the TensorFlow the extra resolves to).
+18. **`credentialIsolation` for the modelscan two-container build (B5-M, decision 104).** The scanner, which parses
+    the artifact, runs in its own container with no network and no runner token, so this build keeps the credential
+    out of the engine process. The manifest keeps `credentialIsolation: false` until the image is built and that
+    layout verified; whether it then becomes true (and decision 79's acceptance stops applying to modelscan) is open.

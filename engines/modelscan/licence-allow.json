@@ -2,20 +2,20 @@
   {
     "subject": "numpy",
     "licence": "Zlib",
-    "decision": "pending owner decision",
-    "why": "numpy 2.5.3's licence expression is BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0; Zlib (permissive, not copyleft) is not on the ADR-0176 list. numpy is a hard dependency of modelscan (its pickle scanner imports it)."
+    "decision": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+    "why": "accepted: Zlib is a permissive licence (no copyleft) on code numpy ships; numpy is a hard dependency of modelscan's pickle scanner."
   },
   {
     "subject": "numpy.libs/libgfortran",
     "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
-    "decision": "pending owner decision",
-    "why": "the GCC Fortran runtime bundled in numpy's manylinux wheel (for OpenBLAS). The GCC Runtime Library Exception lets independent code link it without GPL obligations; ADR-0176 bars GPL in shipped code, so the owner decides (R10 Consequences for B5-M 7). The alternative is building numpy without it."
+    "decision": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+    "why": "accepted: a GCC runtime library under the GCC Runtime Library Exception, which lets independent code use it without GPL obligations; shipped unmodified inside numpy's wheel."
   },
   {
     "subject": "numpy.libs/libquadmath",
     "licence": "LGPL-2.1-or-later",
-    "decision": "pending owner decision",
-    "why": "the GCC quad-precision runtime bundled in numpy's manylinux wheel. Shipped unmodified as a separate shared library; LGPL is outside ADR-0176's list, so the owner decides."
+    "decision": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+    "why": "accepted: an unmodified, dynamically linked LGPL library (the GCC quad-precision runtime) shipped as a separate shared object inside numpy's wheel."
   },
   {
     "subject": "h5py.libs/libhdf5",

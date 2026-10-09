@@ -139,10 +139,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     unverified: [
       "image digest and signature (the image is not built yet)",
       "maintainer count (the repository's merge rights could not be read)",
-      "transitive licences: numpy's wheel bundles libgfortran (GPL-3.0-or-later WITH GCC-exception-3.1) and libquadmath (LGPL-2.1-or-later) and carries Zlib code; h5py bundles HDF5 (BSD-style, not on the ADR-0176 list); the Python runtime is PSF-2.0. Each is admitted only through engines/modelscan/licence-allow.json, every entry pending an owner decision; the base image OS layer is not yet scanned",
+      "transitive licences: numpy's bundled runtime code (Zlib, libgfortran under the GCC runtime exception, libquadmath under LGPL-2.1) was accepted by the owner on 2026-10-09 (ADR-0187 decision 106); h5py's bundled HDF5 (BSD-style, not on the ADR-0176 list) and the Python runtime (PSF-2.0) still await an owner decision; the base image OS layer is not yet scanned",
       "advisories of the Python closure (pip-audit or OSV at the first image build)",
       "runtime behaviour inside the built image (egress test, the scanner's no-network container)",
-      "what a clean result means: modelscan is a deny-list, so an executable format never passes (pending owner confirmation)",
     ],
   },
   garak: {

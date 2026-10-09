@@ -18,7 +18,8 @@
 #     settings come from a file;
 #   - the licence gate (licence-gate.mjs) on the INSTALLED closure, its bundled native libraries and
 #     the Python runtime: anything outside the ADR-0176 list fails the build unless licence-allow.json
-#     admits it, and every entry there must say "pending owner decision" (owner decision 2);
+#     admits it, and every entry there must be a recorded owner acceptance (numpy's runtime code, ADR-0187
+#     decision 106) or say "pending owner decision" (HDF5, CPython);
 #   - our settings file baked read-only at /opt/modelscan/modelscan-settings.toml.
 # Signing, the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) and the image
 # SBOM join publish-image.yml / security.yml when the image is first built in CI (ADR-0184), as for

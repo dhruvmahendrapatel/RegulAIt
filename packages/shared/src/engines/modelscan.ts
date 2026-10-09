@@ -12,7 +12,7 @@
  * that layout and its pickle scanner reads every pickle in the stream (measured: a legacy `.pt` with
  * `os.system` in its third pickle exits 0 clean as `.pt` and 1 with the issue as `.pkl`).
  *
- * WHAT CLEAN MEANS (owner decision 1, PENDING OWNER CONFIRMATION; ADR-0187 decision 105). modelscan is
+ * WHAT CLEAN MEANS: SAFE FORMATS ONLY (owner decision, 2026-10-09; ADR-0187 decision 105). modelscan is
  * one signal and a deny-list: it cannot certify that an executable format is safe to load. So:
  *   - a pickle-family artifact (pickle, legacy or zip PyTorch, joblib, numpy, Keras H5) can never
  *     reach `clean`: at best `no_known_unsafe` ("no known-unsafe operator found") together with an
@@ -406,7 +406,7 @@ export function formatItem(format: ArtifactFormat, detail?: string): { item: Eng
     };
   }
   if (plan.executable) {
-    // owner decision 1 (pending confirmation): an executable format is a finding of its own
+    // owner decision 2026-10-09 (ADR-0187 decision 105): an executable format is a finding of its own
     return {
       item: item(
         MODELSCAN_FORMAT_ITEM_KEY,
@@ -617,7 +617,7 @@ export function deriveArtifactScanVerdict(input: {
   return out("unknown", "this format can never be better than unknown");
 }
 
-/** may this verdict pass an admission check? Only `clean` (owner decision 1, pending confirmation) */
+/** may this verdict pass an admission check? Only `clean` (owner decision 2026-10-09, ADR-0187 decision 105) */
 export function artifactScanAdmissible(verdict: string): boolean {
   return verdict === "clean";
 }

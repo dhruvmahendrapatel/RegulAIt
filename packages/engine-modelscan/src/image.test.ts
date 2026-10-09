@@ -6,7 +6,8 @@
  *     read-only settings are in the build; the runtime is non-root, ships no pip, sets a public
  *     egress-probe address;
  *   - the licence gate denies what ADR-0176 bars, admits nothing outside its list unless the allow
- *     file names it, and refuses an allow file with any entry that is not "pending owner decision";
+ *     file names it, and refuses an allow file with any entry that is neither "pending owner decision"
+ *     nor a recorded owner acceptance ("accepted by owner <date> (ADR-NNNN decision N)");
  *   - the settings patch refuses to run on anything but exactly the expected code.
  */
 import { describe, expect, it } from "vitest";
@@ -72,8 +73,17 @@ describe("the modelscan image's inputs", () => {
     expect(Object.keys(ENGINE_MANIFEST.modelscan.usageDataEnv)).toEqual([SCANNER_ISOLATED_SWITCH]);
   });
 
-  it("every allow-file entry is pending an owner decision, and the list is exactly the known one", () => {
+  it("every allow-file entry is a recorded owner acceptance or pending; the list is exactly the known one", () => {
     expect(gate.allowProblems(allowFile)).toEqual([]);
+    // ADR-0187 decision 106 (owner, 2026-10-09): numpy's bundled runtime code accepted; HDF5 and CPython not asked yet
+    expect(Object.fromEntries(allowFile.map((e) => [`${e.subject} ${e.licence}`, e.decision]))).toEqual({
+      "numpy Zlib": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+      "numpy.libs/libgfortran GPL-3.0-or-later WITH GCC-exception-3.1": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+      "numpy.libs/libquadmath LGPL-2.1-or-later": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+      "h5py.libs/libhdf5 LicenseRef-HDF5": "pending owner decision",
+      "h5py.libs/libhdf5_hl LicenseRef-HDF5": "pending owner decision",
+      "python PSF-2.0": "pending owner decision",
+    });
     expect(allowFile.map((e) => `${e.subject} ${e.licence}`).sort()).toEqual([
       "h5py.libs/libhdf5 LicenseRef-HDF5",
       "h5py.libs/libhdf5_hl LicenseRef-HDF5",
@@ -83,6 +93,9 @@ describe("the modelscan image's inputs", () => {
       "python PSF-2.0",
     ]);
     expect(gate.allowProblems([{ subject: "numpy", licence: "Zlib", decision: "approved", why: "x" }])).toHaveLength(1);
+    // an acceptance must name its date and the ADR decision that records it
+    expect(gate.allowProblems([{ subject: "numpy", licence: "Zlib", decision: "accepted by owner", why: "x" }])).toHaveLength(1);
+    expect(gate.allowProblems([{ subject: "numpy", licence: "Zlib", decision: "accepted by owner 2026-10-09 (ADR-0187 decision 106)", why: "x" }])).toEqual([]);
     expect(gate.allowProblems([{ subject: "numpy", licence: "Zlib", decision: "pending owner decision" }])).toHaveLength(1);
   });
 
