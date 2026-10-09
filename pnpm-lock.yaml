@@ -101,6 +101,9 @@ importers:
       '@regulait/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../../packages/engine-runner
       '@regulait/git-provider':
         specifier: workspace:*
         version: link:../../packages/git-provider
@@ -174,12 +177,12 @@ importers:
         specifier: 3.25.2
         version: 3.25.2(zod@3.25.76)
     devDependencies:
+      '@regulait/engine-modelscan':
+        specifier: workspace:*
+        version: link:../../packages/engine-modelscan
       '@regulait/engine-promptfoo':
         specifier: workspace:*
         version: link:../../packages/engine-promptfoo
-      '@regulait/engine-runner':
-        specifier: workspace:*
-        version: link:../../packages/engine-runner
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -294,6 +297,28 @@ importers:
       drizzle-kit:
         specifier: ^0.31.4
         version: 0.31.11
+
+  packages/engine-modelscan:
+    dependencies:
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../engine-runner
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      smol-toml:
+        specifier: 1.9.0
+        version: 1.9.0
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.15))
 
   packages/engine-promptfoo:
     dependencies:
@@ -3150,6 +3175,10 @@ packages:
   smart-buffer@4.2.0:
     resolution: {integrity: sha512-94hK0Hh8rPqQl2xXc3HsaBoOXKV20MToPkcXvwbISWLEs+64sBq5kFgn2kJDHb1Pry9yrP0dxrCI9RRci7RXKg==}
     engines: {node: '>= 6.0.0', npm: '>= 3.0.0'}
+
+  smol-toml@1.9.0:
+    resolution: {integrity: sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ==}
+    engines: {node: '>= 18'}
 
   socks-proxy-agent@8.0.5:
     resolution: {integrity: sha512-HehCEsotFqbPW9sJ8WVYB6UbmIMv7kUUORIF2Nncq4VQvBfNBLibW9YZR5dlYCSUhwcD628pRllm7n+E+YTzJw==}
@@ -6387,6 +6416,8 @@ snapshots:
   simple-statistics@7.12.1: {}
 
   smart-buffer@4.2.0: {}
+
+  smol-toml@1.9.0: {}
 
   socks-proxy-agent@8.0.5:
     dependencies:

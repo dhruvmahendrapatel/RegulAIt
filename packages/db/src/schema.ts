@@ -57,6 +57,7 @@ import {
   WEBAUTHN_CHALLENGE_PURPOSES,
   // ADR-0187 (migration 0173): the batch-5 engine vocabularies, in lockstep
   // with the migration's CHECKs by being the same constants
+  ARTIFACT_FORMATS,
   ARTIFACT_SCAN_VERDICTS,
   ENGINE_IDS,
   ENGINE_ITEM_VERDICTS,
@@ -3803,6 +3804,8 @@ export const orgSettings = pgTable(
     engineRawReportRetentionDays: integer("engine_raw_report_retention_days").notNull().default(90),
     /** agentic, offensive and unclassified engine sets need approval; off relaxes it */
     engineSensitiveSetApproval: boolean("engine_sensitive_set_approval").notNull().default(true),
+    /** B5-M (migration 0175): the largest model-artifact upload, in MiB; larger relaxes it */
+    modelArtifactMaxMegabytes: integer("model_artifact_max_megabytes").notNull().default(512),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
@@ -4430,6 +4433,7 @@ export const orgSettings = pgTable(
       "org_settings_engine_raw_report_retention_days_check",
       sql`${t.engineRawReportRetentionDays} BETWEEN 1 AND 3650`,
     ),
+    check("org_settings_model_artifact_max_megabytes_check", sql`${t.modelArtifactMaxMegabytes} BETWEEN 1 AND 8192`),
   ],
 );
 
@@ -5355,6 +5359,8 @@ export const modelCardEvidence = pgTable(
       sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'engine_scan' AND ${t.artifactScanId} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.externalRef} IS NULL)`,
     ),
     index("model_card_evidence_card_idx").on(t.cardId),
+    // ADR-0187 B5-M (migration 0175, PR #212 review [4234946093]): a scan is cited on a card at most once
+    uniqueIndex("model_card_evidence_card_scan_unique").on(t.cardId, t.artifactScanId).where(sql`${t.artifactScanId} IS NOT NULL`),
     uniqueIndex("model_card_evidence_run_uq")
       .on(t.cardId, t.evalRunId)
       .where(sql`${t.evalRunId} IS NOT NULL`),
@@ -11820,7 +11826,7 @@ export const engineRunners = pgTable(
 );
 export type EngineRunnerRow = typeof engineRunners.$inferSelect;
 
-/** An uploaded model artifact (B5-M fills the upload; the foundation holds the shape). */
+/** An uploaded model artifact (B5-M: POST /v1/model-artifacts; content-addressed by sha256). */
 export const modelArtifacts = pgTable(
   "model_artifacts",
   {
@@ -11837,6 +11843,9 @@ export const modelArtifacts = pgTable(
   (t) => [
     check("model_artifacts_sha256_check", sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
     check("model_artifacts_size_check", sql`${t.sizeBytes} >= 0`),
+    // B5-M (migration 0175): the format comes from the bytes (ARTIFACT_FORMATS); storage is by sha256
+    check("model_artifacts_format_check", sql`${t.format} IN (${sql.raw(ARTIFACT_FORMATS.map((f) => `'${f}'`).join(", "))})`),
+    check("model_artifacts_storage_key_check", sql`${t.storageKey} = 'sha256/' || ${t.sha256}`),
     index("model_artifacts_sha256_idx").on(t.sha256),
   ],
 );
@@ -11999,5 +12008,8 @@ export const artifactScans = pgTable(
   (t) => [
     index("artifact_scans_artifact_idx").on(t.artifactId),
     check("artifact_scans_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
+    // B5-M (migration 0175): clean only for a verified non-executable format; one scan per run
+    check("artifact_scans_clean_format_check", sql`${t.verdict} <> 'clean' OR ${t.format} = 'safetensors'`),
+    uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );

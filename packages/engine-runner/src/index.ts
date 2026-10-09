@@ -6,3 +6,5 @@ export * from "./egress.js";
 export * from "./process.js";
 export * from "./runner.js";
 export * from "./loop.js";
+export * from "./artifact.js";
+export { fsyncDir } from "./durable.js";

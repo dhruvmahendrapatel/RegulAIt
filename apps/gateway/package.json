@@ -49,6 +49,7 @@
     "@regulait/api-client": "workspace:*",
     "@regulait/connector-provider": "workspace:*",
     "@regulait/db": "workspace:*",
+    "@regulait/engine-runner": "workspace:*",
     "@regulait/git-provider": "workspace:*",
     "@regulait/infra-provider": "workspace:*",
     "@regulait/model-provider": "workspace:*",
@@ -75,8 +76,8 @@
     "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
+    "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
-    "@regulait/engine-runner": "workspace:*",
     "@types/node": "26.1.1",
     "simple-statistics": "7.12.1",
     "vitest": "^4.1.11",

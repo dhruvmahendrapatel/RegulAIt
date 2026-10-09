@@ -14,6 +14,7 @@
  * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
  * them per engine, and network denial stays the real control either way.
  */
+import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
@@ -108,21 +109,40 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     id: "modelscan",
     kind: "model_scan",
     displayName: "modelscan",
-    version: "0.8.8",
+    // B5-M: pinned by hash in engines/modelscan/requirements.txt (image.test.ts keeps them in lockstep)
+    version: MODELSCAN_ENGINE_VERSION,
     generation: 1,
+    // B5-M: the image (engines/modelscan/Dockerfile) has not been built anywhere that could report a
+    // real digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "Apache-2.0",
     maintainerCount: null,
-    usageDataEnv: {},
+    // modelscan has no telemetry, update check or download (R10: measured under strace and with no
+    // network at all), so it has no switch of its own. The one entry here is the SCANNER container's
+    // own egress self-test (network_mode: none), which the runner reports as true only when that
+    // report is fresh, names the pinned version and reached nothing (ADR-0187 decision 104;
+    // packages/engine-modelscan/src/selftest.ts). Network denial is the control.
+    usageDataEnv: { REGULAIT_MODELSCAN_SCANNER_ISOLATED: "1" },
     needsModelAccess: false,
     requiresJudge: false,
+    // B5-M: the scanner already runs in its own container with no network and no runner token
+    // (ADR-0187 decision 104), but the flag stays false until the built image is verified, so
+    // decision 79's gate applies: enabling needs the audited, stepped-up acceptance
     credentialIsolation: false,
-    sets: {},
-    airGappedReducedSet: [],
-    lastVerified: "2026-10-08",
-    // maintenance only: the 12-month release rule lapses around 2027-02 (ADR-0187 open question 3)
+    // one set: scan the target artifact. Any other set is unclassified (offensive: approval first).
+    sets: { scan: "standard" },
+    // planning-time exclusions (decision 61): a format this build has no scanner for
+    airGappedReducedSet: modelscanReducedSet(),
+    lastVerified: "2026-10-09",
+    // maintenance only: the 12-month release rule lapses on 2027-02-18 (R10; ADR-0187 open question 3)
     reCheckBy: "2027-02-18",
-    unverified: [...UNVERIFIED_COMMON],
+    unverified: [
+      "image digest and signature (the image is not built yet)",
+      "maintainer count (the repository's merge rights could not be read)",
+      "transitive licences: numpy's bundled runtime code (Zlib, libgfortran under the GCC runtime exception, libquadmath under LGPL-2.1) was accepted by the owner on 2026-10-09 (ADR-0187 decision 106); h5py's bundled HDF5 (BSD-style, not on the ADR-0176 list) and the Python runtime (PSF-2.0) still await an owner decision; the base image OS layer is not yet scanned",
+      "advisories of the Python closure (pip-audit or OSV at the first image build)",
+      "runtime behaviour inside the built image (egress test, the scanner's no-network container)",
+    ],
   },
   garak: {
     id: "garak",

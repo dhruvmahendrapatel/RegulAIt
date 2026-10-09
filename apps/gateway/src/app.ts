@@ -324,6 +324,8 @@ export interface BuildAppOptions {
    * passes a manifest with a built digest, and taxonomy rows), and the gateway
    * base a runner is told to call. Code-only: never env or admin input. */
   engines?: Pick<EngineOptions, "manifest" | "taxonomy" | "gatewayBaseUrl">;
+  /** ADR-0187 B5-M TEST SEAM: the model-artifact store (default: from the environment; none = uploads refused) */
+  artifactStore?: ArtifactStore | null;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -456,6 +458,7 @@ import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
+import { registerModelArtifactRoutes, type ArtifactStore } from "./model-artifacts.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
@@ -5228,6 +5231,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // (runner token only: registerEngineRunnerScopeHook).
   registerEngineRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
   registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
+  // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
+  // runner's artifact stream (runner token, live lease only)
+  registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a
