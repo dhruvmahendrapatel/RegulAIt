@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { ENGINE_RUNNER_TOKEN_PREFIX, type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
 import { removeFileDurable, writeFileDurable } from "./durable.js";
-import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
+import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, RunnerMalformedResponseError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
 
 /**
  * PR #205 review round 6 [72]: an enrolment under way — the new secret, and the token it supersedes
@@ -252,6 +252,7 @@ function eventOf(e: unknown): RunnerEvent {
 }
 
 function whyOf(e: unknown): string {
+  if (e instanceof RunnerMalformedResponseError) return `${e.status} with no valid answer`;
   return e instanceof RunnerHttpError ? (e.code ?? String(e.status)) : "unreachable";
 }
 
@@ -459,6 +460,21 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
             stopMessage =
               "this runner's image is not the engine's current build, so the gateway refuses to register it: deploy the current image (the engine's manifest names its digest and version)";
             go({ kind: "enrolment_refused" }, "engine_runner_build_obsolete");
+            break;
+          }
+          // PR #205 follow-up [101]: a 2xx whose body is not a valid answer is not a refusal. The
+          // registration may have committed, so the secret is confirmed as a credential (decision 77's
+          // path: any authenticated answer keeps it; a 401 registers it again, a same-hash replay)
+          if (e instanceof RunnerMalformedResponseError) {
+            p.attempts++;
+            if (p.attempts >= (opts.registerAttempts ?? 5)) {
+              stopMessage = `registration did not succeed (${e.status} with no valid answer); ${stopMessage}`;
+              go({ kind: "enrolment_refused" }, "malformed_answer");
+              break;
+            }
+            opts.log?.(`registration answered ${e.status} with no valid answer (${e.why}); checking the secret as a credential`);
+            p.confirm = true;
+            await sleep(Math.min(30_000, base * 2 ** (p.attempts - 1)));
             break;
           }
           // PR #205 review round 13 [95]: a gateway replica whose engine manifest is older than the

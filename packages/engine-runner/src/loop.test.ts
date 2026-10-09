@@ -754,3 +754,77 @@ describe("PR #205 round 15 [99]: after the lease is acquired, nothing re-leases 
     }
   });
 });
+
+describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient, never a definitive one", () => {
+  const RUN_ID = "0000000b-0000-4000-8000-000000000000";
+  const fullLease = () => ({
+    runId: RUN_ID,
+    engineId: "promptfoo",
+    engineVersion: "1",
+    spec: { config: { sets: ["basic"], params: {} }, trials: 1 },
+    target: null,
+    judge: null,
+    artifacts: [],
+    deadlineAt: new Date(Date.now() + 3_600_000).toISOString(),
+    budgetUsd: null,
+  });
+
+  it("a committed lease whose 200 body is truncated, then one that is not a lease: the SAME request id is retried and the run is run once", async () => {
+    const leaseIds: string[] = [];
+    const results: string[] = [];
+    let adapterRuns = 0;
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      if (p.endsWith("/lease")) {
+        const id = String(body["requestId"]);
+        const first = leaseIds[0];
+        leaseIds.push(id);
+        // the gateway leased the run to the first attempt; it re-issues it to that id only (decision 94)
+        if (first !== undefined && id !== first) return { status: 204, json: async () => null };
+        if (leaseIds.length === 1) return { status: 200, json: async () => JSON.parse('{"runId":"0000000b-0000-4000-8000-0000') }; // truncated
+        if (leaseIds.length === 2) return { status: 200, json: async () => ({ runId: RUN_ID }) }; // JSON, but not a lease
+        return { status: 200, json: async () => fullLease() };
+      }
+      if (p.endsWith("/heartbeat")) return { status: 200, json: async () => ({ cancel: false }) };
+      results.push(p);
+      return { status: 200, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    const counting = async () => {
+      adapterRuns++;
+      return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+    };
+    const { o, logs } = await opts({ maxIterations: 4 });
+    await o.store.save(STORED);
+    await runRunnerLoop(client, counting, o);
+    // the truncated body and the non-lease body were retried with the same id; the third answer was the lease
+    expect(leaseIds.slice(0, 3)).toEqual([leaseIds[0], leaseIds[0], leaseIds[0]]);
+    expect(adapterRuns).toBe(1);
+    expect(results).toEqual([`/v1/engine-runner/runs/${RUN_ID}/result`]);
+    // then a new attempt (a new id) once the lease was definitive
+    expect(leaseIds[3]).not.toBe(leaseIds[0]);
+    expect(logs.some((l) => /lease failed \(200 with no valid answer\)/.test(l))).toBe(true);
+  });
+
+  it("a committed registration whose 201 body is truncated keeps its secret: it is confirmed as the credential, never a stop", async () => {
+    const g = gateway({ register: [201], lease: [{ status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/register")) {
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        return { status: 201, json: async () => JSON.parse('{"runnerId":"r1","selfT') };
+      }
+      return http(url, init);
+    };
+    const { o } = await opts({ maxIterations: 1 });
+    await runRunnerLoop(g.client, adapter, o);
+    const reg = g.calls.find((c) => c.path.endsWith("/register"))!;
+    const stored = await o.store.load();
+    expect(stored).toMatch(/^rge_[0-9a-f]{64}$/);
+    expect(reg.body!["tokenHash"]).toBe(sha(stored!));
+    // the secret authenticated a lease: no second registration was needed
+    expect(g.count("/register")).toBe(1);
+    expect(g.calls.filter((c) => c.path.endsWith("/lease")).every((c) => c.bearer === `Bearer ${stored}`)).toBe(true);
+  });
+});

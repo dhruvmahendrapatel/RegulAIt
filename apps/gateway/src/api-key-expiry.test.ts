@@ -43,7 +43,6 @@ import {
   auditLog,
   createDb,
   eq,
-  gte,
   inArray,
   runMigrations,
   users,
@@ -88,6 +87,16 @@ async function issueKey(userId: string, payload: Record<string, unknown>) {
     url: `/v1/users/${userId}/keys`,
     payload,
   });
+}
+
+/**
+ * the ids of the audit rows that already exist for these objects / this rule. A test asserts on the rows
+ * whose ids were NOT there before its action (id-set difference), never on `at >= <JS clock>`: the JS
+ * clock and the database's `now()` are different clocks, so a row written just before the action (the
+ * revoke's own audit row, an earlier settings update) can carry an `at` past a JS timestamp taken after it.
+ */
+async function auditIdsWhere(where: ReturnType<typeof and>): Promise<Set<string>> {
+  return new Set((await db.select({ id: auditLog.id }).from(auditLog).where(where)).map((r) => r.id));
 }
 
 /** the smallest authenticated call there is — `GET /v1/me` needs no grant */
@@ -166,12 +175,12 @@ describe("ADR-0181 — the shipped dials are strict, and an admin may relax them
   });
 
   it("clearing both dials is audited old -> new, and then a key issued with no expiry never expires", async () => {
-    const since = new Date(Date.now() - 1000);
+    const settingsUpdated = eq(auditLog.ruleId, "org-settings-updated");
+    const before = await auditIdsWhere(settingsUpdated);
     await setTtlDials(RELAXED_TTL);
-    const [audit] = await db
-      .select()
-      .from(auditLog)
-      .where(and(eq(auditLog.ruleId, "org-settings-updated"), gte(auditLog.at, since)));
+    const added = (await db.select().from(auditLog).where(settingsUpdated)).filter((r) => !before.has(r.id));
+    expect(added).toHaveLength(1);
+    const [audit] = added;
     expect((audit!.detail as { transitions: unknown }).transitions).toEqual({
       apiKeyDefaultTtlDays: { from: 90, to: null },
       apiKeyMaxTtlDays: { from: 365, to: null },
@@ -227,7 +236,10 @@ describe("ADR-0098 — enforcement in authenticate()", () => {
 
     // move the clock by writing the column, not by sleeping: the subject is
     // the enforcement, not the passage of time
-    const since = new Date();
+    const keyRows = eq(auditLog.objectId, issued.json().id);
+    const before = await auditIdsWhere(keyRows);
+    const [usedRow] = await db.select().from(apiKeys).where(eq(apiKeys.id, issued.json().id));
+    const lastUsedBefore = usedRow!.lastUsedAt!.getTime();
     await db
       .update(apiKeys)
       .set({ expiresAt: new Date(Date.now() - 1000) })
@@ -240,10 +252,7 @@ describe("ADR-0098 — enforcement in authenticate()", () => {
     expect(dead.json().detail).toContain("expired");
 
     // and the refusal is IN THE AUDIT TRAIL with its own discriminating ruleId
-    const rows = await db
-      .select()
-      .from(auditLog)
-      .where(and(eq(auditLog.objectId, issued.json().id), gte(auditLog.at, since)));
+    const rows = (await db.select().from(auditLog).where(keyRows)).filter((r) => !before.has(r.id));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.ruleId).toBe("api-key-refused-expired");
     expect(rows[0]!.effect).toBe("deny");
@@ -253,7 +262,7 @@ describe("ADR-0098 — enforcement in authenticate()", () => {
     // a refused presentation is NOT a use — lastUsedAt is left where the last
     // successful call put it
     const [row] = await db.select().from(apiKeys).where(eq(apiKeys.id, issued.json().id));
-    expect(row!.lastUsedAt!.getTime()).toBeLessThan(since.getTime());
+    expect(row!.lastUsedAt!.getTime()).toBe(lastUsedBefore);
   });
 
   it("EXPIRED and REVOKED are different answers and different audit rows", async () => {
@@ -276,7 +285,9 @@ describe("ADR-0098 — enforcement in authenticate()", () => {
     });
     expect(revoked.statusCode).toBe(200);
 
-    const since = new Date();
+    // the revoke above wrote its own audit row for `revoking`: only rows whose ids were not there before count
+    const bothKeys = inArray(auditLog.objectId, [expiring.json().id, revoking.json().id]);
+    const before = await auditIdsWhere(bothKeys);
     const expiredRes = await callAs(expiring.json().token);
     const revokedRes = await callAs(revoking.json().token);
 
@@ -289,15 +300,7 @@ describe("ADR-0098 — enforcement in authenticate()", () => {
     expect(expiredRes.json().detail).not.toBe(revokedRes.json().detail);
 
     // ...and so do their audit rows
-    const rows = await db
-      .select()
-      .from(auditLog)
-      .where(
-        and(
-          inArray(auditLog.objectId, [expiring.json().id, revoking.json().id]),
-          gte(auditLog.at, since),
-        ),
-      );
+    const rows = (await db.select().from(auditLog).where(bothKeys)).filter((r) => !before.has(r.id));
     expect(rows).toHaveLength(2);
     const byKey = new Map(rows.map((r) => [r.objectId, r]));
     expect(byKey.get(expiring.json().id)!.ruleId).toBe("api-key-refused-expired");
