@@ -260,6 +260,12 @@ export interface RunOnceOptions {
   maxStartAttempts?: number;
   /** round 13 [94]: this lease attempt's request id (the loop keeps it across transient failures) */
   leaseRequestId?: string;
+  /**
+   * PR #205 review round 15 [99]: called the moment the lease answer is DEFINITIVE (a lease parsed,
+   * or no work). The caller retires the request id there: nothing after this point may ever re-lease
+   * the same run.
+   */
+  onLeaseSettled?: () => void;
 }
 
 /**
@@ -417,9 +423,64 @@ export async function runOnce(
   client: RunnerClient,
   adapter: EngineAdapter,
   opts: RunOnceOptions,
-): Promise<{ outcome: "idle" | "posted" | "cancelled" | "failed" | "undelivered"; runId?: string; status?: number }> {
+): Promise<{ outcome: RunOnceOutcome; runId?: string; status?: number; detail?: string }> {
+  // ---- PHASE 1: the lease request — its outcome may be AMBIGUOUS (a timeout, a lost response, a
+  // 5xx). Only an error thrown HERE may be retried with the same request id (decision 94).
   const lease = await client.lease({ imageDigest: opts.imageDigest, engineVersion: opts.engineVersion }, opts.leaseRequestId);
+  // ---- the answer is definitive: the request id is retired before anything else happens
+  opts.onLeaseSettled?.();
   if (!lease) return { outcome: "idle" };
+  // ---- PHASE 2: post-acquisition. PR #205 review round 15 [99]: NOTHING from here may surface as an
+  // error the caller could retry (that re-leases the same run and runs its paid model calls again).
+  // A failure reconciles instead: deliver the envelope if one exists, else report the run failed
+  // (engine_error, with the reason), and if even that does not land, leave it to time out at the gateway.
+  let envelopeOut: EngineResultEnvelope | null = null;
+  try {
+    return await runLeased(client, adapter, opts, lease, (e) => (envelopeOut = e));
+  } catch (e) {
+    return reconcileAfterAcquisition(client, lease, opts, envelopeOut, e);
+  }
+}
+
+/** PR #205 review round 15 [99]: what runOnce reports (`abandoned`: a post-acquisition failure that could not be reported; the run times out at the gateway) */
+export type RunOnceOutcome = "idle" | "posted" | "cancelled" | "failed" | "undelivered" | "abandoned";
+
+/**
+ * PR #205 review round 15 [99]: a failure after the lease was acquired. Never re-leases, never
+ * re-runs: the envelope in memory (or, with none, a failed envelope `engine_error` naming the reason)
+ * gets one more delivery attempt; anything short of a definitive answer leaves the run to time out at
+ * the gateway (its lease and deadline end it there, and its key is revoked then).
+ */
+async function reconcileAfterAcquisition(
+  client: RunnerClient,
+  lease: EngineLease,
+  opts: RunOnceOptions,
+  envelope: EngineResultEnvelope | null,
+  error: unknown,
+): Promise<{ outcome: RunOnceOutcome; runId: string; status?: number; detail?: string }> {
+  const reason = error instanceof Error && error.message ? error.message.slice(0, 200) : "unknown";
+  // the envelope schema is strict (no free text): the code is `engine_error`, the reason goes to the log
+  const final = envelope ?? failedEnvelope(lease, opts.engineVersion, "failed", "engine_error");
+  let status: number | null = null;
+  try {
+    status = await client.result(lease.runId, final, lease.deadlineAt);
+  } catch {
+    status = null;
+  }
+  if (status !== null && status < 500 && status !== 408 && status !== 429) {
+    return { outcome: final.status === "failed" ? "failed" : "posted", runId: lease.runId, status, detail: `after the lease: ${reason}` };
+  }
+  return { outcome: "abandoned", runId: lease.runId, detail: `after the lease: ${reason}; the run is left to time out at the gateway` };
+}
+
+/** PR #205 review round 15 [99]: the post-acquisition phase of runOnce (everything after a lease) */
+async function runLeased(
+  client: RunnerClient,
+  adapter: EngineAdapter,
+  opts: RunOnceOptions,
+  lease: EngineLease,
+  keep: (envelope: EngineResultEnvelope) => void,
+): Promise<{ outcome: RunOnceOutcome; runId?: string; status?: number; detail?: string }> {
   const workDir = `${opts.workRoot.replace(/\/$/, "")}/${lease.runId}`;
   await mkdir(workDir, { recursive: true, mode: 0o700 });
   const abort = new AbortController();
@@ -475,6 +536,7 @@ export async function runOnce(
         : failedEnvelope(lease, opts.engineVersion, "failed", "engine_error");
     }
     if (cancelled) return { outcome: "cancelled", runId: lease.runId };
+    keep(envelope);
     // the heartbeat keeps running through the retries so the lease stays live
     // across a brief gateway outage; the work dir is kept until the gateway
     // gave a definitive answer

@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -688,5 +689,68 @@ describe("decisions 49 and 54: the runner's own token, persisted before it regis
     await o.store.save(STORED);
     await writeFile(o.store.file, "not a token\n");
     expect(await o.store.load()).toBeNull();
+  });
+});
+
+describe("PR #205 round 15 [99]: after the lease is acquired, nothing re-leases the run", () => {
+  it("delivery fails and persisting the envelope throws: the adapter ran once, the run is reported, and no lease reuses the request id", async () => {
+    const runId = "0000000a-0000-4000-8000-000000000000";
+    const lease = {
+      runId,
+      engineId: "promptfoo",
+      engineVersion: "1",
+      spec: { config: { sets: ["basic"], params: {} }, trials: 1 },
+      target: null,
+      judge: null,
+      artifacts: [],
+      deadlineAt: new Date(Date.now() + 3_600_000).toISOString(),
+      budgetUsd: null,
+    };
+    const leaseIds: string[] = [];
+    const results: Array<{ status: string; errorCode: string | null }> = [];
+    let resultCalls = 0;
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      if (p.endsWith("/lease")) {
+        const id = String(body["requestId"]);
+        // a gateway re-issues the still-live lease to a retry with the same id (decision 94)
+        const known = leaseIds.includes(id);
+        leaseIds.push(id);
+        return leaseIds.length === 1 || known ? { status: 200, json: async () => lease } : { status: 204, json: async () => null };
+      }
+      if (p.endsWith("/heartbeat")) return { status: 200, json: async () => ({ cancel: false }) };
+      resultCalls++;
+      results.push({ status: String(body["status"]), errorCode: (body["errorCode"] as string | null) ?? null });
+      // the first delivery (and its retries) cannot reach the gateway; the reconciliation's post lands
+      if (resultCalls === 1) throw new Error("ECONNRESET");
+      return { status: 200, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    let adapterRuns = 0;
+    const counting = async () => {
+      adapterRuns++;
+      return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+    };
+    // persisting the undelivered envelope fails (a full or unwritable volume)
+    const realRename = fs.rename;
+    (fs as { rename: typeof fs.rename }).rename = ((a: fs.PathLike, b: fs.PathLike, cb: (e: NodeJS.ErrnoException | null) => void) =>
+      String(b).includes(RETAINED_RESULT_FILE) ? cb(Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" })) : realRename(a, b, cb)) as typeof fs.rename;
+    try {
+      const { o, logs } = await opts({ maxIterations: 2, maxResultAttempts: 1, retryBaseMs: 1 });
+      await o.store.save(STORED);
+      await runRunnerLoop(client, counting, o);
+      expect(adapterRuns).toBe(1);
+      expect(leaseIds).toHaveLength(2);
+      expect(leaseIds[1]).not.toBe(leaseIds[0]);
+      // the envelope in memory was delivered by the reconciliation (one failed post, then one that landed)
+      expect(results).toEqual([
+        { status: "completed", errorCode: null },
+        { status: "completed", errorCode: null },
+      ]);
+      expect(logs.some((l) => /after the lease: ENOSPC/.test(l))).toBe(true);
+    } finally {
+      (fs as { rename: typeof fs.rename }).rename = realRename;
+    }
   });
 });

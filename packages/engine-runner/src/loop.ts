@@ -345,13 +345,17 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
   // attempt may have leased; dropped once the gateway answered definitively (a lease, no work, or a
   // refusal), so the next attempt is a new one.
   let leaseRequestId: string | null = null;
+  // PR #205 review round 15 [99]: the id is retired the moment the lease answer is definitive
+  // (`onLeaseSettled`), not when runOnce returns — an error after acquisition can never re-lease the
+  // same run (runOnce reconciles those itself and does not throw them).
   const leaseOnce = async () => {
     leaseRequestId ??= randomUUID();
     try {
-      const r = await runOnce(client, adapter, { ...opts, leaseRequestId });
-      leaseRequestId = null;
+      const r = await runOnce(client, adapter, { ...opts, leaseRequestId, onLeaseSettled: () => (leaseRequestId = null) });
+      if (r.detail) opts.log?.(`run ${r.runId}: ${r.outcome} (${r.detail})`);
       return r;
     } catch (e) {
+      // only the lease request itself can throw here (phase 1): its outcome is unknown when transient
       if (eventOf(e).kind !== "transient") leaseRequestId = null;
       throw e;
     }

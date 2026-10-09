@@ -2029,3 +2029,53 @@ describe("PR #205 review round 14: run policy decided in the creation transactio
     await cleanup(r.runnerId);
   });
 });
+
+describe("PR #205 review round 15: one lock order for engine state (run, then approval)", () => {
+  it("[100] a cancel and an approval decision racing on the same run never deadlock: the cancel wins, the decision gets a clean 409", async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`);
+    const [{ threshold }] = ((await db.execute(sql`SELECT engine_run_approval_threshold_usd AS threshold FROM org_settings WHERE id = ${ORG_SETTINGS_ID}`)) as unknown as {
+      rows: Array<{ threshold: number }>;
+    }).rows as [{ threshold: number }];
+    const approver = await makeUser(`b5p-r15-approver-${RUN}@example.com`);
+    await db.execute(sql`UPDATE org_settings SET engine_run_approval_threshold_usd = 0.5 WHERE id = ${ORG_SETTINGS_ID}`);
+    try {
+      const created = await inject("POST", "/v1/engine-runs", alice.key, {
+        engineId: "promptfoo",
+        target: { agentId: targetId, judgeAgentId: judgeId },
+        config: { sets: ["prompt-extraction"] },
+        projectId,
+        budgetUsd: 1,
+        trials: 1,
+        approverUserId: approver.id,
+      });
+      expect(created.statusCode, created.body).toBe(202);
+      const runId = created.json().run.id as string;
+      const approvalId = created.json().approvalId as string;
+      let decide: Promise<{ statusCode: number; body: string }> | null = null;
+      // the cancel holds the run row; the decision starts on its own connection meanwhile and is given
+      // time to take whatever lock it takes first, then the cancel goes on to supersede the approval
+      engineRunTestHooks.afterCancelMarked = async (id) => {
+        if (id !== runId) return;
+        decide = inject("POST", `/v1/approvals/${approvalId}/decide`, approver.key, { decision: "approved", reason: "racing the cancel" });
+        await new Promise((r) => setTimeout(r, 600));
+      };
+      let cancel: { statusCode: number; body: string };
+      try {
+        cancel = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {});
+      } finally {
+        engineRunTestHooks.afterCancelMarked = undefined;
+      }
+      const decided = await decide!;
+      expect(cancel.statusCode, cancel.body).toBe(200);
+      expect(decided.statusCode, decided.body).toBe(409);
+      expect(JSON.parse(decided.body).error).toBe("approval_superseded");
+      expect((await runRow(runId)).status).toBe("cancelled");
+      const [a] = ((await db.execute(sql`SELECT status FROM approvals WHERE id = ${approvalId}`)) as unknown as { rows: Array<{ status: string }> }).rows;
+      expect(a!.status).toBe("superseded");
+    } finally {
+      await db.execute(sql`UPDATE org_settings SET engine_run_approval_threshold_usd = ${threshold} WHERE id = ${ORG_SETTINGS_ID}`);
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+});

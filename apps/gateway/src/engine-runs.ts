@@ -752,6 +752,17 @@ export async function notifyWorkflowsOfEndedRuns(db: Db, runs: ReadonlyArray<Pic
 }
 
 
+/**
+ * PR #205 review round 15 [100]: THE LOCK ORDER for engine state is engine (where taken) → run →
+ * approval. Every path that ends or releases a run holds the run row before it touches the run's
+ * approval (cancel, a workflow ending, a switch-off, the lease's ended paths). The decide route is the
+ * one that starts from the approval: it calls this FIRST, inside its transaction and before it writes
+ * the approval, so it takes the run row before the approval row like every other path.
+ */
+export async function lockEngineRunOfApprovalTx(tx: Tx, approvalId: string): Promise<void> {
+  await tx.select({ id: engineRuns.id }).from(engineRuns).where(eq(engineRuns.approvalId, approvalId)).for("update");
+}
+
 /** the decide path's hook for an `engine_run` approval (inside its transaction) */
 export async function applyEngineRunApprovalDecision(
   tx: Tx,
