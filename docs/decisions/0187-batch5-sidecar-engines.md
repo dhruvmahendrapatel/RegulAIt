@@ -914,6 +914,50 @@ with its audit; work that follows a commit is limited to notifying workflows, wh
   status-checked transaction under the run's lock; the schedule sweep's claim is committed before creating the run on
   purpose (PR #203 review round 2 [23]: a creation that throws is then an audited skip, never lost).
 
+**Review round 12 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [91] [92],
+`zz-b5-promptfoo.test.ts` "review round 12" [91] [92] [93], and the engines test of a wrong-digest registration (now
+refused). No migration. **The root cause, fixed once:** there was no single definition of which runner reports count for
+the current build. There is now one: `isCurrentBuild(manifest, build)` (the manifest's digest, never null, and version)
+and `runnerCountsForCurrentBuild(manifest, runner, report?)` (the runner's registered build is the current build, and so
+is the report it presents, if any), both in `apps/gateway/src/engines.ts`. **Every reader and writer of self-test state
+goes through them:**
+1. the lease's admission (`leaseAdmission`): a runner that does not count is told `reenrol_required`;
+2. the runner self-test route: a report from a runner, or of a build, that does not count changes nothing (409,
+   audited), and its "the engine's record is for the current build" check uses `isCurrentBuild`;
+3. the admin self-test: only a runner that counts is judged (decision 91);
+4. registration: a build that is not the current one is refused (decision 91);
+5. `selfTestAdmitsEnable` (the engine's recorded self-test), which the enable PATCH, the lease and run creation use.
+
+Two checks stay apart on purpose: the shared `evaluateRunnerSelfTest` still reports `digest_mismatch` and
+`version_mismatch` as verdict failures (what a report says, not whose report counts), and the manifest sync compares the
+engine row's stored build with the manifest's (a build change of the engine, not of a runner).
+
+91. **Only current-build runners count, and an obsolete build cannot register** [4229889819]. The admin self-test took the
+    newest live runner whatever its build, so an obsolete runner's report could fail the verdict and switch the current
+    engine off. It now judges the newest live runner whose registered build is the current build (selected by that build
+    and checked with the predicate); with none, it refuses with 409 `engine_no_current_build_runner` and changes nothing.
+    **Decided: registration refuses an obsolete build outright** (secure by default: an old container can never come back
+    as a live runner): 409 `engine_runner_build_obsolete`, decided before the enrolment token is spent, audited
+    `engine-runner-register-obsolete-build`. The runner loop treats that refusal as final: it stops with a
+    `RunnerObsoleteBuildError` saying to deploy the current image, and the promptfoo shim then parks (stays up and idle,
+    repeating the reason once a day) instead of exiting into the restart policy's loop. Tests that need a runner of an
+    earlier build now make one the way an upgrade leaves it: registered while its build was current, its row then naming
+    the old build.
+92. **A lost, then revoked, pending secret is replaced** [4229889826]. A runner that registered, lost the response before
+    storing its credential, and was then revoked was stuck: its pending secret got 401 as a credential, and registering it
+    again with a fresh token got 409 `engine_runner_already_registered` (the revoked row still owns the hash). Now, when the
+    pending secret was refused as a credential AND its hash is registered, the loop discards it, generates a new secret
+    (persisted as the pending enrolment first, with the same `supersedes`), and registers that with the same, still
+    unused, enrolment token (once; a second refusal stops with the reason). On the gateway a revoked runner's hash still
+    blocks reuse of that hash; a new hash registers normally. A gateway test registers a runner, loses every response so
+    nothing is stored, revokes it, and restarts with a fresh token: the runner ends up registered with a new credential
+    and the revoked one stays dead.
+93. **A failing current-build report always clears the engine's pass** [4229889832]. A failing report while the engine
+    was already off left its passing self-test in place, so an admin could re-enable it on contradicted evidence. A
+    failing report from a runner that counts now always records the failure and clears `self_test_passed_at`, whatever
+    the engine's state; only ending its active runs (decision 84) depends on it switching the engine off. A test switches
+    the engine off, submits a failing report, and finds re-enabling refused with `engine_self_test_required`.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
