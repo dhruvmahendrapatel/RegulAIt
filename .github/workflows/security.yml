@@ -592,9 +592,18 @@ jobs:
           report="$RUNNER_TEMP/trivy-image.json"
           trivy image --scanners vuln --severity HIGH,CRITICAL --format json --output "$report" "$IMAGE"
           trivy convert --format table "$report" || true
+          # Each image has its own allow-list (security/image-allowlist.engine-<name>.json, empty when the
+          # file is absent): the gate reports every unmatched entry as stale, so one shared file would let an
+          # exception for one image fail every other image's gate (#213 review). The gateway keeps
+          # security/image-allowlist.json.
+          allowlist="$GITHUB_WORKSPACE/security/image-allowlist.engine-${ENGINE}.json"
+          if [ ! -f "$allowlist" ]; then
+            allowlist="$RUNNER_TEMP/image-allowlist.engine-${ENGINE}.empty.json"
+            printf '{"entries":[]}\n' > "$allowlist"
+          fi
           # --expect-classes: a scan that saw no OS packages or no language packages proves nothing
           node "$GITHUB_WORKSPACE/scripts/security-gate.mjs" --kind trivy --report "$report" \
-            --allowlist "$GITHUB_WORKSPACE/security/image-allowlist.json" --expect-classes os-pkgs,lang-pkgs
+            --allowlist "$allowlist" --expect-classes os-pkgs,lang-pkgs
 
       # Evidence, not a gate: the licences Trivy finds in the image, OS layer
       # included, which the engine's own gate does not see (ADR-0187 open

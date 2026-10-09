@@ -137,7 +137,7 @@ different failure, such as a network error, fails the job as inconclusive.
 
 Every `engines/<name>/Dockerfile` is found by `engines` and becomes one matrix leg. There is no list to keep up to date.
 Each leg gets gates 4–6 above: the same `docker build` (from the repository root, `-f engines/<name>/Dockerfile`), the
-same Trivy gate and allow-list, an image SBOM, and the same unsigned red proof on runs that do not sign. `engine-sign`
+same Trivy gate against its own allow-list (`security/image-allowlist.engine-<name>.json`, empty when absent: the gate fails on stale entries, so one shared file would let an exception for one image break every other image), an image SBOM, and the same unsigned red proof on runs that do not sign. `engine-sign`
 uses `sign`'s condition and identity. The gateway-only runtime-contents check does not apply.
 
 **Also:** the engine's own `licence-gate.mjs` runs inside its build, so a denied licence fails it. The job fails if a
