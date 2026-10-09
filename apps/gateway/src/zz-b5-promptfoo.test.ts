@@ -906,7 +906,10 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
     });
   }
 
-  it("[72] a re-enrolment interrupted after it persisted its pending record is resumed on restart, and the old runner is revoked", async () => {
+  // two crash points: right after the pending record is written (nothing sent yet), and right after
+  // the registration landed (the enrolment token is spent and the old runner already revoked) but
+  // before the new token was stored — the case only resuming the pending record can recover
+  for (const crashAt of ["savePending", "save"] as const) it(`[72] a re-enrolment interrupted (crash in ${crashAt}) is resumed on restart, and the old runner ends revoked`, async () => {
     const NEW = `sha256:${"f".repeat(64)}`;
     const oldSecret = generateRunnerSecret();
     const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(await enrolmentToken("crash-old"), oldSecret, {
@@ -931,18 +934,29 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
       maxIterations: 1,
       sleep: async () => {},
     });
-    // the process dies right after the pending enrolment is on disk
-    const crashing = Object.assign(Object.create(FileRunnerTokenStore.prototype) as FileRunnerTokenStore, store, {
-      savePending: async (p: { secret: string; supersedes: string | null }) => {
-        await store.savePending(p);
-        throw new Error("killed");
-      },
-    });
+    const crashing = Object.assign(
+      Object.create(FileRunnerTokenStore.prototype) as FileRunnerTokenStore,
+      store,
+      crashAt === "savePending"
+        ? {
+            savePending: async (p: { secret: string; supersedes: string | null }) => {
+              await store.savePending(p);
+              throw new Error("killed");
+            },
+          }
+        : {
+            save: async () => {
+              throw new Error("killed");
+            },
+          },
+    );
     await expect(runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), opts(crashing))).rejects.toThrow("killed");
     const old = async () =>
       ((await db.execute(sql`SELECT revoked_at, revoke_reason FROM engine_runners WHERE id = ${reg.runnerId}`)) as unknown as { rows: Array<{ revoked_at: string | null; revoke_reason: string | null }> }).rows[0]!;
-    expect((await old()).revoked_at).toBeNull();
+    if (crashAt === "savePending") expect((await old()).revoked_at).toBeNull();
+    else expect((await old()).revoked_at).not.toBeNull(); // the registration landed, with its revocation
     expect(await store.load()).toBe(oldSecret);
+    expect(await store.loadPending()).toMatchObject({ supersedes: oldSecret });
     // restart from the same volume
     await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), opts(store));
     expect((await old()).revoked_at).not.toBeNull();

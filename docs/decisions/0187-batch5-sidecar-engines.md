@@ -726,7 +726,10 @@ without a judge now name one. No migration.
     token it supersedes, or null; 0600, atomic) before the request leaves, and leaves the stored token alone. Only after
     a 201 is the stored token replaced and the record deleted. A start that finds a valid pending record resumes that
     enrolment first, with the same secret and `supersedes` (the gateway replays a same-hash registration, and the
-    revocation was in the original transaction if it landed). A refused enrolment keeps the record; with no enrolment
+    revocation was in the original transaction if it landed). A failure to write the token after the 201 is not
+    retried as a registration failure: it propagates, and the next start resumes the record (the gateway test crashes
+    at both points: before anything is sent, and after the registration landed but before the token was stored). A
+    refused enrolment keeps the record; with no enrolment
     token set the runner stops and says so. An invalid record is never used. This refines decision 54 (the secret is
     still persisted before the request leaves, as the pending record).
 73. **A judge is required where the manifest says so** [4226962969]. promptfoo needs a judge, but a run or schedule

@@ -328,21 +328,10 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           pending = { secret, body: null, supersedes, attempts: 0 };
         }
         const p = pending;
+        let reg: Awaited<ReturnType<RunnerClient["register"]>> | null = null;
         try {
           p.body ??= await opts.registration();
-          const reg = await client.register(opts.enrollmentToken, p.secret, p.body, p.supersedes ?? undefined);
-          // definitive: only now is the stored token replaced and the pending record dropped
-          await opts.store.save(p.secret);
-          await opts.store.clearPending();
-          opts.log?.(
-            `registered runner ${reg.runnerId}${reg.replayed ? " (replayed)" : ""}${reg.supersededRunnerId ? `; the previous registration ${reg.supersededRunnerId} is revoked` : ""}; ` +
-              `self-test ${reg.selfTest.passed ? "passed" : `failed: ${reg.selfTest.failures.join(", ")}`}`,
-          );
-          held = p.secret;
-          pending = null;
-          lastRefreshAt = null;
-          backoff = base;
-          go({ kind: "enrolled" });
+          reg = await client.register(opts.enrollmentToken, p.secret, p.body, p.supersedes ?? undefined);
         } catch (e) {
           const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
           p.attempts++;
@@ -357,6 +346,21 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           await sleep(Math.min(30_000, base * 2 ** (p.attempts - 1)));
           go({ kind: "transient" });
         }
+        if (!reg) break;
+        // definitive: only now is the stored token replaced and the pending record dropped. A failure
+        // to write them is not a registration failure: it propagates, and the pending record (still on
+        // disk) is resumed at the next start (round 6 [72])
+        await opts.store.save(p.secret);
+        await opts.store.clearPending();
+        opts.log?.(
+          `registered runner ${reg.runnerId}${reg.replayed ? " (replayed)" : ""}${reg.supersededRunnerId ? `; the previous registration ${reg.supersededRunnerId} is revoked` : ""}; ` +
+            `self-test ${reg.selfTest.passed ? "passed" : `failed: ${reg.selfTest.failures.join(", ")}`}`,
+        );
+        held = p.secret;
+        pending = null;
+        lastRefreshAt = null;
+        backoff = base;
+        go({ kind: "enrolled" });
         break;
       }
 
