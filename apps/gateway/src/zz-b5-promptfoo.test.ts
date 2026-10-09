@@ -911,13 +911,14 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
   // the registration landed (the enrolment token is spent and the old runner already revoked) but
   // before the new token was stored — the case only resuming the pending record can recover
   for (const crashAt of ["savePending", "save"] as const) it(`[72] a re-enrolment interrupted (crash in ${crashAt}) is resumed on restart, and the old runner ends revoked`, async () => {
-    const NEW = `sha256:${"f".repeat(64)}`;
+    // round 10 [85]: an upgrade — the old runner holds the OBSOLETE build, the restarted one runs the current
+    const OLD = `sha256:${"f".repeat(64)}`;
     const oldSecret = generateRunnerSecret();
     const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(await enrolmentToken("crash-old"), oldSecret, {
       name: `crash-${RUN}`,
-      imageDigest: PF_DIGEST,
+      imageDigest: OLD,
       engineVersion: MANIFEST.promptfoo.version,
-      selfTest: await report(),
+      selfTest: await report(OLD),
     });
     const dir = await mkdtemp(path.join(tmpdir(), "b5p-r6-"));
     const store = new FileRunnerTokenStore(path.join(dir, "state", "runner-token"));
@@ -926,11 +927,11 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
     const opts = (s: FileRunnerTokenStore) => ({
       engineId: "promptfoo" as const,
       engineVersion: MANIFEST.promptfoo.version,
-      imageDigest: NEW,
+      imageDigest: PF_DIGEST,
       workRoot: path.join(dir, "work"),
       store: s,
       enrollmentToken: token,
-      registration: async () => ({ name: `crash-${RUN}`, imageDigest: NEW, engineVersion: MANIFEST.promptfoo.version, selfTest: await report(NEW) }),
+      registration: async () => ({ name: `crash-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await report() }),
       backoffMs: 1,
       maxIterations: 1,
       sleep: async () => {},
@@ -966,7 +967,7 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
     expect(now).not.toBe(oldSecret);
     expect(await store.loadPending()).toBeNull();
     const [fresh] = ((await db.execute(sql`SELECT reported_digest FROM engine_runners WHERE token_hash = ${runnerTokenHash(now)}`)) as unknown as { rows: Array<{ reported_digest: string }> }).rows;
-    expect(fresh).toMatchObject({ reported_digest: NEW });
+    expect(fresh).toMatchObject({ reported_digest: PF_DIGEST });
   });
 
   it("[73] a promptfoo run (or schedule) without a judge is refused at validation: 422 judge_required", async () => {
@@ -1143,14 +1144,15 @@ describe("PR #205 review round 8: a lost registration response outlives its toke
   };
 
   it("[77] a registration that committed, its response lost until the enrolment token expired: the restart tries the secret and leases", async () => {
-    const NEW = `sha256:${"f".repeat(64)}`;
+    // round 10 [85]: an upgrade — the old runner holds the OBSOLETE build, the restarted one runs the current
+    const OLD = `sha256:${"f".repeat(64)}`;
     const oldSecret = generateRunnerSecret();
     const old = await mintToken("lost-old");
     await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(old.token, oldSecret, {
       name: `lost-old-${RUN}`,
-      imageDigest: PF_DIGEST,
+      imageDigest: OLD,
       engineVersion: MANIFEST.promptfoo.version,
-      selfTest: await report(),
+      selfTest: await report(OLD),
     });
     const dir = await mkdtemp(path.join(tmpdir(), "b5p-r8-"));
     const store = new FileRunnerTokenStore(path.join(dir, "state", "runner-token"));
@@ -1161,11 +1163,11 @@ describe("PR #205 review round 8: a lost registration response outlives its toke
       o: {
         engineId: "promptfoo" as const,
         engineVersion: MANIFEST.promptfoo.version,
-        imageDigest: NEW,
+        imageDigest: PF_DIGEST,
         workRoot: path.join(dir, "work"),
         store,
         enrollmentToken: fresh.token,
-        registration: async () => ({ name: `lost-new-${RUN}`, imageDigest: NEW, engineVersion: MANIFEST.promptfoo.version, selfTest: await report(NEW) }),
+        registration: async () => ({ name: `lost-new-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await report() }),
         backoffMs: 1,
         registerAttempts: 2,
         maxIterations: 1,
@@ -1190,7 +1192,7 @@ describe("PR #205 review round 8: a lost registration response outlives its toke
     expect(logs.some((l) => /had registered: its secret is this runner's credential/.test(l))).toBe(true);
     expect(await store.load()).toBe(pending.secret);
     expect(await store.loadPending()).toBeNull();
-    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${pending.secret}` }, { imageDigest: NEW, engineVersion: MANIFEST.promptfoo.version });
+    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${pending.secret}` }, PF_BUILD);
     expect(l.statusCode, l.body).not.toBe(401);
     // the old registration was superseded when that registration committed
     const [o] = ((await db.execute(sql`SELECT revoked_at FROM engine_runners WHERE token_hash = ${runnerTokenHash(oldSecret)}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
@@ -1322,5 +1324,133 @@ describe("PR #205 review round 9: credential-isolation gate, the judge at lease,
     });
     expect(late.statusCode, late.body).toBe(409);
     expect(await runRow(runId)).toMatchObject({ status: "cancelled" });
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 10 (Codex), decisions 83 to 85 — each red first ([83] is pinned in
+// packages/engine-runner/src/runner.test.ts). Runs after round 9; `liveSecret` is a runner with a
+// fresh report of the current build.
+// ===========================================================================
+describe("PR #205 review round 10: every switch-off ends the engine's runs; an obsolete build never changes the engine", () => {
+  const report = (digest = PF_DIGEST, connected = false) =>
+    buildSelfTest({
+      imageDigest: digest,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: {
+        host: "egress-probe.invalid",
+        ip: "93.184.215.14",
+        lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })),
+        connect: async () => (connected ? "connected" : "denied"),
+      },
+    });
+  const mintToken = async (label: string) => (await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label })).json().token as string;
+  const register = async (label: string, digest = PF_DIGEST) => {
+    const secret = generateRunnerSecret();
+    const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(await mintToken(label), secret, {
+      name: `${label}-${RUN}`,
+      imageDigest: digest,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: await report(digest),
+    });
+    return { secret, runnerId: reg.runnerId };
+  };
+  /** the engine on, with a fresh passing record of the current build (what an admin's enable leaves) */
+  const switchOn = async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`);
+  };
+  const engineOn = async () => ((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled;
+  const keyRevoked = async (runId: string) => {
+    const run = await runRow(runId);
+    const [k] = ((await db.execute(sql`SELECT revoked_at FROM virtual_keys WHERE id = ${run.virtualKeyId}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
+    return k!.revoked_at !== null;
+  };
+  /** a run leased by the live runner, its key live; and one more queued behind it */
+  const leasedAndQueued = async () => {
+    const leasedId = await startRun();
+    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+    expect(l.statusCode, l.body).toBe(200);
+    expect(l.json().runId).toBe(leasedId);
+    expect(await keyRevoked(leasedId)).toBe(false);
+    const queuedId = await startRun();
+    return { leasedId, queuedId };
+  };
+  const expectEnded = async (ids: { leasedId: string; queuedId: string }, reason: string) => {
+    expect(await runRow(ids.leasedId)).toMatchObject({ status: "cancelled", errorCode: reason });
+    expect(await keyRevoked(ids.leasedId)).toBe(true);
+    expect(await runRow(ids.queuedId)).toMatchObject({ status: "cancelled", errorCode: reason });
+    // the runner holding it is told to stop, and its result is refused
+    const hb = await inject("POST", `/v1/engine-runner/runs/${ids.leasedId}/heartbeat`, { authorization: `Bearer ${liveSecret}` }, { phase: "running", progress: 0.5 });
+    expect(hb.statusCode, hb.body).toBe(200);
+    expect(hb.json()).toMatchObject({ cancel: true });
+    const late = await inject("POST", `/v1/engine-runner/runs/${ids.leasedId}/result`, { authorization: `Bearer ${liveSecret}` }, {
+      version: ENGINE_RESULT_VERSION,
+      runId: ids.leasedId,
+      engineId: "promptfoo",
+      engineVersion: MANIFEST.promptfoo.version,
+      status: "completed",
+      errorCode: null,
+      items: [],
+      notRun: [],
+      rawReport: null,
+    });
+    expect(late.statusCode, late.body).toBe(409);
+  };
+
+  it("[84] another runner's failing self-test switches the engine off AND ends its runs, revoking their keys", async () => {
+    await switchOn();
+    const ids = await leasedAndQueued();
+    const failer = await register("egress-fails");
+    const bad = await inject("POST", "/v1/engine-runner/self-test", { authorization: `Bearer ${failer.secret}` }, { selfTest: await report(PF_DIGEST, true) });
+    expect(bad.statusCode, bad.body).toBe(200);
+    expect(bad.json()).toMatchObject({ engineDisabled: true });
+    expect(await engineOn()).toBe(false);
+    await expectEnded(ids, "engine_self_test_failed");
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${failer.runnerId}`);
+  });
+
+  it("[84] an admin's disable ends the engine's runs, revoking their keys", async () => {
+    await switchOn();
+    const ids = await leasedAndQueued();
+    const off = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false });
+    expect(off.statusCode, off.body).toBe(200);
+    await expectEnded(ids, "engine_disabled");
+  });
+
+  it("[84] a failing admin self-test ends the engine's runs, revoking their keys", async () => {
+    await switchOn();
+    const ids = await leasedAndQueued();
+    // the newest live runner's report fails now (its egress connected)
+    const failer = await register("admin-sees-fail");
+    await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(await report(PF_DIGEST, true))}::jsonb WHERE id = ${failer.runnerId}`);
+    const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
+    expect(st.json().passed, st.body).toBe(false);
+    expect(await engineOn()).toBe(false);
+    await expectEnded(ids, "engine_self_test_failed");
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${failer.runnerId}`);
+  });
+
+  it("[85] during a rolling upgrade an obsolete-build runner is told to re-enrol, and its self-test cannot switch the upgraded engine off", async () => {
+    await switchOn();
+    const OLD = `sha256:${"e".repeat(64)}`;
+    const old = await register("obsolete", OLD);
+    const before = ((await db.execute(sql`SELECT self_test FROM engine_runners WHERE id = ${old.runnerId}`)) as unknown as { rows: Array<{ self_test: { at: string } }> }).rows[0]!;
+    // it presents its own (old) build, which matches its registration: still re-enrol, not a self-test
+    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${old.secret}` }, { imageDigest: OLD, engineVersion: MANIFEST.promptfoo.version });
+    expect(l.statusCode, l.body).toBe(409);
+    expect(l.json()).toMatchObject({ error: "engine_runner_reenrol_required", next: "reenrol_required" });
+    // its (failing, old-build) report is refused: nothing about the runner or the engine changes, and it is audited
+    const st = await inject("POST", "/v1/engine-runner/self-test", { authorization: `Bearer ${old.secret}` }, { selfTest: await report(OLD, true) });
+    expect(st.statusCode, st.body).toBe(409);
+    expect(st.json()).toMatchObject({ error: "engine_runner_reenrol_required", next: "reenrol_required" });
+    expect(await engineOn()).toBe(true);
+    const after = ((await db.execute(sql`SELECT self_test FROM engine_runners WHERE id = ${old.runnerId}`)) as unknown as { rows: Array<{ self_test: { at: string } }> }).rows[0]!;
+    expect(after.self_test.at).toBe(before.self_test.at);
+    const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-runner-self-test-obsolete-build' AND object_id = ${old.runnerId}`)) as unknown as { rows: unknown[] }).rows;
+    expect(audit).toHaveLength(1);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
   });
 });

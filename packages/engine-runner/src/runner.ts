@@ -56,7 +56,7 @@ function nextOf(json: { next?: unknown }): EngineRunnerNext | null {
 /** a refusal from a runner route, with the gateway's error code and `next` signal (never the token) */
 export class RunnerHttpError extends Error {
   constructor(
-    readonly route: "register" | "lease" | "self-test",
+    readonly route: "register" | "lease" | "self-test" | "heartbeat",
     readonly status: number,
     readonly code: string | null,
     /** PR #205 review round 5: the one signal the runner's state machine acts on, when the gateway gave it */
@@ -155,6 +155,9 @@ export class RunnerClient {
 
   async heartbeat(runId: string, phase: "starting" | "running" | "uploading", progress: number): Promise<{ cancel: boolean }> {
     const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/heartbeat`, this.bearer(), { phase, progress });
+    // PR #205 review round 10 [83]: a 5xx, 408 or 429 says nothing about the lease — it is thrown
+    // (transient, retried by the caller); any other refusal (401, 404, 409) is definitive: stop
+    if (res.status >= 500 || res.status === 408 || res.status === 429) throw new RunnerHttpError("heartbeat", res.status, null);
     if (res.status !== 200) return { cancel: true }; // the gateway no longer knows this lease: stop
     return (await res.json()) as { cancel: boolean };
   }
@@ -205,6 +208,8 @@ export interface RunOnceOptions {
   retryBaseMs?: number;
   /** result POST attempts before giving up (the lease then expires at the gateway) */
   maxResultAttempts?: number;
+  /** round 10 [83]: starting-heartbeat attempts on a transient failure (default 8; never past the deadline) */
+  maxStartAttempts?: number;
 }
 
 /**
@@ -359,12 +364,29 @@ export async function runOnce(
   const interval = setInterval(() => void beat(), opts.heartbeatMs ?? 15_000);
   const deadline = setTimeout(() => abort.abort(), Math.max(0, Date.parse(lease.deadlineAt) - Date.now()));
   try {
-    await client.heartbeat(lease.runId, "starting", 0).then((hb) => {
-      if (hb.cancel) {
-        cancelled = true;
-        abort.abort();
+    // PR #205 review round 10 [83]: the starting heartbeat is retried on a transient failure (a
+    // network error, a 5xx, a 408, a 429) with a bounded backoff, never past the run's deadline; only
+    // a definitive refusal (or running out of time) abandons the run, reported as `cancelled`, not a crash
+    const startBase = opts.retryBaseMs ?? 1000;
+    const startAttempts = opts.maxStartAttempts ?? 8;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const hb = await client.heartbeat(lease.runId, "starting", 0);
+        if (hb.cancel) {
+          cancelled = true;
+          abort.abort();
+        }
+        break;
+      } catch {
+        const wait = Math.min(30_000, startBase * 2 ** (attempt - 1));
+        if (attempt >= startAttempts || Date.now() + wait >= Date.parse(lease.deadlineAt)) {
+          cancelled = true;
+          abort.abort();
+          break;
+        }
+        await new Promise((r) => setTimeout(r, wait));
       }
-    });
+    }
     if (cancelled) return { outcome: "cancelled", runId: lease.runId };
     let envelope: EngineResultEnvelope;
     try {

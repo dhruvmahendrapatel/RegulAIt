@@ -646,8 +646,12 @@ export async function endRunsHeldByRevokedRunnersTx(tx: Tx, engineId: EngineId, 
  * PR #205 review round 9 [82]: and every run still LEASED (in flight on the old build) — its key is
  * revoked and a later result is refused as late, so no result is ever normalised against a catalogue
  * other than the one it ran under, on any replica.
+ * PR #205 review round 10 [84]: the same for EVERY path that switches an engine off — a failing
+ * runner or admin self-test (`engine_self_test_failed`), an admin's disable (`engine_disabled`), a
+ * build change (`engine_build_changed`) — in the transaction that holds the engine row FOR UPDATE:
+ * no run keeps a live key (or keeps calling models) on an engine that is off.
  */
-export async function cancelRunsOfOldBuildTx(tx: Tx, engineId: EngineId): Promise<EngineRunRow[]> {
+export async function endActiveRunsOfEngineTx(tx: Tx, engineId: EngineId, reason: "engine_build_changed" | "engine_self_test_failed" | "engine_disabled"): Promise<EngineRunRow[]> {
   const waiting = await tx
     .select()
     .from(engineRuns)
@@ -661,7 +665,7 @@ export async function cancelRunsOfOldBuildTx(tx: Tx, engineId: EngineId): Promis
       await endLockedRun(
         tx,
         run,
-        { status: "cancelled", errorCode: "engine_build_changed", normalised: noResult("cancelled"), cause: "engine_build_changed", actorUserId: NO_IDENTITY },
+        { status: "cancelled", errorCode: reason, normalised: noResult("cancelled"), cause: reason, actorUserId: NO_IDENTITY },
         now,
       ),
     );
@@ -1087,6 +1091,16 @@ function leaseAdmission(
       next: "reenrol_required",
       error: "engine_runner_reenrol_required",
       detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+    };
+  }
+  // PR #205 review round 10 [85]: a runner whose registered build is not the CURRENT manifest build
+  // (an old runner during a rolling upgrade) re-enrols from the current image; it is never asked for a
+  // self-test, which (of an obsolete build) could otherwise switch the upgraded engine off
+  if (m.imageDigest === null || runner.reportedDigest !== m.imageDigest || runner.reportedVersion !== m.version) {
+    return {
+      next: "reenrol_required",
+      error: "engine_runner_reenrol_required",
+      detail: "this runner runs a build that is not the current one: deploy the current image and re-enrol it with a new enrolment token",
     };
   }
   const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);

@@ -519,17 +519,17 @@ describe("runner credentials", () => {
     const s = await inject("POST", "/v1/engine-runs", alice.key, { engineId: "garak", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId });
     expect(s.statusCode, s.body).toBe(409);
     expect(s.json().error).toBe("engine_disabled");
-    // a run queued while promptfoo was on is not leased once it is switched off
+    // a run queued while promptfoo was on is not leased once it is switched off — PR #205 review
+    // round 10 [84]: switching it off ends the run (cancelled `engine_disabled`, audited)
     const queued = await startRun({});
     expect(queued.statusCode, queued.body).toBe(202);
     const off = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false });
     expect(off.statusCode, off.body).toBe(200);
+    expect(await runRow(queued.json().run.id)).toMatchObject({ status: "cancelled", errorCode: "engine_disabled" });
     const blocked = await lease();
     expect(blocked.statusCode, blocked.body).toBe(409);
     expect(blocked.json().error).toBe("engine_disabled");
     await enableEngine("promptfoo");
-    const c = await inject("POST", `/v1/engine-runs/${queued.json().run.id}/cancel`, alice.key, {});
-    expect(c.statusCode, c.body).toBe(200);
   });
 });
 

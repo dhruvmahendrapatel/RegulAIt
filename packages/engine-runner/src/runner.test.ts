@@ -241,6 +241,63 @@ describe("PR #203 review round 2", () => {
     expect(g.calls).toHaveLength(1);
   });
 
+  /** a gateway whose starting heartbeat answers in order (then 200), with everything else accepted */
+  function startGateway(starts: Array<number | "throw">) {
+    const seen: string[] = [];
+    let adapterRan = false;
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      if (p.endsWith("/lease")) return { status: 200, json: async () => lease2 };
+      if (p.endsWith("/heartbeat")) {
+        const phase = (JSON.parse(init.body!) as { phase: string }).phase;
+        if (phase === "starting") {
+          const s = starts.shift() ?? 200;
+          seen.push(String(s));
+          if (s === "throw") throw new Error("ECONNRESET");
+          return { status: s, json: async () => ({ cancel: false }) };
+        }
+        return { status: 200, json: async () => ({ cancel: false }) };
+      }
+      return { status: 200, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    client.useToken("rge_test");
+    const adapter = async () => {
+      adapterRan = true;
+      return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+    };
+    return { client, seen, adapter, ran: () => adapterRan };
+  }
+
+  it("PR #205 round 10 [83]: a transient failure of the starting heartbeat is retried; the leased run is run, not abandoned", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-start-"));
+    const g = startGateway(["throw", 503, 200]);
+    const out = await runOnce(g.client, g.adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
+    expect(g.seen).toEqual(["throw", "503", "200"]);
+    expect(g.ran()).toBe(true);
+    expect(out).toMatchObject({ outcome: "posted", status: 200 });
+  });
+
+  it("PR #205 round 10 [83]: a definitive refusal of the starting heartbeat abandons the run quietly (cancelled, no throw, nothing run)", async () => {
+    for (const refusal of [401, 404, 409]) {
+      const root = await mkdtemp(path.join(tmpdir(), "b5-start-"));
+      const g = startGateway([refusal]);
+      const out = await runOnce(g.client, g.adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
+      expect(out).toMatchObject({ outcome: "cancelled" });
+      expect(g.seen).toEqual([String(refusal)]);
+      expect(g.ran()).toBe(false);
+    }
+  });
+
+  it("PR #205 round 10 [83]: transient failures past the attempt budget abandon the run as cancelled, never a throw", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-start-"));
+    const g = startGateway(["throw", "throw", "throw"]);
+    const out = await runOnce(g.client, g.adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1, maxStartAttempts: 3 });
+    expect(out).toMatchObject({ outcome: "cancelled" });
+    expect(g.seen).toHaveLength(3);
+    expect(g.ran()).toBe(false);
+  });
+
   it("PR #205 round 5 [68]: an undelivered run keeps ONLY its envelope, for the loop to retry", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "b5-retain-"));
     const g = gateway(["throw", "throw", "throw"]);

@@ -56,7 +56,7 @@ import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { generateEnrollmentToken } from "./engine-runner-auth.js";
 import { hashToken } from "./token-hash.js";
-import { cancelRunsOfOldBuildTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
+import { endActiveRunsOfEngineTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -137,7 +137,7 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
       // PR #205 review round 7 [75]: runs still waiting were requested (and approved) against the old
       // build: they are cancelled (`engine_build_changed`, audited) in this transaction. Picked over
       // re-versioning them: an approval given for one build is not silently carried to another.
-      const cancelled = buildChanges ? await cancelRunsOfOldBuildTx(tx, id) : [];
+      const cancelled = buildChanges ? await endActiveRunsOfEngineTx(tx, id, "engine_build_changed") : [];
       return { buildChanges, wasEnabled: locked.enabled, from: { version: locked.version, digest: locked.imageDigest }, cancelled };
     });
     if (!out) continue;
@@ -323,10 +323,14 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
             (Object.keys(relaxed).length ? ` (relaxed with a step-up: ${Object.keys(relaxed).join(", ")})` : ""),
         });
       }
-      return { kind: "ok" as const, after: after! };
+      // PR #205 review round 10 [84]: switching the engine off ends its active runs (leased, queued,
+      // awaiting approval) and revokes their keys in this transaction, which holds the engine row
+      const ended = body.enabled === false ? await endActiveRunsOfEngineTx(tx, engineId, "engine_disabled") : [];
+      return { kind: "ok" as const, after: after!, ended };
     });
     if (out.kind === "missing") return reply.status(404).send({ error: "engine_not_found" });
     if (out.kind === "moved") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    await notifyWorkflowsOfEndedRuns(db, out.ended);
     return view(engineId);
   });
 
@@ -360,7 +364,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     };
     // PR #205 review round 6 [71]: the engine row is taken FOR UPDATE, so a failing verdict that
     // switches the engine off serialises with a lease deciding under its FOR SHARE lock
-    const before = await db.transaction(async (tx) => {
+    const { before, ended } = await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       await tx
         .update(engines)
@@ -371,8 +375,11 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           updatedByUserId: req.authCtx.userId,
         })
         .where(eq(engines.id, engineId));
-      return locked;
+      // PR #205 review round 10 [84]: a failing verdict switches the engine off AND ends its active
+      // runs, revoking their keys, in this same transaction
+      return { before: locked, ended: verdict.passed ? [] : await endActiveRunsOfEngineTx(tx, engineId, "engine_self_test_failed") };
     });
+    await notifyWorkflowsOfEndedRuns(db, ended);
     await auditEngine(db, {
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "engine",
@@ -600,8 +607,28 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
       });
     }
+    // PR #205 review round 10 [85]: a report of a build that is not the CURRENT manifest build (an
+    // old runner during a rolling upgrade) changes nothing — neither this runner's stored report nor
+    // the engine — and is audited: an obsolete runner can never switch the current build's engine off
+    const m = manifest[engineId];
+    if (m.imageDigest === null || selfTest.imageDigest !== m.imageDigest || selfTest.engineVersion !== m.version) {
+      await auditEngine(db, {
+        userId: NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: runnerId,
+        ruleId: "engine-runner-self-test-obsolete-build",
+        effect: "deny",
+        detail: { engineId, reported: { digest: selfTest.imageDigest, version: selfTest.engineVersion }, current: { digest: m.imageDigest, version: m.version } },
+        reason: `engine runner ${runner.name} (${engineId}) reported a self-test for a build that is not the current one: refused, nothing changed`,
+      });
+      return reply.status(409).send({
+        error: "engine_runner_reenrol_required",
+        next: "reenrol_required" satisfies EngineRunnerNext,
+        detail: "this runner runs a build that is not the current one: deploy the current image and re-enrol it with a new enrolment token",
+      });
+    }
     const now = new Date();
-    const verdict = evaluateRunnerSelfTest(manifest[engineId], selfTest, now);
+    const verdict = evaluateRunnerSelfTest(m, selfTest, now);
     await engineRunTestHooks.beforeSelfTestTx?.(runnerId);
     const out = await db.transaction(async (tx) => {
       // PR #205 review round 4 [65]: the runner row is LOCKED and its revocation re-read here, like
@@ -612,7 +639,6 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       await tx.update(engineRunners).set({ selfTest, selfTestPassed: verdict.passed, selfTestFailures: verdict.failures }).where(eq(engineRunners.id, runnerId));
       const [engine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       const recorded = engine?.selfTest as { passed?: boolean; imageDigest?: string; version?: string } | null;
-      const m = manifest[engineId];
       const sameBuild = !!recorded?.passed && m.imageDigest !== null && recorded.imageDigest === m.imageDigest && recorded.version === m.version;
       let engineRefreshed = false;
       let engineDisabled = false;
@@ -638,9 +664,14 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           .where(eq(engines.id, engineId));
         engineDisabled = true;
       }
+      // PR #205 review round 10 [84]: the engine switched off here takes its active runs (every
+      // runner's) with it, keys revoked, in this transaction — no run keeps calling models after an
+      // egress-policy failure
+      const ended = engineDisabled ? await endActiveRunsOfEngineTx(tx, engineId, "engine_self_test_failed") : [];
       const engineOn = !!engine?.enabled && !engineDisabled;
-      return { kind: "done" as const, engineRefreshed, engineDisabled, engineOn };
+      return { kind: "done" as const, engineRefreshed, engineDisabled, engineOn, ended };
     });
+    if (out.kind === "done") await notifyWorkflowsOfEndedRuns(db, out.ended);
     if (out.kind === "revoked") {
       return reply
         .status(401)
