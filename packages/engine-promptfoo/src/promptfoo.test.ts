@@ -47,7 +47,7 @@ import {
   RUN_KEY_ENV,
 } from "./config.js";
 import { classifyError, mapPromptfooResults, type PromptfooEnvelopeBody } from "./mapper.js";
-import { promptfooAdapter } from "./adapter.js";
+import { promptfooAdapter, PROMPTFOO_MAX_RESULTS_BYTES } from "./adapter.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name: string) => readFileSync(path.join(here, "fixtures", name));
@@ -79,7 +79,9 @@ function stored(body: PromptfooEnvelopeBody) {
     engineVersion: "0.123.1",
     ...body,
   });
-  return normaliseEngineResult({ envelope, status: envelope.status, taxonomy: ENGINE_TAXONOMY, scrub: (t) => t });
+  // as the gateway does (round 3 [61]): only the manifest's declared reduced set is a planning-time exclusion
+  const declaredNotRun = new Set(ENGINE_MANIFEST.promptfoo.airGappedReducedSet.map((e) => e.key));
+  return normaliseEngineResult({ envelope, status: envelope.status, taxonomy: ENGINE_TAXONOMY, scrub: (t) => t, declaredNotRun });
 }
 
 function result(plugin: string | null, opts: { strategy?: string; success?: boolean; failureReason?: number; error?: string } = {}) {
@@ -392,7 +394,8 @@ describe("the result mapper", () => {
     // promptfoo aborted the scan ("will not resolve on retry") and still exited 0
     const body = mapPromptfooResults({ raw: fixture("results-0.123.1-key-revoked.json"), exitCode: 0, plan });
     expect(body.status).toBe("completed");
-    expect(body.items).toHaveLength(1);
+    const measuredOrErrored = body.items.filter((i) => i.verdict !== "not_run");
+    expect(measuredOrErrored).toHaveLength(1);
     expect(body.items[0]).toMatchObject({ key: "pii:direct/basic", verdict: "unknown", attempts: 2, defeated: 0 });
     expect(body.items[0]!.reason).toMatch(/refused the run's key/);
     expect(body.notRun).toContainEqual({ key: "prompt-extraction/basic", reason: "engine_error" });
@@ -410,7 +413,7 @@ describe("the result mapper", () => {
       exitCode: 0,
       plan: p,
     });
-    expect(body.items.map((i) => i.key)).toEqual(["pii:direct/basic", "pii:direct/base64"]);
+    expect(body.items.filter((i) => i.verdict !== "not_run").map((i) => i.key)).toEqual(["pii:direct/basic", "pii:direct/base64"]);
     expect(body.notRun).toEqual([
       { key: "prompt-extraction/basic", reason: "engine_error" },
       { key: "prompt-extraction/base64", reason: "engine_error" },
@@ -421,6 +424,10 @@ describe("the result mapper", () => {
     expect(n.items.find((i) => i.key === "pii:direct/rot13")).toMatchObject({ verdict: "not_run", notRunReason: "engine_error" });
     // a not-run pair is never clean (the run-level verdict treats not-run as ADR-0187 decision 12 says)
     expect(n.counts.not_run).toBe(4);
+    // round 3 [61]: these not-runs happened at RUN time, so the completed run is incomplete — not pass
+    expect(n.runtimeNotRun).toBe(4);
+    expect(n.verdict).toBe("unknown");
+    expect(n.probeStats.filter((ps) => ps.status === "not_run").map((ps) => ps.probeKey).sort()).toEqual(["pii:direct/rot13", "prompt-extraction/base64", "prompt-extraction/basic", "prompt-extraction/rot13"]);
     expect(n.items.filter((i) => i.verdict === "pass").map((i) => i.key)).toEqual(["pii:direct/basic", "pii:direct/base64"]);
   });
 
@@ -429,6 +436,7 @@ describe("the result mapper", () => {
     expect(body.items.map((i) => [i.key, i.verdict])).toEqual([
       ["some-new-plugin/basic", "unknown"],
       ["unattributed", "unknown"],
+      ["prompt-extraction/basic", "not_run"],
     ]);
     const n = stored(body);
     const reported = n.items.filter((i) => i.key === "some-new-plugin/basic" || i.key === "unattributed");
@@ -438,8 +446,11 @@ describe("the result mapper", () => {
     ]);
     // the planned plugin that produced nothing is not run, never clean
     expect(n.items.find((i) => i.key === "prompt-extraction/basic")).toMatchObject({ verdict: "not_run", notRunReason: "engine_error" });
-    expect(n.unmappedItems).toBe(3);
-    expect(n.mappedItems).toBe(0);
+    // the planned pair with no result is reported as an item with its class (round 3 [61]), not measured
+    expect(n.unmappedItems).toBe(2);
+    expect(n.mappedItems).toBe(1);
+    expect(n.probeStats.map((p) => [p.probeKey, p.status])).toEqual([["prompt-extraction/basic", "not_run"]]);
+    expect(n.verdict).not.toBe("pass");
   });
 });
 
@@ -469,10 +480,24 @@ describe("the adapter", () => {
     expect(none).toMatchObject({ status: "not_run", errorCode: "nothing_runnable" });
     const noJudge = await a(lease({ judge: null }), await ctx());
     expect(noJudge).toMatchObject({ status: "not_run", errorCode: "judge_required" });
-    expect(noJudge.notRun).toContainEqual({ key: "prompt-extraction/basic", reason: "engine_error" });
+    // round 3 [62]: the refusal reports every planned pair (plugin x {basic, planned strategies}), with items
+    expect(noJudge.notRun.filter((x) => x.key.includes("/")).map((x) => x.key).sort()).toEqual(["pii:direct/base64", "pii:direct/basic", "prompt-extraction/base64", "prompt-extraction/basic"]);
+    expect(noJudge.items.map((i) => [i.key, i.verdict, i.sourceTaxonomy.id])).toContainEqual(["pii:direct/base64", "not_run", "strategy:base64"]);
     const offGateway = await a(lease({ target: { ...lease().target!, baseUrl: "not a url" } }), await ctx());
     expect(offGateway).toMatchObject({ status: "not_run" });
     expect(f.calls).toEqual([]);
+  });
+
+  it("[63] a results file over the bound is never read: failed results_too_large, its sha256 streamed, every pair not run", async () => {
+    const big = Buffer.alloc(4096, 0x20);
+    const f = fakeRun((args) => (args[1] === "redteam" ? { exitCode: 0, write: ["redteam.yaml", "tests: []"] } : { exitCode: 0, write: ["results.json", big.toString()] }));
+    const body = await promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: f.run, maxResultsBytes: 1024 })(lease(), await ctx());
+    expect(body).toMatchObject({ status: "failed", errorCode: "results_too_large" });
+    expect(body.rawReport).toEqual({ sha256: createHash("sha256").update(big).digest("hex"), bytes: 0 });
+    expect(body.items.every((i) => i.verdict === "not_run")).toBe(true);
+    expect(stored(body).verdict).toBe("unknown");
+    // the bound is far below the runner's 2 GiB memory limit (docker-compose x-engine-runner)
+    expect(PROMPTFOO_MAX_RESULTS_BYTES).toBeLessThanOrEqual((2 * 1024 ** 3) / 16);
   });
 
   it("generate then the eval step; a failed generation is failed with no items", async () => {
@@ -484,7 +509,10 @@ describe("the adapter", () => {
     expect(body.status).toBe("completed");
     const bad = fakeRun(() => ({ exitCode: 1 }));
     const failed = await promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: bad.run })(lease(), await ctx());
-    expect(failed).toMatchObject({ status: "failed", errorCode: "engine_generate_failed", items: [] });
+    expect(failed).toMatchObject({ status: "failed", errorCode: "engine_generate_failed" });
+    // round 3 [62]: every planned pair is reported not run, never only `<plugin>/basic`
+    expect(failed.items.every((i) => i.verdict === "not_run")).toBe(true);
+    expect(failed.notRun.map((n) => n.key).sort()).toEqual(["pii:direct/base64", "pii:direct/basic", "prompt-extraction/base64", "prompt-extraction/basic"]);
     expect(bad.calls).toEqual([["redteam", "generate"]]);
   });
 

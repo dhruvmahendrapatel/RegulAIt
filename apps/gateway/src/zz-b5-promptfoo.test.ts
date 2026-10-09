@@ -389,6 +389,11 @@ describe("B5-P promptfoo through the real gateway", () => {
     const items = await db.select().from(engineRunItems).where(eq(engineRunItems.runId, runId));
     expect(items.find((i) => i.key === "pii:direct/basic")).toMatchObject({ verdict: "not_run", notRunReason: "egress_denied" });
     expect(items.find((i) => i.key === "prompt-extraction/basic")).toMatchObject({ verdict: "pass" });
+    // PR #205 review round 3 [61] (amends decision 12): denied egress happened at RUN time, so the
+    // completed run is incomplete — its verdict is not pass, and a workflow check bound to it fails
+    const run = await runRow(runId);
+    expect(run.status).toBe("completed");
+    expect(run.summary).toMatchObject({ verdict: "unknown", runtimeNotRun: 1 });
   });
 });
 

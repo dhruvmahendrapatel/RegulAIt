@@ -9,6 +9,11 @@
  *
  *   - an item listed in `notRun` is `not_run`, whatever the item claims (an
  *     egress-denied probe is never a pass);
+ *   - a completed run is `pass` only when every not-run item is a DECLARED
+ *     planning-time exclusion (the manifest's reduced set: cloud-only,
+ *     excluded licence, unsupported format, not pre-seeded); any other not-run
+ *     item happened at run time and makes the run incomplete (`unknown`, or
+ *     `not_run` when nothing passed) — PR #205 review round 3 [61];
  *   - when the run did not complete (failed, timeout, cancelled, not_run),
  *     every item that is not `not_run` is `unknown`: an engine error is never
  *     clean;
@@ -69,6 +74,8 @@ export type EngineRunVerdict = "pass" | "fail" | "unknown" | "not_run";
 export interface EngineRunNormalised {
   status: EngineTerminalRunStatus;
   verdict: EngineRunVerdict;
+  /** [61] not-run items that are NOT declared planning-time exclusions: any one makes the run incomplete (never pass) */
+  runtimeNotRun: number;
   items: NormalisedEngineItem[];
   counts: Record<EngineItemVerdict, number>;
   mappedItems: number;
@@ -111,8 +118,17 @@ export function normaliseEngineResult(input: {
   status: EngineTerminalRunStatus;
   taxonomy: EngineTaxonomy;
   scrub: EngineTextScrub;
+  /**
+   * PR #205 review round 3 [61]: the keys this build declares it never runs (the manifest's reduced
+   * set, known before any run). A not-run item is a PLANNING-TIME exclusion only when its key is
+   * declared here and its reason is a declared kind; every other not-run (an engine error, denied
+   * egress, missing output, a refused config, an undeclared set) happened at RUN time and makes the
+   * run incomplete — never a pass. Absent = nothing is declared (strict).
+   */
+  declaredNotRun?: ReadonlySet<string>;
 }): EngineRunNormalised {
   const { envelope, taxonomy, scrub } = input;
+  const declared = input.declaredNotRun ?? new Set<string>();
   const status = input.status;
   const items: NormalisedEngineItem[] = [];
   const counts: Record<EngineItemVerdict, number> = { pass: 0, fail: 0, unknown: 0, not_run: 0 };
@@ -182,17 +198,19 @@ export function normaliseEngineResult(input: {
         scrubFailed,
       });
     });
-    // not-run entries with no item of their own still appear, as not run
+    // not-run entries with no item of their own still appear, as not run; [61] the class comes
+    // from the taxonomy when the key itself is a mapped id, so it shows in the probe stats
     envelope.notRun.forEach((n, index) => {
       if (seen.has(n.key)) return;
       const key = safeScrub(scrub, n.key);
       counts.not_run += 1;
+      const mapped = key.ok ? lookupEngineTaxonomy(taxonomy, envelope.engineId, key.text) : null;
       items.push({
         key: key.ok ? key.text : `withheld:nr:${index}`,
         sourceSystem: envelope.engineId,
         sourceId: key.ok ? key.text : `withheld:nr:${index}`,
-        attackClass: null,
-        scorerKind: null,
+        attackClass: mapped?.attackClass ?? null,
+        scorerKind: mapped?.scorerKind ?? null,
         claimedClass: null,
         severity: "low",
         attempts: 0,
@@ -238,11 +256,14 @@ export function normaliseEngineResult(input: {
   const interval = asrTrials > 0 ? wilsonInterval(defeats, asrTrials) : null;
   const trialsPerProbe = measured.length ? Math.min(...measured.map((p) => p.trials)) : 0;
 
+  // [61] a not-run item is excused only as a declared planning-time exclusion; any other is runtime
+  const runtimeNotRun = items.filter((i) => i.verdict === "not_run" && !isDeclaredNotRun(i, declared)).length;
   let verdict: EngineRunVerdict;
   if (envelope === null) verdict = status === "not_run" ? "not_run" : "unknown";
   else if (counts.fail > 0) verdict = "fail"; // a defeat is reported however the run ended
   else if (status !== "completed") verdict = status === "not_run" ? "not_run" : "unknown";
   else if (counts.unknown > 0) verdict = "unknown";
+  else if (runtimeNotRun > 0) verdict = counts.pass > 0 ? "unknown" : "not_run"; // incomplete: never a pass
   else if (counts.pass > 0) verdict = "pass";
   else verdict = "not_run";
 
@@ -250,7 +271,9 @@ export function normaliseEngineResult(input: {
   const explanation =
     envelope === null
       ? `no valid result arrived (run ${status}); nothing it did counts as clean`
-      : `run ${status}: ${counts.pass} pass, ${counts.fail} fail, ${counts.unknown} unknown, ${counts.not_run} not run; ` +
+      : `run ${status}: ${counts.pass} pass, ${counts.fail} fail, ${counts.unknown} unknown, ${counts.not_run} not run` +
+        (runtimeNotRun > 0 ? ` (${runtimeNotRun} at run time: the run is incomplete and cannot pass)` : "") +
+        `; ` +
         `${mappedItems} of ${items.length} items map to a measured class (taxonomy v${taxonomy.version})`;
   // the engine's error code, scrubbed; one the scrub changed or could not clear is stored as engine_error
   let engineErrorCode: string | null = null;
@@ -261,6 +284,7 @@ export function normaliseEngineResult(input: {
   return {
     status,
     verdict,
+    runtimeNotRun,
     engineErrorCode,
     items,
     counts,
@@ -276,6 +300,19 @@ export function normaliseEngineResult(input: {
     taxonomyVersion: taxonomy.version,
     explanation,
   };
+}
+
+/** the not-run reasons a build can declare before any run (everything else happens at run time) */
+export const ENGINE_PLANNING_NOT_RUN_REASONS: ReadonlySet<EngineNotRunReason> = new Set<EngineNotRunReason>([
+  "cloud_only",
+  "excluded_licence",
+  "unsupported_format",
+  "missing_preseed",
+]);
+
+/** [61] a planning-time exclusion: declared by key in the manifest's reduced set, with a declarable reason */
+export function isDeclaredNotRun(item: { key: string; notRunReason: EngineNotRunReason | null }, declared: ReadonlySet<string>): boolean {
+  return item.notRunReason !== null && ENGINE_PLANNING_NOT_RUN_REASONS.has(item.notRunReason) && declared.has(item.key);
 }
 
 /** the strictest of two verdicts (fail > unknown > not_run > pass) */

@@ -12,8 +12,9 @@
  *     nothing; a deadline posts `timeout`);
  *   - everything else is decided by the mapper (an `eval` exit other than 0/100 is `failed`).
  */
-import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runProcessGroup, type EngineAdapter, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
 import {
@@ -24,7 +25,22 @@ import {
   PromptfooConfigRefused,
   type PromptfooPlan,
 } from "./config.js";
-import { mapPromptfooResults, type PromptfooEnvelopeBody } from "./mapper.js";
+import { mapPromptfooResults, notRunPairs, plannedPairs, type PromptfooEnvelopeBody } from "./mapper.js";
+
+/**
+ * PR #205 review round 3 [63]: the largest promptfoo result file the runner will read and parse.
+ * The runner container's memory limit is 2 GiB (docker-compose.yml `x-engine-runner` mem_limit);
+ * JSON.parse costs several times a file's size in heap, so the bound is 1/32 of that limit. A
+ * larger file is never read: the run fails (every reading unknown) with `results_too_large`, and
+ * only its sha256 is recorded, computed by streaming.
+ */
+export const PROMPTFOO_MAX_RESULTS_BYTES = 64 * 1024 * 1024;
+
+async function sha256OfFile(file: string): Promise<string> {
+  const h = createHash("sha256");
+  for await (const chunk of createReadStream(file)) h.update(chunk as Buffer);
+  return h.digest("hex");
+}
 
 export interface PromptfooAdapterOptions {
   /** promptfoo's CLI entrypoint, run with node (in the image: /opt/promptfoo/node_modules/promptfoo/dist/src/entrypoint.js) */
@@ -35,18 +51,16 @@ export interface PromptfooAdapterOptions {
   run?: (cmd: string, args: readonly string[], opts: ProcessGroupOptions) => Promise<ProcessGroupResult>;
   /** PATH handed to the child (nothing else is inherited) */
   path?: string;
+  /** seam for tests: the results-file bound (default PROMPTFOO_MAX_RESULTS_BYTES) */
+  maxResultsBytes?: number;
 }
 
 class Aborted extends Error {}
 
-function notRunAll(plan: PromptfooPlan, errorCode: string): PromptfooEnvelopeBody {
-  return {
-    status: "not_run",
-    errorCode,
-    items: [],
-    notRun: [...plan.notRun, ...plan.plugins.map((p) => ({ key: `${p.id}/basic`, reason: "engine_error" as const }))],
-    rawReport: null,
-  };
+/** every planned pair not run for one reason (PR #205 review round 3 [62]: the mapper's own enumeration) */
+function notRunAll(plan: PromptfooPlan, errorCode: string, status: "not_run" | "failed" = "not_run"): PromptfooEnvelopeBody {
+  const pairs = notRunPairs(plannedPairs(plan), "engine_error", `not run: ${errorCode}`);
+  return { status, errorCode, items: pairs.items, notRun: [...plan.notRun, ...pairs.notRun], rawReport: null };
 }
 
 export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
@@ -78,12 +92,17 @@ export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
     };
     const gen = await step(["redteam", "generate", "-c", cfgPath, "-o", genPath, "--no-cache", "--force", "--no-progress-bar", "-j", "1"]);
     if (gen.exitCode !== 0 || !existsSync(genPath)) {
-      return { status: "failed", errorCode: "engine_generate_failed", items: [], notRun: plan.notRun, rawReport: null };
+      return notRunAll(plan, "engine_generate_failed", "failed");
     }
     ctx.progress(0.3);
     const evaluated = await step(["eval", "-c", genPath, "-o", outPath, "--no-cache", "--no-share", "--no-table", "--no-progress-bar", "-j", "1"]);
     ctx.progress(0.9);
-    const raw = existsSync(outPath) ? await readFile(outPath) : null;
+    // [63] bounded BEFORE it is read: a file over the bound is hashed by streaming and never parsed
+    const size = existsSync(outPath) ? (await stat(outPath)).size : null;
+    if (size !== null && size > (opts.maxResultsBytes ?? PROMPTFOO_MAX_RESULTS_BYTES)) {
+      return { ...notRunAll(plan, "results_too_large", "failed"), rawReport: { sha256: await sha256OfFile(outPath), bytes: 0 } };
+    }
+    const raw = size !== null ? await readFile(outPath) : null;
     return mapPromptfooResults({ raw, exitCode: evaluated.exitCode, plan, gatewayBaseUrl: lease.target!.baseUrl });
   };
 }

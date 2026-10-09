@@ -137,6 +137,56 @@ export function rawReportOf(raw: Buffer | null): EngineResultEnvelope["rawReport
 const KEY_SAFE = /[^\x20-\x7e]/g;
 const clip = (s: string, n: number) => s.replace(KEY_SAFE, "?").slice(0, n);
 
+export interface PlannedPair {
+  key: string;
+  plugin: string;
+  strategy: string;
+  /** the taxonomy id the pair maps by: the plugin for `basic`, `strategy:<id>` otherwise */
+  sourceId: string;
+}
+
+/**
+ * THE planned (plugin, strategy) pairs — each planned plugin with `basic` and with every planned
+ * strategy — keyed exactly as result items are. One enumeration, used by the mapper (missing
+ * output) and the adapter (a run refused before it started). PR #205 review [50] and round 3 [62].
+ */
+export function plannedPairs(plan: PromptfooPlan): PlannedPair[] {
+  const out: PlannedPair[] = [];
+  for (const p of plan.plugins) {
+    for (const s of ["basic", ...plan.strategies.map((x) => x.id)]) {
+      out.push({
+        key: `${clip(p.id, 120)}/${clip(s, 70)}`,
+        plugin: p.id,
+        strategy: s,
+        sourceId: s === "basic" ? p.id : `${PROMPTFOO_STRATEGY_SET_PREFIX}${s}`,
+      });
+    }
+  }
+  return out;
+}
+
+/** not-run items (and their not-run entries) for some planned pairs, with a fixed reason sentence */
+export function notRunPairs(pairs: readonly PlannedPair[], reason: EngineNotRunEntry["reason"], sentence: string): { items: EngineResultItem[]; notRun: EngineNotRunEntry[] } {
+  return {
+    items: pairs.map((pair) => {
+      const entry = promptfooPlugin(pair.plugin);
+      const claimed = pair.strategy === "basic" ? (entry?.attackClass ?? null) : (promptfooStrategy(pair.strategy)?.attackClass ?? null);
+      return {
+        key: pair.key,
+        sourceTaxonomy: { system: PROMPTFOO_TAXONOMY_SYSTEM, id: clip(pair.sourceId, ENGINE_RESULT_LIMITS.maxSourceIdChars) },
+        mappedClass: claimed,
+        severity: entry?.severity ?? "medium",
+        attempts: 0,
+        defeated: 0,
+        verdict: "not_run" as const,
+        reason: sentence,
+        dispatchAuditIds: [],
+      };
+    }),
+    notRun: pairs.map((pair) => ({ key: pair.key, reason })),
+  };
+}
+
 /**
  * Map promptfoo's output. `raw` is the bytes of its JSON output file (null when it wrote none),
  * `exitCode` the `eval` step's exit code, `plan` what was asked.
@@ -237,13 +287,13 @@ export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: numbe
     });
   }
   // PR #205 review [50]: every PLANNED (plugin, strategy) pair must have results; a pair that
-  // produced none (generation failed for the plugin, or the strategy rewrote nothing) is not run
-  for (const p of plan.plugins) {
-    for (const s of ["basic", ...plan.strategies.map((x) => x.id)]) {
-      const key = `${clip(p.id, 120)}/${clip(s, 70)}`;
-      if (!buckets.has(key)) notRun.push({ key, reason: "engine_error" });
-    }
-  }
+  // produced none (generation failed for the plugin, or the strategy rewrote nothing) is not run.
+  // Round 3 [61]: reported as an ITEM too (with its taxonomy id), so it is in the probe stats as
+  // not measured, and as a runtime not-run it keeps the run from reading pass.
+  const missing = plannedPairs(plan).filter((pair) => !buckets.has(pair.key));
+  const filled = notRunPairs(missing, "engine_error", "no result: generation or the strategy produced nothing for this pair");
+  items.push(...filled.items);
+  notRun.push(...filled.notRun);
 
   const ok = exitCode !== null && PROMPTFOO_OK_EXIT_CODES.includes(exitCode);
   return {

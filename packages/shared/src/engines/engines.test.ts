@@ -92,8 +92,37 @@ describe("not-clean semantics", () => {
       ["b", "not_run", "egress_denied"],
       ["z", "not_run", "cloud_only"],
     ]);
-    expect(n.verdict).toBe("pass");
+    // PR #205 review round 3 [61] (amends decision 12): b's egress was denied at RUN time and z is
+    // not declared by the build, so the run is incomplete — never a pass — and b is in the probe
+    // stats as not measured
+    expect(n.verdict).toBe("unknown");
+    expect(n.runtimeNotRun).toBe(2);
     expect(n.asrTrials).toBe(3);
+    expect(n.probeStats.find((p) => p.probeKey === "b")).toMatchObject({ status: "not_run" });
+    // only a DECLARED planning-time exclusion leaves a pass a pass
+    const declared = normaliseEngineResult({
+      envelope: env({ items: [item("a", "pi")], notRun: [{ key: "z", reason: "cloud_only" }] }),
+      status: "completed",
+      taxonomy: TAX,
+      scrub: (t) => t,
+      declaredNotRun: new Set(["z"]),
+    });
+    expect(declared).toMatchObject({ verdict: "pass", runtimeNotRun: 0 });
+    // a declared KEY with a runtime reason is still runtime
+    const egressOnDeclared = normaliseEngineResult({
+      envelope: env({ items: [item("a", "pi")], notRun: [{ key: "z", reason: "egress_denied" }] }),
+      status: "completed",
+      taxonomy: TAX,
+      scrub: (t) => t,
+      declaredNotRun: new Set(["z"]),
+    });
+    expect(egressOnDeclared).toMatchObject({ verdict: "unknown", runtimeNotRun: 1 });
+    // a standalone not-run key that is a mapped id shows in the probe stats as not measured
+    const standalone = normaliseEngineResult({ envelope: env({ items: [item("a", "pi")], notRun: [{ key: "pi", reason: "engine_error" }] }), status: "completed", taxonomy: TAX, scrub: (t) => t });
+    expect(standalone.probeStats.map((p) => [p.probeKey, p.status])).toEqual([
+      ["a", "measured"],
+      ["pi", "not_run"],
+    ]);
   });
 
   it("no envelope: nothing, and unknown", () => {

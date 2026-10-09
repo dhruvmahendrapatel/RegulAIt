@@ -420,6 +420,8 @@ export function runSummary(n: EngineRunNormalised, cause: string, envelope: Engi
   return {
     verdict: n.verdict,
     counts: n.counts,
+    // PR #205 review round 3 [61]: not-run items that are not declared planning-time exclusions
+    runtimeNotRun: n.runtimeNotRun,
     mappedItems: n.mappedItems,
     unmappedItems: n.unmappedItems,
     asr: n.asr,
@@ -1412,7 +1414,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           ...(parsed.success ? {} : { issues: parsed.error.issues.slice(0, 20) }),
         });
       }
-      const normalised = normaliseEngineResult({ envelope: envelope!, status: envelope!.status, taxonomy: taxonomyOf(opts), scrub: engineDetectionScrub });
+      // PR #205 review round 3 [61]: only the manifest's declared reduced set may be not-run without
+      // making the run incomplete; every other not-run item happened at run time
+      const declaredNotRun = new Set(manifestOf(opts)[run.engineId as EngineId].airGappedReducedSet.map((e) => e.key));
+      const normalised = normaliseEngineResult({ envelope: envelope!, status: envelope!.status, taxonomy: taxonomyOf(opts), scrub: engineDetectionScrub, declaredNotRun });
       const done = await finishEngineRun(db, run.id, ["leased"], {
         status: envelope!.status,
         errorCode: envelope!.status === "completed" ? null : (normalised.engineErrorCode ?? "engine_error"),
