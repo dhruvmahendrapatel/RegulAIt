@@ -704,6 +704,37 @@ signal. Tests: `loop.test.ts` (the table row by row, then the driver per transit
     `agent_not_dispatchable`. The promptfoo config already refuses an empty model string (`model_invalid`); the shim
     cannot tell a display name from a model, so the gateway is where this is enforced.
 
+**Review round 6 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [72],
+`zz-b5-promptfoo.test.ts` "review round 6" [71] [72] [73]; engine-test fixtures that queued a promptfoo run or schedule
+without a judge now name one. No migration.
+
+71. **The lease decides its admission again under locks** [4226962955]. The admission (decision 67's order) was
+    decided before the lease transaction, which re-read only the runner's revocation, so an admin's disable or a
+    concurrent failing report landing in between still let the lease mint a key. The admission is now one function
+    (`leaseAdmission`); the first call is only a fast path, and inside the transaction the lease takes the runner row
+    `FOR UPDATE` (revocation, report, build), then the engine row `FOR SHARE` (enabled, recorded self-test), and
+    decides again on those rows before it reads the queue. Every path that switches the engine off or records a
+    failing verdict holds the engine row `FOR UPDATE`: the admin PATCH (already), the runner self-test route (already,
+    after the runner row: the same lock order), the admin self-test route and the manifest sync on a build change (both
+    now in a transaction that takes it). So each either commits first and is seen, or waits for the lease to commit
+    (and a run it leased is then ended like any other on a disable or a revocation). Race tests switch the engine off,
+    and land a failing report, between the fast path and the transaction (`engineRunTestHooks.beforeLeaseTx`): 409 with
+    the right `next`, no key, the run still queued.
+72. **An interrupted re-enrolment is resumed, so the superseded credential is still revoked** [4226962963]. The loop
+    wrote the new secret over the stored token before registering, so a crash in between lost `supersedes` and the old
+    registration stayed live. Now an enrolment writes a pending record (`<token file>.pending`: the new secret and the
+    token it supersedes, or null; 0600, atomic) before the request leaves, and leaves the stored token alone. Only after
+    a 201 is the stored token replaced and the record deleted. A start that finds a valid pending record resumes that
+    enrolment first, with the same secret and `supersedes` (the gateway replays a same-hash registration, and the
+    revocation was in the original transaction if it landed). A refused enrolment keeps the record; with no enrolment
+    token set the runner stops and says so. An invalid record is never used. This refines decision 54 (the secret is
+    still persisted before the request leaves, as the pending record).
+73. **A judge is required where the manifest says so** [4226962969]. promptfoo needs a judge, but a run or schedule
+    without `judgeAgentId` was accepted and then always failed at the runner (`judge_required`). The manifest now says
+    it per engine (`requiresJudge`: promptfoo true, modelscan and garak false), and run validation, which schedule
+    creation and the workflow stage share, refuses an agent run without a judge with 422 `judge_required`. No engine
+    name is hard-coded in the check.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
