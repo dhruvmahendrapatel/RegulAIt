@@ -643,12 +643,15 @@ export async function endRunsHeldByRevokedRunnersTx(tx: Tx, engineId: EngineId, 
  * holds the engine row), every run of the engine still waiting — queued or awaiting approval. It was
  * requested (and approved) against the old build; the requester re-runs it. Cancelled with
  * `engine_build_changed`, its pending approval superseded, audited.
+ * PR #205 review round 9 [82]: and every run still LEASED (in flight on the old build) — its key is
+ * revoked and a later result is refused as late, so no result is ever normalised against a catalogue
+ * other than the one it ran under, on any replica.
  */
-export async function cancelWaitingRunsOfEngineTx(tx: Tx, engineId: EngineId): Promise<EngineRunRow[]> {
+export async function cancelRunsOfOldBuildTx(tx: Tx, engineId: EngineId): Promise<EngineRunRow[]> {
   const waiting = await tx
     .select()
     .from(engineRuns)
-    .where(and(eq(engineRuns.engineId, engineId), inArray(engineRuns.status, ["queued", "awaiting_approval"])))
+    .where(and(eq(engineRuns.engineId, engineId), inArray(engineRuns.status, ["queued", "awaiting_approval", "leased"])))
     .orderBy(asc(engineRuns.id))
     .for("update");
   const now = new Date();
@@ -1323,6 +1326,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         const [j] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
         if (!t || decide(t as AgentRow, "execute").effect !== "allow") refusal = "run_as_not_entitled";
         else if (run.judgeAgentId && (!j || decide(j as AgentRow, "execute").effect !== "allow")) refusal = "run_as_not_entitled";
+        // PR #205 review round 9 [81]: the manifest's required judge is checked again here — a judge
+        // agent deleted after queueing nulls `judge_agent_id`, and such a run must never be dispatched
+        // with no judge: it ends `not_run` (audited), before any key is minted
+        else if (m.requiresJudge && !run.judgeAgentId) refusal = "judge_required";
         // PR #205 review round 5 [70]: an agent with no provider model is never dispatched under
         // another name (the display name is not a model): the run ends closed
         else if (!t.model || (run.judgeAgentId && !j!.model)) refusal = "agent_not_dispatchable";

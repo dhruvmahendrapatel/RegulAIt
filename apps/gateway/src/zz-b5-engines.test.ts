@@ -201,10 +201,10 @@ async function enableEngine(engineId: EngineId) {
   const st = await inject("POST", `/v1/engines/${engineId}/self-test`, admin.key);
   expect(st.statusCode, st.body).toBe(200);
   expect(st.json().passed, st.body).toBe(true);
-  const refused = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true });
+  const refused = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true, acceptCredentialIsolationRisk: true });
   expect(refused.statusCode, refused.body).toBe(403);
   const token = await grantFor(refused.json().action);
-  const ok = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true }, { [STEP_UP_HEADER]: token });
+  const ok = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: token });
   expect(ok.statusCode, ok.body).toBe(200);
   expect(ok.json().enabled).toBe(true);
 }
@@ -430,16 +430,16 @@ describe("secure by default", () => {
     const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
     expect(st.json().passed, st.body).toBe(true);
     // an API key can never give a step-up
-    const viaKey = await inject("PATCH", "/v1/engines/promptfoo", admin.key, { enabled: true });
+    const viaKey = await inject("PATCH", "/v1/engines/promptfoo", admin.key, { enabled: true, acceptCredentialIsolationRisk: true });
     expect(viaKey.statusCode, viaKey.body).toBe(403);
     expect(viaKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
     expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { "engine.promptfoo.enabled": true } } });
+    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { "engine.promptfoo.enabled": true, "engine.promptfoo.acceptCredentialIsolationRisk": true } } });
     const [still] = await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`).then((r) => (r as unknown as { rows: Array<{ enabled: boolean }> }).rows);
     expect(still!.enabled).toBe(false);
     const token = await grantFor(refused.json().action);
-    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true }, { [STEP_UP_HEADER]: token });
+    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: token });
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json().enabled).toBe(true);
     const [audit] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "engine-updated")).orderBy(desc(auditLog.seq)).limit(1);

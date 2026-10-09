@@ -123,8 +123,17 @@ const CLOUD_ONLY_PLUGINS: readonly string[] = [
   ...new Set([...PROMPTFOO_UPSTREAM_REMOTE_ONLY_PLUGINS, ...PROMPTFOO_UPSTREAM_UNALIGNED_HARM_PLUGINS, ...PROMPTFOO_UPSTREAM_BIAS_PLUGINS]),
 ].sort();
 
-/** upstream `DATASET_PLUGINS`: datasets downloaded at run time (no pre-seeded copy here); `pliny` is excluded on licence */
-const DATASET_PLUGINS: readonly string[] = PROMPTFOO_UPSTREAM_DATASET_PLUGINS.filter((id) => id !== "pliny");
+/**
+ * PR #205 review round 9 [80]: plugins that download a dataset at run time but that upstream's
+ * `DATASET_PLUGINS` list (0.123.1) omits. `vlsu` fetches its dataset from a public hub at run time
+ * (R10, read from the pinned tarball), so it is `missing_preseed` like the listed ones, decided at
+ * planning time, never an engine error. A LOCAL supplement to the generated list: the test
+ * `the dataset supplement is still needed` fails once upstream lists it, so it can be dropped.
+ */
+export const PROMPTFOO_DATASET_PLUGINS_SUPPLEMENT: readonly string[] = Object.freeze(["vlsu"]);
+
+/** upstream `DATASET_PLUGINS` plus the supplement: datasets downloaded at run time (no pre-seeded copy here); `pliny` is excluded on licence */
+const DATASET_PLUGINS: readonly string[] = [...new Set([...PROMPTFOO_UPSTREAM_DATASET_PLUGINS, ...PROMPTFOO_DATASET_PLUGINS_SUPPLEMENT])].filter((id) => id !== "pliny").sort();
 
 export const PROMPTFOO_PLUGINS: readonly PromptfooPluginEntry[] = Object.freeze([
   // --- runs locally, mapped to a class that counts ---

@@ -47,6 +47,7 @@ import {
 import {
   BATCH5_STRICT_DEFAULTS,
   ENGINE_MANIFEST,
+  ENGINE_RESULT_VERSION,
   ENGINE_TAXONOMY,
   STEP_UP_HEADER,
   type EngineId,
@@ -272,9 +273,9 @@ beforeAll(async () => {
   firstRunnerId = reg.runnerId;
   const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
   expect(st.json().passed, st.body).toBe(true);
-  const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+  const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
   expect(refused.statusCode, refused.body).toBe(403);
-  const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+  const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
   expect(ok.statusCode, ok.body).toBe(200);
 }, 180_000);
 
@@ -461,8 +462,8 @@ describe("PR #205 review: the runner's life", () => {
     // the admin enables it again (a step-up); a run is queued
     const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
     expect(st.json().passed, st.body).toBe(true);
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
-    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) })).statusCode).toBe(200);
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) })).statusCode).toBe(200);
     const runId = await startRun();
     // [49] a RESTART: a new client, the same volume, the same (spent) enrolment token in the env —
     // the stored token is used, the enrolment token is not, and the run is leased and posted
@@ -1240,5 +1241,86 @@ describe("PR #205 review round 8: a lost registration response outlives its toke
     expect(e!.self_test).not.toBeNull();
     expect(await disabledAudits()).toBe(auditsBefore);
     await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 9 (Codex), decisions 79 to 82 — each red first ([80] is pinned in
+// packages/engine-promptfoo/src/promptfoo.test.ts). Runs after round 8: the engine is off with a fresh
+// passing record; `liveSecret` is a runner with a fresh report. The [82] case runs last: it clears it.
+// ===========================================================================
+describe("PR #205 review round 9: credential-isolation gate, the judge at lease, in-flight runs on a build change", () => {
+  const keyRevoked = async (runId: string) => {
+    const run = await runRow(runId);
+    if (!run.virtualKeyId) return null;
+    const [k] = ((await db.execute(sql`SELECT revoked_at FROM virtual_keys WHERE id = ${run.virtualKeyId}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
+    return k!.revoked_at !== null;
+  };
+  const enabled = async () => ((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled;
+
+  it("[79] a build without credential isolation is not enabled unless an admin accepts the risk with a step-up, audited", async () => {
+    expect(ENGINE_MANIFEST.promptfoo.credentialIsolation).toBe(false);
+    expect(await enabled()).toBe(false);
+    const plain = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+    expect(plain.statusCode, plain.body).toBe(409);
+    expect(plain.json()).toMatchObject({ error: "engine_credential_isolation_missing" });
+    expect(plain.json().detail).toMatch(/runner token/);
+    expect(await enabled()).toBe(false);
+    // accepting it is a relaxation: the step-up binds to it
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().action.body.values).toMatchObject({ "engine.promptfoo.acceptCredentialIsolationRisk": true });
+    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(await enabled()).toBe(true);
+    const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-credential-isolation-risk-accepted' ORDER BY seq DESC LIMIT 1`)) as unknown as {
+      rows: Array<{ detail: Record<string, unknown> }>;
+    }).rows;
+    expect(audit[0]!.detail).toMatchObject({ engineId: "promptfoo", credentialIsolation: false });
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false })).statusCode).toBe(200);
+  });
+
+  it("[81] a run whose judge was deleted after queueing is never dispatched without one: it ends not_run, no key", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    try {
+      const runId = await startRun();
+      // what deleting the judge agent does to a queued run (the foreign key nulls it)
+      await db.execute(sql`UPDATE engine_runs SET judge_agent_id = NULL WHERE id = ${runId}`);
+      const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+      expect(l.statusCode, l.body).toBe(204);
+      expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "judge_required", virtualKeyId: null });
+      const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE object_type = 'engine_run' AND object_id = ${runId} AND rule_id = 'engine-run-not-run'`)) as unknown as { rows: unknown[] }).rows;
+      expect(audit).toHaveLength(1);
+    } finally {
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+
+  it("[82] a build change cancels runs in flight on the old build too: the key is revoked, no result is ever normalised against the new catalogue", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    const runId = await startRun();
+    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+    expect(l.statusCode, l.body).toBe(200);
+    expect(l.json().runId).toBe(runId);
+    expect(await keyRevoked(runId)).toBe(false);
+    // the shipped manifest moves on while the run is in flight
+    await db.execute(sql`UPDATE engines SET version = '0.0.1-old' WHERE id = 'promptfoo'`);
+    expect((await inject("GET", "/v1/engines", admin.key)).statusCode).toBe(200);
+    expect(await runRow(runId)).toMatchObject({ status: "cancelled", errorCode: "engine_build_changed" });
+    expect(await keyRevoked(runId)).toBe(true);
+    // the old build's result arrives late: refused, never ingested
+    const late = await inject("POST", `/v1/engine-runner/runs/${runId}/result`, { authorization: `Bearer ${liveSecret}` }, {
+      version: ENGINE_RESULT_VERSION,
+      runId,
+      engineId: "promptfoo",
+      engineVersion: MANIFEST.promptfoo.version,
+      status: "completed",
+      errorCode: null,
+      items: [],
+      notRun: [],
+      rawReport: null,
+    });
+    expect(late.statusCode, late.body).toBe(409);
+    expect(await runRow(runId)).toMatchObject({ status: "cancelled" });
   });
 });

@@ -37,6 +37,13 @@ export interface EngineManifestEntry {
   needsModelAccess: boolean;
   /** PR #205 review round 6 [73]: must an agent run name a judge agent? (run validation refuses one without) */
   requiresJudge: boolean;
+  /**
+   * PR #205 review round 9 [79]: does this build keep the runner credential out of the engine
+   * process's reach (a distinct OS identity, or a separate container)? false = the engine process
+   * runs as the runner's user and could read the credential; enabling then needs an explicit,
+   * stepped-up, audited acceptance (ADR-0187 decision 79). No build has it yet (B5-P2 splits it).
+   */
+  credentialIsolation: boolean;
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
   sets: Readonly<Record<string, EngineSetClass>>;
   /** what an air-gapped install cannot run, published as data */
@@ -73,6 +80,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // PR #205 review round 6 [73]: promptfoo grades with a judge behind the gateway (without one it
     // would fall back to a vendor default, which the config refuses)
     requiresJudge: true,
+    credentialIsolation: false,
     // every set that runs here, by class; a set not listed is offensive (fail closed)
     sets: promptfooManifestSets(),
     // remote generation is off on every install, not only air-gapped ones: this never runs
@@ -98,6 +106,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     usageDataEnv: {},
     needsModelAccess: false,
     requiresJudge: false,
+    credentialIsolation: false,
     sets: {},
     airGappedReducedSet: [],
     lastVerified: "2026-10-08",
@@ -116,6 +125,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     usageDataEnv: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
     needsModelAccess: true,
     requiresJudge: false,
+    credentialIsolation: false,
     sets: {},
     airGappedReducedSet: [],
     lastVerified: "2026-10-08",

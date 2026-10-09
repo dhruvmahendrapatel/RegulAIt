@@ -22,6 +22,7 @@ import {
   ENGINE_MANIFEST,
   ENGINE_RESULT_VERSION,
   ENGINE_TAXONOMY,
+  PROMPTFOO_DATASET_PLUGINS_SUPPLEMENT,
   PROMPTFOO_PLUGINS,
   PROMPTFOO_STRATEGIES,
   PROMPTFOO_UPSTREAM_ALL_PLUGINS,
@@ -127,6 +128,22 @@ describe("the plan: only what this build admits reaches promptfoo", () => {
     for (const s of PROMPTFOO_STRATEGIES) expect(PROMPTFOO_UPSTREAM_ALL_STRATEGIES, s.id).toContain(s.id);
     for (const d of PROMPTFOO_UPSTREAM_DATASET_PLUGINS) expect(["missing_preseed", "excluded_licence"], d).toContain(promptfooPlugin(d)?.disposition);
     expect(PROMPTFOO_UPSTREAM_VERSION).toBe(ENGINE_MANIFEST.promptfoo.version);
+  });
+
+  it("PR #205 round 9 [80]: vlsu (a runtime-downloaded dataset upstream does not list) is excluded at planning time as missing_preseed", () => {
+    expect(promptfooPlugin("vlsu")?.disposition).toBe("missing_preseed");
+    // a mixed run: vlsu is a planning-time exclusion, so the rest still runs (not an engine error)
+    const plan = planPromptfooRun(["prompt-extraction", "vlsu"]);
+    expect(plan.plugins.map((p) => p.id)).toEqual(["prompt-extraction"]);
+    expect(plan.notRun).toEqual([{ key: "vlsu", reason: "missing_preseed" }]);
+    expect(ENGINE_MANIFEST.promptfoo.airGappedReducedSet).toContainEqual({ key: "vlsu", reason: "missing_preseed" });
+  });
+
+  it("PR #205 round 9 [80]: the dataset supplement is still needed (it fails once upstream lists the plugin: drop it then)", () => {
+    for (const id of PROMPTFOO_DATASET_PLUGINS_SUPPLEMENT) {
+      expect(PROMPTFOO_UPSTREAM_ALL_PLUGINS, `${id} is not an upstream plugin`).toContain(id);
+      expect(PROMPTFOO_UPSTREAM_DATASET_PLUGINS, `${id} is now in upstream DATASET_PLUGINS: remove it from the supplement`).not.toContain(id);
+    }
   });
 
   it("the manifest classes every set that runs and lists the reduced set; the taxonomy maps promptfoo ids", () => {

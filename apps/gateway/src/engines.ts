@@ -56,7 +56,7 @@ import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { generateEnrollmentToken } from "./engine-runner-auth.js";
 import { hashToken } from "./token-hash.js";
-import { cancelWaitingRunsOfEngineTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
+import { cancelRunsOfOldBuildTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -137,7 +137,7 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
       // PR #205 review round 7 [75]: runs still waiting were requested (and approved) against the old
       // build: they are cancelled (`engine_build_changed`, audited) in this transaction. Picked over
       // re-versioning them: an approval given for one build is not silently carried to another.
-      const cancelled = buildChanges ? await cancelWaitingRunsOfEngineTx(tx, id) : [];
+      const cancelled = buildChanges ? await cancelRunsOfOldBuildTx(tx, id) : [];
       return { buildChanges, wasEnabled: locked.enabled, from: { version: locked.version, digest: locked.imageDigest }, cancelled };
     });
     if (!out) continue;
@@ -261,6 +261,18 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           detail: `engine ${engineId} cannot be enabled: ${admit.why}. Register a runner from the signed image and run the self-test first.`,
         });
       }
+      // PR #205 review round 9 [79]: a build whose engine process can read the runner credential
+      // (no separate OS identity or container yet) is OFF until an admin accepts that risk
+      // explicitly — a relaxation, so it rides the step-up below and is audited (ADR-0180)
+      if (!manifest[engineId].credentialIsolation && body.acceptCredentialIsolationRisk !== true) {
+        return reply.status(409).send({
+          error: "engine_credential_isolation_missing",
+          detail:
+            `engine ${engineId}'s build runs the engine process as the runner's own user, so a compromised engine could read the runner token ` +
+            "(it can lease this engine's runs and post their results; it cannot reach any other route). " +
+            "To enable it anyway, send acceptCredentialIsolationRisk: true with a step-up; the isolating build is ADR-0187 slice B5-P2.",
+        });
+      }
     }
     const relaxed = engineRowRelaxations(engineId, body, current);
     if (!(await requireRelaxStepUp(db, req, reply, relaxed))) return reply;
@@ -283,7 +295,20 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       if (body.maxBudgetUsd !== undefined) set.maxBudgetUsd = body.maxBudgetUsd;
       if (body.maxConcurrent !== undefined) set.maxConcurrent = body.maxConcurrent;
       const [after] = await tx.update(engines).set(set).where(eq(engines.id, engineId)).returning();
-      const transitions = settingTransitions(locked, body);
+      const transitions = settingTransitions(locked, body, ["acceptCredentialIsolationRisk"]);
+      if (body.enabled === true && !locked.enabled && !manifest[engineId].credentialIsolation) {
+        // round 9 [79]: the accepted risk is its own audit row, naming who accepted it and for which build
+        await tx.insert(auditLog).values({
+          userId: actor ?? NO_IDENTITY,
+          objectType: "engine",
+          objectId: null,
+          detail: { engineId, version: manifest[engineId].version, imageDigest: manifest[engineId].imageDigest, credentialIsolation: false },
+          effect: "allow",
+          ruleId: "engine-credential-isolation-risk-accepted",
+          ruleChain: [],
+          reason: `engine ${engineId} enabled although its engine process can read the runner token: the admin accepted that risk with a step-up (ADR-0187 decision 79)`,
+        });
+      }
       if (Object.keys(transitions).length > 0) {
         await tx.insert(auditLog).values({
           userId: actor ?? NO_IDENTITY,

@@ -151,6 +151,8 @@ export const ENGINE_REFUSALS = {
   engine_disabled: 409,
   /** enabling without a passing, fresh self-test; or a runner whose own report is stale or failing */
   engine_self_test_required: 409,
+  /** PR #205 review round 9 [79]: enabling a build that does not isolate the runner credential, without accepting that risk */
+  engine_credential_isolation_missing: 409,
   /** PR #205 review round 8 [77]: a registration whose token hash is already a runner's credential */
   engine_runner_already_registered: 409,
   /** PR #205 review round 5 [67]: a runner presenting a build other than the one it registered with */
@@ -433,6 +435,13 @@ export const updateEngineSchema = z
     timeoutSeconds: z.number().int().min(ENGINE_ROW_LIMITS.timeoutSeconds.min).max(ENGINE_ROW_LIMITS.timeoutSeconds.max).optional(),
     maxBudgetUsd: z.number().min(ENGINE_ROW_LIMITS.maxBudgetUsd.min).max(ENGINE_ROW_LIMITS.maxBudgetUsd.max).optional(),
     maxConcurrent: z.number().int().min(ENGINE_ROW_LIMITS.maxConcurrent.min).max(ENGINE_ROW_LIMITS.maxConcurrent.max).optional(),
+    /**
+     * PR #205 review round 9 [79]: enabling an engine whose build does not isolate the runner
+     * credential from the engine process (the manifest's `credentialIsolation: false`) is refused
+     * unless the admin accepts that risk explicitly. It is a relaxation: the step-up binds to it,
+     * and it is audited. Only meaningful with `enabled: true`.
+     */
+    acceptCredentialIsolationRisk: z.literal(true).optional(),
   })
   .strict();
 export type UpdateEngineInput = z.infer<typeof updateEngineSchema>;
@@ -451,6 +460,8 @@ export function engineRowRelaxations(
   const out: Record<string, unknown> = {};
   const k = (f: string) => `engine.${engineId}.${f}`;
   if (next.enabled === true && !stored.enabled) out[k("enabled")] = true;
+  // round 9 [79]: accepting the credential-isolation risk is part of what the step-up approves
+  if (next.enabled === true && !stored.enabled && next.acceptCredentialIsolationRisk === true) out[k("acceptCredentialIsolationRisk")] = true;
   if (next.timeoutSeconds !== undefined && next.timeoutSeconds > stored.timeoutSeconds) out[k("timeoutSeconds")] = next.timeoutSeconds;
   if (next.maxBudgetUsd !== undefined && next.maxBudgetUsd > stored.maxBudgetUsd) out[k("maxBudgetUsd")] = next.maxBudgetUsd;
   if (next.maxConcurrent !== undefined && next.maxConcurrent > stored.maxConcurrent) out[k("maxConcurrent")] = next.maxConcurrent;
