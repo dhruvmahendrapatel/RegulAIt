@@ -314,6 +314,39 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     expect(replay.body!["supersedes"]).toBe(STORED);
   });
 
+  it("round 7 [74]: a crash after the new token was stored but before the pending record was deleted: the stored token is used, the stale record dropped", async () => {
+    const SECRET = `rge_${"8".repeat(64)}`;
+    // exactly that state: the stored token IS the pending secret; and no enrolment token is set
+    const { o, logs } = await opts({ enrollmentToken: null, maxIterations: 1 });
+    await o.store.save(SECRET);
+    await o.store.savePending({ secret: SECRET, supersedes: STORED });
+    const g = gateway({ lease: [{ status: 204 }] });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
+    expect(g.calls[0]!.bearer).toBe(`Bearer ${SECRET}`);
+    expect(await o.store.loadPending()).toBeNull();
+    expect(logs.some((l) => /stale pending record is removed/.test(l))).toBe(true);
+  });
+
+  it("round 7 [74]: a stale record that cannot be deleted never blocks the committed credential", async () => {
+    const SECRET = `rge_${"8".repeat(64)}`;
+    const { o, logs } = await opts({ enrollmentToken: null, maxIterations: 1 });
+    await o.store.save(SECRET);
+    await o.store.savePending({ secret: SECRET, supersedes: null });
+    let tries = 0;
+    const stuck = Object.assign(Object.create(Object.getPrototypeOf(o.store) as object) as FileRunnerTokenStore, o.store, {
+      clearPending: async () => {
+        tries++;
+        throw new Error("EROFS");
+      },
+    });
+    const g = gateway({ lease: [{ status: 204 }] });
+    await runRunnerLoop(g.client, adapter, { ...o, store: stuck });
+    expect(tries).toBe(3);
+    expect(g.calls[0]!.bearer).toBe(`Bearer ${SECRET}`);
+    expect(logs.some((l) => /could not be removed/.test(l))).toBe(true);
+  });
+
   it("round 6 [72]: an interrupted enrolment with no enrolment token stops and KEEPS the pending record", async () => {
     const { o } = await opts({ enrollmentToken: null });
     await o.store.save(STORED);

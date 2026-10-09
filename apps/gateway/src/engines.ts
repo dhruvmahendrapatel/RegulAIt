@@ -56,7 +56,7 @@ import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { generateEnrollmentToken } from "./engine-runner-auth.js";
 import { hashToken } from "./token-hash.js";
-import { endLeasedRunsOfRunner, engineRunTestHooks } from "./engine-runs.js";
+import { cancelWaitingRunsOfEngineTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -109,8 +109,8 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
     if (same) continue;
     // PR #205 review round 6 [71]: a build change switches the engine off under the engine row's
     // FOR UPDATE lock, so it serialises with a lease deciding under FOR SHARE
-    await db.transaction(async (tx) => {
-      await tx.select({ id: engines.id }).from(engines).where(eq(engines.id, id)).for("update");
+    const cancelled = await db.transaction(async (tx) => {
+      const [locked] = await tx.select({ version: engines.version, imageDigest: engines.imageDigest }).from(engines).where(eq(engines.id, id)).for("update");
       await tx
         .update(engines)
         .set({
@@ -126,7 +126,14 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
           updatedAt: new Date(),
         })
         .where(eq(engines.id, id));
+      // PR #205 review round 7 [75]: runs still waiting were requested (and approved) against the old
+      // build: they are cancelled (`engine_build_changed`, audited) in this transaction, decided on the
+      // locked row so two concurrent syncs cancel once. Picked over re-versioning them: an approval
+      // given for one build is not silently carried to another; the requester re-runs.
+      const stillChanging = !!locked && (locked.version !== m.version || locked.imageDigest !== m.imageDigest);
+      return stillChanging ? cancelWaitingRunsOfEngineTx(tx, id) : [];
     });
+    await notifyWorkflowsOfEndedRuns(db, cancelled);
     if (changedBuild && row.enabled) {
       await auditEngine(db, {
         userId: NO_IDENTITY,
@@ -377,13 +384,19 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const [row] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
     if (!row) return reply.status(404).send({ error: "engine_runner_not_found" });
     const reason = body.reason ?? "revoked by an administrator";
-    const [revoked] = await db
-      .update(engineRunners)
-      .set({ revokedAt: new Date(), revokedByUserId: req.authCtx.userId, revokeReason: reason })
-      .where(and(eq(engineRunners.id, runnerId), isNull(engineRunners.revokedAt)))
-      .returning();
-    // the runs it holds end now, and their keys with them: the runner is never trusted to stop itself
-    const ended = await endLeasedRunsOfRunner(db, runnerId, req.authCtx.userId ?? NO_IDENTITY);
+    // the runs it holds end now, and their keys with them: the runner is never trusted to stop itself.
+    // PR #205 review round 7 [76]: in the revocation's own transaction (and again when it was already
+    // revoked: the call reconciles), so no failure after a commit leaves a usable key
+    const { revoked, endedRuns } = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(engineRunners)
+        .set({ revokedAt: new Date(), revokedByUserId: req.authCtx.userId, revokeReason: reason })
+        .where(and(eq(engineRunners.id, runnerId), isNull(engineRunners.revokedAt)))
+        .returning();
+      return { revoked: r, endedRuns: await endRunsHeldByRevokedRunnersTx(tx, row.engineId, req.authCtx.userId ?? NO_IDENTITY, runnerId) };
+    });
+    await notifyWorkflowsOfEndedRuns(db, endedRuns);
+    const ended = endedRuns.length;
     await auditEngine(db, {
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "engine_runner",
@@ -414,6 +427,20 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       if (!existing || existing.tokenHash !== body.tokenHash || existing.revokedAt !== null) {
         return reply.status(401).send({ error: "engine_enrollment_invalid", detail: "this enrolment token was already used" });
       }
+      // PR #205 review round 7 [76]: a replay reconciles, idempotently — any run still leased by a
+      // revoked runner of this engine (a superseded one included) ends now, with its key
+      const reconciled = await db.transaction((tx) => endRunsHeldByRevokedRunnersTx(tx, engineId, NO_IDENTITY));
+      await notifyWorkflowsOfEndedRuns(db, reconciled);
+      if (reconciled.length > 0) {
+        await auditEngine(db, {
+          userId: NO_IDENTITY,
+          objectType: "engine_runner",
+          objectId: existing.id,
+          ruleId: "engine-runner-revoked-runs-reconciled",
+          detail: { engineId, endedRuns: reconciled.map((r) => r.id) },
+          reason: `${reconciled.length} run(s) still held by a revoked ${engineId} runner were ended on a registration replay`,
+        });
+      }
       await auditEngine(db, {
         userId: NO_IDENTITY,
         objectType: "engine_runner",
@@ -427,7 +454,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         .send({ runnerId: existing.id, engineId, selfTest: { passed: existing.selfTestPassed, failures: existing.selfTestFailures }, replayed: true });
     };
     if (req.authCtx.engineEnrollmentSpent) return replay();
-    let out: (typeof engineRunners.$inferSelect & { superseded: { id: string; name: string } | null }) | null;
+    let out: (typeof engineRunners.$inferSelect & { superseded: { id: string; name: string } | null; ended: Awaited<ReturnType<typeof endRunsHeldByRevokedRunnersTx>> }) | null;
     try {
       out = await db.transaction(async (tx) => {
         // spend the enrolment token: one winner
@@ -456,6 +483,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         // it held; that registration (a live runner of THIS engine) is revoked in the same transaction,
         // so an upgraded runner never leaves a live credential behind. Anything else is ignored.
         let superseded: { id: string; name: string } | null = null;
+        let ended: Awaited<ReturnType<typeof endRunsHeldByRevokedRunnersTx>> = [];
         if (body.supersedes) {
           const [old] = await tx
             .update(engineRunners)
@@ -463,8 +491,21 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
             .where(and(eq(engineRunners.tokenHash, hashToken(body.supersedes)), eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
             .returning({ id: engineRunners.id, name: engineRunners.name });
           superseded = old ?? null;
+          if (old) {
+            // PR #205 review round 7 [76]: the runs it held end, and their keys are revoked, IN THIS
+            // transaction — a crash or a failure after the commit can no longer leave a usable key
+            ended = await endRunsHeldByRevokedRunnersTx(tx, engineId, NO_IDENTITY, old.id);
+            await auditEngine(tx as unknown as Db, {
+              userId: NO_IDENTITY,
+              objectType: "engine_runner",
+              objectId: old.id,
+              ruleId: "engine-runner-superseded",
+              detail: { engineId, replacedBy: runner!.id, endedRuns: ended.length },
+              reason: `engine runner ${old.name} (${engineId}) revoked: it re-enrolled as ${body.name} after a build change`,
+            });
+          }
         }
-        return { ...runner!, superseded };
+        return { ...runner!, superseded, ended };
       });
     } catch (e) {
       // the hash is already some runner's credential (token_hash is unique): a credential is never shared
@@ -476,6 +517,8 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     }
     // a concurrent request spent it first: it may have been this runner's own retry
     if (!out) return replay();
+    await engineRunTestHooks.afterRegisterTx?.();
+    await notifyWorkflowsOfEndedRuns(db, out.ended);
     await auditEngine(db, {
       userId: NO_IDENTITY,
       objectType: "engine_runner",
@@ -487,18 +530,6 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         `engine runner ${body.name} registered for ${engineId}` +
         (verdict.passed ? " with a passing self-test" : `; its self-test failed (${verdict.failures.join(", ")}), so it can lease nothing`),
     });
-    if (out.superseded) {
-      // the runs the old registration held end now, with their keys, as on an admin revocation
-      const ended = await endLeasedRunsOfRunner(db, out.superseded.id, NO_IDENTITY);
-      await auditEngine(db, {
-        userId: NO_IDENTITY,
-        objectType: "engine_runner",
-        objectId: out.superseded.id,
-        ruleId: "engine-runner-superseded",
-        detail: { engineId, replacedBy: out.id, endedRuns: ended },
-        reason: `engine runner ${out.superseded.name} (${engineId}) revoked: it re-enrolled as ${body.name} after a build change`,
-      });
-    }
     return reply.status(201).send({ runnerId: out.id, engineId, selfTest: verdict, supersededRunnerId: out.superseded?.id ?? null });
   });
 

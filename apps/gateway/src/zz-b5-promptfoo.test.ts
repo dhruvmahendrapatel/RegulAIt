@@ -995,3 +995,130 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
     }
   });
 });
+
+// ===========================================================================
+// PR #205 review round 7 (Codex), decisions 74 to 76 — each red first ([74] is pinned in
+// packages/engine-runner/src/loop.test.ts). Runs after round 6: the engine is off with a fresh
+// passing record. The [75] build-change case runs last: it clears that record.
+// ===========================================================================
+describe("PR #205 review round 7: supersession ends runs in its transaction; leases and queues follow the build", () => {
+  const report = () =>
+    buildSelfTest({
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "denied" },
+    });
+  const enrolmentToken = async (label: string) => (await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label })).json().token as string;
+  const registerBody = async (label: string, secret: string, supersedes?: string) => ({
+    name: `${label}-${RUN}`,
+    imageDigest: PF_DIGEST,
+    engineVersion: MANIFEST.promptfoo.version,
+    selfTest: await report(),
+    tokenHash: runnerTokenHash(secret),
+    ...(supersedes ? { supersedes } : {}),
+  });
+  const newRunner = async (label: string) => {
+    const secret = generateRunnerSecret();
+    const r = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${await enrolmentToken(label)}` }, await registerBody(label, secret));
+    expect(r.statusCode, r.body).toBe(201);
+    return { secret, id: r.json().runnerId as string };
+  };
+  const keyRevoked = async (runId: string) => {
+    const run = await runRow(runId);
+    const [k] = ((await db.execute(sql`SELECT revoked_at FROM virtual_keys WHERE id = ${run.virtualKeyId}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
+    return k!.revoked_at !== null;
+  };
+  /** a run leased (with its key) by the runner holding `secret` */
+  const leasedBy = async (secret: string) => {
+    const runId = await startRun();
+    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${secret}` }, PF_BUILD);
+    expect(l.statusCode, l.body).toBe(200);
+    expect(l.json().runId).toBe(runId);
+    expect(await keyRevoked(runId)).toBe(false);
+    return runId;
+  };
+
+  it("[76] a failure right after a superseding registration commits leaves no usable key: the runs ended in its transaction", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    try {
+      const old = await newRunner("supersede-old");
+      const runId = await leasedBy(old.secret);
+      const secret = generateRunnerSecret();
+      const token = await enrolmentToken("supersede-new");
+      engineRunTestHooks.afterRegisterTx = () => {
+        throw new Error("crashed after the commit");
+      };
+      try {
+        const r = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${token}` }, await registerBody("supersede-new", secret, old.secret));
+        expect(r.statusCode).toBe(500);
+      } finally {
+        engineRunTestHooks.afterRegisterTx = undefined;
+      }
+      expect(await runRow(runId)).toMatchObject({ status: "cancelled", errorCode: "runner_revoked" });
+      expect(await keyRevoked(runId)).toBe(true);
+      // the runner's retry is a replay of the same registration: the same runner, nothing left to end
+      const again = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${token}` }, await registerBody("supersede-new", secret, old.secret));
+      expect(again.statusCode, again.body).toBe(201);
+      expect(again.json()).toMatchObject({ replayed: true });
+    } finally {
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+
+  it("[76] a registration replay reconciles: a run still held by a revoked runner ends, and its key is revoked", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    try {
+      const holder = await newRunner("reconcile-holder");
+      const runId = await leasedBy(holder.secret);
+      // the state an interrupted supersession used to leave: the runner revoked, its run and key still live
+      await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'superseded (left behind)' WHERE id = ${holder.id}`);
+      expect(await keyRevoked(runId)).toBe(false);
+      const secret = generateRunnerSecret();
+      const token = await enrolmentToken("reconcile-replay");
+      const first = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${token}` }, await registerBody("reconcile-replay", secret));
+      expect(first.statusCode, first.body).toBe(201);
+      const replay = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${token}` }, await registerBody("reconcile-replay", secret));
+      expect(replay.statusCode, replay.body).toBe(201);
+      expect(replay.json()).toMatchObject({ replayed: true });
+      expect(await runRow(runId)).toMatchObject({ status: "cancelled", errorCode: "runner_revoked" });
+      expect(await keyRevoked(runId)).toBe(true);
+      // idempotent: a second replay finds nothing more to end
+      const twice = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${token}` }, await registerBody("reconcile-replay", secret));
+      expect(twice.statusCode).toBe(201);
+    } finally {
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+
+  it("[75] a lease takes only a run requested for the runner's engine version", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    const runId = await startRun();
+    try {
+      // a run requested before an upgrade (its version is not the one this runner runs)
+      await db.execute(sql`UPDATE engine_runs SET engine_version = '0.0.1-old' WHERE id = ${runId}`);
+      const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+      expect(l.statusCode, l.body).toBe(204);
+      expect(await runRow(runId)).toMatchObject({ status: "queued", runnerId: null, virtualKeyId: null });
+    } finally {
+      await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {});
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
+  });
+
+  it("[75] a manifest build change cancels the runs still waiting (engine_build_changed, audited)", async () => {
+    await db.execute(sql`UPDATE engines SET enabled = true WHERE id = 'promptfoo'`);
+    const runId = await startRun();
+    // the shipped manifest moved on since this run was queued: the row (and the run) still say the old build
+    await db.execute(sql`UPDATE engine_runs SET engine_version = '0.0.1-old' WHERE id = ${runId}`);
+    await db.execute(sql`UPDATE engines SET version = '0.0.1-old' WHERE id = 'promptfoo'`);
+    const v = await inject("GET", "/v1/engines", admin.key); // any engine route syncs the manifest
+    expect(v.statusCode, v.body).toBe(200);
+    expect(await runRow(runId)).toMatchObject({ status: "cancelled", errorCode: "engine_build_changed" });
+    const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE object_type = 'engine_run' AND object_id = ${runId} AND rule_id = 'engine-run-cancelled'`)) as unknown as { rows: unknown[] }).rows;
+    expect(audit).toHaveLength(1);
+    const [engine] = ((await db.execute(sql`SELECT enabled, version FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean; version: string }> }).rows;
+    expect(engine).toMatchObject({ enabled: false, version: MANIFEST.promptfoo.version });
+  });
+});

@@ -109,7 +109,7 @@ import { engineKeyName, generateVirtualKeyToken } from "./virtual-keys.js";
 import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
-type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type AgentRow = typeof agents.$inferSelect;
 
 // ---------------------------------------------------------------------------
@@ -604,25 +604,76 @@ function noResult(status: EngineTerminalRunStatus): EngineRunNormalised {
   return normaliseEngineResult({ envelope: null, status, taxonomy: taxonomyOf(runtime), scrub: engineDetectionScrub });
 }
 
-/** end every leased run a revoked runner holds (DELETE /v1/engine-runners/:id) */
-export async function endLeasedRunsOfRunner(db: Db, runnerId: string, actorUserId: string): Promise<number> {
-  const held = await db
-    .select({ id: engineRuns.id })
+/**
+ * PR #205 review round 7 [76]: end, IN THE CALLER'S TRANSACTION, every run still leased by a revoked
+ * runner of `engineId` (or by the one runner named) — cancelled, its key revoked, audited — so a
+ * revocation and the end of what it held commit together. Idempotent: a run already ended is not
+ * matched. Returns the ended runs, whose workflows the caller notifies after its commit.
+ */
+export async function endRunsHeldByRevokedRunnersTx(tx: Tx, engineId: EngineId, actorUserId: string, onlyRunnerId?: string): Promise<EngineRunRow[]> {
+  const held = await tx
+    .select()
     .from(engineRuns)
-    .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.status, "leased")));
-  let n = 0;
-  for (const r of held) {
-    const done = await finishEngineRun(db, r.id, ["leased"], {
-      status: "cancelled",
-      errorCode: "runner_revoked",
-      normalised: noResult("cancelled"),
-      cause: "runner_revoked",
-      actorUserId,
-    });
-    if (done) n += 1;
+    .where(
+      and(
+        eq(engineRuns.engineId, engineId),
+        eq(engineRuns.status, "leased"),
+        onlyRunnerId
+          ? eq(engineRuns.runnerId, onlyRunnerId)
+          : inArray(
+              engineRuns.runnerId,
+              tx.select({ id: engineRunners.id }).from(engineRunners).where(and(eq(engineRunners.engineId, engineId), isNotNull(engineRunners.revokedAt))),
+            ),
+      ),
+    )
+    .orderBy(asc(engineRuns.id))
+    .for("update");
+  const now = new Date();
+  const ended: EngineRunRow[] = [];
+  for (const run of held) {
+    ended.push(
+      await endLockedRun(tx, run, { status: "cancelled", errorCode: "runner_revoked", normalised: noResult("cancelled"), cause: "runner_revoked", actorUserId }, now),
+    );
   }
-  return n;
+  return ended;
 }
+
+/**
+ * PR #205 review round 7 [75]: a manifest build change ends, in the caller's transaction (which
+ * holds the engine row), every run of the engine still waiting — queued or awaiting approval. It was
+ * requested (and approved) against the old build; the requester re-runs it. Cancelled with
+ * `engine_build_changed`, its pending approval superseded, audited.
+ */
+export async function cancelWaitingRunsOfEngineTx(tx: Tx, engineId: EngineId): Promise<EngineRunRow[]> {
+  const waiting = await tx
+    .select()
+    .from(engineRuns)
+    .where(and(eq(engineRuns.engineId, engineId), inArray(engineRuns.status, ["queued", "awaiting_approval"])))
+    .orderBy(asc(engineRuns.id))
+    .for("update");
+  const now = new Date();
+  const ended: EngineRunRow[] = [];
+  for (const run of waiting) {
+    ended.push(
+      await endLockedRun(
+        tx,
+        run,
+        { status: "cancelled", errorCode: "engine_build_changed", normalised: noResult("cancelled"), cause: "engine_build_changed", actorUserId: NO_IDENTITY },
+        now,
+      ),
+    );
+    if (run.approvalId) {
+      await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, run.approvalId), eq(approvals.status, "pending")));
+    }
+  }
+  return ended;
+}
+
+/** after a commit: tell the workflows of runs ended in it (a failure is retried by the workflow sweep) */
+export async function notifyWorkflowsOfEndedRuns(db: Db, runs: ReadonlyArray<Pick<EngineRunRow, "id" | "workflowInstanceId" | "workflowStageId">>): Promise<void> {
+  for (const r of runs) if (r.workflowInstanceId) await notifyWorkflowOfEngineRun(db, r);
+}
+
 
 /** the decide path's hook for an `engine_run` approval (inside its transaction) */
 export async function applyEngineRunApprovalDecision(
@@ -685,6 +736,8 @@ export const engineRunTestHooks: {
   beforeSelfTestTx?: (runnerId: string) => Promise<void> | void;
   /** runs just before a due schedule creates its run (PR #203 review round 2 [23]) */
   beforeScheduledCreate?: () => void;
+  /** runs right after a registration's transaction committed, before anything else (PR #205 review round 7 [76]) */
+  afterRegisterTx?: () => Promise<void> | void;
 } = {};
 
 /**
@@ -1240,7 +1293,16 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [run] = await tx
         .select()
         .from(engineRuns)
-        .where(and(eq(engineRuns.engineId, engineId), eq(engineRuns.status, "queued"), sql`${engineRuns.queueExpiresAt} > now()`))
+        // PR #205 review round 7 [75]: only a run requested for the build this runner runs (a run of
+        // another engine version would always end `result_mismatch`)
+        .where(
+          and(
+            eq(engineRuns.engineId, engineId),
+            eq(engineRuns.status, "queued"),
+            eq(engineRuns.engineVersion, build.engineVersion),
+            sql`${engineRuns.queueExpiresAt} > now()`,
+          ),
+        )
         .orderBy(asc(engineRuns.createdAt))
         .limit(1)
         .for("update", { skipLocked: true });

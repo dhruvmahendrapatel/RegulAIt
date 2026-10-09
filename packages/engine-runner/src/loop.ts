@@ -264,7 +264,23 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
   const stored = await opts.store.load();
   // round 6 [72]: an enrolment interrupted by a crash or a restart is resumed first, with the same
   // secret and the same `supersedes`, so the credential it replaces is still revoked
-  const interrupted = await opts.store.loadPending();
+  let interrupted = await opts.store.loadPending();
+  // PR #205 review round 7 [74]: a crash after the new token was stored but before the pending record
+  // was deleted: the stored token IS the pending secret, so that enrolment committed. Use the stored
+  // credential and drop the stale record; failing to delete it never blocks the credential (a later
+  // start finds the same match and tries again).
+  if (interrupted && stored === interrupted.secret) {
+    interrupted = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await opts.store.clearPending();
+        opts.log?.("an enrolment had completed before a restart; its stale pending record is removed");
+        break;
+      } catch {
+        if (attempt === 3) opts.log?.("an enrolment had completed before a restart; its stale pending record could not be removed (tried again at the next start)");
+      }
+    }
+  }
   let state: RunnerState = interrupted ? (interrupted.supersedes ? "reenrolling" : "enrolling") : stored ? "leasing" : "enrolling";
   if (stored && !interrupted) {
     client.useToken(stored);
