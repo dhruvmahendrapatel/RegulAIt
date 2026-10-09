@@ -57,6 +57,7 @@ import { buildSelfTest, FileRunnerTokenStore, generateRunnerSecret, runOnce, Run
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
 import { engineRunTestHooks, runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
+import { recordVirtualKeySpend } from "./virtual-keys.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -1821,6 +1822,57 @@ describe("PR #205 review round 13: an idempotent lease; a monotonic manifest syn
     expect(late.statusCode, late.body).toBe(204);
     await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${r.runnerId}`);
     await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+
+  it("[102] three re-issues with spend on every key: the last key carries exactly what the run spent, and the run is not refused", async () => {
+    await switchOn();
+    const r = await register("three-rotations");
+    const runId = await startRun(); // budget $1
+    const requestId = randomUUID();
+    const lease = () => inject("POST", "/v1/engine-runner/lease", r.bearer, { ...PF_BUILD, requestId });
+    let answer = await lease();
+    expect(answer.statusCode, answer.body).toBe(200);
+    const STEP = 0.2;
+    try {
+      // spend on the current key the way a model call does (the usage ledger row, then the key's counter),
+      // then the response of the lease is lost and the runner retries with the same id: the key rotates
+      for (let rotation = 1; rotation <= 3; rotation++) {
+        const k = (await runRow(runId)).virtualKeyId!;
+        await db.insert(usageEvents).values({ userId: alice.id, virtualKeyId: k, costUsd: STEP });
+        await recordVirtualKeySpend(db, k, STEP);
+        answer = await lease();
+        expect(answer.statusCode, answer.body).toBe(200);
+        expect(answer.json().runId).toBe(runId);
+      }
+      const row = await runRow(runId);
+      const current = await keyRow(row.virtualKeyId!);
+      expect(current.revokedAt).toBeNull();
+      // the fourth key carries what the run spent ($0.60), not the sum of every key's counter ($1.40)
+      expect(current.spentUsd).toBeCloseTo(3 * STEP, 9);
+      // and the run is not refused: a model call on the current key is served
+      const t = answer.json().target as { model: string; apiKey: string; headers: Record<string, string> };
+      const call = await app.inject({
+        method: "POST",
+        url: `${new URL(GATEWAY_BASE).pathname}/chat/completions`,
+        headers: { authorization: `Bearer ${t.apiKey}`, ...t.headers },
+        payload: { model: t.model, messages: [{ role: "user", content: "after three rotations" }] },
+      });
+      expect(call.statusCode, call.body).toBe(200);
+      // the key's counter and the run's cost both equal the true spend on the ledger
+      const ledger = await db
+        .select({ cost: usageEvents.costUsd })
+        .from(usageEvents)
+        .where(sql`${usageEvents.virtualKeyId} IN (SELECT id FROM virtual_keys WHERE engine_run_id = ${runId})`);
+      const trueSpend = ledger.reduce((s, u) => s + Number(u.cost ?? 0), 0);
+      expect(trueSpend).toBeGreaterThan(3 * STEP);
+      expect((await keyRow(current.id)).spentUsd).toBeCloseTo(trueSpend, 9);
+      expect((await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {})).statusCode).toBe(200);
+      expect((await runRow(runId)).costUsd).toBeCloseTo(trueSpend, 9);
+    } finally {
+      await db.execute(sql`UPDATE engine_runs SET status = 'cancelled', finished_at = now(), error_code = 'test_cleanup' WHERE id = ${runId} AND finished_at IS NULL`);
+      await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${r.runnerId}`);
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
   });
 
   it("[94] another runner presenting the same request id never gets the first runner's run, nor rotates its key", async () => {

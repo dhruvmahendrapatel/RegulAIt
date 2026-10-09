@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { ENGINE_RUNNER_TOKEN_PREFIX, type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
 import { removeFileDurable, writeFileDurable } from "./durable.js";
-import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
+import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, RunnerMalformedResponseError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
 
 /**
  * PR #205 review round 6 [72]: an enrolment under way — the new secret, and the token it supersedes
@@ -252,6 +252,7 @@ function eventOf(e: unknown): RunnerEvent {
 }
 
 function whyOf(e: unknown): string {
+  if (e instanceof RunnerMalformedResponseError) return `${e.status} with no valid answer`;
   return e instanceof RunnerHttpError ? (e.code ?? String(e.status)) : "unreachable";
 }
 
@@ -309,6 +310,8 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
     confirmRefused: boolean;
     /** round 12 [92]: this secret replaced a revoked one (regenerated at most once) */
     regenerated: boolean;
+    /** #210 review: the last attempt answered with no valid body at the attempt cap — stop if the confirmation is refused */
+    capReached?: boolean;
   } | null = interrupted
     ? { secret: interrupted.secret, body: null, supersedes: interrupted.supersedes, attempts: 0, confirm: true, confirmRefused: false, regenerated: false }
     : null;
@@ -384,6 +387,12 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
             if (e instanceof RunnerHttpError && e.status === 401) {
               p.confirm = false;
               p.confirmRefused = true;
+              // #210 review: the attempt cap is enforced only once the confirmation has failed — a
+              // malformed answer at the cap may still have committed the registration
+              if (p.capReached) {
+                go({ kind: "enrolment_refused" }, "malformed_answer");
+                break;
+              }
               opts.log?.("the interrupted enrolment's secret is not a registered credential; registering it");
             } else if (ev.kind === "next") {
               authenticated = true;
@@ -459,6 +468,22 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
             stopMessage =
               "this runner's image is not the engine's current build, so the gateway refuses to register it: deploy the current image (the engine's manifest names its digest and version)";
             go({ kind: "enrolment_refused" }, "engine_runner_build_obsolete");
+            break;
+          }
+          // PR #205 follow-up [101]: a 2xx whose body is not a valid answer is not a refusal. The
+          // registration may have committed, so the secret is confirmed as a credential (decision 77's
+          // path: any authenticated answer keeps it; a 401 registers it again, a same-hash replay)
+          if (e instanceof RunnerMalformedResponseError) {
+            // #210 review: always confirm first, even at the attempt cap — the registration may have
+            // committed (the token is then spent and the secret is a live credential). The cap stops the
+            // loop only if that confirmation is refused.
+            p.attempts++;
+            p.capReached = p.attempts >= (opts.registerAttempts ?? 5);
+            if (p.capReached) stopMessage = `registration did not succeed (${e.status} with no valid answer); ${stopMessage}`;
+            opts.log?.(`registration answered ${e.status} with no valid answer (${e.why}); checking the secret as a credential`);
+            p.confirm = true;
+            p.confirmRefused = false;
+            if (!p.capReached) await sleep(Math.min(30_000, base * 2 ** (p.attempts - 1)));
             break;
           }
           // PR #205 review round 13 [95]: a gateway replica whose engine manifest is older than the

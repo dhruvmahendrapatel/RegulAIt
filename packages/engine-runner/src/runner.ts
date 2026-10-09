@@ -18,6 +18,10 @@ import {
   ENGINE_RESULT_VERSION,
   ENGINE_RUNNER_NEXT,
   ENGINE_RUNNER_TOKEN_PREFIX,
+  engineHeartbeatResponseSchema,
+  engineLeaseResponseSchema,
+  engineRunnerRegisterResponseSchema,
+  engineRunnerSelfTestResponseSchema,
   type EngineId,
   type EngineLease,
   type EngineResultEnvelope,
@@ -45,6 +49,37 @@ export interface RunnerClientOptions {
 
 /** a request that took longer than its bound (transient, like a network error) */
 export class RunnerTimeoutError extends Error {}
+
+/**
+ * PR #205 follow-up [101]: a SUCCESS status whose body did not parse as JSON (truncated, cut off) or
+ * did not match the route's answer schema. It is not an answer: the server may well have committed
+ * (a lease, a registration), but the runner cannot learn what. It is TRANSIENT, exactly like a
+ * timeout (decision 94): each caller retries according to its route's idempotency — the lease with
+ * the SAME request id, registration by confirming the same secret, heartbeats and self-tests as
+ * they are. It is deliberately not a `RunnerHttpError`: it carries no refusal and no `next`.
+ */
+export class RunnerMalformedResponseError extends Error {
+  constructor(
+    readonly route: "register" | "lease" | "self-test" | "heartbeat",
+    readonly status: number,
+    readonly why: "unparseable" | "schema" | "unexpected_status",
+  ) {
+    super(`${route} answered ${status} with a body that is not a valid answer (${why}); treated as transient`);
+  }
+}
+
+/** what `call` read: the status, and the body only when it parsed (`parsed: false` = the body was not JSON) */
+interface CallAnswer {
+  status: number;
+  parsed: boolean;
+  body: unknown;
+}
+
+/** the error fields of a refusal body, whatever it held (a refusal's body may be anything) */
+function refusalOf(a: CallAnswer): { error?: unknown; next?: unknown } {
+  return a.parsed && typeof a.body === "object" && a.body !== null ? (a.body as { error?: unknown; next?: unknown }) : {};
+}
+const is2xx = (status: number) => status >= 200 && status < 300;
 
 /**
  * PR #205 review [54]: the runner's own token — `rge_` and 256 bits from the OS CSPRNG. The
@@ -90,7 +125,7 @@ export class RunnerClient {
     this.http = opts.http ?? ((url, init) => fetch(url, init) as unknown as ReturnType<RunnerHttp>);
   }
 
-  private async call(method: string, path: string, bearer: string, body?: unknown, deadlineAt?: string) {
+  private async call(method: string, path: string, bearer: string, body?: unknown, deadlineAt?: string): Promise<CallAnswer> {
     // PR #205 review round 11 [89]: bounded — the request and its body are aborted after the
     // timeout, or at the run's deadline when that is sooner (never below 1 ms)
     const bound = Math.max(1, Math.min(this.opts.requestTimeoutMs ?? 30_000, deadlineAt ? Date.parse(deadlineAt) - Date.now() : Number.POSITIVE_INFINITY));
@@ -113,9 +148,15 @@ export class RunnerClient {
             ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
             signal: abort.signal,
           });
-          // the body is read inside the bound too (a stalled body is a stalled request)
-          const data = res.status === 204 ? null : await res.json().catch(() => null);
-          return { status: res.status, json: async () => data };
+          // the body is read inside the bound too (a stalled body is a stalled request). PR #205
+          // follow-up [101]: a body that does not parse is REPORTED (`parsed: false`), never turned
+          // into null — a null lease reads as "no work", and the committed run would be orphaned
+          if (res.status === 204) return { status: 204, parsed: true, body: null };
+          try {
+            return { status: res.status, parsed: true, body: await res.json() };
+          } catch {
+            return { status: res.status, parsed: false, body: null };
+          }
         })(),
         timedOut,
       ]);
@@ -143,16 +184,18 @@ export class RunnerClient {
       tokenHash: runnerTokenHash(runnerSecret),
       ...(supersedes ? { supersedes } : {}),
     });
-    const json = ((await res.json().catch(() => null)) ?? {}) as {
-      runnerId?: string;
-      selfTest?: { passed: boolean; failures: string[] };
-      replayed?: boolean;
-      supersededRunnerId?: string | null;
-      error?: string;
-    };
-    if (res.status !== 201 || !json.runnerId) throw new RunnerHttpError("register", res.status, json.error ?? null);
-    this.token = runnerSecret;
-    return json as { runnerId: string; selfTest: { passed: boolean; failures: string[] }; replayed?: boolean; supersededRunnerId?: string | null };
+    // PR #205 follow-up [101]: a 2xx that is not a well-formed 201 answer is transient (the
+    // registration may have committed: the loop confirms the same secret, decision 77), never a refusal
+    if (is2xx(res.status)) {
+      if (res.status !== 201) throw new RunnerMalformedResponseError("register", res.status, "unexpected_status");
+      if (!res.parsed) throw new RunnerMalformedResponseError("register", res.status, "unparseable");
+      const answer = engineRunnerRegisterResponseSchema.safeParse(res.body);
+      if (!answer.success) throw new RunnerMalformedResponseError("register", res.status, "schema");
+      this.token = runnerSecret;
+      return answer.data;
+    }
+    const json = refusalOf(res);
+    throw new RunnerHttpError("register", res.status, typeof json.error === "string" ? json.error : null);
   }
 
   /**
@@ -161,9 +204,17 @@ export class RunnerClient {
    */
   async submitSelfTest(selfTest: RunnerSelfTest): Promise<{ passed: boolean; failures: string[]; next: EngineRunnerNext | null }> {
     const res = await this.call("POST", "/v1/engine-runner/self-test", this.bearer(), { selfTest });
-    const json = ((await res.json().catch(() => null)) ?? {}) as { selfTest?: { passed: boolean; failures: string[] }; error?: string; next?: unknown };
-    if (res.status !== 200 || !json.selfTest) throw new RunnerHttpError("self-test", res.status, json.error ?? null, nextOf(json));
-    return { ...json.selfTest, next: nextOf(json) };
+    // PR #205 follow-up [101]: a 2xx that is not a well-formed answer is transient (resubmitting a
+    // report is idempotent: it overwrites the stored one with the same verdict)
+    if (is2xx(res.status)) {
+      if (res.status !== 200) throw new RunnerMalformedResponseError("self-test", res.status, "unexpected_status");
+      if (!res.parsed) throw new RunnerMalformedResponseError("self-test", res.status, "unparseable");
+      const answer = engineRunnerSelfTestResponseSchema.safeParse(res.body);
+      if (!answer.success) throw new RunnerMalformedResponseError("self-test", res.status, "schema");
+      return { ...answer.data.selfTest, next: nextOf(answer.data) };
+    }
+    const json = refusalOf(res);
+    throw new RunnerHttpError("self-test", res.status, typeof json.error === "string" ? json.error : null, nextOf(json));
   }
 
   useToken(token: string): void {
@@ -187,12 +238,19 @@ export class RunnerClient {
       engineVersion: build.engineVersion,
       ...(requestId ? { requestId } : {}),
     });
+    // PR #205 follow-up [101]: ONLY a 204 or a well-formed 200 lease is definitive. A 2xx whose body
+    // is truncated, not JSON, or not a lease is transient: the lease may have committed, so the caller
+    // retries with the SAME request id and gets that run back (decision 94), never "no work"
     if (res.status === 204) return null;
-    if (res.status !== 200) {
-      const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string; next?: unknown };
-      throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null, nextOf(json));
+    if (is2xx(res.status)) {
+      if (res.status !== 200) throw new RunnerMalformedResponseError("lease", res.status, "unexpected_status");
+      if (!res.parsed) throw new RunnerMalformedResponseError("lease", res.status, "unparseable");
+      const answer = engineLeaseResponseSchema.safeParse(res.body);
+      if (!answer.success) throw new RunnerMalformedResponseError("lease", res.status, "schema");
+      return answer.data;
     }
-    return (await res.json()) as EngineLease;
+    const json = refusalOf(res);
+    throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null, nextOf(json));
   }
 
   async heartbeat(runId: string, phase: "starting" | "running" | "uploading", progress: number, deadlineAt?: string): Promise<{ cancel: boolean }> {
@@ -200,12 +258,23 @@ export class RunnerClient {
     // PR #205 review round 10 [83]: a 5xx, 408 or 429 says nothing about the lease — it is thrown
     // (transient, retried by the caller); any other refusal (401, 404, 409) is definitive: stop
     if (res.status >= 500 || res.status === 408 || res.status === 429) throw new RunnerHttpError("heartbeat", res.status, null);
-    if (res.status !== 200) return { cancel: true }; // the gateway no longer knows this lease: stop
-    return (await res.json()) as { cancel: boolean };
+    // PR #205 follow-up [101]: a 2xx that is not a well-formed answer is transient (a heartbeat is
+    // idempotent: a repeat renews the same lease), so neither "carry on" nor "stop" is read into it
+    if (is2xx(res.status)) {
+      if (res.status !== 200) throw new RunnerMalformedResponseError("heartbeat", res.status, "unexpected_status");
+      if (!res.parsed) throw new RunnerMalformedResponseError("heartbeat", res.status, "unparseable");
+      const answer = engineHeartbeatResponseSchema.safeParse(res.body);
+      if (!answer.success) throw new RunnerMalformedResponseError("heartbeat", res.status, "schema");
+      return { cancel: answer.data.cancel };
+    }
+    return { cancel: true }; // the gateway no longer knows this lease: stop
   }
 
   async result(runId: string, envelope: EngineResultEnvelope, deadlineAt?: string): Promise<number> {
     const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/result`, this.bearer(), envelope, deadlineAt);
+    // PR #205 follow-up [101]: the STATUS is the whole answer here (the body is never read): a 2xx means
+    // the gateway stored the result, whatever followed it on the wire. A retry is safe either way: after
+    // a stored result it gets a definitive 409 `engine_run_finished`
     return res.status;
   }
 }
