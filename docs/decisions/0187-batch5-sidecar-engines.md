@@ -1391,6 +1391,58 @@ with each decision).
      wheel's bundled native libraries. `smol-toml` (BSD-3-Clause, 1.9.0, a dev dependency only) parses the settings in
      the test. The stores use node:fs and the AWS SDK the gateway already ships.
 
+**Review round 1 (PR #212, Codex, 2026-10-09; 6 findings, each red first; Codex's security review was clean).**
+Tests: `exchange.test.ts` [121] and the sweep of [124]; `modelscan.test.ts` [122] [123];
+`packages/engine-runner/src/artifact.test.ts` [124]; `apps/gateway/src/model-artifacts.test.ts` [126];
+`zz-b5-modelscan.test.ts` [125]. (Decision 120 belongs to #213.) **Migration 0175 was edited in place** (unmerged; [125]
+adds a unique index): a dev database that applied 0175 from `b5-modelscan` before this round must be rebuilt.
+
+121. **The exchange is restart-safe** [4234946104]. A runner that crashed after staging (`<runId>.staging`) or after
+     publishing (`<runId>`) left job directories nothing would ever remove, so the jobs tmpfs filled. Every executor
+     now has `reconcile(keepRunId)`: it removes every published or staging job whose run is not `keepRunId`. The runner
+     calls it at start with nothing to keep (it holds no run), and the adapter calls it before each scan, keeping the
+     run it holds. The runner cannot write the result volume (read-only there), so results are reconciled by the
+     scanner, which already drops every result whose job is gone; the scanner takes only directories named exactly by
+     a UUID, never `<uuid>.staging`. Red: with `reconcile` a no-op, a crash after staging and after publishing leaves
+     both directories behind.
+122. **A report that contradicts itself decides nothing** [4234946100]. The mapper trusted `summary` beside the lists.
+     `modelscanSummaryProblem` now checks `total_issues` against `issues[]`, each per-severity count (an unknown
+     severity counted is itself a contradiction), `total_scanned` against `scanned_files` and `total_skipped` against
+     `skipped_files` (always listed: the runner passes `--show-skipped`). Any disagreement fails the run
+     `report_inconsistent` (every reading unknown), with its findings kept. Red: `total_issues: 1`, no issue, exit 0
+     read as a passing scan without the check. Measured: the pinned modelscan's real reports satisfy every check (the
+     opt-in real-engine suite passes).
+123. **Anything not proven safetensors is executable** [4234946089]. A file with a safetensors prefix whose header
+     does not verify was `executable: false`, so it carried no `executable_format` finding. The rule is now general and
+     pinned by a test: only `safetensors` (magic and a verified header) is non-executable; `safetensors_invalid`, `gguf`
+     and `empty` became executable too. Ceilings are unchanged (`unknown`, `not_run`, `not_run`), so no verdict
+     improves; each such scan now also lists the finding. Red: a corrupt safetensors header lacked the finding.
+124. **An already-aborted signal starts nothing** [4234946096]. `downloadArtifact` wired the abort listener after the
+     signal had fired, so a cancelled run still fetched. It now refuses an aborted signal before opening a file or
+     making a request (`artifact_aborted`). **Sweep** (every abort wiring in this PR): the exchange no longer publishes
+     a job for an aborted signal, and `runModelscan` no longer spawns modelscan for one; `runProcessGroup` (runner
+     core) already kills at once on an aborted signal, and the scanner's per-job controller is created fresh. Red: a
+     pre-aborted download fetched once; the exchange published the job and waited for its 5-second cancel grace.
+125. **Scan evidence is unique by the database** [4234946093]. Attaching a scan to a card checked for a duplicate by
+     a read before the write, so two concurrent attaches both succeeded. Migration 0175 (edited in place) adds
+     `model_card_evidence_card_scan_unique` on `(card_id, artifact_scan_id)` where a scan is cited; the read stays as a
+     fast path and the unique violation maps to the promised 409 `evidence_already_attached`. **Sweep** (read-before-
+     write uniqueness in this PR): one scan per run is already the unique index `artifact_scans_engine_run_unique` with
+     `ON CONFLICT DO NOTHING`; the content-addressed store's "exists, else write" is idempotent (the same bytes under
+     the same key, written by rename); model artifacts carry no uniqueness by design (one row per upload). The eval-run
+     citation's read-before-write predates this PR and is not changed here. Red: without the index two concurrent
+     attaches both answered 201.
+126. **The filesystem store is durable before the row commits** [4234946106]. It fsynced the temp file but not the
+     directory after the rename, nor the directories `mkdir -p` created. It now fsyncs the parent of every directory it
+     newly created, then the directory holding the object after the rename, all before `putFile` returns (so before the
+     upload's transaction). The directory fsync is the runner core's `fsyncDir` (`packages/engine-runner/src/
+     durable.ts`, now exported), not a second copy; `@regulait/engine-runner` becomes a gateway runtime dependency,
+     bringing `write-file-atomic` 8.0.0 (ISC, already admitted) into the image (`apps/gateway/THIRD_PARTY.md`).
+     `write-file-atomic` itself does not fit: it writes from memory, and an artifact is streamed (up to 8 GiB). Red:
+     without the post-rename fsync the store's directory was never synced. **Sweep** (summaries trusted over lists):
+     the artifact verdict reads the normalised items, never a summary, and the run's aggregates are recomputed by the
+     shared normaliser; the report summary was the only instance.
+
 **Deferred, with the owner of each:** ~~artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence~~ (built in B5-M, decisions 104-119); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
