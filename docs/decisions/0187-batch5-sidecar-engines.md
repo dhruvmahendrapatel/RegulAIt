@@ -788,6 +788,48 @@ without a judge now name one. No migration.
     self-test and an enable between a sync's unlocked read and its transaction
     (`engineRunTestHooks.beforeSyncTx`): the engine stays enabled with its self-test, and no disable is audited.
 
+**Review round 9 (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Tests: `promptfoo.test.ts` [80],
+`zz-b5-promptfoo.test.ts` "review round 9" [79] [81] [82]. No migration.
+
+79. **The runner credential is not isolated from the engine process yet: the engine stays off until an admin
+    accepts that, audited** [4228369415]. The promptfoo child runs as the runner's own user (10001), which owns the
+    runner token and its pending record (0600), so a compromised promptfoo process could read the credential from the
+    state volume, or from the runner's memory and environment through `/proc` or ptrace (same user); the environment
+    allow-list does not help. **What the credential can do:** lease this engine's runs (each with a run-scoped virtual
+    key: the run-as person's ceiling, one project, the run's budget, until its deadline), heartbeat them, post their
+    results and refresh this runner's self-test report. **What it cannot do:** reach any other route (the runner-route
+    allow-list), enable an engine, mint keys outside a lease, or register another runner. A different OS identity for
+    the child is not possible under the current posture (non-root, `cap_drop: [ALL]`, `no-new-privileges`): changing
+    user needs CAP_SETUID/SETGID, which a non-root process gets only through file capabilities or a setuid helper, and
+    `no-new-privileges` disables both at exec; user namespaces are blocked by the default seccomp profile.
+    **Rejected:** (A) dropping `no-new-privileges` and giving a dedicated runner binary SETUID/SETGID file capabilities
+    (weakens the whole container: any setuid or file-capability binary in the image becomes usable); (B) a root
+    process with only SETUID/SETGID that spawns the runner and the engine (a root process in the container).
+    **Chosen (coordinator, 2026-10-09, pending owner confirmation):** (C) the two-container split, as the next slice
+    (B5-P2, open question 13); and (D) in this PR, the risk recorded here and enforced fail-closed in code. The manifest
+    says per build whether it isolates the credential (`credentialIsolation`, false for every build today); enabling
+    an engine whose build does not is refused, 409 `engine_credential_isolation_missing` with the reason, unless the
+    request carries `acceptCredentialIsolationRisk: true`. That acceptance is a relaxation bound into the
+    `settings_relax` step-up (`engine.<id>.acceptCredentialIsolationRisk`) and audited on its own
+    (`engine-credential-isolation-risk-accepted`, with the build). Secure by default; the relaxation is explicit and
+    audited (ADR-0180).
+80. **`vlsu` is a planning-time `missing_preseed` exclusion** [4228369423]. It downloads its dataset at run time
+    (R10), but upstream's `DATASET_PLUGINS` omits it, so planning treated it as unknown and a mixed run went unknown.
+    A local supplement to the generated list (`PROMPTFOO_DATASET_PLUGINS_SUPPLEMENT`, with a comment) classifies it as
+    `missing_preseed`; a test fails once upstream lists it, so the supplement can then be dropped.
+81. **The required judge is checked again at lease** [4228369430]. A judge agent deleted after queueing nulls the
+    run's `judge_agent_id`, and the lease skipped the judge check and dispatched a `requiresJudge` run with no judge.
+    The lease transaction now applies the manifest's `requiresJudge` again: such a run ends `not_run` with
+    `judge_required` (audited `engine-run-not-run`) before any key is minted.
+82. **A build change cancels runs in flight on the old build too** [4228369436]. A run leased to the old build was
+    normalised with the current catalogue after an upgrade. **Picked: cancel**, the simpler secure option: the
+    locked-row build change of decisions 75 and 78 now also cancels every leased run of the engine
+    (`engine_build_changed`, key revoked, audited), so its result arrives late and is refused (409), never ingested.
+    Normalising against the catalogue a run was leased under would need that catalogue kept per build on every
+    replica (or stored per run), and a replica still on the old manifest could then judge the same result differently
+    from one on the new; with cancellation no result is ever normalised against a catalogue other than the one in the
+    manifest every replica now has.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
@@ -843,3 +885,10 @@ compat surface is on (a run then fails at its first call); concurrency is per en
     before the container starts, and the engine images are not signed yet (they are not built). Until then an enabled
     engine rests on the operator deploying the digest the manifest names.
 12. ~~A `no_runnable_plugin` not-run reason~~ — **decided 2026-10-09 (coordinator), see decision 66: no migration.**
+13. **B5-P2: isolate the runner credential from the engine process (decision 79), the next slice.** Split each
+    engine into two containers: a runner container that holds the token volume and talks to the gateway, and an
+    engine worker (same image, its own entrypoint and user, no state volume) that reaches only the gateway's compat
+    routes; jobs and results pass through a shared work volume (job in, result out, cancellation, deadlines). The
+    container posture stays as it is (non-root, `cap_drop: [ALL]`, `no-new-privileges`, read-only root). When it ships,
+    the manifest's `credentialIsolation` becomes true and the enable gate of decision 79 no longer applies. Chosen by
+    the coordinator 2026-10-09, pending the owner's confirmation.
