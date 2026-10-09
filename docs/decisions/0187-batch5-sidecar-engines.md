@@ -1220,8 +1220,169 @@ first).** Tests: `runner.test.ts` and `loop.test.ts` "follow-up [101]", `zz-b5-p
 a pre-existing clock dependence, not engine code. That test and its two siblings now assert on the id-set difference of
 the audit rows, as the Outlook courier test does.
 
-**Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
-evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
+### Implementation decisions (B5-M modelscan, 2026-10-09, branch `b5-modelscan`)
+
+Built from G19's "Consequences for B5-M" (`docs/research/R10-engine-admission.md`) with the coordinator's brief. **Migration
+0175** (`0175_model_artifact_scans`, hand-written, journal `when` 1785110000000): the upload-size setting, the
+`no_known_unsafe` verdict, a format CHECK on artifacts and scans, `clean` only for safetensors, one scan per run, and
+content-addressed storage keys. Code: `packages/shared/src/engines/modelscan.ts` (the scanner contract), the shim
+`packages/engine-modelscan` (runner, scanner, exchange, adapter, settings mirror), `packages/engine-runner/src/artifact.ts`,
+`apps/gateway/src/model-artifacts.ts`, `engines/modelscan` (image, lockfile, settings, patch, licence gate), compose
+`engine-modelscan` and `engine-modelscan-scanner`. Tests: `packages/engine-modelscan/src/modelscan.test.ts` (20),
+`exchange.test.ts` (7), `image.test.ts` (5), `settings.test.ts` (3), `modelscan-real.test.ts` (5, opt-in: the pinned
+modelscan itself, `REGULAIT_MODELSCAN_BIN`), `apps/gateway/src/zz-b5-modelscan.test.ts` (11, the real gateway),
+`model-artifacts.test.ts` (5), `zz-b5-compose.test.ts` (+1). Each guard was shown red by breaking it (mutations recorded
+with each decision).
+
+104. **Two containers, one image: the process that parses the artifact has no network and no credential.** G19's
+     profile asks for `network_mode: none`, but a runner must reach the gateway to lease, heartbeat, fetch and post.
+     So the image runs as two compose services. The **runner** (`engine-modelscan`) merges the hardened template: on
+     `engines`, its own state volume, never running modelscan. The **scanner** (`engine-modelscan-scanner`) has
+     `network_mode: none`, a read-only root, uid 10001, `cap_drop: [ALL]`, `no-new-privileges`, 1 GiB memory, 1 CPU,
+     64 pids, no token, no state; it mounts the job volume (the artifact) read-only and has one writable tmpfs, `/out`
+     (the result volume). Both exchange volumes are tmpfs-backed. The runner downloads into `jobs/<runId>.staging`,
+     writes `job.json`, and renames the directory (a job appears whole); the scanner writes `report.json` then
+     `done.json` (exit code, killed or cancelled, the report's sha256); a cancel is a `cancel` file; the runner reads
+     the report only if its sha256 matches. Run ids must be UUIDs and the artifact name `artifact.(pkl|pt|npy|zip|h5)`,
+     so neither side can be steered to another path. The scanner enforces the wall-clock limit (the run's remaining
+     time less a margin) by killing modelscan's process group; the runner gives up a grace period later and reports
+     `engine_timeout`. **The scanner's own egress self-test** (the same probe, run inside the no-network container) is
+     written to the result volume hourly; the runner reports it as the manifest's one usage-data entry,
+     `REGULAIT_MODELSCAN_SCANNER_ISOLATED`, true only when fresh (2 h), naming the pinned version and reaching nothing,
+     so a scanner with a network, or none at all, fails the self-test and the engine cannot be enabled.
+     **`credentialIsolation` stays false** (coordinator's brief; decision 79's audited, stepped-up acceptance applies):
+     this layout does keep the credential out of the scanner, but the flag waits for a built and verified image.
+     Red: the compose test fails with the scanner given `networks: [engines]`.
+105. **What clean means — strict default, PENDING OWNER CONFIRMATION (owner decision 1).** modelscan is one signal
+     and a deny-list, so it cannot certify that an executable format is safe to load. The gateway derives the
+     artifact's verdict (`deriveArtifactScanVerdict`) from the format IT detected at upload, never from the runner:
+     - any unsafe operator → `unsafe`, however the run ended;
+     - a run that did not complete → `unknown` (`not_run` when it never ran);
+     - the runner reporting a different format → `unknown`;
+     - an unsupported format → `not_run`;
+     - any unknown item or run-time not-run → `unknown`;
+     - otherwise the format's ceiling: **`clean` only for a verified safetensors file**; an executable format (pickle,
+       joblib, dill, legacy or zip PyTorch, numpy, Keras H5) is at best **`no_known_unsafe`**, always with an
+       `executable_format` finding; a zip of unknown layout, an opaque zip or an unrecognised file is never better
+       than `unknown`.
+
+     Only `clean` is admissible (`artifactScanAdmissible`). The engine run's own verdict for an executable format is
+     `fail` (the `format` item is a finding). The DB refuses `clean` for any format but safetensors
+     (`artifact_scans_clean_format_check`). The chip wording is fixed and never says "safe": "Non-executable format
+     verified; no finding", "No known-unsafe operator found (executable format)", "Unsafe operator found", "Scan
+     inconclusive", "Not scanned (unsupported format)". Red: making pickle's ceiling `clean` fails the clean-pickle
+     proof; trusting the runner's format claim, or ignoring an error item beside a passing scan, fails the
+     consistency proof; a forged runner envelope through the real gateway reads `unknown`.
+106. **The licence gate and its allow file — PENDING OWNER DECISION (owner decision 2).** `engines/modelscan/
+     licence-gate.mjs` runs in the build on the INSTALLED site-packages: every distribution by its METADATA licence,
+     every native library a wheel bundles (`<pkg>.libs/*.so*`) by a fixed table, and the Python runtime. A term on the
+     ADR-0176 list passes; anything else passes only when `licence-allow.json` names that subject and that licence
+     AND the entry says exactly "pending owner decision"; an entry saying anything else, or matching nothing (stale),
+     fails the build. The file holds six entries: numpy's Zlib; numpy's bundled `libgfortran`
+     (GPL-3.0-or-later WITH GCC-exception-3.1) and `libquadmath` (LGPL-2.1-or-later); h5py's bundled HDF5 libraries
+     (the HDF Group's BSD-style licence); CPython (PSF-2.0). Run on the cp312 wheels the lockfile pins: 15 allowed, 6
+     pending, 0 denied. Documented in `engines/modelscan/THIRD_PARTY.md`. The image stays inadmissible until the owner
+     decides; the manifest lists it as unverified.
+107. **One patch: modelscan 0.8.8 cannot scan anything from a settings file.** Measured: with any `--settings-file`,
+     every scanner raises on `format_property.value` (a TOML file can only hold string keys, the in-code defaults hold
+     `Property` objects), so an `os.system` pickle exits 3, nothing scanned, seven `MODEL_SCAN` errors (fail closed,
+     but blind). G19 requires our own settings file, so the image patches ONE function
+     (`engines/modelscan/patches/format-names-from-settings.py`): a format named by a string resolves to modelscan's
+     own property of that value, and an unknown name raises (an error, so unknown). The patch refuses to apply unless it
+     finds exactly the expected code, once, and refuses a second application; it is on the image label. Negative
+     control: the real-engine suite run against stock 0.8.8 fails 4 of 5 (everything reads unknown); patched, 5 of 5.
+108. **modelscan's NumPy scanner does not work on numpy 2.x: every `.npy` reads `unknown`.** It calls
+     `np.lib.format._check_version`, which numpy 2.x removed (measured: a `MODEL_SCAN` error on an object array holding
+     `os.system`). Fail closed, and pinned by a real-engine test that turns red the day it works. Options for the
+     owner (open question 15): pin numpy 1.26 for the image, or have the runner strip the `.npy` header and hand the
+     object payload over as a pickle (our code).
+109. **The format is decided from the bytes, on both sides** (`detectArtifactFormat`, G19 2). In order: empty; pickle
+     protocol 2–5 (`PROTO`), and PyTorch's legacy layout by its magic-number pickle; a zip classified from its central
+     directory (zip64 included; a nested archive or an encrypted member makes it `zip_opaque`; a `data.pkl` member makes
+     it `pytorch_zip`; Keras v3 and `.npz` layouts); HDF5 at any of its superblock offsets; NumPy; GGUF; a compression
+     container; tar; then safetensors, which counts only when its header is UTF-8 JSON, every entry is exactly
+     `{dtype, shape, data_offsets}` with a known byte-sized dtype and a byte length equal to its shape, and the offsets
+     tile the data from 0 to the end with no gap, overlap or trailing byte (else `safetensors_invalid`, `unknown`).
+     Anything else is `unrecognised`, handed to modelscan as a pickle (old protocols carry no signature) and never
+     better than `unknown`. modelscan is handed the file as `artifact<ext>`, the extension of the real format; **the
+     legacy PyTorch layout goes as `.pkl`**, because modelscan's PyTorch scanner reads only the first pickle of that
+     layout and its pickle scanner reads every pickle in the stream (measured: `os.system` in the third pickle exits 0
+     as `.pt`, 1 as `.pkl`). modelscan is never started for safetensors or an unsupported format (Keras v3 needs
+     TensorFlow, which the image does not ship; GGUF, compressed, tar, empty): the format item decides, and the
+     unsupported ones are declared planning-time exclusions in the manifest's reduced set. Red: legacy handed as `.pt`
+     fails the legacy proof; dropping the tiling rule fails the safetensors proofs.
+110. **The mapper (G19 3).** Only the `-o` report (bounded at 4 MiB before it is read) and the exit code; stdout is never
+     parsed. Every `issues[]` entry is a finding whatever the exit code; any `errors[]` entry makes the scan `unknown`;
+     an empty `scanned_files` is a run-time not-run (`engine_error`); exit 4, a missing, oversized or unparsable
+     report, or a time-out fail the run and every reading is unknown; a report naming another file, or an exit code
+     the report contradicts, fails the run (`report_inconsistent`) with its findings kept. No artifact text is copied:
+     operator names and member paths are reduced to `[A-Za-z0-9_./-]` (else `?`), error descriptions are dropped,
+     every reason is a fixed sentence; the raw report travels as its sha256 only. Red: dropping the findings of an
+     inconsistent report fails the mapper test.
+111. **Settings, argv and environment are ours.** `engines/modelscan/modelscan-settings.toml` is baked read-only
+     (0444) and always passed with `--settings-file`; modelscan runs from a fresh empty directory on the scanner's
+     tmpfs, with a fixed argv (`scan -p <artifact> -r json -o <out>/report.json --show-skipped -l ERROR
+     --settings-file <ours>`) and an environment built from nothing (the venv's PATH, no user site, no bytecode
+     writes). The settings keep modelscan's defaults and add the deny-list entries G19 measured slipping through
+     (`importlib`, `ctypes`, `http.client`, `code`, `marshal`, `types`, `operator.methodcaller`, and the rest listed
+     in the file); every additional class it names is modelscan's own. `settings.test.ts` parses the file and compares
+     it with `MODELSCAN_SETTINGS`. Measured on the real engine: each of those seven is now a finding.
+112. **The upload.** `POST /v1/model-artifacts?filename=&projectId=` takes `application/octet-stream` only (415
+     `artifact_content_type`), streams it to a private temporary file while hashing and counting, and cuts it off past
+     the org's `modelArtifactMaxMegabytes` (strict 512 MiB, 1–8192, in the strictness registry: raising it is a
+     `settings_relax` step-up, audited) with 413 `artifact_too_large`, the connection closed, nothing kept, and a
+     `model-artifact-upload-refused` audit; a declared length over the limit is refused before reading. The request is
+     drained, never destroyed under the response. The format is decided from the bytes; `filename` is display only
+     (no path, printable). The bytes go to the content-addressed store once (`sha256/<hex>`, a CHECK on the row):
+     a directory (`REGULAIT_MODEL_ARTIFACT_DIR`, 0600 files written by rename) or an S3 bucket
+     (`REGULAIT_MODEL_ARTIFACT_S3_BUCKET`, the SDK the gateway already ships; the bucket verifies our sha256). With
+     neither, uploads are refused (503 `artifact_store_unavailable`). The row and its `model-artifact-uploaded` audit
+     (sha256, size, format and its evidence, declared extension, stored new or not) commit together. The uploader, or
+     an admin, lists and views an artifact with its scans. Red: removing the streaming bound fails the chunked-upload
+     case.
+113. **The runner's stream.** `GET /v1/engine-runner/artifacts/:artifactId` answers only the runner holding a LIVE
+     lease (leased, lease and deadline not passed) on a run that targets the artifact: bytes with `content-length`
+     and `x-regulait-artifact-sha256`, audited `engine-run-artifact-streamed`; anything else is 409
+     `engine_artifact_not_leased`, audited `engine-run-artifact-refused`. The runner (`downloadArtifact`, a new module
+     in the runner core so the runner client is unchanged; the token comes from the runner's own token store) writes
+     exclusively to a 0600 file, never more bytes than the lease names, and refuses a short body or another sha256;
+     the adapter then reports `failed` (`artifact_fetch_failed`) and modelscan is never started. Red: serving a run in
+     any status fails the stream proofs; dropping the sha256 check fails the same-length tampered-body proof.
+114. **One scan record per run, in the run's terminal transaction.** `endLockedRun` (every terminal path: result,
+     cancel, time-out, not-run, an engine switched off) writes the `artifact_scans` row with the gateway-derived
+     verdict and its findings, and a `model-artifact-scanned` audit, in the same transaction (a unique index makes it
+     idempotent). The lease also re-checks an artifact run: the artifact still exists and the run-as person may still
+     use it, else the run ends `not_run` (`artifact_gone`, `artifact_not_accessible`) before anything is leased.
+115. **Only the uploader, or an admin, may scan an artifact** (403 `artifact_not_accessible` at creation, and at
+     lease as above): it is hostile input, and its scans become evidence. Red: removing the check lets another user
+     queue a scan of it.
+116. **`engine_scan` model-card evidence.** `POST /v1/mrm/cards/:id/evidence` `{kind: "engine_scan",
+     artifactScanId}` cites a scan (RESTRICT, like a cited eval run; 409 on a duplicate), audited with the scan's
+     verdict and the artifact's sha256; the card view carries the scan, its chip and whether it is admissible.
+117. **Red proofs, and the two that do not apply.** Through the real gateway and in the package: a renamed pickle,
+     a legacy-layout `.pt` and an `importlib` pickle are `unsafe`; a truncated malicious pickle and a nested zip are
+     `unknown`; none is ever clean; the real pinned modelscan (opt-in suite) agrees on all five. **Engine error →
+     unknown:** exit 4, no report, a time-out. **Cancel:** this engine has no key to revoke (no model access; the
+     lease mints none, `virtualKeyId` stays null), so cancel ends the run at once and the runner's artifact fetch, its
+     heartbeat (`cancel: true`) and its result (409) are all refused; the scan reads `unknown`. **Egress denied →
+     not_run and budget spent → 401 do not apply**: the scanner has no network at all (its self-test proves it) and the
+     engine makes no model call, so there is no egress to deny and no budget to spend.
+118. **What was not built or run here.** No Docker daemon in this environment: the image was not built, so its
+     digest, its signature, the Trivy OS-layer scan and the in-image self-test are not done, and the manifest digest
+     stays null (the engine cannot be enabled). The Python closure was checked by downloading the exact cp312 wheels
+     with `--require-hashes` (all nine verified) and running the licence gate on them; the engine was run from a
+     Python 3.11 venv of the same pinned versions for that interpreter (numpy 2.4.6 there, 2.5.3 in the image), with
+     the patch applied. **Correction to the brief's assumption:** CI's `docker-build` job builds only the gateway
+     image (`docker build .`); neither engine image is built in CI today (open question 16).
+119. **Open-source check (ADR-0176).** modelscan is used, not rewritten. Our own code is the governance part: the
+     format decision (`file-type`, MIT, does not know pickle protocols, the legacy PyTorch magic pickle, a zip's
+     PyTorch or Keras layout, or the safetensors tiling rule), the verdict, the mapper and the exchange. The licence
+     gate reads `dist-info` itself because `pip-licenses` (MIT) would add a package to the image and does not see a
+     wheel's bundled native libraries. `smol-toml` (BSD-3-Clause, 1.9.0, a dev dependency only) parses the settings in
+     the test. The stores use node:fs and the AWS SDK the gateway already ships.
+
+**Deferred, with the owner of each:** ~~artifact upload, artifact streaming to runners and `engine_scan` model-card
+evidence~~ (built in B5-M, decisions 104-119); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
 views (X26–X28; the runner-revocation route is exempt from the affordance census until X26's button). Residuals:
 `engine_run_items` and engine runs follow no retention cascade yet (only the raw report expires); a result's
@@ -1282,3 +1443,19 @@ compat surface is on (a run then fails at its first call); concurrency is per en
     container posture stays as it is (non-root, `cap_drop: [ALL]`, `no-new-privileges`, read-only root). When it ships,
     the manifest's `credentialIsolation` becomes true and the enable gate of decision 79 no longer applies. Chosen by
     the coordinator 2026-10-09, pending the owner's confirmation.
+14. **What a clean model-artifact scan means (B5-M, decision 105): PENDING OWNER CONFIRMATION.** Built strict: only a
+    verified safetensors file can be `clean` (admissible); every executable format is at best `no_known_unsafe` with an
+    `executable_format` finding; the chip never says "safe". The owner may instead choose G19's options (a) a longer
+    deny-list only, or (b) our own allow-list of pickle globals (our code; ADR-0176 needs a written exception).
+15. **numpy for the modelscan image (B5-M, decisions 106 and 108): PENDING OWNER DECISION.** (a) Admit, through the
+    allow file, numpy's bundled GCC runtime libraries (GPL-3.0-or-later WITH GCC-exception-3.1, LGPL-2.1-or-later) and
+    its Zlib code, h5py's HDF5 licence and CPython's PSF-2.0 (each entry says "pending owner decision" today), or build
+    numpy without the GCC runtime; (b) modelscan 0.8.8's NumPy scanner fails on numpy 2.x, so every `.npy` is
+    `unknown`: pin numpy 1.26 for the image, or strip the header in the runner and scan the object payload as a pickle.
+16. **Building the engine images in CI (B5-P and B5-M).** CI's `docker-build` job builds only the gateway image. Until a
+    job builds `engines/promptfoo` and `engines/modelscan` (and signs, scans and records their digests), no engine
+    image exists anywhere and no engine can be enabled. Also open for modelscan: whether `credentialIsolation` becomes
+    true for the two-container build once it is built and verified (decision 104).
+17. **TensorFlow for `.keras` and SavedModel files (B5-M, decision 109).** Not installed: those formats are `not_run`.
+    Adding it is a separate decision (a large native parser of hostile protobuf; its saved-metadata import path is
+    unverified for the TensorFlow the extra resolves to).
