@@ -151,6 +151,8 @@ export const ENGINE_REFUSALS = {
   engine_disabled: 409,
   /** enabling without a passing, fresh self-test; or a runner whose own report is stale or failing */
   engine_self_test_required: 409,
+  /** PR #205 review round 8 [77]: a registration whose token hash is already a runner's credential */
+  engine_runner_already_registered: 409,
   /** PR #205 review round 5 [67]: a runner presenting a build other than the one it registered with */
   engine_runner_reenrol_required: 409,
   /** PR #205 review round 5 [70]: a target or judge agent with no provider model to dispatch to */

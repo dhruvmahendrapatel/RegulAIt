@@ -106,11 +106,19 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
       row.lastVerified === m.lastVerified &&
       row.reCheckBy === m.reCheckBy &&
       JSON.stringify(row.usageDataPosture) === JSON.stringify(posture);
+    // the unlocked read above only decides whether to look closer (`same`); nothing is decided from it
     if (same) continue;
+    await engineRunTestHooks.beforeSyncTx?.(id);
     // PR #205 review round 6 [71]: a build change switches the engine off under the engine row's
-    // FOR UPDATE lock, so it serialises with a lease deciding under FOR SHARE
-    const cancelled = await db.transaction(async (tx) => {
-      const [locked] = await tx.select({ version: engines.version, imageDigest: engines.imageDigest }).from(engines).where(eq(engines.id, id)).for("update");
+    // FOR UPDATE lock, so it serialises with a lease deciding under FOR SHARE.
+    // PR #205 review round 8 [78]: and EVERYTHING the build change does — switching the engine off,
+    // clearing its self-test, cancelling waiting runs, the audit — is decided from the LOCKED row: a
+    // concurrent sync that already installed the new build (and a self-test refreshed since) is seen,
+    // and this one is then a no-op for the build.
+    const out = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(engines).where(eq(engines.id, id)).for("update");
+      if (!locked) return null;
+      const buildChanges = locked.version !== m.version || locked.imageDigest !== m.imageDigest;
       await tx
         .update(engines)
         .set({
@@ -122,26 +130,26 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
           lastVerified: m.lastVerified,
           reCheckBy: m.reCheckBy,
           usageDataPosture: posture,
-          ...(changedBuild ? { enabled: false, selfTestPassedAt: null, selfTest: null } : {}),
+          ...(buildChanges ? { enabled: false, selfTestPassedAt: null, selfTest: null } : {}),
           updatedAt: new Date(),
         })
         .where(eq(engines.id, id));
       // PR #205 review round 7 [75]: runs still waiting were requested (and approved) against the old
-      // build: they are cancelled (`engine_build_changed`, audited) in this transaction, decided on the
-      // locked row so two concurrent syncs cancel once. Picked over re-versioning them: an approval
-      // given for one build is not silently carried to another; the requester re-runs.
-      const stillChanging = !!locked && (locked.version !== m.version || locked.imageDigest !== m.imageDigest);
-      return stillChanging ? cancelWaitingRunsOfEngineTx(tx, id) : [];
+      // build: they are cancelled (`engine_build_changed`, audited) in this transaction. Picked over
+      // re-versioning them: an approval given for one build is not silently carried to another.
+      const cancelled = buildChanges ? await cancelWaitingRunsOfEngineTx(tx, id) : [];
+      return { buildChanges, wasEnabled: locked.enabled, from: { version: locked.version, digest: locked.imageDigest }, cancelled };
     });
-    await notifyWorkflowsOfEndedRuns(db, cancelled);
-    if (changedBuild && row.enabled) {
+    if (!out) continue;
+    await notifyWorkflowsOfEndedRuns(db, out.cancelled);
+    if (out.buildChanges && out.wasEnabled) {
       await auditEngine(db, {
         userId: NO_IDENTITY,
         objectType: "engine",
         objectId: null,
         ruleId: "engine-disabled-manifest-changed",
         effect: "deny",
-        detail: { engineId: id, from: { version: row.version, digest: row.imageDigest }, to: { version: m.version, digest: m.imageDigest } },
+        detail: { engineId: id, from: out.from, to: { version: m.version, digest: m.imageDigest } },
         reason: `engine ${id} switched off: the shipped build changed, so its self-test no longer describes what would run`,
       });
     }
@@ -454,6 +462,17 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         .send({ runnerId: existing.id, engineId, selfTest: { passed: existing.selfTestPassed, failures: existing.selfTestFailures }, replayed: true });
     };
     if (req.authCtx.engineEnrollmentSpent) return replay();
+    // PR #205 review round 8 [77]: a fresh enrolment token with a hash that is ALREADY a runner's
+    // credential (a registration whose response was lost, retried after its token expired) is a clear
+    // 409, decided before the token is spent — the runner then tries its secret as the credential.
+    // Nothing is relaxed: the existing registration is not re-bound to this token.
+    const alreadyRegistered = () =>
+      reply.status(409).send({
+        error: "engine_runner_already_registered",
+        detail: "that runner token is already registered: use it as this runner's credential (an earlier registration's response was lost), or generate a new one",
+      });
+    const [already] = await db.select({ id: engineRunners.id }).from(engineRunners).where(eq(engineRunners.tokenHash, body.tokenHash));
+    if (already) return alreadyRegistered();
     let out: (typeof engineRunners.$inferSelect & { superseded: { id: string; name: string } | null; ended: Awaited<ReturnType<typeof endRunsHeldByRevokedRunnersTx>> }) | null;
     try {
       out = await db.transaction(async (tx) => {
@@ -509,10 +528,9 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       });
     } catch (e) {
       // the hash is already some runner's credential (token_hash is unique): a credential is never shared
+      // (a concurrent registration of the same hash, past the check above)
       const pg = (e as { code?: string; cause?: { code?: string } }) ?? {};
-      if (pg.code === "23505" || pg.cause?.code === "23505") {
-        return reply.status(409).send({ error: "engine_runner_token_conflict", detail: "that runner token is already registered; generate a new one" });
-      }
+      if (pg.code === "23505" || pg.cause?.code === "23505") return alreadyRegistered();
       throw e;
     }
     // a concurrent request spent it first: it may have been this runner's own retry

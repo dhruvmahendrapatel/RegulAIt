@@ -738,6 +738,8 @@ export const engineRunTestHooks: {
   beforeScheduledCreate?: () => void;
   /** runs right after a registration's transaction committed, before anything else (PR #205 review round 7 [76]) */
   afterRegisterTx?: () => Promise<void> | void;
+  /** runs after the manifest sync's unlocked read, before its transaction (PR #205 review round 8 [78]) */
+  beforeSyncTx?: (engineId: string) => Promise<void> | void;
 } = {};
 
 /**

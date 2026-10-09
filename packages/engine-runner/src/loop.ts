@@ -292,9 +292,16 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
   /** the enrolment token is tried at most once per process (it is single-use) */
   let enrolmentTried = !!interrupted;
   /** an enrolment in progress: the same secret, body and `supersedes` on every retry (persisted: round 6 [72]) */
-  let pending: { secret: string; body: Awaited<ReturnType<RunnerLoopOptions["registration"]>> | null; supersedes: string | null; attempts: number } | null = interrupted
-    ? { secret: interrupted.secret, body: null, supersedes: interrupted.supersedes, attempts: 0 }
-    : null;
+  // round 8 [77]: `confirm` — try the pending secret AS the credential before registering again (a
+  // registration may have committed with its response lost); `confirmRefused` — it was tried and refused
+  let pending: {
+    secret: string;
+    body: Awaited<ReturnType<RunnerLoopOptions["registration"]>> | null;
+    supersedes: string | null;
+    attempts: number;
+    confirm: boolean;
+    confirmRefused: boolean;
+  } | null = interrupted ? { secret: interrupted.secret, body: null, supersedes: interrupted.supersedes, attempts: 0, confirm: true, confirmRefused: false } : null;
   /** set when the move to `reenrolling` was for a build change (the held token is then superseded) */
   let supersedeOnReenrol = false;
   let stopMessage = interrupted ? MESSAGE_INTERRUPTED : stored ? MESSAGE_REVOKED : MESSAGE_FIRST;
@@ -326,6 +333,48 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
     switch (current()) {
       case "enrolling":
       case "reenrolling": {
+        // PR #205 review round 8 [77]: a resumed enrolment (or one the gateway says is already
+        // registered) first tries its secret as the runner credential, with a lease. Authenticated —
+        // any answer but a 401 — means the registration committed: keep the secret, drop the pending
+        // record, carry on (a run it leased is run). Only a 401 sends it back to registering, so an
+        // enrolment token that expired meanwhile no longer strands a registered runner.
+        if (pending?.confirm) {
+          const p = pending;
+          client.useToken(p.secret);
+          let authenticated = false;
+          let event: RunnerEvent = { kind: "next", next: "ok" };
+          try {
+            const r = await runOnce(client, adapter, opts);
+            authenticated = true;
+            if (r.outcome !== "idle") opts.log?.(`run ${r.runId}: ${r.outcome}${r.status ? ` (${r.status})` : ""}`);
+          } catch (e) {
+            const ev = eventOf(e);
+            if (e instanceof RunnerHttpError && e.status === 401) {
+              p.confirm = false;
+              p.confirmRefused = true;
+              opts.log?.("the interrupted enrolment's secret is not a registered credential; registering it");
+            } else if (ev.kind === "next") {
+              authenticated = true;
+              event = ev;
+            } else {
+              opts.log?.(`could not check the interrupted enrolment's secret (${whyOf(e)}); will retry`);
+              await backOff();
+              break;
+            }
+          }
+          if (authenticated) {
+            await opts.store.save(p.secret);
+            await opts.store.clearPending();
+            opts.log?.("the interrupted enrolment had registered: its secret is this runner's credential");
+            held = p.secret;
+            pending = null;
+            lastRefreshAt = null;
+            go({ kind: "enrolled" });
+            // an authenticated refusal (the engine off, a report wanted, …) is acted on from leasing
+            if (event.kind === "next" && event.next !== "ok") go(event, event.next);
+            break;
+          }
+        }
         if (!opts.enrollmentToken) {
           go({ kind: "enrolment_refused" }, "no enrolment token");
           break;
@@ -341,7 +390,7 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           // PENDING enrolment before the request leaves; the stored token is not touched until a 201
           const secret = generateRunnerSecret();
           await opts.store.savePending({ secret, supersedes });
-          pending = { secret, body: null, supersedes, attempts: 0 };
+          pending = { secret, body: null, supersedes, attempts: 0, confirm: false, confirmRefused: false };
         }
         const p = pending;
         let reg: Awaited<ReturnType<RunnerClient["register"]>> | null = null;
@@ -349,6 +398,17 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           p.body ??= await opts.registration();
           reg = await client.register(opts.enrollmentToken, p.secret, p.body, p.supersedes ?? undefined);
         } catch (e) {
+          // round 8 [77]: the hash is already registered (a lost response): try the secret directly,
+          // once — if that was already refused, nothing more can be done without an admin
+          if (e instanceof RunnerHttpError && e.code === "engine_runner_already_registered") {
+            if (!p.confirmRefused) {
+              p.confirm = true;
+              break;
+            }
+            stopMessage = `this runner's secret is registered but the gateway refuses it (revoked); ${stopMessage}`;
+            go({ kind: "enrolment_refused" }, "engine_runner_already_registered");
+            break;
+          }
           const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
           p.attempts++;
           if (!transient || p.attempts >= (opts.registerAttempts ?? 5)) {

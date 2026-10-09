@@ -289,29 +289,65 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const pending = (await o.store.loadPending())!;
     expect(pending).toMatchObject({ supersedes: STORED });
     // restart: the interrupted enrolment is resumed with the SAME secret and the SAME supersedes
-    const second = gateway({ lease: [{ status: 204 }] });
+    // round 8 [77]: the restart first tries the pending secret as the credential (not registered: 401)
+    const second = gateway({ lease: [{ status: 401, error: "engine_runner_token_required" }, { status: 204 }] });
     await runRunnerLoop(second.client, adapter, o);
     const reg = second.calls.find((c) => c.path.endsWith("/register"))!;
     expect(reg.body).toMatchObject({ tokenHash: sha(pending.secret), supersedes: STORED });
-    expect(second.calls[0]!.path).toBe("/v1/engine-runner/register"); // before any lease with the old token
+    expect(second.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", bearer: `Bearer ${pending.secret}` }); // the probe, never the old token
+    expect(second.calls[1]!.path).toBe("/v1/engine-runner/register");
     expect(await o.store.load()).toBe(pending.secret);
     expect(await o.store.loadPending()).toBeNull();
   });
 
-  it("round 6 [72]: a lost register response then a crash: the restart replays the same registration", async () => {
-    const { o } = await opts({ maxIterations: 1 });
+  it("round 8 [77]: a registration committed with its response lost, then the enrolment token expired: the restart tries the secret directly and leases", async () => {
+    const { o, logs } = await opts({ maxIterations: 1 });
     await o.store.save(STORED);
-    // the request reached the gateway (which revoked the old runner) but the answer was lost, every time, and the process ended
+    // the request reached the gateway (which registered it) but the answer was lost, every time, and the process ended
     const first = gateway({ lease: [{ status: 409, error: "engine_runner_reenrol_required", next: "reenrol_required" }], register: ["drop"] });
     await expect(runRunnerLoop(first.client, adapter, { ...o, registerAttempts: 2 })).rejects.toBeInstanceOf(RunnerFatalError);
-    const sent = first.calls.filter((c) => c.path.endsWith("/register"));
-    expect(sent).toHaveLength(2);
     expect(await o.store.load()).toBe(STORED);
-    const second = gateway({ lease: [{ status: 204 }] });
+    const pending = (await o.store.loadPending())!;
+    // meanwhile the enrolment token expired: a registration (or its replay) would now be refused
+    const second = gateway({ lease: [{ status: 204 }], register: [401] });
     await runRunnerLoop(second.client, adapter, o);
-    const replay = second.calls.find((c) => c.path.endsWith("/register"))!;
-    expect(replay.body!["tokenHash"]).toBe(sent[0]!.body!["tokenHash"]);
-    expect(replay.body!["supersedes"]).toBe(STORED);
+    expect(second.count("/register")).toBe(0);
+    expect(second.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", bearer: `Bearer ${pending.secret}` });
+    expect(await o.store.load()).toBe(pending.secret);
+    expect(await o.store.loadPending()).toBeNull();
+    expect(logs.some((l) => /had registered: its secret is this runner's credential/.test(l))).toBe(true);
+  });
+
+  it("round 8 [77]: a secret the gateway refuses (401) is registered again; `already registered` after that stops (revoked)", async () => {
+    const { o } = await opts({ maxIterations: 1 });
+    await o.store.save(STORED);
+    await o.store.savePending({ secret: `rge_${"9".repeat(64)}`, supersedes: STORED });
+    // not registered: the probe is refused, the registration goes ahead with the same secret
+    const fresh = gateway({ lease: [{ status: 401, error: "engine_runner_token_required" }, { status: 204 }] });
+    await runRunnerLoop(fresh.client, adapter, o);
+    expect(fresh.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease", "/v1/engine-runner/register", "/v1/engine-runner/lease"]);
+    expect(fresh.calls[1]!.body).toMatchObject({ tokenHash: sha(`rge_${"9".repeat(64)}`), supersedes: STORED });
+    // registered but revoked: the probe is refused AND the hash is already registered: stop
+    await o.store.savePending({ secret: `rge_${"6".repeat(64)}`, supersedes: null });
+    const revoked = gateway({ lease: [{ status: 401, error: "engine_runner_revoked" }], register: [409] });
+    const http = (revoked.client as unknown as { http: RunnerHttp }).http;
+    (revoked.client as unknown as { http: RunnerHttp }).http = async (url, init) =>
+      url.endsWith("/register") ? (await http(url, init), { status: 409, json: async () => ({ error: "engine_runner_already_registered" }) }) : http(url, init);
+    await expect(runRunnerLoop(revoked.client, adapter, o)).rejects.toThrow(/registered but the gateway refuses it/);
+    expect(revoked.count("/register")).toBe(1);
+  });
+
+  it("round 8 [77]: `already registered` on a fresh registration: the secret is tried directly", async () => {
+    const { o } = await opts({ maxIterations: 1 });
+    const g = gateway({ lease: [{ status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) =>
+      url.endsWith("/register") ? (await http(url, init), { status: 409, json: async () => ({ error: "engine_runner_already_registered" }) }) : http(url, init);
+    await runRunnerLoop(g.client, adapter, o);
+    const secret = (await o.store.load())!;
+    expect(g.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/register", "/v1/engine-runner/lease", "/v1/engine-runner/lease"]);
+    expect(g.calls[1]!.bearer).toBe(`Bearer ${secret}`);
+    expect(await o.store.loadPending()).toBeNull();
   });
 
   it("round 7 [74]: a crash after the new token was stored but before the pending record was deleted: the stored token is used, the stale record dropped", async () => {
@@ -351,9 +387,10 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const { o } = await opts({ enrollmentToken: null });
     await o.store.save(STORED);
     await o.store.savePending({ secret: `rge_${"9".repeat(64)}`, supersedes: STORED });
-    const g = gateway({ lease: [{ status: 204 }] });
+    // round 8 [77]: the secret is tried directly first (refused here: it never registered)
+    const g = gateway({ lease: [{ status: 401, error: "engine_runner_token_required" }] });
     await expect(runRunnerLoop(g.client, adapter, o)).rejects.toThrow(/enrolment was interrupted/);
-    expect(g.calls).toHaveLength(0);
+    expect(g.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
     expect(await o.store.loadPending()).toEqual({ secret: `rge_${"9".repeat(64)}`, supersedes: STORED });
     // a pending record that is not valid is never used
     await writeFile(o.store.pendingFile, JSON.stringify({ secret: "not-a-token", supersedes: null }));
