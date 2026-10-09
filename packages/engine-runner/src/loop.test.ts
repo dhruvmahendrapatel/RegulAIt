@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { EngineRunnerNext } from "@regulait/shared";
-import { FileRunnerTokenStore, pinnedImageDigest, RUNNER_STATES, RunnerFatalError, runRunnerLoop, transition, type RunnerEvent, type RunnerState } from "./loop.js";
+import { FileRunnerTokenStore, pinnedImageDigest, RUNNER_STATES, RunnerFatalError, RunnerObsoleteBuildError, runRunnerLoop, transition, type RunnerEvent, type RunnerState } from "./loop.js";
 import { RETAINED_RESULT_FILE, RunnerClient, type RunnerHttp } from "./runner.js";
 
 const STORED = `rge_${"7".repeat(64)}`;
@@ -334,7 +334,49 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     (revoked.client as unknown as { http: RunnerHttp }).http = async (url, init) =>
       url.endsWith("/register") ? (await http(url, init), { status: 409, json: async () => ({ error: "engine_runner_already_registered" }) }) : http(url, init);
     await expect(runRunnerLoop(revoked.client, adapter, o)).rejects.toThrow(/registered but the gateway refuses it/);
-    expect(revoked.count("/register")).toBe(1);
+    // round 12 [92]: one fresh secret is tried before stopping (here the gateway refuses that too:
+    // it is tried directly, refused, registered again, and only then does the loop stop)
+    const regs = revoked.calls.filter((c) => c.path.endsWith("/register"));
+    expect(regs).toHaveLength(3);
+    expect(regs[1]!.body!["tokenHash"]).not.toBe(regs[0]!.body!["tokenHash"]);
+    expect(regs[2]!.body!["tokenHash"]).toBe(regs[1]!.body!["tokenHash"]);
+  });
+
+  it("round 12 [92]: registered, credential lost, then revoked: the dead secret is discarded and a NEW one registers with the unused enrolment token", async () => {
+    const { o, logs } = await opts({ maxIterations: 1 });
+    const dead = `rge_${"5".repeat(64)}`;
+    await o.store.savePending({ secret: dead, supersedes: null });
+    // the dead secret: refused as a credential (revoked) and its hash already registered
+    const g = gateway({ lease: [{ status: 401, error: "engine_runner_revoked" }, { status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/register") && (JSON.parse(init.body!) as { tokenHash: string }).tokenHash === sha(dead)) {
+        await http(url, init);
+        return { status: 409, json: async () => ({ error: "engine_runner_already_registered" }) };
+      }
+      return http(url, init);
+    };
+    await runRunnerLoop(g.client, adapter, o);
+    const regs = g.calls.filter((c) => c.path.endsWith("/register"));
+    expect(regs).toHaveLength(2);
+    expect(regs[0]!.body!["tokenHash"]).toBe(sha(dead));
+    const fresh = (await o.store.load())!;
+    expect(fresh).not.toBe(dead);
+    expect(regs[1]!.body!["tokenHash"]).toBe(sha(fresh));
+    expect(await o.store.loadPending()).toBeNull();
+    expect(g.calls.at(-1)).toMatchObject({ path: "/v1/engine-runner/lease", bearer: `Bearer ${fresh}` });
+    expect(logs.some((l) => /secret was revoked: registering a new one/.test(l))).toBe(true);
+  });
+
+  it("round 12 [91]: an image the gateway says is not the current build stops for good (RunnerObsoleteBuildError, never retried)", async () => {
+    const { o } = await opts();
+    const g = gateway({ lease: [{ status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) =>
+      url.endsWith("/register") ? (await http(url, init), { status: 409, json: async () => ({ error: "engine_runner_build_obsolete" }) }) : http(url, init);
+    await expect(runRunnerLoop(g.client, adapter, o)).rejects.toBeInstanceOf(RunnerObsoleteBuildError);
+    expect(g.count("/register")).toBe(1);
+    expect(g.count("/lease")).toBe(0);
   });
 
   it("round 8 [77]: `already registered` on a fresh registration: the secret is tried directly", async () => {

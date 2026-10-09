@@ -157,6 +157,29 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
   }
 }
 
+/**
+ * PR #205 review round 12: THE definition of "the current build" — the manifest's digest (never
+ * null: an unbuilt engine has no current build) and version. Every reader and writer of self-test
+ * state decides through this (and `runnerCountsForCurrentBuild`), nowhere else.
+ */
+export function isCurrentBuild(manifest: EngineManifestEntry, build: { digest: string | null | undefined; version: string | null | undefined }): boolean {
+  return manifest.imageDigest !== null && build.digest === manifest.imageDigest && build.version === manifest.version;
+}
+
+/**
+ * PR #205 review round 12: a runner's reports count for the current build only when the build it
+ * REGISTERED with is the current build — and, for a report it presents now, when that report is for
+ * the current build too. An obsolete-build runner's reports never change the engine.
+ */
+export function runnerCountsForCurrentBuild(
+  manifest: EngineManifestEntry,
+  runner: { reportedDigest: string; reportedVersion: string },
+  report?: { imageDigest: string; engineVersion: string },
+): boolean {
+  if (!isCurrentBuild(manifest, { digest: runner.reportedDigest, version: runner.reportedVersion })) return false;
+  return report === undefined || isCurrentBuild(manifest, { digest: report.imageDigest, version: report.engineVersion });
+}
+
 /** is the stored self-test of this engine a fresh pass against the manifest as it is now? */
 export function selfTestAdmitsEnable(row: EngineRow, manifest: EngineManifestEntry, now: Date): { ok: boolean; why: string | null } {
   const t = row.selfTest as { passed?: boolean; imageDigest?: string; version?: string } | null;
@@ -164,7 +187,7 @@ export function selfTestAdmitsEnable(row: EngineRow, manifest: EngineManifestEnt
   if (now.getTime() - row.selfTestPassedAt.getTime() > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000) {
     return { ok: false, why: "the last passing self-test is older than 24 hours" };
   }
-  if (manifest.imageDigest === null || t.imageDigest !== manifest.imageDigest || t.version !== manifest.version) {
+  if (!isCurrentBuild(manifest, { digest: t.imageDigest, version: t.version })) {
     return { ok: false, why: "the self-test was for a different build than the shipped manifest names" };
   }
   return { ok: true, why: null };
@@ -349,20 +372,35 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     // PR #205 review round 11 (sweep): the report judged is read in the same transaction, locked
     // (FOR SHARE, taken before the engine row: the lock order of the lease and the runner self-test),
     // so the verdict recorded is the one on the report as it stands; the audit commits with it.
-    const { record, ended } = await db.transaction(async (tx) => {
-      const [runner] = await tx
-        .select()
-        .from(engineRunners)
-        .where(and(eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
-        .orderBy(desc(engineRunners.registeredAt))
-        .limit(1)
-        .for("share");
-      const report = runner ? (runner.selfTest as Parameters<typeof evaluateRunnerSelfTest>[1]) : null;
-      const verdict = report ? evaluateRunnerSelfTest(manifest[engineId], report, now) : { passed: false, failures: ["no_runner" as const] };
+    const m = manifest[engineId];
+    const out = await db.transaction(async (tx) => {
+      // PR #205 review round 12 [91]: only a runner of the CURRENT build counts — the newest live one
+      // whose registered build is the manifest's (an obsolete runner's report can never fail the
+      // verdict and switch the current engine off). With none, nothing is judged and nothing changes.
+      const [runner] =
+        m.imageDigest === null
+          ? []
+          : await tx
+              .select()
+              .from(engineRunners)
+              .where(
+                and(
+                  eq(engineRunners.engineId, engineId),
+                  isNull(engineRunners.revokedAt),
+                  eq(engineRunners.reportedDigest, m.imageDigest),
+                  eq(engineRunners.reportedVersion, m.version),
+                ),
+              )
+              .orderBy(desc(engineRunners.registeredAt))
+              .limit(1)
+              .for("share");
+      if (!runner || !runnerCountsForCurrentBuild(m, runner)) return { kind: "no_current_runner" as const };
+      const report = runner.selfTest as Parameters<typeof evaluateRunnerSelfTest>[1];
+      const verdict = evaluateRunnerSelfTest(m, report, now);
       const record = {
         passed: verdict.passed,
         failures: verdict.failures,
-        runnerId: runner?.id ?? null,
+        runnerId: runner.id,
         imageDigest: report?.imageDigest ?? null,
         version: report?.engineVersion ?? null,
         egress: report?.egress ?? null,
@@ -389,13 +427,19 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         effect: verdict.passed ? "allow" : "deny",
         detail: { engineId, ...record, disabled: !verdict.passed && locked?.enabled === true },
         reason: verdict.passed
-          ? `engine ${engineId} self-test passed (runner ${runner!.id})`
+          ? `engine ${engineId} self-test passed (runner ${runner.id})`
           : `engine ${engineId} self-test failed: ${verdict.failures.join(", ")}` + (locked?.enabled ? " — the engine is switched off" : ""),
       });
-      return { record, ended };
+      return { kind: "judged" as const, record, ended };
     });
-    await notifyWorkflowsOfEndedRuns(db, ended);
-    return reply.send(record);
+    if (out.kind === "no_current_runner") {
+      return reply.status(409).send({
+        error: "engine_no_current_build_runner",
+        detail: `engine ${engineId}'s self-test cannot run: no live runner is registered for the current build (${m.version}, ${m.imageDigest ?? "not built"}). Deploy the current image and enrol its runner; nothing was changed.`,
+      });
+    }
+    await notifyWorkflowsOfEndedRuns(db, out.ended);
+    return reply.send(out.record);
   });
 
   // ---- POST /v1/engines/:engineId/enrollment-tokens (admin; shown once) ------
@@ -469,6 +513,24 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     if (!tokenId || !engineId) return reply.status(401).send({ error: "engine_enrollment_invalid" });
     if (body.selfTest.imageDigest !== body.imageDigest || body.selfTest.engineVersion !== body.engineVersion) {
       return reply.status(422).send({ error: "engine_self_test_inconsistent", detail: "the self-test must describe the image being registered" });
+    }
+    // PR #205 review round 12 [91]: a runner of a build that is not the current one is refused
+    // outright (decided before the enrolment token is spent), so an old container can never come back
+    // as a live runner whose reports might count. Secure by default; audited.
+    if (!isCurrentBuild(manifest[engineId], { digest: body.imageDigest, version: body.engineVersion })) {
+      await auditEngine(db, {
+        userId: NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: null,
+        ruleId: "engine-runner-register-obsolete-build",
+        effect: "deny",
+        detail: { engineId, name: body.name, reported: { digest: body.imageDigest, version: body.engineVersion }, current: { digest: manifest[engineId].imageDigest, version: manifest[engineId].version } },
+        reason: `a runner (${body.name}) tried to register for ${engineId} with a build that is not the current one: refused`,
+      });
+      return reply.status(409).send({
+        error: "engine_runner_build_obsolete",
+        detail: "this image is not the engine's current build: deploy the current image (the engine's manifest names its digest and version), then enrol its runner",
+      });
     }
     const verdict = evaluateRunnerSelfTest(manifest[engineId], body.selfTest, new Date());
     const replay = async () => {
@@ -625,7 +687,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     // old runner during a rolling upgrade) changes nothing — neither this runner's stored report nor
     // the engine — and is audited: an obsolete runner can never switch the current build's engine off
     const m = manifest[engineId];
-    if (m.imageDigest === null || selfTest.imageDigest !== m.imageDigest || selfTest.engineVersion !== m.version) {
+    if (!runnerCountsForCurrentBuild(m, runner, selfTest)) {
       await auditEngine(db, {
         userId: NO_IDENTITY,
         objectType: "engine_runner",
@@ -653,7 +715,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       await tx.update(engineRunners).set({ selfTest, selfTestPassed: verdict.passed, selfTestFailures: verdict.failures }).where(eq(engineRunners.id, runnerId));
       const [engine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       const recorded = engine?.selfTest as { passed?: boolean; imageDigest?: string; version?: string } | null;
-      const sameBuild = !!recorded?.passed && m.imageDigest !== null && recorded.imageDigest === m.imageDigest && recorded.version === m.version;
+      const sameBuild = !!recorded?.passed && isCurrentBuild(m, { digest: recorded.imageDigest, version: recorded.version });
       let engineRefreshed = false;
       let engineDisabled = false;
       if (verdict.passed && sameBuild) {
@@ -666,7 +728,11 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           })
           .where(eq(engines.id, engineId));
         engineRefreshed = true;
-      } else if (!verdict.passed && engine?.enabled) {
+      } else if (!verdict.passed && engine) {
+        // PR #205 review round 12 [93]: a failing current-build report ALWAYS records the failure and
+        // clears the engine's pass, whatever its state — an engine already off can no longer be
+        // re-enabled on the earlier (now contradicted) evidence. Only ending its runs depends on this
+        // switching it off (true → false).
         await tx
           .update(engines)
           .set({
@@ -676,7 +742,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
             updatedAt: now,
           })
           .where(eq(engines.id, engineId));
-        engineDisabled = true;
+        engineDisabled = engine.enabled;
       }
       // PR #205 review round 10 [84]: the engine switched off here takes its active runs (every
       // runner's) with it, keys revoked, in this transaction — no run keeps calling models after an

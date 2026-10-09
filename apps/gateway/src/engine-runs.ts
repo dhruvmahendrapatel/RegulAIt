@@ -97,7 +97,7 @@ import {
   type RunnerSelfTest,
 } from "@regulait/shared";
 import { z } from "zod";
-import { auditEngine, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
+import { auditEngine, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
@@ -1164,7 +1164,7 @@ function leaseAdmission(
   // PR #205 review round 10 [85]: a runner whose registered build is not the CURRENT manifest build
   // (an old runner during a rolling upgrade) re-enrols from the current image; it is never asked for a
   // self-test, which (of an obsolete build) could otherwise switch the upgraded engine off
-  if (m.imageDigest === null || runner.reportedDigest !== m.imageDigest || runner.reportedVersion !== m.version) {
+  if (!runnerCountsForCurrentBuild(m, runner)) {
     return {
       next: "reenrol_required",
       error: "engine_runner_reenrol_required",

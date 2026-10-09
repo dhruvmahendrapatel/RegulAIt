@@ -153,6 +153,10 @@ export const ENGINE_REFUSALS = {
   engine_self_test_required: 409,
   /** PR #205 review round 9 [79]: enabling a build that does not isolate the runner credential, without accepting that risk */
   engine_credential_isolation_missing: 409,
+  /** PR #205 review round 12 [91]: a registration of a build that is not the current manifest build */
+  engine_runner_build_obsolete: 409,
+  /** PR #205 review round 12 [91]: an admin self-test with no live runner of the current build */
+  engine_no_current_build_runner: 409,
   /** PR #205 review round 8 [77]: a registration whose token hash is already a runner's credential */
   engine_runner_already_registered: 409,
   /** PR #205 review round 5 [67]: a runner presenting a build other than the one it registered with */

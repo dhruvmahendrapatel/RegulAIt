@@ -75,6 +75,16 @@ const GATEWAY_BASE = "http://gateway.test/v1";
 const PF_DIGEST = `sha256:${"d".repeat(64)}`;
 const MANIFEST: Record<EngineId, EngineManifestEntry> = { ...ENGINE_MANIFEST, promptfoo: { ...ENGINE_MANIFEST.promptfoo, imageDigest: PF_DIGEST } };
 const PF_BUILD = { imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version };
+/**
+ * PR #205 review round 12 [91]: registration refuses a build that is not the current one, so a
+ * runner "of an earlier build" is made the way an upgrade leaves one — registered while its build was
+ * current, its row and report now naming a build the manifest has moved on from.
+ */
+async function makeObsolete(runnerId: string, digest: string) {
+  await db.execute(
+    sql`UPDATE engine_runners SET reported_digest = ${digest}, self_test = jsonb_set(self_test, '{imageDigest}', to_jsonb(${digest}::text)) WHERE id = ${runnerId}`,
+  );
+}
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 
 let db: Db;
@@ -778,9 +788,11 @@ describe("PR #205 review round 5: the runner state machine against the real gate
   });
 
   it("[67] with an enrolment token it re-enrols with a new secret and the old registration is revoked in the same step, audited", async () => {
-    const NEW = `sha256:${"f".repeat(64)}`;
+    // round 12: the old runner registered on a build the manifest has since moved on from; the restarted one runs the current build
+    const OLD = `sha256:${"f".repeat(64)}`;
     const { secret, runnerId } = await register("upgrade-reenrol");
-    const l = await loop(secret, { imageDigest: NEW, enrollmentToken: await enrolmentToken("upgrade-new"), maxIterations: 1 });
+    await makeObsolete(runnerId, OLD);
+    const l = await loop(secret, { imageDigest: PF_DIGEST, enrollmentToken: await enrolmentToken("upgrade-new"), maxIterations: 1 });
     await l.run;
     const replaced = (await l.store.load())!;
     expect(replaced).not.toBe(secret);
@@ -790,7 +802,7 @@ describe("PR #205 review round 5: the runner state machine against the real gate
     const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-runner-superseded' AND object_id = ${runnerId}`)) as unknown as { rows: unknown[] }).rows;
     expect(audit).toHaveLength(1);
     const [fresh] = ((await db.execute(sql`SELECT id, reported_digest FROM engine_runners WHERE token_hash = ${runnerTokenHash(replaced)}`)) as unknown as { rows: Array<{ id: string; reported_digest: string }> }).rows;
-    expect(fresh).toMatchObject({ reported_digest: NEW });
+    expect(fresh).toMatchObject({ reported_digest: PF_DIGEST });
     // the old token authenticates nothing now
     const gone = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${secret}` }, PF_BUILD);
     expect(gone.statusCode).toBe(401);
@@ -917,10 +929,11 @@ describe("PR #205 review round 6: admission under locks, interrupted re-enrolmen
     const oldSecret = generateRunnerSecret();
     const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(await enrolmentToken("crash-old"), oldSecret, {
       name: `crash-${RUN}`,
-      imageDigest: OLD,
+      imageDigest: PF_DIGEST,
       engineVersion: MANIFEST.promptfoo.version,
-      selfTest: await report(OLD),
+      selfTest: await report(),
     });
+    await makeObsolete(reg.runnerId, OLD); // registered before the upgrade (round 12: registration refuses an obsolete build)
     const dir = await mkdtemp(path.join(tmpdir(), "b5p-r6-"));
     const store = new FileRunnerTokenStore(path.join(dir, "state", "runner-token"));
     await store.save(oldSecret);
@@ -1149,12 +1162,13 @@ describe("PR #205 review round 8: a lost registration response outlives its toke
     const OLD = `sha256:${"f".repeat(64)}`;
     const oldSecret = generateRunnerSecret();
     const old = await mintToken("lost-old");
-    await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(old.token, oldSecret, {
+    const oldReg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(old.token, oldSecret, {
       name: `lost-old-${RUN}`,
-      imageDigest: OLD,
+      imageDigest: PF_DIGEST,
       engineVersion: MANIFEST.promptfoo.version,
-      selfTest: await report(OLD),
+      selfTest: await report(),
     });
+    await makeObsolete(oldReg.runnerId, OLD); // registered before the upgrade (round 12: registration refuses an obsolete build)
     const dir = await mkdtemp(path.join(tmpdir(), "b5p-r8-"));
     const store = new FileRunnerTokenStore(path.join(dir, "state", "runner-token"));
     await store.save(oldSecret);
@@ -1437,7 +1451,8 @@ describe("PR #205 review round 10: every switch-off ends the engine's runs; an o
   it("[85] during a rolling upgrade an obsolete-build runner is told to re-enrol, and its self-test cannot switch the upgraded engine off", async () => {
     await switchOn();
     const OLD = `sha256:${"e".repeat(64)}`;
-    const old = await register("obsolete", OLD);
+    const old = await register("obsolete");
+    await makeObsolete(old.runnerId, OLD); // registered before the upgrade (round 12: registration refuses an obsolete build)
     const before = ((await db.execute(sql`SELECT self_test FROM engine_runners WHERE id = ${old.runnerId}`)) as unknown as { rows: Array<{ self_test: { at: string } }> }).rows[0]!;
     // it presents its own (old) build, which matches its registration: still re-enrol, not a self-test
     const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${old.secret}` }, { imageDigest: OLD, engineVersion: MANIFEST.promptfoo.version });
@@ -1594,5 +1609,138 @@ describe("PR #205 review round 11 (sweep): a sweep re-checks its condition on th
     } finally {
       await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
     }
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 12 (Codex), decisions 91 to 93 — each red first. ONE predicate decides which
+// runner reports count for the current build (`runnerCountsForCurrentBuild`). Runs last: its final
+// case revokes every live runner.
+// ===========================================================================
+describe("PR #205 review round 12: only current-build runners count; a failing report always clears the pass; a revoked lost secret is replaced", () => {
+  const report = (digest = PF_DIGEST, connected = false) =>
+    buildSelfTest({
+      imageDigest: digest,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: {
+        host: "egress-probe.invalid",
+        ip: "93.184.215.14",
+        lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })),
+        connect: async () => (connected ? "connected" : "denied"),
+      },
+    });
+  const mintToken = async (label: string) => (await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label })).json().token as string;
+  const register = async (label: string) => {
+    const secret = generateRunnerSecret();
+    const reg = await new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }).register(await mintToken(label), secret, {
+      name: `${label}-${RUN}`,
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: await report(),
+    });
+    return { secret, runnerId: reg.runnerId };
+  };
+  const switchOn = async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`);
+  };
+  const engineRow = async () =>
+    ((await db.execute(sql`SELECT enabled, self_test_passed_at, self_test FROM engines WHERE id = 'promptfoo'`)) as unknown as {
+      rows: Array<{ enabled: boolean; self_test_passed_at: string | null; self_test: { passed?: boolean; runnerId?: string | null } | null }>;
+    }).rows[0]!;
+
+  it("[91] the admin self-test judges only a current-build runner: a newer obsolete runner's failing report cannot switch the engine off", async () => {
+    await switchOn();
+    const current = await register("current-build");
+    // a newer runner whose registration is of a build the manifest has since moved on from, its report failing
+    const obsolete = await register("newer-but-obsolete");
+    await makeObsolete(obsolete.runnerId, `sha256:${"e".repeat(64)}`);
+    await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(await report(`sha256:${"e".repeat(64)}`, true))}::jsonb WHERE id = ${obsolete.runnerId}`);
+    const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
+    expect(st.statusCode, st.body).toBe(200);
+    expect(st.json()).toMatchObject({ passed: true, runnerId: current.runnerId });
+    expect((await engineRow()).enabled).toBe(true);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+
+  it("[93] a failing current-build report while the engine is OFF still clears its pass: re-enabling is refused (engine_self_test_required)", async () => {
+    await switchOn();
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false })).statusCode).toBe(200);
+    expect((await engineRow()).self_test_passed_at).not.toBeNull();
+    const r = await register("fails-while-off");
+    const bad = await inject("POST", "/v1/engine-runner/self-test", { authorization: `Bearer ${r.secret}` }, { selfTest: await report(PF_DIGEST, true) });
+    expect(bad.statusCode, bad.body).toBe(200);
+    expect(bad.json()).toMatchObject({ selfTest: { passed: false }, engineDisabled: false });
+    const row = await engineRow();
+    expect(row.self_test_passed_at).toBeNull();
+    expect(row.self_test).toMatchObject({ passed: false, runnerId: r.runnerId });
+    const again = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error).toBe("engine_self_test_required");
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${r.runnerId}`);
+  });
+
+  it("[92] registered, the credential lost before it was stored, then revoked: a restart with a fresh token registers a NEW credential; the revoked one stays dead", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "b5p-r12-"));
+    const store = new FileRunnerTokenStore(path.join(dir, "state", "runner-token"));
+    const opts = (enrollmentToken: string) => ({
+      engineId: "promptfoo" as const,
+      engineVersion: MANIFEST.promptfoo.version,
+      imageDigest: PF_DIGEST,
+      workRoot: path.join(dir, "work"),
+      store,
+      enrollmentToken,
+      registration: async () => ({ name: `lost-revoked-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await report() }),
+      backoffMs: 1,
+      registerAttempts: 2,
+      maxIterations: 1,
+      sleep: async () => {},
+    });
+    // the registration commits, its response is lost every time, and the process ends: the secret is only pending
+    const lossy: RunnerHttp = async (url, init) => {
+      const r = await runnerHttp(url, init);
+      if (url.endsWith("/register")) throw new Error("socket hang up");
+      return r;
+    };
+    await expect(
+      runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: lossy }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), opts(await mintToken("lost-1"))),
+    ).rejects.toThrow(RunnerFatalError);
+    const dead = (await store.loadPending())!.secret;
+    expect(await store.load()).toBeNull();
+    // an admin revokes the runner that registration created
+    const [row] = ((await db.execute(sql`SELECT id FROM engine_runners WHERE token_hash = ${runnerTokenHash(dead)}`)) as unknown as { rows: Array<{ id: string }> }).rows;
+    expect((await inject("DELETE", `/v1/engine-runners/${row!.id}`, admin.key)).statusCode).toBe(200);
+    // restart with a fresh enrolment token
+    const logs: string[] = [];
+    await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), {
+      ...opts(await mintToken("lost-2")),
+      log: (m: string) => void logs.push(m),
+    });
+    const fresh = (await store.load())!;
+    expect(fresh).not.toBe(dead);
+    expect(await store.loadPending()).toBeNull();
+    expect(logs.some((m) => /secret was revoked: registering a new one/.test(m))).toBe(true);
+    const [live] = ((await db.execute(sql`SELECT revoked_at FROM engine_runners WHERE token_hash = ${runnerTokenHash(fresh)}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
+    expect(live!.revoked_at).toBeNull();
+    expect((await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${dead}` }, PF_BUILD)).statusCode).toBe(401);
+    expect((await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${fresh}` }, PF_BUILD)).statusCode).not.toBe(401);
+  });
+
+  it("[91] with no live runner of the current build the admin self-test refuses (409) and changes nothing", async () => {
+    await switchOn();
+    const before = await engineRow();
+    // every live runner gone, and one runner left of a build the manifest has moved on from
+    await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE engine_id = 'promptfoo' AND revoked_at IS NULL`);
+    const obsolete = await register("only-obsolete");
+    await makeObsolete(obsolete.runnerId, `sha256:${"e".repeat(64)}`);
+    const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
+    expect(st.statusCode, st.body).toBe(409);
+    expect(st.json().error).toBe("engine_no_current_build_runner");
+    const after = await engineRow();
+    expect(after).toMatchObject({ enabled: true });
+    expect(after.self_test_passed_at).toBe(before.self_test_passed_at);
+    await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
   });
 });

@@ -116,6 +116,13 @@ export class FileRunnerTokenStore implements RunnerTokenStore {
 /** the runner cannot continue without an admin (it says what the admin must do) */
 export class RunnerFatalError extends Error {}
 
+/**
+ * PR #205 review round 12 [91]: this image is not the engine's current build and the gateway refuses
+ * to register it. No restart can change that, so the shim parks (stays up, idle, saying why) instead
+ * of exiting into a restart loop.
+ */
+export class RunnerObsoleteBuildError extends RunnerFatalError {}
+
 const UNSET_DIGEST = `sha256:${"0".repeat(64)}`;
 
 /**
@@ -301,10 +308,16 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
     attempts: number;
     confirm: boolean;
     confirmRefused: boolean;
-  } | null = interrupted ? { secret: interrupted.secret, body: null, supersedes: interrupted.supersedes, attempts: 0, confirm: true, confirmRefused: false } : null;
+    /** round 12 [92]: this secret replaced a revoked one (regenerated at most once) */
+    regenerated: boolean;
+  } | null = interrupted
+    ? { secret: interrupted.secret, body: null, supersedes: interrupted.supersedes, attempts: 0, confirm: true, confirmRefused: false, regenerated: false }
+    : null;
   /** set when the move to `reenrolling` was for a build change (the held token is then superseded) */
   let supersedeOnReenrol = false;
   let stopMessage = interrupted ? MESSAGE_INTERRUPTED : stored ? MESSAGE_REVOKED : MESSAGE_FIRST;
+  /** round 12 [91]: stopped because this image is not the current build (parked, never retried) */
+  let obsolete = false;
   let lastRefreshAt: number | null = null;
   let backoff = base;
   let waitingOn: string | null = null;
@@ -390,7 +403,7 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
           // PENDING enrolment before the request leaves; the stored token is not touched until a 201
           const secret = generateRunnerSecret();
           await opts.store.savePending({ secret, supersedes });
-          pending = { secret, body: null, supersedes, attempts: 0, confirm: false, confirmRefused: false };
+          pending = { secret, body: null, supersedes, attempts: 0, confirm: false, confirmRefused: false, regenerated: false };
         }
         const p = pending;
         let reg: Awaited<ReturnType<RunnerClient["register"]>> | null = null;
@@ -405,8 +418,28 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
               p.confirm = true;
               break;
             }
+            // PR #205 review round 12 [92]: tried directly (401: it is a registered credential that was
+            // revoked) AND the hash is registered: that secret is dead. Discard it, generate a new one
+            // (persisted as the pending enrolment first, with the same `supersedes`) and register that
+            // with the same, still unused, enrolment token. Once only.
+            if (!p.regenerated) {
+              const secret = generateRunnerSecret();
+              await opts.store.savePending({ secret, supersedes: p.supersedes });
+              pending = { secret, body: p.body, supersedes: p.supersedes, attempts: 0, confirm: false, confirmRefused: false, regenerated: true };
+              opts.log?.("the interrupted enrolment's secret was revoked: registering a new one");
+              break;
+            }
             stopMessage = `this runner's secret is registered but the gateway refuses it (revoked); ${stopMessage}`;
             go({ kind: "enrolment_refused" }, "engine_runner_already_registered");
+            break;
+          }
+          // PR #205 review round 12 [91]: this image is not the engine's current build — the gateway
+          // refuses to register it. Stop for good (parked, not a crash loop): no retry can succeed.
+          if (e instanceof RunnerHttpError && e.code === "engine_runner_build_obsolete") {
+            obsolete = true;
+            stopMessage =
+              "this runner's image is not the engine's current build, so the gateway refuses to register it: deploy the current image (the engine's manifest names its digest and version)";
+            go({ kind: "enrolment_refused" }, "engine_runner_build_obsolete");
             break;
           }
           const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
@@ -501,5 +534,5 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
       }
     }
   }
-  throw new RunnerFatalError(stopMessage);
+  throw obsolete ? new RunnerObsoleteBuildError(stopMessage) : new RunnerFatalError(stopMessage);
 }

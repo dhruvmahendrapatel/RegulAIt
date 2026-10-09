@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { buildSelfTest, FileRunnerTokenStore, pinnedImageDigest, runRunnerLoop, RunnerClient } from "@regulait/engine-runner";
+import { buildSelfTest, FileRunnerTokenStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST } from "@regulait/shared";
 import { promptfooAdapter } from "./adapter.js";
 
@@ -53,6 +53,12 @@ async function main(): Promise<void> {
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   main().catch(async (e: unknown) => {
     console.error(`promptfoo runner stopped: ${e instanceof Error ? e.message : String(e)}`);
+    // PR #205 review round 12 [91]: an obsolete image can never register: park (stay up, idle, saying
+    // why once a day) rather than exit into the restart policy's loop
+    if (e instanceof RunnerObsoleteBuildError) {
+      setInterval(() => console.error(`promptfoo runner parked: ${e.message}`), 24 * 3_600_000);
+      return;
+    }
     await new Promise((res) => setTimeout(res, 60_000));
     process.exit(1);
   });

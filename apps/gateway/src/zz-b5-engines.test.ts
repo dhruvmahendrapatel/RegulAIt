@@ -415,10 +415,20 @@ describe("secure by default", () => {
     expect(connected.selfTest.failures).toContain("egress_connected");
     const noSwitch = await enrol("promptfoo", PF_DIGEST, MANIFEST.promptfoo.version, { env: { PROMPTFOO_DISABLE_TELEMETRY: true } });
     expect(noSwitch.selfTest.failures).toContain("usage_env_missing:PROMPTFOO_DISABLE_UPDATE");
-    const wrong = await enrol("promptfoo", `sha256:${"c".repeat(64)}`, MANIFEST.promptfoo.version);
-    expect(wrong.selfTest.failures).toContain("digest_mismatch");
+    // PR #205 review round 12 [91]: an image that is not the current build is not registered at all
+    const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: "wrong-build" });
+    const wrongDigest = `sha256:${"c".repeat(64)}`;
+    const wrong = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${t.json().token}` }, {
+      name: "wrong-build",
+      imageDigest: wrongDigest,
+      engineVersion: MANIFEST.promptfoo.version,
+      selfTest: selfTest(wrongDigest, MANIFEST.promptfoo.version, {}),
+      tokenHash: sha256Hex(runnerSecret()),
+    });
+    expect(wrong.statusCode, wrong.body).toBe(409);
+    expect(wrong.json().error).toBe("engine_runner_build_obsolete");
     // a runner whose self-test failed leases nothing (the engine is off anyway; checked again below)
-    for (const r of [leaky, connected, noSwitch, wrong]) {
+    for (const r of [leaky, connected, noSwitch]) {
       const d = await inject("DELETE", `/v1/engine-runners/${r.id}`, admin.key);
       expect(d.statusCode, d.body).toBe(200);
     }
