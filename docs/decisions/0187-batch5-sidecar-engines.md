@@ -502,6 +502,30 @@ real promptfoo 0.123.1 against a fake gateway), `apps/gateway/src/zz-b5-promptfo
     bodiless lease POST, which the gateway refuses with 400 — no runner could ever have leased against the real app
     (the B5-E tests used a fake transport). The content type is now sent only with a body.
 
+**Review (PR #205, Codex, 2026-10-09; 4 findings, each red first).** Tests: `packages/engine-runner/src/loop.test.ts`
+(4), `zz-b5-promptfoo.test.ts` "PR #205 review" (1), `promptfoo.test.ts` [50], `image.test.ts` and
+`zz-b5-compose.test.ts` [51]. No migration.
+
+48. **A runner waits while its engine is off** [4225536095]. The documented flow is register → an admin enables; until
+    then a lease answers 409 `engine_disabled` (or `engine_self_test_required`), and the runner threw and exited. The
+    loop now lives in the shared runner core (`runRunnerLoop`, `packages/engine-runner/src/loop.ts`), so every engine
+    shim inherits it: a refused lease, a network error or a 5xx waits with a doubling backoff (5 s to 5 min); work
+    resumes when the lease is accepted. Only a refused credential that cannot be replaced (decision 49) ends the process.
+49. **The runner token survives a restart** [4225536098]. The enrolment token is single-use, so a token kept only in
+    memory bricked the runner on any restart. Registration's token is written to a file on the runner's own volume
+    (`FileRunnerTokenStore`: 0600, atomic replace, never logged; compose volume `engine-promptfoo-state` on `/state`,
+    created 0700 and owned by uid 10001 in the image). At start a stored token is used and the enrolment token is
+    ignored. A 401 on the stored token (revoked or unknown) falls back to the enrolment token once; with none, or one
+    the gateway refuses (spent, expired), the runner stops with a message naming the admin's next step. The gateway
+    still refuses a second registration with the same enrolment token.
+50. **Every planned (plugin, strategy) pair is accounted for** [4225536103]. Missing-output detection tracked plugins
+    only, so a strategy that rewrote nothing for a plugin vanished silently. The mapper now walks the planned product
+    (each plugin × `basic` and every planned strategy) and reports each pair with no result `not_run` (`engine_error`).
+51. **The image is linux/amd64 only, explicitly** [4225536109]. `@libsql/linux-x64-gnu` is a hard x64 binding on a
+    multi-arch base: every Dockerfile stage names `--platform=linux/amd64` and the compose service
+    `platform: linux/amd64`, so an arm64 host emulates amd64 rather than building an image whose native binding cannot
+    load. arm64 is open question 10.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
@@ -549,3 +573,6 @@ compat surface is on (a run then fails at its first call); concurrency is per en
 9. **Agentic-named promptfoo plugins are unmapped (decision 40).** If the owner wants them to count toward the
    agentic classes, the run must reach the agent through a path where tool calls are governed and visible (ADR-0068
    adjudication), which a compat-route run is not.
+10. **promptfoo on arm64 (decision 51).** The image is amd64 only because libsql's native binding is pinned per
+    architecture. An arm64 image needs the matching binding chosen per build platform (and its licence and advisories
+    checked); not attempted in B5-P.
