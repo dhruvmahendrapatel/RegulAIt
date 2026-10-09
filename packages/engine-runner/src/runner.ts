@@ -33,6 +33,17 @@ export interface RunnerClientOptions {
   http?: RunnerHttp;
 }
 
+/** a refusal from a runner route, with the gateway's error code (never the token) */
+export class RunnerHttpError extends Error {
+  constructor(
+    readonly route: "register" | "lease",
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(`${route} refused (${status}${code ? ` ${code}` : ""})`);
+  }
+}
+
 /** the five runner routes, nothing else */
 export class RunnerClient {
   private token: string | null = null;
@@ -55,8 +66,8 @@ export class RunnerClient {
   /** exchange a one-time enrolment token for this runner's token */
   async register(enrollmentToken: string, body: { name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest }) {
     const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, body);
-    const json = (await res.json()) as { runnerId?: string; token?: string; selfTest?: { passed: boolean; failures: string[] }; error?: string };
-    if (res.status !== 201 || !json.token) throw new Error(`register refused (${res.status} ${json.error ?? ""})`);
+    const json = ((await res.json().catch(() => null)) ?? {}) as { runnerId?: string; token?: string; selfTest?: { passed: boolean; failures: string[] }; error?: string };
+    if (res.status !== 201 || !json.token) throw new RunnerHttpError("register", res.status, json.error ?? null);
     this.token = json.token;
     return json as { runnerId: string; token: string; selfTest: { passed: boolean; failures: string[] } };
   }
@@ -74,7 +85,10 @@ export class RunnerClient {
   async lease(): Promise<EngineLease | null> {
     const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer());
     if (res.status === 204) return null;
-    if (res.status !== 200) throw new Error(`lease refused (${res.status})`);
+    if (res.status !== 200) {
+      const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string };
+      throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null);
+    }
     return (await res.json()) as EngineLease;
   }
 

@@ -24,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
   authSessions,
@@ -52,7 +52,7 @@ import {
   type EngineId,
   type EngineManifestEntry,
 } from "@regulait/shared";
-import { buildSelfTest, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
+import { buildSelfTest, FileRunnerTokenStore, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, type RunnerHttp } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
@@ -384,5 +384,97 @@ describe("B5-P promptfoo through the real gateway", () => {
     const items = await db.select().from(engineRunItems).where(eq(engineRunItems.runId, runId));
     expect(items.find((i) => i.key === "pii:direct/basic")).toMatchObject({ verdict: "not_run", notRunReason: "egress_denied" });
     expect(items.find((i) => i.key === "prompt-extraction/basic")).toMatchObject({ verdict: "pass" });
+  });
+});
+
+// ===========================================================================
+// PR #205 review (Codex), decisions 48 and 49 — each red first
+// ===========================================================================
+describe("PR #205 review: the runner's life", () => {
+  const pfSelfTest = () =>
+    buildSelfTest({
+      imageDigest: PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "denied" },
+    });
+  const registration = async () => ({ name: `promptfoo-loop-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await pfSelfTest() });
+  const enrolmentToken = async () => {
+    const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: "loop" });
+    expect(t.statusCode, t.body).toBe(201);
+    return t.json().token as string;
+  };
+  const loopOpts = (store: FileRunnerTokenStore, enrollmentToken: string | null, logs: string[], waits: number[], maxIterations: number) => ({
+    engineId: "promptfoo" as const,
+    engineVersion: MANIFEST.promptfoo.version,
+    workRoot: "",
+    heartbeatMs: 25,
+    retryBaseMs: 10,
+    store,
+    enrollmentToken,
+    registration,
+    backoffMs: 100,
+    maxBackoffMs: 400,
+    idleMs: 1,
+    maxIterations,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+    },
+    log: (m: string) => logs.push(m),
+  });
+
+  it("[48][49] a runner registered while the engine is off waits; a restart reuses its stored token; revoked, it stops or re-enrols", async () => {
+    const workRoot = await mkdtemp(path.join(tmpdir(), "b5p-loop-"));
+    const store = new FileRunnerTokenStore(path.join(workRoot, "state", "runner-token"));
+    const adapter = promptfooAdapter({ entrypoint: "/opt/promptfoo/node_modules/promptfoo/dist/src/entrypoint.js", run: promptfooStandIn().run });
+    // the engine is off (tightening needs no step-up): the documented flow is register → enable
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false })).statusCode).toBe(200);
+    const spent = await enrolmentToken();
+    const logs: string[] = [];
+    const waits: number[] = [];
+    const first = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
+    // [48] five refused leases: the loop waits with a capped backoff instead of exiting
+    await runRunnerLoop(first, adapter, { ...loopOpts(store, spent, logs, waits, 5), workRoot });
+    expect(waits).toEqual([100, 200, 400, 400, 400]);
+    expect(logs.some((l) => /waiting: engine_disabled/.test(l))).toBe(true);
+    // [49] the token is on the runner's volume, 0600, and never in a log line
+    const token = await store.load();
+    expect(token).toMatch(/^rge_/);
+    expect((await stat(store.file)).mode & 0o777).toBe(0o600);
+    expect(logs.join("\n")).not.toContain(token!);
+    const runnerId = /registered runner ([0-9a-f-]{36})/.exec(logs.join("\n"))![1]!;
+
+    // the admin enables it again (a step-up); a run is queued
+    const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
+    expect(st.json().passed, st.body).toBe(true);
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) })).statusCode).toBe(200);
+    const runId = await startRun();
+    // [49] a RESTART: a new client, the same volume, the same (spent) enrolment token in the env —
+    // the stored token is used, the enrolment token is not, and the run is leased and posted
+    const restartLogs: string[] = [];
+    const restarted = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
+    await runRunnerLoop(restarted, adapter, { ...loopOpts(store, spent, restartLogs, [], 1), workRoot });
+    expect(restartLogs[0]).toBe("using the stored runner token");
+    expect(restartLogs.some((l) => l.startsWith(`run ${runId}: posted`))).toBe(true);
+    expect((await runRow(runId)).status).toBe("completed");
+
+    // revoked: with only the spent enrolment token it stops with a message saying what to do
+    expect((await inject("DELETE", `/v1/engine-runners/${runnerId}`, admin.key)).statusCode).toBe(200);
+    const stopped = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
+    await expect(runRunnerLoop(stopped, adapter, { ...loopOpts(store, spent, [], [], 3), workRoot })).rejects.toThrow(RunnerFatalError);
+    await expect(runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), adapter, { ...loopOpts(store, null, [], [], 3), workRoot })).rejects.toThrow(
+      /mint a new enrolment token/,
+    );
+    // with a fresh enrolment token it re-enrols and replaces the stored token
+    const fresh = await enrolmentToken();
+    const reLogs: string[] = [];
+    await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), adapter, { ...loopOpts(store, fresh, reLogs, [], 1), workRoot });
+    const replaced = await store.load();
+    expect(replaced).toMatch(/^rge_/);
+    expect(replaced).not.toBe(token);
+    expect(reLogs.some((l) => /trying the enrolment token/.test(l))).toBe(true);
+    expect(reLogs.some((l) => /registered runner/.test(l))).toBe(true);
   });
 });
