@@ -1391,6 +1391,65 @@ with each decision).
      wheel's bundled native libraries. `smol-toml` (BSD-3-Clause, 1.9.0, a dev dependency only) parses the settings in
      the test. The stores use node:fs and the AWS SDK the gateway already ships.
 
+**Deferred, with the owner of each:** ~~artifact upload, artifact streaming to runners and `engine_scan` model-card
+evidence~~ (built in B5-M, decisions 104-119); per-engine images, SBOMs, signatures, taxonomy rows, set
+classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
+views (X26–X28; the runner-revocation route is exempt from the affordance census until X26's button). Residuals:
+`engine_run_items` and engine runs follow no retention cascade yet (only the raw report expires); a result's
+`dispatchAuditIds` are stored as reported, not cross-checked against the run's key; enabling does not check that a
+compat surface is on (a run then fails at its first call); concurrency is per engine, not per runner.
+
+### Implementation decision (engine images in CI, 2026-10-09, branch `ci-engine-images`)
+
+Decisions 104–119 belong to B5-M (PR #212); this slice starts at 120.
+
+120. **Every engine image is built, scanned and signed in `security.yml`, found from `engines/*/Dockerfile`** (closes
+     open question 16). Three jobs join `.github/workflows/security.yml`:
+     - **`engines`** lists every `engines/*/Dockerfile` as a matrix, with no hand-kept list, so modelscan is picked up
+       when PR #212 merges and any later engine is picked up by the PR that adds it. A directory name outside
+       `[a-z0-9-]` fails the job, because the name becomes an image tag and an artifact name.
+     - **`engine-image`** (one leg per engine, `fail-fast: false`) runs on the gateway `image` job's triggers (every PR,
+       push to main, the weekly schedule, a manual run), with no self-skip. It uses the same build: plain
+       `docker build` (BuildKit through the runner's Docker; neither job uses a buildx setup action, and none was
+       added), with `-f engines/<name>/Dockerfile` from the repository root. Its gates match the gateway's: Trivy
+       pinned by version, SHA-256 and Sigstore bundle; a failure on any fixable HIGH or CRITICAL not in
+       the engine's own allow-list, `security/image-allowlist.engine-<name>.json` (an empty list when the file is
+       absent; the gateway keeps `security/image-allowlist.json`, because the gate fails on stale entries and one
+       shared file would let an exception for one image fail every other image); `--expect-classes
+       os-pkgs,lang-pkgs`; and a CycloneDX image SBOM. Engine directory names must follow Docker's repository
+       component grammar, `[a-z0-9]+(-[a-z0-9]+)*`, or the discovery job fails. The
+       gateway's runtime-contents gate is not applied, because it checks the gateway's `/app` tree. Each engine
+       Dockerfile removes its own package managers. **Licence:** an engine's `licence-gate.mjs` judges what the build
+       installs, so it runs inside `docker build`, and a denied licence fails the build. The job fails if a
+       `licence-gate.mjs` exists but the Dockerfile never calls it. It also re-runs an npm-lockfile gate from the
+       tree, and warns if an engine has no gate. A Trivy licence report of the image, including the OS layer, is kept
+       as evidence only. It is not a gate, because admitting licences outside the ADR-0176 list is the owner's
+       decision (open questions 6 and 15). **Digest:** the image ID (what `docker load` reproduces) and the manifest
+       digest from the job's throwaway `registry:3` service are written to the job summary and to `digest.json` in the
+       `engine-<name>-scan` artifact (30 days). That artifact also holds the SBOM, the Trivy reports and the build log,
+       which contains the licence gate's output. On every run that does not sign, the same red proof as the gateway
+       runs: `security-cosign-verify.sh <ref> unsigned` must refuse the image.
+     - **`engine-sign`** uses the gateway `sign` job's condition and steps unchanged. It runs on a push to main only,
+       after `sast`, `secrets`, `dependencies` and `engine-image` have passed, so it is skipped on PRs, schedules and
+       manual runs. It loads the exact scanned image and checks its ID against that engine's digest record (a matrix
+       job has one set of outputs for all its legs). It then pushes the image to its own throwaway registry, signs it
+       with cosign keyless under `security.yml@refs/heads/main`, verifies it with `security-cosign-verify.sh … signed`,
+       and records the signed digest in the summary and the `engine-<name>-signed` artifact (90 days).
+
+     **Why `security.yml` and not `ci.yml`'s `docker-build`:** the verify script pins the signing identity to
+     `security.yml@refs/heads/main`, so the gateway and engine images share one identity and one verify command.
+     **Nothing is published:** no registry is added and none is pushed to except the in-job throwaway ones, and
+     `publish-image.yml` is unchanged. **Open-source check (ADR-0176):** no new action or tool. The job reuses the
+     pinned `actions/checkout`, `upload-artifact` and `download-artifact` SHAs, the pinned `registry:3` digest, and the
+     pinned Trivy and cosign binaries. The PR-diff warning now also covers `engines/*/Dockerfile`,
+     `engines/*/licence-gate.mjs` and `engines/*/licence-allow.json`. actionlint 1.7.7 validated the workflow locally
+     and is not part of CI. **Not verified here:** this environment has no Docker daemon, so neither image was built,
+     scanned or signed, and the first CI run is the first build of each. The image allow-list is empty, so any fixable
+     HIGH or CRITICAL in an engine image fails that engine's leg. The gateway's `sign` job does not depend on the
+     engine jobs. **Still open:** the shipped manifest's digest stays null. A digest from a throwaway registry names no
+     image anyone can pull, so recording one waits for engine images to be published (a `publish-image.yml` change)
+     and for question 8's choice between the image ID and the manifest digest for `docker load` installs.
+
 **Review round 1 (PR #212, Codex, 2026-10-09; 6 findings, each red first; Codex's security review was clean).**
 Tests: `exchange.test.ts` [121] and the sweep of [124]; `modelscan.test.ts` [122] [123];
 `packages/engine-runner/src/artifact.test.ts` [124]; `apps/gateway/src/model-artifacts.test.ts` [126];
@@ -1443,14 +1502,6 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
      the artifact verdict reads the normalised items, never a summary, and the run's aggregates are recomputed by the
      shared normaliser; the report summary was the only instance.
 
-**Deferred, with the owner of each:** ~~artifact upload, artifact streaming to runners and `engine_scan` model-card
-evidence~~ (built in B5-M, decisions 104-119); per-engine images, SBOMs, signatures, taxonomy rows, set
-classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
-views (X26–X28; the runner-revocation route is exempt from the affordance census until X26's button). Residuals:
-`engine_run_items` and engine runs follow no retention cascade yet (only the raw report expires); a result's
-`dispatchAuditIds` are stored as reported, not cross-checked against the run's key; enabling does not check that a
-compat surface is on (a run then fails at its first call); concurrency is per engine, not per runner.
-
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -1487,6 +1538,8 @@ compat surface is on (a run then fails at its first call); concurrency is per en
 8. **promptfoo image build, digest, signature and in-image self-test (B5-P).** Pending a Docker-capable build: until
    then the manifest digest is null and the engine cannot be enabled. Also open: which digest the manifest pins for an
    air-gapped install loaded with `docker load` (a registry manifest digest needs a push; the image ID does not).
+   *2026-10-09, decision 120:* CI now builds, scans and (on main) signs the image and records both identities. The
+   manifest digest stays null until an engine image is published, and the digest choice above is still open.
 9. **Agentic-named promptfoo plugins are unmapped (decision 40).** If the owner wants them to count toward the
    agentic classes, the run must reach the agent through a path where tool calls are governed and visible (ADR-0068
    adjudication), which a compat-route run is not.
@@ -1496,7 +1549,9 @@ compat surface is on (a run then fails at its first call); concurrency is per en
 11. **Engine image admission at deploy time (decision 55).** The runner's self-reported digest only checks consistency
     with its deployment. Proof needs the deployer to verify the image signature (cosign, against our signing identity)
     before the container starts, and the engine images are not signed yet (they are not built). Until then an enabled
-    engine rests on the operator deploying the digest the manifest names.
+    engine rests on the operator deploying the digest the manifest names. *2026-10-09, decision 120:* engine
+    images are now signed on every push to main, but only in CI's throwaway registry; deploy-time verification
+    still needs a published, signed image.
 12. ~~A `no_runnable_plugin` not-run reason~~ — **decided 2026-10-09 (coordinator), see decision 66: no migration.**
 13. **B5-P2: isolate the runner credential from the engine process (decision 79), the next slice.** Split each
     engine into two containers: a runner container that holds the token volume and talks to the gateway, and an
@@ -1515,9 +1570,9 @@ compat surface is on (a run then fails at its first call); concurrency is per en
     say "pending owner decision", so the image is not admissible yet); (b) modelscan 0.8.8's NumPy scanner fails on
     numpy 2.x, so every `.npy` reads `unknown` (fail safe, kept): pin numpy 1.26 for the image, or strip the header in
     the runner and scan the object payload as a pickle.
-16. **Building the engine images in CI (B5-P and B5-M).** CI's `docker-build` job builds only the gateway image. Until a
-    job builds `engines/promptfoo` and `engines/modelscan` (and signs, scans and records their digests), no engine
-    image exists anywhere and no engine can be enabled.
+16. ~~Building the engine images in CI (B5-P and B5-M)~~ — **closed 2026-10-09 by decision 120.** `security.yml`
+    builds every `engines/*/Dockerfile`, scans it and records its digests on every run, and signs it on each push to
+    main.
 17. **TensorFlow for `.keras` and SavedModel files (B5-M, decision 109).** Not installed: those formats are `not_run`.
     Adding it is a separate decision (a large native parser of hostile protobuf; its saved-metadata import path is
     unverified for the TensorFlow the extra resolves to).
