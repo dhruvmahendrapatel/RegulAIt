@@ -52,7 +52,7 @@ import {
   type EngineId,
   type EngineManifestEntry,
 } from "@regulait/shared";
-import { buildSelfTest, FileRunnerTokenStore, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, type RunnerHttp } from "@regulait/engine-runner";
+import { buildSelfTest, FileRunnerTokenStore, generateRunnerSecret, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, runnerTokenHash, type RunnerHttp } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
@@ -85,6 +85,9 @@ let targetId: string;
 let judgeId: string;
 let projectId: string;
 let client: RunnerClient;
+/** the beforeAll runner's own token and id (decisions 53 and 54 drive it directly) */
+let firstRunnerSecret: string;
+let firstRunnerId: string;
 
 type Method = "GET" | "PUT" | "POST" | "PATCH" | "DELETE";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
@@ -261,8 +264,10 @@ beforeAll(async () => {
     env: { ...MANIFEST.promptfoo.usageDataEnv },
     egress: { host: "egress-probe.invalid", ip: "93.184.215.14", lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })), connect: async () => "denied" },
   });
-  const reg = await client.register(t.json().token, { name: `promptfoo-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest });
+  firstRunnerSecret = generateRunnerSecret();
+  const reg = await client.register(t.json().token, firstRunnerSecret, { name: `promptfoo-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest });
   expect(reg.selfTest).toEqual({ passed: true, failures: [] });
+  firstRunnerId = reg.runnerId;
   const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
   expect(st.json().passed, st.body).toBe(true);
   const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
@@ -476,5 +481,112 @@ describe("PR #205 review: the runner's life", () => {
     expect(replaced).not.toBe(token);
     expect(reLogs.some((l) => /trying the enrolment token/.test(l))).toBe(true);
     expect(reLogs.some((l) => /registered runner/.test(l))).toBe(true);
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 2 (Codex), decisions 53 and 54 — each red first
+// ===========================================================================
+describe("PR #205 review round 2: self-test refresh and lost registration responses", () => {
+  const freshSelfTest = (over: { addressConnected?: boolean; digest?: string } = {}) =>
+    buildSelfTest({
+      imageDigest: over.digest ?? PF_DIGEST,
+      engineVersion: MANIFEST.promptfoo.version,
+      requiredEnv: MANIFEST.promptfoo.usageDataEnv,
+      env: { ...MANIFEST.promptfoo.usageDataEnv },
+      egress: {
+        host: "egress-probe.invalid",
+        ip: "93.184.215.14",
+        lookup: () => Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" })),
+        connect: async (h: string) => (over.addressConnected && h === "93.184.215.14" ? "connected" : "denied"),
+      },
+    });
+  const audits = async (ruleId: string, objectId: string) =>
+    (await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = ${ruleId} AND object_id = ${objectId}`)) as unknown as { rows: Array<{ detail: Record<string, unknown> }> };
+
+  it("[53] a stale self-test is refreshed by the runner on its own route: the lease is refused, the loop submits a fresh report, and work resumes", async () => {
+    // the 24 hours pass: the runner's stored report and the engine's recorded self-test are stale
+    const old = new Date(Date.now() - 25 * 3600_000).toISOString();
+    await db.execute(sql`UPDATE engine_runners SET self_test = jsonb_set(self_test, '{at}', to_jsonb(${old}::text)) WHERE id = ${firstRunnerId}`);
+    await db.execute(sql`UPDATE engines SET self_test_passed_at = ${old}::timestamptz WHERE id = 'promptfoo'`);
+    const refused = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${firstRunnerSecret}` });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toBe("engine_self_test_required");
+    // the runner-token route accepts a fresh report, evaluated like registration's, and audits it
+    const runId = await startRun();
+    const workRoot = await mkdtemp(path.join(tmpdir(), "b5p-st-"));
+    const store = new FileRunnerTokenStore(path.join(workRoot, "state", "runner-token"));
+    await store.save(firstRunnerSecret);
+    const logs: string[] = [];
+    await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), {
+      engineId: "promptfoo",
+      engineVersion: MANIFEST.promptfoo.version,
+      workRoot,
+      heartbeatMs: 25,
+      retryBaseMs: 10,
+      store,
+      enrollmentToken: null,
+      registration: async () => ({ name: "x", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await freshSelfTest() }),
+      backoffMs: 1,
+      maxIterations: 2,
+      sleep: async () => {},
+      log: (m) => logs.push(m),
+    });
+    expect(logs.some((l) => /submitted a fresh self-test: passed/.test(l))).toBe(true);
+    expect((await runRow(runId)).status).toBe("completed");
+    const passedAt = ((await db.execute(sql`SELECT self_test_passed_at FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ self_test_passed_at: string }> }).rows[0]!.self_test_passed_at;
+    expect(Date.now() - new Date(passedAt).getTime()).toBeLessThan(60_000);
+    expect((await audits("engine-runner-self-test-refreshed", firstRunnerId)).rows.length).toBeGreaterThanOrEqual(1);
+    // a report for another image is refused (a new image re-enrols)
+    const other = await inject("POST", "/v1/engine-runner/self-test", { authorization: `Bearer ${firstRunnerSecret}` }, { selfTest: await freshSelfTest({ digest: `sha256:${"e".repeat(64)}` }) });
+    expect(other.statusCode, other.body).toBe(422);
+    expect(other.json().error).toBe("engine_self_test_inconsistent");
+  });
+
+  it("[54] a register response lost after the gateway spent the enrolment token is recovered with the same secret", async () => {
+    const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: "lost-response" });
+    expect(t.statusCode, t.body).toBe(201);
+    let dropped = 0;
+    // the first register reaches the gateway (which spends the token and stores the runner), then the response is lost
+    const lossy: RunnerHttp = async (url, init) => {
+      const r = await runnerHttp(url, init);
+      if (url.endsWith("/register") && dropped++ === 0) throw new Error("socket hang up");
+      return r;
+    };
+    const workRoot = await mkdtemp(path.join(tmpdir(), "b5p-lost-"));
+    const store = new FileRunnerTokenStore(path.join(workRoot, "state", "runner-token"));
+    const logs: string[] = [];
+    await runRunnerLoop(new RunnerClient({ gatewayUrl: "http://gateway.test", http: lossy }), promptfooAdapter({ entrypoint: "/x/entrypoint.js", run: promptfooStandIn().run }), {
+      engineId: "promptfoo",
+      engineVersion: MANIFEST.promptfoo.version,
+      workRoot,
+      store,
+      enrollmentToken: t.json().token,
+      registration: async () => ({ name: `lost-${RUN}`, imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: await freshSelfTest() }),
+      backoffMs: 1,
+      maxIterations: 1,
+      sleep: async () => {},
+      log: (m) => logs.push(m),
+    });
+    expect(dropped).toBe(2);
+    expect(logs.some((l) => /registered runner .* \(replayed\)/.test(l))).toBe(true);
+    // exactly one runner for that enrolment token, credentialed by the secret the runner stored
+    const secret = (await store.load())!;
+    const rows = ((await db.execute(sql`SELECT id, token_hash FROM engine_runners WHERE enrollment_token_id = ${t.json().id}`)) as unknown as { rows: Array<{ id: string; token_hash: string }> }).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.token_hash).toBe(runnerTokenHash(secret));
+    expect((await audits("engine-runner-register-replayed", rows[0]!.id)).rows).toHaveLength(1);
+    // the stored secret IS the credential: it leases (204 or a run), never 401
+    const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${secret}` });
+    expect([200, 204]).toContain(l.statusCode);
+  });
+
+  it("[53] a failing fresh report switches the engine off and is audited", async () => {
+    const bad = await inject("POST", "/v1/engine-runner/self-test", { authorization: `Bearer ${firstRunnerSecret}` }, { selfTest: await freshSelfTest({ addressConnected: true }) });
+    expect(bad.statusCode, bad.body).toBe(200);
+    expect(bad.json()).toMatchObject({ selfTest: { passed: false, failures: ["egress_address_connected"] }, engineDisabled: true });
+    const enabled = ((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled;
+    expect(enabled).toBe(false);
+    expect((await audits("engine-runner-self-test-failed", firstRunnerId)).rows.length).toBeGreaterThanOrEqual(1);
   });
 });

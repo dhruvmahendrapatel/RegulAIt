@@ -42,6 +42,7 @@ import {
   createEnrollmentTokenSchema,
   engineRowRelaxations,
   engineRunnerRegisterSchema,
+  engineRunnerSelfTestSchema,
   evaluateRunnerSelfTest,
   revokeRunnerSchema,
   updateEngineSchema,
@@ -52,7 +53,7 @@ import {
 import { z } from "zod";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { generateEnrollmentToken, generateRunnerToken } from "./engine-runner-auth.js";
+import { generateEnrollmentToken } from "./engine-runner-auth.js";
 import { endLeasedRunsOfRunner } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -383,6 +384,10 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
   });
 
   // ---- POST /v1/engine-runner/register (one-time enrolment token) ------------
+  // PR #205 review [54]: the runner brings its own runner token and sends only its sha256, which
+  // is stored as the credential. Nothing secret is returned, so a lost response loses nothing: a
+  // retry with the same (now spent, unexpired) enrolment token and the SAME hash is answered with
+  // the same runner; any other hash is refused. A spent token never mints a second runner.
   app.post("/v1/engine-runner/register", async (req, reply) => {
     const body = engineRunnerRegisterSchema.parse(req.body);
     const tokenId = req.authCtx.engineEnrollmentTokenId;
@@ -392,33 +397,61 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       return reply.status(422).send({ error: "engine_self_test_inconsistent", detail: "the self-test must describe the image being registered" });
     }
     const verdict = evaluateRunnerSelfTest(manifest[engineId], body.selfTest, new Date());
-    const { token, tokenHash } = generateRunnerToken();
-    const out = await db.transaction(async (tx) => {
-      // spend the enrolment token: one winner
-      const [spent] = await tx
-        .update(engineEnrollmentTokens)
-        .set({ usedAt: new Date() })
-        .where(and(eq(engineEnrollmentTokens.id, tokenId), isNull(engineEnrollmentTokens.usedAt), sql`${engineEnrollmentTokens.expiresAt} > now()`))
-        .returning();
-      if (!spent) return null;
-      const [runner] = await tx
-        .insert(engineRunners)
-        .values({
-          engineId,
-          name: body.name,
-          tokenHash,
-          enrollmentTokenId: tokenId,
-          reportedDigest: body.imageDigest,
-          reportedVersion: body.engineVersion,
-          selfTest: body.selfTest,
-          selfTestPassed: verdict.passed,
-          selfTestFailures: verdict.failures,
-        })
-        .returning();
-      await tx.update(engineEnrollmentTokens).set({ runnerId: runner!.id }).where(eq(engineEnrollmentTokens.id, tokenId));
-      return runner!;
-    });
-    if (!out) return reply.status(401).send({ error: "engine_enrollment_invalid", detail: "this enrolment token was already used or has expired" });
+    const replay = async () => {
+      const [existing] = await db.select().from(engineRunners).where(eq(engineRunners.enrollmentTokenId, tokenId));
+      if (!existing || existing.tokenHash !== body.tokenHash || existing.revokedAt !== null) {
+        return reply.status(401).send({ error: "engine_enrollment_invalid", detail: "this enrolment token was already used" });
+      }
+      await auditEngine(db, {
+        userId: NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: existing.id,
+        ruleId: "engine-runner-register-replayed",
+        detail: { engineId, name: existing.name },
+        reason: `engine runner ${existing.name} (${engineId}) re-presented its registration; the same runner was returned`,
+      });
+      return reply
+        .status(201)
+        .send({ runnerId: existing.id, engineId, selfTest: { passed: existing.selfTestPassed, failures: existing.selfTestFailures }, replayed: true });
+    };
+    if (req.authCtx.engineEnrollmentSpent) return replay();
+    let out: typeof engineRunners.$inferSelect | null;
+    try {
+      out = await db.transaction(async (tx) => {
+        // spend the enrolment token: one winner
+        const [spent] = await tx
+          .update(engineEnrollmentTokens)
+          .set({ usedAt: new Date() })
+          .where(and(eq(engineEnrollmentTokens.id, tokenId), isNull(engineEnrollmentTokens.usedAt), sql`${engineEnrollmentTokens.expiresAt} > now()`))
+          .returning();
+        if (!spent) return null;
+        const [runner] = await tx
+          .insert(engineRunners)
+          .values({
+            engineId,
+            name: body.name,
+            tokenHash: body.tokenHash,
+            enrollmentTokenId: tokenId,
+            reportedDigest: body.imageDigest,
+            reportedVersion: body.engineVersion,
+            selfTest: body.selfTest,
+            selfTestPassed: verdict.passed,
+            selfTestFailures: verdict.failures,
+          })
+          .returning();
+        await tx.update(engineEnrollmentTokens).set({ runnerId: runner!.id }).where(eq(engineEnrollmentTokens.id, tokenId));
+        return runner!;
+      });
+    } catch (e) {
+      // the hash is already some runner's credential (token_hash is unique): a credential is never shared
+      const pg = (e as { code?: string; cause?: { code?: string } }) ?? {};
+      if (pg.code === "23505" || pg.cause?.code === "23505") {
+        return reply.status(409).send({ error: "engine_runner_token_conflict", detail: "that runner token is already registered; generate a new one" });
+      }
+      throw e;
+    }
+    // a concurrent request spent it first: it may have been this runner's own retry
+    if (!out) return replay();
     await auditEngine(db, {
       userId: NO_IDENTITY,
       objectType: "engine_runner",
@@ -430,7 +463,76 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         `engine runner ${body.name} registered for ${engineId}` +
         (verdict.passed ? " with a passing self-test" : `; its self-test failed (${verdict.failures.join(", ")}), so it can lease nothing`),
     });
-    return reply.status(201).send({ runnerId: out.id, engineId, token, selfTest: verdict });
+    return reply.status(201).send({ runnerId: out.id, engineId, selfTest: verdict });
+  });
+
+  // ---- POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] --
+  // A runner refreshes its own report: the lease refuses a report older than 24 hours, and before
+  // this route only registration (a new enrolment token) accepted one. Evaluated exactly like
+  // registration's report (manifest, digest, version, switches, egress, freshness) and audited.
+  // The report must describe the image this runner registered with (a different image re-enrols).
+  // A passing report also refreshes the engine's recorded self-test, but ONLY for the build the
+  // admin enabled (the engine's record passed, for the manifest's digest and version); a failing
+  // one switches the engine off, like a failing admin self-test.
+  app.post("/v1/engine-runner/self-test", async (req, reply) => {
+    const { selfTest } = engineRunnerSelfTestSchema.parse(req.body);
+    const runnerId = req.authCtx.engineRunnerId!;
+    const engineId = req.authCtx.engineId as EngineId;
+    await syncEngineManifest(db, manifest);
+    const [runner] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
+    if (!runner) return reply.status(401).send({ error: "engine_runner_token_required" });
+    if (selfTest.imageDigest !== runner.reportedDigest || selfTest.engineVersion !== runner.reportedVersion) {
+      return reply
+        .status(422)
+        .send({ error: "engine_self_test_inconsistent", detail: "the report must describe the image this runner registered with; a new image re-enrols" });
+    }
+    const now = new Date();
+    const verdict = evaluateRunnerSelfTest(manifest[engineId], selfTest, now);
+    const out = await db.transaction(async (tx) => {
+      await tx.update(engineRunners).set({ selfTest, selfTestPassed: verdict.passed, selfTestFailures: verdict.failures }).where(eq(engineRunners.id, runnerId));
+      const [engine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
+      const recorded = engine?.selfTest as { passed?: boolean; imageDigest?: string; version?: string } | null;
+      const m = manifest[engineId];
+      const sameBuild = !!recorded?.passed && m.imageDigest !== null && recorded.imageDigest === m.imageDigest && recorded.version === m.version;
+      let engineRefreshed = false;
+      let engineDisabled = false;
+      if (verdict.passed && sameBuild) {
+        await tx
+          .update(engines)
+          .set({
+            selfTest: { ...recorded, passed: true, failures: [], runnerId, egress: selfTest.egress, at: now.toISOString(), refreshedBy: "runner" },
+            selfTestPassedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(engines.id, engineId));
+        engineRefreshed = true;
+      } else if (!verdict.passed && engine?.enabled) {
+        await tx
+          .update(engines)
+          .set({
+            selfTest: { passed: false, failures: verdict.failures, runnerId, imageDigest: selfTest.imageDigest, version: selfTest.engineVersion, egress: selfTest.egress, at: now.toISOString() },
+            selfTestPassedAt: null,
+            enabled: false,
+            updatedAt: now,
+          })
+          .where(eq(engines.id, engineId));
+        engineDisabled = true;
+      }
+      return { engineRefreshed, engineDisabled };
+    });
+    await auditEngine(db, {
+      userId: NO_IDENTITY,
+      objectType: "engine_runner",
+      objectId: runnerId,
+      ruleId: verdict.passed ? "engine-runner-self-test-refreshed" : "engine-runner-self-test-failed",
+      effect: verdict.passed ? "allow" : "deny",
+      detail: { engineId, selfTest: verdict, egress: selfTest.egress, ...out },
+      reason:
+        `engine runner ${runner.name} (${engineId}) submitted a fresh self-test: ` +
+        (verdict.passed ? "passed" : `failed (${verdict.failures.join(", ")})`) +
+        (out.engineDisabled ? " — the engine is switched off" : out.engineRefreshed ? "; the engine's recorded self-test is refreshed" : ""),
+    });
+    return reply.send({ selfTest: verdict, ...out });
   });
 }
 

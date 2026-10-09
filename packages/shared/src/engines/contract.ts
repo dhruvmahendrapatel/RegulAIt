@@ -117,6 +117,8 @@ export const ENGINE_ENROLLMENT_TOKEN_PREFIX = "rgee_";
  */
 export const ENGINE_RUNNER_ROUTES = [
   "POST /v1/engine-runner/lease",
+  // PR #205 review [53]: a runner refreshes its own self-test report (the lease refuses a stale one)
+  "POST /v1/engine-runner/self-test",
   "POST /v1/engine-runner/runs/:runId/heartbeat",
   "GET /v1/engine-runner/artifacts/:artifactId",
   "POST /v1/engine-runner/runs/:runId/result",
@@ -287,15 +289,26 @@ export type RunnerSelfTest = z.infer<typeof runnerSelfTestSchema>;
 // Runner API bodies
 // ---------------------------------------------------------------------------
 
-/** POST /v1/engine-runner/register (enrolment token as the bearer) */
+/**
+ * POST /v1/engine-runner/register (enrolment token as the bearer).
+ *
+ * PR #205 review [54]: the RUNNER generates its own runner token (`rge_` + 256 CSPRNG bits),
+ * persists it before it calls this route, and sends only its sha256 (`tokenHash`). Nothing secret
+ * comes back, so a lost response loses nothing; a retry with the same enrolment token and the same
+ * hash is answered with the same runner (idempotent), a different hash is refused.
+ */
 export const engineRunnerRegisterSchema = z
   .object({
     name: z.string().trim().min(1).max(100).regex(PRINTABLE),
     imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
     selfTest: runnerSelfTestSchema,
+    tokenHash: z.string().regex(SHA256_HEX),
   })
   .strict();
+
+/** POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] */
+export const engineRunnerSelfTestSchema = z.object({ selfTest: runnerSelfTestSchema }).strict();
 export type EngineRunnerRegisterInput = z.infer<typeof engineRunnerRegisterSchema>;
 
 /** POST /v1/engine-runner/runs/:runId/heartbeat */

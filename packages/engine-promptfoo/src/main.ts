@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { buildSelfTest, FileRunnerTokenStore, runRunnerLoop, RunnerClient } from "@regulait/engine-runner";
+import { buildSelfTest, FileRunnerTokenStore, pinnedImageDigest, runRunnerLoop, RunnerClient } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST } from "@regulait/shared";
 import { promptfooAdapter } from "./adapter.js";
 
@@ -23,8 +23,10 @@ export function installedPromptfooVersion(home = PROMPTFOO_HOME): string {
 
 async function main(): Promise<void> {
   const gatewayUrl = process.env.REGULAIT_GATEWAY_URL;
-  const imageDigest = process.env.REGULAIT_ENGINE_IMAGE_DIGEST;
-  if (!gatewayUrl || !imageDigest) throw new Error("REGULAIT_GATEWAY_URL and REGULAIT_ENGINE_IMAGE_DIGEST are required");
+  if (!gatewayUrl) throw new Error("REGULAIT_GATEWAY_URL is required");
+  // PR #205 review [55]: refuse to start unless the image reference is digest-pinned and agrees
+  // with the digest reported (a consistency check; the signature check at deploy time is the proof)
+  const imageDigest = pinnedImageDigest(process.env.REGULAIT_ENGINE_IMAGE_REF, process.env.REGULAIT_ENGINE_IMAGE_DIGEST);
   const engineVersion = installedPromptfooVersion();
   const client = new RunnerClient({ gatewayUrl });
   const stateDir = process.env.REGULAIT_RUNNER_STATE_DIR ?? "/state";

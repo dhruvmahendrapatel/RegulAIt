@@ -62,16 +62,22 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(env.match(/\n {4}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_GATEWAY_URL:", "REGULAIT_ENGINE_ENROLLMENT_TOKEN:"]);
   });
 
-  it("B5-P: the promptfoo runner merges the template and overrides only its image, platform, state volume and three variables", () => {
+  it("B5-P: the promptfoo runner merges the template and overrides only its image, platform, state volume and four variables", () => {
     const svc = block("engine-promptfoo");
     expect(svc).toMatch(/\n {4}<<: \*engine-runner\n/);
     // nothing that would widen the template: no ports, networks, privileges, profiles or user
     for (const key of ["ports", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode", "tmpfs"]) {
       expect(svc, key).not.toMatch(new RegExp(`\\n {4}${key}:`));
     }
-    // the image reference is configurable for a digest pin and never a floating tag
-    expect(svc).toMatch(/\n {4}image: \$\{REGULAIT_ENGINE_PROMPTFOO_IMAGE:-regulait\/engine-promptfoo:0\.123\.1\}\n/);
-    expect(svc).not.toMatch(/:latest/);
+    // PR #205 review [55]: the image is named by digest only, and the image reference, the
+    // reference the runner checks and the digest it reports all come from ONE variable
+    const REF = "${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const DIGEST = "${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const line = (k: string) => svc.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
+    expect(line("image")).toBe(REF);
+    expect(line("REGULAIT_ENGINE_IMAGE_REF")).toBe(REF);
+    expect(line("REGULAIT_ENGINE_IMAGE_DIGEST")).toBe(DIGEST);
+    expect(svc).not.toMatch(/:latest|engine-promptfoo:0\.123/);
     // PR #205 review [51]: amd64 only (libsql's native x64 binding)
     expect(svc).toMatch(/\n {4}platform: linux\/amd64\n/);
     // PR #205 review [49]: exactly one volume, the runner's own state, a named volume (no host path)
@@ -82,6 +88,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(env.match(/\n {6}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual([
       "REGULAIT_GATEWAY_URL:",
       "REGULAIT_ENGINE_ENROLLMENT_TOKEN:",
+      "REGULAIT_ENGINE_IMAGE_REF:",
       "REGULAIT_ENGINE_IMAGE_DIGEST:",
     ]);
   });

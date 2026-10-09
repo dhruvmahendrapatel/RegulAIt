@@ -1,46 +1,60 @@
 /**
- * ADR-0187 decisions 48 and 49 (PR #205 review), without a gateway: the runner token survives a
- * restart on its own file (0600, never logged), a lease refused because the engine is off is a
- * wait with a capped backoff, and only a refused credential with nothing to re-enrol with stops.
- * (The same behaviour against the real gateway: apps/gateway/src/zz-b5-promptfoo.test.ts.)
+ * ADR-0187 decisions 48, 49, 53 and 54 (PR #205 review), without a gateway: a refused lease while
+ * the engine is off is a wait with a capped backoff; the runner token survives a restart on its own
+ * file (0600, never logged); a stale self-test is refreshed on the runner-token route; the runner
+ * generates its own token, persists it BEFORE registering and sends only its hash, so a lost
+ * response is recoverable. (Against the real gateway: apps/gateway/src/zz-b5-promptfoo.test.ts.)
  */
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { FileRunnerTokenStore, RunnerFatalError, runRunnerLoop } from "./loop.js";
+import { FileRunnerTokenStore, pinnedImageDigest, RunnerFatalError, runRunnerLoop } from "./loop.js";
 import { RunnerClient, type RunnerHttp } from "./runner.js";
 
-const TOKEN = "rge_synthetic_runner_token_000000000000";
+const STORED = `rge_${"7".repeat(64)}`;
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
-function gateway(script: { register?: number; lease: Array<{ status: number; error?: string }> }) {
-  const calls: Array<{ path: string; bearer: string }> = [];
-  let i = 0;
+interface Script {
+  /** register answers, in order (the last repeats); "drop" = the request landed but the response was lost */
+  register?: Array<number | "drop">;
+  lease: Array<{ status: number; error?: string }>;
+  selfTest?: number;
+}
+
+function gateway(script: Script) {
+  const calls: Array<{ path: string; bearer: string; body: Record<string, unknown> | null }> = [];
+  let li = 0;
+  let ri = 0;
   const http: RunnerHttp = async (url, init) => {
     const p = new URL(url).pathname;
-    calls.push({ path: p, bearer: init.headers.authorization ?? "" });
+    const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+    calls.push({ path: p, bearer: init.headers.authorization ?? "", body });
     if (p.endsWith("/register")) {
-      const status = script.register ?? 201;
-      return { status, json: async () => (status === 201 ? { runnerId: "r1", token: TOKEN, selfTest: { passed: true, failures: [] } } : { error: "engine_enrollment_invalid" }) };
+      const list = script.register ?? [201];
+      const step = list[Math.min(ri++, list.length - 1)]!;
+      if (step === "drop") throw new Error("socket hang up");
+      return { status: step, json: async () => (step === 201 ? { runnerId: "r1", selfTest: { passed: true, failures: [] } } : { error: "engine_enrollment_invalid" }) };
     }
-    const step = script.lease[Math.min(i++, script.lease.length - 1)]!;
+    if (p.endsWith("/self-test")) {
+      const status = script.selfTest ?? 200;
+      return { status, json: async () => (status === 200 ? { selfTest: { passed: true, failures: [] } } : { error: "engine_self_test_inconsistent" }) };
+    }
+    const step = script.lease[Math.min(li++, script.lease.length - 1)]!;
     return { status: step.status, json: async () => (step.error ? { error: step.error } : null) };
   };
   return { calls, client: new RunnerClient({ gatewayUrl: "http://gateway.test", http }) };
 }
 
-const registration = async () => ({
-  name: "r",
+const selfTest = () => ({
   imageDigest: `sha256:${"a".repeat(64)}`,
   engineVersion: "1",
-  selfTest: {
-    imageDigest: `sha256:${"a".repeat(64)}`,
-    engineVersion: "1",
-    usageDataEnv: {},
-    egress: { host: "x.invalid", dnsResolved: false, connected: false, address: null, addressConnected: false },
-    at: new Date().toISOString(),
-  },
+  usageDataEnv: {},
+  egress: { host: "x.invalid", dnsResolved: false, connected: false, address: null, addressConnected: false },
+  at: new Date().toISOString(),
 });
+const registration = async () => ({ name: "r", imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1", selfTest: selfTest() });
 
 async function opts(over: Record<string, unknown> = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "runner-loop-"));
@@ -68,49 +82,105 @@ async function opts(over: Record<string, unknown> = {}) {
 const adapter = async () => ({ status: "completed" as const, items: [], notRun: [], rawReport: null });
 
 describe("decision 48: a refused lease while the engine is off is a wait, not an exit", () => {
-  it("engine_disabled and engine_self_test_required back off (capped); then work resumes", async () => {
-    const g = gateway({ lease: [{ status: 409, error: "engine_disabled" }, { status: 409, error: "engine_disabled" }, { status: 409, error: "engine_self_test_required" }, { status: 409, error: "engine_disabled" }, { status: 503 }, { status: 204 }] });
+  it("engine_disabled backs off (capped) and a 5xx is retried; work resumes", async () => {
+    const g = gateway({ lease: [{ status: 409, error: "engine_disabled" }, { status: 409, error: "engine_disabled" }, { status: 409, error: "engine_disabled" }, { status: 409, error: "engine_disabled" }, { status: 503 }, { status: 204 }] });
     const { o, waits, logs } = await opts();
     await runRunnerLoop(g.client, adapter, o);
-    expect(waits).toEqual([10, 20, 40, 40, 40, 1 * 5000]);
+    expect(waits).toEqual([10, 20, 40, 40, 40, 5000]);
     expect(logs.some((l) => /waiting: engine_disabled/.test(l))).toBe(true);
     expect(logs.some((l) => /lease accepted again/.test(l))).toBe(true);
   });
 });
 
-describe("decision 49: the runner token survives a restart", () => {
-  it("is stored 0600 on the runner's volume, never logged, and used instead of the enrolment token on restart", async () => {
-    const { o, logs } = await opts({ maxIterations: 1 });
-    const first = gateway({ lease: [{ status: 204 }] });
-    await runRunnerLoop(first.client, adapter, o);
-    expect(await o.store.load()).toBe(TOKEN);
-    expect((await stat(o.store.file)).mode & 0o777).toBe(0o600);
-    expect(logs.join("\n")).not.toContain(TOKEN);
-    // restart: the stored token is used; register is never called (the enrolment token is spent)
-    const second = gateway({ register: 401, lease: [{ status: 204 }] });
-    await runRunnerLoop(second.client, adapter, o);
-    expect(second.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
-    expect(second.calls[0]!.bearer).toBe(`Bearer ${TOKEN}`);
+describe("decision 53: a stale self-test is refreshed on the runner-token route", () => {
+  it("engine_self_test_required: the self-test is re-run and submitted, and the lease is retried at once", async () => {
+    const g = gateway({ lease: [{ status: 409, error: "engine_self_test_required" }, { status: 204 }] });
+    const { o, waits, logs } = await opts({ maxIterations: 2 });
+    await runRunnerLoop(g.client, adapter, o);
+    const submitted = g.calls.filter((c) => c.path === "/v1/engine-runner/self-test");
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]!.body).toMatchObject({ selfTest: { imageDigest: `sha256:${"a".repeat(64)}` } });
+    expect(waits).toEqual([5000]); // no backoff: leased again at once, then idle
+    expect(logs.some((l) => /submitted a fresh self-test: passed/.test(l))).toBe(true);
   });
 
-  it("a refused stored token: re-enrol once with the enrolment token, or stop with what to do", async () => {
+  it("a refreshed report that does not help is submitted once per refusal streak, then the loop backs off", async () => {
+    const g = gateway({ lease: [{ status: 409, error: "engine_self_test_required" }], selfTest: 422 });
+    const { o, waits } = await opts({ maxIterations: 4 });
+    await runRunnerLoop(g.client, adapter, o);
+    expect(g.calls.filter((c) => c.path === "/v1/engine-runner/self-test")).toHaveLength(1);
+    expect(waits).toEqual([10, 20, 40, 40]);
+  });
+});
+
+describe("decisions 49 and 54: the runner's own token, persisted before it registers", () => {
+  it("is generated by the runner, stored 0600 BEFORE register, sent only as its hash, never logged, reused on restart", async () => {
+    const { o, logs } = await opts({ maxIterations: 1 });
+    let storedAtRegister: string | null = null;
+    const first = gateway({ lease: [{ status: 204 }] });
+    const http = (first.client as unknown as { http: RunnerHttp }).http;
+    (first.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/register")) storedAtRegister = await o.store.load();
+      return http(url, init);
+    };
+    await runRunnerLoop(first.client, adapter, o);
+    const secret = await o.store.load();
+    expect(secret).toMatch(/^rge_[0-9a-f]{64}$/);
+    expect(storedAtRegister).toBe(secret); // persisted before the request left
+    const reg = first.calls.find((c) => c.path.endsWith("/register"))!;
+    expect(reg.body!["tokenHash"]).toBe(sha(secret!));
+    expect(JSON.stringify(reg.body)).not.toContain(secret!);
+    expect((await stat(o.store.file)).mode & 0o777).toBe(0o600);
+    expect(logs.join("\n")).not.toContain(secret!);
+    // restart: the stored token is used; register is never called (the enrolment token is spent)
+    const second = gateway({ register: [401], lease: [{ status: 204 }] });
+    await runRunnerLoop(second.client, adapter, o);
+    expect(second.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
+    expect(second.calls[0]!.bearer).toBe(`Bearer ${secret}`);
+  });
+
+  it("[54] a lost register response is retried with the SAME secret (the gateway replays the same runner)", async () => {
+    const { o } = await opts({ maxIterations: 1 });
+    const g = gateway({ register: ["drop", 201], lease: [{ status: 204 }] });
+    await runRunnerLoop(g.client, adapter, o);
+    const regs = g.calls.filter((c) => c.path.endsWith("/register"));
+    expect(regs).toHaveLength(2);
+    expect(regs[0]!.body!["tokenHash"]).toBe(regs[1]!.body!["tokenHash"]);
+    expect(regs[0]!.body!["tokenHash"]).toBe(sha((await o.store.load())!));
+  });
+
+  it("a refused stored token: re-enrol once with a NEW secret, or stop with what to do", async () => {
     const { o } = await opts();
-    await o.store.save(TOKEN);
+    await o.store.save(STORED);
     // revoked, and the enrolment token is spent → fatal, with the admin's next step
-    await expect(runRunnerLoop(gateway({ register: 401, lease: [{ status: 401, error: "engine_runner_revoked" }] }).client, adapter, o)).rejects.toThrow(
+    await expect(runRunnerLoop(gateway({ register: [401], lease: [{ status: 401, error: "engine_runner_revoked" }] }).client, adapter, o)).rejects.toThrow(
       /enrolment token was refused.*mint a new enrolment token/,
     );
     // no enrolment token at all → fatal
+    await o.store.save(STORED);
     await expect(runRunnerLoop(gateway({ lease: [{ status: 401 }] }).client, adapter, { ...o, enrollmentToken: null })).rejects.toBeInstanceOf(RunnerFatalError);
-    // a fresh enrolment token → re-registers once; a second 401 after that is fatal (no loop of enrolments)
+    // a fresh enrolment token → re-registers once with a new secret; a second 401 after that is fatal
+    await o.store.save(STORED);
     const g = gateway({ lease: [{ status: 401 }, { status: 401 }] });
     await expect(runRunnerLoop(g.client, adapter, o)).rejects.toBeInstanceOf(RunnerFatalError);
-    expect(g.calls.filter((c) => c.path.endsWith("/register"))).toHaveLength(1);
+    const regs = g.calls.filter((c) => c.path.endsWith("/register"));
+    expect(regs).toHaveLength(1);
+    expect(regs[0]!.body!["tokenHash"]).not.toBe(sha(STORED));
+  });
+
+  it("decision 55: the runner starts only from a digest-pinned image reference that agrees with the reported digest", () => {
+    const D = `sha256:${"b".repeat(64)}`;
+    expect(pinnedImageDigest(`regulait/engine-promptfoo@${D}`, D)).toBe(D);
+    expect(pinnedImageDigest(`registry.example:5000/regulait/engine-promptfoo@${D}`, D)).toBe(D);
+    expect(() => pinnedImageDigest("regulait/engine-promptfoo:0.123.1", D)).toThrow(/by digest/);
+    expect(() => pinnedImageDigest(`regulait/engine-promptfoo@${D}`, `sha256:${"c".repeat(64)}`)).toThrow(/must be the digest/);
+    expect(() => pinnedImageDigest(undefined, D)).toThrow(RunnerFatalError);
+    expect(() => pinnedImageDigest(`regulait/engine-promptfoo@sha256:${"0".repeat(64)}`, `sha256:${"0".repeat(64)}`)).toThrow(/placeholder/);
   });
 
   it("a state file that does not hold a runner token is not used", async () => {
     const { o } = await opts();
-    await o.store.save(TOKEN);
+    await o.store.save(STORED);
     await writeFile(o.store.file, "not a token\n");
     expect(await o.store.load()).toBeNull();
   });

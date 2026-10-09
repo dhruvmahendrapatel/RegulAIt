@@ -175,14 +175,26 @@ async function enrol(engineId: EngineId, digest: string, version: string, over: 
   const t = await inject("POST", `/v1/engines/${engineId}/enrollment-tokens`, admin.key, { label: "test" });
   expect(t.statusCode, t.body).toBe(201);
   const enrolment = { authorization: `Bearer ${t.json().token}` };
+  // PR #205 review [54]: the runner generates its own token and registers only its hash
+  const token = runnerSecret();
   const r = await inject("POST", "/v1/engine-runner/register", enrolment, {
     name: `${engineId}-runner-${randomBytes(2).toString("hex")}`,
     imageDigest: digest,
     engineVersion: version,
     selfTest: selfTest(digest, version, over),
+    tokenHash: sha256Hex(token),
   });
   expect(r.statusCode, r.body).toBe(201);
-  return { id: r.json().runnerId as string, token: r.json().token as string, auth: { authorization: `Bearer ${r.json().token}` }, enrolment, selfTest: r.json().selfTest };
+  expect(r.json().token).toBeUndefined();
+  return { id: r.json().runnerId as string, token, auth: { authorization: `Bearer ${token}` }, enrolment, selfTest: r.json().selfTest };
+}
+
+/** a runner's own token, as the runner core generates it (`rge_` + 256 random bits) */
+function runnerSecret(): string {
+  return `rge_${randomBytes(32).toString("hex")}`;
+}
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
 }
 
 async function enableEngine(engineId: EngineId) {
@@ -467,16 +479,22 @@ describe("runner credentials", () => {
     const asLease = await inject("POST", "/v1/engine-runner/lease", enrolment);
     expect(asLease.statusCode).toBe(403);
     expect(asLease.json().error).toBe("engine_runner_scope");
-    const body = { name: "once", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: selfTest(PF_DIGEST, MANIFEST.promptfoo.version) };
+    const secret = runnerSecret();
+    const body = { name: "once", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: selfTest(PF_DIGEST, MANIFEST.promptfoo.version), tokenHash: sha256Hex(secret) };
     const first = await inject("POST", "/v1/engine-runner/register", enrolment, body);
     expect(first.statusCode, first.body).toBe(201);
-    const second = await inject("POST", "/v1/engine-runner/register", enrolment, body);
+    // PR #205 review [54]: a second registration with the spent token mints nothing: the SAME
+    // hash replays the same runner, any other hash is refused
+    const replayed = await inject("POST", "/v1/engine-runner/register", enrolment, body);
+    expect(replayed.statusCode, replayed.body).toBe(201);
+    expect(replayed.json()).toMatchObject({ runnerId: first.json().runnerId, replayed: true });
+    const second = await inject("POST", "/v1/engine-runner/register", enrolment, { ...body, tokenHash: sha256Hex(runnerSecret()) });
     expect(second.statusCode, second.body).toBe(401);
     expect(second.json().error).toBe("engine_enrollment_invalid");
     // a revoked runner token authenticates nothing
     const d = await inject("DELETE", `/v1/engine-runners/${first.json().runnerId}`, admin.key);
     expect(d.statusCode).toBe(200);
-    const after = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${first.json().token}` });
+    const after = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${secret}` });
     expect(after.statusCode).toBe(401);
     expect(after.json().error).toBe("engine_runner_revoked");
   });

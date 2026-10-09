@@ -12,10 +12,11 @@
  * that an engine that throws or exits badly is reported as `failed`, never as
  * a clean result.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { rm, mkdir } from "node:fs/promises";
 import {
   ENGINE_RESULT_VERSION,
+  ENGINE_RUNNER_TOKEN_PREFIX,
   type EngineId,
   type EngineLease,
   type EngineResultEnvelope,
@@ -33,10 +34,22 @@ export interface RunnerClientOptions {
   http?: RunnerHttp;
 }
 
+/**
+ * PR #205 review [54]: the runner's own token — `rge_` and 256 bits from the OS CSPRNG. The
+ * gateway stores only `runnerTokenHash` of it (the same sha256 hex its auth hashes presented
+ * tokens with).
+ */
+export function generateRunnerSecret(): string {
+  return ENGINE_RUNNER_TOKEN_PREFIX + randomBytes(32).toString("hex");
+}
+export function runnerTokenHash(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
 /** a refusal from a runner route, with the gateway's error code (never the token) */
 export class RunnerHttpError extends Error {
   constructor(
-    readonly route: "register" | "lease",
+    readonly route: "register" | "lease" | "self-test",
     readonly status: number,
     readonly code: string | null,
   ) {
@@ -64,12 +77,26 @@ export class RunnerClient {
   }
 
   /** exchange a one-time enrolment token for this runner's token */
-  async register(enrollmentToken: string, body: { name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest }) {
-    const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, body);
-    const json = ((await res.json().catch(() => null)) ?? {}) as { runnerId?: string; token?: string; selfTest?: { passed: boolean; failures: string[] }; error?: string };
-    if (res.status !== 201 || !json.token) throw new RunnerHttpError("register", res.status, json.error ?? null);
-    this.token = json.token;
-    return json as { runnerId: string; token: string; selfTest: { passed: boolean; failures: string[] } };
+  /**
+   * Register with a one-time enrolment token. PR #205 review [54]: `runnerSecret` is the runner's
+   * OWN token (`generateRunnerSecret`), already persisted by the caller; only its sha256 is sent and
+   * nothing secret comes back. Retrying with the same secret after a lost response returns the same
+   * runner.
+   */
+  async register(enrollmentToken: string, runnerSecret: string, body: { name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest }) {
+    const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, { ...body, tokenHash: runnerTokenHash(runnerSecret) });
+    const json = ((await res.json().catch(() => null)) ?? {}) as { runnerId?: string; selfTest?: { passed: boolean; failures: string[] }; replayed?: boolean; error?: string };
+    if (res.status !== 201 || !json.runnerId) throw new RunnerHttpError("register", res.status, json.error ?? null);
+    this.token = runnerSecret;
+    return json as { runnerId: string; selfTest: { passed: boolean; failures: string[] }; replayed?: boolean };
+  }
+
+  /** PR #205 review [53]: submit a fresh self-test report (the lease refuses one older than 24 h) */
+  async submitSelfTest(selfTest: RunnerSelfTest): Promise<{ passed: boolean; failures: string[] }> {
+    const res = await this.call("POST", "/v1/engine-runner/self-test", this.bearer(), { selfTest });
+    const json = ((await res.json().catch(() => null)) ?? {}) as { selfTest?: { passed: boolean; failures: string[] }; error?: string };
+    if (res.status !== 200 || !json.selfTest) throw new RunnerHttpError("self-test", res.status, json.error ?? null);
+    return json.selfTest;
   }
 
   useToken(token: string): void {
