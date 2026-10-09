@@ -338,10 +338,35 @@ export async function validateEngineRunRequest(
 export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: CreateRunContext): Promise<CreateRunOutcome> {
   const checked = await validateEngineRunRequest(db, input, ctx);
   if (!checked.ok) return checked;
-  const { manifest, targetAgent, judgeAgent, budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } = checked.prepared;
+  const { manifest, targetAgent, judgeAgent, budgetUsd, sensitive, overBudget, needsApproval, approverUserId } = checked.prepared;
+  let timeoutSeconds = checked.prepared.timeoutSeconds;
   const now = new Date();
   const configHash = engineRunConfigHash(input);
+  await engineRunTestHooks.beforeCreateTx?.();
   const created = await db.transaction(async (tx) => {
+    // PR #205 review round 11 [87]: the engine row is taken FOR SHARE (every switch-off takes it FOR
+    // UPDATE, decision 84) and the engine's state is decided again HERE: on, its self-test admitting
+    // it, and the budget and timeout ceilings as they are now. A concurrent disable or ceiling drop
+    // either commits first (and this run is refused) or waits for this insert (and then ends the run).
+    const [engine] = await tx.select().from(engines).where(eq(engines.id, input.engineId)).for("share");
+    if (!engine || !engine.enabled) {
+      return { kind: "refused" as const, refusal: { ok: false as const, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` } };
+    }
+    if (!selfTestAdmitsEnable(engine, manifest, now).ok) {
+      return { kind: "refused" as const, refusal: { ok: false as const, status: 409, error: "engine_self_test_required", detail: `engine ${input.engineId}'s self-test no longer admits it: an admin runs it again` } };
+    }
+    if (budgetUsd > engine.maxBudgetUsd) {
+      return {
+        kind: "refused" as const,
+        refusal: {
+          ok: false as const,
+          status: 422,
+          error: "engine_budget_exceeds_ceiling",
+          detail: `a ${input.engineId} run may spend at most $${engine.maxBudgetUsd.toFixed(2)}; asked for $${budgetUsd.toFixed(2)}`,
+        },
+      };
+    }
+    timeoutSeconds = Math.max(60, Math.min(timeoutSeconds, engine.timeoutSeconds));
     const [run] = await tx
       .insert(engineRuns)
       .values({
@@ -388,32 +413,34 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
       approvalId = a!.id;
       await tx.update(engineRuns).set({ approvalId }).where(eq(engineRuns.id, run!.id));
     }
-    return { run: { ...run!, approvalId }, approvalId };
+    // round 11 (sweep): the creation's audit commits with the run
+    await auditEngine(tx as unknown as Db, {
+      userId: ctx.runAsUserId,
+      objectType: "engine_run",
+      objectId: run!.id,
+      ruleId: needsApproval ? "engine-run-queued-for-approval" : "engine-run-created",
+      effect: needsApproval ? "require_approval" : "allow",
+      detail: {
+        engineId: input.engineId,
+        trigger: ctx.trigger,
+        target: input.target,
+        sets: input.config.sets,
+        budgetUsd,
+        timeoutSeconds,
+        configHash,
+        approvalId,
+        sensitiveSet: sensitive,
+        overBudget,
+        ...(ctx.workflow ? { workflow: ctx.workflow } : {}),
+        ...(ctx.scheduleId ? { scheduleId: ctx.scheduleId } : {}),
+      },
+      reason: needsApproval
+        ? `${input.engineId} run queued for approval (${sensitive ? "sensitive set" : "budget over threshold"}); nothing runs until it is approved`
+        : `${input.engineId} run queued (${ctx.trigger})`,
+    });
+    return { kind: "created" as const, run: { ...run!, approvalId }, approvalId };
   });
-  await auditEngine(db, {
-    userId: ctx.runAsUserId,
-    objectType: "engine_run",
-    objectId: created.run.id,
-    ruleId: needsApproval ? "engine-run-queued-for-approval" : "engine-run-created",
-    effect: needsApproval ? "require_approval" : "allow",
-    detail: {
-      engineId: input.engineId,
-      trigger: ctx.trigger,
-      target: input.target,
-      sets: input.config.sets,
-      budgetUsd,
-      timeoutSeconds,
-      configHash,
-      approvalId: created.approvalId,
-      sensitiveSet: sensitive,
-      overBudget,
-      ...(ctx.workflow ? { workflow: ctx.workflow } : {}),
-      ...(ctx.scheduleId ? { scheduleId: ctx.scheduleId } : {}),
-    },
-    reason: needsApproval
-      ? `${input.engineId} run queued for approval (${sensitive ? "sensitive set" : "budget over threshold"}); nothing runs until it is approved`
-      : `${input.engineId} run queued (${ctx.trigger})`,
-  });
+  if (created.kind === "refused") return created.refusal;
   return { ok: true, run: created.run, approvalId: created.approvalId };
 }
 
@@ -461,11 +488,22 @@ export function runSummary(n: EngineRunNormalised, cause: string, envelope: Engi
   };
 }
 
-export async function finishEngineRun(db: Db, runId: string, from: readonly string[], given: FinishArgs): Promise<EngineRunRow | null> {
+export async function finishEngineRun(
+  db: Db,
+  runId: string,
+  from: readonly string[],
+  given: FinishArgs,
+  /**
+   * PR #205 review round 11 (sweep): the condition the caller decided on, re-checked on the LOCKED
+   * row (a sweep's "the lease expired" or "the queue expired" read without a lock may no longer hold)
+   */
+  stillApplies?: (locked: EngineRunRow) => boolean,
+): Promise<EngineRunRow | null> {
   const now = new Date();
   const out = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
     if (!locked || !from.includes(locked.status)) return null;
+    if (stillApplies && !stillApplies(locked)) return null;
     return endLockedRun(tx, locked, given, now);
   });
   if (out && out.workflowInstanceId) await notifyWorkflowOfEngineRun(db, out);
@@ -747,6 +785,14 @@ export const engineRunTestHooks: {
   afterRegisterTx?: () => Promise<void> | void;
   /** runs after the manifest sync's unlocked read, before its transaction (PR #205 review round 8 [78]) */
   beforeSyncTx?: (engineId: string) => Promise<void> | void;
+  /** round 11: after the schedule sweep's read, before its claim [88] */
+  beforeScheduleClaim?: (scheduleId: string) => Promise<void> | void;
+  /** round 11: after a run's creation was validated, before its transaction [87] */
+  beforeCreateTx?: () => Promise<void> | void;
+  /** round 11 (sweep): after the run sweep read an overdue run, before it ends it */
+  beforeSweepEnd?: (runId: string) => Promise<void> | void;
+  /** round 11: inside the cancel transaction, after the marker is written [86] (a throw here is a crash mid-cancel) */
+  afterCancelMarked?: (runId: string) => Promise<void> | void;
 } = {};
 
 /**
@@ -900,14 +946,23 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
     .where(and(eq(engineRuns.status, "leased"), or(lt(engineRuns.deadlineAt, now), lt(engineRuns.leaseExpiresAt, now))))
     .limit(500);
   for (const r of overdue) {
+    await engineRunTestHooks.beforeSweepEnd?.(r.id);
     const deadline = r.deadlineAt !== null && r.deadlineAt < now;
-    const done = await finishEngineRun(db, r.id, ["leased"], {
-      status: "timeout",
-      errorCode: deadline ? "deadline_passed" : "lease_expired",
-      normalised: noResult("timeout"),
-      cause: deadline ? "deadline_passed" : "lease_expired",
-      actorUserId: actor,
-    });
+    // round 11 (sweep): still overdue on the locked row (a heartbeat may have renewed the lease since)
+    const done = await finishEngineRun(
+      db,
+      r.id,
+      ["leased"],
+      {
+        status: "timeout",
+        errorCode: deadline ? "deadline_passed" : "lease_expired",
+        normalised: noResult("timeout"),
+        cause: deadline ? "deadline_passed" : "lease_expired",
+        actorUserId: actor,
+      },
+      (locked) =>
+        (deadline && locked.deadlineAt !== null && locked.deadlineAt < now) || (!deadline && locked.leaseExpiresAt !== null && locked.leaseExpiresAt < now),
+    );
     if (done) {
       if (deadline) out.timedOut += 1;
       else out.leaseExpired += 1;
@@ -919,13 +974,19 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
     .where(and(eq(engineRuns.status, "queued"), lt(engineRuns.queueExpiresAt, now)))
     .limit(500);
   for (const r of stale) {
-    const done = await finishEngineRun(db, r.id, ["queued"], {
-      status: "not_run",
-      errorCode: "no_runner",
-      normalised: noResult("not_run"),
-      cause: "no_runner",
-      actorUserId: actor,
-    });
+    const done = await finishEngineRun(
+      db,
+      r.id,
+      ["queued"],
+      {
+        status: "not_run",
+        errorCode: "no_runner",
+        normalised: noResult("not_run"),
+        cause: "no_runner",
+        actorUserId: actor,
+      },
+      (locked) => locked.queueExpiresAt !== null && locked.queueExpiresAt < now,
+    );
     if (done) out.queueExpired += 1;
   }
   // PR #203 review [5]: workflow hand-offs that did not land are retried
@@ -969,12 +1030,15 @@ export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) 
     .limit(100);
   for (const s of due) {
     const next = new Date(now.getTime() + s.intervalHours * 3_600_000);
+    await engineRunTestHooks.beforeScheduleClaim?.(s.id);
     const [claimed] = await db
       .update(engineSchedules)
       .set({ nextRunAt: next, updatedAt: now })
-      .where(and(eq(engineSchedules.id, s.id), eq(engineSchedules.nextRunAt, s.nextRunAt)))
+      // PR #205 review round 11 [88]: the claim also requires the schedule to be ON now — one switched
+      // off after the read above is not claimed and starts nothing
+      .where(and(eq(engineSchedules.id, s.id), eq(engineSchedules.nextRunAt, s.nextRunAt), eq(engineSchedules.enabled, true)))
       .returning();
-    if (!claimed) continue; // another sweep took it
+    if (!claimed) continue; // another sweep took it, or it was switched off
     let skip: string | null = null;
     let runId: string | null = null;
     const [person] = s.runAsUserId
@@ -997,19 +1061,23 @@ export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) 
         skip = `the run could not be created: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
-    await db.update(engineSchedules).set({ lastRunId: runId ?? s.lastRunId, lastSkip: skip }).where(eq(engineSchedules.id, s.id));
-    if (skip) {
-      out.skipped += 1;
-      await auditEngine(db, {
-        userId: s.runAsUserId ?? NO_IDENTITY,
-        objectType: "engine_schedule",
-        objectId: s.id,
-        ruleId: "engine-schedule-skipped",
-        effect: "deny",
-        detail: { engineId: s.engineId, skip },
-        reason: `scheduled ${s.engineId} run skipped: ${skip}`,
-      });
-    } else out.started += 1;
+    // round 11 (sweep): the schedule's outcome and its skip audit commit together
+    await db.transaction(async (tx) => {
+      await tx.update(engineSchedules).set({ lastRunId: runId ?? s.lastRunId, lastSkip: skip }).where(eq(engineSchedules.id, s.id));
+      if (skip) {
+        await auditEngine(tx as unknown as Db, {
+          userId: s.runAsUserId ?? NO_IDENTITY,
+          objectType: "engine_schedule",
+          objectId: s.id,
+          ruleId: "engine-schedule-skipped",
+          effect: "deny",
+          detail: { engineId: s.engineId, skip },
+          reason: `scheduled ${s.engineId} run skipped: ${skip}`,
+        });
+      }
+    });
+    if (skip) out.skipped += 1;
+    else out.started += 1;
   }
   return out;
 }
@@ -1177,26 +1245,31 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (!run || !visible(req, run)) return reply.status(404).send({ error: "engine_run_not_found" });
     if (isTerminalEngineRunStatus(run.status)) return reply.status(409).send({ error: "engine_run_finished", status: run.status });
     const actor = req.authCtx.userId ?? NO_IDENTITY;
-    await db
-      .update(engineRuns)
-      .set({ cancelRequestedAt: new Date(), cancelRequestedByUserId: req.authCtx.userId })
-      .where(and(eq(engineRuns.id, runId), isNull(engineRuns.cancelRequestedAt)));
-    const done = await finishEngineRun(db, runId, ["awaiting_approval", "queued", "leased"], {
-      status: "cancelled",
-      errorCode: "cancelled",
-      normalised: noResult("cancelled"),
-      cause: body.reason ? `cancelled: ${body.reason}` : "cancelled",
-      actorUserId: actor,
-    });
-    if (!done) {
-      const [now] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
-      return reply.status(409).send({ error: "engine_run_finished", status: now?.status ?? "unknown" });
-    }
-    if (run.approvalId && run.status === "awaiting_approval") {
+    // PR #205 review round 11 [86]: ONE transaction — the cancel marker, the terminal transition, the
+    // key's revocation and the approval's supersession commit together or not at all, so a crash can
+    // never leave a run marked cancelled but still live with its key
+    const out = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
+      if (!locked || !["awaiting_approval", "queued", "leased"].includes(locked.status)) return { kind: "finished" as const, status: locked?.status ?? "unknown" };
+      const now = new Date();
+      await tx
+        .update(engineRuns)
+        .set({ cancelRequestedAt: locked.cancelRequestedAt ?? now, cancelRequestedByUserId: locked.cancelRequestedByUserId ?? req.authCtx.userId })
+        .where(eq(engineRuns.id, runId));
+      await engineRunTestHooks.afterCancelMarked?.(runId);
+      const done = await endLockedRun(
+        tx,
+        locked,
+        { status: "cancelled", errorCode: "cancelled", normalised: noResult("cancelled"), cause: body.reason ? `cancelled: ${body.reason}` : "cancelled", actorUserId: actor },
+        now,
+      );
       // the approval has nothing left to release
-      await db.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, run.approvalId), eq(approvals.status, "pending")));
-    }
-    return reply.send({ run: publicRun(done) });
+      if (locked.approvalId) await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, locked.approvalId), eq(approvals.status, "pending")));
+      return { kind: "done" as const, done };
+    });
+    if (out.kind === "finished") return reply.status(409).send({ error: "engine_run_finished", status: out.status });
+    await notifyWorkflowsOfEndedRuns(db, [out.done]);
+    return reply.send({ run: publicRun(out.done) });
   });
 
   // ---- schedules -----------------------------------------------------------------
@@ -1210,24 +1283,29 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const checked = await validateEngineRunRequest(db, body.request, { runAsUserId: userId, isAdmin: req.authCtx.isAdmin });
     if (!checked.ok) return reply.status(checked.status).send({ error: checked.error, ...(checked.detail ? { detail: checked.detail } : {}) });
     const now = new Date();
-    const [row] = await db
-      .insert(engineSchedules)
-      .values({
-        engineId: body.request.engineId,
-        request: body.request as unknown as Record<string, unknown>,
-        configHash: engineRunConfigHash(body.request),
-        runAsUserId: userId,
-        intervalHours: body.intervalHours,
-        nextRunAt: new Date(now.getTime() + body.intervalHours * 3_600_000),
-      })
-      .returning();
-    await auditEngine(db, {
-      userId,
-      objectType: "engine_schedule",
-      objectId: row!.id,
-      ruleId: "engine-schedule-created",
-      detail: { engineId: body.request.engineId, intervalHours: body.intervalHours, configHash: row!.configHash },
-      reason: `scheduled ${body.request.engineId} run every ${body.intervalHours}h, executing as its creator`,
+    // round 11 (sweep): the schedule and its audit commit together (every run it starts is validated
+    // again, in its own creation transaction, decision 87)
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .insert(engineSchedules)
+        .values({
+          engineId: body.request.engineId,
+          request: body.request as unknown as Record<string, unknown>,
+          configHash: engineRunConfigHash(body.request),
+          runAsUserId: userId,
+          intervalHours: body.intervalHours,
+          nextRunAt: new Date(now.getTime() + body.intervalHours * 3_600_000),
+        })
+        .returning();
+      await auditEngine(tx as unknown as Db, {
+        userId,
+        objectType: "engine_schedule",
+        objectId: r!.id,
+        ruleId: "engine-schedule-created",
+        detail: { engineId: body.request.engineId, intervalHours: body.intervalHours, configHash: r!.configHash },
+        reason: `scheduled ${body.request.engineId} run every ${body.intervalHours}h, executing as its creator`,
+      });
+      return r!;
     });
     return reply.status(201).send({ schedule: row });
   });
@@ -1245,22 +1323,26 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   app.patch("/v1/engine-schedules/:scheduleId", async (req, reply) => {
     const { scheduleId } = scheduleParam.parse(req.params);
     const body = updateEngineScheduleSchema.parse(req.body);
-    const [row] = await db.select().from(engineSchedules).where(eq(engineSchedules.id, scheduleId));
-    if (!row || (!req.authCtx.isAdmin && row.runAsUserId !== req.authCtx.userId)) return reply.status(404).send({ error: "engine_schedule_not_found" });
-    // re-enabling a schedule restarts runs as its creator: only the creator may do that
-    if (body.enabled && row.runAsUserId !== req.authCtx.userId) {
-      return reply.status(403).send({ error: "schedule_owner_only", detail: "only the person a schedule runs as can switch it back on" });
-    }
-    const [after] = await db.update(engineSchedules).set({ enabled: body.enabled, updatedAt: new Date() }).where(eq(engineSchedules.id, scheduleId)).returning();
-    await auditEngine(db, {
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "engine_schedule",
-      objectId: scheduleId,
-      ruleId: body.enabled ? "engine-schedule-enabled" : "engine-schedule-disabled",
-      detail: { engineId: row.engineId, transitions: { enabled: { from: row.enabled, to: body.enabled } } },
-      reason: `scheduled ${row.engineId} run switched ${body.enabled ? "on" : "off"}`,
+    // round 11 (sweep): decided and written under the schedule's row lock, with its audit
+    const out = await db.transaction(async (tx) => {
+      const [row] = await tx.select().from(engineSchedules).where(eq(engineSchedules.id, scheduleId)).for("update");
+      if (!row || (!req.authCtx.isAdmin && row.runAsUserId !== req.authCtx.userId)) return { kind: "missing" as const };
+      // re-enabling a schedule restarts runs as its creator: only the creator may do that
+      if (body.enabled && row.runAsUserId !== req.authCtx.userId) return { kind: "owner_only" as const };
+      const [after] = await tx.update(engineSchedules).set({ enabled: body.enabled, updatedAt: new Date() }).where(eq(engineSchedules.id, scheduleId)).returning();
+      await auditEngine(tx as unknown as Db, {
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "engine_schedule",
+        objectId: scheduleId,
+        ruleId: body.enabled ? "engine-schedule-enabled" : "engine-schedule-disabled",
+        detail: { engineId: row.engineId, transitions: { enabled: { from: row.enabled, to: body.enabled } } },
+        reason: `scheduled ${row.engineId} run switched ${body.enabled ? "on" : "off"}`,
+      });
+      return { kind: "ok" as const, after: after! };
     });
-    return { schedule: after };
+    if (out.kind === "missing") return reply.status(404).send({ error: "engine_schedule_not_found" });
+    if (out.kind === "owner_only") return reply.status(403).send({ error: "schedule_owner_only", detail: "only the person a schedule runs as can switch it back on" });
+    return { schedule: out.after };
   });
 
   // ---- POST /v1/model-artifacts (B5-M builds the upload) ---------------------------
@@ -1357,7 +1439,17 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         target = (t as AgentRow | undefined) ?? null;
         judge = (j as AgentRow | undefined) ?? null;
       }
-      if (refusal) return { kind: "refused" as const, run, refusal };
+      // round 11 (sweep): a run refused here ends HERE, on the row this transaction holds, rather than
+      // in a second transaction after the decision was made
+      if (refusal) {
+        const ended = await endLockedRun(
+          tx,
+          run,
+          { status: "not_run", errorCode: refusal, normalised: noResult("not_run"), cause: refusal, actorUserId: NO_IDENTITY },
+          now,
+        );
+        return { kind: "refused" as const, ended };
+      }
       const deadlineAt = new Date(now.getTime() + run.timeoutSeconds * 1000);
       let apiKey: string | null = null;
       let keyId: string | null = null;
@@ -1434,13 +1526,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (leased.kind === "not_admitted") return refuse(leased.refusal);
     if (leased.kind === "busy" || leased.kind === "none") return reply.status(204).send();
     if (leased.kind === "refused") {
-      await finishEngineRun(db, leased.run.id, ["queued"], {
-        status: "not_run",
-        errorCode: leased.refusal,
-        normalised: noResult("not_run"),
-        cause: leased.refusal,
-        actorUserId: NO_IDENTITY,
-      });
+      await notifyWorkflowsOfEndedRuns(db, [leased.ended]);
       return reply.status(204).send();
     }
     const run = leased.run;
@@ -1480,7 +1566,12 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       if (run.status !== "leased") return { kind: "ended" as const, status: run.status };
       const deadlinePassed = run.deadlineAt !== null && run.deadlineAt.getTime() <= now.getTime();
       const leaseGone = run.leaseExpiresAt !== null && run.leaseExpiresAt.getTime() <= now.getTime();
-      if (deadlinePassed || leaseGone) return { kind: "expired" as const, cause: deadlinePassed ? "deadline_passed" : "lease_expired" };
+      // round 11 (sweep): an expired lease ends HERE, under this row lock, not in a second transaction
+      if (deadlinePassed || leaseGone) {
+        const cause = deadlinePassed ? "deadline_passed" : "lease_expired";
+        const ended = await endLockedRun(tx, run, { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: NO_IDENTITY }, now);
+        return { kind: "expired" as const, cause, ended };
+      }
       const lease = new Date(Math.min(now.getTime() + ENGINE_LEASE_TTL_SECONDS * 1000, run.deadlineAt?.getTime() ?? now.getTime()));
       await tx
         .update(engineRuns)
@@ -1491,15 +1582,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (beat.kind === "not_leased") return reply.status(409).send({ error: "engine_run_not_leased" });
     if (beat.kind === "ended") return reply.send({ cancel: true, status: beat.status });
     if (beat.kind === "expired") {
-      // the expiry only ever moves forward through a heartbeat that saw it live,
-      // so no heartbeat can revive it between the check above and this end
-      await finishEngineRun(db, runId, ["leased"], {
-        status: "timeout",
-        errorCode: beat.cause,
-        normalised: noResult("timeout"),
-        cause: beat.cause,
-        actorUserId: NO_IDENTITY,
-      });
+      await notifyWorkflowsOfEndedRuns(db, [beat.ended]);
       return reply.status(409).send({ error: "engine_run_timed_out", detail: `the run's ${beat.cause === "lease_expired" ? "lease expired" : "deadline passed"}; it ended as a timeout` });
     }
     return reply.send({ cancel: beat.cancel, status: beat.status });

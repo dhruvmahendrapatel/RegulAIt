@@ -443,8 +443,12 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
       case "leasing": {
         if (opts.maxIterations !== undefined && leasingVisits >= opts.maxIterations) return;
         leasingVisits++;
-        // round 5 [68]: retained results are delivered (or dropped) before any new work
-        const retained = await retryRetainedResults(client, opts.workRoot, { now: clock, ...(opts.log ? { log: opts.log } : {}) });
+        // round 5 [68]: retained results are delivered (or dropped) before any new work. Round 11 [90]:
+        // from the persistent retain root (and the work root, for any crash leftovers there)
+        let retained = 0;
+        for (const root of [...new Set([opts.retainRoot ?? opts.workRoot, opts.workRoot])]) {
+          retained += await retryRetainedResults(client, root, { now: clock, ...(opts.log ? { log: opts.log } : {}) });
+        }
         if (retained >= cap) {
           if (waitingOn !== "retention_full") opts.log?.(`waiting: ${retained} undelivered results are retained; no new work until they are delivered`);
           waitingOn = "retention_full";

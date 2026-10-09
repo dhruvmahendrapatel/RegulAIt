@@ -138,21 +138,22 @@ export async function syncEngineManifest(db: Db, manifest: Readonly<Record<Engin
       // build: they are cancelled (`engine_build_changed`, audited) in this transaction. Picked over
       // re-versioning them: an approval given for one build is not silently carried to another.
       const cancelled = buildChanges ? await endActiveRunsOfEngineTx(tx, id, "engine_build_changed") : [];
-      return { buildChanges, wasEnabled: locked.enabled, from: { version: locked.version, digest: locked.imageDigest }, cancelled };
+      // round 11 (sweep): the switch-off's audit commits with it
+      if (buildChanges && locked.enabled) {
+        await auditEngine(tx as unknown as Db, {
+          userId: NO_IDENTITY,
+          objectType: "engine",
+          objectId: null,
+          ruleId: "engine-disabled-manifest-changed",
+          effect: "deny",
+          detail: { engineId: id, from: { version: locked.version, digest: locked.imageDigest }, to: { version: m.version, digest: m.imageDigest } },
+          reason: `engine ${id} switched off: the shipped build changed, so its self-test no longer describes what would run`,
+        });
+      }
+      return { cancelled };
     });
     if (!out) continue;
     await notifyWorkflowsOfEndedRuns(db, out.cancelled);
-    if (out.buildChanges && out.wasEnabled) {
-      await auditEngine(db, {
-        userId: NO_IDENTITY,
-        objectType: "engine",
-        objectId: null,
-        ruleId: "engine-disabled-manifest-changed",
-        effect: "deny",
-        detail: { engineId: id, from: out.from, to: { version: m.version, digest: m.imageDigest } },
-        reason: `engine ${id} switched off: the shipped build changed, so its self-test no longer describes what would run`,
-      });
-    }
   }
 }
 
@@ -343,28 +344,30 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const { engineId } = engineParam.parse(req.params);
     await syncEngineManifest(db, manifest);
     const now = new Date();
-    const [runner] = await db
-      .select()
-      .from(engineRunners)
-      .where(and(eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
-      .orderBy(desc(engineRunners.registeredAt))
-      .limit(1);
-    const report = runner ? (runner.selfTest as Parameters<typeof evaluateRunnerSelfTest>[1]) : null;
-    const verdict = report
-      ? evaluateRunnerSelfTest(manifest[engineId], report, now)
-      : { passed: false, failures: ["no_runner" as const] };
-    const record = {
-      passed: verdict.passed,
-      failures: verdict.failures,
-      runnerId: runner?.id ?? null,
-      imageDigest: report?.imageDigest ?? null,
-      version: report?.engineVersion ?? null,
-      egress: report?.egress ?? null,
-      at: now.toISOString(),
-    };
     // PR #205 review round 6 [71]: the engine row is taken FOR UPDATE, so a failing verdict that
-    // switches the engine off serialises with a lease deciding under its FOR SHARE lock
-    const { before, ended } = await db.transaction(async (tx) => {
+    // switches the engine off serialises with a lease deciding under its FOR SHARE lock.
+    // PR #205 review round 11 (sweep): the report judged is read in the same transaction, locked
+    // (FOR SHARE, taken before the engine row: the lock order of the lease and the runner self-test),
+    // so the verdict recorded is the one on the report as it stands; the audit commits with it.
+    const { record, ended } = await db.transaction(async (tx) => {
+      const [runner] = await tx
+        .select()
+        .from(engineRunners)
+        .where(and(eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
+        .orderBy(desc(engineRunners.registeredAt))
+        .limit(1)
+        .for("share");
+      const report = runner ? (runner.selfTest as Parameters<typeof evaluateRunnerSelfTest>[1]) : null;
+      const verdict = report ? evaluateRunnerSelfTest(manifest[engineId], report, now) : { passed: false, failures: ["no_runner" as const] };
+      const record = {
+        passed: verdict.passed,
+        failures: verdict.failures,
+        runnerId: runner?.id ?? null,
+        imageDigest: report?.imageDigest ?? null,
+        version: report?.engineVersion ?? null,
+        egress: report?.egress ?? null,
+        at: now.toISOString(),
+      };
       const [locked] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       await tx
         .update(engines)
@@ -377,21 +380,21 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         .where(eq(engines.id, engineId));
       // PR #205 review round 10 [84]: a failing verdict switches the engine off AND ends its active
       // runs, revoking their keys, in this same transaction
-      return { before: locked, ended: verdict.passed ? [] : await endActiveRunsOfEngineTx(tx, engineId, "engine_self_test_failed") };
+      const ended = verdict.passed ? [] : await endActiveRunsOfEngineTx(tx, engineId, "engine_self_test_failed");
+      await auditEngine(tx as unknown as Db, {
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "engine",
+        objectId: null,
+        ruleId: verdict.passed ? "engine-self-test-passed" : "engine-self-test-failed",
+        effect: verdict.passed ? "allow" : "deny",
+        detail: { engineId, ...record, disabled: !verdict.passed && locked?.enabled === true },
+        reason: verdict.passed
+          ? `engine ${engineId} self-test passed (runner ${runner!.id})`
+          : `engine ${engineId} self-test failed: ${verdict.failures.join(", ")}` + (locked?.enabled ? " — the engine is switched off" : ""),
+      });
+      return { record, ended };
     });
     await notifyWorkflowsOfEndedRuns(db, ended);
-    await auditEngine(db, {
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "engine",
-      objectId: null,
-      ruleId: verdict.passed ? "engine-self-test-passed" : "engine-self-test-failed",
-      effect: verdict.passed ? "allow" : "deny",
-      detail: { engineId, ...record, disabled: !verdict.passed && before?.enabled === true },
-      reason: verdict.passed
-        ? `engine ${engineId} self-test passed (runner ${runner!.id})`
-        : `engine ${engineId} self-test failed: ${verdict.failures.join(", ")}` +
-          (before?.enabled ? " — the engine is switched off" : ""),
-    });
     return reply.send(record);
   });
 
@@ -402,19 +405,23 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const { token, tokenHash } = generateEnrollmentToken();
     const now = new Date();
     const expiresAt = new Date(now.getTime() + body.ttlMinutes * 60_000);
-    const [row] = await db
-      .insert(engineEnrollmentTokens)
-      .values({ engineId, tokenHash, label: body.label ?? null, createdByUserId: req.authCtx.userId, createdAt: now, expiresAt })
-      .returning();
-    await auditEngine(db, {
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "engine_runner",
-      objectId: row!.id,
-      ruleId: "engine-enrollment-token-minted",
-      detail: { engineId, expiresAt: expiresAt.toISOString(), label: body.label ?? null },
-      reason: `one-time enrolment token minted for engine ${engineId}, valid until ${expiresAt.toISOString()}`,
+    // round 11 (sweep): the token and its audit commit together (a minted credential is never unaudited)
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .insert(engineEnrollmentTokens)
+        .values({ engineId, tokenHash, label: body.label ?? null, createdByUserId: req.authCtx.userId, createdAt: now, expiresAt })
+        .returning();
+      await auditEngine(tx as unknown as Db, {
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: r!.id,
+        ruleId: "engine-enrollment-token-minted",
+        detail: { engineId, expiresAt: expiresAt.toISOString(), label: body.label ?? null },
+        reason: `one-time enrolment token minted for engine ${engineId}, valid until ${expiresAt.toISOString()}`,
+      });
+      return r!;
     });
-    return reply.status(201).send({ id: row!.id, engineId, token, expiresAt: expiresAt.toISOString() });
+    return reply.status(201).send({ id: row.id, engineId, token, expiresAt: expiresAt.toISOString() });
   });
 
   // ---- DELETE /v1/engine-runners/:runnerId (admin) ----------------------------
@@ -433,18 +440,20 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         .set({ revokedAt: new Date(), revokedByUserId: req.authCtx.userId, revokeReason: reason })
         .where(and(eq(engineRunners.id, runnerId), isNull(engineRunners.revokedAt)))
         .returning();
-      return { revoked: r, endedRuns: await endRunsHeldByRevokedRunnersTx(tx, row.engineId, req.authCtx.userId ?? NO_IDENTITY, runnerId) };
+      const ended = await endRunsHeldByRevokedRunnersTx(tx, row.engineId, req.authCtx.userId ?? NO_IDENTITY, runnerId);
+      // round 11 (sweep): the revocation's audit commits with it
+      await auditEngine(tx as unknown as Db, {
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: runnerId,
+        ruleId: "engine-runner-revoked",
+        detail: { engineId: row.engineId, alreadyRevoked: !r, endedRuns: ended.length },
+        reason: `engine runner ${row.name} (${row.engineId}) revoked: its token authenticates nothing from now on`,
+      });
+      return { revoked: r, endedRuns: ended };
     });
     await notifyWorkflowsOfEndedRuns(db, endedRuns);
     const ended = endedRuns.length;
-    await auditEngine(db, {
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "engine_runner",
-      objectId: runnerId,
-      ruleId: "engine-runner-revoked",
-      detail: { engineId: row.engineId, alreadyRevoked: !revoked, endedRuns: ended },
-      reason: `engine runner ${row.name} (${row.engineId}) revoked: its token authenticates nothing from now on`,
-    });
     return reply.send({ id: runnerId, revokedAt: (revoked ?? row).revokedAt, endedRuns: ended });
   });
 
@@ -469,26 +478,30 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       }
       // PR #205 review round 7 [76]: a replay reconciles, idempotently — any run still leased by a
       // revoked runner of this engine (a superseded one included) ends now, with its key
-      const reconciled = await db.transaction((tx) => endRunsHeldByRevokedRunnersTx(tx, engineId, NO_IDENTITY));
-      await notifyWorkflowsOfEndedRuns(db, reconciled);
-      if (reconciled.length > 0) {
-        await auditEngine(db, {
+      // round 11 (sweep): the reconciliation and its audits commit together
+      const reconciled = await db.transaction(async (tx) => {
+        const ended = await endRunsHeldByRevokedRunnersTx(tx, engineId, NO_IDENTITY);
+        if (ended.length > 0) {
+          await auditEngine(tx as unknown as Db, {
+            userId: NO_IDENTITY,
+            objectType: "engine_runner",
+            objectId: existing.id,
+            ruleId: "engine-runner-revoked-runs-reconciled",
+            detail: { engineId, endedRuns: ended.map((r) => r.id) },
+            reason: `${ended.length} run(s) still held by a revoked ${engineId} runner were ended on a registration replay`,
+          });
+        }
+        await auditEngine(tx as unknown as Db, {
           userId: NO_IDENTITY,
           objectType: "engine_runner",
           objectId: existing.id,
-          ruleId: "engine-runner-revoked-runs-reconciled",
-          detail: { engineId, endedRuns: reconciled.map((r) => r.id) },
-          reason: `${reconciled.length} run(s) still held by a revoked ${engineId} runner were ended on a registration replay`,
+          ruleId: "engine-runner-register-replayed",
+          detail: { engineId, name: existing.name },
+          reason: `engine runner ${existing.name} (${engineId}) re-presented its registration; the same runner was returned`,
         });
-      }
-      await auditEngine(db, {
-        userId: NO_IDENTITY,
-        objectType: "engine_runner",
-        objectId: existing.id,
-        ruleId: "engine-runner-register-replayed",
-        detail: { engineId, name: existing.name },
-        reason: `engine runner ${existing.name} (${engineId}) re-presented its registration; the same runner was returned`,
+        return ended;
       });
+      await notifyWorkflowsOfEndedRuns(db, reconciled);
       return reply
         .status(201)
         .send({ runnerId: existing.id, engineId, selfTest: { passed: existing.selfTestPassed, failures: existing.selfTestFailures }, replayed: true });
@@ -556,6 +569,18 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
             });
           }
         }
+        // round 11 (sweep): the registration's audit commits with it
+        await auditEngine(tx as unknown as Db, {
+          userId: NO_IDENTITY,
+          objectType: "engine_runner",
+          objectId: runner!.id,
+          ruleId: "engine-runner-registered",
+          effect: verdict.passed ? "allow" : "deny",
+          detail: { engineId, name: body.name, imageDigest: body.imageDigest, engineVersion: body.engineVersion, selfTest: verdict },
+          reason:
+            `engine runner ${body.name} registered for ${engineId}` +
+            (verdict.passed ? " with a passing self-test" : `; its self-test failed (${verdict.failures.join(", ")}), so it can lease nothing`),
+        });
         return { ...runner!, superseded, ended };
       });
     } catch (e) {
@@ -569,17 +594,6 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     if (!out) return replay();
     await engineRunTestHooks.afterRegisterTx?.();
     await notifyWorkflowsOfEndedRuns(db, out.ended);
-    await auditEngine(db, {
-      userId: NO_IDENTITY,
-      objectType: "engine_runner",
-      objectId: out.id,
-      ruleId: "engine-runner-registered",
-      effect: verdict.passed ? "allow" : "deny",
-      detail: { engineId, name: body.name, imageDigest: body.imageDigest, engineVersion: body.engineVersion, selfTest: verdict },
-      reason:
-        `engine runner ${body.name} registered for ${engineId}` +
-        (verdict.passed ? " with a passing self-test" : `; its self-test failed (${verdict.failures.join(", ")}), so it can lease nothing`),
-    });
     return reply.status(201).send({ runnerId: out.id, engineId, selfTest: verdict, supersededRunnerId: out.superseded?.id ?? null });
   });
 
@@ -669,6 +683,19 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       // egress-policy failure
       const ended = engineDisabled ? await endActiveRunsOfEngineTx(tx, engineId, "engine_self_test_failed") : [];
       const engineOn = !!engine?.enabled && !engineDisabled;
+      // round 11 (sweep): the report's audit commits with the report (and with any switch-off)
+      await auditEngine(tx as unknown as Db, {
+        userId: NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: runnerId,
+        ruleId: verdict.passed ? "engine-runner-self-test-refreshed" : "engine-runner-self-test-failed",
+        effect: verdict.passed ? "allow" : "deny",
+        detail: { engineId, selfTest: verdict, egress: selfTest.egress, engineRefreshed, engineDisabled },
+        reason:
+          `engine runner ${runner.name} (${engineId}) submitted a fresh self-test: ` +
+          (verdict.passed ? "passed" : `failed (${verdict.failures.join(", ")})`) +
+          (engineDisabled ? " — the engine is switched off" : engineRefreshed ? "; the engine's recorded self-test is refreshed" : ""),
+      });
       return { kind: "done" as const, engineRefreshed, engineDisabled, engineOn, ended };
     });
     if (out.kind === "done") await notifyWorkflowsOfEndedRuns(db, out.ended);
@@ -680,18 +707,6 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     // round 5: the same signal the lease gives — a failing report must be re-proved; a passing one
     // leases when the engine is on and waits for an admin when it is off (never re-enables it)
     const next: EngineRunnerNext = !verdict.passed ? "self_test_required" : out.engineOn ? "ok" : "admin_disabled";
-    await auditEngine(db, {
-      userId: NO_IDENTITY,
-      objectType: "engine_runner",
-      objectId: runnerId,
-      ruleId: verdict.passed ? "engine-runner-self-test-refreshed" : "engine-runner-self-test-failed",
-      effect: verdict.passed ? "allow" : "deny",
-      detail: { engineId, selfTest: verdict, egress: selfTest.egress, engineRefreshed: out.engineRefreshed, engineDisabled: out.engineDisabled },
-      reason:
-        `engine runner ${runner.name} (${engineId}) submitted a fresh self-test: ` +
-        (verdict.passed ? "passed" : `failed (${verdict.failures.join(", ")})`) +
-        (out.engineDisabled ? " — the engine is switched off" : out.engineRefreshed ? "; the engine's recorded self-test is refreshed" : ""),
-    });
     return reply.send({ selfTest: verdict, next, engineRefreshed: out.engineRefreshed, engineDisabled: out.engineDisabled });
   });
 }

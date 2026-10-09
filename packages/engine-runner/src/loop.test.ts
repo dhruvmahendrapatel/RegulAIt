@@ -473,6 +473,18 @@ describe("round 5 [68]: undelivered results are retried before leasing, dropped 
     expect((await readdir(o.workRoot)).sort()).toEqual([RUN(1), "not-a-run"].sort()); // only run-id dirs are touched
   });
 
+  it("round 11 [90]: a result retained on the persistent root (the state volume) is delivered after a restart, before any lease", async () => {
+    const g = gateway({ lease: [{ status: 204 }], result: [200] });
+    const { o, dir } = await opts({ maxIterations: 1 });
+    await o.store.save(STORED);
+    const retainRoot = path.join(dir, "state", "undelivered");
+    const kept = await retain(retainRoot, 1, future());
+    // a fresh process: the tmpfs work root is empty, the state volume still holds the result
+    await runRunnerLoop(g.client, adapter, { ...o, retainRoot });
+    expect(g.calls.map((c) => c.path)).toEqual([`/v1/engine-runner/runs/${RUN(1)}/result`, "/v1/engine-runner/lease"]);
+    expect(existsSync(kept)).toBe(false);
+  });
+
   it("at the cap no work is leased: the loop waits until the results are delivered", async () => {
     const g = gateway({ lease: [{ status: 204 }], result: [503, 503, 503, 503, 503, 503, 200] });
     const { o, logs } = await opts({ maxIterations: 3, maxRetainedResults: 3 });

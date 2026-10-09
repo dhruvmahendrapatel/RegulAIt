@@ -27,14 +27,23 @@ import {
 import { probeEgress, type EgressProbeOptions } from "./egress.js";
 
 export interface RunnerHttp {
-  (url: string, init: { method: string; headers: Record<string, string>; body?: string }): Promise<{ status: number; json(): Promise<unknown> }>;
+  (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<{ status: number; json(): Promise<unknown> }>;
 }
 
 export interface RunnerClientOptions {
   /** the gateway on the engines network, e.g. http://gateway:3000 */
   gatewayUrl: string;
   http?: RunnerHttp;
+  /**
+   * PR #205 review round 11 [89]: every request (response body included) is bounded by this many ms
+   * (default 30 s), and by the run's deadline where it has one. A timeout is a transient failure: it
+   * throws like a network error, so every caller's existing retry applies.
+   */
+  requestTimeoutMs?: number;
 }
+
+/** a request that took longer than its bound (transient, like a network error) */
+export class RunnerTimeoutError extends Error {}
 
 /**
  * PR #205 review [54]: the runner's own token — `rge_` and 256 bits from the OS CSPRNG. The
@@ -80,15 +89,38 @@ export class RunnerClient {
     this.http = opts.http ?? ((url, init) => fetch(url, init) as unknown as ReturnType<RunnerHttp>);
   }
 
-  private async call(method: string, path: string, bearer: string, body?: unknown) {
-    // B5-P: a JSON content-type is sent only with a body — the gateway (Fastify) refuses an empty
-    // body declared as JSON with 400, which made every bodiless lease fail against the real app
-    const res = await this.http(`${this.opts.gatewayUrl.replace(/\/$/, "")}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${bearer}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  private async call(method: string, path: string, bearer: string, body?: unknown, deadlineAt?: string) {
+    // PR #205 review round 11 [89]: bounded — the request and its body are aborted after the
+    // timeout, or at the run's deadline when that is sooner (never below 1 ms)
+    const bound = Math.max(1, Math.min(this.opts.requestTimeoutMs ?? 30_000, deadlineAt ? Date.parse(deadlineAt) - Date.now() : Number.POSITIVE_INFINITY));
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(new RunnerTimeoutError(`${method} ${path} took longer than ${bound} ms`));
+      }, bound);
     });
-    return res;
+    try {
+      return await Promise.race([
+        (async () => {
+          // B5-P: a JSON content-type is sent only with a body — the gateway (Fastify) refuses an empty
+          // body declared as JSON with 400, which made every bodiless lease fail against the real app
+          const res = await this.http(`${this.opts.gatewayUrl.replace(/\/$/, "")}${path}`, {
+            method,
+            headers: { authorization: `Bearer ${bearer}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+            signal: abort.signal,
+          });
+          // the body is read inside the bound too (a stalled body is a stalled request)
+          const data = res.status === 204 ? null : await res.json().catch(() => null);
+          return { status: res.status, json: async () => data };
+        })(),
+        timedOut,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** exchange a one-time enrolment token for this runner's token */
@@ -153,8 +185,8 @@ export class RunnerClient {
     return (await res.json()) as EngineLease;
   }
 
-  async heartbeat(runId: string, phase: "starting" | "running" | "uploading", progress: number): Promise<{ cancel: boolean }> {
-    const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/heartbeat`, this.bearer(), { phase, progress });
+  async heartbeat(runId: string, phase: "starting" | "running" | "uploading", progress: number, deadlineAt?: string): Promise<{ cancel: boolean }> {
+    const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/heartbeat`, this.bearer(), { phase, progress }, deadlineAt);
     // PR #205 review round 10 [83]: a 5xx, 408 or 429 says nothing about the lease — it is thrown
     // (transient, retried by the caller); any other refusal (401, 404, 409) is definitive: stop
     if (res.status >= 500 || res.status === 408 || res.status === 429) throw new RunnerHttpError("heartbeat", res.status, null);
@@ -162,8 +194,8 @@ export class RunnerClient {
     return (await res.json()) as { cancel: boolean };
   }
 
-  async result(runId: string, envelope: EngineResultEnvelope): Promise<number> {
-    const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/result`, this.bearer(), envelope);
+  async result(runId: string, envelope: EngineResultEnvelope, deadlineAt?: string): Promise<number> {
+    const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/result`, this.bearer(), envelope, deadlineAt);
     return res.status;
   }
 }
@@ -203,6 +235,12 @@ export interface RunOnceOptions {
   /** round 5 [67]: the image digest this runner runs (presented on every lease with engineVersion) */
   imageDigest: string;
   workRoot: string;
+  /**
+   * PR #205 review round 11 [90]: where an undelivered result is kept until delivery is definitive or
+   * its deadline passes — a directory on the runner's PERSISTENT state volume, separate from the
+   * engine's work dirs (default: workRoot, which loses it on restart)
+   */
+  retainRoot?: string;
   heartbeatMs?: number;
   /** first retry delay for the result POST (doubles each time, capped at 30 s) */
   retryBaseMs?: number;
@@ -231,7 +269,7 @@ export async function postResultWithRetry(
   for (let attempt = 1; attempt <= max; attempt++) {
     let status: number | null = null;
     try {
-      status = await client.result(runId, envelope);
+      status = await client.result(runId, envelope, opts.deadlineAt);
     } catch {
       status = null;
     }
@@ -296,7 +334,7 @@ export async function retryRetainedResults(
     }
     let status: number | null = null;
     try {
-      status = await client.result(r.runId, r.envelope);
+      status = await client.result(r.runId, r.envelope, r.deadlineAt);
     } catch {
       status = null;
     }
@@ -352,7 +390,7 @@ export async function runOnce(
   let keepWorkDir = false;
   const beat = async () => {
     try {
-      const hb = await client.heartbeat(lease.runId, "running", progress);
+      const hb = await client.heartbeat(lease.runId, "running", progress, lease.deadlineAt);
       if (hb.cancel) {
         cancelled = true;
         abort.abort();
@@ -371,7 +409,7 @@ export async function runOnce(
     const startAttempts = opts.maxStartAttempts ?? 8;
     for (let attempt = 1; ; attempt++) {
       try {
-        const hb = await client.heartbeat(lease.runId, "starting", 0);
+        const hb = await client.heartbeat(lease.runId, "starting", 0, lease.deadlineAt);
         if (hb.cancel) {
           cancelled = true;
           abort.abort();
@@ -409,12 +447,15 @@ export async function runOnce(
     });
     if (status === null || status >= 500 || status === 408 || status === 429) {
       // PR #205 review round 5 [68]: keep ONLY the envelope (the engine's own files go now), so the
-      // loop can retry the delivery before its next lease and the tmpfs does not fill up
+      // loop can retry the delivery before its next lease and the tmpfs does not fill up.
+      // PR #205 review round 11 [90]: kept under `retainRoot` — the runner's persistent state volume,
+      // apart from the engine's work dirs — so a restart still delivers it (or drops it at its deadline)
+      const retainDir = `${(opts.retainRoot ?? opts.workRoot).replace(/\/$/, "")}/${lease.runId}`;
       await rm(workDir, { recursive: true, force: true });
-      await mkdir(workDir, { recursive: true, mode: 0o700 });
+      await mkdir(retainDir, { recursive: true, mode: 0o700 });
       const retained: RetainedResult = { runId: lease.runId, deadlineAt: lease.deadlineAt, envelope };
-      await writeFile(`${workDir}/${RETAINED_RESULT_FILE}`, JSON.stringify(retained), { mode: 0o600 });
-      keepWorkDir = true;
+      await writeFile(`${retainDir}/${RETAINED_RESULT_FILE}`, JSON.stringify(retained), { mode: 0o600 });
+      keepWorkDir = retainDir === workDir;
       return { outcome: "undelivered", runId: lease.runId };
     }
     return { outcome: envelope.status === "failed" ? "failed" : "posted", runId: lease.runId, status };

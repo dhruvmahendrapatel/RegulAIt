@@ -18,7 +18,7 @@ import path from "node:path";
 import { ENGINE_RESULT_VERSION, type EngineLease } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
-import { buildSelfTest, RETAINED_RESULT_FILE, runOnce, RunnerClient, type RunnerHttp } from "./runner.js";
+import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
 
 const refuse = (code: string) => () => Promise.reject(Object.assign(new Error(code), { code }));
 
@@ -296,6 +296,60 @@ describe("PR #203 review round 2", () => {
     expect(out).toMatchObject({ outcome: "cancelled" });
     expect(g.seen).toHaveLength(3);
     expect(g.ran()).toBe(false);
+  });
+
+  it("PR #205 round 11 [89]: a request that never answers is aborted at its timeout and fails as transient", async () => {
+    let signal: AbortSignal | undefined;
+    const hang: RunnerHttp = (_url, init) => {
+      signal = init.signal;
+      return new Promise(() => {}); // never settles, never honours the signal
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: hang, requestTimeoutMs: 20 });
+    client.useToken("rge_test");
+    const t0 = Date.now();
+    await expect(client.lease({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" })).rejects.toBeInstanceOf(RunnerTimeoutError);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("PR #205 round 11 [89]: the bound is the run's deadline when that is sooner", async () => {
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: () => new Promise(() => {}), requestTimeoutMs: 60_000 });
+    client.useToken("rge_test");
+    const t0 = Date.now();
+    await expect(client.heartbeat("r", "running", 0, new Date(Date.now() + 30).toISOString())).rejects.toBeInstanceOf(RunnerTimeoutError);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it("PR #205 round 11 [89]: a timed-out result post is retried like any transient failure", async () => {
+    let calls = 0;
+    const http: RunnerHttp = async () => {
+      calls++;
+      if (calls === 1) return new Promise(() => {});
+      return { status: 200, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http, requestTimeoutMs: 20 });
+    client.useToken("rge_test");
+    const env = { version: ENGINE_RESULT_VERSION, runId: lease2.runId, engineId: "promptfoo" as const, engineVersion: "0.123.1", status: "completed" as const, errorCode: null, items: [], notRun: [], rawReport: null };
+    expect(await postResultWithRetry(client, lease2.runId, env, { deadlineAt: new Date(Date.now() + 60_000).toISOString(), retryBaseMs: 1 })).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("PR #205 round 11 [90]: an undelivered result is kept under the persistent retain root, never in the engine's work dir", async () => {
+    const work = await mkdtemp(path.join(tmpdir(), "b5-work-"));
+    const retain = await mkdtemp(path.join(tmpdir(), "b5-retain-"));
+    const g = gateway(["throw", "throw"]);
+    const out = await runOnce(g.client, adapter(g), {
+      engineId: "promptfoo",
+      engineVersion: "0.123.1",
+      imageDigest: `sha256:${"a".repeat(64)}`,
+      workRoot: work,
+      retainRoot: retain,
+      retryBaseMs: 1,
+      maxResultAttempts: 2,
+    });
+    expect(out).toMatchObject({ outcome: "undelivered" });
+    expect(await readdir(work)).toEqual([]);
+    expect(await readdir(path.join(retain, lease2.runId))).toEqual([RETAINED_RESULT_FILE]);
   });
 
   it("PR #205 round 5 [68]: an undelivered run keeps ONLY its envelope, for the loop to retry", async () => {

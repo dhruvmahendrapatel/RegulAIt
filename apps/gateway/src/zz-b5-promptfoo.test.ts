@@ -56,7 +56,7 @@ import {
 import { buildSelfTest, FileRunnerTokenStore, generateRunnerSecret, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, runnerTokenHash, type RunnerHttp } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
-import { engineRunTestHooks } from "./engine-runs.js";
+import { engineRunTestHooks, runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -519,7 +519,9 @@ describe("PR #205 review round 2: self-test refresh and lost registration respon
     (await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = ${ruleId} AND object_id = ${objectId}`)) as unknown as { rows: Array<{ detail: Record<string, unknown> }> };
 
   it("[53] a stale self-test is refreshed by the runner on its own route: the lease is refused, the loop submits a fresh report, and work resumes", async () => {
-    // the 24 hours pass: the runner's stored report and the engine's recorded self-test are stale
+    // a run is queued while all is fresh (round 11 [87]: creation itself needs the engine's record
+    // to admit it); then the 24 hours pass: the runner's stored report and the engine's record are stale
+    const runId = await startRun();
     const old = new Date(Date.now() - 25 * 3600_000).toISOString();
     await db.execute(sql`UPDATE engine_runners SET self_test = jsonb_set(self_test, '{at}', to_jsonb(${old}::text)) WHERE id = ${firstRunnerId}`);
     await db.execute(sql`UPDATE engines SET self_test_passed_at = ${old}::timestamptz WHERE id = 'promptfoo'`);
@@ -527,7 +529,6 @@ describe("PR #205 review round 2: self-test refresh and lost registration respon
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error).toBe("engine_self_test_required");
     // the runner-token route accepts a fresh report, evaluated like registration's, and audits it
-    const runId = await startRun();
     const workRoot = await mkdtemp(path.join(tmpdir(), "b5p-st-"));
     const store = new FileRunnerTokenStore(path.join(workRoot, "state", "runner-token"));
     await store.save(firstRunnerSecret);
@@ -1452,5 +1453,146 @@ describe("PR #205 review round 10: every switch-off ends the engine's runs; an o
     const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-runner-self-test-obsolete-build' AND object_id = ${old.runnerId}`)) as unknown as { rows: unknown[] }).rows;
     expect(audit).toHaveLength(1);
     await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+  });
+});
+
+// ===========================================================================
+// PR #205 review round 11 (Codex), decisions 86 to 88 (89 and 90 are pinned in packages/engine-runner)
+// — each red first. Runs after round 10; `liveSecret` is a runner with a fresh report.
+// ===========================================================================
+describe("PR #205 review round 11: one transaction per state change", () => {
+  const switchOn = async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true, max_budget_usd = 5 WHERE id = 'promptfoo'`);
+  };
+  const switchOff = () => db.execute(sql`UPDATE engines SET enabled = false, max_budget_usd = 5 WHERE id = 'promptfoo'`);
+  const keyRevoked = async (runId: string) => {
+    const run = await runRow(runId);
+    const [k] = ((await db.execute(sql`SELECT revoked_at FROM virtual_keys WHERE id = ${run.virtualKeyId}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
+    return k!.revoked_at !== null;
+  };
+  const runsNow = async () => ((await db.execute(sql`SELECT count(*)::int AS n FROM engine_runs WHERE engine_id = 'promptfoo'`)) as unknown as { rows: Array<{ n: number }> }).rows[0]!.n;
+  const runBody = (budgetUsd = 1) => ({ engineId: "promptfoo", target: { agentId: targetId, judgeAgentId: judgeId }, config: { sets: ["prompt-extraction", "pii:direct"] }, projectId, budgetUsd, trials: 2 });
+
+  it("[86] a cancel that crashes midway leaves nothing half-done: no marker on a live run; a cancel then ends it, key and all, at once", async () => {
+    await switchOn();
+    try {
+      const runId = await startRun();
+      const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+      expect(l.statusCode, l.body).toBe(200);
+      engineRunTestHooks.afterCancelMarked = () => {
+        throw new Error("crashed mid-cancel");
+      };
+      try {
+        const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {});
+        expect(c.statusCode).toBe(500);
+      } finally {
+        engineRunTestHooks.afterCancelMarked = undefined;
+      }
+      // all or nothing: still leased, no marker, key live
+      expect(await runRow(runId)).toMatchObject({ status: "leased", cancelRequestedAt: null });
+      expect(await keyRevoked(runId)).toBe(false);
+      const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {});
+      expect(c.statusCode, c.body).toBe(200);
+      const row = await runRow(runId);
+      expect(row).toMatchObject({ status: "cancelled", errorCode: "cancelled" });
+      expect(row.cancelRequestedAt).not.toBeNull();
+      expect(await keyRevoked(runId)).toBe(true);
+    } finally {
+      await switchOff();
+    }
+  });
+
+  it("[87] a disable landing between a run's validation and its insert: the run is refused, nothing is created", async () => {
+    await switchOn();
+    try {
+      const before = await runsNow();
+      engineRunTestHooks.beforeCreateTx = async () => {
+        await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+      };
+      try {
+        const r = await inject("POST", "/v1/engine-runs", alice.key, runBody());
+        expect(r.statusCode, r.body).toBe(409);
+        expect(r.json()).toMatchObject({ error: "engine_disabled" });
+      } finally {
+        engineRunTestHooks.beforeCreateTx = undefined;
+      }
+      expect(await runsNow()).toBe(before);
+    } finally {
+      await switchOff();
+    }
+  });
+
+  it("[87] a budget-ceiling drop landing between validation and insert: the run is refused", async () => {
+    await switchOn();
+    try {
+      const before = await runsNow();
+      engineRunTestHooks.beforeCreateTx = async () => {
+        await db.execute(sql`UPDATE engines SET max_budget_usd = 0.5 WHERE id = 'promptfoo'`);
+      };
+      try {
+        const r = await inject("POST", "/v1/engine-runs", alice.key, runBody(1));
+        expect(r.statusCode, r.body).toBe(422);
+        expect(r.json()).toMatchObject({ error: "engine_budget_exceeds_ceiling" });
+      } finally {
+        engineRunTestHooks.beforeCreateTx = undefined;
+      }
+      expect(await runsNow()).toBe(before);
+    } finally {
+      await switchOff();
+    }
+  });
+
+  it("[88] a schedule switched off after the sweep read it is not claimed and starts nothing", async () => {
+    await switchOn();
+    try {
+      const c = await inject("POST", "/v1/engine-schedules", alice.key, { request: runBody(), intervalHours: 24 });
+      expect(c.statusCode, c.body).toBe(201);
+      const id = c.json().schedule.id as string;
+      const due = new Date(Date.now() - 1000);
+      await db.execute(sql`UPDATE engine_schedules SET next_run_at = ${due.toISOString()}::timestamptz WHERE id = ${id}`);
+      const before = await runsNow();
+      engineRunTestHooks.beforeScheduleClaim = async (scheduleId) => {
+        if (scheduleId === id) await db.execute(sql`UPDATE engine_schedules SET enabled = false WHERE id = ${id}`);
+      };
+      try {
+        await runEngineScheduleSweep(db);
+      } finally {
+        engineRunTestHooks.beforeScheduleClaim = undefined;
+      }
+      expect(await runsNow()).toBe(before);
+      const [s] = ((await db.execute(sql`SELECT next_run_at, last_run_id FROM engine_schedules WHERE id = ${id}`)) as unknown as { rows: Array<{ next_run_at: string; last_run_id: string | null }> }).rows;
+      expect(new Date(s!.next_run_at).getTime()).toBe(due.getTime());
+      expect(s!.last_run_id).toBeNull();
+    } finally {
+      await switchOff();
+    }
+  });
+});
+
+describe("PR #205 review round 11 (sweep): a sweep re-checks its condition on the locked row", () => {
+  it("a lease renewed between the sweep's read and its end is not timed out", async () => {
+    const record = { passed: true, failures: [], runnerId: null, imageDigest: PF_DIGEST, version: MANIFEST.promptfoo.version, egress: null, at: new Date().toISOString() };
+    await db.execute(sql`UPDATE engines SET self_test = ${JSON.stringify(record)}::jsonb, self_test_passed_at = now(), enabled = true WHERE id = 'promptfoo'`);
+    try {
+      const runId = await startRun();
+      const l = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${liveSecret}` }, PF_BUILD);
+      expect(l.statusCode, l.body).toBe(200);
+      // the lease looks expired to the sweep's read...
+      await db.execute(sql`UPDATE engine_runs SET lease_expires_at = now() - interval '1 second' WHERE id = ${runId}`);
+      engineRunTestHooks.beforeSweepEnd = async (id) => {
+        // ...and a heartbeat renews it before the sweep ends it
+        if (id === runId) await db.execute(sql`UPDATE engine_runs SET lease_expires_at = now() + interval '90 seconds' WHERE id = ${runId}`);
+      };
+      try {
+        await runEngineRunSweep(db);
+      } finally {
+        engineRunTestHooks.beforeSweepEnd = undefined;
+      }
+      expect(await runRow(runId)).toMatchObject({ status: "leased" });
+      expect((await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {})).statusCode).toBe(200);
+    } finally {
+      await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
+    }
   });
 });

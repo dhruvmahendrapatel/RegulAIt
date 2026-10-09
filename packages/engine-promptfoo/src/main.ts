@@ -35,6 +35,9 @@ async function main(): Promise<void> {
     engineVersion,
     imageDigest,
     workRoot: process.env.REGULAIT_WORK_DIR ?? "/work",
+    // PR #205 review round 11 [90]: undelivered results survive a restart on the state volume (0700,
+    // the runner's own), apart from the engine's work dirs on the tmpfs
+    retainRoot: path.join(stateDir, "undelivered"),
     store: new FileRunnerTokenStore(path.join(stateDir, "runner-token")),
     enrollmentToken: process.env.REGULAIT_ENGINE_ENROLLMENT_TOKEN || null,
     registration: async () => ({
