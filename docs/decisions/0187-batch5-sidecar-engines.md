@@ -830,6 +830,37 @@ without a judge now name one. No migration.
     from one on the new; with cancellation no result is ever normalised against a catalogue other than the one in the
     manifest every replica now has.
 
+**Review round 10 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `runner.test.ts` [83],
+`zz-b5-promptfoo.test.ts` "review round 10" [84] [85]; the engines test of an admin's disable now expects its queued run
+ended. No migration.
+
+83. **A transient failure of the starting heartbeat no longer abandons a leased run** (review body, no thread). The
+    first heartbeat after a lease threw on a transport error, `runOnce` threw, the work directory was deleted and the
+    run was left to time out. The starting heartbeat is now retried on a transient failure (a network error, a 5xx, a
+    408, a 429; the client throws for those) with a bounded backoff (`maxStartAttempts`, default 8, doubling from
+    `retryBaseMs`, capped at 30 s), never past the run's deadline. Only a definitive refusal (401, 404, 409: the
+    gateway no longer knows the lease) or running out of attempts or time abandons it, reported as `cancelled`, not
+    thrown, so the loop does not treat it as a crash. The periodic heartbeat likewise no longer cancels the run on a
+    5xx (it is transient and ignored; the lease's own expiry is the backstop).
+84. **Every path that switches an engine off ends its active runs in the same transaction** [4228874846]. A failing
+    self-test switched the engine off but left other runners' leases and their virtual keys alive, so a run could keep
+    calling models after an egress-policy failure. One helper (`endActiveRunsOfEngineTx`) ends every leased, queued and
+    awaiting-approval run of the engine (cancelled, key revoked, pending approval superseded, audited; workflows told
+    after the commit), inside the transaction that holds the engine row `FOR UPDATE`, with the reason as the error code.
+    **Paths covered:** a failing runner self-test (`engine_self_test_failed`), a failing admin self-test
+    (`engine_self_test_failed`), an admin's disable (`engine_disabled`), and a build change in the manifest sync
+    (`engine_build_changed`, decisions 75 and 82). A runner's revocation (admin, or a supersession) does not switch the
+    engine off; it ends that runner's leased runs in its own transaction (decision 76). Once a run is not leased, its
+    heartbeat answers `cancel: true` and its result is refused (409), as before.
+85. **An obsolete-build runner can never change the current build's engine** [4228874856]. During a rolling upgrade an
+    old runner presenting its own (old) registered build was told `self_test_required`; its old-build report was then
+    accepted and could switch the newly enabled engine off, repeatedly. The lease admission now also compares the
+    runner's registered build with the CURRENT manifest build (a null manifest digest never matches): a mismatch is
+    `reenrol_required`. The runner self-test route refuses any report whose build is not the current manifest build:
+    409 `engine_runner_reenrol_required`, no change to the runner's stored report or to the engine, audited
+    `engine-runner-self-test-obsolete-build`. A two-build test registers a runner of an obsolete build and has it try
+    to switch the upgraded engine off.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
