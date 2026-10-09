@@ -392,6 +392,55 @@ export interface EngineLease {
 }
 
 // ---------------------------------------------------------------------------
+// Runner-route ANSWERS, as the runner validates them (PR #205 follow-up [101])
+// ---------------------------------------------------------------------------
+//
+// A 2xx whose body does not parse, or does not match these, is NOT an answer: the runner treats it
+// as transient, exactly like a timeout (decision 94), and retries according to the route's own
+// idempotency. Objects are not strict, so a newer gateway may add fields; every field the runner
+// reads is required and typed.
+
+const headerMap = z.record(z.string(), z.string());
+
+/** 200 from POST /v1/engine-runner/lease (204 is "no work"; anything else is not a lease) */
+export const engineLeaseResponseSchema = z.object({
+  runId: z.string().uuid(),
+  engineId: z.enum(ENGINE_IDS),
+  engineVersion: z.string().min(1),
+  spec: z.object({
+    config: z.object({
+      sets: z.array(z.string()).min(1),
+      params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+    }),
+    trials: z.number().int().positive(),
+  }),
+  target: z.object({ baseUrl: z.string().min(1), model: z.string().min(1), apiKey: z.string().min(1), headers: headerMap }).nullable(),
+  judge: z.object({ model: z.string().min(1), headers: headerMap }).nullable(),
+  artifacts: z.array(z.object({ id: z.string().uuid(), sha256: z.string(), size: z.number().int().nonnegative() })),
+  deadlineAt: z.string().datetime({ offset: true }),
+  budgetUsd: z.number().nonnegative().nullable(),
+});
+// the schema yields exactly what an EngineLease is (a compile-time check, no runtime cost)
+const _leaseShape: (l: z.infer<typeof engineLeaseResponseSchema>) => EngineLease = (l) => l;
+void _leaseShape;
+
+const selfTestVerdictAnswer = z.object({ passed: z.boolean(), failures: z.array(z.string()) });
+
+/** 200 from POST /v1/engine-runner/runs/:runId/heartbeat */
+export const engineHeartbeatResponseSchema = z.object({ cancel: z.boolean() });
+
+/** 200 from POST /v1/engine-runner/self-test (`next` is read separately: an unknown signal is ignored) */
+export const engineRunnerSelfTestResponseSchema = z.object({ selfTest: selfTestVerdictAnswer, next: z.unknown().optional() });
+
+/** 201 from POST /v1/engine-runner/register */
+export const engineRunnerRegisterResponseSchema = z.object({
+  runnerId: z.string().min(1),
+  selfTest: selfTestVerdictAnswer,
+  replayed: z.boolean().optional(),
+  supersededRunnerId: z.string().min(1).nullable().optional(),
+});
+
+// ---------------------------------------------------------------------------
 // Admin and user API bodies
 // ---------------------------------------------------------------------------
 

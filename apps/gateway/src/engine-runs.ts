@@ -1251,11 +1251,11 @@ async function reissueLeaseTx(tx: Tx, run: EngineRunRow, engineId: EngineId, m: 
   let keyId: string | null = run.virtualKeyId;
   if (run.virtualKeyId && run.targetKind === "agent" && m.needsModelAccess && target) {
     await revokeRunKey(tx, run, "lease_reissued", NO_IDENTITY);
-    const [{ spent } = { spent: 0 }] = await tx
-      .select({ spent: sql<number>`COALESCE(SUM(${virtualKeys.spentUsd}), 0)::float8` })
-      .from(virtualKeys)
-      .where(eq(virtualKeys.engineRunId, run.id));
-    const minted = await mintRunKeyTx(tx, run, engineId, target, judge, run.deadlineAt!, Number(spent));
+    // PR #205 follow-up [102]: what the run has ACTUALLY spent, read off the usage ledger by every key
+    // it has held (the same figure `runCostUsd` reports). Never the sum of the keys' `spent_usd`: each
+    // replacement key starts at the amount carried into it, so from the second re-issue on that sum
+    // counts the carried amount again, and retries alone could exhaust the budget.
+    const minted = await mintRunKeyTx(tx, run, engineId, target, judge, run.deadlineAt!, await runCostUsd(tx, run));
     apiKey = minted.token;
     keyId = minted.keyId;
   }
