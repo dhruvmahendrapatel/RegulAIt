@@ -226,7 +226,7 @@ describe("the result mapper", () => {
     expect(crashed).toMatchObject({ status: "failed", errorCode: "engine_error" });
     const n = stored(crashed);
     expect(n.verdict).toBe("unknown");
-    expect(n.items.filter((i) => i.key !== "bias:age").map((i) => i.verdict)).toEqual(["unknown", "unknown"]);
+    expect(n.items.filter((i) => i.notRunReason === null).map((i) => i.verdict)).toEqual(["unknown", "unknown"]);
     // an engine error on an attempt: that item is unknown even though the run completed
     const errored = mapPromptfooResults({
       raw: output([result("prompt-extraction"), result("prompt-extraction", { success: false, failureReason: 2, error: "Error: provider returned malformed JSON" })]),
@@ -273,6 +273,28 @@ describe("the result mapper", () => {
     expect(n.counts.pass).toBe(0);
     expect(n.items[0]!.verdict).toBe("unknown");
     expect(classifyError('API error: 401 Unauthorized {"error":{"code":"virtual_key_revoked"}}')).toBe("key_revoked");
+  });
+
+  it("[50] every planned (plugin, strategy) pair with no result is not run — a missing strategy pair too", () => {
+    const p = planPromptfooRun(["prompt-extraction", "pii:direct", "strategy:base64", "strategy:rot13"]);
+    // pii:direct's basic and base64 cases ran; its rot13 rewrite and all of prompt-extraction produced nothing
+    const body = mapPromptfooResults({
+      raw: output([result("pii:direct"), result("pii:direct", { strategy: "base64" })]),
+      exitCode: 0,
+      plan: p,
+    });
+    expect(body.items.map((i) => i.key)).toEqual(["pii:direct/basic", "pii:direct/base64"]);
+    expect(body.notRun).toEqual([
+      { key: "prompt-extraction/basic", reason: "engine_error" },
+      { key: "prompt-extraction/base64", reason: "engine_error" },
+      { key: "prompt-extraction/rot13", reason: "engine_error" },
+      { key: "pii:direct/rot13", reason: "engine_error" },
+    ]);
+    const n = stored(body);
+    expect(n.items.find((i) => i.key === "pii:direct/rot13")).toMatchObject({ verdict: "not_run", notRunReason: "engine_error" });
+    // a not-run pair is never clean (the run-level verdict treats not-run as ADR-0187 decision 12 says)
+    expect(n.counts.not_run).toBe(4);
+    expect(n.items.filter((i) => i.verdict === "pass").map((i) => i.key)).toEqual(["pii:direct/basic", "pii:direct/base64"]);
   });
 
   it("an unknown plugin, or an unattributed result, is unmapped and never passes", () => {

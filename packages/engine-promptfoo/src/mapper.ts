@@ -17,8 +17,9 @@
  * EVERY result of the item failed to connect, `not_run` with reason `egress_denied`); otherwise
  * graded passes → `pass`; nothing graded → `unknown`. Results this mapper cannot attribute to a
  * plugin are one `unknown` item. An item whose plugin is not in the run's plan is `unknown` too
- * (promptfoo ran something we did not ask for). A planned plugin with no result at all is
- * `not_run` (`engine_error`): generation produced nothing for it.
+ * (promptfoo ran something we did not ask for). Every planned (plugin, strategy) pair — each
+ * plugin with `basic` and with every planned strategy — that has no result at all is `not_run`
+ * (`engine_error`): generation or the strategy produced nothing for it.
  *
  * The run's status: exit 0 or 100 (promptfoo's "some tests failed") with parseable output is
  * `completed`; any other exit is `failed` (`engine_error`) and the server then reads every item
@@ -158,9 +159,7 @@ export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: numbe
 
   const items: EngineResultItem[] = [];
   const notRun: EngineNotRunEntry[] = [...planNotRun];
-  const seenPlugins = new Set<string>();
   for (const [key, b] of buckets) {
-    if (b.plugin) seenPlugins.add(b.plugin);
     const entry = b.plugin ? promptfooPlugin(b.plugin) : null;
     const strategyEntry = promptfooStrategy(b.strategy);
     const sourceId = b.strategy === "basic" ? (b.plugin ?? "unattributed") : `${PROMPTFOO_STRATEGY_SET_PREFIX}${b.strategy}`;
@@ -207,9 +206,13 @@ export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: numbe
       dispatchAuditIds: [],
     });
   }
-  // a planned plugin that produced no test case at all: generation failed for it
+  // PR #205 review [50]: every PLANNED (plugin, strategy) pair must have results; a pair that
+  // produced none (generation failed for the plugin, or the strategy rewrote nothing) is not run
   for (const p of plan.plugins) {
-    if (!seenPlugins.has(p.id)) notRun.push({ key: `${p.id}/basic`, reason: "engine_error" });
+    for (const s of ["basic", ...plan.strategies.map((x) => x.id)]) {
+      const key = `${clip(p.id, 120)}/${clip(s, 70)}`;
+      if (!buckets.has(key)) notRun.push({ key, reason: "engine_error" });
+    }
   }
 
   const ok = exitCode !== null && PROMPTFOO_OK_EXIT_CODES.includes(exitCode);
