@@ -482,8 +482,9 @@ jobs:
             name="${f#engines/}"
             name="${name%/Dockerfile}"
             # the name becomes an image tag and an artifact name: refuse anything else
-            if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
-              echo "::error file=${f}::engine directory name '${name}' is not lower-case [a-z0-9-]; rename it"
+            # Docker repository-name component grammar: [a-z0-9]+(-[a-z0-9]+)* (no leading, trailing or doubled hyphen)
+            if ! [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+              echo "::error file=${f}::engine directory name '${name}' must be lower-case [a-z0-9] runs joined by single hyphens; rename it"
               exit 1
             fi
             names+=("$name")

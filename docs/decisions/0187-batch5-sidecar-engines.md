@@ -1242,7 +1242,11 @@ Decisions 104–119 belong to B5-M (PR #212); this slice starts at 120.
        `docker build` (BuildKit through the runner's Docker; neither job uses a buildx setup action, and none was
        added), with `-f engines/<name>/Dockerfile` from the repository root. Its gates match the gateway's: Trivy
        pinned by version, SHA-256 and Sigstore bundle; a failure on any fixable HIGH or CRITICAL not in
-       `security/image-allowlist.json`; `--expect-classes os-pkgs,lang-pkgs`; and a CycloneDX image SBOM. The
+       the engine's own allow-list, `security/image-allowlist.engine-<name>.json` (an empty list when the file is
+       absent; the gateway keeps `security/image-allowlist.json`, because the gate fails on stale entries and one
+       shared file would let an exception for one image fail every other image); `--expect-classes
+       os-pkgs,lang-pkgs`; and a CycloneDX image SBOM. Engine directory names must follow Docker's repository
+       component grammar, `[a-z0-9]+(-[a-z0-9]+)*`, or the discovery job fails. The
        gateway's runtime-contents gate is not applied, because it checks the gateway's `/app` tree. Each engine
        Dockerfile removes its own package managers. **Licence:** an engine's `licence-gate.mjs` judges what the build
        installs, so it runs inside `docker build`, and a denied licence fails the build. The job fails if a
