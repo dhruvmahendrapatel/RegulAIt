@@ -78,6 +78,8 @@ import {
   createEngineScheduleSchema,
   engineConfigNeedsApproval,
   engineHeartbeatSchema,
+  engineRunnerLeaseSchema,
+  type EngineRunnerNext,
   engineResultEnvelopeSchema,
   evaluateRunnerSelfTest,
   isTerminalEngineRunStatus,
@@ -268,6 +270,18 @@ export async function validateEngineRunRequest(
       const j = await entitlementRefusal(db, ctx.runAsUserId, input.target.judgeAgentId, "judge");
       if ("ok" in j) return j;
       judgeAgent = j;
+    }
+    // PR #205 review round 5 [70]: an engine calls the agent's provider model through the gateway;
+    // an agent with none set cannot be dispatched (its display name is not a model)
+    for (const [role, a] of [["target", targetAgent], ["judge", judgeAgent]] as const) {
+      if (a && !a.model) {
+        return {
+          ok: false,
+          status: 422,
+          error: "agent_not_dispatchable",
+          detail: `the ${role} agent '${a.name}' has no provider model set, so an engine cannot call it: set its model first`,
+        };
+      }
     }
   } else {
     const [art] = await db.select({ id: modelArtifacts.id }).from(modelArtifacts).where(eq(modelArtifacts.id, input.target.artifactId));
@@ -1127,45 +1141,51 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   app.post("/v1/engine-runner/lease", async (req, reply) => {
     const runnerId = req.authCtx.engineRunnerId!;
     const engineId = req.authCtx.engineId as EngineId;
+    // round 5 [67]: the runner says which build it is running now
+    const build = engineRunnerLeaseSchema.parse(req.body);
     await syncEngineManifest(db, manifest);
     const [runner] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
+    if (!runner) return reply.status(401).send({ error: "engine_runner_token_required", next: "revoked" satisfies EngineRunnerNext });
     const [engine] = await db.select().from(engines).where(eq(engines.id, engineId));
-    if (!engine || !engine.enabled) {
-      // PR #205 review round 4 [64]: say WHY, so a runner whose own last report failed keeps
-      // re-proving itself on a slow cadence, and one that an admin simply switched off just waits.
-      // A passing refresh never re-enables the engine: that stays an audited admin action.
-      const reason = runner && !runner.selfTestPassed ? "runner_self_test_failed" : "disabled";
-      return reply.status(409).send({
-        error: "engine_disabled",
-        reason,
-        detail:
-          reason === "runner_self_test_failed"
-            ? `engine ${engineId} is off and this runner's last self-test failed: submit a fresh one; an admin re-enables the engine`
-            : `engine ${engineId} is off: no work is leased`,
-      });
-    }
     const m = manifest[engineId];
     const now = new Date();
-    // PR #203 review [3]: decided NOW, never from a stored boolean — the runner's
-    // own report is re-evaluated against the manifest (digest, version, switches,
-    // egress, and its 24-hour freshness), and the engine's recorded self-test
-    // must still admit it (fresh, same build)
-    const runnerVerdict = runner ? evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now) : null;
+    // PR #205 review round 5 (ADR-0187 decision 67): every refusal carries the ONE signal the
+    // runner's state machine acts on, decided in this order:
+    //   1. a build other than the one this credential registered → `reenrol_required` [67];
+    //   2. this runner's own report does not pass NOW (stale after 24 h, failing, or for a build the
+    //      manifest no longer names) → `self_test_required`, WHATEVER the engine's state [69] — so a
+    //      runner keeps its report fresh while the engine is off and an admin can enable it;
+    //   3. the engine is off (an admin's switch, or a failed report switched it off) → `admin_disabled`:
+    //      the runner waits; a passing report never re-enables the engine (round 4 [64]);
+    //   4. the engine's recorded self-test no longer admits it → `self_test_required` (a runner's
+    //      passing report of the enabled build refreshes that record).
+    // PR #203 review [3] stands: decided now, never from a stored boolean.
+    const refuse = (next: EngineRunnerNext, error: string, detail: string) => reply.status(409).send({ error, next, detail });
+    if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
+      return refuse(
+        "reenrol_required",
+        "engine_runner_reenrol_required",
+        "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+      );
+    }
+    const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);
+    if (!runnerVerdict.passed) {
+      return refuse(
+        "self_test_required",
+        "engine_self_test_required",
+        `this runner's self-test does not pass now (${runnerVerdict.failures.join(", ")}): run it again and submit it`,
+      );
+    }
+    if (!engine || !engine.enabled) {
+      return refuse("admin_disabled", "engine_disabled", `engine ${engineId} is off: no work is leased until an admin enables it`);
+    }
     const engineAdmits = selfTestAdmitsEnable(engine, m, now);
-    if (
-      !runner ||
-      !runnerVerdict?.passed ||
-      runner.reportedDigest !== m.imageDigest ||
-      runner.reportedVersion !== m.version ||
-      !engineAdmits.ok
-    ) {
-      return reply.status(409).send({
-        error: "engine_self_test_required",
-        detail:
-          !runnerVerdict?.passed
-            ? `this runner's self-test does not pass now (${runnerVerdict?.failures.join(", ") ?? "no runner"}); re-enrol it from the signed image`
-            : `the engine's self-test no longer admits it (${engineAdmits.why ?? "build changed"}); run the self-test again`,
-      });
+    if (!engineAdmits.ok) {
+      return refuse(
+        "self_test_required",
+        "engine_self_test_required",
+        `the engine's self-test no longer admits it (${engineAdmits.why ?? "build changed"}): submit a fresh runner self-test`,
+      );
     }
     await engineRunTestHooks.beforeLeaseTx?.(runnerId);
     const leased = await db.transaction(async (tx) => {
@@ -1208,6 +1228,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         const [j] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
         if (!t || decide(t as AgentRow, "execute").effect !== "allow") refusal = "run_as_not_entitled";
         else if (run.judgeAgentId && (!j || decide(j as AgentRow, "execute").effect !== "allow")) refusal = "run_as_not_entitled";
+        // PR #205 review round 5 [70]: an agent with no provider model is never dispatched under
+        // another name (the display name is not a model): the run ends closed
+        else if (!t.model || (run.judgeAgentId && !j!.model)) refusal = "agent_not_dispatchable";
         else if (!run.projectId) refusal = "project_gone";
         else {
           // PR #203 review [10]: attribution is re-checked here too (a member removed
@@ -1290,7 +1313,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       return { kind: "leased" as const, run: updated!, apiKey, target, judge };
     });
     if (leased.kind === "revoked") {
-      return reply.status(401).send({ error: "engine_runner_revoked", detail: "this runner was revoked: its token authenticates nothing" });
+      return reply.status(401).send({ error: "engine_runner_revoked", next: "revoked" satisfies EngineRunnerNext, detail: "this runner was revoked: its token authenticates nothing" });
     }
     if (leased.kind === "busy" || leased.kind === "none") return reply.status(204).send();
     if (leased.kind === "refused") {
@@ -1306,6 +1329,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const run = leased.run;
     const [artifact] = run.targetArtifactId ? await db.select().from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId)) : [];
     const headers = (agentId: string): Record<string, string> => ({ [AGENT_HEADER]: agentId, [PROJECT_HEADER]: run.projectId! });
+    // round 5 [70]: the lease transaction refused an agent with no provider model (`agent_not_dispatchable`),
+    // so `model` is the agent's own provider model here, never its display name
     const body: EngineLease = {
       runId: run.id,
       engineId,
@@ -1313,9 +1338,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       spec: { config: run.config, trials: run.trials },
       target:
         leased.apiKey && leased.target
-          ? { baseUrl: gatewayBaseUrlOf(opts), model: leased.target.model ?? leased.target.name, apiKey: leased.apiKey, headers: headers(leased.target.id) }
+          ? { baseUrl: gatewayBaseUrlOf(opts), model: leased.target.model!, apiKey: leased.apiKey, headers: headers(leased.target.id) }
           : null,
-      judge: leased.apiKey && leased.judge ? { model: leased.judge.model ?? leased.judge.name, headers: headers(leased.judge.id) } : null,
+      judge: leased.apiKey && leased.judge ? { model: leased.judge.model!, headers: headers(leased.judge.id) } : null,
       artifacts: artifact ? [{ id: artifact.id, sha256: artifact.sha256, size: artifact.sizeBytes }] : [],
       deadlineAt: run.deadlineAt!.toISOString(),
       budgetUsd: leased.apiKey ? run.budgetUsd : null,

@@ -12,13 +12,13 @@
 import { describe, expect, it } from "vitest";
 import { createServer } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ENGINE_RESULT_VERSION, type EngineLease } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
-import { buildSelfTest, runOnce, RunnerClient, type RunnerHttp } from "./runner.js";
+import { buildSelfTest, RETAINED_RESULT_FILE, runOnce, RunnerClient, type RunnerHttp } from "./runner.js";
 
 const refuse = (code: string) => () => Promise.reject(Object.assign(new Error(code), { code }));
 
@@ -139,7 +139,7 @@ describe("runOnce", () => {
         seenDir = ctx.workDir;
         throw new Error("engine crashed");
       },
-      { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root },
+      { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root },
     );
     expect(out.outcome).toBe("failed");
     const posted = calls.find((c) => c.path.endsWith("/result"))!.body as Record<string, unknown>;
@@ -160,7 +160,7 @@ describe("runOnce", () => {
             reject(new Error("aborted"));
           });
         }),
-      { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, heartbeatMs: 20 },
+      { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, heartbeatMs: 20 },
     );
     expect(out.outcome).toBe("cancelled");
     expect(aborted).toBe(true);
@@ -227,7 +227,7 @@ describe("PR #203 review round 2", () => {
   it("[18] a transient failure or 5xx on the result is retried, keeping the work dir, until a 2xx", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
     const g = gateway(["throw", 503, 200]);
-    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, retryBaseMs: 1 });
+    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
     expect(out).toMatchObject({ outcome: "posted", status: 200 });
     expect(g.calls).toHaveLength(3);
     expect(g.seen()).toBe(true);
@@ -236,9 +236,24 @@ describe("PR #203 review round 2", () => {
   it("[18] a definitive 4xx stops the retries", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
     const g = gateway([409, 200]);
-    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, retryBaseMs: 1 });
+    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
     expect(out).toMatchObject({ status: 409 });
     expect(g.calls).toHaveLength(1);
+  });
+
+  it("PR #205 round 5 [68]: an undelivered run keeps ONLY its envelope, for the loop to retry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-retain-"));
+    const g = gateway(["throw", "throw", "throw"]);
+    const out = await runOnce(g.client, async (_l, ctx) => {
+      g.setDir(ctx.workDir);
+      await writeFile(path.join(ctx.workDir, "promptfoo-output.json"), "x".repeat(1024));
+      return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+    }, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1, maxResultAttempts: 2 });
+    expect(out).toMatchObject({ outcome: "undelivered" });
+    const dir = path.join(root, lease2.runId);
+    expect(await readdir(dir)).toEqual([RETAINED_RESULT_FILE]);
+    const kept = JSON.parse(await readFile(path.join(dir, RETAINED_RESULT_FILE), "utf8")) as { runId: string; deadlineAt: string; envelope: { runId: string } };
+    expect(kept).toMatchObject({ runId: lease2.runId, deadlineAt: lease2.deadlineAt, envelope: { runId: lease2.runId } });
   });
 
   it("[22] the abort listener is removed when the process ends", async () => {

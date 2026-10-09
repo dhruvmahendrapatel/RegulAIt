@@ -13,13 +13,15 @@
  * a clean result.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { rm, mkdir } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import {
   ENGINE_RESULT_VERSION,
+  ENGINE_RUNNER_NEXT,
   ENGINE_RUNNER_TOKEN_PREFIX,
   type EngineId,
   type EngineLease,
   type EngineResultEnvelope,
+  type EngineRunnerNext,
   type RunnerSelfTest,
 } from "@regulait/shared";
 import { probeEgress, type EgressProbeOptions } from "./egress.js";
@@ -46,17 +48,28 @@ export function runnerTokenHash(secret: string): string {
   return createHash("sha256").update(secret).digest("hex");
 }
 
-/** a refusal from a runner route, with the gateway's error code (never the token) */
+/** the gateway's `next` signal, when it gave a known one (PR #205 review round 5) */
+function nextOf(json: { next?: unknown }): EngineRunnerNext | null {
+  return typeof json.next === "string" && (ENGINE_RUNNER_NEXT as readonly string[]).includes(json.next) ? (json.next as EngineRunnerNext) : null;
+}
+
+/** a refusal from a runner route, with the gateway's error code and `next` signal (never the token) */
 export class RunnerHttpError extends Error {
   constructor(
     readonly route: "register" | "lease" | "self-test",
     readonly status: number,
     readonly code: string | null,
-    /** the gateway's `reason` beside the code, when it gave one (PR #205 review round 4 [64]) */
-    readonly reason: string | null = null,
+    /** PR #205 review round 5: the one signal the runner's state machine acts on, when the gateway gave it */
+    readonly next: EngineRunnerNext | null = null,
   ) {
-    super(`${route} refused (${status}${code ? ` ${code}` : ""}${reason ? `: ${reason}` : ""})`);
+    super(`${route} refused (${status}${code ? ` ${code}` : ""}${next ? `; next: ${next}` : ""})`);
   }
+}
+
+/** the build a runner is running, presented on every lease (round 5 [67]) */
+export interface RunnerBuild {
+  imageDigest: string;
+  engineVersion: string;
 }
 
 /** the five runner routes, nothing else */
@@ -85,20 +98,39 @@ export class RunnerClient {
    * nothing secret comes back. Retrying with the same secret after a lost response returns the same
    * runner.
    */
-  async register(enrollmentToken: string, runnerSecret: string, body: { name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest }) {
-    const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, { ...body, tokenHash: runnerTokenHash(runnerSecret) });
-    const json = ((await res.json().catch(() => null)) ?? {}) as { runnerId?: string; selfTest?: { passed: boolean; failures: string[] }; replayed?: boolean; error?: string };
+  async register(
+    enrollmentToken: string,
+    runnerSecret: string,
+    body: { name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest },
+    /** round 5 [67]: the runner token this registration replaces (a build change), as proof of possession */
+    supersedes?: string,
+  ) {
+    const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, {
+      ...body,
+      tokenHash: runnerTokenHash(runnerSecret),
+      ...(supersedes ? { supersedes } : {}),
+    });
+    const json = ((await res.json().catch(() => null)) ?? {}) as {
+      runnerId?: string;
+      selfTest?: { passed: boolean; failures: string[] };
+      replayed?: boolean;
+      supersededRunnerId?: string | null;
+      error?: string;
+    };
     if (res.status !== 201 || !json.runnerId) throw new RunnerHttpError("register", res.status, json.error ?? null);
     this.token = runnerSecret;
-    return json as { runnerId: string; selfTest: { passed: boolean; failures: string[] }; replayed?: boolean };
+    return json as { runnerId: string; selfTest: { passed: boolean; failures: string[] }; replayed?: boolean; supersededRunnerId?: string | null };
   }
 
-  /** PR #205 review [53]: submit a fresh self-test report (the lease refuses one older than 24 h) */
-  async submitSelfTest(selfTest: RunnerSelfTest): Promise<{ passed: boolean; failures: string[] }> {
+  /**
+   * PR #205 review [53]: submit a fresh self-test report. Round 5: the answer carries `next`, the
+   * same signal a lease gives (a passing report leases when the engine is on, waits when it is off).
+   */
+  async submitSelfTest(selfTest: RunnerSelfTest): Promise<{ passed: boolean; failures: string[]; next: EngineRunnerNext | null }> {
     const res = await this.call("POST", "/v1/engine-runner/self-test", this.bearer(), { selfTest });
-    const json = ((await res.json().catch(() => null)) ?? {}) as { selfTest?: { passed: boolean; failures: string[] }; error?: string };
-    if (res.status !== 200 || !json.selfTest) throw new RunnerHttpError("self-test", res.status, json.error ?? null);
-    return json.selfTest;
+    const json = ((await res.json().catch(() => null)) ?? {}) as { selfTest?: { passed: boolean; failures: string[] }; error?: string; next?: unknown };
+    if (res.status !== 200 || !json.selfTest) throw new RunnerHttpError("self-test", res.status, json.error ?? null, nextOf(json));
+    return { ...json.selfTest, next: nextOf(json) };
   }
 
   useToken(token: string): void {
@@ -110,13 +142,13 @@ export class RunnerClient {
     return this.token;
   }
 
-  /** a lease, or null when there is no work (204) */
-  async lease(): Promise<EngineLease | null> {
-    const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer());
+  /** a lease, or null when there is no work (204). Round 5 [67]: presents the build it is running. */
+  async lease(build: RunnerBuild): Promise<EngineLease | null> {
+    const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer(), { imageDigest: build.imageDigest, engineVersion: build.engineVersion });
     if (res.status === 204) return null;
     if (res.status !== 200) {
-      const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string; reason?: string };
-      throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null, typeof json.reason === "string" ? json.reason : null);
+      const json = ((await res.json().catch(() => null)) ?? {}) as { error?: string; next?: unknown };
+      throw new RunnerHttpError("lease", res.status, typeof json.error === "string" ? json.error : null, nextOf(json));
     }
     return (await res.json()) as EngineLease;
   }
@@ -165,6 +197,8 @@ export type EngineAdapter = (
 export interface RunOnceOptions {
   engineId: EngineId;
   engineVersion: string;
+  /** round 5 [67]: the image digest this runner runs (presented on every lease with engineVersion) */
+  imageDigest: string;
   workRoot: string;
   heartbeatMs?: number;
   /** first retry delay for the result POST (doubles each time, capped at 30 s) */
@@ -203,6 +237,74 @@ export async function postResultWithRetry(
   return null;
 }
 
+/** PR #205 review round 5 [68]: the one file an undelivered run's work directory keeps */
+export const RETAINED_RESULT_FILE = "undelivered-result.json";
+export interface RetainedResult {
+  runId: string;
+  deadlineAt: string;
+  envelope: EngineResultEnvelope;
+}
+const RUN_DIR = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * PR #205 review round 5 [68]: retry the delivery of every retained result, once each (the loop's
+ * backoff spaces the attempts; a network error, a 5xx, a 408 or a 429 is not definitive, exactly
+ * as in `postResultWithRetry`). A work directory goes when the gateway answered definitively (a 2xx,
+ * or a 4xx such as 409 the run ended or timed out), when the run's deadline has passed (the gateway
+ * has ended it), or when it holds no readable result (a crash leftover: nothing to deliver). Only
+ * run-id directories are touched. Returns how many are still retained.
+ */
+export async function retryRetainedResults(
+  client: RunnerClient,
+  workRoot: string,
+  opts: { now?: () => number; log?: (message: string) => void } = {},
+): Promise<number> {
+  const root = workRoot.replace(/\/$/, "");
+  let names: string[];
+  try {
+    names = (await readdir(root, { withFileTypes: true })).filter((d) => d.isDirectory() && RUN_DIR.test(d.name)).map((d) => d.name);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw e;
+  }
+  const now = opts.now ?? Date.now;
+  let retained = 0;
+  for (const name of names) {
+    const dir = `${root}/${name}`;
+    let r: RetainedResult | null = null;
+    try {
+      const parsed = JSON.parse(await readFile(`${dir}/${RETAINED_RESULT_FILE}`, "utf8")) as Partial<RetainedResult>;
+      if (parsed.runId === name && typeof parsed.deadlineAt === "string" && parsed.envelope) r = parsed as RetainedResult;
+    } catch {
+      r = null;
+    }
+    if (!r) {
+      opts.log?.(`run ${name}: a work directory with no result to deliver was removed`);
+      await rm(dir, { recursive: true, force: true });
+      continue;
+    }
+    const deadline = Date.parse(r.deadlineAt);
+    if (!Number.isFinite(deadline) || now() >= deadline) {
+      opts.log?.(`run ${name}: the deadline passed before its result was delivered; the gateway has ended it`);
+      await rm(dir, { recursive: true, force: true });
+      continue;
+    }
+    let status: number | null = null;
+    try {
+      status = await client.result(r.runId, r.envelope);
+    } catch {
+      status = null;
+    }
+    if (status !== null && status < 500 && status !== 408 && status !== 429) {
+      opts.log?.(`run ${name}: retained result delivered (${status})`);
+      await rm(dir, { recursive: true, force: true });
+    } else {
+      retained++;
+    }
+  }
+  return retained;
+}
+
 /** an envelope that reports a run that produced nothing usable */
 export function failedEnvelope(lease: EngineLease, engineVersion: string, status: "failed" | "timeout" | "cancelled", errorCode: string): EngineResultEnvelope {
   return {
@@ -235,7 +337,7 @@ export async function runOnce(
   adapter: EngineAdapter,
   opts: RunOnceOptions,
 ): Promise<{ outcome: "idle" | "posted" | "cancelled" | "failed" | "undelivered"; runId?: string; status?: number }> {
-  const lease = await client.lease();
+  const lease = await client.lease({ imageDigest: opts.imageDigest, engineVersion: opts.engineVersion });
   if (!lease) return { outcome: "idle" };
   const workDir = `${opts.workRoot.replace(/\/$/, "")}/${lease.runId}`;
   await mkdir(workDir, { recursive: true, mode: 0o700 });
@@ -284,6 +386,12 @@ export async function runOnce(
       ...(opts.maxResultAttempts !== undefined ? { maxAttempts: opts.maxResultAttempts } : {}),
     });
     if (status === null || status >= 500 || status === 408 || status === 429) {
+      // PR #205 review round 5 [68]: keep ONLY the envelope (the engine's own files go now), so the
+      // loop can retry the delivery before its next lease and the tmpfs does not fill up
+      await rm(workDir, { recursive: true, force: true });
+      await mkdir(workDir, { recursive: true, mode: 0o700 });
+      const retained: RetainedResult = { runId: lease.runId, deadlineAt: lease.deadlineAt, envelope };
+      await writeFile(`${workDir}/${RETAINED_RESULT_FILE}`, JSON.stringify(retained), { mode: 0o600 });
       keepWorkDir = true;
       return { outcome: "undelivered", runId: lease.runId };
     }

@@ -1,37 +1,32 @@
 /**
- * ADR-0187 decisions 48 and 49 (PR #205 review) — THE RUNNER'S LIFE, shared by every engine shim:
- * a runner token that survives a restart, and a loop that waits instead of dying.
+ * ADR-0187 — THE RUNNER'S LIFE, shared by every engine shim: a runner token that survives a
+ * restart, and a loop that is an explicit STATE MACHINE driven by one gateway signal.
  *
- * Token (decision 49). The enrolment token is single-use, so a runner that kept its runner token
- * only in memory was bricked by any restart. The token registration returns is now written to a
- * file on the runner's own volume (`FileRunnerTokenStore`: mode 0600, written atomically, never
- * logged). At start, a stored token is used and the enrolment token is ignored. Only when the
- * gateway refuses the stored token (401: revoked or unknown) is the enrolment token tried, once;
- * if there is none, or it is refused too (spent, expired), the runner stops with a message saying
- * what the admin must do. The gateway still refuses a second registration with the same enrolment
- * token.
+ * Token (decisions 49 and 54). The runner generates its own token, persists it on its own volume
+ * (`FileRunnerTokenStore`: mode 0600, written atomically, never logged) BEFORE it registers, and
+ * sends only its hash, so a lost response loses nothing. At start a stored token is used and the
+ * enrolment token is ignored. The state volume is never deleted: a new token replaces the file
+ * only when this runner enrols.
  *
- * Loop (decision 48). The documented flow is register → the admin enables the engine; until then
- * a lease answers 409 `engine_disabled` (or `engine_self_test_required` while the self-test is
- * stale). Those are WAITING states: the loop backs off (doubling, capped) and keeps leasing. A
- * network error or a 5xx is retried the same way. Only a refused credential with no way to
- * re-enrol ends the process.
+ * States (PR #205 review round 5, decision 67 — the table is in the ADR and `transition` below):
+ *   enrolling    no credential yet: register with the enrolment token
+ *   leasing      retry retained results [68], then lease (presenting the build it runs [67])
+ *   refreshing   re-run the self-test and submit it on the runner-token route
+ *   waiting      a slow, capped backoff, then lease again (the engine is off by an admin, or a
+ *                refused report waits for its cadence, or too many results are retained)
+ *   reenrolling  register again with the enrolment token (a build change, or a revoked credential)
+ *   stopped      the runner cannot continue without an admin: it says what to do and exits
  *
- * Self-test (decision 53). After 24 hours the lease refuses the runner's report
- * (`engine_self_test_required`); the loop re-runs the self-test, submits it on the runner-token
- * route, and leases again at once if the gateway accepted it (at most once per refusal streak).
- *
- * Enrolment (decision 54). The runner generates its own token, persists it, then registers only
- * its hash, so nothing secret comes back and a lost response is recoverable (see `enrol`).
+ * Every lease refusal and every self-test answer carries `next` (`ok`, `admin_disabled`,
+ * `self_test_required`, `reenrol_required`, `revoked`); the loop acts on that and nothing else. A
+ * 401 without one means `revoked`. A network error, a 5xx, a 408, a 429 or a refusal with no signal
+ * is transient: backed off and retried, never a state change of its own.
  */
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ENGINE_RUNNER_TOKEN_PREFIX, type RunnerSelfTest } from "@regulait/shared";
-import { generateRunnerSecret, RunnerHttpError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
-
-/** lease refusals that mean "wait": the engine is off, or its self-test must be refreshed */
-export const LEASE_WAIT_CODES: ReadonlySet<string> = new Set(["engine_disabled", "engine_self_test_required"]);
+import { ENGINE_RUNNER_TOKEN_PREFIX, type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
+import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
 
 export interface RunnerTokenStore {
   load(): Promise<string | null>;
@@ -64,7 +59,7 @@ export class FileRunnerTokenStore implements RunnerTokenStore {
   }
 }
 
-/** the runner cannot continue without an admin (a refused credential and nothing to re-enrol with) */
+/** the runner cannot continue without an admin (it says what the admin must do) */
 export class RunnerFatalError extends Error {}
 
 const UNSET_DIGEST = `sha256:${"0".repeat(64)}`;
@@ -84,14 +79,80 @@ export function pinnedImageDigest(imageRef: string | undefined, imageDigest: str
   return m[2]!;
 }
 
+// ---------------------------------------------------------------------------
+// The state machine (pure: the table-driven test pins every row)
+// ---------------------------------------------------------------------------
+
+export const RUNNER_STATES = ["enrolling", "leasing", "refreshing", "waiting", "reenrolling", "stopped"] as const;
+export type RunnerState = (typeof RUNNER_STATES)[number];
+
+export type RunnerEvent =
+  /** the gateway's signal (a lease refusal or a self-test answer; a 200/204 lease is `ok`) */
+  | { kind: "next"; next: EngineRunnerNext }
+  /** nothing definitive arrived (a network error, a 5xx, a 408, a 429, a refusal with no signal) */
+  | { kind: "transient" }
+  /** a registration landed */
+  | { kind: "enrolled" }
+  /** no enrolment token to use, or it was refused: an admin must act */
+  | { kind: "enrolment_refused" }
+  /** a wait is over */
+  | { kind: "wait_over" }
+  /** round 5 [68]: too many undelivered results are retained to take more work */
+  | { kind: "retention_full" };
+
+export interface TransitionContext {
+  /** the self-test cadence allows a submission now (none yet, or the last definitive one is old enough) */
+  refreshDue: boolean;
+  /** an enrolment token is set and has not been tried by this process */
+  enrolmentAvailable: boolean;
+}
+
+/** THE TABLE (ADR-0187 decision 67). Anything not named keeps the state. */
+export function transition(state: RunnerState, event: RunnerEvent, ctx: TransitionContext): RunnerState {
+  if (state === "stopped") return "stopped";
+  switch (event.kind) {
+    case "enrolled":
+      return state === "enrolling" || state === "reenrolling" ? "leasing" : state;
+    case "enrolment_refused":
+      return state === "enrolling" || state === "reenrolling" ? "stopped" : state;
+    case "transient":
+      // a lost refresh goes back to leasing (the cadence is not used up); everything else retries itself
+      return state === "refreshing" ? "leasing" : state;
+    case "wait_over":
+      return state === "waiting" ? "leasing" : state;
+    case "retention_full":
+      return state === "leasing" ? "waiting" : state;
+    case "next":
+      if (state !== "leasing" && state !== "refreshing") return state;
+      switch (event.next) {
+        case "ok":
+          return "leasing";
+        case "admin_disabled":
+          return "waiting";
+        case "self_test_required":
+          // a lease that asks for a report refreshes when the cadence allows; a refused report waits
+          return state === "leasing" && ctx.refreshDue ? "refreshing" : "waiting";
+        case "reenrol_required":
+        case "revoked":
+          return ctx.enrolmentAvailable ? "reenrolling" : "stopped";
+      }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The driver
+// ---------------------------------------------------------------------------
+
 export interface RunnerLoopOptions extends RunOnceOptions {
   store: RunnerTokenStore;
   /** the one-time enrolment token from the environment, or null */
   enrollmentToken: string | null;
   /** what registration reports (built fresh each time: the self-test is current) */
   registration: () => Promise<{ name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest }>;
-  /** round 4 [64]: how often a runner disabled for its own failed report re-proves itself (default 15 min) */
-  failedSelfTestRefreshMs?: number;
+  /** the self-test cadence: after a definitive submission, the next one waits this long (default 15 min) */
+  selfTestRefreshMs?: number;
+  /** round 5 [68]: refuse to lease while this many undelivered results are retained (default 3) */
+  maxRetainedResults?: number;
   /** clock seam for tests (ms) */
   now?: () => number;
   /** register attempts on a transient failure, same secret each time (default 5) */
@@ -101,163 +162,188 @@ export interface RunnerLoopOptions extends RunOnceOptions {
   /** first wait after a refusal or an error, doubling up to maxBackoffMs (defaults 5 s and 5 min) */
   backoffMs?: number;
   maxBackoffMs?: number;
-  /** stop after this many lease attempts (tests); unset = forever */
+  /** stop after this many visits to `leasing` (tests); unset = forever */
   maxIterations?: number;
   sleep?: (ms: number) => Promise<void>;
   /** never receives a token */
   log?: (message: string) => void;
 }
 
-const MESSAGE_NO_ENROLMENT =
-  "the gateway refused this runner's stored token (revoked or unknown) and no usable enrolment token is set: " +
+const MESSAGE_FIRST =
+  "this runner has no stored token and no enrolment token is set: " +
+  "mint an enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner";
+const MESSAGE_REVOKED =
+  "the gateway refused this runner's token (revoked or unknown) and no unused enrolment token is set: " +
   "mint a new enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner";
+const MESSAGE_REENROL =
+  "this runner's token was registered for another build (the image or engine version changed) and no unused enrolment token is set: " +
+  "mint a new enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner (the old registration is revoked when it re-enrols)";
 
-/**
- * PR #205 review [54]: enrol with a runner token the runner generates itself and PERSISTS BEFORE
- * calling register (only its hash is sent; nothing secret comes back). A lost response loses
- * nothing: a transient failure is retried with the same secret (the gateway answers a replay of
- * the same enrolment token and hash with the same runner), and after a crash the stored secret is
- * the credential if the registration landed — or is refused (401) and replaced if it did not.
- */
-async function enrol(client: RunnerClient, opts: RunnerLoopOptions, sleep: (ms: number) => Promise<void>): Promise<void> {
-  if (!opts.enrollmentToken) throw new RunnerFatalError(MESSAGE_NO_ENROLMENT);
-  const secret = generateRunnerSecret();
-  await opts.store.save(secret);
-  const body = await opts.registration();
-  let reg: Awaited<ReturnType<RunnerClient["register"]>> | null = null;
-  for (let attempt = 1; reg === null; attempt++) {
-    try {
-      reg = await client.register(opts.enrollmentToken, secret, body);
-    } catch (e) {
-      if (e instanceof RunnerHttpError && e.status === 401) {
-        throw new RunnerFatalError(`the enrolment token was refused (${e.code ?? "401"}: spent, expired or for another engine); ${MESSAGE_NO_ENROLMENT}`);
-      }
-      const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
-      if (!transient || attempt >= (opts.registerAttempts ?? 5)) throw e;
-      await sleep(Math.min(30_000, (opts.backoffMs ?? 5_000) * 2 ** (attempt - 1)));
-    }
+/** a definitive answer or a transient failure, from anything a runner route threw */
+function eventOf(e: unknown): RunnerEvent {
+  if (e instanceof RunnerHttpError) {
+    if (e.next) return { kind: "next", next: e.next };
+    if (e.status === 401) return { kind: "next", next: "revoked" };
   }
-  opts.log?.(`registered runner ${reg.runnerId}${reg.replayed ? " (replayed)" : ""}; self-test ${reg.selfTest.passed ? "passed" : `failed: ${reg.selfTest.failures.join(", ")}`}`);
+  return { kind: "transient" };
 }
 
-/** PR #205 review [53]: re-run the self-test and submit it; true when the gateway accepted a passing report */
-/**
- * [53] Re-run the self-test and submit it. PR #205 review round 3 [60]: the outcome says whether
- * the gateway ANSWERED — `passed` / `refused` (a definitive answer: a verdict, or a 4xx with a
- * reason) — or nothing definitive happened (`transient`: a network error, a 5xx, a 408 or a 429),
- * in which case the caller must try again after its normal backoff rather than give up.
- */
-async function refreshSelfTest(client: RunnerClient, opts: RunnerLoopOptions): Promise<"passed" | "refused" | "transient"> {
-  try {
-    const verdict = await client.submitSelfTest((await opts.registration()).selfTest);
-    opts.log?.(`submitted a fresh self-test: ${verdict.passed ? "passed" : `failed: ${verdict.failures.join(", ")}`}`);
-    return verdict.passed ? "passed" : "refused";
-  } catch (e) {
-    if (e instanceof RunnerHttpError && e.status === 401) throw e;
-    const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
-    opts.log?.(`could not submit a fresh self-test (${e instanceof RunnerHttpError ? (e.code ?? e.status) : "unreachable"})${transient ? "; will retry" : ""}`);
-    return transient ? "transient" : "refused";
-  }
+function whyOf(e: unknown): string {
+  return e instanceof RunnerHttpError ? (e.code ?? String(e.status)) : "unreachable";
 }
 
 /**
- * Connect (stored token first, enrolment only without one), then lease and run forever (or for
- * `maxIterations`). Throws `RunnerFatalError` only when the credential is refused and cannot be
- * replaced.
+ * Run the state machine until it stops (or for `maxIterations` visits to `leasing`). Throws
+ * `RunnerFatalError` with what the admin must do when it stops.
  */
 export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter, opts: RunnerLoopOptions): Promise<void> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const clock = opts.now ?? Date.now;
   const base = opts.backoffMs ?? 5_000;
   const max = opts.maxBackoffMs ?? 300_000;
+  const cadence = opts.selfTestRefreshMs ?? 15 * 60_000;
+  const cap = opts.maxRetainedResults ?? 3;
+
   const stored = await opts.store.load();
-  // set once the enrolment token has been spent (or found unusable) in this process
-  let enrolled = false;
+  let state: RunnerState = stored ? "leasing" : "enrolling";
   if (stored) {
     client.useToken(stored);
     opts.log?.("using the stored runner token");
-  } else {
-    await enrol(client, opts, sleep);
-    enrolled = true;
   }
+  /** the credential in use (what a re-enrolment after a build change supersedes) */
+  let held: string | null = stored;
+  /** the enrolment token is tried at most once per process (it is single-use) */
+  let enrolmentTried = false;
+  /** an enrolment in progress: the same secret and body on every retry */
+  let pending: { secret: string; body: Awaited<ReturnType<RunnerLoopOptions["registration"]>>; supersedes: string | null; attempts: number } | null = null;
+  /** set when the move to `reenrolling` was for a build change (the held token is then superseded) */
+  let supersedeOnReenrol = false;
+  let stopMessage = stored ? MESSAGE_REVOKED : MESSAGE_FIRST;
+  let lastRefreshAt: number | null = null;
   let backoff = base;
   let waitingOn: string | null = null;
-  // a fresh self-test is submitted at most once per refusal streak (no tight loop when it fails)
-  let refreshedSinceAccepted = false;
-  // round 4 [64]: when this runner last submitted a definitive refresh while disabled for its own failed report
-  let lastFailedRefreshAt: number | null = null;
-  const clock = opts.now ?? Date.now;
-  for (let i = 0; opts.maxIterations === undefined || i < opts.maxIterations; i++) {
-    try {
-      const r = await runOnce(client, adapter, opts);
-      backoff = base;
-      refreshedSinceAccepted = false;
-      if (waitingOn) opts.log?.(`lease accepted again (was ${waitingOn})`);
-      waitingOn = null;
-      if (r.outcome === "idle") await sleep(opts.idleMs ?? 5_000);
-      else opts.log?.(`run ${r.runId}: ${r.outcome}${r.status ? ` (${r.status})` : ""}`);
-      continue;
-    } catch (e) {
-      if (e instanceof RunnerHttpError && (e.route === "lease" || e.route === "self-test") && e.status === 401) {
-        // the credential is gone: re-enrol once if we can, else stop
-        if (enrolled) throw new RunnerFatalError(MESSAGE_NO_ENROLMENT);
-        opts.log?.(`the stored runner token was refused (${e.code ?? "401"}); trying the enrolment token`);
-        enrolled = true;
-        await enrol(client, opts, sleep);
-        continue;
-      }
-      if (e instanceof RunnerFatalError) throw e;
-      // [53] a stale report: re-run the self-test, submit it, and lease again at once if it passed
-      // Round 3 [60]: only a DEFINITIVE answer latches (a verdict, or a 4xx refusal); a transient
-      // failure leaves the latch open, so the refresh is tried again after the normal backoff
-      if (e instanceof RunnerHttpError && e.code === "engine_self_test_required" && !refreshedSinceAccepted) {
+  let leasingVisits = 0;
+
+  // read through a function: `go` moves the state, so no narrowed copy of it may be trusted
+  const current = (): RunnerState => state;
+  const go = (event: RunnerEvent, why?: string) => {
+    if (event.kind === "next" && (event.next === "reenrol_required" || event.next === "revoked")) {
+      supersedeOnReenrol = event.next === "reenrol_required";
+      stopMessage = supersedeOnReenrol ? MESSAGE_REENROL : MESSAGE_REVOKED;
+    }
+    const from = state;
+    state = transition(state, event, {
+      refreshDue: lastRefreshAt === null || clock() - lastRefreshAt >= cadence,
+      enrolmentAvailable: !!opts.enrollmentToken && !enrolmentTried,
+    });
+    if (from !== state) opts.log?.(`state: ${from} -> ${state}${why ? ` (${why})` : ""}`);
+  };
+  const backOff = async () => {
+    await sleep(backoff);
+    backoff = Math.min(max, backoff * 2);
+  };
+
+  while (current() !== "stopped") {
+    switch (current()) {
+      case "enrolling":
+      case "reenrolling": {
+        if (!pending) {
+          if (!opts.enrollmentToken || enrolmentTried) {
+            go({ kind: "enrolment_refused" }, "no unused enrolment token");
+            break;
+          }
+          enrolmentTried = true;
+          const supersedes = current() === "reenrolling" && supersedeOnReenrol ? held : null;
+          // decision 54: the new secret is persisted BEFORE the request leaves
+          const secret = generateRunnerSecret();
+          await opts.store.save(secret);
+          pending = { secret, body: await opts.registration(), supersedes, attempts: 0 };
+        }
+        const p = pending;
         try {
-          const outcome = await refreshSelfTest(client, opts);
-          if (outcome !== "transient") refreshedSinceAccepted = true;
-          if (outcome === "passed") continue;
-        } catch (inner) {
-          if (inner instanceof RunnerHttpError && inner.status === 401) {
-            if (enrolled) throw new RunnerFatalError(MESSAGE_NO_ENROLMENT);
-            enrolled = true;
-            await enrol(client, opts, sleep);
-            continue;
+          const reg = await client.register(opts.enrollmentToken!, p.secret, p.body, p.supersedes ?? undefined);
+          opts.log?.(
+            `registered runner ${reg.runnerId}${reg.replayed ? " (replayed)" : ""}${reg.supersededRunnerId ? `; the previous registration ${reg.supersededRunnerId} is revoked` : ""}; ` +
+              `self-test ${reg.selfTest.passed ? "passed" : `failed: ${reg.selfTest.failures.join(", ")}`}`,
+          );
+          held = p.secret;
+          pending = null;
+          lastRefreshAt = null;
+          backoff = base;
+          go({ kind: "enrolled" });
+        } catch (e) {
+          const transient = !(e instanceof RunnerHttpError) || e.status >= 500 || e.status === 408 || e.status === 429;
+          p.attempts++;
+          if (!transient || p.attempts >= (opts.registerAttempts ?? 5)) {
+            stopMessage =
+              e instanceof RunnerHttpError && e.status === 401
+                ? `the enrolment token was refused (${e.code ?? "401"}: spent, expired or for another engine); ${stopMessage}`
+                : `registration did not succeed (${whyOf(e)}); ${stopMessage}`;
+            go({ kind: "enrolment_refused" }, whyOf(e));
+            break;
           }
-          throw inner;
+          await sleep(Math.min(30_000, base * 2 ** (p.attempts - 1)));
+          go({ kind: "transient" });
         }
+        break;
       }
-      // Round 4 [64]: the engine is off BECAUSE this runner's last report failed (the gateway says
-      // so in `reason`). Keep re-proving on a slow cadence — a temporary network-policy problem must
-      // not need a re-enrolment — but never lease harder: a passing report updates only this
-      // runner's stored report; re-enabling the engine stays an audited admin action with step-up.
-      // A transient submission failure does not use up the cadence (it is retried after the backoff).
-      // An engine an admin simply switched off (`reason: disabled`) gets no refreshes at all.
-      if (e instanceof RunnerHttpError && e.code === "engine_disabled" && e.reason === "runner_self_test_failed") {
-        const t = clock();
-        if (lastFailedRefreshAt === null || t - lastFailedRefreshAt >= (opts.failedSelfTestRefreshMs ?? 15 * 60_000)) {
-          try {
-            const outcome = await refreshSelfTest(client, opts);
-            if (outcome !== "transient") lastFailedRefreshAt = t;
-          } catch (inner) {
-            if (inner instanceof RunnerHttpError && inner.status === 401) {
-              if (enrolled) throw new RunnerFatalError(MESSAGE_NO_ENROLMENT);
-              enrolled = true;
-              await enrol(client, opts, sleep);
-              continue;
-            }
-            throw inner;
+
+      case "leasing": {
+        if (opts.maxIterations !== undefined && leasingVisits >= opts.maxIterations) return;
+        leasingVisits++;
+        // round 5 [68]: retained results are delivered (or dropped) before any new work
+        const retained = await retryRetainedResults(client, opts.workRoot, { now: clock, ...(opts.log ? { log: opts.log } : {}) });
+        if (retained >= cap) {
+          if (waitingOn !== "retention_full") opts.log?.(`waiting: ${retained} undelivered results are retained; no new work until they are delivered`);
+          waitingOn = "retention_full";
+          go({ kind: "retention_full" }, "retention_full");
+          break;
+        }
+        try {
+          const r = await runOnce(client, adapter, opts);
+          backoff = base;
+          lastRefreshAt = null;
+          if (waitingOn) opts.log?.(`lease accepted again (was ${waitingOn})`);
+          waitingOn = null;
+          if (r.outcome === "idle") await sleep(opts.idleMs ?? 5_000);
+          else opts.log?.(`run ${r.runId}: ${r.outcome}${r.status ? ` (${r.status})` : ""}`);
+          go({ kind: "next", next: "ok" });
+        } catch (e) {
+          const event = eventOf(e);
+          const why = event.kind === "next" ? event.next : whyOf(e);
+          if (why !== waitingOn) opts.log?.(event.kind === "next" ? `lease refused: ${why}` : `lease failed (${why}); retrying`);
+          waitingOn = why;
+          if (event.kind === "transient") await backOff();
+          go(event, why);
+        }
+        break;
+      }
+
+      case "refreshing": {
+        try {
+          const verdict = await client.submitSelfTest((await opts.registration()).selfTest);
+          lastRefreshAt = clock();
+          opts.log?.(`submitted a fresh self-test: ${verdict.passed ? "passed" : `failed: ${verdict.failures.join(", ")}`}`);
+          go({ kind: "next", next: verdict.next ?? (verdict.passed ? "ok" : "self_test_required") }, verdict.next ?? undefined);
+        } catch (e) {
+          const event = eventOf(e);
+          if (event.kind === "transient") {
+            opts.log?.(`could not submit a fresh self-test (${whyOf(e)}); will retry`);
+            await backOff();
+          } else {
+            lastRefreshAt = clock();
           }
+          go(event, event.kind === "next" ? event.next : whyOf(e));
         }
+        break;
       }
-      const why = e instanceof RunnerHttpError ? (e.code ?? String(e.status)) : "unreachable";
-      if (why !== waitingOn) {
-        opts.log?.(
-          e instanceof RunnerHttpError && e.code !== null && LEASE_WAIT_CODES.has(e.code)
-            ? `waiting: ${e.code} (an admin enables the engine after its self-test passes)`
-            : `lease failed (${why}); retrying`,
-        );
+
+      case "waiting": {
+        await backOff();
+        go({ kind: "wait_over" });
+        break;
       }
-      waitingOn = why;
-      await sleep(backoff);
-      backoff = Math.min(max, backoff * 2);
     }
   }
+  throw new RunnerFatalError(stopMessage);
 }

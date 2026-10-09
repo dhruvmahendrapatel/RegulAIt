@@ -221,8 +221,9 @@ async function startRun(body: Record<string, unknown>, who = alice.key) {
   });
 }
 
+const PF_BUILD = () => ({ imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version });
 async function lease(runner = pfRunner) {
-  const r = await inject("POST", "/v1/engine-runner/lease", runner.auth);
+  const r = await inject("POST", "/v1/engine-runner/lease", runner.auth, PF_BUILD());
   return r;
 }
 
@@ -512,7 +513,7 @@ describe("runner credentials", () => {
   it("a disabled engine cannot be leased or started", async () => {
     const gk = await enrol("garak", GK_DIGEST, MANIFEST.garak.version);
     expect(gk.selfTest.passed).toBe(true);
-    const l = await inject("POST", "/v1/engine-runner/lease", gk.auth);
+    const l = await inject("POST", "/v1/engine-runner/lease", gk.auth, { imageDigest: GK_DIGEST, engineVersion: MANIFEST.garak.version });
     expect(l.statusCode, l.body).toBe(409);
     expect(l.json().error).toBe("engine_disabled");
     const s = await inject("POST", "/v1/engine-runs", alice.key, { engineId: "garak", target: { agentId: targetId }, config: { sets: ["basic"] }, projectId });
@@ -1124,7 +1125,7 @@ describe("review round 2", () => {
       if (runnerId === second.id) await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'revoked mid-lease' WHERE id = ${second.id}`);
     };
     try {
-      const l = await inject("POST", "/v1/engine-runner/lease", second.auth);
+      const l = await inject("POST", "/v1/engine-runner/lease", second.auth, PF_BUILD());
       expect(l.statusCode, l.body).toBe(401);
       expect(l.json().error).toBe("engine_runner_revoked");
     } finally {

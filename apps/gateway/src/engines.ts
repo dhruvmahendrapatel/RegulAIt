@@ -44,6 +44,7 @@ import {
   engineRunnerRegisterSchema,
   engineRunnerSelfTestSchema,
   evaluateRunnerSelfTest,
+  type EngineRunnerNext,
   revokeRunnerSchema,
   updateEngineSchema,
   type EngineId,
@@ -54,6 +55,7 @@ import { z } from "zod";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { generateEnrollmentToken } from "./engine-runner-auth.js";
+import { hashToken } from "./token-hash.js";
 import { endLeasedRunsOfRunner, engineRunTestHooks } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -415,7 +417,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         .send({ runnerId: existing.id, engineId, selfTest: { passed: existing.selfTestPassed, failures: existing.selfTestFailures }, replayed: true });
     };
     if (req.authCtx.engineEnrollmentSpent) return replay();
-    let out: typeof engineRunners.$inferSelect | null;
+    let out: (typeof engineRunners.$inferSelect & { superseded: { id: string; name: string } | null }) | null;
     try {
       out = await db.transaction(async (tx) => {
         // spend the enrolment token: one winner
@@ -440,7 +442,19 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           })
           .returning();
         await tx.update(engineEnrollmentTokens).set({ runnerId: runner!.id }).where(eq(engineEnrollmentTokens.id, tokenId));
-        return runner!;
+        // PR #205 review round 5 [67]: a re-enrolment after a build change presents the runner token
+        // it held; that registration (a live runner of THIS engine) is revoked in the same transaction,
+        // so an upgraded runner never leaves a live credential behind. Anything else is ignored.
+        let superseded: { id: string; name: string } | null = null;
+        if (body.supersedes) {
+          const [old] = await tx
+            .update(engineRunners)
+            .set({ revokedAt: new Date(), revokeReason: `superseded: re-enrolled as runner ${runner!.id} after a build change` })
+            .where(and(eq(engineRunners.tokenHash, hashToken(body.supersedes)), eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
+            .returning({ id: engineRunners.id, name: engineRunners.name });
+          superseded = old ?? null;
+        }
+        return { ...runner!, superseded };
       });
     } catch (e) {
       // the hash is already some runner's credential (token_hash is unique): a credential is never shared
@@ -463,7 +477,19 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         `engine runner ${body.name} registered for ${engineId}` +
         (verdict.passed ? " with a passing self-test" : `; its self-test failed (${verdict.failures.join(", ")}), so it can lease nothing`),
     });
-    return reply.status(201).send({ runnerId: out.id, engineId, selfTest: verdict });
+    if (out.superseded) {
+      // the runs the old registration held end now, with their keys, as on an admin revocation
+      const ended = await endLeasedRunsOfRunner(db, out.superseded.id, NO_IDENTITY);
+      await auditEngine(db, {
+        userId: NO_IDENTITY,
+        objectType: "engine_runner",
+        objectId: out.superseded.id,
+        ruleId: "engine-runner-superseded",
+        detail: { engineId, replacedBy: out.id, endedRuns: ended },
+        reason: `engine runner ${out.superseded.name} (${engineId}) revoked: it re-enrolled as ${body.name} after a build change`,
+      });
+    }
+    return reply.status(201).send({ runnerId: out.id, engineId, selfTest: verdict, supersededRunnerId: out.superseded?.id ?? null });
   });
 
   // ---- POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] --
@@ -480,11 +506,15 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const engineId = req.authCtx.engineId as EngineId;
     await syncEngineManifest(db, manifest);
     const [runner] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
-    if (!runner) return reply.status(401).send({ error: "engine_runner_token_required" });
+    if (!runner) return reply.status(401).send({ error: "engine_runner_token_required", next: "revoked" satisfies EngineRunnerNext });
+    // PR #205 review round 5 [67]: a report of another build means the runner was upgraded under a
+    // credential registered for the old one. That is not an inconsistency to wait out: it re-enrols.
     if (selfTest.imageDigest !== runner.reportedDigest || selfTest.engineVersion !== runner.reportedVersion) {
-      return reply
-        .status(422)
-        .send({ error: "engine_self_test_inconsistent", detail: "the report must describe the image this runner registered with; a new image re-enrols" });
+      return reply.status(409).send({
+        error: "engine_runner_reenrol_required",
+        next: "reenrol_required" satisfies EngineRunnerNext,
+        detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+      });
     }
     const now = new Date();
     const verdict = evaluateRunnerSelfTest(manifest[engineId], selfTest, now);
@@ -524,11 +554,17 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           .where(eq(engines.id, engineId));
         engineDisabled = true;
       }
-      return { kind: "done" as const, engineRefreshed, engineDisabled };
+      const engineOn = !!engine?.enabled && !engineDisabled;
+      return { kind: "done" as const, engineRefreshed, engineDisabled, engineOn };
     });
     if (out.kind === "revoked") {
-      return reply.status(401).send({ error: "engine_runner_revoked", detail: "this runner was revoked: its token authenticates nothing" });
+      return reply
+        .status(401)
+        .send({ error: "engine_runner_revoked", next: "revoked" satisfies EngineRunnerNext, detail: "this runner was revoked: its token authenticates nothing" });
     }
+    // round 5: the same signal the lease gives — a failing report must be re-proved; a passing one
+    // leases when the engine is on and waits for an admin when it is off (never re-enables it)
+    const next: EngineRunnerNext = !verdict.passed ? "self_test_required" : out.engineOn ? "ok" : "admin_disabled";
     await auditEngine(db, {
       userId: NO_IDENTITY,
       objectType: "engine_runner",
@@ -541,7 +577,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         (verdict.passed ? "passed" : `failed (${verdict.failures.join(", ")})`) +
         (out.engineDisabled ? " — the engine is switched off" : out.engineRefreshed ? "; the engine's recorded self-test is refreshed" : ""),
     });
-    return reply.send({ selfTest: verdict, engineRefreshed: out.engineRefreshed, engineDisabled: out.engineDisabled });
+    return reply.send({ selfTest: verdict, next, engineRefreshed: out.engineRefreshed, engineDisabled: out.engineDisabled });
   });
 }
 

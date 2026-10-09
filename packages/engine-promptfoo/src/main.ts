@@ -33,6 +33,7 @@ async function main(): Promise<void> {
   await runRunnerLoop(client, promptfooAdapter({ entrypoint: `${PROMPTFOO_HOME}/dist/src/entrypoint.js` }), {
     engineId: "promptfoo",
     engineVersion,
+    imageDigest,
     workRoot: process.env.REGULAIT_WORK_DIR ?? "/work",
     store: new FileRunnerTokenStore(path.join(stateDir, "runner-token")),
     enrollmentToken: process.env.REGULAIT_ENGINE_ENROLLMENT_TOKEN || null,

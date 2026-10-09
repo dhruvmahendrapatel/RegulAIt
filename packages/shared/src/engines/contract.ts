@@ -149,8 +149,12 @@ export const ENGINE_REFUSALS = {
   engine_runner_revoked: 401,
   /** the engine is off: no lease, no run */
   engine_disabled: 409,
-  /** enabling without a passing, fresh self-test */
+  /** enabling without a passing, fresh self-test; or a runner whose own report is stale or failing */
   engine_self_test_required: 409,
+  /** PR #205 review round 5 [67]: a runner presenting a build other than the one it registered with */
+  engine_runner_reenrol_required: 409,
+  /** PR #205 review round 5 [70]: a target or judge agent with no provider model to dispatch to */
+  agent_not_dispatchable: 422,
   /** a run, heartbeat or result for a run this runner does not hold */
   engine_run_not_leased: 409,
   /** a result for a run that already ended (late) */
@@ -304,11 +308,40 @@ export const engineRunnerRegisterSchema = z
     engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
     selfTest: runnerSelfTestSchema,
     tokenHash: z.string().regex(SHA256_HEX),
+    /**
+     * PR #205 review round 5 [67]: a runner re-enrolling because its build changed presents the
+     * runner token it held (proof of possession). On a successful registration the gateway revokes
+     * that runner, if it is a live runner of the same engine, in the same transaction (audited).
+     */
+    supersedes: z.string().startsWith(ENGINE_RUNNER_TOKEN_PREFIX).max(200).regex(/^[\x21-\x7e]+$/).optional(),
   })
   .strict();
 
 /** POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] */
 export const engineRunnerSelfTestSchema = z.object({ selfTest: runnerSelfTestSchema }).strict();
+
+/**
+ * PR #205 review round 5: THE ONE SIGNAL a runner acts on. Every lease refusal and every self-test
+ * answer carries `next`; the runner's loop is a state machine driven by it (ADR-0187 decision 67):
+ * - `ok`: lease (a 200 or a 204 lease means the same);
+ * - `admin_disabled`: the engine is off by an admin and this runner's report is fresh: wait;
+ * - `self_test_required`: this runner's report is stale or failing, or the engine's record needs
+ *   it, whatever the engine's state: re-run the self-test and submit it;
+ * - `reenrol_required`: the runner presents a build other than the one its credential registered:
+ *   re-enrol with an enrolment token, or stop and say so;
+ * - `revoked`: the credential authenticates nothing: stop (an admin mints an enrolment token).
+ */
+export const ENGINE_RUNNER_NEXT = ["ok", "admin_disabled", "self_test_required", "reenrol_required", "revoked"] as const;
+export type EngineRunnerNext = (typeof ENGINE_RUNNER_NEXT)[number];
+
+/** POST /v1/engine-runner/lease — round 5 [67]: the build the runner is running now */
+export const engineRunnerLeaseSchema = z
+  .object({
+    imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
+  })
+  .strict();
+export type EngineRunnerLeaseInput = z.infer<typeof engineRunnerLeaseSchema>;
 export type EngineRunnerRegisterInput = z.infer<typeof engineRunnerRegisterSchema>;
 
 /** POST /v1/engine-runner/runs/:runId/heartbeat */

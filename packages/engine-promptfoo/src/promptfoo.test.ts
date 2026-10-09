@@ -562,7 +562,7 @@ describe("the adapter", () => {
         return 200;
       },
     } as unknown as RunnerClient;
-    const out = await runOnce(client, adapter, { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: await mkdtemp(path.join(tmpdir(), "pf-cancel-")), heartbeatMs: 20 });
+    const out = await runOnce(client, adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: await mkdtemp(path.join(tmpdir(), "pf-cancel-")), heartbeatMs: 20 });
     expect(out.outcome).toBe("cancelled");
     expect(aborted).toBe(true);
     // the engine is not started again after the cancel (no eval step), and nothing is posted
