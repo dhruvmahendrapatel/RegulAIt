@@ -84,6 +84,6 @@ export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
     const evaluated = await step(["eval", "-c", genPath, "-o", outPath, "--no-cache", "--no-share", "--no-table", "--no-progress-bar", "-j", "1"]);
     ctx.progress(0.9);
     const raw = existsSync(outPath) ? await readFile(outPath) : null;
-    return mapPromptfooResults({ raw, exitCode: evaluated.exitCode, plan });
+    return mapPromptfooResults({ raw, exitCode: evaluated.exitCode, plan, gatewayBaseUrl: lease.target!.baseUrl });
   };
 }

@@ -68,11 +68,29 @@ export type PromptfooResult = z.infer<typeof resultSchema>;
 
 export type ErrorKind = "key_revoked" | "egress" | "refused" | "engine";
 
-/** classify an error text without keeping it */
-export function classifyError(text: string): ErrorKind {
+const CONNECTION_ERROR = /ENOTFOUND|EAI_AGAIN|EAI_NONAME|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ECONNRESET|ETIMEDOUT|getaddrinfo|fetch failed|socket hang up|network (error|is unreachable)/i;
+
+/** the destination hosts an error text names (URLs, and resolver errors), lower-cased */
+function hostsNamedIn(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/\b[a-z][a-z0-9+.-]*:\/\/\[?([^\s/:\]?#"']+)/gi)) out.add(m[1]!.toLowerCase());
+  for (const m of text.matchAll(/\b(?:ENOTFOUND|EAI_AGAIN|EAI_NONAME)\s+([A-Za-z0-9.-]+)/g)) out.add(m[1]!.toLowerCase());
+  for (const m of text.matchAll(/getaddrinfo\s+\w+\s+([A-Za-z0-9.-]+)/g)) out.add(m[1]!.toLowerCase());
+  return [...out];
+}
+
+/**
+ * Classify an error text without keeping it. PR #205 review [57]: a connection error is egress
+ * ONLY when the text names a destination and none of the named destinations is the gateway (the
+ * internal network blocked a call off it). A connection error to the gateway, or one naming no
+ * host at all, is not evidence of egress: it is an engine error (the item is unknown, not not-run).
+ */
+export function classifyError(text: string, gatewayHost: string | null = null): ErrorKind {
   if (/\b401\b|virtual_key_revoked|virtual_key_expired|unauthori[sz]ed/i.test(text)) return "key_revoked";
-  if (/ENOTFOUND|EAI_AGAIN|EAI_NONAME|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ECONNRESET|ETIMEDOUT|getaddrinfo|fetch failed|socket hang up|network (error|is unreachable)/i.test(text)) {
-    return "egress";
+  if (CONNECTION_ERROR.test(text)) {
+    const gw = gatewayHost?.toLowerCase() ?? null;
+    const hosts = hostsNamedIn(text);
+    return hosts.length > 0 && hosts.every((h) => h !== gw) ? "egress" : "engine";
   }
   if (/\b403\b|forbidden/i.test(text)) return "refused";
   return "engine";
@@ -105,12 +123,14 @@ function sha256Hex(b: Buffer): string {
   return createHash("sha256").update(b).digest("hex");
 }
 
+/**
+ * PR #205 review [52]: promptfoo's output file holds the generated prompts, the model's responses
+ * and the graders' text, and no model text may leave the runner. The envelope carries ONLY the
+ * sha256 of the original bytes (`bytes: 0`: nothing attached); what the gateway stores is the
+ * mapper's own items, built from ids, verdicts and counts.
+ */
 export function rawReportOf(raw: Buffer | null): EngineResultEnvelope["rawReport"] {
   if (!raw) return null;
-  if (raw.length <= ENGINE_RESULT_LIMITS.maxRawReportBytes) {
-    return { sha256: sha256Hex(raw), bytes: raw.length, contentBase64: raw.toString("base64") };
-  }
-  // too large to carry: only its hash is reported, and `bytes: 0` says nothing is attached
   return { sha256: sha256Hex(raw), bytes: 0 };
 }
 
@@ -121,8 +141,14 @@ const clip = (s: string, n: number) => s.replace(KEY_SAFE, "?").slice(0, n);
  * Map promptfoo's output. `raw` is the bytes of its JSON output file (null when it wrote none),
  * `exitCode` the `eval` step's exit code, `plan` what was asked.
  */
-export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: number | null; plan: PromptfooPlan }): PromptfooEnvelopeBody {
+export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: number | null; plan: PromptfooPlan; gatewayBaseUrl?: string | null }): PromptfooEnvelopeBody {
   const { raw, exitCode, plan } = input;
+  let gatewayHost: string | null = null;
+  try {
+    gatewayHost = input.gatewayBaseUrl ? new URL(input.gatewayBaseUrl).hostname : null;
+  } catch {
+    gatewayHost = null;
+  }
   const planNotRun: EngineNotRunEntry[] = [...plan.notRun];
   if (!raw) {
     return { status: "failed", errorCode: "engine_output_missing", items: [], notRun: planNotRun, rawReport: null };
@@ -151,7 +177,7 @@ export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: numbe
     }
     b.total++;
     const err = errorOf(r);
-    if (err !== null) b.errors[classifyError(err)]++;
+    if (err !== null) b.errors[classifyError(err, gatewayHost)]++;
     else if (r.success === true) b.passes++;
     else if (r.success === false && r.failureReason === PROMPTFOO_FAILURE_REASON.ASSERT) b.defeats++;
     else b.errors.engine++; // neither graded nor an error: not evidence of anything
@@ -165,18 +191,22 @@ export function mapPromptfooResults(input: { raw: Buffer | null; exitCode: numbe
     const sourceId = b.strategy === "basic" ? (b.plugin ?? "unattributed") : `${PROMPTFOO_STRATEGY_SET_PREFIX}${b.strategy}`;
     const errors = Object.values(b.errors).reduce((a, n) => a + n, 0);
     const graded = b.passes + b.defeats;
-    // the governed trial limit: a defeat is never hidden by the cap
-    const attempts = Math.min(graded, ENGINE_RESULT_LIMITS.maxAttempts);
-    const defeated = Math.min(b.defeats, attempts);
+    // PR #205 review [58]: a bucket the run did not plan is decided FIRST — unknown, with no
+    // attempts and no defeats, so nothing of it is counted as a pass or a fail anywhere
     const inPlan = b.plugin !== null && planned.has(b.plugin) && plannedStrategies.has(b.strategy);
+    // the governed trial limit: a defeat is never hidden by the cap
+    const attempts = inPlan ? Math.min(graded, ENGINE_RESULT_LIMITS.maxAttempts) : 0;
+    const defeated = inPlan ? Math.min(b.defeats, attempts) : 0;
     let verdict: EngineResultItem["verdict"];
     let reason: string;
-    if (defeated > 0) {
+    if (!inPlan) {
+      verdict = "unknown";
+      reason = b.plugin
+        ? "the engine ran a plugin or strategy this run did not ask for; nothing of it counts"
+        : "the engine returned results it did not attribute to a plugin; nothing of it counts";
+    } else if (defeated > 0) {
       verdict = "fail";
       reason = `${b.defeats} of ${graded} graded attempts defeated the target`;
-    } else if (!inPlan) {
-      verdict = "unknown";
-      reason = b.plugin ? "the engine ran a plugin or strategy this run did not ask for" : "the engine returned results it did not attribute to a plugin";
     } else if (errors > 0 && b.errors.egress === b.total) {
       verdict = "not_run";
       reason = `${ERROR_SENTENCE.egress} on every attempt`;

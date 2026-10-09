@@ -35,6 +35,12 @@
  */
 import type { RedTeamAttackClass, RedTeamSeverity } from "../redteam.js";
 import type { EngineNotRunReason } from "./contract.js";
+import {
+  PROMPTFOO_UPSTREAM_BIAS_PLUGINS,
+  PROMPTFOO_UPSTREAM_DATASET_PLUGINS,
+  PROMPTFOO_UPSTREAM_REMOTE_ONLY_PLUGINS,
+  PROMPTFOO_UPSTREAM_UNALIGNED_HARM_PLUGINS,
+} from "./promptfoo-upstream.js";
 
 /** the release the image is built from; equals the vendored OWASP tables' release (ADR-0187) */
 export const PROMPTFOO_ENGINE_VERSION = "0.123.1";
@@ -105,77 +111,20 @@ const notRunnable = (id: string, disposition: Exclude<PromptfooDisposition, "loc
   severity: "medium",
 });
 
-/** upstream `REMOTE_ONLY_PLUGIN_IDS` at 0.123.1, flattened (the industry lists spelled out) */
-const CLOUD_ONLY_PLUGINS = [
-  "agentic:memory-poisoning",
-  "ascii-smuggling",
-  "bfla",
-  "bola",
-  "cca",
-  "competitors",
-  "coppa",
-  "data-exfil",
-  "ferpa",
-  "goal-misalignment",
-  "harmful:misinformation-disinformation",
-  "harmful:specialized-advice",
-  "hijacking",
-  "indirect-prompt-injection",
-  "mcp",
-  "model-identification",
-  "off-topic",
-  "rag-document-exfiltration",
-  "rag-poisoning",
-  "rag-source-attribution",
-  "reasoning-dos",
-  "religion",
-  "special-token-injection",
-  "ssrf",
-  "system-prompt-override",
-  "wordplay",
-  // the unaligned-provider harm set: generated only by the vendor's remote endpoint
-  "harmful:chemical-biological-weapons",
-  "harmful:child-exploitation",
-  "harmful:copyright-violations",
-  "harmful:cybercrime",
-  "harmful:cybercrime:malicious-code",
-  "harmful:graphic-content",
-  "harmful:harassment-bullying",
-  "harmful:hate",
-  "harmful:illegal-activities",
-  "harmful:illegal-drugs",
-  "harmful:illegal-drugs:meth",
-  "harmful:indiscriminate-weapons",
-  "harmful:insults",
-  "harmful:non-violent-crime",
-  "harmful:profanity",
-  "harmful:radicalization",
-  "harmful:self-harm",
-  "harmful:sex-crime",
-  "harmful:sexual-content",
-  "harmful:unsafe-practices",
-  "harmful:violent-crime",
-  "harmful:weapons:ied",
-  // bias plugins return nothing when remote generation is off
-  "bias:age",
-  "bias:disability",
-  "bias:gender",
-  "bias:race",
-] as const;
+/**
+ * PR #205 review [59]: the cloud-only list is GENERATED from the pinned package's own lists
+ * (promptfoo-upstream.ts, by engines/promptfoo/extract-plugin-lists.mjs), never typed by hand:
+ * upstream `REMOTE_ONLY_PLUGIN_IDS` (including the coding-agent collections and plugins and the
+ * medical, financial, pharmacy, insurance, ecommerce, telecom and realestate lists), the
+ * unaligned-provider `harmful:*` set (generated only by the vendor's remote endpoint), and
+ * `bias:*` (returns nothing with remote generation off).
+ */
+const CLOUD_ONLY_PLUGINS: readonly string[] = [
+  ...new Set([...PROMPTFOO_UPSTREAM_REMOTE_ONLY_PLUGINS, ...PROMPTFOO_UPSTREAM_UNALIGNED_HARM_PLUGINS, ...PROMPTFOO_UPSTREAM_BIAS_PLUGINS]),
+].sort();
 
-/** dataset plugins that download their data at run time (no pre-seeded copy in this image) */
-const DATASET_PLUGINS = [
-  "aegis",
-  "beavertails",
-  "cyberseceval",
-  "donotanswer",
-  "harmbench",
-  "toxic-chat",
-  "unsafebench",
-  "vlguard",
-  "vlsu",
-  "xstest",
-] as const;
+/** upstream `DATASET_PLUGINS`: datasets downloaded at run time (no pre-seeded copy here); `pliny` is excluded on licence */
+const DATASET_PLUGINS: readonly string[] = PROMPTFOO_UPSTREAM_DATASET_PLUGINS.filter((id) => id !== "pliny");
 
 export const PROMPTFOO_PLUGINS: readonly PromptfooPluginEntry[] = Object.freeze([
   // --- runs locally, mapped to a class that counts ---

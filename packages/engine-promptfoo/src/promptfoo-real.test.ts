@@ -114,6 +114,23 @@ async function runReal(sets: string[], signal = new AbortController().signal) {
   return { run, egressLog, workDir };
 }
 
+describe.skipIf(!HOME)("[59] the generated upstream lists match the installed package (no drift)", () => {
+  it("re-extracting from the installed promptfoo gives exactly the committed snapshot", async () => {
+    const shared = await import("@regulait/shared");
+    const extractor = (await import(path.resolve(here, "../../../engines/promptfoo/extract-plugin-lists.mjs"))) as {
+      extractLists: (dir: string) => Record<string, unknown>;
+    };
+    const fresh = extractor.extractLists(HOME!) as Record<string, string[] | string>;
+    expect(fresh["sourceSha256"]).toBe(shared.PROMPTFOO_UPSTREAM_SOURCE_SHA256);
+    expect(fresh["remoteOnlyPlugins"]).toEqual([...shared.PROMPTFOO_UPSTREAM_REMOTE_ONLY_PLUGINS]);
+    expect(fresh["unalignedHarmPlugins"]).toEqual([...shared.PROMPTFOO_UPSTREAM_UNALIGNED_HARM_PLUGINS]);
+    expect(fresh["biasPlugins"]).toEqual([...shared.PROMPTFOO_UPSTREAM_BIAS_PLUGINS]);
+    expect(fresh["datasetPlugins"]).toEqual([...shared.PROMPTFOO_UPSTREAM_DATASET_PLUGINS]);
+    expect(fresh["allPlugins"]).toEqual([...shared.PROMPTFOO_UPSTREAM_ALL_PLUGINS]);
+    expect(fresh["allStrategies"]).toEqual([...shared.PROMPTFOO_UPSTREAM_ALL_STRATEGIES]);
+  });
+});
+
 describe.skipIf(!HOME)("the real promptfoo 0.123.1 against a fake gateway", () => {
   it("every call goes to the gateway on the run's key; nothing else is contacted", async () => {
     seen = [];

@@ -181,36 +181,69 @@ export function assertGatewayOnly(config: Record<string, unknown>, env: Record<s
     throw new PromptfooConfigRefused("gateway_url_invalid", "the lease's base URL is not a URL");
   }
   const baseHref = base.href.replace(/\/$/, "");
-  const providers: unknown[] = [];
-  const walk = (v: unknown, path: string, key: string | null): void => {
-    if (key !== null && FORBIDDEN_KEYS.has(key)) throw new PromptfooConfigRefused("config_forbidden_key", `${path} is not allowed`);
+  // PR #205 review [56]: the URL rule applies to the TRANSPORT — the three provider objects, every
+  // string inside them — and stays strict there. Prompt text (the purpose, the prompt template) is
+  // not scanned: a purpose may mention a URL. Instead, the config's SHAPE is an allow-list, so no
+  // other field can carry a transport setting at all.
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  const onlyKeys = (v: unknown, path: string, allowed: readonly string[]) => {
+    if (v === undefined) return;
+    if (!isObj(v)) throw new PromptfooConfigRefused("config_unexpected_key", `${path} must be an object`);
+    for (const k of Object.keys(v)) {
+      if (FORBIDDEN_KEYS.has(k)) throw new PromptfooConfigRefused("config_forbidden_key", `${path}.${k} is not allowed`);
+      if (!allowed.includes(k)) throw new PromptfooConfigRefused("config_unexpected_key", `${path}.${k} is not a field this build writes`);
+    }
+  };
+  const walkProvider = (v: unknown, path: string): void => {
     if (typeof v === "string") {
       if (URL_RE.test(v) && !(v === baseHref || v.startsWith(`${baseHref}/`))) {
         throw new PromptfooConfigRefused("config_non_gateway_url", `${path} points off the gateway`);
       }
       return;
     }
-    if (Array.isArray(v)) {
-      v.forEach((x, i) => walk(x, `${path}[${i}]`, null));
-      return;
-    }
-    if (v && typeof v === "object") {
-      const o = v as Record<string, unknown>;
-      if (key === "provider" || (key === null && path.startsWith("targets["))) providers.push(o);
-      for (const [k, x] of Object.entries(o)) walk(x, path ? `${path}.${k}` : k, k);
+    if (Array.isArray(v)) return v.forEach((x, i) => walkProvider(x, `${path}[${i}]`));
+    if (isObj(v)) {
+      for (const [k, x] of Object.entries(v)) {
+        if (FORBIDDEN_KEYS.has(k)) throw new PromptfooConfigRefused("config_forbidden_key", `${path}.${k} is not allowed`);
+        walkProvider(x, `${path}.${k}`);
+      }
     }
   };
-  walk(config, "", null);
+  onlyKeys(config, "config", ["description", "targets", "prompts", "defaultTest", "redteam", "sharing", "evaluateOptions"]);
   if (config["sharing"] !== false) throw new PromptfooConfigRefused("config_sharing_on", "sharing must be false");
   if (!Array.isArray(config["targets"]) || config["targets"].length !== 1) throw new PromptfooConfigRefused("config_targets", "exactly one target");
   // the generator and the grader must be named explicitly: unset, promptfoo falls back to a vendor default
-  const redteam = config["redteam"] as { provider?: unknown } | undefined;
+  const redteam = config["redteam"] as { provider?: unknown; plugins?: unknown; strategies?: unknown } | undefined;
   const defaultTest = config["defaultTest"] as { options?: { provider?: unknown } } | undefined;
-  if (providers.length !== 3 || !redteam?.provider || !defaultTest?.options?.provider) {
+  if (!redteam?.provider || !defaultTest?.options?.provider) {
     throw new PromptfooConfigRefused("config_providers", "exactly the target, the generator (redteam.provider) and the grader (defaultTest.options.provider)");
   }
+  const providers: Array<{ v: unknown; path: string }> = [
+    { v: config["targets"][0], path: "targets[0]" },
+    { v: redteam.provider, path: "redteam.provider" },
+    { v: defaultTest.options.provider, path: "defaultTest.options.provider" },
+  ];
   for (const p of providers) {
-    const o = p as { id?: unknown; config?: { apiBaseUrl?: unknown; apiKeyEnvar?: unknown; useDefaultApiKey?: unknown } };
+    walkProvider(p.v, p.path);
+    onlyKeys(p.v, p.path, ["id", "label", "config"]);
+    onlyKeys((p.v as { config?: unknown }).config, `${p.path}.config`, ["apiBaseUrl", "apiKeyEnvar", "useDefaultApiKey", "headers"]);
+  }
+  onlyKeys(defaultTest, "defaultTest", ["options"]);
+  onlyKeys(defaultTest.options, "defaultTest.options", ["provider"]);
+  onlyKeys(redteam, "redteam", ["purpose", "injectVar", "numTests", "provider", "plugins", "strategies"]);
+  onlyKeys(config["evaluateOptions"], "evaluateOptions", ["maxConcurrency", "cache"]);
+  for (const [field, allowed] of [["plugins", ["id", "numTests"]], ["strategies", ["id"]]] as const) {
+    const list = redteam[field];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) throw new PromptfooConfigRefused("config_unexpected_key", `redteam.${field} must be a list`);
+    list.forEach((e, i) => onlyKeys(e, `redteam.${field}[${i}]`, allowed));
+  }
+  const prompts = config["prompts"];
+  if (prompts !== undefined && !(Array.isArray(prompts) && prompts.every((p) => typeof p === "string"))) {
+    throw new PromptfooConfigRefused("config_unexpected_key", "prompts must be a list of templates");
+  }
+  for (const { v } of providers) {
+    const o = v as { id?: unknown; config?: { apiBaseUrl?: unknown; apiKeyEnvar?: unknown; useDefaultApiKey?: unknown } };
     if (typeof o.id !== "string" || !o.id.startsWith(GATEWAY_PROVIDER_PREFIX)) {
       throw new PromptfooConfigRefused("config_provider_not_gateway", "every provider is the gateway's OpenAI-compatible chat route");
     }
