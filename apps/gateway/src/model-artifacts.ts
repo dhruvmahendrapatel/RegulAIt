@@ -27,7 +27,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Readable, Transform } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { FastifyInstance } from "fastify";
@@ -281,7 +281,39 @@ export function displayFilename(name: string | undefined): string {
   return clean.length ? clean : "artifact";
 }
 
-class TooLarge extends Error {}
+/**
+ * Stream `body` into a new 0600 file, calling `onChunk` for each chunk written, until the body ends
+ * (false) or more than `limit` bytes have arrived (true: the file is closed, nothing more is written,
+ * and the rest of the body is drained and dropped).
+ */
+export async function streamBounded(body: Readable, file: string, limit: number, onChunk: (chunk: Buffer) => void): Promise<boolean> {
+  const out = createWriteStream(file, { mode: 0o600, flags: "wx" });
+  let seen = 0;
+  let over = false;
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => out.end(() => resolve());
+    out.on("error", reject);
+    body.on("error", reject);
+    body.on("data", (chunk: Buffer) => {
+      if (over) return;
+      seen += chunk.length;
+      if (seen > limit) {
+        over = true;
+        finish();
+        return;
+      }
+      onChunk(chunk);
+      if (!out.write(chunk)) {
+        body.pause();
+        out.once("drain", () => body.resume());
+      }
+    });
+    body.on("end", () => {
+      if (!over) finish();
+    });
+  });
+  return over;
+}
 
 function fileReaderOf(fh: Awaited<ReturnType<typeof open>>, size: number): ArtifactReader {
   return {
@@ -306,6 +338,7 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
   // ---- POST /v1/model-artifacts (the upload) -----------------------------------
   app.register(async (scope) => {
     // this route — and only this one — takes the raw body as a stream; the global JSON parser is untouched
+    scope.removeAllContentTypeParsers();
     scope.addContentTypeParser("*", (_req, payload, done) => done(null, payload));
     scope.post("/v1/model-artifacts", { bodyLimit: 8192 * MIB + 1 }, async (req, reply) => {
       const body = req.body as Readable | undefined;
@@ -365,22 +398,17 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
       const hash = createHash("sha256");
       let size = 0;
       try {
-        try {
-          await pipeline(
-            body,
-            new Transform({
-              transform(chunk: Buffer, _enc, cb) {
-                size += chunk.length;
-                if (size > limit) return cb(new TooLarge("too large"));
-                hash.update(chunk);
-                cb(null, chunk);
-              },
-            }),
-            createWriteStream(tmp, { mode: 0o600, flags: "wx" }),
-          );
-        } catch (e) {
-          if (e instanceof TooLarge) return refuse(size);
-          throw e;
+        // past the limit nothing more is written or hashed: the file is closed and removed, the rest of
+        // the body is read and dropped (the request is not destroyed under the response), and the
+        // answer is 413 with the connection closed
+        const tooLarge = await streamBounded(body, tmp, limit, (chunk) => {
+          size += chunk.length;
+          hash.update(chunk);
+        });
+        if (tooLarge) {
+          size = Math.max(size, limit + 1);
+          reply.header("connection", "close");
+          return refuse(size);
         }
         const sha256 = hash.digest("hex");
         // THE FORMAT IS DECIDED FROM THE BYTES, never from `filename`

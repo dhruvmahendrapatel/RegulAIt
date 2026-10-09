@@ -1673,6 +1673,12 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         }
         target = (t as AgentRow | undefined) ?? null;
         judge = (j as AgentRow | undefined) ?? null;
+      } else {
+        // B5-M: an artifact run is re-checked here too: the artifact still exists and the run-as person
+        // may still use it (its uploader, or an admin)
+        const [art] = run.targetArtifactId ? await tx.select({ uploadedByUserId: modelArtifacts.uploadedByUserId }).from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId)) : [];
+        if (!art) refusal = "artifact_gone";
+        else if (!artifactAccessible(art, { userId: person.id, isAdmin: person.isAdmin })) refusal = "artifact_not_accessible";
       }
       // round 11 (sweep): a run refused here ends HERE, on the row this transaction holds, rather than
       // in a second transaction after the decision was made
