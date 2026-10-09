@@ -827,4 +827,38 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     expect(g.count("/register")).toBe(1);
     expect(g.calls.filter((c) => c.path.endsWith("/lease")).every((c) => c.bearer === `Bearer ${stored}`)).toBe(true);
   });
+
+  it("#210 review: a truncated 201 on the LAST permitted attempt is still confirmed before the cap stops anything", async () => {
+    const g = gateway({ register: [201], lease: [{ status: 204 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/register")) {
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        return { status: 201, json: async () => JSON.parse('{"runnerId":"r1","selfT') };
+      }
+      return http(url, init);
+    };
+    const { o } = await opts({ maxIterations: 1, registerAttempts: 1 });
+    await runRunnerLoop(g.client, adapter, o);
+    const stored = await o.store.load();
+    expect(stored).toMatch(/^rge_[0-9a-f]{64}$/);
+    expect(g.count("/register")).toBe(1);
+    expect(g.calls.some((c) => c.path.endsWith("/lease") && c.bearer === `Bearer ${stored}`)).toBe(true);
+  });
+
+  it("#210 review: at the cap, a confirmation the gateway refuses (401) stops the loop", async () => {
+    const g = gateway({ register: [201], lease: [{ status: 401 }] });
+    const http = (g.client as unknown as { http: RunnerHttp }).http;
+    (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
+      if (url.endsWith("/register")) {
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        return { status: 201, json: async () => JSON.parse('{"runnerId":"r1","selfT') };
+      }
+      return http(url, init);
+    };
+    const { o } = await opts({ registerAttempts: 1 });
+    await expect(runRunnerLoop(g.client, adapter, o)).rejects.toBeInstanceOf(RunnerFatalError);
+    expect(g.count("/register")).toBe(1);
+    expect(await o.store.load()).toBeNull();
+  });
 });

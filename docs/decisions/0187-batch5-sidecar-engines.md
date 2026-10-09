@@ -1206,6 +1206,15 @@ first).** Tests: `runner.test.ts` and `loop.test.ts` "follow-up [101]", `zz-b5-p
      writes them). The fourth key carries $0.60, a model call on it is served (200), and the key's counter and the run's
      cost both equal the ledger. Red with the old sum: the fourth key carries $1.40 and the call is refused 402.
 
+103. **A malformed registration answer at the attempt cap is still confirmed** (#210 review, [4234145857]). Decision
+     101 sent a 2xx registration answer with no valid body to the confirmation path (try the secret as a credential),
+     but checked the attempt cap first: the last permitted attempt (or the only one, `registerAttempts: 1`) stopped the
+     runner although the registration may have committed, spending the enrolment token and leaving a live credential.
+     The cap now applies only after the confirmation: the secret is always tried first, and the loop stops only if
+     that confirmation is refused (401). A malformed answer also clears an earlier refusal, since that attempt may
+     itself have committed. **Test:** `registerAttempts: 1` and a truncated 201: the secret is stored and leases
+     (red before the fix: a fatal stop); and the same with the confirmation refused: a fatal stop, nothing stored.
+
 **Test-only, not a decision:** `api-key-expiry.test.ts` "EXPIRED and REVOKED are different answers" failed once in CI
 (3 audit rows, not 2). It selected rows with `at >=` a JS-clock timestamp, so the revoke's own audit row could be counted:
 a pre-existing clock dependence, not engine code. That test and its two siblings now assert on the id-set difference of
