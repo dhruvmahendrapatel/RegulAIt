@@ -1158,6 +1158,68 @@ migration.
   - The model-call path updates a key's `spent_usd` and never locks a run.
   - Consistent.
 
+**PR #205 follow-up (2026-10-09, branch `b5-p-followup`; 2 findings from the merged PR's review threads, each red
+first).** Tests: `runner.test.ts` and `loop.test.ts` "follow-up [101]", `zz-b5-promptfoo.test.ts` "[102]". No migration.
+
+101. **A 2xx whose body is not a valid answer is transient, never definitive** [4232403372]. The runner client turned a
+     body that did not parse as JSON into `null`. A lease that committed at the gateway, answered 200, and lost the end of
+     its body therefore read as "no work": `runOnce` retired the request id, reported idle, and the run with its minted key
+     sat orphaned until its lease expired. Now:
+     - **Only a 204, or a 200 whose body parses AND matches the lease schema, is definitive.** The answer schemas live in
+       the shared contract (`engineLeaseResponseSchema` and its siblings, typed against `EngineLease`; not strict, so a
+       newer gateway may add fields). Any other 2xx (a body cut off, not JSON, the wrong shape, or an unexpected 2xx status)
+       throws `RunnerMalformedResponseError`.
+     - **It is transient, exactly like a timeout (decision 94).** It is not a `RunnerHttpError` and carries no `next`, so
+       the loop keeps the request id and retries; the gateway returns the run that attempt leased, its key rotated.
+     - **A refusal keeps its old reading.** A non-2xx whose body does not parse is a refusal with no code and no `next`,
+       which was already transient.
+     - **Test.** A lease answers a truncated 200, then a 200 that is JSON but not a lease, then the lease. All three
+       attempts carry the same request id, the adapter runs once, the result is posted, and the next attempt is a new id.
+       Red with the parse failure mapped back to `null`: the first answer reads as idle and the run never runs.
+
+     **The sweep (follow-up [101]): every runner-client call that read a body, by its own idempotency.**
+     - **Lease:** fixed as above.
+     - **Registration:** a malformed 201 threw `register refused (201)`, which the loop counted as a definitive refusal and
+       STOPPED the runner, although the registration had committed. It now throws `RunnerMalformedResponseError`; the loop
+       then confirms the same secret as the credential (decision 77's path: any authenticated answer keeps it, a 401
+       registers it again, which the gateway replays for the same hash, decision 54). The attempts cap still bounds a
+       gateway that never answers well. Red: the old mapping stops the loop with "registration did not succeed (201)".
+     - **Heartbeat:** a malformed 200 returned `null`; the caller's `hb.cancel` then threw a `TypeError` that happened to be
+       treated as transient, and a 200 with `{}` read as "carry on". Now it throws `RunnerMalformedResponseError`: neither
+       "carry on" nor "stop" is read into it, and both callers already retry a throw (a heartbeat is idempotent). A
+       definitive refusal (409, 404, 401) still stops the run.
+     - **Self-test:** a malformed 200 threw a `RunnerHttpError` with status 200 (transient only by accident), and a body
+       with any truthy `selfTest` passed unchecked. Now it is schema-checked and throws `RunnerMalformedResponseError`;
+       resubmitting a report is idempotent.
+     - **Result post:** no change. Its status line is the whole answer and the body is never read: a 2xx means the gateway
+       stored the result, and a retry after it gets the definitive 409 `engine_run_finished` anyway.
+     - **Retained results** (`retryRetainedResults`) and the reconciliation after acquisition (decision 99) go through the
+       result post: covered by the line above.
+102. **A re-issued lease carries the run's real spend** [4232403382]. Decision 94's rotation minted the new key at the SUM
+     of every key's `spent_usd`. Each replacement key starts at the amount carried into it, so from the second re-issue on
+     that sum counted the carried amount again: $0.20 spent on each of the first three keys carried $0.20, then $0.60, then $1.40 into the next,
+     and retries alone exhausted a $1 budget. The carried amount is now what the run actually spent, read off the usage
+     ledger over every key the run has held (`runCostUsd`, the same figure the run's cost reports). This also counts a
+     late charge to a key revoked by an earlier rotation, which the newest key's counter alone would miss. No column was
+     needed. The decision 94 text "carries what the run's earlier keys already spent" stands; its arithmetic was wrong.
+     **Test:** three rotations with $0.20 spent at each step (the ledger row and the key's counter, as a model call
+     writes them). The fourth key carries $0.60, a model call on it is served (200), and the key's counter and the run's
+     cost both equal the ledger. Red with the old sum: the fourth key carries $1.40 and the call is refused 402.
+
+103. **A malformed registration answer at the attempt cap is still confirmed** (#210 review, [4234145857]). Decision
+     101 sent a 2xx registration answer with no valid body to the confirmation path (try the secret as a credential),
+     but checked the attempt cap first: the last permitted attempt (or the only one, `registerAttempts: 1`) stopped the
+     runner although the registration may have committed, spending the enrolment token and leaving a live credential.
+     The cap now applies only after the confirmation: the secret is always tried first, and the loop stops only if
+     that confirmation is refused (401). A malformed answer also clears an earlier refusal, since that attempt may
+     itself have committed. **Test:** `registerAttempts: 1` and a truncated 201: the secret is stored and leases
+     (red before the fix: a fatal stop); and the same with the confirmation refused: a fatal stop, nothing stored.
+
+**Test-only, not a decision:** `api-key-expiry.test.ts` "EXPIRED and REVOKED are different answers" failed once in CI
+(3 audit rows, not 2). It selected rows with `at >=` a JS-clock timestamp, so the revoke's own audit row could be counted:
+a pre-existing clock dependence, not engine code. That test and its two siblings now assert on the id-set difference of
+the audit rows, as the Outlook courier test does.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run

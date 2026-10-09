@@ -1,6 +1,6 @@
 ---
-phase: adr0187-batch-5-foundation-followup
-last_updated: 2026-10-08
+phase: adr0187-batch-5-modelscan
+last_updated: 2026-10-09
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,23 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-09 - B5-P promptfoo merged (PR #205) with its follow-up (PR #210); G19 research merged (PR #208); B5-M started.**
+- Owner: "merge #205 once round 15 is green". Fifteen rounds of automated review produced ADR-0187 decisions 39-100.
+  The round-15 findings and a flaky test went to the follow-up, #210, which added decisions 101-103. Migration 0174 is
+  used (lease request id, manifest generation). Next migration 0175, next ADR 0188.
+- Decision 79, a residual risk: the engine process shares its runner's OS user, so it can read the runner credential.
+  Enabling an engine whose build has `credentialIsolation: false` (every build today) is therefore refused unless an
+  admin accepts the risk through an audited step-up. The fix is follow-up slice B5-P2, which splits each engine into a
+  runner container and a worker container (open question 13). Owner confirmation pending.
+- G19 (docs/research/R10-engine-admission.md, #208) now covers modelscan 0.8.8 and garak 0.17.0 with CyberSecEval.
+  Claude took the research over because Codex had been inactive. Its OWNER DECISION items:
+  - what a clean modelscan result means (strict default while pending: pickle-family formats can never pass);
+  - numpy's GPL-with-runtime-exception and LGPL libraries, and garak's licences outside our list;
+  - the 2023 to 2025 OWASP crosswalk;
+  - use-restricted garak assets.
+- Next: B5-M modelscan (branch `b5-modelscan`, in progress), then B5-G garak, then B5-P2. Codex X26-X29 and
+  #182/#184/#185 still wait on Codex.
 
 **2026-10-08 - Batch 5 foundation merged (PR #203, 0ad1990); review round 2 in its own PR; engine slices next.**
 - Owner: "merge #203 once round 1 is green". B5-F + B5-E landed with migration 0173 (engines, runners, runs, items,

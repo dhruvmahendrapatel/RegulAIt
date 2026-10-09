@@ -18,7 +18,7 @@ import path from "node:path";
 import { ENGINE_RESULT_VERSION, type EngineLease, type EngineResultEnvelope } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
-import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
+import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerHttpError, RunnerMalformedResponseError, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
 
 const refuse = (code: string) => () => Promise.reject(Object.assign(new Error(code), { code }));
 
@@ -372,5 +372,74 @@ describe("PR #203 review round 2", () => {
     const ac = new AbortController();
     await runProcessGroup("/bin/sh", ["-c", "true"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, signal: ac.signal, timeoutMs: 5000 });
     expect(getEventListeners(ac.signal, "abort")).toHaveLength(0);
+  });
+});
+
+describe("PR #205 follow-up [101]: the sweep of every runner route for a swallowed parse error", () => {
+  const truncated = async () => JSON.parse('{"cancel":fa');
+  const clientAnswering = (status: number, json: () => Promise<unknown>) => {
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: async () => ({ status, json }) });
+    client.useToken("rge_test");
+    return client;
+  };
+  const build = { imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" };
+  const st = {
+    imageDigest: build.imageDigest,
+    engineVersion: "1",
+    usageDataEnv: {},
+    egress: { host: "x.invalid", dnsResolved: false, connected: false, address: null, addressConnected: false },
+    at: new Date().toISOString(),
+  };
+
+  it("lease: a truncated 200, a 200 that is not a lease, and a 2xx other than 200/204 are transient errors, never 'no work'", async () => {
+    for (const [status, json] of [
+      [200, truncated],
+      [200, async () => ({ runId: "22222222-2222-4222-8222-222222222222" })],
+      [200, async () => null],
+      [202, async () => ({})],
+    ] as const) {
+      await expect(clientAnswering(status, json).lease(build, "33333333-3333-4333-8333-333333333333")).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    }
+    // the controls: a 204 is no work, and a well-formed 200 is a lease
+    expect(await clientAnswering(204, async () => null).lease(build)).toBeNull();
+    const lease = {
+      runId: "22222222-2222-4222-8222-222222222222",
+      engineId: "promptfoo",
+      engineVersion: "1",
+      spec: { config: { sets: ["basic"], params: {} }, trials: 1 },
+      target: { baseUrl: "http://gateway.test/v1", model: "m", apiKey: "rglv_x", headers: { "x-a": "b" } },
+      judge: null,
+      artifacts: [],
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      budgetUsd: 1,
+    };
+    expect(await clientAnswering(200, async () => lease).lease(build)).toEqual(lease);
+    // a refusal whose body is truncated stays a refusal with no signal (transient in the loop, as before)
+    const refused = clientAnswering(503, truncated).lease(build);
+    await expect(refused).rejects.toBeInstanceOf(RunnerHttpError);
+    await expect(refused).rejects.toMatchObject({ status: 503, code: null, next: null });
+  });
+
+  it("heartbeat: a truncated or shapeless 200 is transient (thrown), neither 'carry on' nor 'stop'; a definitive refusal still stops", async () => {
+    await expect(clientAnswering(200, truncated).heartbeat("r", "running", 0)).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    await expect(clientAnswering(200, async () => ({})).heartbeat("r", "running", 0)).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    await expect(clientAnswering(200, async () => ({ cancel: false })).heartbeat("r", "running", 0)).resolves.toEqual({ cancel: false });
+    await expect(clientAnswering(409, truncated).heartbeat("r", "running", 0)).resolves.toEqual({ cancel: true });
+  });
+
+  it("self-test: a truncated or shapeless 200 is transient, not a refusal", async () => {
+    await expect(clientAnswering(200, truncated).submitSelfTest(st)).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    await expect(clientAnswering(200, async () => ({ selfTest: "passed" })).submitSelfTest(st)).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    await expect(clientAnswering(200, async () => ({ selfTest: { passed: true, failures: [] }, next: "ok" })).submitSelfTest(st)).resolves.toEqual({ passed: true, failures: [], next: "ok" });
+  });
+
+  it("register: a truncated 201 is transient (the loop confirms the secret), and sets no token", async () => {
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: async () => ({ status: 201, json: truncated }) });
+    await expect(client.register("rgee_x", "rge_secret", { name: "r", imageDigest: build.imageDigest, engineVersion: "1", selfTest: st })).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    await expect(client.heartbeat("r", "running", 0)).rejects.toThrow(/not registered/);
+  });
+
+  it("result: the status is the whole answer; a 2xx with a truncated body is still definitive (a retry would get 409 engine_run_finished)", async () => {
+    expect(await clientAnswering(200, truncated).result("r", {} as EngineResultEnvelope)).toBe(200);
   });
 });
