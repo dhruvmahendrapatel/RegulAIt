@@ -766,6 +766,28 @@ without a judge now name one. No migration.
     reconciles when called on an already-revoked runner). A test fails the step right after the commit
     (`engineRunTestHooks.afterRegisterTx`): the run is already cancelled and its key revoked.
 
+**Review round 8 (PR #205, Codex, 2026-10-09; 2 findings, each red first).** Tests: `loop.test.ts` [77],
+`zz-b5-promptfoo.test.ts` "review round 8" [77] [78]. No migration.
+
+77. **A committed registration whose response was lost survives its enrolment token's expiry** [4227906414]. If a
+    registration committed but every response was lost until the enrolment token expired, a replay was refused (the
+    token expired) and a fresh token hit the unique token-hash constraint: the runner was stranded. No gateway
+    relaxation (an expired enrolment token is still refused). Instead, a runner resuming a pending enrolment FIRST tries
+    the pending secret as its credential, with a lease: any answer but a 401 means the registration committed — the
+    secret is stored, the pending record dropped, and the loop carries on (a run that lease handed out is run). Only a
+    401 sends it back to registering, with the same secret. A fresh enrolment token with a hash that is already a
+    runner's credential is now a clear 409 `engine_runner_already_registered`, decided before the token is spent
+    (replacing decision 54's `engine_runner_token_conflict`, which a unique violation still maps to under a race); the
+    loop then tries the secret directly, once — refused there too (the runner was revoked), it stops and says so.
+78. **The manifest sync decides a build change only from the locked row** [4227906421]. `changedBuild` came from an
+    unlocked read, so a second concurrent sync could switch the engine off and clear its self-test after the first had
+    installed the new build and a self-test had been refreshed. The unlocked read now only decides whether to look
+    closer; inside the transaction, on the engine row taken `FOR UPDATE`, the build comparison decides switching off,
+    clearing the self-test, cancelling waiting runs (decision 75) and the audit. When the locked row already carries the
+    new build, the sync changes nothing about the build. A two-connection test installs the new build, a passing
+    self-test and an enable between a sync's unlocked read and its transaction
+    (`engineRunTestHooks.beforeSyncTx`): the engine stays enabled with its self-test, and no disable is audited.
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
