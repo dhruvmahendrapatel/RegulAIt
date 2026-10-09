@@ -1414,6 +1414,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/engine-schedules": "engines",
   "PATCH /v1/engine-schedules/:scheduleId": "engines",
   "POST /v1/model-artifacts": "engines",
+  "GET /v1/model-artifacts": "engines",
+  "GET /v1/model-artifacts/:artifactId": "engines",
   "PUT /v1/servers/:serverId/owner": "servers",
   "PUT /v1/connectors/:connectorId/owner": "connectors",
   "GET /v1/inventory/agents/:agentId": "inventory",
