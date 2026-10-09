@@ -12,13 +12,13 @@
 import { describe, expect, it } from "vitest";
 import { createServer } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ENGINE_RESULT_VERSION, type EngineLease } from "@regulait/shared";
+import { ENGINE_RESULT_VERSION, type EngineLease, type EngineResultEnvelope } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
-import { buildSelfTest, runOnce, RunnerClient, type RunnerHttp } from "./runner.js";
+import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
 
 const refuse = (code: string) => () => Promise.reject(Object.assign(new Error(code), { code }));
 
@@ -139,7 +139,7 @@ describe("runOnce", () => {
         seenDir = ctx.workDir;
         throw new Error("engine crashed");
       },
-      { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root },
+      { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root },
     );
     expect(out.outcome).toBe("failed");
     const posted = calls.find((c) => c.path.endsWith("/result"))!.body as Record<string, unknown>;
@@ -160,7 +160,7 @@ describe("runOnce", () => {
             reject(new Error("aborted"));
           });
         }),
-      { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, heartbeatMs: 20 },
+      { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, heartbeatMs: 20 },
     );
     expect(out.outcome).toBe("cancelled");
     expect(aborted).toBe(true);
@@ -227,7 +227,7 @@ describe("PR #203 review round 2", () => {
   it("[18] a transient failure or 5xx on the result is retried, keeping the work dir, until a 2xx", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
     const g = gateway(["throw", 503, 200]);
-    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, retryBaseMs: 1 });
+    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
     expect(out).toMatchObject({ outcome: "posted", status: 200 });
     expect(g.calls).toHaveLength(3);
     expect(g.seen()).toBe(true);
@@ -236,9 +236,135 @@ describe("PR #203 review round 2", () => {
   it("[18] a definitive 4xx stops the retries", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "b5-retry-"));
     const g = gateway([409, 200]);
-    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", workRoot: root, retryBaseMs: 1 });
+    const out = await runOnce(g.client, adapter(g), { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
     expect(out).toMatchObject({ status: 409 });
     expect(g.calls).toHaveLength(1);
+  });
+
+  /** a gateway whose starting heartbeat answers in order (then 200), with everything else accepted */
+  function startGateway(starts: Array<number | "throw">) {
+    const seen: string[] = [];
+    let adapterRan = false;
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      if (p.endsWith("/lease")) return { status: 200, json: async () => lease2 };
+      if (p.endsWith("/heartbeat")) {
+        const phase = (JSON.parse(init.body!) as { phase: string }).phase;
+        if (phase === "starting") {
+          const s = starts.shift() ?? 200;
+          seen.push(String(s));
+          if (s === "throw") throw new Error("ECONNRESET");
+          return { status: s, json: async () => ({ cancel: false }) };
+        }
+        return { status: 200, json: async () => ({ cancel: false }) };
+      }
+      return { status: 200, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    client.useToken("rge_test");
+    const adapter = async () => {
+      adapterRan = true;
+      return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+    };
+    return { client, seen, adapter, ran: () => adapterRan };
+  }
+
+  it("PR #205 round 10 [83]: a transient failure of the starting heartbeat is retried; the leased run is run, not abandoned", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-start-"));
+    const g = startGateway(["throw", 503, 200]);
+    const out = await runOnce(g.client, g.adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
+    expect(g.seen).toEqual(["throw", "503", "200"]);
+    expect(g.ran()).toBe(true);
+    expect(out).toMatchObject({ outcome: "posted", status: 200 });
+  });
+
+  it("PR #205 round 10 [83]: a definitive refusal of the starting heartbeat abandons the run quietly (cancelled, no throw, nothing run)", async () => {
+    for (const refusal of [401, 404, 409]) {
+      const root = await mkdtemp(path.join(tmpdir(), "b5-start-"));
+      const g = startGateway([refusal]);
+      const out = await runOnce(g.client, g.adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1 });
+      expect(out).toMatchObject({ outcome: "cancelled" });
+      expect(g.seen).toEqual([String(refusal)]);
+      expect(g.ran()).toBe(false);
+    }
+  });
+
+  it("PR #205 round 10 [83]: transient failures past the attempt budget abandon the run as cancelled, never a throw", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-start-"));
+    const g = startGateway(["throw", "throw", "throw"]);
+    const out = await runOnce(g.client, g.adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1, maxStartAttempts: 3 });
+    expect(out).toMatchObject({ outcome: "cancelled" });
+    expect(g.seen).toHaveLength(3);
+    expect(g.ran()).toBe(false);
+  });
+
+  it("PR #205 round 11 [89]: a request that never answers is aborted at its timeout and fails as transient", async () => {
+    let signal: AbortSignal | undefined;
+    const hang: RunnerHttp = (_url, init) => {
+      signal = init.signal;
+      return new Promise(() => {}); // never settles, never honours the signal
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: hang, requestTimeoutMs: 20 });
+    client.useToken("rge_test");
+    const t0 = Date.now();
+    await expect(client.lease({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" })).rejects.toBeInstanceOf(RunnerTimeoutError);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("PR #205 round 11 [89]: the bound is the run's deadline when that is sooner", async () => {
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: () => new Promise(() => {}), requestTimeoutMs: 60_000 });
+    client.useToken("rge_test");
+    const t0 = Date.now();
+    await expect(client.heartbeat("r", "running", 0, new Date(Date.now() + 30).toISOString())).rejects.toBeInstanceOf(RunnerTimeoutError);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it("PR #205 round 11 [89]: a timed-out result post is retried like any transient failure", async () => {
+    let calls = 0;
+    const http: RunnerHttp = async () => {
+      calls++;
+      if (calls === 1) return new Promise(() => {});
+      return { status: 200, json: async () => ({}) };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http, requestTimeoutMs: 20 });
+    client.useToken("rge_test");
+    const env: EngineResultEnvelope = { version: ENGINE_RESULT_VERSION, runId: lease2.runId, engineId: "promptfoo" as const, engineVersion: "0.123.1", status: "completed" as const, errorCode: null, items: [], notRun: [], rawReport: null };
+    expect(await postResultWithRetry(client, lease2.runId, env, { deadlineAt: new Date(Date.now() + 60_000).toISOString(), retryBaseMs: 1 })).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("PR #205 round 11 [90]: an undelivered result is kept under the persistent retain root, never in the engine's work dir", async () => {
+    const work = await mkdtemp(path.join(tmpdir(), "b5-work-"));
+    const retain = await mkdtemp(path.join(tmpdir(), "b5-retain-"));
+    const g = gateway(["throw", "throw"]);
+    const out = await runOnce(g.client, adapter(g), {
+      engineId: "promptfoo",
+      engineVersion: "0.123.1",
+      imageDigest: `sha256:${"a".repeat(64)}`,
+      workRoot: work,
+      retainRoot: retain,
+      retryBaseMs: 1,
+      maxResultAttempts: 2,
+    });
+    expect(out).toMatchObject({ outcome: "undelivered" });
+    expect(await readdir(work)).toEqual([]);
+    expect(await readdir(path.join(retain, lease2.runId))).toEqual([RETAINED_RESULT_FILE]);
+  });
+
+  it("PR #205 round 5 [68]: an undelivered run keeps ONLY its envelope, for the loop to retry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "b5-retain-"));
+    const g = gateway(["throw", "throw", "throw"]);
+    const out = await runOnce(g.client, async (_l, ctx) => {
+      g.setDir(ctx.workDir);
+      await writeFile(path.join(ctx.workDir, "promptfoo-output.json"), "x".repeat(1024));
+      return { status: "completed" as const, items: [], notRun: [], rawReport: null };
+    }, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: root, retryBaseMs: 1, maxResultAttempts: 2 });
+    expect(out).toMatchObject({ outcome: "undelivered" });
+    const dir = path.join(root, lease2.runId);
+    expect(await readdir(dir)).toEqual([RETAINED_RESULT_FILE]);
+    const kept = JSON.parse(await readFile(path.join(dir, RETAINED_RESULT_FILE), "utf8")) as { runId: string; deadlineAt: string; envelope: { runId: string } };
+    expect(kept).toMatchObject({ runId: lease2.runId, deadlineAt: lease2.deadlineAt, envelope: { runId: lease2.runId } });
   });
 
   it("[22] the abort listener is removed when the process ends", async () => {

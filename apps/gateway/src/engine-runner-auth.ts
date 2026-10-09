@@ -19,7 +19,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, engineEnrollmentTokens, engineRunners, eq, gt, isNull, sql, type Db } from "@regulait/db";
+import { and, engineEnrollmentTokens, engineRunners, eq, gt, sql, type Db } from "@regulait/db";
 import {
   ENGINE_ENROLLMENT_ROUTES,
   ENGINE_ENROLLMENT_TOKEN_PREFIX,
@@ -34,10 +34,9 @@ export const ENROLLMENT_ROUTE_SET: ReadonlySet<string> = new Set<string>(ENGINE_
 /** every route only a runner credential reaches */
 export const ALL_RUNNER_ROUTES: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
 
-export function generateRunnerToken(): { token: string; tokenHash: string } {
-  const token = ENGINE_RUNNER_TOKEN_PREFIX + randomBytes(32).toString("hex");
-  return { token, tokenHash: hashToken(token) };
-}
+// PR #205 review [54]: the gateway no longer mints runner tokens. The runner generates its own
+// (`generateRunnerSecret`, packages/engine-runner) and registers only its sha256 — `hashToken`
+// over the same `rge_` string — so nothing secret ever travels back to it.
 
 export function generateEnrollmentToken(): { token: string; tokenHash: string } {
   const token = ENGINE_ENROLLMENT_TOKEN_PREFIX + randomBytes(32).toString("hex");
@@ -48,22 +47,26 @@ export function generateEnrollmentToken(): { token: string; tokenHash: string } 
  * Resolve a presented bearer to a runner or enrolment context, a refusal, or
  * null when the token is not an engine credential at all (the caller then
  * tries the other credential kinds). An enrolment token is only CHECKED here
- * (unused, unexpired); the register route spends it atomically.
+ * (unexpired); the register route spends it atomically. PR #205 review [54]: a SPENT, unexpired
+ * enrolment token still authenticates — to the register route only, where it can do nothing but
+ * replay the registration it already made (same runner-token hash → same runner; any other hash
+ * is refused). It never mints a second runner.
  */
 export async function resolveEngineCredential(db: Db, token: string): Promise<AuthContext | AuthRefusal | null> {
   if (token.startsWith(ENGINE_ENROLLMENT_TOKEN_PREFIX)) {
     const [row] = await db
-      .select({ id: engineEnrollmentTokens.id, engineId: engineEnrollmentTokens.engineId })
+      .select({ id: engineEnrollmentTokens.id, engineId: engineEnrollmentTokens.engineId, usedAt: engineEnrollmentTokens.usedAt })
       .from(engineEnrollmentTokens)
-      .where(
-        and(
-          eq(engineEnrollmentTokens.tokenHash, hashToken(token)),
-          isNull(engineEnrollmentTokens.usedAt),
-          gt(engineEnrollmentTokens.expiresAt, sql`now()`),
-        ),
-      );
+      .where(and(eq(engineEnrollmentTokens.tokenHash, hashToken(token)), gt(engineEnrollmentTokens.expiresAt, sql`now()`)));
     if (!row) return "engine_enrollment_invalid";
-    return { userId: null, isAdmin: false, via: "engine-enrollment", engineEnrollmentTokenId: row.id, engineId: row.engineId };
+    return {
+      userId: null,
+      isAdmin: false,
+      via: "engine-enrollment",
+      engineEnrollmentTokenId: row.id,
+      engineEnrollmentSpent: row.usedAt !== null,
+      engineId: row.engineId,
+    };
   }
   if (token.startsWith(ENGINE_RUNNER_TOKEN_PREFIX)) {
     const [row] = await db

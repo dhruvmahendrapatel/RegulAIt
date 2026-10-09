@@ -454,7 +454,7 @@ import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
-import { applyEngineRunApprovalDecision, registerEngineRunRoutes } from "./engine-runs.js";
+import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
 import { registerEngineRunnerScopeHook, engineCredentialRoutes } from "./engine-runner-auth.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
@@ -4297,6 +4297,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           };
         }
       }
+      // ADR-0187 decision 100 (PR #205 review round 15): an engine run's approval is decided under the
+      // lock order every engine path keeps — the run row first, then the approval — so a cancel (or a
+      // switch-off) holding the run cannot deadlock with this decision
+      if (row.objectType === "engine_run") await lockEngineRunOfApprovalTx(tx as unknown as Parameters<typeof lockEngineRunOfApprovalTx>[0], row.id);
       const [updated] = await tx
         .update(approvals)
         .set({
