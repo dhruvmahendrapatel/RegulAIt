@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   ARTIFACT_FORMAT_PLANS,
   ARTIFACT_FORMATS,
+  deriveArtifactScanVerdict,
   detectArtifactFormat,
   mapModelscanReport,
   modelscanArtifactName,
@@ -242,8 +243,41 @@ describe("B5-M RED PROOFS (owner decision 1 strict default: executable formats n
   });
 
   it("an artifact that does not arrive intact is never scanned (sha256 checked)", async () => {
-    const r = await scanAndJudge(cleanPickle(), NEVER, { fetchBytes: maliciousPickle() });
+    // same length, one byte different: only the sha256 can tell
+    const swapped = Buffer.from(cleanPickle());
+    swapped[swapped.length - 2] = swapped[swapped.length - 2]! ^ 0x01;
+    const r = await scanAndJudge(cleanPickle(), NEVER, { fetchBytes: swapped });
     expect(r.envelope.errorCode).toBe("artifact_fetch_failed");
     expect(r.judged.verdict).toBe("unknown");
+    // and a longer body is cut off and refused
+    const longer = await scanAndJudge(cleanPickle(), NEVER, { fetchBytes: Buffer.concat([cleanPickle(), Buffer.from("x")]) });
+    expect(longer.envelope.errorCode).toBe("artifact_fetch_failed");
+  });
+
+  it("the gateway does not trust a runner's own consistency: a passing scan beside an error item is unknown", () => {
+    const judged = deriveArtifactScanVerdict({
+      storedFormat: "pickle",
+      runStatus: "completed",
+      runVerdict: "fail",
+      runtimeNotRun: 0,
+      items: [
+        { key: "format", sourceSystem: "regulait-artifact-format", sourceId: "pickle", verdict: "fail", severity: "high" },
+        { key: "modelscan/scan", sourceSystem: "modelscan", sourceId: "scan", verdict: "pass", severity: "low" },
+        { key: "modelscan/error/1", sourceSystem: "modelscan-error", sourceId: "PICKLE_GENOPS", verdict: "unknown", severity: "medium" },
+      ],
+    });
+    expect(judged.verdict).toBe("unknown");
+    // nor a runner that reports another format than the one the gateway detected at upload
+    const relabelled = deriveArtifactScanVerdict({
+      storedFormat: "pickle",
+      runStatus: "completed",
+      runVerdict: "fail",
+      runtimeNotRun: 0,
+      items: [
+        { key: "format", sourceSystem: "regulait-artifact-format", sourceId: "zip", verdict: "fail", severity: "high" },
+        { key: "modelscan/scan", sourceSystem: "modelscan", sourceId: "scan", verdict: "pass", severity: "low" },
+      ],
+    });
+    expect(relabelled.verdict).toBe("unknown");
   });
 });

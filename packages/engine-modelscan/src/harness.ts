@@ -41,7 +41,7 @@ export function leaseFor(bytes: Buffer, deadlineMs = 60_000): EngineLease {
   };
 }
 
-export function fakeFetch(bytes: Buffer, status = 200) {
+export function fakeFetch(bytes: Buffer, status = 200): () => Promise<Response> {
   return async () => new Response(status === 200 ? new Uint8Array(bytes) : null, { status });
 }
 

@@ -491,6 +491,76 @@ services:
       REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
       REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
 
+  # --- modelscan engine: runner + scanner (profile: engines) — ADR-0187 B5-M --
+  #
+  # ONE image (engines/modelscan/Dockerfile), TWO containers (decision 104).
+  # Every uploaded model artifact is hostile input, so the process that parses
+  # it has no network at all and never holds the runner credential:
+  #
+  #   engine-modelscan          the runner: the hardened template, on `engines`
+  #                             (reaches only the gateway), its own state volume
+  #                             (the runner token), the job volume read-write,
+  #                             the result volume READ-ONLY. It fetches the
+  #                             artifact (sha256 checked) and never runs
+  #                             modelscan.
+  #   engine-modelscan-scanner  the scanner: network_mode none, read-only root,
+  #                             non-root, cap_drop ALL, no-new-privileges, no
+  #                             token, no state; the job volume (the artifact)
+  #                             READ-ONLY; its one writable place is /out (the
+  #                             result volume, a tmpfs); smaller memory, CPU and
+  #                             pids limits; the wall-clock limit is the run's
+  #                             deadline, enforced per scan by killing
+  #                             modelscan's process group.
+  #
+  # Both exchange volumes are tmpfs-backed, so nothing of an artifact survives
+  # the containers. The job volume must hold the largest artifact the org
+  # setting admits (512 MiB strict default): raise
+  # REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE with that setting.
+  # Digest pinning as for promptfoo: one variable,
+  # REGULAIT_ENGINE_MODELSCAN_DIGEST=sha256:<digest>, names the image of BOTH
+  # containers and the digest the runner reports; the all-zero default names
+  # no image.
+  engine-modelscan:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-modelscan-state:/state
+      - engine-modelscan-jobs:/jobs
+      - engine-modelscan-results:/results:ro
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_MODELSCAN_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_MODELSCAN_JOBS_DIR: /jobs
+      REGULAIT_MODELSCAN_RESULTS_DIR: /results
+
+  engine-modelscan-scanner:
+    profiles: ["engines"]
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["node", "/app/dist/scanner-main.js"]
+    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /work:size=64m,mode=0700,uid=10001,gid=10001
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 64
+    volumes:
+      - engine-modelscan-jobs:/jobs:ro
+      - engine-modelscan-results:/out
+    environment:
+      REGULAIT_MODELSCAN_JOBS_DIR: /jobs
+      REGULAIT_MODELSCAN_RESULTS_DIR: /out
+    restart: unless-stopped
+
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
   # OFF by default. Keycloak brokers Microsoft Entra ID, Google and GitHub and
@@ -689,5 +759,20 @@ volumes:
   demo_license_keys:
   # ADR-0187 decision 49: the promptfoo runner's own state (its runner token only)
   engine-promptfoo-state:
+  # ADR-0187 B5-M: the modelscan runner's own state (its runner token only), and
+  # the two tmpfs-backed exchange volumes between the runner and the scanner
+  engine-modelscan-state:
+  engine-modelscan-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=${REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE:-1100m},uid=10001,gid=10001,mode=0750"
+  engine-modelscan-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,uid=10001,gid=10001,mode=0750"
   caddy_data:
   caddy_config:

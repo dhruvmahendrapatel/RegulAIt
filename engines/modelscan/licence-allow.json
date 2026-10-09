@@ -1,0 +1,38 @@
+[
+  {
+    "subject": "numpy",
+    "licence": "Zlib",
+    "decision": "pending owner decision",
+    "why": "numpy 2.5.3's licence expression is BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0; Zlib (permissive, not copyleft) is not on the ADR-0176 list. numpy is a hard dependency of modelscan (its pickle scanner imports it)."
+  },
+  {
+    "subject": "numpy.libs/libgfortran",
+    "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
+    "decision": "pending owner decision",
+    "why": "the GCC Fortran runtime bundled in numpy's manylinux wheel (for OpenBLAS). The GCC Runtime Library Exception lets independent code link it without GPL obligations; ADR-0176 bars GPL in shipped code, so the owner decides (R10 Consequences for B5-M 7). The alternative is building numpy without it."
+  },
+  {
+    "subject": "numpy.libs/libquadmath",
+    "licence": "LGPL-2.1-or-later",
+    "decision": "pending owner decision",
+    "why": "the GCC quad-precision runtime bundled in numpy's manylinux wheel. Shipped unmodified as a separate shared library; LGPL is outside ADR-0176's list, so the owner decides."
+  },
+  {
+    "subject": "h5py.libs/libhdf5",
+    "licence": "LicenseRef-HDF5",
+    "decision": "pending owner decision",
+    "why": "the HDF5 library bundled in h5py's wheel, under the HDF Group's own BSD-style licence (h5py licenses/hdf5.txt), which has no SPDX id on the ADR-0176 list."
+  },
+  {
+    "subject": "h5py.libs/libhdf5_hl",
+    "licence": "LicenseRef-HDF5",
+    "decision": "pending owner decision",
+    "why": "HDF5's high-level library, bundled with libhdf5 under the same licence."
+  },
+  {
+    "subject": "python",
+    "licence": "PSF-2.0",
+    "decision": "pending owner decision",
+    "why": "the CPython runtime of the base image (permissive, not copyleft), which modelscan needs to run; PSF-2.0 is not on the ADR-0176 list."
+  }
+]
