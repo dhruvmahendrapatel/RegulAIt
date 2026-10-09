@@ -67,7 +67,6 @@ import {
   type EngineRunRow,
 } from "@regulait/db";
 import {
-  BATCH5_NOT_BUILT,
   ENGINE_IDS,
   ENGINE_LEASE_TTL_SECONDS,
   ENGINE_QUEUE_TTL_SECONDS,
@@ -101,6 +100,7 @@ import {
 import { z } from "zod";
 import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
+import { artifactAccessible, recordArtifactScanTx } from "./model-artifacts.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -351,8 +351,13 @@ export async function validateEngineRunRequest(
       }
     }
   } else {
-    const [art] = await db.select({ id: modelArtifacts.id }).from(modelArtifacts).where(eq(modelArtifacts.id, input.target.artifactId));
+    const [art] = await db.select({ id: modelArtifacts.id, uploadedByUserId: modelArtifacts.uploadedByUserId }).from(modelArtifacts).where(eq(modelArtifacts.id, input.target.artifactId));
     if (!art) return { ok: false, status: 404, error: "unknown_artifact" };
+    // B5-M: an artifact is scanned by the person who uploaded it, or an admin (it is hostile input,
+    // and its scans become evidence)
+    if (!artifactAccessible(art, { userId: ctx.runAsUserId, isAdmin: ctx.isAdmin })) {
+      return { ok: false, status: 403, error: "artifact_not_accessible", detail: "only the person who uploaded this artifact, or an admin, can scan it" };
+    }
   }
   if (input.projectId) {
     const attribution = await assertProjectAttribution(db, input.projectId, ctx.runAsUserId, ctx.isAdmin);
@@ -599,6 +604,9 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       dispatchAuditIds: it.dispatchAuditIds,
     }));
   for (let i = 0; i < itemRows.length; i += 500) await tx.insert(engineRunItems).values(itemRows.slice(i, i + 500));
+  // B5-M: an artifact run's scan record is written in this same transaction, whatever ended the run
+  // (the verdict is the gateway's, from the format it detected at upload)
+  await recordArtifactScanTx(tx, locked, args.status, args.normalised);
   let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
   if (args.status === "completed") {
     const kind = manifestOf(opts)[locked.engineId as EngineId].kind;
@@ -1516,8 +1524,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     return { schedule: out.after };
   });
 
-  // ---- POST /v1/model-artifacts (B5-M builds the upload) ---------------------------
-  app.post("/v1/model-artifacts", async (_req, reply) => reply.status(501).send(BATCH5_NOT_BUILT));
+  // POST /v1/model-artifacts and the runner's GET /v1/engine-runner/artifacts/:artifactId are B5-M's
+  // (model-artifacts.ts)
 
   // ===== runner routes (runner token only; the scope hook enforces it) ==========
 
@@ -1784,9 +1792,6 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     }
     return reply.send({ cancel: beat.cancel, status: beat.status });
   });
-
-  // streamed through the gateway once B5-M builds the artifact store
-  app.get("/v1/engine-runner/artifacts/:artifactId", async (_req, reply) => reply.status(501).send(BATCH5_NOT_BUILT));
 
   app.post(
     "/v1/engine-runner/runs/:runId/result",

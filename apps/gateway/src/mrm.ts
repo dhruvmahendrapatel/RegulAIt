@@ -46,6 +46,7 @@ import {
   agents,
   and,
   approvals,
+  artifactScans,
   asc,
   auditLog,
   customModelProviders,
@@ -65,7 +66,9 @@ import {
   type ModelCardApprovalRow,
   type ModelCardRow,
 } from "@regulait/db";
+import { scanView } from "./model-artifacts.js";
 import {
+  ARTIFACT_SCAN_CHIP,
   SCORING_SEMANTICS_VERSION,
   assessCardCompleteness,
   attachModelCardEvidenceSchema,
@@ -541,6 +544,11 @@ async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number)
   // one place the change is invisible.
   const evidence = await Promise.all(
     evidenceRows.map(async (e) => {
+      if (e.artifactScanId) {
+        // ADR-0187 B5-M: an engine-scan citation carries the scan's verdict and its chip (never "safe")
+        const [s] = await db.select().from(artifactScans).where(eq(artifactScans.id, e.artifactScanId));
+        return { ...e, groundedness: null, scoringSemantics: null, artifactScan: s ? scanView(s) : null };
+      }
       if (!e.evalRunId) return { ...e, groundedness: null, scoringSemantics: null };
       const results = await db
         .select()
@@ -984,6 +992,18 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     const body = attachModelCardEvidenceSchema.parse(req.body);
     const [card] = await db.select().from(modelCards).where(eq(modelCards.id, id));
     if (!card) return reply.status(404).send({ error: "unknown_model_card" });
+    // ADR-0187 B5-M: a model-artifact scan cited as evidence. The citation records the verdict the
+    // gateway derived; an executable format is never `clean`, and the chip never says "safe".
+    let scan: typeof artifactScans.$inferSelect | undefined;
+    if (body.kind === "engine_scan") {
+      [scan] = await db.select().from(artifactScans).where(eq(artifactScans.id, body.artifactScanId!));
+      if (!scan) return reply.status(404).send({ error: "unknown_artifact_scan" });
+      const [dupe] = await db
+        .select({ id: modelCardEvidence.id })
+        .from(modelCardEvidence)
+        .where(and(eq(modelCardEvidence.cardId, id), eq(modelCardEvidence.artifactScanId, scan.id)));
+      if (dupe) return reply.status(409).send({ error: "evidence_already_attached" });
+    }
     if (body.kind === "eval_run") {
       const [run] = await db.select().from(evalRuns).where(eq(evalRuns.id, body.evalRunId!));
       if (!run) return reply.status(404).send({ error: "unknown_eval_run" });
@@ -1000,6 +1020,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         kind: body.kind,
         evalRunId: body.kind === "eval_run" ? body.evalRunId! : null,
         externalRef: body.kind === "external" ? body.externalRef! : null,
+        artifactScanId: body.kind === "engine_scan" ? body.artifactScanId! : null,
         label: body.label ?? null,
         note: body.note ?? null,
         attachedByUserId: req.authCtx.userId ?? null,
@@ -1016,6 +1037,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         kind: row!.kind,
         evalRunId: row!.evalRunId,
         externalRef: row!.externalRef,
+        artifactScanId: row!.artifactScanId,
+        ...(scan ? { artifactScanVerdict: scan.verdict, artifactSha256: scan.artifactSha256 } : {}),
       },
       effect: "allow",
       ruleId: "mrm-evidence-attached",
@@ -1023,7 +1046,9 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       reason:
         row!.kind === "eval_run"
           ? "an ADR-0044 eval run was attached as measured evidence behind this risk position"
-          : "an external report was referenced as evidence behind this risk position",
+          : row!.kind === "engine_scan"
+            ? `a model-artifact scan was attached as evidence behind this risk position (${scan ? ARTIFACT_SCAN_CHIP[scan.verdict as keyof typeof ARTIFACT_SCAN_CHIP] : "scan"})`
+            : "an external report was referenced as evidence behind this risk position",
     });
     return reply.status(201).send({ evidence: row });
   });
@@ -1040,7 +1065,7 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "model_card",
       objectId: id,
-      detail: { phase: "evidence", action: "detached", evidenceId, evalRunId: row.evalRunId },
+      detail: { phase: "evidence", action: "detached", evidenceId, evalRunId: row.evalRunId, artifactScanId: row.artifactScanId },
       effect: "deny",
       ruleId: "mrm-evidence-detached",
       ruleChain: [],

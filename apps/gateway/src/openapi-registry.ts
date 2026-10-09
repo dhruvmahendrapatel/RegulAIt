@@ -452,6 +452,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/engine-schedules": "internal",
   "PATCH /v1/engine-schedules/:scheduleId": "internal",
   "POST /v1/model-artifacts": "internal",
+  "GET /v1/model-artifacts": "internal",
+  "GET /v1/model-artifacts/:artifactId": "internal",
   "PUT /v1/servers/:serverId/owner": "internal",
   "PUT /v1/connectors/:connectorId/owner": "internal",
   "GET /v1/inventory/agents/:agentId": "internal",

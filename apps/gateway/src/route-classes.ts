@@ -725,6 +725,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/engine-schedules",
   "PATCH /v1/engine-schedules/:scheduleId",
   "POST /v1/model-artifacts",
+  // B5-M: the caller's own uploads (an admin sees all), checked in-handler
+  "GET /v1/model-artifacts",
+  "GET /v1/model-artifacts/:artifactId",
 ]);
 
 /**
