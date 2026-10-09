@@ -116,7 +116,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     // no network at all, and nothing that could widen it
     expect(scanner).toMatch(/\n {4}network_mode: none\n/);
     for (const key of ["networks", "ports", "privileged", "cap_add", "<<", "depends_on", "extra_hosts", "dns"]) {
-      expect(scanner, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[<]/g, "\\$&")}:`));
+      expect(scanner, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&")}:`));
     }
     expect(scanner).toMatch(/\n {4}read_only: true\n/);
     expect(scanner).toMatch(/\n {4}cap_drop: \[ALL\]\n/);
