@@ -607,6 +607,32 @@ runner-generated credential uses the existing `engine_runners.token_hash`, `enro
     times a file's size in heap) without reading or parsing it: the run fails (`results_too_large`, every reading
     unknown, every planned pair not run) and only the file's sha256 is recorded, computed by streaming.
 
+**Review round 4 (PR #205, Codex, 2026-10-09; 3 findings, each red first).** Tests: `loop.test.ts` [64],
+`promptfoo.test.ts` [66], `zz-b5-promptfoo.test.ts` "review round 4" [64] [65] [66]. No migration (see [66]).
+
+64. **A runner disabled for its own failed report keeps re-proving itself, slowly** [4226325872]. A failing report
+    switched the engine off; later leases answered `engine_disabled` and the loop refreshed only on
+    `engine_self_test_required`, so after a temporary network-policy problem the runner could not present a passing
+    report without re-enrolling. The lease refusal now carries a `reason`: `runner_self_test_failed` when this runner's
+    own stored report failed, `disabled` otherwise (an admin switched it off, or this runner's report already passes).
+    On `runner_self_test_failed` the shared loop re-runs and submits the self-test every 15 minutes
+    (`failedSelfTestRefreshMs`), and a transient submission failure does not use up that cadence; on `disabled` it
+    submits nothing. A passing refresh updates ONLY the runner's stored report: it never re-enables the engine.
+    Re-enabling after a failure stays an audited admin action with a step-up, whose self-test then evaluates the fresh
+    stored report (secure by default).
+65. **A self-test report never lands after a revocation** [4226325882]. The self-test route read the runner without a
+    lock and updated unconditionally, so a report racing a revocation could still write the runner's report and switch
+    the whole engine off. The transaction now takes the runner row `FOR UPDATE` and re-reads `revoked_at` before touching
+    the runner or the engine (revocation UPDATEs that row, so one waits for the other); revoked → 401
+    `engine_runner_revoked`. A race test revokes the runner between the route's pre-checks and its transaction
+    (`engineRunTestHooks.beforeSelfTestTx`).
+66. **A strategy needs a plugin** [4226325878]. A strategy-only plan produced neither items nor not-run entries. Run
+    creation (and schedule validation, which shares it) now refuses a promptfoo set list made only of `strategy:` sets
+    (422 `engine_config_invalid`). When every requested plugin is excluded at planning time, each requested strategy is
+    recorded not run and the run's error code is `no_runnable_plugin`. **The reason column admits only migration 0173's
+    vocabulary**, so the item's reason is `engine_error` for now; a dedicated `no_runnable_plugin` not-run reason needs
+    migration 0174 and was not added (owner question 12).
+
 **Deferred, with the owner of each:** artifact upload, artifact streaming to runners and `engine_scan` model-card
 evidence (B5-M; both runner and upload routes answer 501); per-engine images, SBOMs, signatures, taxonomy rows, set
 classes, the `--with-engines` bundle and the Kubernetes NetworkPolicy manifest (B5-P/M/G); the Engines page and run
@@ -661,3 +687,6 @@ compat surface is on (a run then fails at its first call); concurrency is per en
     with its deployment. Proof needs the deployer to verify the image signature (cosign, against our signing identity)
     before the container starts, and the engine images are not signed yet (they are not built). Until then an enabled
     engine rests on the operator deploying the digest the manifest names.
+12. **A `no_runnable_plugin` not-run reason (decision 66).** Adding it to `ENGINE_NOT_RUN_REASONS` needs migration 0174
+    (the `engine_run_items.not_run_reason` CHECK from 0173). Until the owner approves that migration, the strategies of a
+    run whose every plugin is excluded are recorded with `engine_error`, and the run's error code names the cause.
