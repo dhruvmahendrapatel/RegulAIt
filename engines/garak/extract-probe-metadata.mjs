@@ -64,8 +64,9 @@ if (mode === "--json") {
   lines.push(" *");
   lines.push(" * `detector` is the probe's primary detector: the only one garak runs with `extended_detectors: false`,");
   lines.push(" * which the runner always sets. `owasp` are garak's own tags, in the 2023 OWASP LLM Top 10 numbering");
-  lines.push(" * (R10); the crosswalk to the 2025 list is in garak.ts. To update: pin a new release, re-run the");
-  lines.push(" * extractor, re-read R10.");
+  lines.push(" * (R10): upstream data only, never read to map a probe. The 2025 mapping is our own per-probe table,");
+  lines.push(" * garak-owasp-2025.ts (ADR-0187 decision 213). To update: pin a new release, re-run the extractor,");
+  lines.push(" * re-read R10, and re-review every row of that table (its test fails until you do).");
   lines.push(" */");
   lines.push(`export const GARAK_UPSTREAM_VERSION = ${JSON.stringify(version)};`);
   lines.push(`export const GARAK_UPSTREAM_SOURCE_SHA256 = ${JSON.stringify(sha256)};`);
