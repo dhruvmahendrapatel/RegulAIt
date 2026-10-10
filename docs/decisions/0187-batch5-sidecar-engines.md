@@ -1917,6 +1917,91 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
   and modelscan are each re-checked against the CI-built image layout, and whichever has not been checked reads
   `false`.
 
+### Implementation decisions (B5-G OWASP table, owner decision on question 19, 2026-10-10, branch `b5-garak-owasp`)
+
+Built from the owner's decision on question 19. **No migration.** Code: `packages/shared/src/engines/garak-owasp-2025.ts`
+(the table, the review binding, `garakOwasp2025`, `garakOwasp2025Row`, `garakOwasp2025Coverage`); the 2023 crosswalk is
+removed from `garak.ts`; the extractor's header text (`engines/garak/extract-probe-metadata.mjs`) now points at the
+table. `garak-upstream.ts` is not edited. Tests: `packages/shared/src/engines/garak-owasp-2025.test.ts` (5) and its
+committed snapshot `__snapshots__/garak-owasp-2025.coverage.json`; the two crosswalk cases in `garak.test.ts` are
+removed. Open source first (ADR-0176): no maintained library maps garak's probes to the 2025 list, and the mapping is a
+RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
+
+213. **garak's 2023 tags are upstream data only; decision 148's crosswalk is retired.** The `owasp` field in
+     `garak-upstream.ts` stays as generated (garak's own `owasp:llmNN` tags, 2023 numbering), and nothing reads it to
+     map a probe. `garakOwaspTags2023` stays as a provenance accessor, documented as never used for mapping.
+     `GARAK_OWASP_CROSSWALK` and its row type are gone; `garakOwasp2025(probe)` keeps its name and now reads our table
+     (a probe with no row returns `[]`). Red: the test pins rows that a renumbering of garak's tags cannot produce
+     (`web_injection.MarkdownImageExfil` is LLM05 only, `suffix.GCGCached` is LLM01 though untagged upstream,
+     `continuation.*` is none though tagged llm01).
+214. **The evidence rule: never overclaim.** A probe counts toward a 2025 risk only when a failure of that probe, as
+     its primary detector scores it, is evidence of that risk. It maps to none when its failure shows a content harm
+     the 2025 list does not name (toxicity, slurs, sexual content, malware text), when it measures only a refusal gap
+     with no attack technique (`donotanswer.*`), or when its detector cannot tell the risk from a look-alike (a
+     key-shaped string is not a leaked key). LLM01 is claimed only where the prompt carries an attack technique:
+     injection, a persona or role-play jailbreak, encoding, obfuscation, an adversarial suffix, or an iterative
+     attacker model. The table is reported provenance; what counts toward A3 is still the attack class (decision 147).
+215. **The table: one row per probe of the pinned release, with a one-line rationale.** 191 rows (every probe in
+     `garak-upstream.ts` at garak 0.17.0, including the never-runnable `test.*` and `grandma.GrandmaIntent`). Ids and
+     names are the official 2025 OWASP Top 10 for LLM Applications, checked on 2026-10-10 against the primary source
+     (genai.owasp.org/llm-top-10), and equal the vendored `OWASP_LLM_TOP_10_MAPPING` keys and names, which the test
+     pins. Probes per 2025 risk (all rows / rows that run in this build today):
+
+     | 2025 risk | Probes | Run today |
+     | --- | --- | --- |
+     | LLM01 Prompt Injection | 94 | 51 |
+     | LLM02 Sensitive Information Disclosure | 22 | 2 |
+     | LLM03 Supply Chain | 1 | 0 |
+     | LLM04 Data and Model Poisoning | 0 | 0 |
+     | LLM05 Improper Output Handling | 17 | 16 |
+     | LLM06 Excessive Agency | 1 | 0 |
+     | LLM07 System Prompt Leakage | 1 | 0 |
+     | LLM08 Vector and Embedding Weaknesses | 0 | 0 |
+     | LLM09 Misinformation | 16 | 7 |
+     | LLM10 Unbounded Consumption | 0 | 0 |
+     | none | 40 | 14 |
+
+     One probe (`agent_breaker.AgentBreaker`) carries two risks, so the rows sum to 192. "Run today" is the catalogue's
+     `local` disposition before questions 20, 22 and 24 are built; it is not pinned by the test. The full table, with
+     every rationale, is the source file; the committed snapshot lists every probe under its risk.
+216. **Every row is re-reviewed at each garak pin change, and CI enforces it.** `GARAK_OWASP_2025_REVIEW` names the
+     release (`0.17.0`) and the `plugin_cache.json` sha256 the table was reviewed against, as literals. The test fails
+     (a) when a probe in `garak-upstream.ts` has no row, or a row names a probe the release does not have; (b) when a
+     row cites an id outside the 2025 list; (c) when the review binding differs from `GARAK_UPSTREAM_VERSION`, its
+     sha256 or the manifest's garak version, so a pin bump stops CI even when the probe set is unchanged; (d) when the
+     coverage summary differs from the committed snapshot. To pass after a bump, a person re-reads every row against the
+     new release's probes and detectors, then moves the binding and the snapshot in the same change. Red, each shown on
+     the branch: deleting the `tap.TAPCached` row fails (a) and (d); `owasp:llm:11` on `dra.DRA` fails (b) and (d); a
+     binding of `0.16.0` fails (c) and (d).
+217. **Judgement calls in the rows** (each read against the pinned wheel's probe and detector source, sha256 matching
+     decision 142):
+     - memorisation (`divergence.Repeat`, `divergence.RepeatExtended`, `leakreplay.*`) → LLM02 only; `propile.*`
+       (personal data completion) → LLM02;
+     - `divergence.RepeatedToken` → **none**, against the brief's "divergence.* → LLM02" default: its detector flags
+       long, repetitive or citation-like output (instability), not leaked data, and a 2,000-character reply is not
+       evidence of unbounded consumption;
+     - `agent_breaker.AgentBreaker` → LLM06 and LLM01 (it drives the agent's tools with crafted prompts);
+     - `web_injection.*` → LLM05 only: the output carries a payload a renderer acts on, but the exfiltrated text is
+       planted, so no disclosure is claimed, and the payload request is the prompt itself, not an injected instruction;
+       `ansiescape.*`, `exploitation.*` and `av_spam_scanning.*` → LLM05 on the same reading;
+     - `sysprompt_extraction.SystemPromptExtraction` → LLM07 only (the detector measures leakage, not an override);
+     - `apikey.*` → none, and `grandma.Win10`/`Win11` → LLM01 only (role-play jailbreak): key-shaped output is not
+       claimed as a leak;
+     - `packagehallucination.*` → LLM09 only (the 2025 LLM09 text names hallucinated packages; LLM03 is the
+       application's own supply chain); `fileformats.HF_Files` → LLM03 (an unsafe model artifact);
+     - `donotanswer.InformationHazard` and `.MisinformationHarms` → none (the detector measures only that the model did
+       not refuse);
+     - `topic.*`, `glitch.*`, `goodside.Davidjl`, `goodside.ThreatenJSON`, `lmrc.Anthropomorphisation`,
+       `lmrc.Deadnaming` → none;
+     - nothing maps to LLM04, LLM08 or LLM10: no garak probe in this release produces evidence of them over the chat
+       route.
+218. **Consumers.** Before this change the crosswalk had no runtime consumer: findings carry `sourceTaxonomy`
+     (`garak`, probe) and the attack class; the coverage view, model-card evidence and reports cite OWASP through the
+     evaluator catalog's per-class references (`evaluator-catalog.ts`), never through garak's tags; the gateway and the
+     Engines page read neither. Its only readers were the package export and two test cases. Those now read the new
+     table (exported from `@regulait/shared`), and any future reader that shows a garak probe's OWASP risks must call
+     `garakOwasp2025` or `garakOwasp2025Coverage`; reading `GarakUpstreamProbe.owasp` for that is a review finding.
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -2003,6 +2088,7 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
     decides (candidates: llm07 → 2025 LLM06 Excessive Agency or LLM05; llm10 → nothing). The alternative R10 names —
     our own per-probe OWASP table that ignores garak's tags — is also open.
     *decided 2026-10-10 by the owner: our own per-probe table (see "Owner decisions (2026-10-10, garak)").*
+    *Built 2026-10-10, decisions 213-218 (`garak-owasp-2025.ts`).*
 20. **B5-G: probes excluded pending an owner decision on provenance or licence (decision 144).** (a) Inline payloads
     garak reproduces from named third-party posts: doctor, grandma, goodside, glitch. (b) Licences outside the list:
     badchars (Unicode licence), the OpenRAIL toxicity classifier (atkgen.Tox, latentinjection.LatentJailbreak,
