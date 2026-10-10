@@ -1000,6 +1000,18 @@ session's rulings below are binding on S5 and the slices after it. Items 1 to 6 
 7. **Introspection reads `aud` as one string,** as the token endpoint does: a client assertion's `aud` must be exactly
    the token endpoint URL (not an array containing it), and a token whose `aud` is not a single string is inactive.
 
+8. **The delegation step-up binds the whole authority (Codex X45 I7S5-02, MEDIUM).** The `identity_manage` step-up
+   for a write delegation on a classified project bound only the agent, project and resource, so a grant approved for
+   a narrow delegation could sign a wider one. Its facts are now the whole intended authority, computed after the cap
+   and lifetime are resolved: `op`, `agentIdentityId`, `projectId`, `resource`, `env`, `authorizationDetails`, the
+   resolved `capMicros`, `maxDepth`, the resolved `lifetimeSeconds` and `agentKeyThumbprint` (or null). The 403
+   returns exactly these as `action.body`, and the client posts that object verbatim to `/v1/auth/step-up/options`
+   (no web client calls the proof route yet; S6's must echo it). A grant for other facts is refused and not spent.
+9. **Replay claims outlive their signed window on any process clock (Codex X45 I7S5-04, LOW).** The adapter added the
+   provider's process-relative `expiresIn` to the database clock, so under process skew a claim could expire before
+   the signed window ended. A `client_assertion` claim now lasts at least until the verified `exp` plus the 5 s
+   allowance; an `as_dpop` claim at least until the proof's `iat` plus its 60 s acceptance age plus 5 s.
+
 Recorded with these:
 
 - **A child's resource is its parent's audience, strictly, for v1.** This answers the S3 open question above. A child
