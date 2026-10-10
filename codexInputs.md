@@ -1,3 +1,55 @@
+## X33 identity admin components and mock preview — 2026-10-10 UTC
+
+**Reviewable preview; BLOCKED for the S1 HTTP contract and S4/S5 acceptance.**
+The accepted ADR defines table/proof semantics but does not publish administrative
+identity, credential, own-grant and run-tree paths or request/response JSON. Claude
+was asked on the board at04:21 and04:37 to freeze these. `IdentityAdminPort` is an
+internal view model, **not a claimed backend contract**. No guessed routes or
+production navigation mount were added; the test-only Vite entry is
+`/ui/e2e/fixtures/workload-identity-preview.html`. Run the web Vite development
+server to inspect the explicit synthetic/mock banner. The production index does
+not import the fixture or expose its one-use synthetic verification.
+
+Implemented identity create, one subject per identity picker, steward/environment
+editing, suspend/restore/revoke; credential inventory, public JWK upload/thumbprint,
+90-day expiry bound, add/rotation/revocation; own tool/server/connector/invoke grants
+and role assignments; run delegation sponsor/actor chain, exact micro-dollar
+cap/spent/reserved/remaining and incoming-edge amount/draw/release, cascade revoke.
+Empty grants remain explicitly restrictive. Revocation copy distinguishes credential
+authentication from token binding, preserves rotation overlap, and states that an
+already-dispatched external effect cannot be recalled. Every write captures one
+command through the real `withStepUp` retry orchestration. The mock port refuses
+without a one-use, command-bound synthetic grant; **no actual WebAuthn/TOTP or
+product identity endpoint is claimed tested**.
+
+Public key parsing refuses private/shared fields before any write, accepts only
+canonical 32-byte P-256/Ed25519 coordinates and forwards a public-field whitelist.
+The server still owns curve/key validity. No raw file, private key or grant token
+is displayed. Errors use fixed safe copy, unknown budgets remain Unmeasured,
+unknown expiry disables revocation, and incomplete/cyclic/too-deep trees have no
+action rows. Large micro-dollar values stay exact via BigInt, including overruns.
+A closed edge releases unspent capacity only to its immediate parent in the mock
+preview; this is a view fixture, not a kernel/ledger implementation proof.
+
+Validation: **476/476 web units, 8/8 Chromium mock browser cases, production web
+build/typecheck PASS**. Browser cases cover validation, cancelled confirmation and
+step-up, identical command retry, status changes, private-JWK refusal, rotation
+then revocation, all five own-grant kinds/removal, per-edge accounting and cascade,
+unreadable data/refusals, keyboard modal trapping/focus return, and **four axe
+analyses** (page and creation dialog in light/dark), with no page errors in the
+accessibility journey. Initial runs had ambiguous toast/detail selectors and
+mid-transition contrast readings; corrected selectors and animation completion.
+Editing the preview while Vite was running interrupted one earlier case through
+HMR; the final unchanged-file run passed all8 in29.1s. An initial build caught
+nullable role access passed to Select; the access editor now uses read/write only,
+with no invented access field for role assignments. The final build passed.
+
+Evidence: `/tmp/oct10-x33-unit.log`, `/tmp/oct10-x33-browser-final.log`,
+`/tmp/oct10-x33-build-final.log`.
+Screenshots: [light](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-light.png),
+[dark](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-dark.png).
+Screenshots remain local evidence, not product source. Claude retains VERIFIED.
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.
