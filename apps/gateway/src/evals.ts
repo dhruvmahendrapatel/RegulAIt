@@ -94,6 +94,10 @@ import {
   startEvalRunSchema,
   validateScorerConfig,
   promptFromBody,
+  builtinCaseHeldByPlatform,
+  BUILTIN_EVAL_DATASET_PREFIX,
+  builtinEvalDatasetByName,
+  isReservedEvalDatasetName,
   combinePanelVerdicts,
   judgeCalibrationSchema,
   judgementBudgetProblem,
@@ -134,6 +138,9 @@ import { loadVersions } from "./config-versions.js";
 import { registerEvalDatasetSourceRoutes } from "./eval-dataset-sources.js";
 import { calibrateRunJudges, type AnnotationLabelsFor } from "./eval-judge-calibration.js";
 import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
+import { checkBuiltinEvalDatasetForRun, isBuiltinEvalDataset } from "./eval-builtin-datasets.js";
+import { holdOffensiveBuiltinRun } from "./eval-run-approvals.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -285,6 +292,16 @@ export interface EvalRunOptions {
   panelJudges?: Record<string, EvalJudge> | undefined;
   /** ADR-0173 batch 2c — the pinned baseline a `config_change` run re-runs */
   configChangeOfRunId?: string | null | undefined;
+  /**
+   * ADR-0187 decision 190 — the approval that releases a run of an OFFENSIVE
+   * built-in dataset. `consume` spends it atomically and is called only after
+   * every other check passed, immediately before the run row is written, so a
+   * refused run never spends a consent. Absent = no approval: such a run is
+   * refused (403 `eval_run_approval_required`). Only the run route supplies one;
+   * a workflow-bound, scheduled or config-change run of an offensive set is
+   * therefore always refused while the org's sensitive-set approval is on.
+   */
+  approval?: { approvalId: string; consume: () => Promise<boolean> } | null | undefined;
 }
 
 /** a panel member resolved for this run */
@@ -733,6 +750,48 @@ export async function runEvalSuite(
     }
   }
 
+  // ------------------------------------------------------------------
+  // ADR-0187 decisions 189–190 — A BUILT-IN DATASET IS VERIFIED, AND AN
+  // OFFENSIVE ONE IS APPROVED, BEFORE ANY ROW. The pinned file must verify and
+  // the stored rows must be exactly its content; then, when the org's
+  // sensitive-set approval is on (the decision-9 dial, strict by default), an
+  // offensive set runs only with an approval this caller can spend.
+  // ------------------------------------------------------------------
+  const builtin = await checkBuiltinEvalDatasetForRun(db, dataset);
+  const builtinNeedsApproval =
+    builtin.builtin && builtin.spec.sensitivity === "offensive" && (await loadOrgSettings(db)).engineSensitiveSetApproval;
+  if (builtin.builtin && (builtin.refusal || (builtinNeedsApproval && !opts.approval))) {
+    const refusal = builtin.refusal ?? {
+      status: 403,
+      error: "eval_run_approval_required",
+      detail:
+        `${dataset.name} is an offensive built-in dataset: a run waits for approval. Start it from POST /v1/evals/runs ` +
+        "as the person it runs as; it queues for an approver and runs once approved. Workflow, scheduled and " +
+        "config-change runs of it are refused.",
+    };
+    await db.insert(auditLog).values({
+      userId: opts.userId,
+      objectType: "eval_run",
+      objectId: dataset.id,
+      detail: {
+        phase: "builtin-dataset",
+        purpose,
+        ...originDetail,
+        builtinDataset: builtin.spec.key,
+        sensitivity: builtin.spec.sensitivity,
+        datasetName: dataset.name,
+        datasetVersion: dataset.version,
+        agentId: agent.id,
+        trigger: opts.trigger,
+      },
+      effect: "deny",
+      ruleId: refusal.error,
+      ruleChain: [],
+      reason: refusal.detail,
+    });
+    return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+  }
+
   const cases = await db
     .select()
     .from(evalCases)
@@ -957,6 +1016,28 @@ export async function runEvalSuite(
   const tolerance = opts.tolerance ?? 0.05;
   const configHash = await agentConfigHash(db, agent as AgentRow);
   const usesPanelPath = panelAgents.length > 0 || repetitions > 1;
+
+  // ADR-0187 decision 190 — the consent is spent HERE, after every refusal
+  // above and immediately before the run row: losing the race to a second
+  // submission, or an approval that expired meanwhile, runs nothing.
+  let spentApprovalId: string | null = null;
+  if (builtinNeedsApproval && opts.approval) {
+    if (!(await opts.approval.consume())) {
+      const detail = `approval '${opts.approval.approvalId}' was already used or has expired; nothing ran — submit the run again to raise a fresh one`;
+      await db.insert(auditLog).values({
+        userId: opts.userId,
+        objectType: "eval_run",
+        objectId: dataset.id,
+        detail: { phase: "builtin-dataset-approval", purpose, ...originDetail, approvalId: opts.approval.approvalId, datasetName: dataset.name },
+        effect: "deny",
+        ruleId: "eval_run_approval_not_spendable",
+        ruleChain: [],
+        reason: detail,
+      });
+      return { ok: false, status: 409, error: "eval_run_approval_not_spendable", detail };
+    }
+    spentApprovalId = opts.approval.approvalId;
+  }
   let run: EvalRunRow | undefined;
   try {
     [run] = await db
@@ -1114,6 +1195,30 @@ export async function runEvalSuite(
       },
     });
     const latencyMs = Date.now() - started;
+
+    if (!outcome.ok && builtin.builtin && builtinCaseHeldByPlatform(builtin.spec, outcome.error)) {
+      // ADR-0187 decision 191 — on an ATTACK set a content-layer block means
+      // the attack never reached the model: red-team polarity (ADR-0072), the
+      // case passes and the row says the PLATFORM held, never that the agent
+      // refused. Only the guardrail and PII gates qualify; any other failure
+      // falls through to the ordinary zero below.
+      scores.push({
+        caseId: c.id,
+        scorerKind: kind,
+        score: 1,
+        passed: true,
+        latencyMs,
+        costUsd: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        outputText: null,
+        judgeRationale: null,
+        error: `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`,
+        detail: { dispatch: "failed", status: outcome.status, errorCode: outcome.error, platformHeld: true, method: "platform-held" },
+      });
+      await closeSpan(db, caseSpanId, "denied", `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`);
+      continue;
+    }
 
     if (!outcome.ok) {
       // A blocked or refused dispatch is a FAILED case, not a skipped one. A
@@ -1492,6 +1597,9 @@ export async function runEvalSuite(
         : {}),
       costUsd,
       ...(opts.workflow ? { workflowInstanceId: opts.workflow.instanceId, stageId: opts.workflow.stageId, check: opts.workflow.checkName } : {}),
+      // ADR-0187 decisions 189–190: which pinned built-in this measured, and the consent that released it
+      ...(builtin.builtin ? { builtinDataset: builtin.spec.key, sensitivity: builtin.spec.sensitivity } : {}),
+      ...(spentApprovalId ? { approvalId: spentApprovalId } : {}),
     },
     effect: gate.passed ? "allow" : "deny",
     ruleId: gate.passed ? "eval-run-passed" : gate.regression ? "eval-regression" : "eval-run-failed",
@@ -1626,6 +1734,8 @@ export function summarizeGroundedness(
 // ---------------------------------------------------------------------------
 
 export async function datasetIsFrozen(db: Db, dataset: EvalDatasetRow): Promise<boolean> {
+  // ADR-0187 decision 187: a built-in dataset is pinned content, frozen from the moment it is seeded
+  if (isBuiltinEvalDataset(dataset)) return true;
   const [row] = await db
     .select({ n: count() })
     .from(evalRuns)
@@ -1977,18 +2087,32 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     const caseMap = new Map(counts.map((c) => [c.datasetId, c.n]));
     const runMap = new Map(runCounts.map((c) => [c.datasetId, c.n]));
     return {
-      datasets: rows.map((d) => ({
-        ...d,
-        caseCount: caseMap.get(d.id) ?? 0,
-        runCount: runMap.get(d.id) ?? 0,
-        frozen: (runMap.get(d.id) ?? 0) > 0,
-      })),
+      datasets: rows.map((d) => {
+        // ADR-0187 decision 187: a built-in dataset is read-only and says what it is
+        const spec = isBuiltinEvalDataset(d) ? builtinEvalDatasetByName(d.name) : null;
+        return {
+          ...d,
+          caseCount: caseMap.get(d.id) ?? 0,
+          runCount: runMap.get(d.id) ?? 0,
+          frozen: (runMap.get(d.id) ?? 0) > 0 || isBuiltinEvalDataset(d),
+          builtin: isBuiltinEvalDataset(d)
+            ? { key: spec?.key ?? null, sensitivity: spec?.sensitivity ?? "offensive", current: spec?.version === d.version, measures: spec?.measures ?? null }
+            : null,
+        };
+      }),
       note: "A dataset version freezes the moment a run scores against it. Editing cases mints the next version instead — a gate result is meaningless if the ruler can move underneath it.",
     };
   });
 
   app.post("/v1/evals/datasets", async (req, reply) => {
     const body = createEvalDatasetSchema.parse(req.body);
+    // ADR-0187 decision 187: the built-in prefix names seeded, pinned content only
+    if (isReservedEvalDatasetName(body.name)) {
+      return reply.status(422).send({
+        error: "dataset_name_reserved",
+        detail: `names starting with '${BUILTIN_EVAL_DATASET_PREFIX}' are reserved for built-in datasets`,
+      });
+    }
     const [existing] = await db
       .select({ n: count() })
       .from(evalDatasets)
@@ -2083,6 +2207,13 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     const { id } = idParam.parse(req.params);
     const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, id));
     if (!dataset) return reply.status(404).send({ error: "unknown_dataset" });
+    // ADR-0187 decision 187: a built-in dataset changes only with a new vendored pin
+    if (isBuiltinEvalDataset(dataset)) {
+      return reply.status(409).send({
+        error: "builtin_dataset_immutable",
+        detail: `${dataset.name} is pinned vendored content; a new version comes only with a new upstream pin`,
+      });
+    }
     const body = z.object({ note: z.string().max(2000).optional() }).parse(req.body ?? {});
     const [maxRow] = await db
       .select({ max: sql<number>`coalesce(max(${evalDatasets.version}), 0)::int` })
@@ -2147,6 +2278,9 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
+    // ADR-0187 decision 190: an offensive built-in dataset waits for approval
+    const held = await holdOffensiveBuiltinRun(db, body, userId);
+    if (held.kind === "reply") return reply.status(held.status).send(held.body);
     const outcome = await runEvalSuite(db, opts.dataKey, {
       datasetId: body.datasetId,
       agentId: body.agentId,
@@ -2163,6 +2297,7 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       // ADR-0173 batch 2c
       judgePanel: body.judgePanel ?? null,
       repetitions: body.repetitions,
+      approval: held.kind === "release" ? held.approval : null,
     });
     if (!outcome.ok) {
       return reply.status(outcome.status).send({
