@@ -10,15 +10,27 @@
  *    Every writer of a decision's addenda (R35), and every Decision BOM assembly
  *    and version allocation (R40), takes THIS lock first; two concurrent first
  *    requests then serialise and return the same frozen BOM.
- *  - PER SUBJECT: a transaction-scoped advisory lock keyed by the AI BOM subject
- *    (kind and id), taken BEFORE the repeatable-read capture and held through
- *    the snapshot insert (R50), so an older capture can never take the next
- *    version after a newer one. No row exists for every subject (the install has
- *    none), so the key is advisory by design.
+ *    The same REPEATABLE READ gap applies here (see the caveat below): callers
+ *    use READ COMMITTED, or take a session lock on the decision before BEGIN.
+ *  - PER SUBJECT: an advisory lock keyed by the AI BOM subject (kind and id),
+ *    namespace `BOM_SUBJECT_LOCK_NAMESPACE`, key `hashtext('<kind>:<id>')`, held
+ *    through the snapshot insert (R50). No row exists for every subject (the
+ *    install has none), so the key is advisory by design.
  *
- * Both are `_xact_` locks: released at commit or rollback, never leaked. A hash
- * collision between two keys only makes unrelated writers wait; the database
- * guards (contiguous versions, the addendum chain) stay the integrity backstop.
+ *    ORDERING CAVEAT (B3 finding): a REPEATABLE READ transaction takes its
+ *    snapshot when its FIRST statement starts, which is before that statement
+ *    waits for a lock. So `lockAiBomSubject` called as the first statement of
+ *    an RR transaction does NOT order the capture after the previous holder's
+ *    commit: the snapshot can predate it. A writer that captures under RR must
+ *    take a SESSION-level `pg_advisory_lock` on the same (namespace, key) on its
+ *    own connection BEFORE `BEGIN ISOLATION LEVEL REPEATABLE READ`, and unlock it
+ *    in `finally` (B3 does). `lockAiBomSubject` (xact-scoped) is correct only in
+ *    READ COMMITTED transactions, and it conflicts with that session lock.
+ *
+ * The per-decision lock is `_xact_` (row lock or advisory): released at commit
+ * or rollback, never leaked. A hash collision between two keys only makes
+ * unrelated writers wait; the database guards (contiguous versions, the
+ * addendum chain) stay the integrity backstop.
  *
  * OPEN SOURCE FIRST (ADR-0176): Postgres's own row and advisory locks; nothing to adopt.
  */
@@ -41,7 +53,7 @@ export async function lockDecisionForBom(tx: Tx, auditId: string): Promise<{ tar
   return { target: "advisory" };
 }
 
-/** take the per-subject lock of an AI BOM subject */
+/** take the per-subject lock of an AI BOM subject, transaction-scoped: READ COMMITTED writers only (see the caveat above) */
 export async function lockAiBomSubject(tx: Tx, subjectKind: string, subjectId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(${BOM_SUBJECT_LOCK_NAMESPACE}::int, hashtext(${`${subjectKind}:${subjectId}`}))`);
 }

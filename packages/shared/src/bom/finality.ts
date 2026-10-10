@@ -9,13 +9,16 @@
  *  - `decisionBomFinality`: R4 and R44's freezing rule, with the #280 policy for
  *    UNBOUNDED retention (4237493042): `anchored` compares the Object Lock's
  *    `retain_until` with the end of the evidence retention, which does not exist
- *    when retention is unbounded. Rather than leave every BOM pending forever,
- *    that case freezes as the distinct, achievable `anchored_finite_lock`: every
- *    other `anchored` requirement holds (flushed, observed tamper-resistant,
- *    timestamped when required) and the recorded `retain_until` is still in the
- *    future. The signed body carries `retain_until`; the verifier reports
- *    `anchored_lapsed` once it has passed (R44), and `cannotProve` says the
- *    commitment is finite while the retention is not.
+ *    when retention is unbounded. That case is the distinct state
+ *    `anchored_finite_lock`: every other `anchored` requirement holds (flushed,
+ *    observed tamper-resistant, timestamped when required) and the recorded
+ *    `retain_until` is still in the future. It ranks BELOW `anchored`; the strict
+ *    default refuses it (pending, reason `retention_unbounded`), and an admin's
+ *    audited relaxation `decision_bom_finite_lock_finality = accept` makes it
+ *    final (security review F6, ADR-0180). The signed body carries
+ *    `retain_until`; the verifier reports `anchored_lapsed` once it has passed
+ *    (R44), and `cannotProve` says the commitment is finite while the retention
+ *    is not.
  */
 import type { DecisionBomFinalityState } from "./contract.js";
 
@@ -39,6 +42,7 @@ export const DECISION_BOM_PENDING_REASONS = [
   "lock_not_recorded",
   "lock_shorter_than_retention",
   "lock_lapsed",
+  "retention_unbounded",
 ] as const;
 export type DecisionBomPendingReason = (typeof DECISION_BOM_PENDING_REASONS)[number];
 
@@ -62,18 +66,20 @@ export interface FinalityInput {
   /** the freeze time (the database clock at assembly) */
   now: Date;
   setting: DecisionBomFinalitySetting;
+  /** `org_settings.decision_bom_finite_lock_finality`: strict `refuse` */
+  finiteLock: "refuse" | "accept";
 }
 export type FinalityDecision =
   | { freeze: true; state: DecisionBomFinalityState }
   | { freeze: false; reason: DecisionBomPendingReason | "receipt_unsigned" };
 
 const RANK: Record<DecisionBomFinalityState, number> = {
-  anchored: 3,
+  anchored: 4,
   anchored_finite_lock: 3,
   anchored_unverified_destination: 2,
   chain_signed: 1,
 };
-const FLOOR: Record<DecisionBomFinalitySetting, number> = { anchored: 3, anchored_unverified_destination: 2, chain_signed: 1 };
+const FLOOR: Record<DecisionBomFinalitySetting, number> = { anchored: 4, anchored_unverified_destination: 2, chain_signed: 1 };
 
 /** the strongest state the facts support, and why it is not `anchored` */
 function strongest(i: FinalityInput): { state: DecisionBomFinalityState; shortOf: DecisionBomPendingReason | null } {
@@ -93,6 +99,7 @@ export function decisionBomFinality(i: FinalityInput): FinalityDecision {
   if (!i.receiptSigned) return { freeze: false, reason: "receipt_unsigned" };
   const { state, shortOf } = strongest(i);
   if (RANK[state] >= FLOOR[i.setting]) return { freeze: true, state };
+  if (state === "anchored_finite_lock") return i.finiteLock === "accept" ? { freeze: true, state } : { freeze: false, reason: "retention_unbounded" };
   return { freeze: false, reason: shortOf ?? "anchor_not_flushed" };
 }
 

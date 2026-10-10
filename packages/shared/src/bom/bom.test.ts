@@ -40,7 +40,9 @@ import {
   decisionFactsAddendumSchema,
   decisionFactsSchema,
   evalCasesDigest,
+  bomJsonSafeIssues,
   findEmailShapes,
+  hasEmailShape,
   parseTrainingDatasetChecksum,
   projectBomRow,
   type DecisionBomBody,
@@ -175,6 +177,8 @@ describe("the v8 serial number (amendment 5)", () => {
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(aiBomSerialNumber(U(50))).toBe(a);
     expect(aiBomSerialNumber(U(51))).not.toBe(a);
+    // F7: an upper-case id derives the same serial as Postgres's lower-case uuid::text
+    expect(aiBomSerialNumber("ABCDEF01-2345-4678-89AB-CDEF01234567")).toBe(aiBomSerialNumber("abcdef01-2345-4678-89ab-cdef01234567"));
   });
 });
 
@@ -239,6 +243,19 @@ describe("regulait.decision-facts.v1 and the addendum", () => {
     const twice = facts();
     twice.rows.push(approvalRow());
     expect(decisionFactsSchema.safeParse(twice).success).toBe(false);
+  });
+  it("F5: refuses numbers and keys the two canonicalisers would serialise differently", () => {
+    for (const bad of [{ n: 0.5 }, { n: 2 ** 53 }, { n: 1e21 }, { n: 1e-7 }, { n: -0 }, { "\u00e9": 1 }, { "\ud83d\ude00": 1 }]) {
+      expect(bomJsonSafeIssues(bad), JSON.stringify(bad)).not.toEqual([]);
+    }
+    expect(bomJsonSafeIssues({ a: [1, -2, Number.MAX_SAFE_INTEGER, "\u00e9\ud83d\ude00", null, true], "k ~": {} })).toEqual([]);
+    // through the facts schema: a jsonb projection column (a grant's scope) with a non-ASCII key
+    const f = facts();
+    const projection = projectBomRow("delegation_grants", { id: U(70), scope: { "\u00e9": 1 } });
+    f.rows.push({ table: "delegation_grants" as never, id: U(70), projection: projection as never, digest: bomRowDigest("delegation_grants", projection) });
+    const r = decisionFactsSchema.safeParse(f);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("printable ASCII");
   });
   it("an addendum names its predecessor; an unknown version is refused", () => {
     const a = { v: DECISION_FACTS_ADDENDUM_VERSION, auditId: U(1), n: 1, prev: bomDigestOf(facts()), rows: [], postActionVerification: { result: "passed" as const, stageId: null } };
@@ -314,10 +331,20 @@ describe("regulait.ai-bom.v1 (the signed native body)", () => {
     key.records.agents![0]!["owner@example.com"] = "x";
     expect(aiBomNativeBodySchema.safeParse(key).success).toBe(false);
     expect(findEmailShapes({ a: ["ok", { "b@c.de": 1 }] })).toEqual(["$.a[1]{key}"]);
+    for (const [v, want] of [["x@y.z", true], ["a.b+c@d-e.fg.hi", true], ["@y.z", false], ["x@y", false], ["x @y.z", false], ["x@.z", false], ["a@b@c.d", true]] as const) {
+      expect(hasEmailShape(v), v).toBe(want);
+    }
     for (const url of ["https://api.example/v1?token=abc", "https://api.example/v1#secret", "https://user:pass@api.example/v1"]) {
       const b = aiBom();
       b.records.endpoints[0]!.url = url;
       expect(aiBomNativeBodySchema.safeParse(b).success, url).toBe(false);
+    }
+  });
+  it("CodeQL js/polynomial-redos: the email scan is linear on 100k adversarial characters", () => {
+    for (const evil of ["!".repeat(100_000) + "@", "!".repeat(100_000) + "@a", "a@".repeat(50_000) + "!", "!@".repeat(50_000), "@" + "a.".repeat(50_000) + "!"]) {
+      const t0 = performance.now();
+      expect(findEmailShapes({ v: evil })).toEqual([]);
+      expect(performance.now() - t0, `${evil.slice(0, 8)}…`).toBeLessThan(50);
     }
   });
   it("the install subject is the nil uuid (R20)", () => {
@@ -335,19 +362,24 @@ describe("finality (R4, R44) and #280's unbounded-retention policy", () => {
   const now = new Date("2026-02-01T00:00:00.000Z");
   const base: FinalityInput = {
     anchor: { status: "flushed", tamperResistant: true, tsaGranted: true, retainUntil: new Date("2027-06-01T00:00:00.000Z") },
-    receiptSigned: true, timestampMode: "required", decisionAt, retainedDays: 365, now, setting: "anchored",
+    receiptSigned: true, timestampMode: "required", decisionAt, retainedDays: 365, now, setting: "anchored", finiteLock: "refuse",
   };
   it("anchored only when the lock covers the decision's retention", () => {
     expect(decisionBomFinality(base)).toEqual({ freeze: true, state: "anchored" });
     expect(decisionBomFinality({ ...base, retainedDays: 1000 })).toEqual({ freeze: false, reason: "lock_shorter_than_retention" });
   });
-  it("UNBOUNDED retention freezes as anchored_finite_lock under the strict default — never pending forever", () => {
-    expect(decisionBomFinality({ ...base, retainedDays: null })).toEqual({ freeze: true, state: "anchored_finite_lock" });
-    // still needs every other anchored fact
-    expect(decisionBomFinality({ ...base, retainedDays: null, anchor: { ...base.anchor!, tamperResistant: false } })).toEqual({ freeze: false, reason: "destination_not_tamper_resistant" });
-    expect(decisionBomFinality({ ...base, retainedDays: null, anchor: { ...base.anchor!, retainUntil: null } })).toEqual({ freeze: false, reason: "lock_not_recorded" });
-    expect(decisionBomFinality({ ...base, retainedDays: null, anchor: { ...base.anchor!, retainUntil: new Date(now.getTime() - 1) } })).toEqual({ freeze: false, reason: "lock_lapsed" });
-    expect(decisionBomFinality({ ...base, retainedDays: null, anchor: { ...base.anchor!, tsaGranted: false } })).toEqual({ freeze: false, reason: "timestamp_pending" });
+  it("F6: UNBOUNDED retention is NOT final under the strict default; an audited relaxation accepts anchored_finite_lock", () => {
+    const unbounded = { ...base, retainedDays: null };
+    expect(decisionBomFinality(unbounded)).toEqual({ freeze: false, reason: "retention_unbounded" });
+    expect(decisionBomFinality({ ...unbounded, finiteLock: "accept" })).toEqual({ freeze: true, state: "anchored_finite_lock" });
+    // the relaxation never weakens the other anchored facts
+    const accept = { ...unbounded, finiteLock: "accept" as const };
+    expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, tamperResistant: false } })).toEqual({ freeze: false, reason: "destination_not_tamper_resistant" });
+    expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, retainUntil: null } })).toEqual({ freeze: false, reason: "lock_not_recorded" });
+    expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, retainUntil: new Date(now.getTime() - 1) } })).toEqual({ freeze: false, reason: "lock_lapsed" });
+    expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, tsaGranted: false } })).toEqual({ freeze: false, reason: "timestamp_pending" });
+    // a weaker floor already accepts it (it ranks above unverified destination, below anchored)
+    expect(decisionBomFinality({ ...unbounded, setting: "anchored_unverified_destination" })).toEqual({ freeze: true, state: "anchored_finite_lock" });
   });
   it("the verifier reports anchored_lapsed once retain_until passes; a frozen state is never edited", () => {
     const until = base.anchor!.retainUntil!;

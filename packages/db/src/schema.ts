@@ -109,6 +109,7 @@ import {
   DECISION_BOM_FINALITY_STATES,
   DECISION_CAPTURE_STATUSES,
   DECISION_FACTS_CAPTURE_MODES,
+  DECISION_BOM_FINITE_LOCK_FINALITY_MODES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -3942,6 +3943,10 @@ export const orgSettings = pgTable(
       .default(["1.7"]),
     /** exports per minute per person; higher relaxes it */
     bomExportRateLimitPerMinute: integer("bom_export_rate_limit_per_minute").notNull().default(30),
+    /** F6 / #280: `accept` (an audited relaxation) makes `anchored_finite_lock` final under unbounded retention */
+    decisionBomFiniteLockFinality: text("decision_bom_finite_lock_finality", { enum: DECISION_BOM_FINITE_LOCK_FINALITY_MODES })
+      .notNull()
+      .default("refuse"),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
@@ -4603,6 +4608,7 @@ export const orgSettings = pgTable(
       sql`jsonb_typeof(${t.cyclonedxExportVersions}) = 'array' AND ${t.cyclonedxExportVersions} <@ '["1.7", "1.6"]'::jsonb AND ${t.cyclonedxExportVersions} @> '["1.7"]'::jsonb`,
     ),
     check("org_settings_bom_export_rate_limit_per_minute_check", sql`${t.bomExportRateLimitPerMinute} BETWEEN 1 AND 600`),
+    check("org_settings_decision_bom_finite_lock_finality_check", sql`${t.decisionBomFiniteLockFinality} IN ('refuse', 'accept')`),
   ],
 );
 
@@ -11963,7 +11969,8 @@ export const aiBomSnapshots = pgTable(
     version: integer("version").notNull(),
     /** amendment 5: `regulait_ai_bom_serial(id)`, checked in the database */
     serialNumber: uuid("serial_number").notNull(),
-    supersedesId: uuid("supersedes_id").references((): AnyPgColumn => aiBomSnapshots.id),
+    /** no FK: checked at insert by the version guard; an older version stays prunable */
+    supersedesId: uuid("supersedes_id"),
     trigger: text("trigger", { enum: AI_BOM_SNAPSHOT_TRIGGERS }).notNull(),
     basis: jsonb("basis").notNull(),
     /** the exact canonical bytes (text, never jsonb: jsonb would reorder keys) */
@@ -12029,6 +12036,7 @@ export const decisionFacts = pgTable(
       "decision_facts_payload_check",
       sql`COALESCE(jsonb_typeof(${t.facts}) = 'object' AND ${t.facts} ->> 'v' = ${t.factsVersion} AND ${t.facts} ->> 'auditId' = ${t.auditId}::text AND ${t.facts} -> 'auditSeq' = to_jsonb(${t.auditSeq}) AND (${t.facts} #>> '{model,aiBomSnapshotId}') IS NOT DISTINCT FROM ${t.aiBomSnapshotId}::text, false)`,
     ),
+    check("decision_facts_json_safe_check", sql`"regulait_bom_json_safe"(${t.facts})`),
     check(
       "decision_facts_hash_check",
       sql`${t.factsHash} = encode(sha256(convert_to("regulait_canonical_json"(${t.facts}), 'UTF8')), 'hex')`,
@@ -12060,6 +12068,7 @@ export const decisionFactAddenda = pgTable(
       "decision_fact_addenda_payload_check",
       sql`COALESCE(jsonb_typeof(${t.facts}) = 'object' AND ${t.facts} ->> 'v' = 'regulait.decision-facts-addendum.v1' AND ${t.facts} ->> 'auditId' = ${t.auditId}::text AND ${t.facts} -> 'n' = to_jsonb(${t.n}) AND ${t.facts} ->> 'prev' = ${t.prevHash}, false)`,
     ),
+    check("decision_fact_addenda_json_safe_check", sql`"regulait_bom_json_safe"(${t.facts})`),
     check(
       "decision_fact_addenda_hash_check",
       sql`${t.factsHash} = encode(sha256(convert_to("regulait_canonical_json"(${t.facts}), 'UTF8')), 'hex')`,
@@ -12100,7 +12109,8 @@ export const decisionBoms = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     auditId: uuid("audit_id").notNull(),
     version: integer("version").notNull(),
-    supersedesId: uuid("supersedes_id").references((): AnyPgColumn => decisionBoms.id),
+    /** no FK: checked at insert by the version guard; an older version stays prunable */
+    supersedesId: uuid("supersedes_id"),
     finality: text("finality", { enum: DECISION_BOM_FINALITY_STATES }).notNull(),
     body: text("body").notNull(),
     bodySha256: text("body_sha256").notNull(),
