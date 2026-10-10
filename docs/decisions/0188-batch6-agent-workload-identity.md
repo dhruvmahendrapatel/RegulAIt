@@ -1032,6 +1032,27 @@ owner decision.
    the list, detail and grant-set read; `identity_manage` step-up). The demo seed grants each demo agent itself that
    way. Identities and delegation grants are never deleted, so an agent, person or project they name can no longer be
    hard-deleted (tests skip them in cleanup).
+   **Stewards bound what may be granted (S4 amendment 1, follow-up N1 from the #326 review):** a grant-set write is refused 422
+   `grant_exceeds_stewards`, audited, when an item is held by none of the identity's stewards (`sponsor_user_ids`:
+   their own direct or role grants minus revocations; a connector in its mode and for every listed object). The
+   system principal holds nothing, so an unowned agent's identity is granted nothing until an admin names a person
+   (`PATCH /v1/workload-identities/:id`, built for this; `identity_manage` step-up bound to the change). The
+   at-use intersection (decision 3) is unchanged. The PUT's step-up is bound to the identity, the revision and a
+   canonical digest of the set (N2), so a step-up for one set is never good for another.
+   **Fix round from the #336 review.**
+   - **Changing the stewards (M1).** A PATCH that changes the stewards re-checks the identity's CURRENT grant set
+     against the proposed stewards in the same transaction. If an item is no longer held it is refused 422
+     `grant_exceeds_stewards`, with a deny audit row. When a steward later loses a grant, nothing cascades: the
+     drift is bounded at use by the sponsor intersection (decision 3). Revocation cascades are not built.
+   - **"Holds" (L3).** It is the steward's direct and role grants minus the steward's revocations, the same
+     subtraction as `sponsorGrantsMiss`. A whole-server revocation (`tool_name IS NULL`) takes every tool and the
+     server grant. An agent or connector revocation also takes a role-derived grant.
+   - **Locking (L5).** The check reads those grant, assignment and revocation rows `FOR SHARE` inside the write's
+     transaction.
+   - **Digest (L2).** The set digest is the canonical JSON of structured, sorted entries; no strings are joined.
+   - **Auditing (L4).** Every PATCH refusal writes a deny audit row: `identity_not_found`, revoked,
+     `steward_not_found` and `grant_exceeds_stewards`. The PATCH step-up is bound to the identity and a digest of
+     exactly the change.
 2. **One chain per piece of work.** A pillar-7 node dispatch gets a root grant from the initiating user to the top
    lead's agent and one child per lead down to the worker (consecutive same-agent hops collapse); a builder turn or
    resumed segment, and each schedule firing, gets a root to the builder agent (context: the turn, or the schedule); an
@@ -1059,6 +1080,76 @@ owner decision.
    envelopes, policy simulation, routing and model listings for a person, and the MCP and compat routes for a person's
    own key. A workload caller (S5's delegated token) is decided with its grant on `/mcp` tools/call, tools/list, every
    protocol method and the logging relay, and on the compat dispatch and model listing.
+
+### Amendments from the conformance-vector gaps (2026-10-10)
+
+The specification vectors merged in PR #334 (`packages/shared/test-vectors/delegation/`) list six places where this
+ADR left a behaviour undefined. Each item below closes one. Where the decisions already imply the answer, it is
+written down. Where the code on `main` answers it securely and consistently with the decisions, the code's behaviour
+is adopted and cited. Where the code is weaker, the strict rule is written and marked **code follow-up required**.
+None relaxes a strict default (ADR-0180).
+
+1. **An mTLS parent's child exchange is refused `mtls_parent_handoff_unsupported`, before the depth guard.** Decision
+   23 checks the parent token first, and a certificate-bound parent fails that check: it can never hand off across
+   processes in v1, whatever its depth. S5 item 1's `delegation_depth_unenforced` guard runs after the parent's
+   authorization has been checked. So for a parent bound with `cnf.x5t#S256` the answer is `invalid_grant` with
+   `error_code` `mtls_parent_handoff_unsupported`, today and after the depth switch lifts. Both refusals come before
+   any replay claim and any allocation. *Adopted from the code:* `checkDelegationAuthorization`
+   (`apps/gateway/src/delegated-token.ts`) refuses the mTLS binding before it reads anything else, and the token
+   endpoint's depth guard (`apps/gateway/src/oauth/token-endpoint.ts`) runs only after that check passes. Vector
+   `child-mtls-parent-active`.
+2. **A child whose resource is not its parent's audience is refused `invalid_target` with `error_code`
+   `audience_not_parent`.** The recorded ruling under the S5 amendments makes the parent's audience the child's only
+   allowed resource. The error is `invalid_target`, the decision 15 error for a resource fault. The check runs after
+   the parent's authorization (item 1) and before the depth guard, so it answers in both profiles. *Adopted from the
+   code* (`token-endpoint.ts`, the child preflight). Vector `child-other-audience`.
+3. **A `delegationRootMaxLifetimeSeconds` above 86 400 is refused as a malformed setting, and nothing is saved.** The
+   bound is a validation limit, not a relaxation an admin may unlock. So `PUT /v1/org/settings` answers `400` with
+   `error` `validation`, the same as any value outside a setting's registered limits. The refusal comes before any
+   step-up is asked for, and a `settings_relax` step-up does not change it. *Adopted from the code:*
+   `IDENTITY_SETTING_LIMITS` (`packages/shared/src/identity/settings.ts`, 60 to 86 400) parsed by
+   `updateOrgSettingsSchema` and answered by the app's validation handler. The proof route's own `lifetimeSeconds`
+   carries the same 86 400 ceiling. Vector `s5-max-lifetime-setting-over-24h`.
+4. **A step-up grant made for other facts is refused as `step_up_required`, and it is not spent.** The grant is looked
+   up by the digest of the exact facts S5 item 8 lists. A grant for any other facts does not match, so nothing is
+   spent. The answer is the ADR-0186 refusal: `403` with `error` `step_up_required`, the current facts as
+   `action.body`, and `presentedGrant: "not_valid_for_this_action"`. A `step-up-grant-refused` deny row is written.
+   *Adopted from the code* (`checkStepUp`, `apps/gateway/src/step-up.ts`). Vectors `s5-step-up-other-*`.
+5. **Owner decision 4's credential refusals.** Each one is a `403` before any proof is signed:
+   - the **bootstrap token** (no person): `error` `delegation_proof_credential`;
+   - a **virtual key** (already a delegated credential): `error` `virtual_key_scope`. The route allow-list hook
+     answers first, because no virtual-key purpose lists `POST /v1/delegations/proofs`. The route's own
+     `delegation_proof_credential` stays as the backstop;
+   - an **API key whose owner does not meet the org MFA rule**: `error` `mfa_enrollment_required` with `credential`
+     `api_key`, from the authentication hook (ADR-0181 FX2), audited `api-key-mfa-enrollment-required`.
+
+   *Adopted from the code* (`createDelegationProofRoute`, the virtual-key hook and the MFA gate in
+   `apps/gateway/src/app.ts`). **Code follow-up required:** the route's `delegation_proof_credential` refusal writes no
+   audit row. Every other refusal on this route is an audited deny (S5 item 2), and refusing a person-less or
+   delegated credential that tries to start a delegation is a governance decision. It must write the same
+   `delegation-proof-refused` deny row, with the credential kind and no secret. Vectors `human-proof-credential-*`.
+6. **The root wire names and types are recorded as S5 built them.** Decision 15 names the fields; these are their
+   spellings and types. The suite RFC of owner decision 5 may still change them, but only in a later ADR.
+   - **The proof request** (`POST /v1/delegations/proofs`, JSON, `createDelegationProofSchema`): `agentIdentityId`
+     (uuid), `authorizationDetails` (the decision 27 scope, at least one entry), `resource` (URL), `projectId` (uuid),
+     `env`, and optionally `agentKeyThumbprint` (base64url SHA-256), `capMicros` (integer micro-dollars), `lifetimeSeconds`
+     (integer, 60 to 86 400) and `maxDepth` (integer, 0 to the depth ceiling). Unknown members are refused.
+   - **The proof** is a JWS with `alg` `EdDSA`, `typ` `regulait-delegation-proof+jwt` and the issuer key's `kid`. Its
+     claims are: `iss` and `aud`, both our issuer; `sub`, the person's user id; `jti`; `iat`; `exp`, at most 120 s
+     after `iat`; `agent`, the agent identity id; `child_cnf`, the agent's key thumbprint, present only when given; and
+     `delegation`.
+   - **`delegation` is canonical text, not an object.** In the proof and in the child's delegation authorization
+     (decision 23), `delegation` is a string: the RFC 8785 form of the body. A verifier compares that string with
+     the canonical form of what it was given, byte for byte. A JSON object in its place is refused.
+   - **The body** (`delegationBodySchema`, strict) has these members: `authorization_details`, `resource`,
+     `project_id` (uuid or `null`), `env`, `cap_micros` (integer or `null`; `null` means uncapped and is never
+     omitted), `max_depth` (integer), and `expires_at` (absolute epoch seconds). The proof route turns
+     `lifetimeSeconds` into `expires_at`. The root exchange takes cap, depth and lifetime only from the signed body and
+     never from the form. The child exchange restates them as the form fields `cap_micros` (decimal digits or the
+     literal `null`), `max_depth`, `expires_at`, `project_id` and `env`.
+
+   *Adopted from the code* (`packages/shared/src/identity/contract.ts`, `.../identity/delegation-authz.ts`,
+   `apps/gateway/src/oauth/delegation-proof.ts`). Vectors `root-request-template` and the `request-*` family.
 
 ## Spike S0 result (2026-10-10)
 

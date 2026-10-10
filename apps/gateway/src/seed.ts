@@ -226,6 +226,12 @@ for (const userId of [adminId, danaId, averyId]) {
 const DEMO_AGENT_MODES = ["plan", "execute", "chat", "review", "ask", "read"];
 for (const agentId of Object.values(agentIds)) {
   const identity = await ensureIdentityFor(db, { kind: "agent", id: agentId });
+  // S4 follow-up N1: an agent is granted only what one of its identity's stewards holds. Ada (granted every
+  // demo agent above) is named steward of each demo agent's identity, through the real route.
+  const ident = await call("GET", `/v1/workload-identities/${identity.id}`);
+  if (!(ident.sponsorUserIds ?? []).includes(adminId)) {
+    await call("PATCH", `/v1/workload-identities/${identity.id}`, { sponsorUserIds: [adminId] });
+  }
   const current = await call("GET", `/v1/workload-identities/${identity.id}/grants`);
   if ((current.agents ?? []).some((g: Json) => g.agentId === agentId)) continue;
   await call("PUT", `/v1/workload-identities/${identity.id}/grants`, {
