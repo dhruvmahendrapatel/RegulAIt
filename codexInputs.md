@@ -759,6 +759,124 @@ Validation (Linux, pinned workspace dependencies):
 - `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: **passed**.
   `git diff --check`: **passed**. The existing large-chunk build warning remains.
 
+## X21 — signed decision receipts (2026-10-07)
+
+Implemented the ADR-0186 receipt seam: bounded, advisory-locked, audit-ordered signing; public-only key registry with same-id substitution refusal; idempotence; atomic failure on corrupt audit content; admin list/status/keys/export/verify routes; metadata-only export audit; and the audit page export/upload/verification panel. No reason or detail text is signed/exported. Missing deployment keys remain honestly unsigned. Pure/offline verification states signature, prefix, omission, identity and timing limits, with independently pinned public-key input supported by the CLI. The shared index export is explicitly authorized in Claude's 20:55 coordination message.
+
+Validation: 7/7 shared verifier tests, 6/6 real PostgreSQL signing/API/CLI cases, 5/5 browser cases and 336/336 web unit tests passed. Gateway and web TypeScript/build passed. The gateway suite creates/drops its own dedicated database when driven with DATABASE_URL; an explicit RECEIPT_TEST_DATABASE_URL is caller-owned. All keys and data are synthetic. The initial DB fixtures needed a real UUID actor and required ruleChain; the initial browser selector assumed a heading rather than the existing Card title. Those failed fixture runs are excluded from product evidence.
+
+Local evidence, not committed: /workspace/.regulait-onboarding/x21-{verifier-final,gateway-auto-db,gateway-final-tests,browser-final,gateway-final-build,web-final-build,web-unit-final}.log. Full inherited gateway foundation tests still assert receipt routes are 501/not_built; Claude has been asked to adapt receipt-only assertions at integration. The full suite is not claimed green on this implementation.
+
+### X21 latest follow-up validation — 2026-10-07
+
+The `3de6d0ac` bootstrap-export UUID and independently pinned-key validation
+follow-up is now rerun in the isolated slice checkout: actual PostgreSQL/API/CLI
+**6/6 PASS**, shared verifier **7/7 PASS**, shared build PASS
+(`x21-latest-{gateway,verifier,shared-build}.log`). No synthetic actor strings
+reach the UUID audit column on bootstrap export. Earlier 5/5 browser, 336 units
+and both builds remain recorded above. No full unrelated gateway-suite claim.
+
+
+### X21 cross-review corrections — 2026-10-08
+R21-01 fixed: online verifier replaces bundle keys with deployment receipt_signing_keys; submitted same-ID x mismatches are untrusted and cannot verify as valid. Real registry substitution attack is a genuine red. Offline CLI always prints UNPINNED and exits2 without a trusted-keys file; pinned valid prefixes exit0, invalid signatures exit1. UI explains registry pinning. R21-02 fixed: empty audit strings allowed; oversized tool names/rule IDs carry SHA256 in optional typed fields with raw fields null. Real empty/5k signing/verifying succeeds; status surfaces failed/disabled scheduled sweeps or pending rows older than120s as stalled, without exposing error text. R21-03 authorized receipt-only foundation route/sweep expectations updated to real200/400/no_key. R21-04 configuration rule IDs (including agent-owner-set, fallback-chain-configured and mcp-tool-price-set) excluded from signing AND lag counts. Future configuration writers must extend that explicit classification. R21-05 listing receipt envelopes writes only range/count audit metadata. R21-06 payload/envelope/bundle/public-key validators now use strict zod schemas with existing bounds/date/sequence checks. No private JWKs or free reason/detail accepted.
+Validation: actual PostgreSQL/app/CLI9/9 plus21 foundation=30/30; verifier7/7, complete shared1944/1944, receipt browser6/6 with stalled-state screenshot in testInfo output. Shared build and fresh DB/gateway build plus web build/typecheck PASS. Four baseline failures captured (three independent review regressions plus downstream signing blockage); `/tmp/x21-review-red.log`, `/tmp/x21-reviewed-*`, `/tmp/x21-review-fresh-*`. No full gateway-suite claim.
+## X22 — RFC 3161 anchor timestamps (2026-10-07)
+
+Replaced the timestamp seam with HTTPS-only, admin allow-listed, DNS-pinned RFC 3161 requests over canonical anchor bytes. No default TSA. Configured certificate roots and optional policy are deployment inputs; key material is neither accepted nor logged. One writer serializes capture/manual/scheduled attempts; granted tokens are not overwritten; failed attempts retry with exponential backoff, a 20-attempt automatic ceiling, a 10-anchor sweep bound and a 15-second request/body deadline. Responses/trust bundles are bounded to 1 MiB. Verification requires granted status, SHA-256 imprint, nonce, requested policy, supported signature hash, CMS signature, a chain to configured roots at generation time, critical exclusive timestamp EKU, and the ESS certificate/issuer binding. No AIA/OCSP/CRL network retrieval or certificate-revocation guarantee is claimed. Manual attempts are audited by state/count, and failure never changes a successful storage flush.
+
+The audit panel distinguishes unconfigured/pending/failed/verified-at-issuance states and offers authenticated DER reply download and retry. It states independent trust/anchor-byte verification and completeness/receipt-time limits.
+
+Focused validation: 11/11 gateway cases (6 independent OpenSSL crypto checks plus 5 real PostgreSQL cases exercising the actual egress guard with synthetic DNS/final transport), and 6/6 browser cases PASS. No live/public TSA contacted. The first capture test used the wrong CaptureResult property; corrected anchorId. Negative EKU cases re-sign fresh TSTInfo so a one-second certificate notBefore boundary does not mask the intended EKU check. Gateway/web final builds and units run separately. Local evidence, not committed: /workspace/.regulait-onboarding/x22-{gateway-final,crypto-eku-diagnosis,browser,gateway-final-build,web-final-build,web-units}.log.
+
+Integration prerequisite requested under To Claude: audit-chain.ts must create the original record before inserting the anchor and store record.capturedAt as createdAt, making retry reconstruction byte-identical; its GET mapping must add anchorTimestampSummary and omit raw tsaToken. Those hot-file edits belong to Claude and are not applied here. Full gateway foundation 501/not_built expectations also need owner adaptation. X22 is reviewable but not represented as fully integrated until these dependencies land.
+
+### X22 authorized integration follow-up — 2026-10-07
+
+Claude's 22:15 coordination message explicitly authorized the two audit-chain
+seams. Capture now constructs the canonical record before inserting the anchor
+and persists `createdAt` from that record's `capturedAt`. The list maps measured
+timestamp summaries and omits raw `tsaToken`; DER remains on the authenticated
+`.tsr` endpoint. Two genuine regression proofs fail before these changes:
+25ms simulated insert latency makes the flushed/reconstructed timestamps differ,
+and the real anchors API lacks the verified summary (`x22-seams-red.log`).
+
+Final actual PostgreSQL/guard/OpenSSL run **13/13 PASS** (seven DB cases plus six
+independent crypto cases, `x22-seams-final.log`). It includes a real capture →
+verified issuance → list summary → idempotent retry → downloaded token
+reverification from the persisted canonical record. Gateway `tsc --noEmit` PASS
+(`x22-seams-typecheck.log`). No live/public TSA or certificate-revocation check
+is claimed. Earlier 6/6 browser, 336 units and both build evidence remains in
+the initial X22 section; current-main integration follows this checkpoint.
+
+X22 post-main integration evidence (`1eebf0cf`): 13/13 gateway/crypto cases,
+6/6 browser cases and web build/typecheck PASS. Logs:
+`x22-current-main-{tests,browser,web-build}.log` in the onboarding directory.
+The authorized hot-file dependencies are complete; review and merge remain
+Claude's responsibility.
+
+
+### X22 cross-review response — 2026-10-08
+R22-01/02 already fixed at10447cbd with two genuine seam reds; anchorTimestampSummary is in the existing value import. R22-03 fixed: capture sentAt immediately before guarded fetch, reject genTime older than sentAt minus300s and later than validation plus300s; independent request-window red on a valid signed reply. R22-04 authorized own timestamp foundation assertions now expect missing-anchor404 and unconfigured sweep. R22-05 uses pkijs parsed ExtKeyUsage; narrow ESS asn1js profile exception and its checks documented in audit-timestamp-README.md, gateway THIRD_PARTY wording corrected. R22-06 original complete reply DER is retained and exported exactly, with status1 byte-equality red. R22-08 captures payloadVersion in a versioned public envelope in the existing tsa_token column before attempts (also retained after failure/unconfigured); retries use stored version; legacy rows pin historical regulait.audit.v1 rather than current build constant. R22-09 PEM certificates-only documented; fetch stays under dedicated lock/deadline pending a durable claim protocol. R22-07 local no-revocation documentation delivered; Claude must add the same line to owned §4.9/ADR.
+Validation: `vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts src/zz-adr0186-b4-foundation.test.ts`36/36 (15 slice plus21 foundation), six timestamp browser cases, gateway build/typecheck and web build/typecheck PASS. Two new genuine crypto/red-reply tests fail on old verifier. No live TSA or network revocation claim. Logs `/tmp/x22-review-*`.
+## X23 — pinned detection content (2026-10-07)
+
+Data-only snapshots: Pipelock 7014542ea14fec82dfbc2ad38caf77bd63e7ad69,
+NeMo 9f793de53e432c4c9c765975f5dd54df175fcb6e and AGT
+f68f2cf312c7e1366d6fd5654c51d8380c815222. Per-file SHA-256, permissive
+licences/notices and retrieval times are committed; no enterprise/ee source or
+upstream runtime execution. Offline converter `--check` reproduces exact bytes.
+62 secret shapes and 25 description heuristics run on RE2; unsupported content
+is named in manifests. All five NeMo rules exceed the approved condition
+grammar, so this snapshot supplies zero NeMo injection detections. See the
+owned detection-content README for exclusions and the extra pre-normalization
+Mn-removal pass that prevents quadratic ICU combining-mark reordering.
+
+Genuine red proof: `x23-boundary-red.log` demonstrated the provider pattern
+redacting its preceding delimiter. Separate left-boundary checking fixes this.
+Combined candidate matching plus converter-proved mandatory ASCII prefixes
+retain original match spans and Unicode fallback; parity checks include
+50,000-space gaps. No timing assertions were relaxed. The separate
+secret-patterns/scan run passed every performance case; its remaining 24
+failures concern older exact marker grammar and negative samples now caught by
+intentionally broader upstream rules. These owner-file tests need adjudication,
+not blanket replacement. The full shared suite is recorded separately and is
+not claimed green; foundation empty-pack/identity and truncated-PEM marker
+assertions also need updates from Claude.
+
+Validation in the existing isolated slice checkout:
+- Shared vendor/linear/audit-ReDoS: 23/23; extended native credential/scan/vendor
+  run: 114 passed, 24 failed as described above (`x23-prefix-tests.log`).
+- Real migrated disposable PostgreSQL + actual buildApp/auth/settings manifest
+  API: 3/3 (`x23-gateway.log`). Test cleanup drops only its own scratch DB.
+- Browser: 4/4 on both Guardrails and Admission review, including disabled
+  packs, zero eligible rules, errors and unreported enforcement. Screenshots
+  `/workspace/.regulait-onboarding/x23-guardrails.png` and `x23-admission.png`;
+  final post-main browser log `x23-browser-merged.log`.
+- Shared/gateway builds, web `tsc --noEmit` and web build PASS; 336 web units
+  PASS (`x23-{shared-build-final,gateway-build,web-tsc,web-build,web-units}.log`).
+
+INTEGRATION BLOCKERS: `credentialAudienceViolations` is an exported, tested
+pure helper; no real guarded-outbound consumer exists in the foundation.
+API/UI truthfully report `outboundAudienceEnforced: false`. Requested Claude's
+hot-file consumer authorization/integration and disposition of zero eligible
+NeMo rules on the coordination board. Central third-party notice rows and
+owner-file historical test adjudication are also requested. This slice remains
+BLOCKED for full ADR acceptance, despite the passing measured local checks.
+
+### X23 review disposition — 2026-10-07 22:15 UTC
+
+Claude accepts zero eligible NeMo rules as a documented ADR residual, owns the
+guarded-outbound consumer and central third-party notice rows, and is
+adjudicating the historical shared-test groups. Those expectations remain
+unchanged. Local measured coverage is preserved; X23 stays BLOCKED for outbound
+integration and the test verdict, with no pending NeMo grammar request.
+
+
+### X23 cross-review corrections — 2026-10-08
+R23-01 adjudication bcab26d9 merged as requested (trace-evaluation dotted scrub marker fix and reviewed expectations). R23-02/05 fixed: candidate gates cover all default rules, exact-pattern proofs pinned in prefix-proofs.json; Unicode long-s/Kelvin folds participate, original RE2 spans preserved. Synthetic non-ASCII benchmarks:50k1.67ms,400k5.33ms,800k10.84ms. Non-ASCII/400k budget tests remain100ms; no budget weakened. R23-03 all Unicode mark runs capped30 before ICU; genuine spacing-mark red28.75s, restored budget passes. R23-04 pinned core-only Pipelock Apache2+NOTICE, NeMo Apache2 and AGT MIT rows added to shared THIRD_PARTY. R23-06 preset-only Ethereum Address excluded:61 default shapes,13 exclusions (including7 unsupported audience exemptions). R23-07 README corrected3 checksum+2 unresolved Go constants. R23-08 genuine seeded concatenation red (case16);20,000 deterministic synthetic cases pass after bounded two-pass fixed-point handling, with whole remaining-fragment redaction when a new marker exposes credentials. This can remove benign prose only in those pathological fragments and is documented. R23-09 real runtime-DLP pack consumer tested and explained in UI; audit redaction unconditional; installed caller-content audience enforcement remains Claude's seam and API staysfalse until real wiring/test.
+Validation: full shared suite1951/1951; isolated vendor/secret/audit regressions151/151 earlier and new full fixed-point corpus green; offline converter --check/shared build/typecheck PASS; actual API/auth/settings3/3 and manifest browser4/4; gateway/web builds PASS. Logs `/tmp/x23-reviewed-*`, `/tmp/x23-review-*`, `/tmp/x23-spacing-red.log`, `/tmp/x23-idempotence-red.log`. BLOCKED only for Claude-owned outbound wiring/integration acceptance; NeMo zero-rule residual accepted.
+
+X23 CI portability follow-up: both manifest screenshots now use Playwright testInfo.outputPath; CI shard annotations proved the absolute /workspace paths failed with ENOENT. Unicode mark runs are capped before per-character invisible tables as well as after removal joins runs, reducing avoidable normalization work without changing the 100ms budgets. Full shared suite 1951/1951, shared build, web build/typecheck and manifest browser 4/4 PASS (`/tmp/x23-portable-*`). The preceding CI unit-test job failed, but its downloadable log is proxy-blocked; its cause remains unresolved rather than attributed to the screenshot failures. New CI will validate this revision.
 ## X24 — measured detection monitor rules and R13-20/21 (2026-10-07)
 
 Implemented the four assigned rules in the actual loader. MCP drift compares
@@ -839,3 +957,14 @@ R24-03 now requires attributed history strictly before the baseline window start
 Validation: restoring main's loader fails the incomplete-baseline database regression; restoring the main web files fails all four account-return request variants and the non-colour link regression (/tmp/oct10-x24-{monitor,browser}-red.log). Corrected loader/app 11/11 PASS (/tmp/oct10-x24-monitor-final.log); nine browser tests PASS (/tmp/oct10-x24-browser-final.log), including held PATCH/artifact success/refusal and light/dark link-in-text-block axe. Portable screenshot and traces are in apps/web/test-results. Fresh gateway and web tsc --noEmit and web production build PASS (/tmp/oct10-x24-tsc.log, /tmp/oct10-x24-final-tsc.log, /tmp/oct10-x24-web-build.log). Main fde6625b retained; Claude owns review and verification.
 ### R166-21–24 calendar follow-up — 2026-10-09 CDT
 Utah now credits the original checked C13-72-S101_2026050620260506.pdf; the HTML index is an unchecked lead. SB 53 and historical C-27 retain their October 4 primary source, checked date and historical status, with the blocked October 7 recheck appended. C-27's original status was proposed, not adopted; it remains a historical proposal with no invented enactment deadline. Article/annex citation spacing is corrected. All 13 reconciliation source links now pin main fde6625b (read October 10 UTC); the current transparency controlRefs is still empty. No fresh primary-law verification claimed. Markdown table/link structure and git diff --check PASS; documentation-only follow-up.
+
+### X21 re-review R21-07–10 — 2026-10-10 UTC
+R21-07: replaced the configuration deny-list with explicit receiptClass metadata at eligible audit writers. Decisions/approvals opt in; configuration writers classify out; unknown and historical unclassified rows fail closed and remain available in the audit chain. Metadata is written after caller-controlled detail spreads. The TypeScript source check resolves every eligible gateway writer, including helpers, unions and implicit MCP defaults, and fails when classification is absent. R21-08 verifies with the registry key regardless of bundle keys (valid originals remain valid despite bogus supplied keys; attacker signatures fail). R21-09 single-envelope reads are metadata-audited. R21-10 imports precede the receipt module documentation.
+Evidence: reverting eligibility/key handling reproduces two independent DB regressions (plus the downstream signed-count failure); restored actual PostgreSQL/API/CLI 9/9 and writer coverage 1/1 PASS. Fresh gateway dependency builds, gateway tsc --noEmit and web build/typecheck PASS. Logs /tmp/oct10-x21-*. Unclassified past rows are intentionally not backfilled or signed; receipt omission limits remain explicit. No full gateway CI claim.
+### X22 second cross-review corrections — 2026-10-09 CDT
+R22-05 uses MIT @peculiar/asn1-ess 2.10.0 and its existing schema/x509 dependencies through their public APIs, with notices. A local schema subclass corrects the library's optional DEFAULT algorithm decoding for OpenSSL's omitted SHA-256 field; all other ESS fields remain library-defined. R22-10 requires sentAt, including DB verification: reverting only the lower-bound check makes the real retry return 200 instead of 502 (/tmp/oct10-x22-db-red.log). R22-11 uses per-anchor pg_try_advisory_xact_lock(hashtext(id)) with immediate 409 timestamp_in_progress; the transport deadline starts before DNS and checks again before sending. A timed-out DNS continuation cannot send later; another retry acquires the lock. README describes the transport bound accurately. R22-12 disables Retry when not_configured. Corrupt stored JSON returns 500 and flush preserves the stored payload version.
+Validation: 19/19 actual PostgreSQL/guarded transport/independent OpenSSL crypto tests PASS (DATABASE_URL=<local scratch base> pnpm --filter @regulait/gateway exec vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts; /tmp/oct10-x22-final-green.log). Gateway dependency build and fresh gateway tsc --noEmit PASS (/tmp/oct10-x22-dependencies-build.log, /tmp/oct10-x22-final-tsc.log); web build/typecheck and six mocked browser cases PASS (/tmp/oct10-x22-web-build.log, /tmp/oct10-x22-browser.log). No public TSA used. Main merge d6569fc3 retained; Claude owns integration with X21 and the shared sweep state.
+X22 publication cleanup: removed a local generated-output symlink accidentally included by the directory-wide staging command. It is environment setup only and is not part of the implementation.
+### X23 second cross-review corrections — 2026-10-09 CDT
+R23-10: caller-defined marker labels no longer make real credentials opaque. Only known rule-label combinations and field markers are protected; existing generated markers remain idempotent. Genuine old-scrubber red captured in /tmp/oct10-x23-marker-red.log. R23-02/05: remove the eight-open-gate fallback, tighten JWT/Discord/Stripe gates and emit reviewed bounded prefix context for candidate suffix scans; unbounded prefixes retain full scans. Original text still supplies exact spans. Added above-eight-gates 400k near-miss budget and Unicode UTF-16 offset regressions without weakening budgets. R23-11 portable screenshot paths were retained and verified.
+Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.

@@ -575,10 +575,16 @@ unless stated.
       Both web writers (the profiles page, the first-run pack) go through `withStepUp` and the census covers them.
 
 **Two notes on B4S-09 (no code change)**
-- **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
-  actually run. A tool-scoped approval (ADR-0104) still matches a call with other arguments at the database lookup, but
-  the signature then fails to verify: the approval is superseded and that call refused. In passkey mode a tool-scoped
-  approval therefore releases only the exact call that was signed.
+- **Tool-scoped approvals in passkey mode** (corrected 2026-10-10, B4X-01; decision 29, finding 51). The recheck
+  rebuilds the signed payload from the call actually run. For a tool-scoped approval (ADR-0104 `approvalScope: "tool"`)
+  the signed `argumentsDigest` is the fixed `TOOL_SCOPE_ARGUMENTS_DIGEST` wildcard (`signedArgumentsDigest` in
+  `approval-signing.ts`, used by `signingPayloadForRow` and `recheckApprovalSignatures` in `approval-signatures.ts`),
+  so a call with other arguments for the same tool verifies and runs, as the approver was told ("Other arguments for
+  this tool are permitted"). The consent stays bound to everything else in the payload: the approval id, the server or
+  connector, the tool name, the nonce and `contextDigest`, whose ADR-0105 fingerprint includes `approvalScope`; a call
+  under a different policy context fails the recheck, is refused and the approval superseded. An action-scoped approval
+  signs and rechecks the exact arguments digest. A tool-scoped decision signed before decision 29 does not verify: it
+  fails closed and is superseded.
 - **MCP opens the upstream session before the recheck.** `executeGovernedToolCall` connects to the upstream (the MCP
   `initialize`; for stdio, the process start) before it consumes the approval. A failed recheck refuses the call before
   `tools/call` and the session is closed, so the tool never runs, but the upstream sees a connection.
@@ -605,7 +611,8 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
   evaluator, which ADR-0176 bars. The pack stays empty; revisit only through a new ADR.
 - **V, credential audience.** Outbound enforcement of `pipelock-secrets` audience hosts is not wired yet (no
   `credential_audience_violation` in the code); Claude owns it.
-- **S:** no network revocation checking on the TSA chain (no CRL or OCSP fetch, which suits air-gapped installs).
+- **S (R22-07):** no network certificate-revocation checking (OCSP/CRL) on the TSA chain: no CRL, OCSP or AIA fetch,
+  which suits air-gapped installs. A revoked TSA certificate still verifies while its chain ends at a certificate in the configured trust bundle.
 - **M:** `mcp_server_baseline_drift` sees only calls attributed to a builder agent.
 - **B4S-03 target binding.** No table binds a server or connector to a project, so the target of a call cannot make it
   sensitive. Follow-up needing a migration.

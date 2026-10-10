@@ -211,7 +211,7 @@ async function entitlementRefusal(db: Db, userId: string, agentId: string, role:
       userId,
       objectType: "agent",
       objectId: a.id,
-      detail: { phase: "engine-run-entitlement", role },
+      detail: { phase: "engine-run-entitlement", role, receiptClass: "decision" },
       effect: "deny",
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,

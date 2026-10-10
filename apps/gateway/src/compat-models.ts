@@ -189,6 +189,7 @@ export function registerModelsDiscovery(app: FastifyInstance, db: Db) {
         shape: modelsShapeFor(req),
         count: models.length,
         ...(vk ? { virtualKeyId: vk.id } : {}),
+        receiptClass: "configuration",
       },
       effect: "allow",
       ruleId: "models-listed",

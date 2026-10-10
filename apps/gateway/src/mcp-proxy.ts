@@ -244,7 +244,7 @@ export async function refuseStdioWithoutEntitlement(
     userId: args.userId,
     serverId: args.serverId,
     toolName: args.toolName ?? null,
-    detail: { phase: "stdio-entitlement", method: args.phase, projectId: args.projectId ?? null },
+    detail: { phase: "stdio-entitlement", method: args.phase, projectId: args.projectId ?? null, receiptClass: "decision" },
     ...decision,
   });
   return decision;
@@ -503,6 +503,7 @@ export async function supersedeStaleConsent(
         approvalId: row.id,
         retirementReason: row.reason,
         projectId: ctx.projectId,
+        receiptClass: "decision",
       },
       effect: "deny",
       ruleId: row.reason === "expired" ? "approval-expired" : "approval-context-stale",
@@ -812,7 +813,7 @@ async function executeGovernedToolCallInner(
     let preparedPii: PreparedPiiApproval | undefined;
     const refuseTransformation = async (reason: string): Promise<GovernedToolCallOutcome> => {
       const decision: Decision = { effect: "deny", ruleId: "pii-transformation-refused", ruleChain: [], reason };
-      await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "pii" } });
+      await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "pii", receiptClass: "decision" } });
       return { kind: "denied", decision };
     };
     if (piiMode === "redact") {
@@ -898,6 +899,7 @@ async function executeGovernedToolCallInner(
         contextDigest,
         projectId,
         target: auditTarget(serverRow),
+        receiptClass: "decision",
       },
       effect: decision.effect,
       ruleId: decision.ruleId,
@@ -936,6 +938,7 @@ async function executeGovernedToolCallInner(
             toolKind: kind,
             projectId,
             governingTags: mcpMode.governingTags,
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "mcp-default-mode",
@@ -992,6 +995,7 @@ async function executeGovernedToolCallInner(
           projectId,
           toolKind: kind,
           pricePerCallUsd,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "project-budget-cap",
@@ -1050,6 +1054,7 @@ async function executeGovernedToolCallInner(
             // COUNTS ONLY — never the matched substrings
             pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
             projectId,
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "pii-blocked",
@@ -1324,6 +1329,7 @@ async function executeGovernedToolCallInner(
           phase: "pii",
           pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
           projectId,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "pii-blocked",
@@ -1343,6 +1349,7 @@ async function executeGovernedToolCallInner(
           phase: "pii",
           pii: { mode: piiMode, action: "warn", inputHits, outputHits },
           projectId,
+          receiptClass: "decision",
         },
         effect: "allow",
         ruleId: "pii-warned",
@@ -1833,6 +1840,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         phase: "tool-price",
         before: before.pricePerCallUsd,
         after: body.pricePerCallUsd,
+        receiptClass: "configuration",
       },
       effect: "allow",
       ruleId: "mcp-tool-price-set",
@@ -1898,7 +1906,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         await db.insert(auditLog).values({
           userId,
           serverId,
-          detail: { phase: "attribution", requireMcpAttribution: true },
+          detail: { phase: "attribution", requireMcpAttribution: true, receiptClass: "decision" },
           effect: "deny",
           ruleId: "mcp-attribution-required",
           ruleChain: [],
