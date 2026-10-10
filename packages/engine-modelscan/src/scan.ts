@@ -12,10 +12,22 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { runProcessGroup, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
-import { MODELSCAN_MAX_REPORT_BYTES, NPY_OBJECT_PAYLOAD_MAX_BYTES, NPY_OBJECT_PAYLOAD_NAME, npyCheckSchema, type ArtifactFormat, type NpyCheck } from "@regulait/shared";
+import {
+  MODELSCAN_MAX_REPORT_BYTES,
+  NPY_OBJECT_PAYLOAD_MAX_BYTES,
+  NPY_OBJECT_PAYLOAD_NAME,
+  NPZ_MAX_MEMBERS,
+  NPZ_MAX_UNCOMPRESSED_BYTES,
+  npyCheckSchema,
+  npzCheckSchema,
+  npzMemberPayloadName,
+  type ArtifactFormat,
+  type NpyCheck,
+  type NpzCheck,
+} from "@regulait/shared";
 import { MODELSCAN_IMAGE_PATHS } from "./settings.js";
 
 export interface ModelscanInvocation {
@@ -110,71 +122,129 @@ export async function runModelscan(inv: ModelscanInvocation, opts: ModelscanRunn
 }
 
 // ---------------------------------------------------------------------------------------------------
-// ADR-0187 decisions 180–184 (closes open question 15(b)): `.npy` artifacts
+// ADR-0187 decisions 180–184 and 219–224 (open question 15(b) and (c)): `.npy` and `.npz` artifacts
 // ---------------------------------------------------------------------------------------------------
 
-/** what one scan job produced: modelscan's outcome and, for a `.npy`, the header check */
+/** what one scan job produced: modelscan's outcome and, for a `.npy` or a `.npz`, the scanner's own check */
 export interface ScanOutcome extends ModelscanOutcome {
   /** the `.npy` header check; null for every other format (and when the check was cut off) */
   npy: NpyCheck | null;
+  /** the `.npz` archive check (decisions 219–224); null for every other format (and when the check was cut off) */
+  npz: NpzCheck | null;
 }
 
 const NOTHING: ModelscanOutcome = { exitCode: null, timedOut: false, cancelled: false, report: null, reportSha256: null, reportTooLarge: false };
 const CHECK_FAILED: NpyCheck = { kind: "invalid", problem: "npy_check_failed" };
+const NPZ_CHECK_FAILED: NpzCheck = { kind: "invalid", problem: "npz_check_failed" };
+/** the `.npz` answer lists every member (at most NPZ_MAX_MEMBERS, each under 64 bytes of JSON) */
+const NPZ_ANSWER_MAX_BYTES = 128 * 1024;
 
 /** the helper's argv: isolated, no site, stdlib only; nothing from the artifact but the paths we chose */
 export function npyCheckArgs(helper: string, artifactPath: string, payloadPath: string): string[] {
   return ["-I", "-S", helper, artifactPath, payloadPath, String(NPY_OBJECT_PAYLOAD_MAX_BYTES)];
 }
 
+/** the `.npz` argv (decision 220): the whole archive's object payloads share the one `.npy` bound */
+export function npzCheckArgs(helper: string, artifactPath: string, payloadDir: string): string[] {
+  return ["-I", "-S", helper, "--npz", artifactPath, payloadDir, String(NPY_OBJECT_PAYLOAD_MAX_BYTES), String(NPZ_MAX_UNCOMPRESSED_BYTES), String(NPZ_MAX_MEMBERS)];
+}
+
 /**
- * Run the strict header check (engines/modelscan/npy-header.py) in this (the scanner's) container,
- * from a fresh empty working directory, with the same environment built from nothing as modelscan.
- * Anything but exit 0 and exactly one valid JSON answer is `npy_check_failed` (unknown).
+ * Run the helper (engines/modelscan/npy-header.py) in this (the scanner's) container, from a fresh
+ * empty working directory beside `besideDir`, with the same environment built from nothing as
+ * modelscan. Anything but exit 0 and exactly one answer the schema accepts is `failed` (unknown).
  */
-export async function runNpyCheck(
-  inv: { artifactPath: string; payloadPath: string; timeoutMs: number; signal?: AbortSignal },
-  opts: ModelscanRunnerOptions = {},
-): Promise<{ check: NpyCheck | null; timedOut: boolean; cancelled: boolean }> {
-  const cwd = path.join(path.dirname(inv.payloadPath), "cwd");
+async function runHelper<T>(
+  inv: { args: string[]; besideDir: string; timeoutMs: number; signal?: AbortSignal; maxOutputBytes: number },
+  parse: (v: unknown) => { success: true; data: T } | { success: false },
+  failed: T,
+  opts: ModelscanRunnerOptions,
+): Promise<{ check: T | null; timedOut: boolean; cancelled: boolean }> {
+  const cwd = path.join(inv.besideDir, "cwd");
   await rm(cwd, { recursive: true, force: true });
   await mkdir(cwd, { recursive: true, mode: 0o700 });
   try {
-    const r = await runProcessGroup(opts.python ?? MODELSCAN_IMAGE_PATHS.python, npyCheckArgs(opts.npyHelper ?? MODELSCAN_IMAGE_PATHS.npyHelper, inv.artifactPath, inv.payloadPath), {
+    const r = await runProcessGroup(opts.python ?? MODELSCAN_IMAGE_PATHS.python, inv.args, {
       cwd,
       env: modelscanEnv(cwd, opts.path ?? MODELSCAN_IMAGE_PATHS.venvBin),
       timeoutMs: Math.max(1000, inv.timeoutMs),
       ...(inv.signal ? { signal: inv.signal } : {}),
-      maxOutputBytes: 4096,
+      maxOutputBytes: inv.maxOutputBytes,
     });
     const cancelled = Boolean(inv.signal?.aborted);
     if (r.killed) return { check: null, timedOut: !cancelled, cancelled };
     const lines = r.stdout.split("\n").filter((l) => l.length > 0);
-    if (r.exitCode !== 0 || lines.length !== 1) return { check: CHECK_FAILED, timedOut: false, cancelled: false };
+    if (r.exitCode !== 0 || lines.length !== 1) return { check: failed, timedOut: false, cancelled: false };
     let parsed: unknown;
     try {
       parsed = JSON.parse(lines[0]!);
     } catch {
-      return { check: CHECK_FAILED, timedOut: false, cancelled: false };
+      return { check: failed, timedOut: false, cancelled: false };
     }
-    const check = npyCheckSchema.safeParse(parsed);
-    return { check: check.success ? check.data : CHECK_FAILED, timedOut: false, cancelled: false };
+    const check = parse(parsed);
+    return { check: check.success ? check.data : failed, timedOut: false, cancelled: false };
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
 }
 
 /**
- * ONE scan job, in the scanner's container: modelscan on the artifact, except for a `.npy`, whose
- * header is checked first (decisions 180–184):
- *   - numeric: no pickle anywhere, so modelscan is not started;
- *   - object: exactly the payload bytes (a pickle stream) go to modelscan's PICKLE scanner, as
- *     `artifact.pkl` in a directory of their own, removed afterwards;
- *   - refused, or the check did not answer: modelscan is not started; the mapper reads `unknown`.
+ * Run the strict header check on one `.npy`. Anything but exit 0 and exactly one valid JSON answer is
+ * `npy_check_failed` (unknown).
+ */
+export async function runNpyCheck(
+  inv: { artifactPath: string; payloadPath: string; timeoutMs: number; signal?: AbortSignal },
+  opts: ModelscanRunnerOptions = {},
+): Promise<{ check: NpyCheck | null; timedOut: boolean; cancelled: boolean }> {
+  const args = npyCheckArgs(opts.npyHelper ?? MODELSCAN_IMAGE_PATHS.npyHelper, inv.artifactPath, inv.payloadPath);
+  return runHelper(
+    { args, besideDir: path.dirname(inv.payloadPath), timeoutMs: inv.timeoutMs, maxOutputBytes: 4096, ...(inv.signal ? { signal: inv.signal } : {}) },
+    (v) => npyCheckSchema.safeParse(v),
+    CHECK_FAILED,
+    opts,
+  );
+}
+
+/**
+ * Run the strict archive check on one `.npz` (decisions 219–224). Object members' payloads land in
+ * `payloadDir` as `member-NNNN.pkl`. Anything but exit 0, exactly one valid JSON answer, and a payload
+ * directory holding exactly the object members' files is `npz_check_failed` (unknown).
+ */
+export async function runNpzCheck(
+  inv: { artifactPath: string; payloadDir: string; timeoutMs: number; signal?: AbortSignal },
+  opts: ModelscanRunnerOptions = {},
+): Promise<{ check: NpzCheck | null; timedOut: boolean; cancelled: boolean }> {
+  const args = npzCheckArgs(opts.npyHelper ?? MODELSCAN_IMAGE_PATHS.npyHelper, inv.artifactPath, inv.payloadDir);
+  const r = await runHelper(
+    { args, besideDir: path.dirname(inv.payloadDir), timeoutMs: inv.timeoutMs, maxOutputBytes: NPZ_ANSWER_MAX_BYTES, ...(inv.signal ? { signal: inv.signal } : {}) },
+    (v) => npzCheckSchema.safeParse(v),
+    NPZ_CHECK_FAILED,
+    opts,
+  );
+  if (r.check === null) return r;
+  // the payload directory must hold exactly the object members' files: modelscan scans the directory
+  const want = r.check.kind === "npz" ? r.check.members.flatMap((m, i) => (m.kind === "object" ? [npzMemberPayloadName(i)] : [])).sort() : [];
+  const have = (await readdir(inv.payloadDir)).sort();
+  if (want.length !== have.length || want.some((n, i) => n !== have[i])) return { check: NPZ_CHECK_FAILED, timedOut: false, cancelled: false };
+  return r;
+}
+
+/**
+ * ONE scan job, in the scanner's container: modelscan on the artifact, except
+ *   - a `.npy`, whose header is checked first (decisions 180–184):
+ *     - numeric: no pickle anywhere, so modelscan is not started;
+ *     - object: exactly the payload bytes (a pickle stream) go to modelscan's PICKLE scanner, as
+ *       `artifact.pkl` in a directory of their own, removed afterwards;
+ *     - refused, or the check did not answer: modelscan is not started; the mapper reads `unknown`;
+ *   - a `.npz`, whose archive and every member are checked first (decisions 219–224): an archive-level
+ *     refusal, or an archive with no object member, starts nothing; otherwise modelscan scans the
+ *     directory of object payloads (one `member-NNNN.pkl` per object member, as pickles), removed
+ *     afterwards.
  */
 export async function runScanJob(inv: ModelscanInvocation & { format: ArtifactFormat }, opts: ModelscanRunnerOptions = {}): Promise<ScanOutcome> {
-  if (inv.format !== "numpy") return { ...(await runModelscan(inv, opts)), npy: null };
-  if (inv.signal?.aborted) return { ...NOTHING, cancelled: true, npy: null };
+  if (inv.format === "numpy_npz") return runNpzJob(inv, opts);
+  if (inv.format !== "numpy") return { ...(await runModelscan(inv, opts)), npy: null, npz: null };
+  if (inv.signal?.aborted) return { ...NOTHING, cancelled: true, npy: null, npz: null };
   const started = Date.now();
   const npyDir = path.join(inv.outDir, "npy");
   await rm(npyDir, { recursive: true, force: true });
@@ -182,13 +252,33 @@ export async function runScanJob(inv: ModelscanInvocation & { format: ArtifactFo
   try {
     const payloadPath = path.join(npyDir, NPY_OBJECT_PAYLOAD_NAME);
     const checked = await runNpyCheck({ artifactPath: inv.artifactPath, payloadPath, timeoutMs: inv.timeoutMs, ...(inv.signal ? { signal: inv.signal } : {}) }, opts);
-    if (checked.cancelled) return { ...NOTHING, cancelled: true, npy: null };
-    if (checked.timedOut || checked.check === null) return { ...NOTHING, timedOut: true, npy: null };
-    if (checked.check.kind !== "object") return { ...NOTHING, npy: checked.check };
+    if (checked.cancelled) return { ...NOTHING, cancelled: true, npy: null, npz: null };
+    if (checked.timedOut || checked.check === null) return { ...NOTHING, timedOut: true, npy: null, npz: null };
+    if (checked.check.kind !== "object") return { ...NOTHING, npy: checked.check, npz: null };
     const remaining = inv.timeoutMs - (Date.now() - started);
     const outcome = await runModelscan({ artifactPath: payloadPath, outDir: inv.outDir, timeoutMs: remaining, ...(inv.signal ? { signal: inv.signal } : {}) }, opts);
-    return { ...outcome, npy: checked.check };
+    return { ...outcome, npy: checked.check, npz: null };
   } finally {
     await rm(npyDir, { recursive: true, force: true });
+  }
+}
+
+async function runNpzJob(inv: ModelscanInvocation, opts: ModelscanRunnerOptions): Promise<ScanOutcome> {
+  if (inv.signal?.aborted) return { ...NOTHING, cancelled: true, npy: null, npz: null };
+  const started = Date.now();
+  const npzDir = path.join(inv.outDir, "npz");
+  const payloadDir = path.join(npzDir, "payloads");
+  await rm(npzDir, { recursive: true, force: true });
+  await mkdir(payloadDir, { recursive: true, mode: 0o700 });
+  try {
+    const checked = await runNpzCheck({ artifactPath: inv.artifactPath, payloadDir, timeoutMs: inv.timeoutMs, ...(inv.signal ? { signal: inv.signal } : {}) }, opts);
+    if (checked.cancelled) return { ...NOTHING, cancelled: true, npy: null, npz: null };
+    if (checked.timedOut || checked.check === null) return { ...NOTHING, timedOut: true, npy: null, npz: null };
+    if (checked.check.kind !== "npz" || !checked.check.members.some((m) => m.kind === "object")) return { ...NOTHING, npy: null, npz: checked.check };
+    const remaining = inv.timeoutMs - (Date.now() - started);
+    const outcome = await runModelscan({ artifactPath: payloadDir, outDir: inv.outDir, timeoutMs: remaining, ...(inv.signal ? { signal: inv.signal } : {}) }, opts);
+    return { ...outcome, npy: null, npz: checked.check };
+  } finally {
+    await rm(npzDir, { recursive: true, force: true });
   }
 }

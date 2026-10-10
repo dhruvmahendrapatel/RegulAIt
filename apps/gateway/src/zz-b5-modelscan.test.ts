@@ -126,7 +126,7 @@ function answering(a: { exitCode: number | null; report?: unknown; timedOut?: bo
       jobs.push(job);
       await onScan?.(job);
       const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false, npy: null };
+      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false, npy: null, npz: null };
     },
     async release() {},
     async reconcile() {
