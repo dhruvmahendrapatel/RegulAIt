@@ -297,6 +297,21 @@ async function send<T>(method: string, path: string, body?: unknown, extraHeader
   return { body: (json ?? {}) as T, headers: res.headers };
 }
 
+/**
+ * ADR-0187 X28: a refusal another transport received (an upload that reports
+ * progress uses XMLHttpRequest, which `fetch` cannot) gets the same handling as
+ * every call above: a lost session routes to /login, a step-up refusal tells the
+ * prompt, and the caller throws the returned ApiError.
+ */
+export function apiErrorFrom(method: string, path: string, status: number, payload: ApiErrorPayload | null): ApiError {
+  if (status === 401) {
+    if (isSessionLoss(path, payload)) onUnauthorized?.();
+    return new ApiError(401, payload ?? { error: "unauthenticated" });
+  }
+  if (status === 403 && payload?.error === "step_up_required") announceStepUp(method, path, payload);
+  return new ApiError(status, payload ?? { error: "HTTP " + status });
+}
+
 async function parseBody(res: Response): Promise<ApiErrorPayload | null> {
   const text = await res.text();
   if (!text) return null;

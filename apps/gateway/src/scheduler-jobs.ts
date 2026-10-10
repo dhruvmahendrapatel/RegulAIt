@@ -63,6 +63,8 @@ export interface SchedulerJobsOptions {
   /** needed by the two jobs that DISPATCH (eval drift, red-team): the same
    * envelope key every other dispatch path takes */
   dataKey?: string | undefined;
+  /** the model-artifact store the retention sweep deletes from (default: from the environment) */
+  artifactStore?: ArtifactStore | null | undefined;
 }
 
 /** stable job ids. Exported because tests, the API and the SPA all name them,
@@ -108,6 +110,8 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0187: defined and run by engine-runs.ts (block at the end)
   engineRunSweep: "engine-run-sweep",
   engineScheduleSweep: "engine-schedule-sweep",
+  // ADR-0187 decision 127: defined and run by model-artifacts.ts (block at the end)
+  modelArtifactRetentionSweep: "model-artifact-retention-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -772,6 +776,7 @@ import { memoryRetentionJobDefinitions } from "./memory-retention.js";
 import { decisionReceiptJobDefinitions } from "./decision-receipts.js";
 import { anchorTimestampJobDefinitions } from "./audit-timestamp.js";
 import { engineJobDefinitions } from "./engine-runs.js";
+import { modelArtifactJobDefinitions, type ArtifactStore } from "./model-artifacts.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -783,6 +788,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...decisionReceiptJobDefinitions(), // ADR-0186 R: decision-receipt-sign-sweep
     ...anchorTimestampJobDefinitions(), // ADR-0186 S: anchor-timestamp-sweep
     ...engineJobDefinitions(), // ADR-0187: engine-run-sweep, engine-schedule-sweep
+    ...modelArtifactJobDefinitions(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }), // ADR-0187 decision 127: model-artifact-retention-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

@@ -65,6 +65,13 @@ LABEL org.opencontainers.image.title="regulait-engine-modelscan" \
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+# PR #212 review [4235322394] (ADR-0187 decision 129): the Node binary comes from the node image, but its
+# shared libraries (libstdc++.so.6, libgcc_s.so.1) must come from THIS base, as Debian packages Trivy
+# sees and scans. Fail the build, here, if either package is missing, if any library node links
+# against does not resolve, or if node cannot start; never at the first run.
+RUN dpkg-query -W -f='${Package} ${Version}\n' libstdc++6 libgcc-s1 \
+ && if ldd /usr/local/bin/node | grep -q 'not found'; then ldd /usr/local/bin/node; exit 1; fi \
+ && node --version
 COPY --from=closure /opt/modelscan /opt/modelscan
 COPY --from=shim /out /app
 # the settings are read-only for everyone; the runner's state volume is its own (0700, uid 10001),
