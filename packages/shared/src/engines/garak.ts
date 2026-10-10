@@ -277,7 +277,7 @@ export interface GarakOwaspCrosswalkRow {
 /**
  * THE CROSSWALK, versioned by the garak release whose tags it reads. Only the rows R10 supports are
  * mapped. The two 2023 risks with no clean 2025 target (Insecure Plugin Design; Model Theft) map to
- * nothing until the owner decides (OWNER DECISION, ADR-0187 open question B5-G 1). This is reported
+ * nothing until the owner decides (OWNER DECISION, ADR-0187 open question 19). This is reported
  * provenance only: what COUNTS toward A3 is the per-probe attack class above, never an OWASP tag.
  */
 export const GARAK_OWASP_CROSSWALK: { garakVersion: string; rows: readonly GarakOwaspCrosswalkRow[] } = Object.freeze({
