@@ -309,7 +309,7 @@ export const createCompliancePackSchema = z
      * the pack ships no starting profile and the admin authors it, exactly as
      * before this batch. Refused without a cascadeTag: a profile preset with
      * no tag to hang it on is a claim about nothing. */
-    cascadePreset: z.record(z.unknown()).nullish(),
+    cascadePreset: z.record(z.string(), z.unknown()).nullish(),
     controls: z.array(packControlSchema).min(1).max(500),
   })
   .strict()

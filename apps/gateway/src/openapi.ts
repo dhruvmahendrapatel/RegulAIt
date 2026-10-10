@@ -34,19 +34,15 @@
  * deployment should not have to read our source. It is admin-gated and it is
  * not the published artifact.
  *
- * ONE DEPENDENCY WAS ADDED: `zod-to-json-schema` (3.25.2, zero runtime
- * dependencies of its own, already resolved in this workspace's lockfile as a
- * transitive dependency of the OpenAI SDK). It is the difference between bodies
- * DERIVED from the schemas the handlers enforce and bodies re-typed by hand
- * beside them — which is the exact drift this ADR exists to prevent. Under
- * ADR-0012's dependency scrutiny that trade is worth one small, pinned,
- * dependency-free package.
+ * Bodies are DERIVED from the schemas the handlers enforce, never re-typed by
+ * hand beside them — which is the exact drift this ADR exists to prevent. Zod 4
+ * renders JSON Schema natively (`z.toJSONSchema`), so the `zod-to-json-schema`
+ * package this file used to depend on was removed (ADR-0192).
  */
 import { decideApprovalWithMeasuredSchema } from "./condition-metrics.js";
 import { putOverrideSchema } from "./guardrails.js";
 import type { FastifyInstance } from "fastify";
-import type { ZodTypeAny } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod";
 import {
   assignRoleSchema,
   createApiKeySchema,
@@ -152,7 +148,7 @@ export const DEPRECATIONS: Readonly<Record<string, DeprecationEntry>> = {};
 export interface RouteDoc {
   summary: string;
   /** the zod schema the HANDLER parses the body with — not a copy of it */
-  body?: ZodTypeAny;
+  body?: z.ZodType;
   /** a named response shape, when one is worth stating */
   responseNote?: string;
 }
@@ -329,8 +325,10 @@ function securityFor(auth: RouteAuthClass): Array<Record<string, string[]>> {
   }
 }
 
-function jsonSchemaFor(schema: ZodTypeAny): Record<string, unknown> {
-  const out = zodToJsonSchema(schema, { $refStrategy: "none", target: "openApi3" }) as Record<string, unknown>;
+function jsonSchemaFor(schema: z.ZodType): Record<string, unknown> {
+  // a request body is what the caller sends, so render the INPUT side (a defaulted field is optional);
+  // refinements and transforms have no JSON Schema form and render as their base type
+  const out = z.toJSONSchema(schema, { target: "openapi-3.0", io: "input", unrepresentable: "any" }) as Record<string, unknown>;
   delete out.$schema;
   return out;
 }

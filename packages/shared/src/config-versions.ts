@@ -199,7 +199,7 @@ export function canaryModeNote(t: ConfigArtifactType): string {
 
 export const createConfigVersionSchema = z
   .object({
-    body: z.record(z.unknown()),
+    body: z.record(z.string(), z.unknown()),
     label: z.string().min(1).max(200).nullish(),
     /** activate immediately (the behaviour an in-place UPDATE used to have,
      * except the previous version row survives) */
@@ -500,7 +500,7 @@ const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
     patchCadenceDays: z.number().int().positive().nullish(),
     maxProjectBudgetUsd: z.number().nonnegative().nullish(),
     budgetEnforcement: z.enum(["block", "warn_only"]).nullish(),
-    guardrailModes: z.record(z.string()).nullish(),
+    guardrailModes: z.record(z.string(), z.string()).nullish(),
     redteamGatingClasses: z.array(z.string()).nullish(),
     redteamMinTrials: z.number().int().positive().nullish(),
     redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullish(),

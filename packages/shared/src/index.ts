@@ -1500,7 +1500,7 @@ export const invokeConnectorSchema = z.object({
   operation: z.enum(["read", "write"]),
   object: z.string().min(1).max(256).optional(),
   /** EXECUTION: the write body / read parameters handed to the adapter */
-  payload: z.record(z.unknown()).optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
   /** pillar 5: attribute this call's cost to a project */
   projectId: z.string().uuid().optional(),
 });
@@ -1841,7 +1841,7 @@ export const autoAdvanceSchema = z.object({
    * Default false — review stays a human gate. */
   acceptReviews: z.boolean().optional(),
   /** per-node work instructions; a node absent here uses its title */
-  inputs: z.record(z.string().max(100_000)).optional(),
+  inputs: z.record(z.string(), z.string().max(100_000)).optional(),
   maxTokens: z.number().int().min(1).max(64_000).optional(),
 });
 
@@ -1934,7 +1934,7 @@ export const pmWebhookSchema = z.object({
   externalId: z.string().min(1).max(256),
   event: z.enum(["updated", "deleted", "commented"]),
   state: z.string().min(1).max(128).optional(),
-  fields: z.record(z.unknown()).optional(),
+  fields: z.record(z.string(), z.unknown()).optional(),
 });
 
 // PILLAR 4 (§9, ADR-0011): teams + Shared-Project membership + context store.
@@ -1978,7 +1978,7 @@ export const createInfraResourceSchema = z.object({
   name: z.string().min(1).max(200),
   /** infra-provider kind; 'mock' (keyless, deterministic) for the MVP */
   provider: z.enum(["mock", "aws", "azure", "gcp"]).default("mock"),
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
   /** §8.3 compliance tags; the cascade derives backup/patch floors */
   classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
 });
@@ -1992,7 +1992,7 @@ export const createInfraPolicySchema = z.object({
   certRotationDaysBeforeExpiry: z.number().int().positive().nullable().optional(),
   backupSchedule: z.string().min(1).max(200).nullable().optional(),
   backupRetentionDays: z.number().int().positive().nullable().optional(),
-  driftBaseline: z.record(z.unknown()).nullable().optional(),
+  driftBaseline: z.record(z.string(), z.unknown()).nullable().optional(),
   autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
 });
 
@@ -3986,7 +3986,7 @@ export const authzCheckRequestSchema = z.object({
   /** The real call arguments, so data-scope rules evaluate the actual values.
    *  Absent means absent — a data-scope rule still fails closed rather than
    *  being skipped, which is the behaviour that must not change. */
-  args: z.record(z.unknown()).optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
 
   /** Pillar-5 attribution, from which the deploy-mode context is derived, so a
    *  mode-scoped rule matches the same way it would on the real dispatch. */

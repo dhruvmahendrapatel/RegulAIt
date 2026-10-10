@@ -77,7 +77,7 @@ const alertParam = z.object({ alertId: z.string().uuid() });
 const proposeBody = z
   .object({
     kind: z.string().min(1).max(64),
-    params: z.record(z.string().max(200)),
+    params: z.record(z.string(), z.string().max(200)),
     approverUserId: z.string().uuid(),
   })
   .strict();

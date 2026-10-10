@@ -50,7 +50,7 @@ describe("prompt commit hash", () => {
     const h = promptCommitHash(base);
     const variants: PromptHashInput[] = [
       { ...base, template: "Hi {{name}}!" },
-      { ...base, modelConfig: { agentId: "00000000-0000-0000-0000-000000000001", maxTokens: null } },
+      { ...base, modelConfig: { agentId: "00000000-0000-4000-8000-000000000001", maxTokens: null } },
       { ...base, variables: ["name", "x"] },
       { ...base, outputSchema: { type: "object" } },
       { ...base, tools: [{ name: "t", description: "", inputSchema: {} }] },
@@ -67,7 +67,7 @@ describe("prompt commit hash", () => {
 
 describe("playground evaluate shape", () => {
   it("takes rows or a dataset, never both or neither, and at most 50 rows", () => {
-    const m = "00000000-0000-0000-0000-000000000001";
+    const m = "00000000-0000-4000-8000-000000000001";
     expect(playgroundEvaluateSchema.safeParse({ template: "x", modelAgentId: m, rows: [] }).success).toBe(true);
     expect(playgroundEvaluateSchema.safeParse({ template: "x", modelAgentId: m }).success).toBe(false);
     expect(playgroundEvaluateSchema.safeParse({ template: "x", modelAgentId: m, rows: [], datasetId: m }).success).toBe(false);

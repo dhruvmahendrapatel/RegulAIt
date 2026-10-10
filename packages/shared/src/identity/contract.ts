@@ -528,10 +528,10 @@ const uniqueBy = <T>(key: (v: T) => string) => (a: T[]) => new Set(a.map(key)).s
  */
 export const actorEntitlementsSchema = z
   .object({
-    tools: z.array(identityToolGrantSchema).max(5000).refine(uniqueBy((g) => `${g.serverId}/${g.toolName}`), { message: "duplicate tool grant" }),
-    servers: z.array(identityServerGrantSchema).max(1000).refine(uniqueBy((g) => g.serverId), { message: "duplicate server grant" }),
-    agents: z.array(identityAgentGrantSchema).max(1000).refine(uniqueBy((g) => g.agentId), { message: "duplicate agent grant" }),
-    connectors: z.array(identityConnectorGrantSchema).max(1000).refine(uniqueBy((g) => g.connectorId), { message: "duplicate connector grant" }),
+    tools: z.array(identityToolGrantSchema).max(5000).refine(uniqueBy((g: IdentityToolGrant) => `${g.serverId}/${g.toolName}`), { message: "duplicate tool grant" }),
+    servers: z.array(identityServerGrantSchema).max(1000).refine(uniqueBy((g: IdentityServerGrant) => g.serverId), { message: "duplicate server grant" }),
+    agents: z.array(identityAgentGrantSchema).max(1000).refine(uniqueBy((g: IdentityAgentGrant) => g.agentId), { message: "duplicate agent grant" }),
+    connectors: z.array(identityConnectorGrantSchema).max(1000).refine(uniqueBy((g: IdentityConnectorGrant) => g.connectorId), { message: "duplicate connector grant" }),
   })
   .strict();
 export type ActorEntitlements = z.infer<typeof actorEntitlementsSchema>;

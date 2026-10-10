@@ -192,7 +192,17 @@ export const builderCreateSkillSchema = z
     visibility: z.enum(["private", "workspace"]),
   })
   .strict();
-export const builderUpdateSkillSchema = builderCreateSkillSchema.partial().strict();
+/** a PATCH: built from the fields, not `.partial()`, because zod 4 fills a default inside an optional
+ * field and an omitted description would be reset to "" */
+export const builderUpdateSkillSchema = z
+  .object({
+    name: builderCreateSkillSchema.shape.name,
+    description: z.string().max(1000),
+    body: builderCreateSkillSchema.shape.body,
+    visibility: builderCreateSkillSchema.shape.visibility,
+  })
+  .partial()
+  .strict();
 export const builderImportSkillSchema = z.object({ markdown: z.string().min(1).max(40_000) }).strict();
 
 export const builderUsageQuerySchema = z.object({

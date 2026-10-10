@@ -1125,7 +1125,7 @@ const createRuleSchema = z.object({
 const ruleIdParam = z.object({ ruleId: z.string().uuid() });
 const escalateSchema = z.object({
   mintKind: z.enum(SOD_MINT_KINDS),
-  payload: z.record(z.unknown()),
+  payload: z.record(z.string(), z.unknown()),
   approverUserId: z.string().uuid(),
   justification: z.string().optional(),
 });

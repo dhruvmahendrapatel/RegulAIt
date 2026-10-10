@@ -69,7 +69,7 @@ export const createModelCardSchema = z
     agentId: z.string().uuid().optional(),
     customProviderId: z.string().uuid().optional(),
     intendedUse: z.string().min(1).max(2000),
-    dataClaims: z.record(z.unknown()).default({}),
+    dataClaims: z.record(z.string(), z.unknown()).default({}),
     limitations: z.string().max(20_000).nullish(),
     biasFairness: z.array(biasFairnessEntrySchema).max(50).default([]),
     standardRefs: z.array(z.string().min(1).max(200)).max(50).default([]),
@@ -86,7 +86,7 @@ export const createModelCardSchema = z
 
 export const updateModelCardSchema = z.object({
   intendedUse: z.string().min(1).max(2000).optional(),
-  dataClaims: z.record(z.unknown()).optional(),
+  dataClaims: z.record(z.string(), z.unknown()).optional(),
   limitations: z.string().max(20_000).nullish(),
   biasFairness: z.array(biasFairnessEntrySchema).max(50).optional(),
   standardRefs: z.array(z.string().min(1).max(200)).max(50).optional(),

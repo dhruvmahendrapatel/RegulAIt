@@ -106,7 +106,7 @@ export type MetricParamsCheck =
 export function validateMetricParams(metric: AssuranceMetricId, params: unknown): MetricParamsCheck {
   const r = METRIC_PARAMS_SCHEMAS[metric].safeParse(params ?? {});
   if (r.success) return { ok: true, params: r.data as Record<string, unknown> };
-  return { ok: false, issues: r.error.issues.map((i) => ({ path: ["params", ...i.path], message: i.message })) };
+  return { ok: false, issues: r.error.issues.map((i) => ({ path: ["params", ...i.path.map((p) => (typeof p === "symbol" ? String(p) : p))], message: i.message })) };
 }
 
 // ---------------------------------------------------------------------------

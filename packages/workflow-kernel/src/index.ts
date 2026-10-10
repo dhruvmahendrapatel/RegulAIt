@@ -158,7 +158,7 @@ const stageSchema = z.object({
         judgeAgent: z.string().min(1).optional(),
         /** the engine's named plugin/probe sets */
         sets: z.array(z.string().min(1).max(100)).min(1).max(50),
-        params: z.record(z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
+        params: z.record(z.string(), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
         trials: z.number().int().min(1).max(25).optional(),
         budgetUsd: z.number().positive().max(10_000).optional(),
       }),

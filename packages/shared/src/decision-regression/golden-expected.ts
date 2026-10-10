@@ -419,7 +419,7 @@ export const GOLDEN_EXPECTED: Readonly<Record<string, DecisionOutcome>> = {
   "unscreened-missing-answer": {
     "tier": null,
     "reasons": [
-      "answers refused: decisionAutonomy Required"
+      "answers refused: decisionAutonomy Invalid option: expected one of \"narrow-procedural\"|\"informs-human\"|\"human-reviews\"|\"fully-automated\""
     ],
     "frameworks": [],
     "requiredRoles": [],

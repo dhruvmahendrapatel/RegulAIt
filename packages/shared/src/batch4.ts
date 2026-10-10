@@ -526,20 +526,20 @@ export const batch4OrgSettingsFields = {
 
 /** POST /v1/auth/step-up/options */
 export const stepUpOptionsSchema = z
-  .object({ action: z.object({ kind: z.enum(STEP_UP_ACTION_KINDS), body: z.record(z.unknown()).default({}) }).strict() })
+  .object({ action: z.object({ kind: z.enum(STEP_UP_ACTION_KINDS), body: z.record(z.string(), z.unknown()).default({}) }).strict() })
   .strict();
 export type StepUpOptionsInput = z.infer<typeof stepUpOptionsSchema>;
 
 /** POST /v1/auth/step-up/verify */
 export const stepUpVerifySchema = z.discriminatedUnion("method", [
   z.object({ stepUpId: z.string().uuid(), method: z.literal("totp"), code: z.string().regex(/^\d{6}$/) }).strict(),
-  z.object({ stepUpId: z.string().uuid(), method: z.literal("passkey"), response: z.record(z.unknown()) }).strict(),
+  z.object({ stepUpId: z.string().uuid(), method: z.literal("passkey"), response: z.record(z.string(), z.unknown()) }).strict(),
 ]);
 export type StepUpVerifyInput = z.infer<typeof stepUpVerifySchema>;
 
 /** POST /v1/auth/passkeys */
 export const registerPasskeySchema = z
-  .object({ challengeId: z.string().uuid(), response: z.record(z.unknown()), label: z.string().trim().min(1).max(100) })
+  .object({ challengeId: z.string().uuid(), response: z.record(z.string(), z.unknown()), label: z.string().trim().min(1).max(100) })
   .strict();
 export type RegisterPasskeyInput = z.infer<typeof registerPasskeySchema>;
 
@@ -552,7 +552,7 @@ export type ApprovalSigningOptionsInput = z.infer<typeof approvalSigningOptionsS
 
 /** the `passkey` member of the extended POST /v1/approvals/:id/decide body */
 export const approvalDecidePasskeyField = z
-  .object({ challengeId: z.string().uuid(), response: z.record(z.unknown()) })
+  .object({ challengeId: z.string().uuid(), response: z.record(z.string(), z.unknown()) })
   .strict();
 
 /** POST/PATCH /v1/rules/approvals gain these (slice A) */

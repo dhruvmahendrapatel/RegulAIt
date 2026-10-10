@@ -749,7 +749,7 @@ export const aiBomNativeBodySchema = z
     compositions: z
       .array(z.object({ aggregate: z.enum(["complete", "incomplete", "unknown"]), assemblies: z.array(z.string().min(1).max(512)).max(100000) }).strict())
       .max(1024),
-    renderings: z.record(z.enum(BOM_RENDERING_FORMATS), renderingEntry),
+    renderings: z.partialRecord(z.enum(BOM_RENDERING_FORMATS), renderingEntry),
   })
   .strict()
   .superRefine((body, ctx) => {

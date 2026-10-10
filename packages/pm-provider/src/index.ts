@@ -92,7 +92,7 @@ export const pmMappingSchema = z.object({
       acceptanceCriteria: z.string().min(1).optional(),
     }),
     /** RegulAIt node status → provider state name; unmapped = skip, never invent */
-    statusMap: z.record(z.string().min(1)).optional(),
+    statusMap: z.record(z.string(), z.string().min(1)).optional(),
   }),
   /** §5: how sign-off decisions appear on the linked item. Absent config or an
    * unmapped stage falls back to a comment — a decision is never silently
@@ -101,7 +101,7 @@ export const pmMappingSchema = z.object({
     .object({
       target: z.enum(["status_transition", "comment"]).default("comment"),
       /** sign-off stage id → provider state (used when target=status_transition) */
-      stageMap: z.record(z.string().min(1)).optional(),
+      stageMap: z.record(z.string(), z.string().min(1)).optional(),
     })
     .optional(),
   /** §4: Decision records mirror as a linked work item of the customer's
@@ -1072,7 +1072,7 @@ const webhookWorkItemSchema = z.object({
   url: z.string().default(""),
   type: z.string().default("task"),
   state: z.string().nullable().default(null),
-  fields: z.record(z.unknown()).default({}),
+  fields: z.record(z.string(), z.unknown()).default({}),
   comments: z.array(z.string()).default([]),
 });
 

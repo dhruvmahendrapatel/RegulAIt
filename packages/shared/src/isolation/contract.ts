@@ -284,7 +284,7 @@ export const executionProfileNetworkSchema = z.discriminatedUnion("mode", [
         .array(z.object({ host: z.string().refine(isExactHost, { message: "an exact host name or IP literal" }), port: z.number().int().min(1).max(65535) }).strict())
         .min(1)
         .max(EXECUTION_PROFILE_LIMITS.allowList.max)
-        .refine(uniqueBy((e) => `${e.host}:${e.port}`), { message: "duplicate allow-list entry" }),
+        .refine(uniqueBy((e: { host: string; port: number }) => `${e.host}:${e.port}`), { message: "duplicate allow-list entry" }),
     })
     .strict(),
 ]);
@@ -319,8 +319,8 @@ export const executionProfileBodySchema = z
         inputs: z
           .array(executionProfileInputSchema)
           .max(EXECUTION_PROFILE_LIMITS.inputs.max)
-          .refine(uniqueBy((i) => i.name), { message: "duplicate input name" })
-          .refine(uniqueBy((i) => i.mountPath), { message: "duplicate input mount path" }),
+          .refine(uniqueBy((i: z.infer<typeof executionProfileInputSchema>) => i.name), { message: "duplicate input name" })
+          .refine(uniqueBy((i: z.infer<typeof executionProfileInputSchema>) => i.mountPath), { message: "duplicate input mount path" }),
       })
       .strict(),
     network: executionProfileNetworkSchema,
