@@ -117,7 +117,7 @@ function decisionBom(): DecisionBomBody {
       ],
       anchor: {
         id: U(40),
-        record: { seq: 42, rowHash: H("4"), headAt: T, algorithm: "sha256", payloadVersion: 1, capturedAt: T },
+        record: { seq: 42, rowHash: H("4"), headAt: T, algorithm: "sha256", payloadVersion: "regulait.audit.v1", capturedAt: T },
         destination: "s3_object_lock", status: "flushed", externalRef: "s3://anchors/a/anchor-42.json", flushedAt: T,
         tamperResistant: true, observationMode: "compliance", observedAt: T, retainUntil: "2033-10-10T12:00:00.000Z",
         tsa: { token: "MIIB", genTime: T, messageImprint: H("5"), policyOid: "1.2.3", nonce: "ab12", requestSentAt: T, requestFactsLegacy: false },
@@ -305,6 +305,12 @@ describe("regulait.decision-bom.v1", () => {
     expect(decisionBomBodySchema.safeParse(noAnchor).success).toBe(false);
     noAnchor.finality = "chain_signed";
     expect(decisionBomBodySchema.safeParse(noAnchor).success).toBe(true);
+  });
+  it("B4.7-1: the anchor record's payloadVersion is the stored string the imprint covers, never an integer", () => {
+    expect(decisionBom().proof.anchor!.record.payloadVersion).toBe("regulait.audit.v1");
+    const integer = clone(decisionBom()) as unknown as { proof: { anchor: { record: { payloadVersion: unknown } } } };
+    integer.proof.anchor.record.payloadVersion = 1;
+    expect(decisionBomBodySchema.safeParse(integer).success).toBe(false);
   });
   it("a legacy timestamp may lack request facts (#280); any other may not (R33)", () => {
     const legacy = decisionBom();

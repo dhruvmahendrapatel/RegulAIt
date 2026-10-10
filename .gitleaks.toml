@@ -214,3 +214,36 @@ condition = "AND"
 paths = ['''^packages/shared/src/bom/ai-bom\.test\.ts$''', '''^packages/shared/src/bom/ai-bom-spdx\.test\.ts$''']
 regexTarget = "match"
 regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0189 B4 specification worked example: TEST-ONLY keys derived from published seed strings, with key ids and seed texts that contain CANARY (no private key is checked in). Scoped to these four files and to matches containing CANARY."
+condition = "AND"
+paths = [
+  '''^docs/decisions/0189-batch6-decision-bom-ai-bom\.md$''',
+  '''^apps/gateway/src/testing/bom-b4-spec-example\.ts$''',
+  '''^apps/gateway/src/adr0189-b4-spec-example\.test\.ts$''',
+  '''^scripts/bom-b4-spec-example\.mjs$''',
+]
+regexTarget = "match"
+regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0188 delegation specification vectors (adopts #320): synthetic one-use ids, nonces and token bytes, each containing CANARY. JWS parts are stored split, never as a compact token. Scoped to this directory and to matches containing CANARY."
+condition = "AND"
+paths = ['''^packages/shared/test-vectors/delegation/''']
+regexTarget = "match"
+regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0190 placement specification vectors (adopts #319): synthetic executor-proof ids containing CANARY. Scoped to this directory and to matches containing CANARY."
+condition = "AND"
+paths = ['''^packages/shared/test-vectors/placement/''']
+regexTarget = "match"
+regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0189 B4 specification-only verifier vectors (adopts PR #312, X46): TEST-ONLY keys derived from published seed texts that contain CANARY, with CANARY key ids; signatures, digests and public keys only, no private key. Scoped to this directory and to matches containing CANARY."
+condition = "AND"
+paths = ['''^packages/shared/test-vectors/decision-bom/''']
+regexTarget = "match"
+regexes = ['''CANARY''']

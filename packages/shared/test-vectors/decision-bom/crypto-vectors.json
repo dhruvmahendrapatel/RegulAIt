@@ -1,0 +1,174 @@
+{
+  "format": "regulait.b4-primitive-vectors.v2",
+  "note": "Adopted from PR #312 (X46 draft) and regenerated with CANARY-seeded keys. Primitive Ed25519 and v-domain fixtures only: the small objects are not schema-complete bodies; b4-vectors.json holds the route-valid bundles.",
+  "keys": [
+    {
+      "keyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "seedText": "regulait ADR-0189 B4 vectors TEST-ONLY CANARY primitive key A seed",
+      "role": "pinned root A",
+      "fingerprint": "sha256:749c7296234a0c157431314b87ebb639453a876f88abf0e04e4d70c0da09fe8d"
+    },
+    {
+      "keyId": "TEST-ONLY-CANARY-primitive-key-B",
+      "seedText": "regulait ADR-0189 B4 vectors TEST-ONLY CANARY primitive key B seed",
+      "role": "pinned root B",
+      "fingerprint": "sha256:274a16e9ef4e6be2e1a6befcedd6b3f0902784335c913125da6700feb7dd1bf1"
+    }
+  ],
+  "primitives": [
+    {
+      "id": "K01",
+      "title": "authentic body under pinned root A",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "AgKUBtUHS+MP3/VxkeK3aHT7Vb6FJmCaFa8WKFjOJ9tDhsUgNLkCbu/pgptETW+Taps3t6CUd+xIKnIH20OhBQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§5",
+        "§6"
+      ]
+    },
+    {
+      "id": "K02",
+      "title": "altered signed bytes",
+      "bytes": "{\"decision\":{\"seq\":8},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "AgKUBtUHS+MP3/VxkeK3aHT7Vb6FJmCaFa8WKFjOJ9tDhsUgNLkCbu/pgptETW+Taps3t6CUd+xIKnIH20OhBQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "Test strategy: Signature and binding"
+      ]
+    },
+    {
+      "id": "K03",
+      "title": "authentic signature, wrong pinned key",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "AgKUBtUHS+MP3/VxkeK3aHT7Vb6FJmCaFa8WKFjOJ9tDhsUgNLkCbu/pgptETW+Taps3t6CUd+xIKnIH20OhBQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEA3PpUEiQYwYcn8LQKZy8eInrZX7aYfk4Jg6e80qG9eAY=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-B",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§6"
+      ]
+    },
+    {
+      "id": "K04",
+      "title": "fresh signature by B, verified under original root A",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "sBl/DM64OLfpRCKqIjL0iBwUsT6sSQNe1EnDvmCWHjj3RjttnW+3IPa4KJFilejuoZXS4lEfCUFWtZ9DXi1EAQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§6",
+        "ADR-0116 §1"
+      ]
+    },
+    {
+      "id": "K05",
+      "title": "the same signature under a separately supplied root B (never a bundled key)",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "sBl/DM64OLfpRCKqIjL0iBwUsT6sSQNe1EnDvmCWHjj3RjttnW+3IPa4KJFilejuoZXS4lEfCUFWtZ9DXi1EAQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEA3PpUEiQYwYcn8LQKZy8eInrZX7aYfk4Jg6e80qG9eAY=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-B",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§6"
+      ]
+    },
+    {
+      "id": "K06",
+      "title": "a valid receipt v2 signature is not a BOM domain",
+      "bytes": "{\"factsHash\":\"99a7e4d00d41b076f7ee944d5c1f48587d9b18da3270fa74c968647c269e1f98\",\"v\":\"regulait.receipt.v2\"}",
+      "signatureBase64": "MadlxtYhAvaozSNtMwliJ3Jy9OyvDA/27s82mj0jV9aRfK3hA4hAO6bqtCyhipcxFf7hH5IAeLHC44E6lgoDBw==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": false,
+      "refs": [
+        "§5",
+        "OWNER DECISION 2"
+      ]
+    },
+    {
+      "id": "K07",
+      "title": "a receipt signature presented over BOM bytes",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "MadlxtYhAvaozSNtMwliJ3Jy9OyvDA/27s82mj0jV9aRfK3hA4hAO6bqtCyhipcxFf7hH5IAeLHC44E6lgoDBw==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§5"
+      ]
+    },
+    {
+      "id": "K08",
+      "title": "unknown v with a valid primitive signature",
+      "bytes": "{\"v\":\"regulait.decision-bom.v999\"}",
+      "signatureBase64": "0/tQcqWnK5QiJ/F4KvFbpGe+Y9VHPMP+ixX7jj3BpcrulIciVS70Iz6ZJu1cDGkC/ED5ZflioLlzp/dUhuJMCQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": false,
+      "refs": [
+        "§5"
+      ]
+    },
+    {
+      "id": "K09",
+      "title": "AI BOM v domain",
+      "bytes": "{\"v\":\"regulait.ai-bom.v1\"}",
+      "signatureBase64": "hKzsZ+YeFMPOgkX7QutZAcb2zaErsGkLR0ZhCXqEKnXixIaZQhRWx2sY9OAx1v8fj50v3634NkLhAU9l6aoaCQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "R19"
+      ]
+    },
+    {
+      "id": "K10",
+      "title": "signature over the bytes plus a trailing newline",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "zHap2wOt/VnB8OS4rICJNqQNhoxveEMpQ0Lw3Dy4+FGb30myTTqdGr1mEk7WtiYNGciXrg69UZGCOBAMg3OOCQ==",
+      "pinnedSpkiDerBase64": "MCowBQYDK2VwAyEAS1l20iFxVelXSzAmCM1LGWV7ZoYH+RYbi0vKv26nKhs=",
+      "pinnedKeyId": "TEST-ONLY-CANARY-primitive-key-A",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§5",
+        "B4.1 Files: no trailing newline"
+      ]
+    }
+  ],
+  "facts": {
+    "canonicalBytes": "{\"audit_seq\":7}",
+    "sha256": "99a7e4d00d41b076f7ee944d5c1f48587d9b18da3270fa74c968647c269e1f98",
+    "nonCanonicalBytes": "{ \"audit_seq\":7 }",
+    "nonCanonicalSha256": "b1cc544687bb2d752567bf3ea0bb296bfd6a741a67caf41b77812307fb873f4a",
+    "refs": [
+      "R37",
+      "R48"
+    ]
+  },
+  "rendering": {
+    "bytes": "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.7\"}",
+    "sha256": "d5444e04cf09826ffc281f55bde8ad21712f648e83286c5b8d831ff41cdd6c1f",
+    "utf8ByteLength": 45,
+    "mutationBytes": "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\"}",
+    "refs": [
+      "R7",
+      "R19"
+    ]
+  }
+}
