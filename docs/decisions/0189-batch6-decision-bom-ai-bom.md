@@ -188,7 +188,7 @@ Sections, each built from stored facts only:
 | Section | Content | Source |
 |---|---|---|
 | `decision` | audit id and `seq`, time (database clock), object type and id, server, tool or connector, effect, `ruleId`, rule chain ids | `audit_log` |
-| `receipt` | `receiptSeq`, payload hash, `keyId` | `decision_receipts` |
+| `receipt` | `receiptSeq`, payload hash, `keyId`, and the exact stored envelope: canonical payload bytes and signature (R48) | `decision_receipts` |
 | `principal` | **sponsor** user id (an id, never an email or name; decision 7) | `audit_log.user_id` (the sponsor under ADR-0188 decision 9) |
 | `actors` | the **actor chain** as workload identifiers (`spiffe://…/regulait/<kind>/<id>`), the delegation grant id, its stored `path` and `depth`, the grant's scope and cap at decision time, `binding_kind` and thumbprint, `auth_credential_id` | ADR-0188: `audit_log.actor_chain`, `actor_identity_id`, `delegation_grant_id` (decision 9); `delegation_grants` (decisions 4, 12, 22); `issued_tokens` (decision 12); `workload_identities` (decision 2) |
 | `action` | the ADR-0104 `argumentsDigest` and `contextDigest`; target (server, tool, connector, model); **inputs by digest and classification only** (prompt commit hash, dataset version and checksum, project `data_sensitivity`, compliance profile), never content | `decision_facts` (decision 4) |
@@ -396,7 +396,8 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
   Loader and renderers run on rows shaped by the `packages/db` schema (nulls and defaults included), and a test fails
   on any rendered value with no source column or stated derivation (R30, R32); one snapshot per subject kind (R31).
 - **No content.** Seeded prompts, arguments and outputs containing canary strings never appear in any BOM, rendering or
-  bundle; an email address in any input field fails validation.
+  bundle; an email address in any input field fails validation; a seeded endpoint `?token=` or `#fragment` never
+  appears, and an endpoint with userinfo refuses the snapshot (R47).
 - **Finality.** Before the anchor flushes → 409 `bom_anchor_pending`; flushed to a destination not observed
   tamper-resistant → still 409 under the default; after a tamper-resistant flush → frozen as `anchored`; with each
   relaxed setting → frozen as `anchored_unverified_destination` or with `proof.anchor: absent`, the verifier reports
@@ -689,7 +690,7 @@ R21. **The email scan covers the whole bundle.** `export-bundle/3` adds files ou
     included); an `installId` that matches the scan refuses the export until the operator changes it.
 
 R22. **An AI BOM is loaded from one consistent snapshot.** B3's loader reads every source table in a single
-    `REPEATABLE READ READ ONLY` transaction, so a model card, prompt promotion or admission changing mid-load cannot
+    `REPEATABLE READ` transaction (read-write, holding the per-subject lock through the snapshot insert, R50), so a model card, prompt promotion or admission changing mid-load cannot
     produce a mix of states that never existed. The `basis` records, for each loaded row, its table, id and the
     SHA-256 of its canonical projection (as R18), so the snapshot's inputs can be reproduced and a disputed read
     diagnosed.
@@ -723,7 +724,7 @@ R25. **Automatic snapshots fail closed without a signing key (OWNER DECISION 12)
       relaxed, the trigger proceeds and an audited `snapshot_skipped_no_key` row records the gap for that subject and
       trigger, shown on the posture page and in the drift view. No snapshot is taken later on its behalf.
     - With a key present, the automatic snapshot is taken after the triggering transaction commits, through the same
-      path as an on-demand snapshot (R22's read-only capture, then the insert, under the per-subject lock). If that
+      path as an on-demand snapshot (one `REPEATABLE READ` read-write transaction under the per-subject lock, R50). If that
       snapshot fails, an audited `snapshot_failed` row records the gap; an admin can take an on-demand snapshot.
     - Triggers do nothing before the R17 switch has flipped, as R2 says.
 
@@ -745,7 +746,7 @@ R27. **Data flows are keyed to each use case, never collapsed.** §3's service `
     several use cases with different `data_sensitivity`. For those snapshots each provider endpoint carries one
     outbound and one inbound flow **per use case that references the agent**, each with that use case's
     classification and a `regulait:dataFlow:useCase` property naming the use case id. An agent that no use case
-    references gets flows with no classification and `regulait:dataFlow:classification = unknown`, and is listed in
+    references gets flows with `classification: "unknown"` (R49) and `regulait:dataFlow:classification = unknown`, and is listed in
     the `incomplete` composition. Distinct classifications are never merged into one, and no project is picked
     arbitrarily. A use-case-scoped snapshot keeps §3's single flow pair.
 
@@ -920,6 +921,36 @@ R46. **Facts captured under v1 receipts are shown but not claimed as receipt-bou
     recorded at decision time: the receipt does not commit to them". From the boundary on, a missing or mismatched
     `factsHash` is `invalid` as before.
 
+### Tenth review round (2026-10-10)
+
+Four findings were defects in the text and are fixed here. The others are spike fixes on PR #265 or entry
+conditions. None was moot under OWNER DECISION 12.
+
+R47. **Exported endpoints are sanitised; credentials never leave in a URL.** The registration schemas accept
+    arbitrary URLs, and the egress guard refuses userinfo but not query strings or fragments
+    (`apps/gateway/src/egress-guard.ts`). An endpoint such as `https://host/api?token=…` would otherwise ship in every
+    AI BOM. So every service endpoint (provider, MCP server, connector) is exported only as scheme, host, port and
+    path, with the query and fragment always removed. An endpoint with userinfo refuses the snapshot, naming the
+    service. A stdio server or a connector with no recorded endpoint has no `endpoints` field. This is an invariant
+    (a secret-leak class) and cannot be relaxed. Test strategy: a seeded `?token=` and `#secret` never appear in any
+    rendering or bundle, and a `user:pass@` endpoint refuses the snapshot.
+
+R48. **The bundle carries the exact receipt envelope.** The `receipt` section had only the seq, the payload hash and
+    the key id, so a verifier could neither check the receipt signature nor read `factsHash`. The Decision BOM body
+    now carries the receipt exactly as stored: the canonical payload bytes, the signature and the key id, for v1 and
+    v2 alike. The verifier checks the signature against the out-of-band trust root and the payload hash, then reads
+    `factsHash` (v2) or reports R46's `receipt_v1_no_factsHash` (v1).
+
+R49. **A flow with no known classification says `unknown` in the field.** CycloneDX 1.7 requires `classification` on
+    every service data flow, so R27's no-use-case case now sets `classification: "unknown"` (and keeps the
+    `regulait:dataFlow:classification = unknown` property and the `incomplete` composition) rather than omitting the
+    field.
+
+R50. **An on-demand snapshot is one writable transaction.** R22's `READ ONLY` loader could not hold a row lock or
+    insert, so the per-subject lock would end before the insert. The capture and the insert now run in **one**
+    `REPEATABLE READ` read-write transaction that takes the per-subject lock first and holds it through the snapshot
+    and rendering inserts. The automatic snapshot after a trigger (R25) uses the same transaction shape.
+
 ### Owner items from the review (not decided here)
 
 1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
@@ -940,7 +971,7 @@ as further amendments. They are recorded as entry conditions on the B1–B8 slic
 gets its own review against this ADR and those conditions. An amendment is added here only when a finding contradicts
 an accepted decision or needs an owner choice.
 
-### Entry conditions from review rounds 8–9
+### Entry conditions from review rounds 8–10
 
 
 - **B3** (4237322637): the agent's active and canary system-prompt config versions are components, each with its id,
@@ -964,7 +995,12 @@ an accepted decision or needs an owner choice.
   `redteam.ts` and `compat-core.ts`, and any others a grep finds. A test fails on any decision writer that bypasses
   the shared writer.
 - **B3** (4237346650): the per-subject lock is taken before the repeatable-read capture and held through the snapshot
-  insert, so an older capture can never take the next version after a newer one.
+  insert, so an older capture can never take the next version after a newer one (one transaction, R50).
+- **B5** (4237371312): every `dataset_DatasetPackage` gets the same explicit mandatory-property check as `AIPackage`
+  (R3; including `builtTime`, `originatedBy`, `releaseTime`, `downloadLocation`, `primaryPurpose`, `datasetType`) and
+  the same `not_producible` fallback, never a placeholder.
+- **B3** (4237376660): a scan whose `engine_run_id` is null (`ON DELETE SET NULL`) gets an explicit unknown assessor
+  and is in the `incomplete` composition; no engine name, version or image digest is invented for it.
 - **Moot under OWNER DECISION 12** (fail closed, no queue): the queued-path conditions from 4237322631, 4237344250,
   4237346647, 4237346653, 4237346644 and 4237346659 (request idempotency, binding decisions to a request, fulfilment
   tombstones, full-field capture, terminal outcomes, outage-time binding) were removed.
