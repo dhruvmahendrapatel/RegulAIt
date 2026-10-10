@@ -14,6 +14,7 @@
  * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
  * them per engine, and network denial stays the real control either way.
  */
+import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakManifestSets, garakReducedSet } from "./garak.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
@@ -148,20 +149,40 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     id: "garak",
     kind: "redteam",
     displayName: "garak",
-    version: "0.17.0",
+    // B5-G: pinned by hash in engines/garak/requirements.txt (image.test.ts keeps them in lockstep)
+    version: GARAK_ENGINE_VERSION,
     generation: 1,
+    // B5-G: the image (engines/garak/Dockerfile) has not been built anywhere that could report a real
+    // digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "Apache-2.0",
+    // R10: about monthly releases and many contributors, but the merge-right count is unverified
     maintainerCount: null,
-    usageDataEnv: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
+    // the WORKER's switches (it runs garak), each confirmed by the worker's own fresh self-test, plus that
+    // self-test itself (ADR-0187 decisions 140-141; packages/engine-garak/src/selftest.ts)
+    usageDataEnv: { ...GARAK_USAGE_DATA_ENV, [GARAK_WORKER_SELF_TEST_SWITCH]: "1" },
     needsModelAccess: true,
+    // garak's admitted probes are judged by local detectors; no judge model is used (the hosted-judge
+    // detectors are excluded, ADR-0187 decision 146)
     requiresJudge: false,
-    credentialIsolation: false,
-    sets: {},
-    airGappedReducedSet: [],
-    lastVerified: "2026-10-08",
-    reCheckBy: "2027-01-08",
-    unverified: [...UNVERIFIED_COMMON, "whether the offline environment fully localises the Hugging Face loaders"],
+    // B5-G (decision 140): two containers from the start. The runner holds the runner token and never
+    // runs garak; the worker runs garak with no runner token and no state volume, and holds only the
+    // run's own virtual key for the run's lifetime. Decision 79's acceptance therefore does not apply.
+    credentialIsolation: true,
+    // every probe that runs, by class; a probe not listed is offensive (fail closed)
+    sets: garakManifestSets(),
+    // planning-time exclusions (decision 61), keyed by the probe name the runner reports
+    airGappedReducedSet: garakReducedSet(),
+    lastVerified: "2026-10-10",
+    reCheckBy: "2027-01-10",
+    unverified: [
+      "image digest and signature (the image is not built yet)",
+      "maintainer count (the repository's merge rights could not be read)",
+      "transitive licences: MPL-2.0 (certifi, mikeshardmind-base2048, parts of tqdm and orjson), ZPL-2.1 (DateTime, zope.interface), and the Python runtime (PSF-2.0) are outside the ADR-0176 list and await an owner decision; the native libraries inside the CPU torch wheel and the base image OS layer are not yet scanned",
+      "advisories of the Python closure (pip-audit or OSV at the first image build)",
+      "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
+      "nothing is pre-seeded: probes that need a Hugging Face model or dataset are not run",
+    ],
   },
 });
 
