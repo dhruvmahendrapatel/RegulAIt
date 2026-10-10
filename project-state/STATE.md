@@ -21,6 +21,15 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-10 (evening) - zod 3.25.76 -> 4.6.5 across the workspace (ADR-0192).** Full record:
+[sessions/2026-10-10-session-02-zod4.md](sessions/2026-10-10-session-02-zod4.md).
+- Direct move to the zod 4 API in one PR, because the gateway composes shared's schemas. `zod/v3` was rejected (a
+  frozen copy). `zod-to-json-schema` was removed in favour of the native `z.toJSONSchema`.
+- Rule for new code: zod 4 applies a `.default()` inside `.optional()`/`.partial()`, so build PATCH schemas from
+  default-free fields. Enum-keyed records are `z.partialRecord`. `.uuid()` is strict RFC 9562, so test fixtures
+  use RFC ids.
+- Next ADR 0193 (0191 is taken on another branch).
+
 **2026-10-10 (afternoon) - Batch 6 slices in parallel: S3 in CI, B1 merged, I1 next; CI sharded.** Full record:
 [sessions/2026-10-10-session-01.md](sessions/2026-10-10-session-01.md).
 - Merged: B1 BOM foundation (#283, migration 0182), spike B0 (#265), ADR-0189 (#253), outbound credential audience
