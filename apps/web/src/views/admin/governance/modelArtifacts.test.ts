@@ -13,6 +13,7 @@ import {
   nameMismatch,
   preUploadRefusal,
   refusalText,
+  retentionText,
   safeFindingId,
   scanStatus,
   statusWord,
@@ -166,7 +167,31 @@ describe("the upload", () => {
   it("refusal sentences: known codes get ours, others the client's", () => {
     expect(refusalText(new ApiError(413, { error: "artifact_too_large", detail: "the limit is 512 MiB" }))).toMatch(/over the organisation's model-artifact size limit.*\(the limit is 512 MiB\)/);
     expect(refusalText(new ApiError(503, { error: "artifact_store_unavailable" }))).toMatch(/no model-artifact store/);
-    expect(refusalText(new ApiError(409, { error: "artifact_quota_exceeded" }))).toMatch(/Artifact quota exceeded/i);
+    expect(refusalText(new ApiError(409, { error: "artifact_shelf_full" }))).toMatch(/Artifact shelf full/i);
+  });
+
+  it("quota refusals: separate wording for a count and for bytes, for the uploader and the deployment", () => {
+    const q = (status: number, p: Record<string, unknown>) => refusalText(new ApiError(status, { error: "artifact_quota_exceeded", detail: "raw detail", ...p }));
+    expect(q(409, { scope: "uploader", measure: "count", limit: 20, used: 20 })).toBe(
+      "Storing this would take your model artifacts past the limit of 20 artifacts (20 stored). Delete artifacts you no longer need, or an admin may raise the quota (the change needs a step-up). Nothing of this upload was kept.",
+    );
+    expect(q(413, { scope: "uploader", measure: "bytes", limit: 2048 * MIB, used: 2000 * MIB })).toMatch(/^Storing this would take your model artifacts past the limit of 2\.00 GiB \(1\.95 GiB stored\)\./);
+    expect(q(409, { scope: "org", measure: "count", limit: 1000, used: 1000 })).toMatch(/^Storing this would take this deployment's model artifacts past the limit of 1000 artifacts/);
+    expect(q(413, { scope: "org", measure: "bytes", limit: 10 * MIB, used: "x" })).toMatch(/past the limit of 10\.0 MiB\. Delete/);
+    // a shape this page does not know still reads as a quota refusal, never the raw detail
+    expect(q(409, {})).toMatch(/^Storing this would exceed a model-artifact storage quota\./);
+    expect(q(409, {})).not.toContain("raw detail");
+  });
+
+  it("artifact_in_use is a fixed sentence", () => {
+    expect(refusalText(new ApiError(409, { error: "artifact_in_use", citedScans: 1, unfinishedRuns: 0, detail: "server words" }))).toBe(
+      "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",
+    );
+  });
+
+  it("retention states the setting and the first date the sweep may delete it", () => {
+    expect(retentionText("2026-10-01T12:00:00.000Z", 30, true)).toMatch(/^Kept for 30 days\. It may be deleted from Oct 31, 2026, unless a scan of it is cited/);
+    expect(retentionText("2026-10-01T12:00:00.000Z", 30, false)).toMatch(/the strict default; the organisation's setting could not be read/);
   });
 
   it("posts raw bytes as octet-stream with the CSRF header, reports progress, and turns a refusal into an ApiError", async () => {

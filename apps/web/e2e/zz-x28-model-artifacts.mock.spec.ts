@@ -13,19 +13,20 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { expectAxeClean, installBuilderMock, type MockState } from "./builder-fixtures";
 import { ARTIFACT_CHIP, ARTIFACTS, ARTIFACT_SCANS, installEnginesMock, type EnginesMockState } from "./engines-fixtures";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 /** the page also reads the skills tab's queues and the org's size limit */
-async function installPageMocks(page: Page, opts: { maxMegabytes?: number } = {}) {
+async function installPageMocks(page: Page, opts: { maxMegabytes?: number; retentionDays?: number } = {}) {
   await page.route("**/v1/admission/skills", (route) => json(route, { scannerVersion: "skill-admission/2", holdAt: "medium", refuseAt: "high", rules: [], skills: [] }));
   await page.route("**/v1/release-quarantine", (route) => json(route, { enabled: false, minReleaseAgeDays: 7, recommendedDays: 7, servers: [], skills: [] }));
   await page.route("**/v1/mcp/admission", (route) => json(route, { mode: "log", enforcing: false, servers: [] }));
-  await page.route("**/v1/org/settings", (route) => json(route, { settings: { modelArtifactMaxMegabytes: opts.maxMegabytes ?? 512 } }));
+  await page.route("**/v1/org/settings", (route) => json(route, { settings: { modelArtifactMaxMegabytes: opts.maxMegabytes ?? 512, modelArtifactRetentionDays: opts.retentionDays ?? 30 } }));
 }
 
-async function setup(page: Page, opts: { maxMegabytes?: number } = {}): Promise<{ st: MockState; eng: EnginesMockState }> {
+async function setup(page: Page, opts: { maxMegabytes?: number; retentionDays?: number } = {}): Promise<{ st: MockState; eng: EnginesMockState }> {
   const st = await installBuilderMock(page);
   await installPageMocks(page, opts);
   const eng = await installEnginesMock(page);
@@ -98,17 +99,8 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     // the fixture's modelscan is not built (off): enable it for this test only
     const modelscan = eng.engines.engines.find((e: { id: string }) => e.id === "modelscan");
     modelscan.enabled = true;
-    // the real gateway classes modelscan's `scan` set as standard (no approver); the shared mock
-    // approves only `basic`, so this test answers the run itself, as the gateway does
-    const posted: unknown[] = [];
-    await page.route("**/v1/engine-runs", (route) => {
-      if (route.request().method() !== "POST") return route.fallback();
-      const body = route.request().postDataJSON();
-      posted.push(body);
-      const run = { id: "99999999-7777-4000-8000-0000000000f1", engineId: "modelscan", engineVersion: "0.8.8", status: "queued", targetArtifactId: body.target.artifactId, createdAt: new Date().toISOString(), finishedAt: null, errorCode: null };
-      eng.runs.unshift(run);
-      return json(route, { run, approvalId: null }, 202);
-    });
+    // modelscan's `scan` set is standard, as the manifest classes it: no approver, the run is queued
+    const posted = () => eng.calls.filter((c) => c.method === "POST" && c.path === "/v1/engine-runs").map((c) => c.body);
     await artifactsTab(page);
     await expect(page.getByText("Size limit: 512 MiB")).toBeVisible();
     // a pickle (protocol 4) named as safetensors: the name decides nothing
@@ -126,7 +118,7 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     await expect(row(page, "innocent.safetensors").getByTestId("scan-status")).toContainText("Not scanned");
 
     await page.getByRole("button", { name: "Scan with modelscan" }).click();
-    await expect.poll(() => posted).toEqual([{ engineId: "modelscan", target: { artifactId: "99999999-8888-4000-8000-000000000105" }, config: { sets: ["scan"] } }]);
+    await expect.poll(posted).toEqual([{ engineId: "modelscan", target: { artifactId: "99999999-8888-4000-8000-000000000105" }, config: { sets: ["scan"] } }]);
     await expect(row(page, "innocent.safetensors")).toContainText("Queued — waiting for a scanner");
     await expect(page.getByRole("button", { name: "Scan with modelscan" })).toBeDisabled();
     await expectAxeClean(page, "uploaded artifact with a queued scan");
@@ -149,12 +141,14 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     expect(eng.calls.filter((c) => c.method === "POST" && c.path === "/v1/model-artifacts")).toHaveLength(0);
   });
 
-  test("the gateway's refusals are shown as they arrive: 413, 503 and one this page does not know", async ({ page }) => {
+  test("the gateway's refusals are shown as they arrive: 413 size, 503, the two quota refusals and one this page does not know", async ({ page }) => {
     await setup(page);
     const answers = [
       { status: 413, body: { error: "artifact_too_large", detail: "the limit is 512 MiB (an admin may raise it; the change needs a step-up)" } },
       { status: 503, body: { error: "artifact_store_unavailable", detail: "no model-artifact store is configured on this gateway, so nothing is accepted" } },
-      { status: 409, body: { error: "artifact_quota_exceeded", detail: "this person's artifact quota is used up" } },
+      { status: 409, body: { error: "artifact_quota_exceeded", scope: "uploader", measure: "count", setting: "modelArtifactUploaderQuotaCount", limit: 20, used: 20, detail: "x" } },
+      { status: 413, body: { error: "artifact_quota_exceeded", scope: "org", measure: "bytes", setting: "modelArtifactOrgQuotaMegabytes", limit: 20480 * 1024 * 1024, used: 20480 * 1024 * 1024 - 10, detail: "x" } },
+      { status: 409, body: { error: "artifact_shelf_full", detail: "a refusal this page has no sentence for" } },
     ];
     let n = 0;
     await page.route(/\/v1\/model-artifacts\?/, (route) => {
@@ -163,7 +157,13 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
       return json(route, a.body, a.status);
     });
     await artifactsTab(page);
-    const expected = [/over the organisation's model-artifact size limit, so nothing of it was kept/, /no model-artifact store configured/, /Artifact quota exceeded — this person's artifact quota is used up/i];
+    const expected = [
+      /over the organisation's model-artifact size limit, so nothing of it was kept/,
+      /no model-artifact store configured/,
+      /would take your model artifacts past the limit of 20 artifacts \(20 stored\)\. Delete artifacts you no longer need/,
+      /would take this deployment's model artifacts past the limit of 20\.00 GiB \(20\.00 GiB stored\)/,
+      /Artifact shelf full — a refusal this page has no sentence for/,
+    ];
     for (const want of expected) {
       await page.getByTestId("artifact-file").setInputFiles({ name: "w.safetensors", mimeType: "application/octet-stream", buffer: Buffer.from([1, 2, 3]) });
       await page.getByRole("button", { name: "Upload", exact: true }).click();
@@ -202,6 +202,49 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     await page.getByTestId("artifact-file").setInputFiles({ name: "w.safetensors", mimeType: "application/octet-stream", buffer: Buffer.from([1]) });
     await page.getByRole("button", { name: "Upload", exact: true }).click();
     await expect(page).toHaveURL(/\/ui\/login/);
+  });
+
+  test("retention: the org's setting and the date the sweep may delete it", async ({ page }) => {
+    await setup(page, { retentionDays: 45 });
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.gguf.id}`);
+    await expect(page.getByTestId("artifact-retention")).toContainText("Kept for 45 days.");
+    await expect(page.getByTestId("artifact-retention")).toContainText(/It may be deleted from \w{3} \d{1,2}, \d{4}, unless a scan of it is cited as model-card evidence or a run on it is unfinished/);
+  });
+
+  test("delete: a confirmation naming the audit and the step-up, then the same DELETE resent once with the grant", async ({ page }) => {
+    const { eng } = await setup(page);
+    const su = await requireStepUpOn(page, { method: "DELETE", path: `/v1/model-artifacts/${ARTIFACTS.gguf.id}`, kind: "settings_relax" });
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.gguf.id}`);
+    await page.getByRole("button", { name: "Delete model.gguf" }).click();
+    const dialog = page.getByRole("dialog", { name: "Delete model.gguf?" });
+    await expect(dialog).toContainText("recorded in the audit log under your name");
+    await expect(dialog).toContainText("confirm it's you (a step-up)");
+    await expect(dialog).toContainText("cited as model-card evidence or a run on it has not finished");
+    await expectAxeClean(page, "delete artifact confirmation");
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    await expect(page.getByRole("button", { name: "Open model.gguf" })).toHaveCount(0);
+    await expect(page).not.toHaveURL(/artifact=/);
+    // the harness answered the first (grant-less) DELETE; the artifact mock saw only the resent one, with the grant
+    expect(eng.calls.filter((c) => c.method === "DELETE").map((c) => c.headers["x-regulait-step-up"] ?? null)).toEqual(["rgsu_1"]);
+  });
+
+  test("delete refused while in use: the fixed sentence, and the artifact stays", async ({ page }) => {
+    await setup(page);
+    await page.route(`**/v1/model-artifacts/${ARTIFACTS.safetensors.id}`, (route) =>
+      route.request().method() === "DELETE"
+        ? json(route, { error: "artifact_in_use", citedScans: 1, unfinishedRuns: 0, detail: "a scan of this artifact is cited as model-card evidence" }, 409)
+        : route.fallback(),
+    );
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}`);
+    await page.getByRole("button", { name: "Delete weights.safetensors" }).click();
+    await page.getByRole("dialog", { name: "Delete weights.safetensors?" }).getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(page.getByTestId("delete-error")).toHaveText(
+      "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",
+    );
+    await expect(page.getByRole("button", { name: "Open weights.safetensors" })).toBeVisible();
+    await expectAxeClean(page, "delete refused in use");
   });
 
   test("a scan refusal from the gateway is shown (engine disabled), and nothing reads as clean", async ({ page }) => {

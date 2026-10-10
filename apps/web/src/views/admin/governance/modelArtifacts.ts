@@ -270,6 +270,27 @@ export function runStatusText(run: Pick<EngineRunLite, "status" | "errorCode">):
 export const MIB = 1024 * 1024;
 /** the strict shipped default of `modelArtifactMaxMegabytes`, used until the org's value is read */
 export const DEFAULT_MAX_MEGABYTES = 512;
+/** the strict shipped default of `modelArtifactRetentionDays` (ADR-0187 decision 127) */
+export const DEFAULT_RETENTION_DAYS = 30;
+
+const DAY_MS = 24 * 3_600_000;
+const day = (t: number) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+/**
+ * Retention as the gateway applies it (ADR-0187 decision 127): an artifact older
+ * than the setting that nothing keeps (no scan of it cited as model-card
+ * evidence, no unfinished run on it) is deleted by the hourly sweep. The API
+ * sends no per-artifact expiry, so this states the rule and the date from which
+ * the sweep may delete it.
+ */
+export function retentionText(createdAt: string, retentionDays: number, known: boolean): string {
+  const from = Date.parse(createdAt) + retentionDays * DAY_MS;
+  const when = Number.isFinite(from) ? ` It may be deleted from ${day(from)}` : " It may be deleted once that age is reached";
+  return (
+    `Kept for ${retentionDays} days${known ? "" : " (the strict default; the organisation's setting could not be read)"}.` +
+    `${when}, unless a scan of it is cited as model-card evidence or a run on it is unfinished. The setting is read when the sweep runs, so a change applies to artifacts already stored.`
+  );
+}
 
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "—";
@@ -302,11 +323,31 @@ const REFUSAL_SENTENCE: Record<string, string> = {
   engine_config_invalid: "The scan request was refused as invalid.",
   engine_approver_required: "This scan needs an approver before it can run.",
   human_required: "An artifact must be uploaded by a signed-in person.",
+  artifact_in_use:
+    "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",
 };
+
+const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : null);
+
+/** 413/409 `artifact_quota_exceeded`: whose quota (`scope`), of what (`measure`), its limit and use */
+function quotaSentence(p: ApiErrorPayload): string {
+  const whose = p.scope === "org" ? "this deployment's" : p.scope === "uploader" ? "your" : null;
+  const limit = n(p.limit);
+  const used = n(p.used);
+  const tail = " Delete artifacts you no longer need, or an admin may raise the quota (the change needs a step-up). Nothing of this upload was kept.";
+  if (whose && p.measure === "count") {
+    return `Storing this would take ${whose} model artifacts past the limit of ${limit ?? "?"} artifacts${used !== null ? ` (${used} stored)` : ""}.${tail}`;
+  }
+  if (whose && p.measure === "bytes") {
+    return `Storing this would take ${whose} model artifacts past the limit of ${limit !== null ? formatBytes(limit) : "?"}${used !== null ? ` (${formatBytes(used)} stored)` : ""}.${tail}`;
+  }
+  return `Storing this would exceed a model-artifact storage quota.${tail}`;
+}
 
 export function refusalText(e: unknown): string {
   if (e instanceof ApiError) {
     const code = typeof e.payload.error === "string" ? e.payload.error : "";
+    if (code === "artifact_quota_exceeded") return quotaSentence(e.payload);
     const sentence = REFUSAL_SENTENCE[code];
     if (sentence) {
       const detail = code === "artifact_too_large" && typeof e.payload.detail === "string" ? ` (${e.payload.detail.replace(/[^\x20-\x7e]/g, "").slice(0, 160)})` : "";
