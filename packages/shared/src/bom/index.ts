@@ -9,3 +9,6 @@ export * from "./ai-bom-records.js";
 export * from "./ai-bom-cyclonedx.js";
 export * from "./ai-bom-cyclonedx-schema.js";
 export * from "./ai-bom-builder.js";
+// slice B5: the SPDX 3.0.1 renderer and its offline validator
+export * from "./ai-bom-spdx.js";
+export * from "./ai-bom-spdx-schema.js";
