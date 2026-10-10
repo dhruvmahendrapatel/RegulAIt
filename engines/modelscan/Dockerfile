@@ -22,7 +22,8 @@
 #     decision 106) or say "pending owner decision" (HDF5, CPython);
 #   - our settings file baked read-only at /opt/modelscan/modelscan-settings.toml;
 #   - the strict .npy header check (npy-header.py, stdlib only, ADR-0187 decision 180) baked
-#     read-only at /opt/modelscan/npy-header.py: the scanner runs it before modelscan on every .npy.
+#     read-only at /opt/modelscan/npy-header.py: the scanner runs it before modelscan on every .npy, and
+#     with `--npz` on every .npz (decisions 219-224: zipfile, strict, each member through the .npy check).
 # Signing, the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) and the image
 # SBOM join publish-image.yml / security.yml when the image is first built in CI (ADR-0184), as for
 # promptfoo. The manifest (packages/shared/src/engines/manifest.ts) carries NO digest until an image

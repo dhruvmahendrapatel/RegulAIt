@@ -2,7 +2,7 @@
  * ADR-0187 B5-M — hostile and benign model-artifact fixtures, written BYTE BY BYTE (never produced by
  * pickling anything, never loaded). Used by the tests only; not exported from the package index.
  */
-import { crc32 } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 
 const enc = (s: string) => Buffer.from(s, "utf8");
 /** SHORT_BINUNICODE */
@@ -157,4 +157,75 @@ export function numericNpy(version: readonly [number, number] = [1, 0], n = 3): 
 /** a NumPy .npy file with an object dtype whose payload is `pickle` */
 export function objectNpy(pickle: Buffer, version: readonly [number, number] = [1, 0]): Buffer {
   return npyFile({ header: npyHeader("|O", [1]), payload: pickle, version });
+}
+
+/**
+ * ADR-0187 decisions 219–224: a zip written byte by byte with control over every field the `.npz`
+ * check cross-reads. `method` 8 deflates `data` (raw deflate, as zip does); `declaredSize` overrides
+ * the uncompressed size in both headers (a zip bomb that lies, or one that declares too much); `crc`
+ * overrides the CRC; `localFlags` overrides the general-purpose flags in the LOCAL header only (so it
+ * disagrees with the central directory); `comment` is an archive comment; `prefix` is bytes before the
+ * first member.
+ */
+export interface ArchiveMember {
+  name: string;
+  data: Buffer;
+  method?: 0 | 8;
+  declaredSize?: number;
+  crc?: number;
+  encrypted?: boolean;
+  localFlags?: number;
+}
+
+export function zipArchive(entries: readonly ArchiveMember[], opts: { comment?: string; prefix?: Buffer } = {}): Buffer {
+  const prefix = opts.prefix ?? Buffer.alloc(0);
+  const locals: Buffer[] = [prefix];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc(e.name);
+    const method = e.method ?? 0;
+    const body = method === 8 ? deflateRawSync(e.data) : e.data;
+    const crc = e.crc ?? crc32(e.data) >>> 0;
+    const usize = e.declaredSize ?? e.data.length;
+    const flags = e.encrypted ? 0x1 : 0;
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0);
+    lh.writeUInt16LE(20, 4);
+    lh.writeUInt16LE(e.localFlags ?? flags, 6);
+    lh.writeUInt16LE(method, 8);
+    lh.writeUInt32LE(crc, 14);
+    lh.writeUInt32LE(body.length, 18);
+    lh.writeUInt32LE(usize, 22);
+    lh.writeUInt16LE(name.length, 26);
+    locals.push(lh, name, body);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0);
+    ch.writeUInt16LE(20, 4);
+    ch.writeUInt16LE(20, 6);
+    ch.writeUInt16LE(flags, 8);
+    ch.writeUInt16LE(method, 10);
+    ch.writeUInt32LE(crc, 16);
+    ch.writeUInt32LE(body.length, 20);
+    ch.writeUInt32LE(usize, 24);
+    ch.writeUInt16LE(name.length, 28);
+    ch.writeUInt32LE(offset, 42);
+    centrals.push(ch, name);
+    offset += 30 + name.length + body.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const comment = enc(opts.comment ?? "");
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(cd.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(comment.length, 20);
+  return Buffer.concat([...locals, cd, end, comment]);
+}
+
+/** a NumPy .npz of the given members (name, .npy bytes), stored (savez) or deflated (savez_compressed) */
+export function npzFile(members: ReadonlyArray<readonly [string, Buffer]>, method: 0 | 8 = 0): Buffer {
+  return zipArchive(members.map(([name, data]) => ({ name, data, method })));
 }
