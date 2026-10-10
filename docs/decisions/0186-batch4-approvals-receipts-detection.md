@@ -592,13 +592,13 @@ unless stated.
       is not revocation; `RECEIPT_CANNOT_PROVE` says so and both the API and the offline CLI return it (tests pin
       both). Proposed follow-up, not built: a signed revocation record (key id, reason, effective time) whose time is
       covered by an anchored RFC 3161 timestamp, so a verifier can reject receipts not covered by an earlier anchor.
-    - **Item 3, gate-dense scrub CPU (B4I-02) and budget flakes (B4I-03).** Codex's 30a730c is kept unchanged. The
-      gate-dense value (`"sk gl m n secret mysql: redis postgres mongodb xox sig= key- tok_ dapi hf_ r8_ "` x 5300,
+    - **Item 3, gate-dense scrub CPU (B4I-02) and budget flakes (B4I-03).** B4I-02 is closed by decision 31; as first
+      found, with Codex's 30a730c the gate-dense value (`"sk gl m n secret mysql: redis postgres mongodb xox sig= key- tok_ dapi hf_ r8_ "` x 5300,
       418,700 characters) still takes 290-360 ms on the development box (CPU 290-300 ms), against 100 ms: 17 rules
       pass their gates and each runs one RE2 scan of the remainder. Measured alternatives in re2js 2.8.6: a combined
       `RE2Set` of the 17 rules 440-590 ms (whatever the DFA memory), one alternation 440 ms, per-gate windows with a
-      result cache 120 ms (single-letter gates give 116,600 hits) and still inexact for unbounded rules. Open,
-      returned to the owner. B4I-03: the nine files that bound wall time (eight budgets, plus `pii-conformance` under the 5 s test timeout) form a Vitest `timing` project
+      result cache 120 ms (single-letter gates give 116,600 hits) and still inexact for unbounded rules. B4I-03: the nine
+      files that bound wall time (eight budgets, plus `pii-conformance` under the 5 s test timeout) form a Vitest `timing` project
       (`fileParallelism: false`, run after the parallel `unit` project by `sequence.groupOrder`), CI runs
       `@regulait/shared` alone before the other packages, and `timing-isolation.test.ts` keeps the list complete.
       No budget or timeout changed.
@@ -613,6 +613,42 @@ unless stated.
       must equal the digest hash (`timestamp_signature_hash_mismatch`); anything else is
       `timestamp_signature_algorithm_unsupported`. Red: a real SHA-1-signed token with a SHA-256 digestAlgorithm
       verified. Ed25519 tokens are refused until a TSA needs them.
+
+31. **B4I-02 closed: vendored-secret scan plans derived from RE2's compiled program (2026-10-10, branch
+    `b4-codex-int-2`).** The literal gates (hand-proved, some a single letter: `m`/`n` for Discord, `sk` for Twilio,
+    `-` for SSNs) let a gate-dense value send 17 rules into a full RE2 scan each. The converter now derives, per rule
+    and from re2js's own compiled program rather than a second regex parser:
+    - a **prefilter**: positions 1..k of every match (k = the minimum match length, at most 24), each a class holding
+      every code point RE2 can consume there (the union over the NFA states reachable after i runes; empty-width
+      assertions pass through and folded ASCII literals add U+017F/U+212A, so each class is a superset). The
+      shortest shipped prefilter pins 11 positions; no rule has a single-character gate and none needs to be
+      always-scan.
+    - a **maximum match length** in UTF-16 units (a possibly astral rune counts 2), or none when the program loops.
+    At runtime a native `RegExp` (`gu`) scans for the prefilter. It is a fixed sequence of classes with no alternation
+    or repetition, so there is nothing to backtrack. Every match starts at a hit, and a rule with no hit costs no RE2
+    work. A bounded rule is matched by RE2 in a window at each hit: one unit of left context for `\b`, then
+    maxLength + 1 units. This reproduces the full-text leftmost-first match, because no match from the hit can
+    reach beyond the window and every boundary RE2 reads is inside it. Results are memoised per call by window
+    content (256 entries). An unbounded rule gets one RE2 scan from its first hit. Custom rule lists keep the
+    combined RE2 set. The derivation is pinned to re2js 2.8.6 (the converter refuses another version) and
+    self-checks four hand-computed plans. It replaces `prefix-proofs.json`, the reviewed fragments, start contexts
+    and the unused space-run proof. The patterns themselves still run only on RE2; the native engine sees only the
+    generated class sequences. ADR-0176: no maintained library computes RE2 prefilters or match bounds, and using
+    RE2's own program avoids a second parse that could disagree with the engine.
+    Two output-preserving `audit-scrub.ts` changes: the second pass skips the marker scan for pieces without
+    `[redacted:`, and a single-rule span keys the marker cache by its rule id. Proof (`scan-plans.test.ts`): spans
+    and candidate rules equal a full RE2 scan of every rule on the 400k dense inputs, on 5,005 corpus inputs (forged
+    markers, tokens, random fragments, near misses; `src/__fixtures__/scrub-equivalence-corpus.ts`) and on 1,500
+    seeded Unicode-noise inputs (astral, lone surrogates, case-fold lookalikes). `scrubAuditText` output on the
+    corpus is pinned to main 20e11ee by per-group digests in `scrub-equivalence.snapshot.json`, generated from
+    main's build and not from this code; Codex's 30a730c produced the same digests. A probe shrinking Google's
+    maxLength fails three of those tests. Budget (`scrub-dense.test.ts`, timing project, 100 ms unchanged), CPU
+    on the loaded development box before -> after: gate-dense 273 -> 11 ms, dense Slack 91 -> about 55-70 ms (its
+    rest is marker work in `audit-scrub.ts`), dense Google 209 -> 24-32 ms. On the previous code the new
+    gate-dense test failed at 334 ms (Slack 219 ms, Google 228 ms in the same run). Worst case: a bounded rule
+    pays one RE2 window per prefilter hit, so a non-periodic input built to hit one rule's first 24 positions
+    every few characters without matching costs a few microseconds per hit. That is still far below the previous
+    worst case (every gated rule scanning the whole value), but it is not a universal 100 ms bound.
 
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode** (corrected 2026-10-10, B4X-01; decision 29, finding 51). The recheck
