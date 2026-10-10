@@ -169,6 +169,13 @@ regexTarget = "secret"
 regexes = ['''^b4s1-synthetic$''']
 
 [[allowlists]]
+description = "ADR-0188 S3: earlier commits on this branch held the PEM-block parsing regex as a source literal (not key material; the current code builds the pattern at runtime). Matches only a 'secret' containing the regex source text, in this one file."
+condition = "AND"
+paths = ['''^apps/gateway/src/identity-signing-keys\.ts$''']
+regexTarget = "secret"
+regexes = ['''\[\\s\\S\]\*\?-----END PRIVATE KEY-----''']
+
+[[allowlists]]
 description = "ADR-0189 spike B0 evidence: an Ed25519 signature (not a key) over synthetic records, made with a fixed public test seed to prove deterministic output"
 condition = "AND"
 paths = ['''^spikes/bom-b0/evidence/sample\.sha256\.json$''']

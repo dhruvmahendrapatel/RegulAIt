@@ -1459,6 +1459,11 @@ export const auditLog = pgTable(
         "engine_run",
         "engine_schedule",
         "model_artifact",
+        // ADR-0188 (batch 6 item 1) S3: the issuer's signing keys (activate,
+        // rotate, revoke; `object_id` NULL, the kid in `detail`) and
+        // delegation grants (cascade revocation). Plain text column — no DDL.
+        "identity_signing_key",
+        "delegation_grant",
       ],
     })
       .notNull()
