@@ -353,7 +353,7 @@ hash); `execution-refused` (reason); `execution-profile-mismatch`. Placements al
 `usage_events` (as ADR-0188 does for the actor chain). Reports are stored for the audit-retention period of the
 compliance profile; their hashes for as long as the audit row.
 
-### 14. Data model sketch (migration `0182+`; not written here)
+### 14. Data model sketch (migration `0183+`; not written here)
 
 - `execution_profiles` (`id`, `name`, `version`, `body` canonical text, `digest`, `min_class`, `retired_at`,
   `created_by`, `created_at`; UNIQUE (`name`, `version`); append-only).
@@ -367,6 +367,52 @@ compliance profile; their hashes for as long as the audit row.
   `delegation_grants.required_isolation_class`, `execution_profile_digest`.
 - Settings rows for decision 11 in the strictness registry (ADR-0181).
 
+## Amendments after slice I0 (2026-10-10)
+
+The I0 spike ([R13](../research/R13-isolation-i0-spike.md), PR #269) returned **GO for gVisor as the L2 backend**,
+**no change for Kata** (not testable without `/dev/kvm`), and **OpenShell GO for L1 and L3 only**. These amendments
+bind the slices that follow. Where one changes a decision above, it wins over the original text. None relaxes a
+strict default: each makes a default stricter or a definition more exact (ADR-0180).
+
+- **A. The runsc configuration is part of the profile (decisions 4 and 10).** Without `--oci-seccomp`, runsc ignores
+  the OCI seccomp filter (measured `Seccomp: 0`, `unshare` allowed). The executor starts runsc with `--oci-seccomp`,
+  `--network=none` (or the decision 5 channel), `--sidecar-usage-policy=STRICT`,
+  `--sidecar-release-enforcement-policy=ALWAYS` and a named platform. The attestation records these flags. The
+  self-test's `Seccomp: 2` check now passes for the right reason.
+- **B. `--directfs=false` is the default.** With directfs on, the Sentry runs with weaker syscall filters. Turning
+  directfs on is an audited relaxation. Slice I4 measures its cost.
+- **C. `process.pids` maps to `RLIMIT_NPROC` (decision 2).** Under runsc the OCI `pids` limit is a host cgroup limit
+  that also counts the Sentry's threads; at 64 a fork-heavy workload crashed the Sentry. The workload limit (128) is
+  `RLIMIT_NPROC` (measured: a clean EAGAIN). The executor also sets a host cgroup `pids.max` with headroom for the
+  Sentry (512 worked in I0). A Sentry crash is a fail-closed outcome and is reported as one.
+- **D. Probe definitions (decision 6).** "Read-only root" means EROFS, or `ro` on `/` in `/proc/self/mounts`; EACCES
+  as a non-root user proves nothing. The resource probes split into what the sandbox sees (`MemTotal`, `RLIMIT_*`) and
+  what only the executor sees (host cgroup CPU quota, memory limit, `pids.max`, throttling counters). The in-sandbox
+  CPU count is derived from the quota and proves nothing about it.
+- **E. gVisor installs as one unit (decision 12 and the survey row).** The release tarball (`runsc`, the shim and the
+  `gvisor-bin/` sidecars), pinned by sha512 and installed together on a world-traversable path. A bare `runsc` copy no
+  longer runs.
+- **F. OpenShell never attests L2 (decision 1).** The L2 row's OpenShell clause is replaced: OpenShell's container
+  drivers attest **L1** only, and OpenShell reaches **L3** only through its MicroVM driver. Its baseline (Landlock ABI
+  3 or later, seccomp user notification) is absent inside gVisor. The executor refuses an OpenShell placement with
+  `runtimeClassName: gvisor`.
+- **G. OpenShell admission conditions (slice I7).** Gateway and supervisor are built from source without telemetry
+  (`--no-default-features --features defaults-without-telemetry`). A release image with telemetry compiled in is not
+  admitted, and the telemetry host is still blocked at the network layer. Air-gapped installs use image pull policy
+  `Never` with preloaded images. Landlock is a hard requirement. `allow_insecure_transport` is refused. Only
+  interceptors are used, because supervisor middleware is https-only and outside owner decision 7. Decision 7's
+  mitigations gain an `SO_PEERCRED` check and a `0600` socket. OpenShell reuses tokens until rotation, so `jti` replay
+  detection is not available; this is recorded as a residual.
+- **H. Survey corrections.** The survey table is corrected as in R13 §4: Kata 4.2.0 and 3.32.0, the nsjail date, the
+  OpenShell PyPI scope, and `go-landlock` (MIT). Open question 8 drops the items R13 verified.
+- **I. Open question 6.** Rootless `runsc` works on Linux without root. The macOS and Windows path is still untested
+  and needs a run inside a Linux VM.
+- **J. Migration number.** ADR-0189 slice B1 takes `0182`, so slice I1 uses `0183+` (decision 14 and the slice table).
+
+Still to run on a real host or in CI (R13, "Needs a real host or CI"): the ADR-0187 worker under runsc in compose and
+the decision 19 egress probe (I4), the Kata and MicroVM probes (I6/I7), Kubernetes `RuntimeClass` (I6), timings on a
+quiet host, cgroup v2 behaviour, and the OpenShell kernel floor on our CI runners.
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches (`schema.ts`, migrations, `app.ts`, `route-classes.ts`, `openapi-registry.ts`, the
@@ -378,7 +424,7 @@ checked against the specification rather than against themselves.
 | Slice | Owner | Content | Depends on | Parallel? |
 |---|---|---|---|---|
 | **I0 spike** (research, no product code) | Claude | gVisor: the offline install path (APT package or bundled binary), an ADR-0187 worker under `runtime: runsc` in compose, the decision 6 probe set distinguishing runc, runsc and (on a KVM host, if one is available; otherwise recorded as not run) Kata; overhead for a stdio MCP round trip. OpenShell 0.1.x: gateway and a sandbox in compose, its interceptor contract over `unix://`, prover findings, its telemetry with an egress test (ADR-0177 §1), preloaded images air-gapped, its kernel floor on our CI hosts. Primary-source re-check of every release and licence in the survey table, including the ones GitHub refusal left unconfirmed (Kata's latest tag, Firecracker, nsjail). Output: a research note, go/no-go per backend | none | **Yes, now** |
-| **I1 foundation** | Claude | Migration `0182+` (decision 14), `schema.ts`, shared zod for `regulait.execution-profile.v1`, the shipped profiles, strict settings with audited relaxation, routes as 501 stubs | I0 go; ADR-0188 S1 and ADR-0189 B1 merged (shared journal) | serial (hot files) |
+| **I1 foundation** | Claude | Migration `0183+` (decision 14), `schema.ts`, shared zod for `regulait.execution-profile.v1`, the shipped profiles, strict settings with audited relaxation, routes as 501 stubs | I0 go; ADR-0188 S1 and ADR-0189 B1 merged (shared journal) | serial (hot files) |
 | **I2 placement decision** | Claude | Required-class computation (decision 7), refusal codes, the `execution-profile` rule id, the `delegation-isolation` check in `delegation.ts`, audit actions | I1; ADR-0188 S3/S4 merged | serial |
 | **I3 executor core** | Claude | `packages/sandbox-executor`: ADR-0188 registration and DPoP, the outbound stream, placement offers, the self-test and per-placement report, quarantine; a fake backend for tests | I1; ADR-0188 S5 merged | **Yes**, with I2 |
 | **I4 gVisor backend and stdio move** | Claude | `runsc` backend (compose and Kubernetes), stdio closure images pinned by digest, MCP over the executor stream, **removal of the in-gateway stdio spawn**, ISACA item 5 collector | I2, I3 | serial |
