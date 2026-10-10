@@ -995,18 +995,27 @@ R51. **The mandatory SPDX properties are collected, never invented (slice B9).**
       (`YYYY-MM-DDThh:mm:ssZ`). A download location follows R47 and #280 (4237493036), the rule B3 and B5 already apply
       to every exported endpoint: an `https` origin (`https://host[:port]`) only. A value with a path, query, fragment
       or userinfo, a non-https scheme, or a non-ASCII host is **refused** at write, never cut down to its origin,
-      because cutting would record a value nobody declared. `packageVersion` and `originatedBy` are bounded plain text,
+      because cutting would record a value nobody declared. Plain `http` is refused too: B5 never exports it, so a
+      stored `http` value could never render (owner accepted https only, 2026-10-10). `packageVersion` and `originatedBy` are bounded plain text,
       refused when they carry a URL, an `@`, control characters or credential-shaped material (the audit scrubber's
       own rules). `datasetType` is one or more values of the SPDX 3.0.1 `DatasetType` vocabulary. The database
       repeats the shape checks in CHECK constraints.
     - **Rendering.** The AI BOM loader reads the current values in the snapshot's own transaction, so they are in the
-      signed native body and its basis. A declared value is used before a model card's supplier-declared
-      `data_claims` value for the same property (B5's existing source, unchanged otherwise). With every mandatory
+      signed native body and its basis. The declarations are the **only** source of these properties (owner,
+      2026-10-10): the `releaseTime` and `downloadLocation` keys of a model card's `data_claims`, B5's earlier source,
+      are retired, so a value can never come from two places. The loader drops those two keys from a card's claims,
+      and a record set that still carries one is refused. There is no grandfathering, because the product is not live
+      (ADR-0180). A declared `packageVersion` is used only when the card has no `pinned_model_version`. With every mandatory
       value present, SPDX 3.0.1 renders and passes B5's cardinality check, schema and SHACL; with any missing, R3's
       `not_producible` lists exactly the missing names. A dataset with no declared `datasetType` keeps the standard's
       own `noAssertion` value (R3). No setting can relax any of this, because nothing here is a default to relax.
+    - **Accepted limits for v1 (owner, 2026-10-10).** The missing names are reported per class
+      (`ai_AIPackage.releaseTime`), not per element, as B5 does; the GET route's `undeclared` list shows them per
+      record. An agent with no model card has no SPDX rendering, because declarations attach to model cards. Who
+      declared a value, when, and from which source stays in the table and the audit trail and is never rendered into
+      SPDX or CycloneDX output.
     - **Not in B9.** Requiring these values before a model card can be approved (option (c)) is not adopted; approval
-      is unchanged.
+      is unchanged. It is an open follow-up (open question 8).
 
 ## Further design review happens at slice level
 
@@ -1071,6 +1080,9 @@ an accepted decision or needs an owner choice.
    re-checks it if it comes back. Nothing further is open here.
 7. **The argument digest coverage** (Context): if B2 finds receipt-eligible paths that never compute
    `argumentsDigest`, those paths record `not_recorded` until a follow-up computes it.
+8. **Approval gate for the SPDX properties (R51, open follow-up).** Should a model card that will be exported as SPDX
+   need its declared `releaseTime`, `downloadLocation` and (without a pin) `packageVersion` before it can be approved
+   (owner item 1's option (c))? Slice B9 adds no gate; approval is unchanged.
 
 ## Consequences
 
