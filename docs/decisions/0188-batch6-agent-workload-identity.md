@@ -4,7 +4,9 @@
   ("accept all on ADR-0188"). Design only until the build slices land. Amended
   2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table; amended again
   after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23. Amended again during S1 (main-session rulings from
-  the S2 planning pass): decisions 24 to 28 (agent grant storage, actor order, depth, strict scope, rule ids).
+  the S2 planning pass): decisions 24 to 28 (agent grant storage, actor order, depth, strict scope, rule ids). Amended
+  again after the S5 security review (PR #302): external child exchanges refused until the signed depth is enforced,
+  steward and project checks on delegation proofs, CA rules on X.509 issuers, strict root caps and lifetimes.
 - **Date:** 2026-10-10
 - **Deciders:** owner (accepted all nine recommendations, 2026-10-10); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
@@ -948,6 +950,75 @@ Open questions carried to S5 and S6:
   and project to match and leaves the audience to the binding.
 - The S6 admin screens for grants (list, revoke, tree) have no backend routes yet. S5 or S6 must add them with the
   `identity_manage` step-up.
+
+### Amendments from the S5 security review (2026-10-10)
+
+The security review of S5 (PR #302, reviewed at 37476e9) found one high, two medium and four low issues. The main
+session's rulings below are binding on S5 and the slices after it. Items 1 to 6 are fixed in S5 itself.
+
+1. **External child exchanges are refused until the signed depth is enforced (HIGH).** The proof signs `max_depth`,
+   but `createRootGrant` does not store it, and S5's interim guard refused only when the parent was itself a child
+   (`depth > 0`). A person who signed `max_depth: 0` therefore did not stop the agent from authorising a child. The
+   guard is now fail-closed: a child exchange is refused, before any replay claim, unless the parent grant carries an
+   enforced depth limit, with `invalid_grant` and `error_code` `delegation_depth_unenforced`, audited like every other
+   token-endpoint refusal. Until S4's `depth_limit` (migration 0184) exists **and** the root exchange persists the
+   signed `max_depth` into it, no parent qualifies, so every external child exchange is refused. Lifting it is an
+   explicit code switch, not a column check alone: S4 storing the org limit on a root does not by itself make the
+   signed depth enforced. Follow-up (S4 + S5): persist min(org limit, signed `max_depth`) as the root's
+   `depth_limit`, enforce it on every admission, then lift the switch, with the reviewer's probe as the test (a proof
+   with `max_depth: 0`, the root exchange, A authorises child B → refused `delegation_depth`).
+2. **Only a steward with access to the project may start a delegation (MEDIUM).** `POST /v1/delegations/proofs`
+   checked no relation between the person, the agent and the project. Now the caller must be listed in the workload
+   identity's `sponsor_user_ids` (a steward) and must be an **explicit member** of `projectId` (a `project_members`
+   row). *Master ruling after the fix round:* a delegation-specific check, not ADR-0011's attribution rule: a project
+   with no members is NOT open for delegation, and being an admin is not membership (ADR-0180). ADR-0011's general
+   rule is unchanged. Otherwise 403 `delegation_not_steward` or `delegation_project_access`, each audited as a deny.
+3. **Every issuer on an X.509 path must be a CA (MEDIUM).** `pkijs` 3.4.1 `CertificateChainValidationEngine` checks
+   signatures and validity but not `basicConstraints.cA`, the `keyCertSign` key usage or `pathLenConstraint` on
+   issuers, so a leaf certificate could sign another leaf. After the engine accepts a path, our validator walks
+   `certificatePath` and requires every issuer (intermediates and the anchor) to have `cA = true`, the `keyCertSign`
+   bit, and a `pathLenConstraint`, when present, at least the number of intermediates below it; otherwise
+   `certificate_issuer`. Decision 21 is read with this: the engine does the path and the signatures, our code does
+   the CA rules.
+4. **An admitted proxy's own TLS certificate is never a client certificate (LOW).** When the socket peer is an
+   admitted proxy (trusted address and authenticated, decision 21), the client certificate is the forwarded one, or
+   none. The proxy's own TLS peer certificate only authenticates the proxy.
+5. **A timed-out exchange leaves no live grant (LOW).** The grant and the token are created in one transaction that
+   re-reads the timeout flag before it commits; an aborted request revokes the new grant in that same transaction
+   (reason `request_aborted`), and a timeout that fires during the commit revokes it straight after. The request's
+   audit row waits for the exchange to settle and records what really happened (`timeout`, or
+   `timeout_grant_revoked` with the grant id). A refusal is never recorded while a live grant exists.
+6. **Strict root-grant defaults (ADR-0180).** Three new org settings, all strict, relaxed only through the audited
+   `PUT /v1/org/settings` with the `settings_relax` step-up (migration 0188):
+   - `delegationUncappedRootAllowed` (strict `false`): a root grant with no cap is refused
+     (`delegation_cap_required`) unless an admin turns this on.
+   - `delegationRootDefaultCapMicros` (strict `0` = none, so the person must name a cap): the cap applied when a
+     person names none. Setting one, or raising it, is a relaxation that needs the `settings_relax` step-up (master ruling, confirmed).
+   - `delegationRootMaxLifetimeSeconds` (strict 900): the longest root grant. The default lifetime is 15 minutes (not
+     1 hour); a longer request is refused (`delegation_lifetime`) unless an admin raises the limit (up to 24 h).
+   The proof route and the root exchange both enforce them, so a setting tightened between the two still applies.
+7. **Introspection reads `aud` as one string,** as the token endpoint does: a client assertion's `aud` must be exactly
+   the token endpoint URL (not an array containing it), and a token whose `aud` is not a single string is inactive.
+
+8. **The delegation step-up binds the whole authority (Codex X45 I7S5-02, MEDIUM).** The `identity_manage` step-up
+   for a write delegation on a classified project bound only the agent, project and resource, so a grant approved for
+   a narrow delegation could sign a wider one. Its facts are now the whole intended authority, computed after the cap
+   and lifetime are resolved: `op`, `agentIdentityId`, `projectId`, `resource`, `env`, `authorizationDetails`, the
+   resolved `capMicros`, `maxDepth`, the resolved `lifetimeSeconds` and `agentKeyThumbprint` (or null). The 403
+   returns exactly these as `action.body`, and the client posts that object verbatim to `/v1/auth/step-up/options`
+   (no web client calls the proof route yet; S6's must echo it). A grant for other facts is refused and not spent.
+9. **Replay claims outlive their signed window on any process clock (Codex X45 I7S5-04, LOW).** The adapter added the
+   provider's process-relative `expiresIn` to the database clock, so under process skew a claim could expire before
+   the signed window ended. A `client_assertion` claim now lasts at least until the verified `exp` plus the 5 s
+   allowance; an `as_dpop` claim at least until the proof's `iat` plus its 60 s acceptance age plus 5 s.
+
+Recorded with these:
+
+- **A child's resource is its parent's audience, strictly, for v1.** This answers the S3 open question above. A child
+  may not narrow to another audience; revisit only on a proven multi-audience need.
+- **Workload-identity CRUD belongs to S6's backend,** under the `identity_manage` step-up, in one module beside
+  `oauth/grant-admin.ts`. Steward edits (`sponsor_user_ids`) and the SPIFFE trust bundles move from environment
+  variables into audited storage in S9.
 
 ## Spike S0 result (2026-10-10)
 
