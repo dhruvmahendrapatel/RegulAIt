@@ -181,6 +181,8 @@ export const DELEGATION_REVOKE_REASONS = [
   "sponsor_disabled",
   "agent_halted",
   "run_ended",
+  /** S5 review item 5 (migration 0188): the token request timed out after its grant was made */
+  "request_aborted",
 ] as const;
 export type DelegationRevokeReason = (typeof DELEGATION_REVOKE_REASONS)[number];
 
@@ -358,7 +360,15 @@ export const TOKEN_ENDPOINT_ERRORS = [
   "use_dpop_nonce",
 ] as const;
 /** RegulAIt `error_code`s riding `invalid_grant` (decisions 15, 23) */
-export const DELEGATION_ERROR_CODES = ["delegation_budget", "delegation_depth", "mtls_parent_handoff_unsupported"] as const;
+export const DELEGATION_ERROR_CODES = [
+  "delegation_budget",
+  "delegation_depth",
+  "mtls_parent_handoff_unsupported",
+  // S5 security review (ADR-0188 amendments): items 1 and 6
+  "delegation_depth_unenforced",
+  "delegation_cap_required",
+  "delegation_lifetime",
+] as const;
 
 /** the form fields of `POST /oauth/token` (decisions 15 and 23); S5 validates the semantics */
 export const tokenExchangeRequestSchema = z
@@ -599,9 +609,11 @@ export const createDelegationProofSchema = z
     env: environmentName,
     /** the agent's key thumbprint, when known: binds the proof to that key */
     agentKeyThumbprint: z.string().regex(SHA256_B64URL_PATTERN).optional(),
-    /** S5: the root grant's cap in integer micro-dollars; omitted = no per-grant cap (the sponsor's own budgets still apply) */
+    /** S5: the root grant's cap in integer micro-dollars; omitted = the org's default root cap, and with none set (the
+     *  strict default) the request is refused unless the org allows uncapped roots (S5 review item 6) */
     capMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
-    /** S5: how long the root grant lives (60 s to 24 h; default 1 h). Its tokens still live `delegated_token_ttl_seconds`. */
+    /** S5: how long the root grant lives (60 s to 24 h; default 15 min, at most the org's `delegation_root_max_lifetime_seconds`).
+     *  Its tokens still live `delegated_token_ttl_seconds`. */
     lifetimeSeconds: z.number().int().min(60).max(86_400).optional(),
     /** S5: how many further delegations the agent may make below itself (default and ceiling: the org's `delegation_max_depth`) */
     maxDepth: z.number().int().min(0).max(DELEGATION_DEPTH_CEILING).optional(),

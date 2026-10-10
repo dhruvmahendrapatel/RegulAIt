@@ -88,6 +88,10 @@ const RELAXED: Partial<Record<IdentitySettingKey, unknown>> = {
   delegatedTokenTtlSeconds: 3600,
   delegationMaxDepth: 8,
   dpopNonceRequired: false,
+  // S5 security review item 6 (migration 0188)
+  delegationUncappedRootAllowed: true,
+  delegationRootDefaultCapMicros: 1_000_000,
+  delegationRootMaxLifetimeSeconds: 86_400,
 };
 
 function refusalText(e: unknown): string {

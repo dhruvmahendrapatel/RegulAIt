@@ -54,6 +54,10 @@ describe("ADR-0188 settings: strict by default", () => {
       workloadClientAuthMethods: ["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"],
       dpopNonceRequired: true,
       workloadKeyMaxAgeDays: 90,
+      // S5 security review item 6: strict root grants
+      delegationUncappedRootAllowed: false,
+      delegationRootDefaultCapMicros: 0,
+      delegationRootMaxLifetimeSeconds: 900,
     });
   });
 
@@ -73,7 +77,18 @@ describe("ADR-0188 settings: strict by default", () => {
     expect(identitySettingLooser("workloadKeyMaxAgeDays", 90, 30)).toBe(true);
     expect(identitySettingLooser("delegationMaxDepth", 3, 2)).toBe(true);
     expect(identitySettingLooser("agentEntitlementMode", "sponsor_only", "own_grants")).toBe(true);
-    expect(IDENTITY_SETTING_KEYS).toHaveLength(6);
+    // S5 review item 6: uncapped roots, any default root cap and a longer root lifetime are relaxations
+    expect(identitySettingRelaxed("delegationUncappedRootAllowed", true)).toBe(true);
+    expect(identitySettingRelaxed("delegationUncappedRootAllowed", false)).toBe(false);
+    expect(identitySettingRelaxed("delegationRootDefaultCapMicros", 1)).toBe(true);
+    expect(identitySettingRelaxed("delegationRootDefaultCapMicros", 0)).toBe(false);
+    expect(identitySettingRelaxed("delegationRootMaxLifetimeSeconds", 901)).toBe(true);
+    expect(identitySettingRelaxed("delegationRootMaxLifetimeSeconds", 600)).toBe(false);
+    expect(identitySettingLooser("delegationUncappedRootAllowed", true, false)).toBe(true);
+    expect(identitySettingLooser("delegationRootDefaultCapMicros", 500, 100)).toBe(true);
+    expect(identitySettingLooser("delegationRootDefaultCapMicros", 100, 500)).toBe(false);
+    expect(identitySettingLooser("delegationRootMaxLifetimeSeconds", 900, 600)).toBe(true);
+    expect(IDENTITY_SETTING_KEYS).toHaveLength(9);
   });
 
   it("PUT /v1/org/settings holds the bounds; client_secret_* can never be added", () => {
@@ -82,6 +97,11 @@ describe("ADR-0188 settings: strict by default", () => {
     expect(ok({ delegatedTokenTtlSeconds: 3601 })).toBe(false);
     expect(ok({ delegationMaxDepth: 9 })).toBe(false);
     expect(ok({ workloadKeyMaxAgeDays: 91 })).toBe(false);
+    expect(ok({ delegationRootMaxLifetimeSeconds: 59 })).toBe(false);
+    expect(ok({ delegationRootMaxLifetimeSeconds: 86_401 })).toBe(false);
+    expect(ok({ delegationRootDefaultCapMicros: -1 })).toBe(false);
+    expect(ok({ delegationRootDefaultCapMicros: 1_000_000_000_001 })).toBe(false);
+    expect(ok({ delegationUncappedRootAllowed: "yes" })).toBe(false);
     expect(ok({ agentEntitlementMode: "union" })).toBe(false);
     expect(ok({ workloadClientAuthMethods: ["client_secret_basic"] })).toBe(false);
     expect(ok({ workloadClientAuthMethods: ["client_secret_post"] })).toBe(false);
