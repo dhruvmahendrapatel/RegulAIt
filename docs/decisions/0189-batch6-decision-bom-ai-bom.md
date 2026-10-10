@@ -1,6 +1,6 @@
 # ADR-0189: Batch 6 item 2 — Decision BOM and AI BOM (PF-09)
 
-- **Status:** Proposed
+- **Status:** Accepted (owner, 2026-10-10)
 - **Date:** 2026-10-10
 - **Deciders:** owner (the eleven OWNER DECISION items below); the rest follows ADR-0180 (secure by default) and ADR-0176
   (open source first)
@@ -167,7 +167,7 @@ tooling for software provenance, but it adds a second signature format beside ou
 subject is an artefact digest, which a decision does not naturally have. Kept as an optional export view (OWNER
 DECISION 1).
 
-## Decision (Proposed)
+## Decision (Accepted 2026-10-10)
 
 ### 1. Two documents, two scopes
 
@@ -391,9 +391,10 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
 - **Identity (after ADR-0188).** A three-deep delegated call's Decision BOM lists sponsor, each actor and the grant
   path exactly as the audit row's `actor_chain`; a revoked credential after the decision does not change the frozen BOM.
 
-## Owner decisions
+## Owner decisions (accepted 2026-10-10)
 
-Each item needs the owner's answer; the recommendation is what this ADR proposes.
+The owner accepted all eleven recommendations on 2026-10-10, as written below. Spike B0 may start now; B1 onward waits
+for ADR-0188 S1 and S4, as the slice plan says.
 
 1. **OWNER DECISION — Decision BOM format.** *Recommended:* our own `regulait.decision-bom.v1` (no standard defines a
    Decision BOM), RFC 8785 canonical and signed, linked to the AI BOM by CycloneDX BOM-Link; an in-toto Statement in a
