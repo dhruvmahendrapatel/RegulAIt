@@ -191,6 +191,28 @@ function narrowAssignmentStart(match: string, start: number): number {
   return start + i;
 }
 
+/**
+ * ADR-0189 B7 security review: an opaque HTTP bearer token, `Bearer <token>`
+ * with a space (the header form; the `bearer = …` assignment form is the shared
+ * `assignment` rule), RFC 6750 b64token alphabet, 20 or more characters so
+ * "Bearer token missing" stays prose. SCRUB-ONLY on purpose: it is not a DLP
+ * detector rule, because as a detector it would fire on every model prompt
+ * that shows an example header (the reason `mcp-discovery.ts` keeps its own
+ * header shape). Linear: a start is only tried at the literal word `Bearer`,
+ * the separator run is capped and disjoint from the token class, and the `=`
+ * padding is outside the token class. The span is narrowed to the token, so
+ * the word `Bearer` survives in the ledger.
+ */
+const SCRUB_ONLY_RULES: readonly { readonly id: string; readonly re: RegExp }[] = [
+  { id: "bearer_token", re: /\bBearer[ \t]{1,16}[A-Za-z0-9._~+/-]{20,}=*/gi },
+];
+/** `Bearer   tok…` -> the start of `tok…` */
+function narrowBearerStart(match: string, start: number): number {
+  let i = "Bearer".length;
+  while (i < match.length && (match[i] === " " || match[i] === "\t")) i += 1;
+  return start + i;
+}
+
 interface Span {
   start: number;
   end: number;
@@ -205,7 +227,7 @@ interface Span {
  * string, so it cannot accidentally change it.
  */
 const MARKER_PATTERN=/\[redacted:([a-z0-9_.+]+):[0-9]+:[a-f0-9]{12}\]/g;
-const MARKER_LABELS=new Set([FIELD_RULE_LABEL,...CREDENTIAL_MATERIAL_RULES.map(rule=>shortRuleId(rule.id)),...GENERATED_SECRET_RULES.map(rule=>rule.id)]);
+const MARKER_LABELS=new Set([FIELD_RULE_LABEL,...CREDENTIAL_MATERIAL_RULES.map(rule=>shortRuleId(rule.id)),...SCRUB_ONLY_RULES.map(rule=>rule.id),...GENERATED_SECRET_RULES.map(rule=>rule.id)]);
 function knownMarkers(text:string){
  const labels=new Map<string,boolean>();
  const matches:RegExpMatchArray[]=[];
@@ -264,7 +286,7 @@ function scrubAuditTextPass(text: string, pieces?: string[]): string {
   const overlapsMarker=(start:number,end:number)=>protectedMarkers.some(([a,b])=>start>=a!&&end<=b!);
   const onlyWordDash = /^[\w-]*$/.test(text);
   const spans: Span[] = [];
-  for (const rule of CREDENTIAL_MATERIAL_RULES) {
+  for (const rule of [...CREDENTIAL_MATERIAL_RULES, ...SCRUB_ONLY_RULES]) {
     // The RegExp objects are module constants shared with `runRules`, and every
     // one carries /g — reset before use or a previous scan's lastIndex decides
     // where this one starts.
@@ -288,6 +310,7 @@ function scrubAuditTextPass(text: string, pieces?: string[]): string {
       let end = start + m[0].length;
       if (rule.id === "dlp.secret.private_key") end = extendPemSpan(text, end);
       if (rule.id === "dlp.secret.assignment") start = narrowAssignmentStart(m[0], start);
+      if (rule.id === "bearer_token") start = narrowBearerStart(m[0], start);
       if(!overlapsMarker(start,end))spans.push({ start, end, rule: shortRuleId(rule.id) });
     }
   }
