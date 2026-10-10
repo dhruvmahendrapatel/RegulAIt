@@ -57,6 +57,7 @@ beforeAll(async () => {
 describe("kernel — MCP role-derived revocations with scope", () => {
   const base = (toolName: string, kind: "read" | "write", revScope?: "full" | "read_only") => ({
     userId: "u1",
+    actor: null,
     serverId: "s1",
     tool: { serverId: "s1", name: toolName, kind },
     toolGrants: [],
@@ -95,6 +96,7 @@ describe("kernel — MCP role-derived revocations with scope", () => {
 describe("kernel — connector revocations with scope", () => {
   const base = (operation: "read" | "write", scope?: "full" | "read_only") => ({
     userId: "u1",
+    actor: null,
     connectorId: "c1",
     operation,
     connectorGrants: [

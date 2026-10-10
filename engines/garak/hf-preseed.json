@@ -1,0 +1,258 @@
+{
+  "_comment": "ADR-0187 decisions 198-200: the licence-clear Hugging Face assets R10 names (consequence 8), pre-seeded into the garak image at these pinned commits by preseed-hf.py. Each licence was read from the card at that commit; every file is pinned by sha256 and size. Changing a row means re-reading its licence at the new commit.",
+  "assets": [
+    {
+      "kind": "model",
+      "id": "garak-llm/refutation_detector_distilbert",
+      "revision": "906ac60cba379abc1ad1ed328acebeb17357adac",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "misleading.MustRefuteClaimModel"
+      ],
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "bbaae55558c42e9263a223d0374047e2259a1b2250aa2c7644573fcd8e36928d",
+          "size": 794
+        },
+        {
+          "path": "config.json",
+          "sha256": "1faa532c2d1ff1ae504bcdc0c76f911e31121853355b9d8e2e03dd91b08b5a69",
+          "size": 604
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "de64e6a9396b841917c47e7c18f2f0bc0fad44290b9fe65798f3f00267002d88",
+          "size": 267832560
+        },
+        {
+          "path": "special_tokens_map.json",
+          "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
+          "size": 125
+        },
+        {
+          "path": "tokenizer.json",
+          "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+          "size": 711396
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "bb75bf4f97f4a69e71313e8f3e55b8387075b369ea2f5c75aae416ace006f2c2",
+          "size": 320
+        },
+        {
+          "path": "vocab.txt",
+          "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+          "size": 231508
+        }
+      ]
+    },
+    {
+      "kind": "model",
+      "id": "garak-llm/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli",
+      "revision": "75044664e962c6237d48ec4d72fa189fb8723fdc",
+      "licence": "mit",
+      "usedBy": [
+        "misleading.MustContradictNLI"
+      ],
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "de0be609136000f3cd3a45b03b5d2525b05375d48d22b1f0279357a27de67df6",
+          "size": 166
+        },
+        {
+          "path": "config.json",
+          "sha256": "9d074204b668902ea51bd8ecb323f01cd37040cb54e8601d872c8fdb0687131e",
+          "size": 703
+        },
+        {
+          "path": "merges.txt",
+          "sha256": "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
+          "size": 456318
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "214cd01cbb7f8106ca679dbb041c77714436a5a9f408dc58bf7cd7eec48bc1ae",
+          "size": 1425698116
+        },
+        {
+          "path": "special_tokens_map.json",
+          "sha256": "c611b1f7d416eb001ee4f293d903ea8c88e703463f1d403f1866a0352743fd00",
+          "size": 772
+        },
+        {
+          "path": "tokenizer_config.json",
+          "sha256": "0f6d13e6f4da6f9e24f22ada6bc3be571123d858d7c0c05a8a7cd55a9c23c2e8",
+          "size": 49
+        },
+        {
+          "path": "vocab.json",
+          "sha256": "06b4d46c8e752d410213d9548eb27a54db70fda0319b6271fb8d59dead5e1cab",
+          "size": 898822
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/pypi-20241031",
+      "revision": "d0cb6954a12ebe3e383e9946ab2685efa23130fa",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "packagehallucination.PythonPypi"
+      ],
+      "column": "text",
+      "minRows": 1000,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "pypi-20241031.tsv",
+          "sha256": "fa8157292dd6fce02ad6c33c1108334e1ef2b073cfa89dce51ccb7b6f96faad0",
+          "size": 22888094
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/npm-20241031",
+      "revision": "98e02cd0a2d568a8b36300431aefba21550a9d34",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "packagehallucination.JavaScriptNpm"
+      ],
+      "column": "text",
+      "minRows": 1000,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "npm-20241031.tsv",
+          "sha256": "8fef3aebd20305e1d87379e8db988eb17de473d93fffd9d47c14f7da84eec923",
+          "size": 158765695
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/rubygems-20241031",
+      "revision": "51ab0238f9c16b5c31ecfdf935da9fd5abf74647",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "packagehallucination.RubyGems"
+      ],
+      "column": "text",
+      "minRows": 1000,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "rubygems-20241031.tsv",
+          "sha256": "b02bdb8f4c1780f1bceb8cc220e59934a874e3b4c55713b9352ae3dc0f19fd30",
+          "size": 7286213
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/dart-20250811",
+      "revision": "f50076de413a4f660d65b398096fae750b35d53b",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "packagehallucination.Dart"
+      ],
+      "column": "text",
+      "minRows": 1000,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "dart_packages_dataset.jsonl",
+          "sha256": "67d3ba124fbc7d04b4eba1d2f66a4ab2e5aba86504394b11c30d2f6b7bc32bf7",
+          "size": 1918852
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/perl-20250811",
+      "revision": "2b41fd08111f283b03d00544121ba438c769db22",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "packagehallucination.Perl"
+      ],
+      "column": "text",
+      "minRows": 1000,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "perl_modules_dataset.jsonl",
+          "sha256": "d14585fc8958dc27bf8175a714c7542ba07cf33eec4301ceee674cf8b23ed640",
+          "size": 2253873
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/raku-20250811",
+      "revision": "e2b0b34ad3cb30e6c62076f4cfeb605c94f3a809",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "packagehallucination.RakuLand"
+      ],
+      "column": "text",
+      "minRows": 100,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "raku_packages_dataset.jsonl",
+          "sha256": "2cc18fba81a1ab72126d18542f7f622f1c4e68552df80cb95d99213295bc34fc",
+          "size": 57584
+        }
+      ]
+    },
+    {
+      "kind": "dataset",
+      "id": "garak-llm/drh-System-Prompt-processed",
+      "revision": "26bb2b284b0380268bc74fe51b1c5eeaccb02242",
+      "licence": "apache-2.0",
+      "usedBy": [
+        "sysprompt_extraction.SystemPromptExtraction"
+      ],
+      "column": "systemprompt",
+      "minRows": 100,
+      "files": [
+        {
+          "path": "README.md",
+          "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+          "size": 31
+        },
+        {
+          "path": "drh.json",
+          "sha256": "40e5fe95a5c189ecc72c50ec02ab14a3352fb5c7e7f8294fda1057ea2d40b7d6",
+          "size": 1464877
+        }
+      ]
+    }
+  ]
+}

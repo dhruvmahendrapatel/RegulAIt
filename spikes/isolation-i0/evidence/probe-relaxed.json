@@ -1,0 +1,47 @@
+{
+ "cpu_count": 4,
+ "dmesg": [
+  "[    0.000000] Starting gVisor..."
+ ],
+ "dns": "resolved:172.66.147.243",
+ "egress_host_listener": "connected",
+ "egress_public_literal": "connected",
+ "etc_write": "writable",
+ "home_listing": {
+  "entries": 0
+ },
+ "host_process": {
+  "cmdline_has_token": false,
+  "kill0": "ESRCH",
+  "pids_visible": 1
+ },
+ "interfaces": [
+  "lo",
+  "ifb0",
+  "ifb1",
+  "eth0",
+  "docker0"
+ ],
+ "kernel": "Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016",
+ "meminfo": {
+  "MemFree": "16464968 kB",
+  "MemTotal": "16479424 kB"
+ },
+ "rlimit_nofile": [
+  20000,
+  20000
+ ],
+ "root_mount": "rw",
+ "rootfs_write": "writable",
+ "status": {
+  "CapBnd": "00000000a80405fb",
+  "CapEff": "00000000a80405fb",
+  "CapPrm": "00000000a80405fb",
+  "Gid": "0\t0\t0\t0",
+  "NoNewPrivs": "0",
+  "Seccomp": "0",
+  "Uid": "0\t0\t0\t0"
+ },
+ "uname_release": "4.19.0-gvisor",
+ "work_write": "writable"
+}

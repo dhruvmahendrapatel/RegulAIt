@@ -108,7 +108,7 @@ const decide = (
     undefined,
     undefined,
     undefined,
-    opts,
+    { ...opts, actor: null },
   ).then((r) => r.decision);
 
 async function createDoc(over: Record<string, unknown> = {}) {
@@ -223,7 +223,7 @@ describe("ADR-0182 A14: nothing published, nothing changes", () => {
         await tx.delete(aiPolicyDocuments).where(eq(aiPolicyDocuments.status, "published"));
         seen.required = (await literacyPostureFor(tx, people.inTeam.id)).required;
         seen.effect = (
-          await governedEvaluate(tx, people.inTeam.id, serverId, { serverId, name: TOOL, kind: "read" }, undefined, null, null)
+          await governedEvaluate(tx, people.inTeam.id, serverId, { serverId, name: TOOL, kind: "read" }, undefined, null, null, undefined, undefined, undefined, undefined, { actor: null })
         ).decision.effect;
         throw ROLLBACK;
       })
@@ -576,6 +576,8 @@ describe("ADR-0182 A14: Cedar schema v3 — principal.aiTrainingCurrent", () => 
   it("a v3 policy requiring current training denies a person who is not current and allows one who is; simulation agrees", async () => {
     const created = await inject("POST", "/v1/abac/policies", AUTH, {
       name: `a14-need-training-${RUN}`,
+      // ADR-0188 S2 moved the default to v4; this case is about v3, so it names it
+      schemaVersion: "v3",
       source: `forbid (principal, action == RegulAIt::Action::"McpToolCall", resource)
                when { resource.toolName == "${TOOL}" } unless { principal.aiTrainingCurrent };`,
     });

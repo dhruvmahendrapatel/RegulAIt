@@ -1,0 +1,28 @@
+{
+ "seccomp_filter_flags0_control": {
+  "result": 0,
+  "errno": 0,
+  "error": ""
+ },
+ "seccomp_filter_new_listener": {
+  "result": -1,
+  "errno": 22,
+  "error": "Invalid argument"
+ },
+ "kernel": "4.19.0-gvisor",
+ "landlock": {
+  "abi": null,
+  "errno": 38,
+  "error": "Function not implemented"
+ },
+ "seccomp_ret_kill_process": {
+  "available": false,
+  "errno": 22,
+  "error": "Invalid argument"
+ },
+ "seccomp_ret_user_notif": {
+  "available": false,
+  "errno": 22,
+  "error": "Invalid argument"
+ }
+}

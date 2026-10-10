@@ -293,6 +293,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  *   declared STRING columns only (the ADR-0115 `eval_results.detail`
  *   answer). The one writer, the risk-acceptance route, scrubs each
  *   `description` with `PROSE_SCRUB` before the insert.
+ * - `delegation_grants.revoked_reason` — ADR-0188 (migration 0180): a DB
+ *   CHECK limits it to seven revocation codes (`admin`, `cascade`, …), and it
+ *   is set only together with `revoked_at`. A credential cannot appear in it.
  * - `engine_run_items.not_run_reason` — ADR-0187: a DB CHECK limits it to the
  *   six not-run codes (`cloud_only`, `egress_denied`, …). A credential cannot
  *   appear in a six-member enum.
@@ -303,6 +306,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
+  "delegation_grants.revoked_reason",
   "engine_run_items.not_run_reason",
   "mcp_registry_entries.conflict_reason",
   "migration_audit_outbox.reason",

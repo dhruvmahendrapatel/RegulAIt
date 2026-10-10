@@ -1,0 +1,18 @@
+{"mode": "mem", "progress_mib": 32}
+{"mode": "mem", "progress_mib": 64}
+{"mode": "mem", "progress_mib": 96}
+{"mode": "mem", "progress_mib": 128}
+{"mode": "mem", "progress_mib": 160}
+{"mode": "mem", "progress_mib": 192}
+{"mode": "mem", "progress_mib": 224}
+{"mode": "mem", "progress_mib": 256}
+{"mode": "mem", "progress_mib": 288}
+{"mode": "mem", "progress_mib": 320}
+{"mode": "mem", "progress_mib": 352}
+{"mode": "mem", "progress_mib": 384}
+{"mode": "mem", "progress_mib": 416}
+{"mode": "mem", "progress_mib": 448}
+{"mode": "mem", "progress_mib": 480}
+{"mode": "mem", "progress_mib": 512}
+{"mode": "mem", "requested_mib": 512, "allocated_mib": 512, "outcome": "completed"}
+exit=0 wall_s=4.1

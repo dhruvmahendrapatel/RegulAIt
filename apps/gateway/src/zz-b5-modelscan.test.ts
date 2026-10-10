@@ -35,7 +35,7 @@ import {
 } from "@regulait/db";
 import { ARTIFACT_SCAN_CHIP, BATCH5_STRICT_DEFAULTS, ENGINE_MANIFEST, ENGINE_RESULT_VERSION, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
 import { buildSelfTest, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
-import { modelscanAdapter, type ModelscanOutcome, type ScanExecutor, type ScanJob } from "@regulait/engine-modelscan";
+import { modelscanAdapter, type ScanExecutor, type ScanOutcome, type ScanJob } from "@regulait/engine-modelscan";
 import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, safetensorsFile, truncatedMaliciousPickle } from "@regulait/engine-modelscan/fixtures";
 import { buildApp } from "./app.js";
 import { FileArtifactStore } from "./model-artifacts.js";
@@ -122,11 +122,11 @@ function answering(a: { exitCode: number | null; report?: unknown; timedOut?: bo
   return {
     jobs,
     stage: async () => mkdtemp(path.join(tmpdir(), "b5m-gw-")),
-    async scan(job): Promise<ModelscanOutcome> {
+    async scan(job): Promise<ScanOutcome> {
       jobs.push(job);
       await onScan?.(job);
       const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false };
+      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false, npy: null };
     },
     async release() {},
     async reconcile() {

@@ -1473,6 +1473,7 @@ async function evaluateNodeOwner(
   }
   const kernelDecision = evaluateAgent({
     userId,
+    actor: null, // ADR-0188 S4 replaces
     // ADR-0124 — a pillar-7 worker is a real dispatch under the initiating
     // user's entitlements. It inherits the halt for the same reason it
     // inherits every other ceiling: a delegated run must never be able to do
@@ -1903,6 +1904,7 @@ export async function planRun(
       return withModelPolicy(
         evaluateAgent({
           userId,
+          actor: null, // ADR-0188 S4 replaces
           // ADR-0124 — same rule as every other worker dispatch.
           execution: { ...postureOf(ownerExecutionMode, agentHaltOf(agent)), ...ownerLiteracy },
           agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
