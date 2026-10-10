@@ -30,12 +30,12 @@ sleep 1
 echo "== probe: host control" >&2
 python3 -I "$SPIKE/probe.py" "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-host.json"
 echo "== probe: gVisor relaxed control" >&2
-"$RUN" "$RUNSC" "$WORK" relaxed host probe-relaxed -- /usr/local/bin/python3 -I /i0/probe.py "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-relaxed.json" 2> "$EVID/probe-relaxed.stderr"
+"$RUN" "$RUNSC" "$WORK" relaxed host probe-relaxed -- /usr/local/bin/python3 -I /i0/probe.py "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-relaxed.json" 2> "$EVID/probe-relaxed-stderr.txt"
 echo "== probe: gVisor restricted" >&2
-"$RUN" "$RUNSC" "$WORK" restricted none probe-restricted -- /usr/local/bin/python3 -I /i0/probe.py "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-restricted.json" 2> "$EVID/probe-restricted.stderr"
+"$RUN" "$RUNSC" "$WORK" restricted none probe-restricted -- /usr/local/bin/python3 -I /i0/probe.py "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-restricted.json" 2> "$EVID/probe-restricted-stderr.txt"
 
 echo "== probe: gVisor restricted, uid 0 (read-only root isolated from file permissions)" >&2
-"$RUN" "$RUNSC" "$WORK" restricted-uid0 none probe-restricted-uid0 -- /usr/local/bin/python3 -I /i0/probe.py "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-restricted-uid0.json" 2> "$EVID/probe-restricted-uid0.stderr"
+"$RUN" "$RUNSC" "$WORK" restricted-uid0 none probe-restricted-uid0 -- /usr/local/bin/python3 -I /i0/probe.py "$HOST_IP" "$PORT" "$SENTINEL" "$TOKEN" > "$EVID/probe-restricted-uid0.json" 2> "$EVID/probe-restricted-uid0-stderr.txt"
 
 # Seccomp stand-in: unshare(2) is denied by the restricted filter.
 for p in relaxed restricted; do
