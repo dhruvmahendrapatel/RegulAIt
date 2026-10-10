@@ -788,6 +788,10 @@ export async function runRuleSimulation(
                 },
               },
             },
+            undefined,
+            undefined,
+            // a replay re-decides a RECORDED call; the actor chain is not on the audit row yet (S4 stamps it)
+            { actor: null }, // ADR-0188 S4 replaces
           );
           const verdict = evaluation.candidateDecision
             ? {
