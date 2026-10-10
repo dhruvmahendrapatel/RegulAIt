@@ -138,6 +138,14 @@ export function buildPromptfooConfig(lease: EngineLease, plan: PromptfooPlan): R
  */
 export function buildPromptfooEnv(lease: EngineLease, workDir: string, inherited: { PATH?: string | undefined } = process.env): Record<string, string> {
   if (!lease.target) throw new PromptfooConfigRefused("target_required", "a promptfoo run needs a model target behind the gateway");
+  return promptfooEnvFor(lease.target.apiKey, workDir, inherited);
+}
+
+/**
+ * B5-P2: the same environment from the run key alone, so the worker container (which never sees a
+ * lease) builds it for its own work directory. The run key is the only credential in it.
+ */
+export function promptfooEnvFor(runKey: string, workDir: string, inherited: { PATH?: string | undefined } = process.env): Record<string, string> {
   return {
     PATH: inherited.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     HOME: workDir,
@@ -147,7 +155,7 @@ export function buildPromptfooEnv(lease: EngineLease, workDir: string, inherited
     PROMPTFOO_CACHE_PATH: `${workDir}/.promptfoo/cache`,
     PROMPTFOO_FAILED_TEST_EXIT_CODE: "100",
     ...PROMPTFOO_USAGE_DATA_ENV,
-    [RUN_KEY_ENV]: lease.target.apiKey,
+    [RUN_KEY_ENV]: runKey,
   };
 }
 

@@ -24,6 +24,7 @@
  *
  * The mapper reads only modelscan's `-o` JSON report and its exit code, never stdout (G19 3).
  */
+import { parse as parseJsonSyntax, type ValueNode } from "@humanwhocodes/momoa";
 import { z } from "zod";
 import type { EngineItemVerdict, EngineNotRunReason, EngineResultEnvelope, EngineResultItem, EngineTerminalRunStatus } from "./contract.js";
 import type { RedTeamSeverity } from "../redteam.js";
@@ -164,6 +165,20 @@ const SIG = {
 } as const;
 
 /**
+ * Where an HDF5 superblock may start: offset 0, then every power of two from 512 (a user block of any
+ * power-of-two size, as the HDF5 library itself searches) while the 8-byte signature still fits in the
+ * file. PR #212 review [4235322383] (ADR-0187 decision 131): the probe stopped at 2048, so a header behind
+ * a larger user block read `unrecognised`. The bound is THE FILE SIZE, so every offset the library
+ * would accept is probed; that is at most 24 reads of 8 bytes for the 8 GiB upload ceiling (2^33),
+ * and never more than 54 for any size a reader can report.
+ */
+export function hdf5SuperblockOffsets(size: number): number[] {
+  const out = size >= 8 ? [0] : [];
+  for (let at = 512; at + 8 <= size && at <= Number.MAX_SAFE_INTEGER / 2; at *= 2) out.push(at);
+  return out;
+}
+
+/**
  * What the artifact really is, from its bytes. Order matters: a pickle is recognised before anything
  * that could be parsed out of its tail; a zip is classified from its central directory; safetensors
  * only when its header verifies. No extension is consulted anywhere.
@@ -177,8 +192,8 @@ export async function detectArtifactFormat(reader: ArtifactReader): Promise<Arti
     return { format: "pickle", evidence: `pickle PROTO opcode, protocol ${head[1]}` };
   }
   if (bytesEq(head, 0, SIG.zipLocal) || bytesEq(head, 0, SIG.zipEmpty)) return classifyZip(reader);
-  for (const at of [0, 512, 1024, 2048]) {
-    if (at === 0 ? bytesEq(head, 0, SIG.hdf5) : at + 8 <= reader.size && bytesEq(await reader.read(at, 8), 0, SIG.hdf5)) {
+  for (const at of hdf5SuperblockOffsets(reader.size)) {
+    if (at === 0 ? bytesEq(head, 0, SIG.hdf5) : bytesEq(await reader.read(at, 8), 0, SIG.hdf5)) {
       return { format: "keras_h5", evidence: `HDF5 superblock signature at offset ${at}` };
     }
   }
@@ -227,6 +242,32 @@ function u64le(b: Uint8Array, at: number): number {
 }
 
 /**
+ * Does any JSON object in `text` name the same key twice (compared after unescaping, as a parser sees
+ * it: `"w"` and `"w"` are the same key; `"a\"b"` and `"a\\b"` are not)? Read from momoa's syntax
+ * tree, which keeps every member, walked without recursion. Throws on text that is not JSON.
+ * Open-source check (ADR-0176): `@humanwhocodes/momoa` 3.3.13 (Apache-2.0, no dependencies, no
+ * network) reports every member; JSON.parse silently keeps the last.
+ */
+export function jsonHasDuplicateKey(text: string): boolean {
+  const stack: ValueNode[] = [parseJsonSyntax(text, { mode: "json" }).body];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.type === "Object") {
+      const seen = new Set<string>();
+      for (const m of node.members) {
+        const key = m.name.type === "String" ? m.name.value : m.name.name;
+        if (seen.has(key)) return true;
+        seen.add(key);
+        stack.push(m.value);
+      }
+    } else if (node.type === "Array") {
+      for (const el of node.elements) stack.push(el.value);
+    }
+  }
+  return false;
+}
+
+/**
  * A safetensors file: an 8-byte little-endian header length N, N bytes of JSON, then the data. It is
  * a CANDIDATE when N is plausible and the header starts with `{`; it is `safetensors` only when the
  * header is valid UTF-8 JSON, every entry is `{dtype, shape, data_offsets}` with a known byte-sized
@@ -244,11 +285,18 @@ export async function verifySafetensors(reader: ArtifactReader, head?: Uint8Arra
   const raw = n + 8 <= h.length ? h.subarray(8, 8 + n) : await reader.read(8, n);
   if (raw.length !== n) return invalid("header shorter than its declared length");
   let parsed: unknown;
+  let duplicate: boolean;
   try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    duplicate = jsonHasDuplicateKey(text);
+    parsed = JSON.parse(text);
   } catch {
     return invalid("header is not valid UTF-8 JSON");
   }
+  // Codex review B5X-01 (ADR-0187 decision 132): JSON.parse keeps the LAST of two equal keys, so a
+  // duplicate could hide a tensor or field the reference parser judges; any duplicate, at any level
+  // (tensor names, a tensor's fields, `__metadata__` and its keys), is refused
+  if (duplicate) return invalid("the header repeats a key in one object");
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return invalid("header is not a JSON object");
   const dataBytes = reader.size - 8 - n;
   const spans: Array<[number, number]> = [];

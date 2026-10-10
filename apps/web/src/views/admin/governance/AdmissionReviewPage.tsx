@@ -10,19 +10,23 @@ import { DetectionContentPanel } from "./DetectionContentPanel";
  *    audited, per-item override with a reason).
  *  - MCP servers held by the ADR-0097 manifest scan, read-only here (they are
  *    cleared from the MCP servers page's existing flow).
+ *  - ADR-0187 X28: a Model artifacts tab (ModelArtifactsTab) — upload a model
+ *    file, scan it with modelscan, and read why it is or is not clean.
  *
  * Findings are counts and locations only — the gateway never sends the matched
  * text, so this page cannot become a delivery vector for what it reviews.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdmissionFindingCount, SkillAdmissionState } from "../../../api/types";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Table, Tabs } from "../../../ui/kit";
 import { ReasonModal, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { putOrgSettings, api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import ModelArtifactsTab from "./ModelArtifactsTab";
 
 interface ReviewSkill {
   id: string;
@@ -89,7 +93,16 @@ type Pending =
   | { kind: "deny-share"; skill: ReviewSkill }
   | { kind: "override"; item: QuarantineItem; target: "mcp_server" | "skill" };
 
+const TABS = [
+  { id: "review", label: "Skills and servers" },
+  { id: "artifacts", label: "Model artifacts" },
+];
+
 export default function AdmissionReviewPage() {
+  // ADR-0187 X28: the tab and the open artifact live in the URL, so a model card can link to a scan
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "artifacts" ? "artifacts" : "review";
+  const setTab = (id: string) => setParams(id === "artifacts" ? { tab: "artifacts" } : {}, { replace: true });
   const skills = useQuery({ queryKey: [...KEY, "skills"], queryFn: () => api.get<SkillQueue>("/v1/admission/skills") });
   const quarantine = useQuery({ queryKey: [...KEY, "quarantine"], queryFn: () => api.get<Quarantine>("/v1/release-quarantine") });
   const mcp = useQuery({ queryKey: [...KEY, "mcp"], queryFn: () => api.get<McpQueue>("/v1/mcp/admission") });
@@ -145,6 +158,13 @@ export default function AdmissionReviewPage() {
           </p>
         }
       />
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+      {tab === "artifacts" ? (
+        <ModelArtifactsTab
+          selected={params.get("artifact")}
+          onSelect={(id) => setParams(id ? { tab: "artifacts", artifact: id } : { tab: "artifacts" }, { replace: true })}
+        />
+      ) : (
       <div className={v.stack}>
         <DetectionContentPanel />
         <WaitingPeriodCard q={quarantine.data} onOverride={(item, target) => setPending({ kind: "override", item, target })} loading={quarantine.isLoading} />
@@ -232,6 +252,7 @@ export default function AdmissionReviewPage() {
           />
         </Card>
       </div>
+      )}
       <ReasonModal
         open={pending !== null}
         title={

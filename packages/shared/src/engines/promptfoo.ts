@@ -3,7 +3,7 @@
  *
  * One pure, versioned catalogue shared by the gateway (manifest set classes and the taxonomy
  * map) and the promptfoo runner (config generator and result mapper). Every fact below was read
- * from the pinned release's own published package (npm `promptfoo@0.123.1`, its `dist/src`
+ * from the pinned release's own published package (npm `promptfoo@0.124.1`, its `dist/src`
  * bundle), offline, and is recorded with how it was read in
  * docs/research/R10-engine-admission.md §promptfoo. Where a fact could not be established, the
  * entry fails closed: the plugin is not run and says why.
@@ -43,7 +43,7 @@ import {
 } from "./promptfoo-upstream.js";
 
 /** the release the image is built from; equals the vendored OWASP tables' release (ADR-0187) */
-export const PROMPTFOO_ENGINE_VERSION = "0.123.1";
+export const PROMPTFOO_ENGINE_VERSION = "0.124.1";
 
 /** the vocabulary name in `sourceTaxonomy.system` for every promptfoo item */
 export const PROMPTFOO_TAXONOMY_SYSTEM = "promptfoo";
@@ -53,7 +53,7 @@ export const PROMPTFOO_STRATEGY_SET_PREFIX = "strategy:";
 
 /**
  * The usage-data and remote-fetch switches the runner sets, each at the value the self-test
- * requires (env name -> value). Read from the 0.123.1 source (R10):
+ * requires (env name -> value). Read from the 0.123.1 source (R10), re-checked in the 0.124.1 bundle (ADR-0187 decision 176):
  *   - DISABLE_TELEMETRY: no PostHog client; still sends one "telemetry disabled" event unless
  *     the image's patch is applied (patches/telemetry-disabled-sends-nothing.mjs);
  *   - DISABLE_UPDATE: no version check;
