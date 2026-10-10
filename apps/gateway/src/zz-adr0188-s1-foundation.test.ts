@@ -874,7 +874,8 @@ describe("ADR-0188 the stubs: every route answers 501 under its auth class", () 
 
   it("each route not yet built answers 501 not_built to an authorised caller", async () => {
     // S3 built its routes (the JWKS and the signing keys); zz-adr0188-s3-issuer-grants.test.ts covers them
-    for (const r of IDENTITY_ROUTES.filter((x) => x.slice !== "S3")) {
+    // S4 built the identity reads and the own-grant set; zz-adr0188-s4-in-process.test.ts covers them
+    for (const r of IDENTITY_ROUTES.filter((x) => x.slice !== "S3" && x.slice !== "S4")) {
       const headers = r.cls === "public" ? {} : r.cls === "user" ? users.member.auth : users.admin.auth;
       const res = await inject(r.method, url(r.path), headers, r.method === "GET" || r.method === "DELETE" ? undefined : {});
       expect(res.statusCode, `${r.method} ${r.path}: ${res.body}`).toBe(501);

@@ -1223,6 +1223,13 @@
     {
       "idx": 184,
       "version": "7",
+      "when": 1785119000000,
+      "tag": "0184_delegation_depth_limit",
+      "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
       "when": 1785120000000,
       "tag": "0185_guard_search_path_and_truncate",
       "breakpoints": true

@@ -117,7 +117,7 @@ function decisionBom(): DecisionBomBody {
       ],
       anchor: {
         id: U(40),
-        record: { seq: 42, rowHash: H("4"), headAt: T, algorithm: "sha256", payloadVersion: 1, capturedAt: T },
+        record: { seq: 42, rowHash: H("4"), headAt: T, algorithm: "sha256", payloadVersion: "regulait.audit.v1", capturedAt: T },
         destination: "s3_object_lock", status: "flushed", externalRef: "s3://anchors/a/anchor-42.json", flushedAt: T,
         tamperResistant: true, observationMode: "compliance", observedAt: T, retainUntil: "2033-10-10T12:00:00.000Z",
         tsa: { token: "MIIB", genTime: T, messageImprint: H("5"), policyOid: "1.2.3", nonce: "ab12", requestSentAt: T, requestFactsLegacy: false },
@@ -306,6 +306,12 @@ describe("regulait.decision-bom.v1", () => {
     noAnchor.finality = "chain_signed";
     expect(decisionBomBodySchema.safeParse(noAnchor).success).toBe(true);
   });
+  it("B4.7-1: the anchor record's payloadVersion is the stored string the imprint covers, never an integer", () => {
+    expect(decisionBom().proof.anchor!.record.payloadVersion).toBe("regulait.audit.v1");
+    const integer = clone(decisionBom()) as unknown as { proof: { anchor: { record: { payloadVersion: unknown } } } };
+    integer.proof.anchor.record.payloadVersion = 1;
+    expect(decisionBomBodySchema.safeParse(integer).success).toBe(false);
+  });
   it("a legacy timestamp may lack request facts (#280); any other may not (R33)", () => {
     const legacy = decisionBom();
     Object.assign(legacy.proof.anchor!.tsa!, { nonce: null, requestSentAt: null, requestFactsLegacy: true });
@@ -384,8 +390,15 @@ describe("finality (R4, R44) and #280's unbounded-retention policy", () => {
     expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, retainUntil: null } })).toEqual({ freeze: false, reason: "lock_not_recorded" });
     expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, retainUntil: new Date(now.getTime() - 1) } })).toEqual({ freeze: false, reason: "lock_lapsed" });
     expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, tsaGranted: false } })).toEqual({ freeze: false, reason: "timestamp_pending" });
-    // a weaker floor already accepts it (it ranks above unverified destination, below anchored)
-    expect(decisionBomFinality({ ...unbounded, setting: "anchored_unverified_destination" })).toEqual({ freeze: true, state: "anchored_finite_lock" });
+    // a weaker floor accepts it only when the finite-lock relaxation is also `accept`
+    expect(decisionBomFinality({ ...accept, setting: "anchored_unverified_destination" })).toEqual({ freeze: true, state: "anchored_finite_lock" });
+  });
+  it("F6: `refuse` never yields anchored_finite_lock, whatever the floor (R44: an uncovered lock freezes at most as anchored_unverified_destination)", () => {
+    const unbounded = { ...base, retainedDays: null };
+    for (const setting of ["anchored_unverified_destination", "chain_signed"] as const) {
+      expect(decisionBomFinality({ ...unbounded, setting })).toEqual({ freeze: true, state: "anchored_unverified_destination" });
+    }
+    expect(decisionBomFinality({ ...unbounded, setting: "anchored" })).toEqual({ freeze: false, reason: "retention_unbounded" });
   });
   it("the verifier reports anchored_lapsed once retain_until passes; a frozen state is never edited", () => {
     const until = base.anchor!.retainUntil!;

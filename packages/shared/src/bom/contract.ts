@@ -587,7 +587,9 @@ export const decisionBomAnchorSchema = z
         rowHash: bomDigestSchema,
         headAt: bomTimeSchema,
         algorithm: bomIdentifierSchema,
-        payloadVersion: bomIntSchema,
+        /** contract amended 2026-10-10 (ADR-0189 B4.7-1): the audit payload version string the anchor stores and
+         * imprints (`AnchorRecord.payloadVersion`, e.g. "regulait.audit.v1"), never an integer */
+        payloadVersion: bomIdentifierSchema,
         capturedAt: bomTimeSchema,
       })
       .strict(),
