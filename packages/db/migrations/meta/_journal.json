@@ -1209,6 +1209,20 @@
     {
       "idx": 182,
       "version": "7",
+      "when": 1785117000000,
+      "tag": "0182_decision_bom_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1785118000000,
+      "tag": "0183_isolation_execution_profiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
       "when": 1785120000000,
       "tag": "0185_guard_search_path_and_truncate",
       "breakpoints": true

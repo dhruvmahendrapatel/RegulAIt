@@ -27,6 +27,8 @@ name: CI
 #  4. `cancel-in-progress` kills superseded runs when a PR is pushed to again.
 #  5. TIGHT `timeout-minutes`. The expensive failure mode is not a slow job, it
 #     is a HUNG one billing its full cap; 25 -> 20/12 caps that blast radius.
+#     (The 2026-10-10 stopgap of 45 on the unsharded job is gone: every
+#     build-and-test job is back to 20 or less now that the gateway is sharded.)
 #
 # ── Monthly arithmetic (RE-MEASURED 2026-10-02, runs 37050080219 / 37045578961 /
 #    37042881890; the 2026-08-01 figures below it were 2.5x stale — CI-03) ───
@@ -51,9 +53,32 @@ name: CI
 #   sum rises by roughly two extra setups (~2–3 min each) and the coverage job,
 #   ~6–8 min a PR push. NOT YET MEASURED on a runner — replace with the real
 #   figure after the first runs, as above.
+#   2026-10-10: the gateway suite (372 files) had pushed build-and-test to
+#   20–30+ min, cancelled at a 30-min cap. It is now `vitest --shard=i/4` across
+#   four `gateway-tests` jobs, each with its own Postgres and object store; the
+#   build, the shared and other package suites and the static pre-flights run
+#   once in `build-and-test-base`; `gateway-coverage` proves the split; the
+#   aggregate `build-and-test` keeps the required check name.
+#     MEASURED locally (4-core dev container shared with other sessions, load
+#     average 6–10, so ~2–3x slower than a runner): shards 1–4 = 13.2 / 16.4 /
+#     18.8 / 20.9 min wall (shard 4 re-run green: 23.4, load avg 12), 93
+#     files each, run one after another. Vitest splits
+#     by file COUNT (SHA-1 of the path), not duration: per-file test time was
+#     241 / 322 / 323 / 444 s, so the slowest shard carries ~33% of the suite,
+#     not 25%. With three shards the slowest would carry ~43%; that is why four.
+#     ESTIMATE on a runner (NOT YET MEASURED — replace after the first runs),
+#     from ~25 min of serial gateway test time:
+#       gateway-tests        ~4 min setup (install, object store, gateway build)
+#                            + 5–9 min tests -> 9–13 min each, ~44 min for four
+#       build-and-test-base  install + `pnpm -r build` + packages, ~8 min
+#       gateway-coverage ~2 min; build-and-test (the aggregate) ~1 min
+#     => ~55 billed min for what was one ~25–33 min job, for a wall clock of
+#     ~13 min instead of 20–30+. The extra ~20 billed minutes are three more
+#     runner setups and the split's own small jobs — the price of a run that
+#     finishes inside its cap; at 2,000 min/month, ~25 fewer PR pushes a month.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
-# and they should stay that way. The next cheap lever is `vitest --shard=1/2`
-# across two jobs with their own databases (halves wall clock, same billed sum).
+# and they should stay that way. The next lever, when a shard nears its 20-min
+# cap, is a fifth matrix entry (one more ~4-min setup), not a higher cap.
 # If that ceiling is ever actually hit, the next lever is narrowing
 # `pull_request` to `types: [ready_for_review]` so draft iterations stop
 # billing — NOT taken now, because this repo's agents open drafts and a draft
@@ -86,16 +111,139 @@ permissions:
   contents: read
 
 jobs:
-  build-and-test:
+  # ── build-and-test, split (2026-10-10) ─────────────────────────────────────
+  # One job ran everything and the gateway suite (372 files, serial against one
+  # Postgres) dominated it: ~13 min on 2026-10-02, 20–30+ min by 2026-10-10, and
+  # PRs were cancelled at the 30-minute cap while still making progress. It is
+  # now four kinds of job:
+  #   build-and-test-base  the build, @regulait/shared (alone, with its timing
+  #                        project), every other package's tests, and the static
+  #                        pre-flights — each run exactly ONCE, here. No services.
+  #   gateway-tests        the gateway suite, `vitest --shard=i/N`, one runner,
+  #                        Postgres service and object store per shard.
+  #   gateway-coverage     proves every gateway test file ran in exactly one shard.
+  #   build-and-test       the aggregate: green only when all of the above are.
+  #                        It keeps the job name branch protection requires.
+  build-and-test-base:
+    name: build-and-test / build, packages, static pre-flights
     runs-on: ubuntu-latest
-    # Not a performance target — a blast-radius cap. A hung job bills its full
-    # timeout, so this is the most CI minutes any single run can waste. A normal
-    # run is ~13 min (see the arithmetic above); 20 left ~7 min of headroom and
-    # a slow runner day turned green PRs red for timing (CI-03). By 2026-10-10
-    # the gateway suite had grown to 20-30 min (batches 4-6) and three PRs were
-    # cancelled at 30 while still making progress (not hung); 45 is a stopgap
-    # until the gateway tests are sharded across jobs.
-    timeout-minutes: 45
+    # A blast-radius cap, not a target (see the arithmetic above). Without the
+    # gateway suite this job is install + `pnpm -r build` + the package suites.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `pnpm -r build` also typechecks + bundles the React SPA (apps/web),
+      # which is the ONLY UI since ADR-0033 deleted the two single-file
+      # template-literal shells. The check-ui-syntax.mjs step that used to
+      # `node --check` their inline <script> blocks went with them: tsc and
+      # vite parse the SPA's real TypeScript, so a UI typo can no longer ship
+      # behind a green build.
+      - run: pnpm -r build
+
+      # ADR-0186 decision 30 item 3 (B4I-03): @regulait/shared holds the wall-clock budget tests (its `timing`
+      # Vitest project, serialized after its parallel `unit` project). It runs on its own first, so nothing on
+      # the other cores can stretch those budgets; every other package then runs in parallel as before.
+      # `!regulait` keeps the root's own recursive `test` script out of the filter, and `!@regulait/gateway`
+      # leaves the gateway to the `gateway-tests` shards below — this job has no database to give it.
+      # The shared budget tests therefore no longer share a runner with the gateway suite at all.
+      - run: pnpm --filter @regulait/shared test
+      - run: pnpm -r --filter '!@regulait/shared' --filter '!regulait' --filter '!@regulait/gateway' test
+        env:
+          # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
+          REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+      # B9c — THE AFFORDANCE CENSUS, AS A GATE.
+      #
+      # `scripts/preflight-ui-affordances.mjs` compares the gateway's DELETE
+      # routes against the controls the SPA actually renders, and the POST routes
+      # against the lists it shows. It was written during a UI-completeness sweep
+      # and deliberately NOT wired in, for the one honest reason: it exited 1. A
+      # check that fails on arrival is a check somebody disables.
+      #
+      # It exits 0 as of this commit — 53 of 53 DELETE routes reachable, no
+      # collection the UI lists without a way to add to it — so it becomes a
+      # gate now, which is the only way the property survives. The failure it
+      # prevents is specific and has happened repeatedly in this repo: an
+      # endpoint ships, the list that shows its objects ships, and the control
+      # that removes one does not. Access could be granted from the portal and
+      # only taken back with a database client; saved views existed for a year
+      # with no screen; a training backend announced "will refuse every job" and
+      # offered no way to configure one. Each was found by a human reading the
+      # product, which is not a mechanism.
+      #
+      # It is STATIC — it reads route registrations and TSX sources, needs no
+      # database and no build — so it sits in this job purely to avoid a second
+      # runner startup. Exit 1 means a gap, exit 2 means the script could not
+      # run; both fail the job. An intentional API-only route is declared in
+      # `DELIBERATELY_API_ONLY` inside the script, with a reason, rather than by
+      # loosening this step.
+      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
+        run: node scripts/preflight-ui-affordances.mjs
+
+      # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
+      # agent, one Status line per task, inboxes acked within 12h, a line
+      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
+      #
+      # The same step runs every `scripts/*.test.mjs` — `--dir scripts` scopes
+      # discovery to this directory, so an untracked nested checkout on a
+      # developer machine is never swept in. That includes the G10-G15-VERIFY
+      # guard (`basename-collisions.test.mjs`): no two tracked files in one
+      # directory may differ only by case or extension, because an
+      # extensionless import of either one breaks the build on a Windows
+      # (case-insensitive) checkout while every Linux gate stays green.
+      - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
+        run: |
+          node scripts/coordination.mjs lint
+          pnpm exec vitest run --dir scripts
+
+  gateway-tests:
+    name: gateway shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    # A blast-radius cap, not a target: the slowest shard plus setup is well
+    # under it (see the arithmetic above). If a shard nears it, add a shard to
+    # the matrix rather than raising this — the coverage job checks any layout.
+    timeout-minutes: 20
+    strategy:
+      # one failing shard must not cancel the others: the coverage job needs
+      # every report, and a cancelled shard hides which files it would have run
+      fail-fast: false
+      matrix:
+        # SHARD COUNT: see the arithmetic at the top. `--shard` takes the total
+        # from strategy.job-total, so adding an entry here is the whole change.
+        #
+        # HOW VITEST SPLITS: by FILE, after sorting the files by a SHA-1 of their
+        # path (BaseSequencer.shard), into equal-COUNT slices — not by duration.
+        # Each shard then runs its files serially (`fileParallelism: false` in
+        # apps/gateway/vitest.config.ts), on its own fresh database. ORDER: on a
+        # fresh runner there is no Vitest results cache, so a shard runs its
+        # files in that SHA-1 order — NOT the unsharded order, and a new file
+        # moves the slice boundaries. A test that only passes because another
+        # file wrote rows to the shared database first is therefore a defect the
+        # split can expose: zz-adr0185-g5-metrics.test.ts was one (its real boot
+        # met another file's ciphertexts) and now uses its own scratch database,
+        # as the other boot tests do. The layout is deterministic, so such a
+        # failure reproduces locally with the same --shard=i/N.
+        #
+        # TIMING: the gateway has no wall-clock budget tests of the
+        # `@regulait/shared` `timing` kind (those run once, alone, in
+        # build-and-test-base). Its few elapsed-time assertions are
+        # deadline upper bounds (a timeout fires within N ms) and each shard
+        # runs alone on its runner, so they see LESS load than they did when the
+        # gateway shared `pnpm -r test`'s parallelism with every other package.
+        shard: [1, 2, 3, 4]
+
 
     services:
       postgres:
@@ -137,6 +285,7 @@ jobs:
       REGULAIT_TEST_S3_ENDPOINT: http://localhost:9000
       REGULAIT_TEST_S3_ACCESS_KEY_ID: regulait
       REGULAIT_TEST_S3_SECRET_ACCESS_KEY: regulait-dev-objectstore
+
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -185,24 +334,42 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:9000/) || code=000
           [ "$code" != 000 ] || { echo "object store not reachable on 127.0.0.1:9000 after init" >&2; docker compose ps -a; exit 1; }
 
-      # `pnpm -r build` also typechecks + bundles the React SPA (apps/web),
-      # which is the ONLY UI since ADR-0033 deleted the two single-file
-      # template-literal shells. The check-ui-syntax.mjs step that used to
-      # `node --check` their inline <script> blocks went with them: tsc and
-      # vite parse the SPA's real TypeScript, so a UI typo can no longer ship
-      # behind a green build.
-      - run: pnpm -r build
+      # The gateway suite imports its workspace dependencies from their dist/
+      # (each package.json `main`) and some tests run the BUILT gateway
+      # (dist/seed.js), so the shard builds the gateway and its dependencies —
+      # not apps/web. Type-checking the whole repo is build-and-test-base's job.
+      - name: Build the gateway and its workspace dependencies
+        run: pnpm --filter "@regulait/gateway..." build
 
-      # ADR-0186 decision 30 item 3 (B4I-03): @regulait/shared holds the wall-clock budget tests (its `timing`
-      # Vitest project, serialized after its parallel `unit` project). It runs on its own first, so the
-      # gateway suite on the other cores cannot stretch those budgets; every other package then runs in
-      # parallel as before. `!regulait` keeps the root's own recursive `test` script out of the filter.
-      - run: pnpm --filter @regulait/shared test
-      - run: pnpm -r --filter '!@regulait/shared' --filter '!regulait' test
+      - name: Gateway suite, shard ${{ matrix.shard }} of ${{ strategy.job-total }}
+        run: >-
+          pnpm --filter @regulait/gateway exec vitest run --dir src
+          --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          --reporter=default --reporter=github-actions --reporter=json
+          --outputFile.json="$RUNNER_TEMP/gateway-shard-${{ matrix.shard }}-of-${{ strategy.job-total }}.json"
         env:
           # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
           REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
+      # always (not on a cancelled run): the coverage job needs a failing
+      # shard's report too, or it cannot say which files that shard ran
+      - name: Shard report for the coverage check
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gateway-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/gateway-shard-${{ matrix.shard }}-of-${{ strategy.job-total }}.json
+          if-no-files-found: error
+          retention-days: 3
+
+      # SHARDED (2026-10-10): this pre-flight runs in EVERY shard, after that
+      # shard's tests, on that shard's database. It is the one pre-flight that
+      # is not "exactly once": its value is the rows the suite wrote (point 2
+      # below), and each shard's database now holds only its slice of them. Run
+      # once it would scan a quarter of the suite's rows (or, in a job of its
+      # own, an empty database); run per shard the union is the whole suite,
+      # as before. Cost: ~1 s per shard, no extra runner.
+      #
       # ADR-0110 — the deferred-unique PRE-FLIGHT, as a real gate.
       #
       # ADR-0109 shipped `scripts/preflight-unique-constraints.mjs` and said so
@@ -212,7 +379,7 @@ jobs:
       # duplicate would block one of migration 0108/0109's constraints, and 2 if
       # it could not run at all — any non-zero fails the job.
       #
-      # WHY IT RUNS *AFTER* `pnpm -r test`, NOT BEFORE:
+      # WHY IT RUNS *AFTER* the tests, NOT BEFORE:
       #  1. It needs a MIGRATED database and the suite is what migrates one —
       #     every gateway test file calls `runMigrations` on boot. Putting the
       #     check first would mean adding a separate migrate step (a second way
@@ -238,49 +405,65 @@ jobs:
       - name: Pre-flight — duplicates that would block a unique constraint (ADR-0109/0110)
         run: node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
 
-      # B9c — THE AFFORDANCE CENSUS, AS A GATE.
-      #
-      # `scripts/preflight-ui-affordances.mjs` compares the gateway's DELETE
-      # routes against the controls the SPA actually renders, and the POST routes
-      # against the lists it shows. It was written during a UI-completeness sweep
-      # and deliberately NOT wired in, for the one honest reason: it exited 1. A
-      # check that fails on arrival is a check somebody disables.
-      #
-      # It exits 0 as of this commit — 53 of 53 DELETE routes reachable, no
-      # collection the UI lists without a way to add to it — so it becomes a
-      # gate now, which is the only way the property survives. The failure it
-      # prevents is specific and has happened repeatedly in this repo: an
-      # endpoint ships, the list that shows its objects ships, and the control
-      # that removes one does not. Access could be granted from the portal and
-      # only taken back with a database client; saved views existed for a year
-      # with no screen; a training backend announced "will refuse every job" and
-      # offered no way to configure one. Each was found by a human reading the
-      # product, which is not a mechanism.
-      #
-      # It is STATIC — it reads route registrations and TSX sources, needs no
-      # database and no build — so it sits in this job purely to avoid a second
-      # runner startup. Exit 1 means a gap, exit 2 means the script could not
-      # run; both fail the job. An intentional API-only route is declared in
-      # `DELIBERATELY_API_ONLY` inside the script, with a reason, rather than by
-      # loosening this step.
-      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
-        run: node scripts/preflight-ui-affordances.mjs
+  gateway-coverage:
+    name: gateway / every test file ran exactly once
+    needs: gateway-tests
+    # runs when a shard failed too, so a red run still says whether the shards
+    # covered the suite; it does not run on a cancelled (superseded) run
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
-      # agent, one Status line per task, inboxes acked within 12h, a line
-      # budget. History lives in git. `pnpm checkin` is the only writer of a row.
-      #
-      # The same step runs every `scripts/*.test.mjs` — `--dir scripts` scopes
-      # discovery to this directory, so an untracked nested checkout on a
-      # developer machine is never swept in. That includes the G10-G15-VERIFY
-      # guard (`basename-collisions.test.mjs`): no two tracked files in one
-      # directory may differ only by case or extension, because an
-      # extensionless import of either one breaks the build on a Windows
-      # (case-insensitive) checkout while every Linux gate stays green.
-      - name: Coordination file lint (structure only — never agent staleness) + repo filename guard
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # `vitest list --filesOnly` only resolves the include globs: no build, no
+      # database, no test code executed. It also IGNORES --shard (measured on
+      # Vitest 4.1.11), so it is the unsharded list by construction.
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: gateway-report-*
+          path: ${{ runner.temp }}/shards
+          merge-multiple: true
+
+      - name: Unsharded list of gateway test files
+        run: pnpm --filter @regulait/gateway exec vitest list --dir src --filesOnly --json="$RUNNER_TEMP/gateway-list.json"
+
+      # Every listed file ran in exactly one shard, no shard ran an unlisted
+      # file, and every shard 1..N reported (the shard is read from the report's
+      # file name). scripts/vitest-shard-coverage.mjs, with its own tests in
+      # scripts/ (run by build-and-test-base).
+      - name: Every gateway test file ran in exactly one shard
+        run: node scripts/vitest-shard-coverage.mjs --root apps/gateway "$RUNNER_TEMP/gateway-list.json" "$RUNNER_TEMP"/shards/gateway-shard-*.json
+
+  # THE REQUIRED CHECK. Branch protection on `main` requires a check named
+  # `build-and-test` (project-state/sessions/2026-07-24-session-02.md); this job
+  # keeps that name so the split needs no settings change. It is green only
+  # when every part is: a SKIPPED required check counts as passing, so this
+  # runs whenever a dependency failed (`!cancelled()`, not the default
+  # `success()`, which would skip it) and checks each result itself.
+  build-and-test:
+    needs: [build-and-test-base, gateway-tests, gateway-coverage]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Every part of build-and-test passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          node scripts/coordination.mjs lint
-          pnpm exec vitest run --dir scripts
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'length == 3 and all(.[]; .result == "success")' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
