@@ -159,6 +159,8 @@ export interface RouteDoc {
   responseNote?: string;
   /** the query-string schema (a zod object), rendered as `in: query` parameters */
   query?: ZodTypeAny;
+  /** the path-parameter schema (a zod object keyed by parameter name); unnamed parameters stay plain strings */
+  params?: ZodTypeAny;
   /** the 2XX JSON body schema, when the route's contract freezes one */
   response?: ZodTypeAny;
   /** a 2XX that is bytes, not JSON (ADR-0189 bundles): its content type and the headers it carries */
@@ -181,6 +183,7 @@ const BOM_B4_DOCS: Record<string, RouteDoc> = Object.fromEntries(
       errors: c.errors,
       errorBody: bomErrorEnvelopeSchema,
     };
+    doc.params = c.params;
     if ("query" in c) doc.query = c.query;
     if ("body" in c) doc.body = c.body;
     if (c.response.kind === "json") doc.response = c.response.schema;
@@ -426,11 +429,12 @@ export function buildOpenApiDocument(
       operation["x-regulait-deprecation"] = deprecation;
     }
 
+    const paramShape = doc?.params ? ((jsonSchemaFor(doc.params) as { properties?: Record<string, Record<string, unknown>> }).properties ?? {}) : {};
     const params = pathParams(entry.url).map((name) => ({
       name,
       in: "path",
       required: true,
-      schema: { type: "string" },
+      schema: paramShape[name] ?? { type: "string" },
     }));
     const queryShape = doc?.query ? (jsonSchemaFor(doc.query) as { properties?: Record<string, unknown>; required?: string[] }) : null;
     const queryParams = Object.entries(queryShape?.properties ?? {}).map(([name, schema]) => ({
@@ -471,7 +475,7 @@ export function buildOpenApiDocument(
         };
       }
     }
-    operation.responses = {
+    const responses: Record<string, unknown> = {
       "2XX": success,
       "400": { description: "Request body failed schema validation." },
       ...(auth === "public"
@@ -498,8 +502,13 @@ export function buildOpenApiDocument(
             }
           : {}),
       "429": { description: "Rate limited. Retry after the `retry-after` header." },
-      ...refusals,
     };
+    // a contract's refusal codes are ADDED to a generic entry (its description, e.g. the MFA refusal, is kept)
+    for (const [status, refusal] of Object.entries(refusals) as Array<[string, Record<string, unknown>]>) {
+      const generic = responses[status] as { description?: string } | undefined;
+      responses[status] = generic ? { ...refusal, description: `${generic.description ?? ""} ${String(refusal.description)}`.trim() } : refusal;
+    }
+    operation.responses = responses;
 
     const p = openApiPath(entry.url);
     paths[p] ??= {};

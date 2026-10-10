@@ -24,12 +24,17 @@ import {
   BOM_CANNOT_PROVE_COPY,
   BOM_ERROR_CODES,
   BOM_ROUTES,
+  BOM_EXPORT_VERIFY_KEYS_ENV,
+  BOM_EXPORT_VERIFY_KEYS_FILE_ENV,
   BOM_VERIFY_CHECKS,
+  BOM_VERIFY_MAX_BASE64,
+  BOM_VERIFY_MAX_REQUEST_BYTES,
   bomBundleHeadersSchema,
   bomCanonicalBytes,
   bomCapabilitiesSchema,
   bomCostString,
   bomErrorEnvelopeSchema,
+  bomExportVerifyKeyringSchema,
   bomRowDigest,
   bomSha256,
   bomVerifyCheckResultSchema,
@@ -42,6 +47,7 @@ import {
   DECISION_BOM_SECTIONS,
   DECISION_BOM_VERSION,
   DECISION_FACTS_VERSION,
+  decisionBomBundleHref,
   decisionBomReadQuerySchema,
   decisionBomReadResponseSchema,
   exportBundleV3ManifestSchema,
@@ -501,6 +507,63 @@ describe("B4 contract round 2: Codex X48 counterexamples (B4C-01..03) and the re
     expect(accepts(v2)).toBe(false);
     expect(accepts({ ...v2, checks: [...ai.checks, valid("supersedes")] })).toBe(true);
     expect(accepts({ ...ai, checks: ai.checks.filter((c) => c.check !== "serial_number") })).toBe(false);
+  });
+});
+
+describe("B4 contract round 2: automated review of #327 (items 1-8)", () => {
+  it("1 (R21): an email-shaped installId, or any email-shaped manifest value, is refused", () => {
+    const m = decisionManifest();
+    expect(exportBundleV3ManifestSchema.safeParse({ ...m, installId: "ops@example.test", installIdSource: "operator" }).success).toBe(false);
+    expect(exportBundleV3ManifestSchema.safeParse({ ...m, installId: "install-7", installIdSource: "operator" }).success).toBe(true);
+  });
+  it("2: a stored AI BOM response needs body_signature, body_schema and its own checks for a valid outcome", () => {
+    const ai: BomVerifyResponse = {
+      ...verifyResponse(), source: "ai_bom_snapshot", bodyVersion: AI_BOM_VERSION, sections: [], cannotProve: ["facts_true", "signing_time_beyond_anchor"], manifest: null,
+      identity: { subject: "ai-bom", snapshotId: U(50), subjectKind: "agent", subjectId: U(7), version: 1, serialNumber: `urn:uuid:${aiBomSerialNumber(U(50))}` },
+      outcome: "valid",
+      checks: AI_BOM_REQUIRED_CHECKS.map((check) => ({ check, status: "valid" as const, reason: null, ref: null })),
+    };
+    expect(bomVerifyResponseSchema.safeParse(ai).success).toBe(true);
+    for (const drop of ["body_signature", "body_schema", "body_version", "serial_number"]) {
+      expect(bomVerifyResponseSchema.safeParse({ ...ai, checks: ai.checks.filter((c) => c.check !== drop) }).success, drop).toBe(false);
+    }
+    expect(bomVerifyResponseSchema.safeParse({ ...ai, checks: [{ check: "body_schema", status: "valid", reason: null, ref: null }] }).success).toBe(false);
+  });
+  it("3: the global MFA refusal is in every B4 route's 403 list, with the API-key credential marker", () => {
+    for (const r of BOM_B4_ROUTES) expect(BOM_B4_ROUTE_CONTRACT[r].errors[403], r).toContain("mfa_enrollment_required");
+    roundTrips(bomErrorEnvelopeSchema, { error: "mfa_enrollment_required", detail: "enroll TOTP" });
+    roundTrips(bomErrorEnvelopeSchema, { error: "mfa_enrollment_required", credential: "api_key", detail: "enroll TOTP" });
+    expect(bomErrorEnvelopeSchema.safeParse({ error: "mfa_enrollment_required", credential: "session" }).success).toBe(false);
+  });
+  it("4: the verify request limit holds the largest admitted request", () => {
+    const largest = JSON.stringify({ source: "bundle", bundleBase64: "A".repeat(BOM_VERIFY_MAX_BASE64) });
+    expect(bomVerifyRequestSchema.safeParse(JSON.parse(largest)).success).toBe(true);
+    expect(largest.length).toBeLessThanOrEqual(BOM_VERIFY_MAX_REQUEST_BYTES);
+    expect(bomVerifyRequestSchema.safeParse({ source: "bundle", bundleBase64: "A".repeat(BOM_VERIFY_MAX_BASE64 + 4) }).success).toBe(false);
+  });
+  it("5: the export verification keyring is a list of public keys, each id once", () => {
+    const pem = (c: string) => `-----BEGIN PUBLIC KEY-----\n${c.repeat(60)}\n-----END PUBLIC KEY-----\n`;
+    roundTrips(bomExportVerifyKeyringSchema, [{ keyId: "export-2026", publicKeyPem: pem("A") }, { keyId: "export-2025", publicKeyPem: pem("B"), fingerprint: `sha256:${H("c")}` }]);
+    expect(bomExportVerifyKeyringSchema.safeParse([]).success).toBe(false);
+    expect(bomExportVerifyKeyringSchema.safeParse([{ keyId: "k", publicKeyPem: pem("A") }, { keyId: "k", publicKeyPem: pem("B") }]).success).toBe(false);
+    expect(bomExportVerifyKeyringSchema.safeParse([{ keyId: "k", publicKeyPem: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n" }]).success).toBe(false);
+    expect(bomExportVerifyKeyringSchema.safeParse([{ keyId: "k", publicKeyPem: pem("A"), privateKeyPem: "x" }]).success).toBe(false);
+    expect(BOM_EXPORT_VERIFY_KEYS_ENV).toBe("REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS");
+    expect(BOM_EXPORT_VERIFY_KEYS_FILE_ENV).toBe("REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE");
+  });
+  it("6: bundle.href downloads exactly the returned decision and version", () => {
+    const r = readResponse("anchored", 2);
+    expect(r.bundle.href).toBe(decisionBomBundleHref(U(1), 2));
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, bundle: { ...r.bundle, href: decisionBomBundleHref(U(1), 1) } }).success).toBe(false);
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, bundle: { ...r.bundle, href: decisionBomBundleHref(U(2), 2) } }).success).toBe(false);
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, bundle: { ...r.bundle, href: "/v1/decisions/x/bom/bundle" } }).success).toBe(false);
+  });
+  it("8: installIdSource is absent exactly when installId is null", () => {
+    const m = decisionManifest();
+    expect(exportBundleV3ManifestSchema.safeParse({ ...m, installId: null, installIdSource: "absent" }).success).toBe(true);
+    expect(exportBundleV3ManifestSchema.safeParse({ ...m, installId: null, installIdSource: "operator" }).success).toBe(false);
+    expect(exportBundleV3ManifestSchema.safeParse({ ...m, installId: null, installIdSource: "license" }).success).toBe(false);
+    expect(exportBundleV3ManifestSchema.safeParse({ ...m, installId: "install-7", installIdSource: "absent" }).success).toBe(false);
   });
 });
 

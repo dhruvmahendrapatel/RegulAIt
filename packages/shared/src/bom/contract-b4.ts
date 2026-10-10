@@ -46,6 +46,8 @@ import {
   DECISION_BOM_FINALITY_STATES,
   DECISION_BOM_SECTIONS,
   decisionBomBodySchema,
+  findEmailShapes,
+  hasEmailShape,
 } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,8 @@ export const bomErrorEnvelopeSchema = z.discriminatedUnion("error", [
   plain("ai_bom_too_large"),
   plain("bom_snapshot_busy"),
   z.object({ error: z.literal("rate_limited"), detail, retryAfterSeconds }).strict(),
+  /** the global MFA gate (ADR-0181/0183): a session, or an API key (`credential: "api_key"`), whose owner must enroll TOTP */
+  z.object({ error: z.literal("mfa_enrollment_required"), detail, credential: z.literal("api_key").optional() }).strict(),
   z.object({ error: z.literal("bom_signing_unavailable"), detail, missingKey: z.enum(BOM_MISSING_KEYS) }).strict(),
   z.object({ error: z.literal("bom_anchor_pending"), detail, reason: z.enum(BOM_ANCHOR_PENDING_REASONS), retryAfterSeconds }).strict(),
   z.object({ error: z.literal("format_not_rendered_for_snapshot"), detail, formats: z.array(z.enum(AI_BOM_DOWNLOAD_FORMATS)).min(1).max(8) }).strict(),
@@ -196,6 +200,9 @@ export const decisionBomVersionSummarySchema = z
   })
   .strict();
 export type DecisionBomVersionSummary = z.infer<typeof decisionBomVersionSummarySchema>;
+
+/** the one download path of a Decision BOM version (`bundle.href` is bound to it) */
+export const decisionBomBundleHref = (auditId: string, version: number): string => `/v1/decisions/${auditId}/bom/bundle?version=${version}`;
 
 export const bomBundleLinkSchema = z
   .object({
@@ -246,6 +253,7 @@ export const decisionBomReadResponseSchema = z
     if (!r.versions.some((v) => v.id === r.bom.id && v.version === r.bom.version)) issue("versions lists the returned version");
     if (r.versions.some((v, i) => i > 0 && v.version <= r.versions[i - 1]!.version)) issue("versions ascend");
     if (r.bundle.subject !== "decision-bom") issue("a Decision BOM links a decision-bom bundle");
+    if (r.bundle.href !== decisionBomBundleHref(r.auditId, r.bom.version)) issue("bundle.href downloads exactly this decision's returned version");
     const lapsedOk = r.bom.reportedFinality === r.bom.finality || (r.bom.reportedFinality === "anchored_lapsed" && (r.bom.finality === "anchored" || r.bom.finality === "anchored_finite_lock"));
     if (!lapsedOk) issue("reportedFinality is the frozen state, or anchored_lapsed for an anchored state (R44)");
   });
@@ -328,7 +336,9 @@ export const exportBundleV3ManifestSchema = z
   .object({
     schema: z.literal(EXPORT_BUNDLE_V3_SCHEMA),
     product: z.literal("regulait"),
-    installId: z.string().min(1).max(256).nullable(),
+    /** ADR-0116's install identity; refused when email-shaped (R21: the manifest is scanned too) */
+    installId: z.string().min(1).max(256).refine((v) => !hasEmailShape(v), "an email-shaped installId is refused (R21)").nullable(),
+    /** `absent` exactly when `installId` is null */
     installIdSource: z.enum(["operator", "license", "absent"]),
     exportedAt: bomTimeSchema,
     exportedAtSource: z.literal("database"),
@@ -362,8 +372,44 @@ export const exportBundleV3ManifestSchema = z
     const paths = m.files.map((f) => f.path);
     if (paths.some((p, i) => i > 0 && p <= paths[i - 1]!)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "files sorted by path, each once" });
     if (paths.some((p) => p.startsWith("audit/rows/"))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "no audit row payloads (R39)" });
+    if ((m.installIdSource === "absent") !== (m.installId === null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "installIdSource is absent exactly when installId is null" });
+    }
+    // R21: the manifest is email-scanned before it is signed, like every other bundle entry
+    const emails = findEmailShapes(m);
+    if (emails.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `email-shaped value at ${emails.join(", ")}` });
   });
 export type ExportBundleV3Manifest = z.infer<typeof exportBundleV3ManifestSchema>;
+
+// ---------------------------------------------------------------------------
+// the export-key VERIFICATION trust root (master decision, round 2; spec B4.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Online verify authenticates a bundle's manifest against a configured list of export PUBLIC keys, loaded
+ * independently of the signing key, so a deployment with no export private key can still verify bundles. Two forms,
+ * the same JSON document (`bomExportVerifyKeyringSchema`): inline in `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS`, or in a
+ * file named by `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE` (air-gapped installs). A manifest whose `signingKeyId` is
+ * not in the trusted set is `bundle_manifest_signature` `invalid` `unknown_key`. Implemented in B4.
+ */
+export const BOM_EXPORT_VERIFY_KEYS_ENV = "REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS" as const;
+export const BOM_EXPORT_VERIFY_KEYS_FILE_ENV = "REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE" as const;
+/** an Ed25519 SubjectPublicKeyInfo PEM, as `KeyObject.export({type: "spki", format: "pem"})` writes it */
+const spkiPem = z.string().max(1024).regex(/^-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----\n?$/);
+export const bomExportVerifyKeySchema = z
+  .object({
+    keyId: bomKeyIdSchema,
+    publicKeyPem: spkiPem,
+    /** optional pin: when given, the fingerprint of `publicKeyPem` must equal it or the keyring is refused at load */
+    fingerprint: bomKeyFingerprintSchema.optional(),
+  })
+  .strict();
+export const bomExportVerifyKeyringSchema = z
+  .array(bomExportVerifyKeySchema)
+  .min(1)
+  .max(64)
+  .refine((keys) => new Set(keys.map((k) => k.keyId)).size === keys.length, "each keyId once");
+export type BomExportVerifyKeyring = z.infer<typeof bomExportVerifyKeyringSchema>;
 
 // ---------------------------------------------------------------------------
 // POST /v1/boms/verify (§6, §9, R6, R19)
@@ -371,7 +417,12 @@ export type ExportBundleV3Manifest = z.infer<typeof exportBundleV3ManifestSchema
 
 /** the decoded bundle ceiling; the base64 text is at most 4/3 of it */
 export const BOM_VERIFY_MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
-const BOM_VERIFY_MAX_BASE64 = Math.ceil(BOM_VERIFY_MAX_BUNDLE_BYTES / 3) * 4;
+export const BOM_VERIFY_MAX_BASE64 = Math.ceil(BOM_VERIFY_MAX_BUNDLE_BYTES / 3) * 4;
+/**
+ * The route's `bodyLimit`: the largest admitted request (the base64 text plus its JSON envelope,
+ * `{"source":"bundle","bundleBase64":"…"}`) with headroom; above it the route answers 413 `bom_bundle_too_large`.
+ */
+export const BOM_VERIFY_MAX_REQUEST_BYTES = BOM_VERIFY_MAX_BASE64 + 1024;
 
 /**
  * Three sources. The trust root is ALWAYS the server's recorded keys
@@ -704,7 +755,7 @@ export interface BomRouteContract {
   errors: Readonly<Record<number, readonly BomErrorCode[]>>;
 }
 
-const ACCESS_ERRORS = { 401: [], 403: ["bom_export_forbidden", "admin_only"], 429: ["rate_limited"], 501: ["not_built"] } as const;
+const ACCESS_ERRORS = { 401: [], 403: ["bom_export_forbidden", "admin_only", "mfa_enrollment_required"], 429: ["rate_limited"], 501: ["not_built"] } as const;
 
 export const BOM_B4_ROUTE_CONTRACT = {
   "GET /v1/decisions/:auditId/bom": {
