@@ -4608,3 +4608,6 @@ export { vendoredMcpFindings } from "./detection-content/mcp.js";
 
 // ADR-0186 R: public offline receipt-verification seam.
 export * from "./receipts/verify.js";
+
+// ADR-0187 decisions 185–192: the built-in CyberSecEval eval datasets (pure: pins, mapping, digests).
+export * from "./eval-datasets/cyberseceval.js";

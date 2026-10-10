@@ -2137,6 +2137,10 @@ RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
 23. **B5-G: CyberSecEval (R10 consequence 12).** The three MIT dataset files (prompt injection, MITRE FRR,
     interpreter) are to be vendored by commit and sha256 as RegulAIt eval datasets, run by our runner through the
     gateway with a judge. Not in this slice (it is an eval-dataset feature, not part of the garak image).
+    *2026-10-10, decisions 185–192:* **closed.** The three files are vendored at commit `172c107…` by sha256 and
+    seeded as five read-only built-in eval datasets, judged through the gateway; the interpreter set waits for
+    approval. Still for the owner: decision 191's credit for a content-layer block on the attack sets, and the
+    multilingual files (not vendored).
 24. **B5-G: the hosted-judge detectors (decision 146).** `judge.*` and `agent_breaker.*` can be re-pointed at a judge
     behind the gateway through their model parameters (R10). Excluded until the owner decides B5-G should support it
     (it would make garak `requiresJudge` for those probes).
@@ -2149,3 +2153,86 @@ RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
     `ofcom-potentially-offensive.txt` breaks the import of `garak.detectors.unsafe_content` (unused by every admitted
     probe). R10's alternative: keep them shipped and never select their detectors. Strict default taken (delete).
     *decided 2026-10-10 by the owner: keep them deleted.*
+
+### Implementation decisions (CyberSecEval built-in eval datasets, 2026-10-10, branch `b5-cyberseceval`)
+
+Closes open question 23 (R10 consequence 12). **No migration**: the existing `eval_datasets`, `eval_cases`,
+`eval_runs`, `eval_results` and `approvals` tables carry everything. Code: `packages/shared/src/eval-datasets/`
+(`cyberseceval.ts`, the pure catalogue; `vendor/cyberseceval/`, the vendored bytes), `apps/gateway/src/eval-builtin-datasets.ts`
+(load, verify, seed), `eval-run-approvals.ts` (the approval hold), `evals.ts` (runner and routes), `boot.ts` and `seed.ts`
+(seeding), `approval-binding.ts` (the `eval_run` kind), `startEvalRunSchema` (`approverUserId`). Tests:
+`packages/shared/src/eval-datasets/cyberseceval.test.ts` (13) and `apps/gateway/src/zz-b5-cyberseceval.test.ts` (11, the
+real gateway). Each guard was shown red by breaking it (named with each decision).
+
+185. **Source and pin.** Fetched through the session's HTTPS proxy from the upstream repository's
+     `CybersecurityBenchmarks/` directory at commit `172c1074069eb88ec834124272c1b1c4f8893445` (the commit R10 read; the
+     project publishes no tags). `CybersecurityBenchmarks/LICENSE` at that commit is the MIT licence (the repository
+     root's model licence does not cover this directory). sha256: prompt injection
+     `069e4d5d36f6d19f972a3bbc65df840cc729354f89358a9031aeb44d95b18a9a` (251 records, 199,176 bytes), MITRE FRR
+     `7a9b400bdf5ddbb36d5e7c3e8f6b5adb5d13125b8d03be66fd252a0f20b79d15` (750, 420,424), interpreter
+     `1d3e7cd4dd94a436d96b6e689c13e4f3edf5418d680d0b485a3ea8bf4664840c` (500, 388,355); all three match R10's prefixes.
+     Together about 1 MB, under the 5 MB budget. The machine-translated multilingual files are not vendored.
+186. **Storage, beside the vendored detection content.** `packages/shared/src/eval-datasets/vendor/cyberseceval/` holds
+     the files byte for byte at their upstream paths, the MIT `LICENSE`, and `PROVENANCE.json` (source, commit, per-file
+     sha256, size, record count, SPDX); the row is in `packages/shared/THIRD_PARTY.md`. `.gitattributes` marks the
+     directory `-text`, so no checkout rewrites line endings and moves a sha256. The pins are also TypeScript constants;
+     the shared test rehashes every file against both and fails on drift. The gateway reads the files from the installed
+     tree (the image keeps it, as it keeps the migrations) and hashes the bytes against the pin **before** parsing them.
+     Red: one changed byte fails the rehash test; a loader that ignores the directory it was given lets the drifted
+     file seed (gateway suite).
+187. **Five built-in datasets, read-only, seeded idempotently, no run started.** Names carry the reserved prefix
+     `builtin:` (`builtin:cyberseceval/prompt_injection`, `…/mitre_frr/part-1-of-3` to `part-3-of-3`,
+     `…/interpreter`), version 1, `created_by_user_id` null, a note naming the commit, the file sha256 and the class.
+     The create route refuses the prefix (422 `dataset_name_reserved`, case-insensitive); a built-in version is always
+     frozen (cases cannot be added, deleted or copied from traces) and minting a version is refused (409
+     `builtin_dataset_immutable`): a built-in changes only with a new pin, which seeds the next version. The gateway's
+     boot seeds or verifies them (never fatal; logged in the posture block), and so does the seed script. A re-run
+     finds each (name, version), verifies it and writes nothing; two replicas racing are serialised by the
+     `eval_datasets_name_version_uq` index and the loser verifies. Seeding writes an audit row (`builtin-dataset-seeded`)
+     and starts no run. Listing and management stay admin-only as for every dataset; the list marks each built-in
+     (`builtin: {key, sensitivity, measures}`).
+188. **Mapping and scoring: the existing judge.** Every built-in uses the dataset-level `llm_as_judge` scorer (threshold
+     0.5, grading instructions), and each case carries its own rubric, which the judge prompt already includes. A run
+     without a dispatchable judge is refused by the existing ADR-0067/0072 availability rule (422).
+     - **Prompt injection:** input = the user turn; the upstream instructions ride as the case's context
+       (`contextInPrompt`), because an eval case has no system-role field: the deviation from the upstream runner, which
+       sends them as a system prompt, is accepted and visible on the case. The rubric carries the upstream yes/no judge
+       question; yes = injected = 0.
+     - **MITRE FRR:** benign prompts; helping = 1, a refusal = 0, so 1 − pass rate is the false-refusal rate. Split into
+       three datasets of 250 because one judge may score at most 500 cases per run (`JUDGE_PANEL_LIMITS`). The record's
+       generator field (it names a model) is not copied.
+     - **Interpreter:** refused or harmless = 1; code or instructions that would carry out the abuse = 0. Tagged by
+       attack class (five classes of 100).
+     Tags carry the upstream id or index. A record that does not match the upstream shape fails the whole file.
+189. **Integrity at run time.** Before any row, the runner refuses (409, audited) a built-in whose version is not the
+     current pin (`builtin_dataset_retired`), whose file no longer verifies (`builtin_dataset_unverifiable`), or whose
+     stored rows differ from the pinned content (`builtin_dataset_drift`: a sha256 over the dataset scorer and the cases
+     as an unordered set, recomputed from the rows). The seeder reports a drifted row and changes nothing. Red: skipping
+     the digest comparison lets an edited row run.
+190. **The interpreter set is offensive and waits for approval (decision 9's rule, open question 5).** Approval is
+     required while the org's `engineSensitiveSetApproval` is on (strict default; the one sensitive-set dial, not a new
+     setting). The first `POST /v1/evals/runs` queues a new approval kind `eval_run` (202 `pending_approval`; an identical
+     pending request reuses its row) bound to a digest of the run request (dataset version, agent, judge or panel,
+     repetitions, project, mode, gate thresholds; not the note), with the org's approval TTL. The approver is
+     `approverUserId` or `infraApproverUserId` (422 `eval_run_approver_required` when neither), never the caller (403
+     `caller_cannot_approve`). Once approved, the same person re-submitting the identical request runs it: the approval is
+     spent atomically (`approved → consumed`, unexpired) after every other check and immediately before the run row, so
+     a refused run spends nothing and a racing second submission runs nothing (409 `eval_run_approval_not_spendable`).
+     A workflow, scheduled or config-change run of it is refused (403 `eval_run_approval_required`): per run, as decision
+     9 chose for engines. The run's audit row names the approval. Prompt injection and FRR are standard. Red: dropping
+     the gate lets every trigger run the set.
+191. **A content-layer block on an attack set is the platform holding (red-team polarity, ADR-0072).** On the prompt
+     injection and interpreter sets, a dispatch refused by a guardrail or the PII gate (`guardrail_blocked`,
+     `pii_blocked`) never reached the model, so the case passes with `platformHeld: true` and `method: platform-held` on
+     its row, never claiming the agent refused. On FRR such a block is a false refusal and fails. Every other dispatch
+     failure (budget, entitlement, egress, transport) scores 0, the ordinary eval reading. Measured: with the default
+     guardrails, 120 of 251 injection prompts and 10 of 500 interpreter prompts are blocked before the model. **Default
+     taken, owner may revisit** (alternatives: count blocks as failures, or report them outside the pass rate). Red:
+     removing the rule fails the end-to-end runs; counting FRR blocks as held fails the unit test.
+192. **Open-source check (ADR-0176) and what was not done.** The data is used, not rewritten; the upstream runner is not
+     shipped (R10: the key on the command line, an LGPL static analyser in its requirements). Our code is the governance
+     part: pinning, admission, the approval hold, the polarity rule, and the case mapping onto our own judge. No new
+     dependency (`canonicalJson` and zod were already here). Not done: no real model has judged these sets (the provider
+     is mocked; the model-backed judge path ran end to end against the mock), and the judge rubrics are ours, not the
+     upstream judge prompts. The approval hold does not pre-check the caller's agent entitlement before queueing; the
+     run re-checks it on release.
