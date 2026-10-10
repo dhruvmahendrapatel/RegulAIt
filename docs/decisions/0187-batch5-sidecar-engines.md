@@ -1885,6 +1885,65 @@ guard was shown red by breaking it (recorded with each decision). `packages/engi
      0.124.1 itself requires `simple-git ^4.0.2`, so that override is dropped; `basic-ftp` 6.2.2 stays (without it 5.3.1
      resolves). The licence gate's result is unchanged (11 pending, open question 6).
 
+### Owner decisions (2026-10-10, garak open questions 19-26)
+
+Taken by the owner in session on 2026-10-10. The build follows in its own slices.
+
+- **Question 21, accepted:** the 20 licences in the garak image's allow-file are admitted: PSF-2.0, MPL-2.0, ZPL-2.1,
+  MIT-0, CNRI-Python, MIT-CMU, the FreeType, HarfBuzz, libjpeg-turbo, libpng and libtiff licences, and Boost BSL-1.0.
+  "BSL-1.0" is the Boost Software License, which is permissive; it is not the Business Source License that ADR-0176
+  bans. MPL-2.0 files are admitted only while unmodified. torch's terms are Apache-2.0 WITH LLVM-exception. This
+  amends the ADR-0176 list for these named licences in shipped engine images only. The image becomes admissible
+  once CI's scans of the OS layer and the native libraries are clean.
+- **Question 20, accepted:** every probe excluded under decision 144 is admitted:
+  - the inline third-party payloads: doctor, grandma, goodside, glitch;
+  - badchars (Unicode licence);
+  - the OpenRAIL toxicity classifier: atkgen.Tox, latentinjection.LatentJailbreak, lmrc.Bullying,
+    realtoxicityprompts.*;
+  - the CC-BY-4.0 word list and system-prompt dataset: the lmrc slur and sexual probes, sysprompt_extraction.
+
+  The required attribution and use-restriction notices go in THIRD_PARTY.md. The OpenRAIL use restrictions must
+  appear in the image notices.
+- **Question 19, decided: our own per-probe OWASP table.** We keep a table mapping each probe to its 2025 OWASP risk
+  and ignore garak's 2023 tags. Every row is reviewed at each garak pin change. A probe with no defensible 2025 risk
+  maps to none; we never overclaim coverage.
+- **Question 22, accepted: pre-seed now.** The licence-clear Hugging Face assets named in R10 are pre-seeded in the
+  image at pinned revisions, with the offline load proven in the image. This adds about 2 GB.
+- **Question 24, accepted: hosted-judge probes run through a gateway judge.** `judge.*` and `agent_breaker.*` are
+  re-pointed at a judge model reached only through the gateway, so the call is governed, costed and audited like any
+  other model call. Those probes become `requiresJudge`. Approvals apply as for agentic sets.
+- **Question 26, kept:** the two word lists stay deleted (strict default).
+- **Question 25 (coordinator, technical):** both engines keep `credentialIsolation` at its verified value only. garak
+  and modelscan are each re-checked against the CI-built image layout, and whichever has not been checked reads
+  `false`.
+
+**Review (X29-G, Codex, after #228 merged; 2 findings, each red first; branch `b5-garak-fix`).** Tests:
+`packages/engine-garak/src/garak.test.ts` [161], `packages/engine-promptfoo/src/promptfoo.test.ts` [162], and the
+garak gateway suite's report fixture (now paired records). No migration.
+
+161. **A pass needs complete detector coverage, reconciled by attempt UUID** (B5X-02, MEDIUM). The mapper counted only
+     the scores in completed (`status` 2) attempt lines and checked them against the eval line, so two partial lists
+     that agreed could pass: one scored output beside (a) another generated attempt that was never scored, or (b) a
+     completed attempt with two outputs and one score. garak 0.17.0 writes each attempt twice, generated (status 1)
+     then scored (status 2), with the same `uuid` (`probes/base.py`, `harnesses/base.py`). Now every attempt line of
+     the probe must carry a uuid, an `outputs` list and status 1 or 2; each generated uuid must have exactly one
+     completed record with the same number of outputs; every completed record must have its generation; and each
+     completed record must carry one score per output. A normal 1/2 pair is one attempt (never counted twice). An
+     unmatched generation, a missing or extra score, a duplicate generation or completed record, or a completed record
+     with no generation reads `unknown` (`coverage_incomplete`); a hit already observed still makes the item `fail`.
+     Counts only: no prompt or output text is read or copied. Red: with the check removed the new test fails (case
+     (a) reads `pass`). The opt-in real-engine suite passes against the pinned garak with the rule in place, now on a
+     venv pruned exactly as the image is (which also closes decision 158's "not a post-prune run" gap for the two
+     probes it runs: promptinject.HijackHateHumans and encoding.InjectBase64).
+162. **The promptfoo cancel proof no longer races the scheduler** (B5X-03, LOW). It cancelled on the second heartbeat
+     (20 ms), assuming the adapter had reached the fake engine by then; under load the cancel landed first, the runner
+     correctly posted nothing, but the "the engine saw the abort" assertion failed. The fake engine now signals that
+     generation started, and the heartbeat cancels only after that signal, so the proof is of a cancel DURING
+     generation (abort seen, the eval step never started, nothing posted) whatever the timing. A second test pins the
+     early cancel: the starting heartbeat already carries it, the engine is never started and nothing is posted.
+     Shown: with an 80 ms delay inserted before the adapter, the old timing fails the abort assertion (Codex's
+     reproduction) and the synchronised test passes.
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -1970,21 +2029,25 @@ guard was shown red by breaking it (recorded with each decision). `packages/engi
     have no clean 2025 target: llm07 Insecure Plugin Design and llm10 Model Theft. Both map to nothing until the owner
     decides (candidates: llm07 → 2025 LLM06 Excessive Agency or LLM05; llm10 → nothing). The alternative R10 names —
     our own per-probe OWASP table that ignores garak's tags — is also open.
+    *decided 2026-10-10 by the owner: our own per-probe table (see "Owner decisions (2026-10-10, garak)").*
 20. **B5-G: probes excluded pending an owner decision on provenance or licence (decision 144).** (a) Inline payloads
     garak reproduces from named third-party posts: doctor, grandma, goodside, glitch. (b) Licences outside the list:
     badchars (Unicode licence), the OpenRAIL toxicity classifier (atkgen.Tox, latentinjection.LatentJailbreak,
     lmrc.Bullying, realtoxicityprompts.*), the CC-BY-4.0 word list and system-prompt dataset (lmrc slur and sexual
     probes, sysprompt_extraction). Strict default meanwhile: `excluded_licence`, data deleted where it is a file.
+    *decided 2026-10-10 by the owner: every listed probe is admitted (see "Owner decisions (2026-10-10, garak)").*
 21. **B5-G: the garak image's licences outside the ADR-0176 list (decision 157).** 20 allow-file entries say "pending
     owner decision": PSF-2.0 (CPython, aiohappyeyeballs, defusedxml, typing_extensions), MPL-2.0 (certifi,
     mikeshardmind-base2048, orjson, tqdm), ZPL-2.1 (datetime, zope.interface), MIT-0 (cffi), CNRI-Python (regex),
     MIT-CMU (pillow), pillow's FreeType (FTL), HarfBuzz, libjpeg-turbo, libpng and libtiff licences, and torch's
     LLVM-exception and BSL-1.0 terms. All permissive or file-level. The image is not admissible until decided; the
     torch wheel's native libraries and the OS layer still need the first CI scan.
+    *decided 2026-10-10 by the owner: all 20 licences are admitted (see "Owner decisions (2026-10-10, garak)").*
 22. **B5-G: pre-seeding Hugging Face assets (decision 146).** R10 lists licence-clear assets (two Apache/MIT detector
     models; six Apache-2.0 package-list datasets and one system-prompt dataset). Pre-seeding them would admit
     packagehallucination (six probes) and the misleading NLI detectors; it needs the offline load proven in the image
     (`refs/main` set to each pinned revision) and adds about 2 GB. Not done in B5-G; the probes stay `missing_preseed`.
+    *decided 2026-10-10 by the owner: pre-seed now.*
 23. **B5-G: CyberSecEval (R10 consequence 12).** The three MIT dataset files (prompt injection, MITRE FRR,
     interpreter) are to be vendored by commit and sha256 as RegulAIt eval datasets, run by our runner through the
     gateway with a judge. Not in this slice (it is an eval-dataset feature, not part of the garak image).
@@ -1995,12 +2058,15 @@ guard was shown red by breaking it (recorded with each decision). `packages/engi
 24. **B5-G: the hosted-judge detectors (decision 146).** `judge.*` and `agent_breaker.*` can be re-pointed at a judge
     behind the gateway through their model parameters (R10). Excluded until the owner decides B5-G should support it
     (it would make garak `requiresJudge` for those probes).
+    *decided 2026-10-10 by the owner: supported through a gateway judge.*
 25. **B5-G: `credentialIsolation: true` before the image is verified (decision 140).** Set on the lead's instruction for
     the two-container build; modelscan's equivalent build keeps `false` until verified (question 18). The two should be
     reconciled once either image is built and its layout checked.
+    *decided 2026-10-10 (coordinator): verified value only, for both engines.*
 26. **B5-G: the deleted unsafe_content word lists (decision 145).** Deleting `profanity_en.csv` and
     `ofcom-potentially-offensive.txt` breaks the import of `garak.detectors.unsafe_content` (unused by every admitted
     probe). R10's alternative: keep them shipped and never select their detectors. Strict default taken (delete).
+    *decided 2026-10-10 by the owner: keep them deleted.*
 
 ### Implementation decisions (CyberSecEval built-in eval datasets, 2026-10-10, branch `b5-cyberseceval`)
 
