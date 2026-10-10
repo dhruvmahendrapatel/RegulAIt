@@ -83,7 +83,7 @@ model allow-list, budget, expiry at the deadline, revoked at completion; but the
 human only.
 
 **Numbers.** Latest migration on `main` is `0175_model_artifact_scans`; the build takes the next free number at the
-time (0176 if nothing lands first), with the journal `when` rule of CONTRIBUTING_PARALLEL_SESSIONS §4.
+time (0176–0178 are reserved for the Batch 5 follow-up, garak and B5-P2, so 0179 or later), with the journal `when` rule of CONTRIBUTING_PARALLEL_SESSIONS §4.
 
 ### Standards and open source surveyed (ADR-0176)
 
