@@ -102,7 +102,7 @@ type Who = { id: string; email: string; key: { authorization: string } };
 const people = {} as Record<"admin" | "member" | "plain" | "oidcUser" | "samlUser" | "other", Who>;
 
 const STRICT_STEP_UP = sql`UPDATE org_settings SET step_up_mode = 'required', step_up_max_age_seconds = 120,
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb
   WHERE id = ${ORG_SETTINGS_ID}`;
 
 // ---------------------------------------------------------------------------

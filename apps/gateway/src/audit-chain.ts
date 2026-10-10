@@ -52,6 +52,7 @@ import {
   and,
   asc,
   auditAnchors,
+  auditChainVersions,
   auditLog,
   desc,
   eq,
@@ -943,6 +944,15 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
     prevRowHash = before[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   }
 
+  // ADR-0188 decision 19: the v2 boundary comes from the verifier-trusted
+  // `audit_chain_versions` table, never from a row's own flag (bounded
+  // verification from any seq loads it the same way)
+  const [boundary] = await db
+    .select({ fromSeq: auditChainVersions.fromSeq })
+    .from(auditChainVersions)
+    .where(eq(auditChainVersions.version, 2));
+  const v2FromSeq = boundary?.fromSeq ?? null;
+
   let cursor = fromSeq - 1;
   let rowsScanned = 0;
   let batches = 0;
@@ -969,6 +979,10 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
         ruleChain: auditLog.ruleChain,
         reason: auditLog.reason,
         deployMode: auditLog.deployMode,
+        chainVersion: auditLog.chainVersion,
+        actorIdentityId: auditLog.actorIdentityId,
+        delegationGrantId: auditLog.delegationGrantId,
+        actorChain: auditLog.actorChain,
         contentHash: auditLog.contentHash,
         prevHash: auditLog.prevHash,
         rowHash: auditLog.rowHash,
@@ -982,7 +996,7 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
     batches += 1;
     rowsScanned += page.length;
 
-    const res = verifyChainBatch(page, { expectedSeq, prevRowHash });
+    const res = verifyChainBatch(page, { expectedSeq, prevRowHash, v2FromSeq });
     if (res.break) {
       firstBreak = res.break;
       break;

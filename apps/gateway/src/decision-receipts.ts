@@ -1,8 +1,8 @@
 import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
-import { and, asc, auditLog, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
-import { auditContentHash, auditRowHash, isDecisionReceiptPayload, isReceiptBundle, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, receiptPayloadHash, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
+import { and, asc, auditChainVersions, auditLog, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
+import { auditChainVersionAt, auditContentHashFor, auditRowHash, isDecisionReceiptPayload, isReceiptBundle, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, receiptPayloadHash, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
@@ -60,12 +60,16 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
     const rows = await tx.select().from(auditLog).where(eligibleAfter(last?.auditSeq ?? 0)).orderBy(asc(auditLog.seq)).limit(SWEEP_LIMIT);
     if (!rows.length) return { signed: 0, state: "signing" as const };
     if (!recorded) await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt: opts.now });
+    // ADR-0188 decision 19: rows from the recorded v2 boundary on hash as v2 (and must say so)
+    const [boundary] = await tx.select({ fromSeq: auditChainVersions.fromSeq }).from(auditChainVersions).where(eq(auditChainVersions.version, 2));
+    const v2FromSeq = boundary?.fromSeq ?? null;
     let receiptSeq = last?.receiptSeq ?? 0;
     let prev = last?.payloadHash ?? RECEIPT_GENESIS_PREV;
     for (const row of rows) {
       // Never notarise corrupted audit content merely because the stored hash exists.
       if (row.seq === null || !row.contentHash || !row.rowHash || !row.prevHash ||
-          row.contentHash !== auditContentHash(row) || row.rowHash !== auditRowHash(row.prevHash, row.contentHash))
+          (row.chainVersion ?? null) !== (auditChainVersionAt(row.seq, v2FromSeq) === 2 ? 2 : null) ||
+          row.contentHash !== auditContentHashFor(row, auditChainVersionAt(row.seq, v2FromSeq)) || row.rowHash !== auditRowHash(row.prevHash, row.contentHash))
         throw new Error("Audit row failed integrity verification; no receipts from this pass committed.");
       const tool=boundedDecisionField(row.toolName),rule=boundedDecisionField(row.ruleId);
       const payload: DecisionReceiptPayload = {
