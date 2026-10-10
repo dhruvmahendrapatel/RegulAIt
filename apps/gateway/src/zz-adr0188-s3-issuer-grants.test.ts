@@ -83,6 +83,7 @@ import {
 import {
   configuredIdentitySigningKeys,
   currentIssuerSigner,
+  revokeIdentitySigningKey,
   publishedSigningKeys,
   rotateIdentitySigningKey,
   SIGNING_KEY_OVERLAP_SECONDS,
@@ -221,7 +222,12 @@ beforeAll(async () => {
   const k0 = (await configuredIdentitySigningKeys())[0]!;
   // a shared database may already hold an active key from another run: make ours the signer
   const [active] = await db.select().from(identitySigningKeys).where(sql`activated_at is not null and retired_at is null and revoked_at is null`);
-  if (active && active.kid !== k0.kid) await rotateIdentitySigningKey(db, { kid: k0.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+  // a shared database may already hold keys from another run (ours are retired in afterAll): only an EMPTY
+  // table auto-activates on first use, so otherwise make our key the signer explicitly, as an admin would
+  const recordedKeys = await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys);
+  if (recordedKeys.length > 0 && active?.kid !== k0.kid) {
+    await rotateIdentitySigningKey(db, { kid: k0.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+  }
 
   const u = await inject("POST", "/v1/users", AUTH, { email: `s3-sponsor-${RUN}@example.com`, displayName: `s3 sponsor ${RUN}` });
   expect(u.statusCode, u.body).toBe(201);
@@ -308,14 +314,14 @@ describe("ADR-0188 S3 — creation refuses over-scope, never narrows (decisions 
   it("a child outside the parent's scope, outliving it, or naming an identity already in the chain → refused, nothing written", async () => {
     const root = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: toolScope([T.read], "read"), capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc });
     const base = { parentGrantId: root.id, capMicros: null, binding: inProc, expiresAt: new Date(root.expiresAt.getTime() - 1000) };
-    const e1 = await refusal(admitChildGrant(db, { ...base, actorIdentityId: ids[1]!, scope: toolScope([T.write]), idempotencyKey: "a" }));
+    const e1 = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, ...base, actorIdentityId: ids[1]!, scope: toolScope([T.write]), idempotencyKey: "a" }));
     expect([e1.ruleId, e1.code]).toEqual(["delegation-scope", "outside_parent_scope"]);
     // a write entry never covers a read and vice versa (decision 27)
-    const e1b = await refusal(admitChildGrant(db, { ...base, actorIdentityId: ids[1]!, scope: toolScope([T.read], "write"), idempotencyKey: "a2" }));
+    const e1b = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, ...base, actorIdentityId: ids[1]!, scope: toolScope([T.read], "write"), idempotencyKey: "a2" }));
     expect(e1b.ruleId).toBe("delegation-scope");
-    const e2 = await refusal(admitChildGrant(db, { ...base, actorIdentityId: ids[1]!, scope: toolScope([T.read], "read"), expiresAt: new Date(root.expiresAt.getTime() + 60_000), idempotencyKey: "b" }));
+    const e2 = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, ...base, actorIdentityId: ids[1]!, scope: toolScope([T.read], "read"), expiresAt: new Date(root.expiresAt.getTime() + 60_000), idempotencyKey: "b" }));
     expect([e2.ruleId, e2.code]).toEqual(["delegation-scope", "outlives_parent"]);
-    const e3 = await refusal(admitChildGrant(db, { ...base, actorIdentityId: ids[0]!, scope: toolScope([T.read], "read"), idempotencyKey: "c" }));
+    const e3 = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, ...base, actorIdentityId: ids[0]!, scope: toolScope([T.read], "read"), idempotencyKey: "c" }));
     expect([e3.ruleId, e3.code]).toEqual(["actor-chain-invalid", "identity_in_chain"]);
     const n = await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, root.id));
     expect(n).toHaveLength(0);
@@ -323,14 +329,14 @@ describe("ADR-0188 S3 — creation refuses over-scope, never narrows (decisions 
 
   it("depth max + 1 → delegation-depth (strict default 3: four agents, a fifth refused); max_depth beyond the limit refused", async () => {
     let parent = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc });
-    const e0 = await refusal(admitChildGrant(db, { parentGrantId: parent.id, actorIdentityId: ids[1]!, scope: toolScope([T.write]), capMicros: null, expiresAt: parent.expiresAt, binding: inProc, idempotencyKey: "md", maxFurtherDepth: 3 }));
+    const e0 = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: parent.id, actorIdentityId: ids[1]!, scope: toolScope([T.write]), capMicros: null, expiresAt: parent.expiresAt, binding: inProc, idempotencyKey: "md", maxFurtherDepth: 3 }));
     expect(e0.ruleId).toBe("delegation-depth");
     for (let i = 1; i <= 3; i++) {
-      parent = (await admitChildGrant(db, { parentGrantId: parent.id, actorIdentityId: ids[i]!, scope: toolScope([T.write]), capMicros: null, expiresAt: parent.expiresAt, binding: inProc, idempotencyKey: `d${i}` })).grant;
+      parent = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: parent.id, actorIdentityId: ids[i]!, scope: toolScope([T.write]), capMicros: null, expiresAt: parent.expiresAt, binding: inProc, idempotencyKey: `d${i}` })).grant;
     }
     expect(parent.depth).toBe(3);
     expect((await decide(parent.id, T.write)).effect).toBe("allow");
-    const e = await refusal(admitChildGrant(db, { parentGrantId: parent.id, actorIdentityId: ids[4]!, scope: toolScope([T.write]), capMicros: null, expiresAt: parent.expiresAt, binding: inProc, idempotencyKey: "d4" }));
+    const e = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: parent.id, actorIdentityId: ids[4]!, scope: toolScope([T.write]), capMicros: null, expiresAt: parent.expiresAt, binding: inProc, idempotencyKey: "d4" }));
     expect(e.ruleId).toBe("delegation-depth");
   });
 });
@@ -343,7 +349,7 @@ describe("ADR-0188 S3 — decision 22 budgets on edges (worked examples)", () =>
   // retried request is byte-identical and a grandchild never outlives its parent
   const CHILD_EXP = new Date(Date.now() + 1800_000);
   const child = (parentId: string, identity: number, cap: number, key: string) =>
-    admitChildGrant(db, { parentGrantId: parentId, actorIdentityId: ids[identity]!, scope: toolScope([T.write]), capMicros: M(cap), expiresAt: CHILD_EXP, binding: inProc, idempotencyKey: key });
+    admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: parentId, actorIdentityId: ids[identity]!, scope: toolScope([T.write]), capMicros: M(cap), expiresAt: CHILD_EXP, binding: inProc, idempotencyKey: key });
 
   it("scenario 1: root 100 → B 100 → C 1 is admitted (decision 16 refused this)", async () => {
     const r = await root(100);
@@ -394,6 +400,20 @@ describe("ADR-0188 S3 — decision 22 budgets on edges (worked examples)", () =>
     expect((await grant(d.id)).revokedAt).toBeNull();
   });
 
+  it("creation and admission each write a delegation_grant audit row in the same transaction (chain ids, no secrets); a replay writes none", async () => {
+    const r = await root(10);
+    const c = await child(r.id, 1, 4, "audit-c");
+    const rowsFor = (id: string) => db.select().from(auditLog).where(and(eq(auditLog.objectType, "delegation_grant"), eq(auditLog.objectId, id)));
+    const [ra] = await rowsFor(r.id);
+    expect(ra).toMatchObject({ userId, ruleId: "delegation-create" });
+    expect(ra!.detail).toMatchObject({ phase: "create", grantId: r.id, rootGrantId: r.id, parentGrantId: null, depth: 0, actorIdentityId: ids[0] });
+    const [ca] = await rowsFor(c.grant.id);
+    expect(ca!.detail).toMatchObject({ phase: "admit", rootGrantId: r.id, parentGrantId: r.id, path: [r.id], depth: 1, actorIdentityId: ids[1], capMicros: M(4) });
+    expect(JSON.stringify([ra!.detail, ca!.detail])).not.toMatch(/thumbprint|credential|jkt|token/i);
+    await child(r.id, 1, 4, "audit-c"); // idempotent replay
+    expect(await rowsFor(c.grant.id)).toHaveLength(1);
+  });
+
   it("scenario 3: two concurrent children of 60 under a fresh root of 100 → exactly one admitted", async () => {
     const r = await root(100);
     const out = await Promise.allSettled([child(r.id, 1, 60, "s3a"), child(r.id, 2, 60, "s3b")]);
@@ -406,7 +426,7 @@ describe("ADR-0188 S3 — decision 22 budgets on edges (worked examples)", () =>
   it("idempotency: a retried request (lost reply) returns the same child and reserves once; a different body under the key is refused", async () => {
     const r = await root(100);
     const first = await child(r.id, 1, 30, "idem");
-    const again = await admitChildGrant(db, {
+    const again = await admitChildGrant(db, { environment: ENV, projectId: null,
       parentGrantId: r.id,
       actorIdentityId: ids[1]!,
       scope: toolScope([T.write]),
@@ -469,9 +489,9 @@ describe("ADR-0188 S3 — decision 17: the live chain, read fresh at every use",
     const both = [...toolScope([T.write]), ...toolScope([T.read], "read")];
     const root = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: both, capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc });
     const exp = new Date(root.expiresAt.getTime() - 1000);
-    const mid = (await admitChildGrant(db, { parentGrantId: root.id, actorIdentityId: ids[1]!, scope: both, capMicros: null, expiresAt: exp, binding: inProc, idempotencyKey: "m" })).grant;
-    const leaf = (await admitChildGrant(db, { parentGrantId: mid.id, actorIdentityId: ids[2]!, scope: toolScope([T.write]), capMicros: null, expiresAt: exp, binding: inProc, idempotencyKey: "l" })).grant;
-    const sib = (await admitChildGrant(db, { parentGrantId: root.id, actorIdentityId: ids[3]!, scope: toolScope([T.read], "read"), capMicros: null, expiresAt: exp, binding: inProc, idempotencyKey: "s" })).grant;
+    const mid = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: root.id, actorIdentityId: ids[1]!, scope: both, capMicros: null, expiresAt: exp, binding: inProc, idempotencyKey: "m" })).grant;
+    const leaf = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: mid.id, actorIdentityId: ids[2]!, scope: toolScope([T.write]), capMicros: null, expiresAt: exp, binding: inProc, idempotencyKey: "l" })).grant;
+    const sib = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: root.id, actorIdentityId: ids[3]!, scope: toolScope([T.read], "read"), capMicros: null, expiresAt: exp, binding: inProc, idempotencyKey: "s" })).grant;
     return { root, mid, leaf, sib };
   }
 
@@ -702,7 +722,7 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     const credA2 = await registerJwk(ids[2]!, A2);
     const credB2 = await registerJwk(ids[2]!, B2);
     const g = await externalRoot(2, credA2, { kind: "dpop", thumbprint: await jkt(B2) });
-    const child = (await admitChildGrant(db, { parentGrantId: g.id, actorIdentityId: ids[3]!, scope: toolScope([T.write]), capMicros: null, expiresAt: g.expiresAt, binding: inProc, idempotencyKey: "prov" })).grant;
+    const child = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: g.id, actorIdentityId: ids[3]!, scope: toolScope([T.write]), capMicros: null, expiresAt: g.expiresAt, binding: inProc, idempotencyKey: "prov" })).grant;
     const t = await mint(g.id);
     const call = async () => verify(resourceRequest(t.accessToken, await dpopProof(B2, { token: t.accessToken })));
     expect((await call()).ok).toBe(true);
@@ -721,7 +741,7 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     const Bc = workloadKey();
     const credC = await registerJwk(ids[4]!, workloadKey());
     const r = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[3]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc });
-    const c = (await admitChildGrant(db, { parentGrantId: r.id, actorIdentityId: ids[4]!, scope: toolScope([T.write]), capMicros: null, expiresAt: r.expiresAt, binding: { kind: "dpop", thumbprint: await jkt(Bc), authCredentialId: credC, audience }, idempotencyKey: "rt" })).grant;
+    const c = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: r.id, actorIdentityId: ids[4]!, scope: toolScope([T.write]), capMicros: null, expiresAt: r.expiresAt, binding: { kind: "dpop", thumbprint: await jkt(Bc), authCredentialId: credC, audience }, idempotencyKey: "rt" })).grant;
     const t = await mint(c.id);
     expect((await verify(resourceRequest(t.accessToken, await dpopProof(Bc, { token: t.accessToken })))).ok).toBe(true);
     await revokeDelegationGrant(db, { grantId: r.id, reason: "admin" });
@@ -768,6 +788,24 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     } finally {
       await restore();
     }
+  });
+
+  it("after a key has been revoked, a mint never silently activates a configured key: no signer until an admin rotates", async () => {
+    // configure a fresh third key, then revoke the CURRENT signer (compromise)
+    writeIssuerKeys([issuerKeys[0]!, issuerKeys[1]!, issuerKeys[2]!]);
+    const current = await currentIssuerSigner(db);
+    await revokeIdentitySigningKey(db, { kid: current.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+    const before = (await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).length;
+    const auditsBefore = (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, "identity-signing-key-activate"))).length;
+    await expect(mint(rootExt)).rejects.toMatchObject({ code: "signing_key_unavailable" });
+    // nothing was recorded or activated, and no SYSTEM activation row was written
+    expect((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).length).toBe(before);
+    expect((await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, "identity-signing-key-activate"))).length).toBe(auditsBefore);
+    // an admin rotation (the step-up route; here the function it calls) restores a signer
+    const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
+    const next = (await configuredIdentitySigningKeys()).find((k) => !recorded.has(k.kid))!;
+    await rotateIdentitySigningKey(db, { kid: next.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+    expect((await mint(rootExt)).kid).toBe(next.kid);
   });
 });
 
@@ -866,7 +904,7 @@ describe("ADR-0188 S3 — decision 23: a parent authorises one specific child an
 
     // the caller then admits exactly the signed body, bound to B's key
     const credB = await registerJwk(ids[6]!, workloadKey());
-    const child = await admitChildGrant(db, {
+    const child = await admitChildGrant(db, { environment: b.env, projectId: b.project_id,
       parentGrantId: parentGrant,
       actorIdentityId: ids[6]!,
       scope: b.authorization_details,
@@ -896,6 +934,34 @@ describe("ADR-0188 S3 — decision 23: a parent authorises one specific child an
     expect(r.ok ? "" : r.code).toBe("authz_not_parent_key");
     const stale = await authz(b, "f2", { iat: Math.floor(Date.now() / 1000) - 61 });
     expect((await check(stale, b, "f2")).ok).toBe(false);
+  });
+
+  it("a body A genuinely SIGNED with an env or project other than the parent's is refused delegation_body_mismatch, before any claim; admission refuses the same", async () => {
+    for (const [label, over] of [
+      ["env", { env: "production" }],
+      ["project", { project_id: randomUUID() }],
+    ] as const) {
+      const b = body(over);
+      const a = await authz(b, `bm-${label}`);
+      const r = await check(a, b, `bm-${label}`);
+      expect(r.ok ? "" : r.code, label).toBe("delegation_body_mismatch");
+    }
+    const credB = await registerJwk(ids[6]!, workloadKey());
+    for (const over of [{ environment: "production", projectId: null }, { environment: ENV, projectId: randomUUID() }]) {
+      const e = await refusal(
+        admitChildGrant(db, {
+          ...over,
+          parentGrantId: parentGrant,
+          actorIdentityId: ids[6]!,
+          scope: toolScope([T.write]),
+          capMicros: M(1),
+          expiresAt: new Date(Date.now() + 600_000),
+          idempotencyKey: `bm-${over.environment}-${over.projectId ?? "none"}`,
+          binding: { kind: "dpop", thumbprint: await jkt(Bkey), authCredentialId: credB, audience },
+        }),
+      );
+      expect(e.code).toBe("delegation_body_mismatch");
+    }
   });
 
   it("a certificate-bound (mTLS) parent cannot hand off across processes in v1", async () => {

@@ -578,6 +578,10 @@ export async function checkDelegationAuthorization(db: Db, input: DelegationAuth
     return no("delegation_body_invalid", "invalid_request");
   }
   if (a.delegation !== canonicalBody) return no("authz_body_mismatch");
+  // the signed env and project must BE the parent's (a child inherits both): refuse, never narrow or replace
+  if (input.body.env !== stored.live.leaf.environment || input.body.project_id !== stored.live.leaf.projectId) {
+    return no("delegation_body_mismatch");
+  }
   if (a.idempotency_key !== input.idempotencyKey) return no("authz_idempotency_mismatch");
 
   // everything matched: only now is A's authorization consumed (once, atomically)

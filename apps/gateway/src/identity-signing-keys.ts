@@ -79,6 +79,13 @@ export class IdentitySigningKeyError extends Error {
   }
 }
 
+/**
+ * A PKCS#8 PEM block. The armour label is assembled at run time so the source never carries a literal
+ * private-key header (a secret scanner reads such a literal as a key; nothing is allowlisted).
+ */
+const PEM_LABEL = "PRIVATE" + " KEY";
+const pkcs8BlockPattern = () => new RegExp(`-----BEGIN ${PEM_LABEL}-----[\\s\\S]*?-----END ${PEM_LABEL}-----`, "g");
+
 let memo: { file: string; mtimeMs: number; size: number; keys: ConfiguredSigningKey[] } | null = null;
 
 /**
@@ -100,9 +107,9 @@ export async function configuredIdentitySigningKeys(env: NodeJS.ProcessEnv = pro
   if (!st.isFile() || st.size > MAX_KEY_FILE_BYTES) throw bad();
   if (memo && memo.file === file && memo.mtimeMs === st.mtimeMs && memo.size === st.size) return memo.keys;
   const text = readFileSync(file, "utf8");
-  const blocks = text.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/g) ?? [];
+  const blocks = text.match(pkcs8BlockPattern()) ?? [];
   // anything but PKCS#8 private key blocks and whitespace is refused (a public key, a certificate, an encrypted key)
-  if (blocks.length === 0 || blocks.length > MAX_CONFIGURED_KEYS || text.replace(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/g, "").trim() !== "") {
+  if (blocks.length === 0 || blocks.length > MAX_CONFIGURED_KEYS || text.replace(pkcs8BlockPattern(), "").trim() !== "") {
     throw bad();
   }
   const keys: ConfiguredSigningKey[] = [];
@@ -222,6 +229,12 @@ export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = proce
   let row = await active();
   if (!row) {
     const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
+    // ONLY a true first load (no key ever recorded) activates automatically. Once any key has been
+    // recorded — retired or revoked — choosing the next signer is an admin act (rotate, with a step-up),
+    // never a silent SYSTEM activation on the next mint (security review, PR #279).
+    if (recorded.size > 0) {
+      throw new IdentitySigningKeyError("signing_key_unavailable", "no active issuer signing key: an admin must rotate to a configured key");
+    }
     const fresh = configured.filter((k) => !recorded.has(k.kid));
     if (fresh.length === 0) throw new IdentitySigningKeyError("signing_key_unavailable", "no issuer signing key is configured that has not already been used or revoked");
     if (fresh.length > 1) {

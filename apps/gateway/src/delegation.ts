@@ -452,6 +452,13 @@ export interface AdmitChildGrantInput extends CommonGrantInput {
    * this may not exceed it). Not stored: below the child, the org setting caps.
    */
   maxFurtherDepth?: number;
+  /**
+   * What the request ASKS for (decision 23's signed body `env` / `project_id`). A child inherits both
+   * from its parent and can never change them, so a request naming anything else is refused
+   * `delegation_body_mismatch` — never silently replaced with the parent's values.
+   */
+  environment: string;
+  projectId: string | null;
 }
 
 function validateCommon(input: CommonGrantInput, now: Date): void {
@@ -583,7 +590,39 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
         ...bindingColumns(input.binding),
       })
       .returning();
+    await auditGrantCreated(tx, row!, "create");
     return row!;
+  });
+}
+
+/**
+ * The audit row of a grant's creation or admission, in the creating transaction. Ids, depth, cap and
+ * binding KIND only: no thumbprint, credential material or token. The actor fields of `audit_log` stay
+ * empty until the audit v2 cutover (decision 19, S4); the chain is in `detail`.
+ */
+async function auditGrantCreated(tx: Tx, g: DelegationGrantRow, phase: "create" | "admit"): Promise<void> {
+  await tx.insert(auditLog).values({
+    userId: g.sponsorUserId,
+    objectType: "delegation_grant",
+    objectId: g.id,
+    detail: {
+      phase,
+      grantId: g.id,
+      rootGrantId: g.rootGrantId,
+      parentGrantId: g.parentGrantId,
+      path: g.path,
+      depth: g.depth,
+      actorIdentityId: g.actorIdentityId,
+      projectId: g.projectId,
+      environment: g.environment,
+      capMicros: g.capMicros,
+      bindingKind: g.bindingKind,
+      expiresAt: g.expiresAt.toISOString(),
+    },
+    effect: "allow",
+    ruleId: phase === "create" ? "delegation-create" : "delegation-admit",
+    ruleChain: [],
+    reason: phase === "create" ? "root delegation grant created (ADR-0188 decision 4)" : "child delegation grant admitted under its parent (ADR-0188 decision 22)",
   });
 }
 
@@ -624,6 +663,9 @@ export async function admitChildGrant(
   return db.transaction(async (tx) => {
     const [parent] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.parentGrantId)).for("update");
     if (!parent) return refuse("actor-chain-invalid", "parent_not_found", `no delegation grant ${input.parentGrantId}`);
+    if (input.environment !== parent.environment || input.projectId !== parent.projectId) {
+      refuse("delegation-request-invalid", "delegation_body_mismatch", "the requested environment or project is not the parent's (a child inherits both)");
+    }
 
     // a retried request (lost reply) returns the same child and edge, never a second allocation
     const [edge] = await tx
@@ -709,6 +751,7 @@ export async function admitChildGrant(
         .set({ reservedMicros: sql`${delegationGrants.reservedMicros} + ${amount}` })
         .where(eq(delegationGrants.id, parent.id));
     }
+    await auditGrantCreated(tx, grant!, "admit");
     return { grant: grant!, allocation: allocation!, replayed: false };
   });
 }
