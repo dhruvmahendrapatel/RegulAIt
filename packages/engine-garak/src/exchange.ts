@@ -30,6 +30,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/p
 import path from "node:path";
 import { z } from "zod";
 import { garakProbeForSet } from "@regulait/shared";
+import { garakProbeNeedsJudge } from "./config.js";
 import { runGarakProbe, type GarakRunnerOptions } from "./garak-run.js";
 import { GARAK_MAX_REPORT_BYTES, type GarakProbeOutcome } from "./mapper.js";
 
@@ -56,11 +57,24 @@ export const garakJobSchema = z
       })
       .strict(),
     apiKey: z.string().regex(PRINTABLE),
+    /**
+     * ADR-0187 decision 204: the run's judge agent behind the gateway (its model and headers; the key is
+     * the same run key above), present only when a planned probe calls a judge model, else null.
+     */
+    judge: z
+      .object({
+        model: z.string().regex(PRINTABLE).max(200),
+        headers: z.record(z.string().regex(/^x-regulait-[a-z-]{1,40}$/), z.string().regex(PRINTABLE).max(200)),
+      })
+      .strict()
+      .nullable(),
     trials: z.number().int().min(1).max(25),
     /** the whole job's time limit (the run's remaining time less a margin) */
     timeoutMs: z.number().int().min(1000).max(4 * 3600 * 1000),
   })
-  .strict();
+  .strict()
+  // a judge probe never reaches the worker without its judge (the worker would refuse its config anyway)
+  .refine((j) => j.judge !== null || !j.probes.some((p) => garakProbeNeedsJudge(p.probe)), "a judge probe needs the run's judge");
 export type GarakJob = z.infer<typeof garakJobSchema>;
 
 const doneSchema = z
@@ -113,7 +127,7 @@ export class LocalGarakExecutor implements GarakExecutor {
       const left = until - Date.now();
       if (left < 1000) break;
       const o = await runGarakProbe(
-        { probe: p.probe, target: job.target, apiKey: job.apiKey, trials: job.trials, workDir: path.join(this.root, job.runId, String(i)), timeoutMs: left, signal },
+        { probe: p.probe, target: job.target, judge: job.judge, apiKey: job.apiKey, trials: job.trials, workDir: path.join(this.root, job.runId, String(i)), timeoutMs: left, signal },
         this.opts,
       );
       if (o.cancelled) return { outcomes, cancelled: true };
@@ -285,7 +299,16 @@ export async function workerTick(
         let o: Awaited<ReturnType<typeof runGarakProbe>>;
         try {
           o = await runGarakProbe(
-            { probe: p.probe, target: job.target, apiKey: job.apiKey, trials: job.trials, workDir: path.join(opts.workRoot, runId, String(i)), timeoutMs: left, signal: abort.signal },
+            {
+              probe: p.probe,
+              target: job.target,
+              judge: job.judge,
+              apiKey: job.apiKey,
+              trials: job.trials,
+              workDir: path.join(opts.workRoot, runId, String(i)),
+              timeoutMs: left,
+              signal: abort.signal,
+            },
             opts.garak,
           );
         } catch (e) {

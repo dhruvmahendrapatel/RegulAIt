@@ -20,8 +20,9 @@
  *                        personal data, has no licence G19 could establish, or carries a licence outside the
  *                        ADR-0176 list (each an OWNER DECISION where a licence exists but is not on the list);
  *   - `missing_preseed`  the probe or its detector needs a Hugging Face model or dataset, or a lexicon,
- *                        downloaded at run time; nothing is pre-seeded in this build and the engines network
- *                        has no route out;
+ *                        that is not pre-seeded in the image, and the engines network has no route out. The
+ *                        licence-clear Hub assets R10 names ARE pre-seeded at pinned revisions (owner,
+ *                        open question 22; decisions 198-200): `GARAK_PRESEEDED_HF_ASSETS`;
  *   - `cloud_only`       the probe drives a hosted attacker or judge model, or fetches its payload from the
  *                        internet at run time.
  *
@@ -84,6 +85,28 @@ export interface GarakProbeEntry {
   severity: RedTeamSeverity;
   /** why it does not run here (a fixed sentence), or null */
   note: string | null;
+  /**
+   * ADR-0187 decision 203 (owner decision on open question 24): the probe calls a model as a judge (its
+   * primary detector is a `judge.*` or `agent_breaker.*` detector) or as its attacker (an `agent_breaker`
+   * probe). Such a probe runs only with a judge agent behind the gateway, reached with the run's own key:
+   * a run selecting it names a judge the requester is entitled to, or it is refused (default-deny).
+   */
+  requiresJudge: boolean;
+}
+
+/**
+ * Decision 203: the garak modules whose detectors (and, for `agent_breaker`, whose probe's attacker and
+ * parser) call a model. In garak 0.17.0 those default to a hosted endpoint (R10); this build re-points
+ * every one of them at the run's judge agent through the gateway's compat route (engine-garak config.ts).
+ */
+export const GARAK_JUDGE_MODULES: readonly string[] = Object.freeze(["judge", "agent_breaker"]);
+
+const moduleOf = (name: string): string => name.split(".")[0]!;
+
+/** does this probe call a model as judge or attacker (decision 203)? derived from garak's own metadata */
+function probeNeedsJudge(probe: string): boolean {
+  const detector = GARAK_UPSTREAM_PROBES.find((p) => p.probe === probe)?.detector ?? null;
+  return GARAK_JUDGE_MODULES.includes(moduleOf(probe)) || (detector !== null && GARAK_JUDGE_MODULES.includes(moduleOf(detector)));
 }
 
 type Local = [probe: string, setClass: GarakSetClass, attackClass: RedTeamAttackClass | null, severity: RedTeamSeverity];
@@ -116,6 +139,25 @@ const LOCAL: readonly Local[] = [
   // --- training-data divergence (garak-authored; the same class as promptfoo's divergent-repetition) ---
   ["divergence.Repeat", "standard", "data_exfiltration", "medium"],
   ["divergence.RepeatExtended", "standard", "data_exfiltration", "medium"],
+  // --- admitted by the owner 2026-10-10 (open question 20; decision 195): inline payloads reproduced from
+  //     named third-party posts (doctor, grandma, goodside, glitch) and the Unicode-licensed confusables
+  //     data (badchars). Each one's primary detector is a string, trigger or regex detector.
+  ...moduleProbes("doctor").map((p): Local => [p, "offensive", "jailbreak", "high"]),
+  ["grandma.Substances", "offensive", "jailbreak", "high"],
+  ["grandma.Win10", "offensive", "jailbreak", "medium"],
+  ["grandma.Win11", "offensive", "jailbreak", "medium"],
+  ["goodside.Tag", "standard", "prompt_injection", "high"],
+  ["goodside.WhoIsRiley", "standard", null, "low"],
+  ["goodside.ThreatenJSON", "standard", null, "low"],
+  ["goodside.Davidjl", "standard", null, "low"],
+  ...moduleProbes("glitch").map((p): Local => [p, "standard", null, "low"]),
+  ["badchars.BadCharacters", "offensive", "encoding_evasion", "medium"],
+  // --- runnable since the owner's pre-seed decision (open question 22; decision 199): the Apache-2.0
+  //     system-prompt dataset and package-list datasets are in the image at pinned revisions ---
+  ["sysprompt_extraction.SystemPromptExtraction", "standard", "system_prompt_extraction", "high"],
+  ...moduleProbes("packagehallucination")
+    .filter((p) => p !== "packagehallucination.Rust")
+    .map((p): Local => [p, "standard", null, "medium"]),
   // --- reported, never counted ---
   ["divergence.RepeatedToken", "standard", null, "low"],
   ...moduleProbes("web_injection").map((p): Local => [p, "standard", null, "medium"]),
@@ -132,6 +174,11 @@ const LOCAL: readonly Local[] = [
   ...moduleProbes("exploitation").map((p): Local => [p, "offensive", null, "high"]),
   ...moduleProbes("malwaregen").map((p): Local => [p, "offensive", null, "high"]),
   ...moduleProbes("av_spam_scanning").map((p): Local => [p, "offensive", null, "medium"]),
+  // --- decision 204 (owner decision on open question 24): attacks an agent's tool use, with its attacker,
+  // parser and judge all re-pointed at the run's judge agent behind the gateway. Agentic for approvals. It
+  // reaches the agent over the chat route only, where no tool call is governed or visible, so — as for
+  // promptfoo's agentic-named plugins (decision 40) — it is reported, never counted toward an agentic class.
+  ["agent_breaker.AgentBreaker", "agentic", null, "high"],
 ];
 
 /** not run here, with the reason and the fixed sentence the Engines page shows */
@@ -146,39 +193,30 @@ const NOT_RUN: ReadonlyArray<[probes: readonly string[], disposition: Exclude<Ga
   [moduleProbes("continuation"), "excluded_licence", "slang-dictionary examples with no licence stated (G19: unverified)"],
   [["misleading.FalseAssertion"], "excluded_licence", "false-claim files with no source or licence (G19: unverified)"],
   [moduleProbes("phrasing"), "excluded_licence", "tense-rephrasing prompts whose source has no licence (G19: unverified)"],
-  [["badchars.BadCharacters"], "excluded_licence", "Unicode confusables data under the Unicode licence, outside the ADR-0176 list (OWNER DECISION)"],
   [["tap.TAPCached"], "excluded_licence", "cached TAP prompt file whose own origin is not stated (G19: unverified)"],
+  // admitted by the owner 2026-10-10 (open question 20) but still not runnable here (decision 196): the
+  // toxicity detector's model is not pre-seeded, and its module reads the two word lists kept deleted
   [
     [...moduleProbes("latentinjection").filter((p) => p.startsWith("latentinjection.LatentJailbreak")), "atkgen.Tox", "lmrc.Bullying", ...moduleProbes("realtoxicityprompts")],
-    "excluded_licence",
-    "the primary detector is a toxicity model under a use-restricted (OpenRAIL) licence (OWNER DECISION)",
+    "missing_preseed",
+    "licence admitted; its toxicity-model detector is not pre-seeded and its detector module reads word lists kept deleted",
   ],
   [
-    ["lmrc.Profanity", "lmrc.SexualContent", "lmrc.Sexualisation", "lmrc.SlurUsage", "grandma.Slurs"],
+    ["lmrc.Profanity", "lmrc.SexualContent", "lmrc.Sexualisation", "lmrc.SlurUsage"],
     "excluded_licence",
-    "the detector reads word lists with no licence (G19: unverified) or under CC-BY-4.0 (OWNER DECISION)",
+    "its detector reads the profanity word list, which has no licence G19 could establish and stays deleted (owner)",
   ],
-  [
-    [...moduleProbes("doctor"), ...moduleProbes("grandma").filter((p) => p !== "grandma.Slurs"), ...moduleProbes("goodside"), ...moduleProbes("glitch")],
-    "excluded_licence",
-    "payloads reproduced from named third-party posts; provenance not reviewed by G19 (OWNER DECISION)",
-  ],
-  [["sysprompt_extraction.SystemPromptExtraction"], "excluded_licence", "needs a CC-BY-4.0 Hub dataset (OWNER DECISION) and a second one not pre-seeded"],
+  [["grandma.Slurs"], "excluded_licence", "its detector reads the slang-dictionary slur list, which has no licence stated (G19: unverified)"],
   [["packagehallucination.Rust"], "excluded_licence", "its Hub dataset declares no licence"],
   [["audio.AudioAchillesHeel"], "excluded_licence", "its Hub dataset declares no licence (and it needs audio input)"],
-  [
-    moduleProbes("packagehallucination").filter((p) => p !== "packagehallucination.Rust"),
-    "missing_preseed",
-    "its package-list Hub dataset is not pre-seeded in this build",
-  ],
   [["ansiescape.AnsiRawTokenizerHF"], "missing_preseed", "loads a Hugging Face tokenizer that is not pre-seeded"],
   [moduleProbes("topic"), "missing_preseed", "downloads the WordNet lexicon at run time"],
   [["sata.MLM"], "missing_preseed", "downloads an NLTK tagger at run time"],
-  [
-    ["agent_breaker.AgentBreaker", "tap.TAP", "tap.PAIR", "goat.GOATAttack", "fitd.FITD", "dan.AutoDAN"],
-    "cloud_only",
-    "drives a hosted or downloaded attacker or judge model",
-  ],
+  [["tap.TAP", "tap.PAIR", "dan.AutoDAN"], "cloud_only", "drives a hosted or downloaded attacker or judge model"],
+  // decision 205: their primary detector is a `judge.*` detector, which this build can re-point at the
+  // gateway judge, but their payload data has no licence G19 could find and is deleted from the image
+  // (decision 145), so they still never run
+  [["fitd.FITD", "goat.GOATAttack"], "excluded_licence", "its payload data has no licence found and is deleted from the image (its judge could run through the gateway)"],
   [["suffix.GCG", "suffix.BEAST"], "cloud_only", "fetches its attack corpus from a git host at run time"],
   [moduleProbes("visual_jailbreak"), "cloud_only", "fetches its images from a git host at run time"],
   [["fileformats.HF_Files"], "cloud_only", "downloads the target's Hub repository"],
@@ -190,9 +228,9 @@ function buildCatalogue(): GarakProbeEntry[] {
     if (out.has(e.probe)) throw new Error(`garak catalogue: ${e.probe} listed twice`);
     out.set(e.probe, e);
   };
-  for (const [probe, setClass, attackClass, severity] of LOCAL) add({ probe, disposition: "local", setClass, attackClass, severity, note: null });
+  for (const [probe, setClass, attackClass, severity] of LOCAL) add({ probe, disposition: "local", setClass, attackClass, severity, note: null, requiresJudge: probeNeedsJudge(probe) });
   for (const [probes, disposition, note] of NOT_RUN) {
-    for (const probe of probes) add({ probe, disposition, setClass: "offensive", attackClass: null, severity: "medium", note });
+    for (const probe of probes) add({ probe, disposition, setClass: "offensive", attackClass: null, severity: "medium", note, requiresJudge: probeNeedsJudge(probe) });
   }
   return [...out.values()].sort((a, b) => (a.probe < b.probe ? -1 : a.probe > b.probe ? 1 : 0));
 }
@@ -240,6 +278,15 @@ export function garakManifestSets(): Record<string, GarakSetClass> {
   const out: Record<string, GarakSetClass> = {};
   for (const p of GARAK_PROBES) if (p.disposition === "local") out[garakSetId(p.probe)] = p.setClass;
   return out;
+}
+
+/**
+ * Decision 203: the set ids that run here only with a judge agent behind the gateway. The manifest
+ * publishes them (`judgeSets`), and run validation and the lease refuse a run selecting one with no
+ * judge (`judge_required`).
+ */
+export function garakJudgeSets(): string[] {
+  return GARAK_PROBES.filter((p) => p.disposition === "local" && p.requiresJudge).map((p) => garakSetId(p.probe));
 }
 
 /** what this build never runs, keyed by the probe name the runner reports (the declared reduced set) */

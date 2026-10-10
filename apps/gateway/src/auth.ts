@@ -124,7 +124,7 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
    *  ADR-0066's model surfaces; 'pdp' is `POST /v1/authz/check` and nothing
    *  else; ADR-0187 'engine' is the compat model routes, pinned to one project.
@@ -139,6 +139,12 @@ export interface AuthContext {
   /** PR #205 review [54]: the enrolment token was already spent (it can only replay its registration) */
   engineEnrollmentSpent?: boolean;
   engineId?: string;
+  /** ADR-0188 (S5): a workload presenting a gateway-issued, sender-bound
+   * delegated token (`via === "workload"`). `userId` is then the SPONSOR (the
+   * human the work is for), `isAdmin` is always false, and the agent principal
+   * and the delegation grant are named here. Nothing produces this yet (S1). */
+  workloadIdentityId?: string;
+  delegationGrantId?: string;
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */
   virtualKeyId?: string;

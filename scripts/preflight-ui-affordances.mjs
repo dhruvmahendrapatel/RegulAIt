@@ -37,6 +37,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 const DELIBERATELY_API_ONLY = new Map([
+  // TEMPORARY (M-053): ADR-0188 S1 registers revoking a workload credential as
+  // a 501 stub; its button belongs to the agent identities page, Codex's X33
+  // (slice S6). Deleting this entry is part of X33's acceptance.
+  ["/v1/workload-identities/:x/credentials/:x", "ADR-0188 S1: revoke a workload credential — the agent identities page button is X33 (Codex, S6); remove this entry when it lands"],
 ]);
 
 const walk = (dir, out = []) => {

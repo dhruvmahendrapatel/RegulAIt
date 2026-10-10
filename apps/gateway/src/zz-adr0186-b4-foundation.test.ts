@@ -96,7 +96,7 @@ const RELAXED: { [K in Batch4SettingKey]: unknown } = {
 
 const STRICT_SQL = sql`UPDATE org_settings SET approval_signature_mode = 'passkey', step_up_mode = 'required',
   step_up_max_age_seconds = 120,
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb,
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb,
   tool_approval_sensitive_quorum = 2, decision_receipts_mode = 'on', audit_anchor_timestamp_mode = 'required',
   vendored_detection_packs = '["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]'::jsonb,
   monitor_mcp_baseline_days = 14, monitor_jailbreak_threshold = 3, monitor_jailbreak_window_hours = 24`;

@@ -1,0 +1,2 @@
+{"mode": "cpu", "workers": 4, "seconds": 3, "iterations": 10585138}
+exit=0 wall_s=3.91

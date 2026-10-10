@@ -116,6 +116,7 @@ beforeAll(async () => {
 describe("(c) kernel: deploy-mode-scoped restriction rules", () => {
   const base = {
     userId: "u1",
+    actor: null,
     serverId: "s1",
     tool: { serverId: "s1", name: "t", kind: "write" as const },
     toolGrants: [{ id: "g1", userId: "u1", serverId: "s1", toolName: "t" }],
@@ -219,15 +220,15 @@ describe("(c) server-derived context + the rule deploy-mode endpoint", () => {
   it("governedEvaluate honours the mode scope end-to-end: attributed in-context call pauses, out-of-context allows", async () => {
     const tool = { serverId, name: "a4_write", kind: "write" as const };
     // no in-flight deploy-bound work → context [] → the byoc-scoped rule does not match
-    const before = await governedEvaluate(db, piaId, serverId, tool, undefined, null, projectId);
+    const before = await governedEvaluate(db, piaId, serverId, tool, undefined, null, projectId, undefined, undefined, undefined, undefined, { actor: null });
     expect(before.decision.effect).toBe("allow");
     // an in-flight instance towards the byoc target flips the context
     const instanceId = await makeWorkflowTowards("a4-byoc", "a4-live-change", "a4-live");
-    const inCtx = await governedEvaluate(db, piaId, serverId, tool, undefined, null, projectId);
+    const inCtx = await governedEvaluate(db, piaId, serverId, tool, undefined, null, projectId, undefined, undefined, undefined, undefined, { actor: null });
     expect(inCtx.decision.effect).toBe("require_approval");
     expect(inCtx.decision.reason).toContain("deploy-mode byoc");
     // an UNATTRIBUTED call never derives a context — the scoped rule stays dormant
-    const unattributed = await governedEvaluate(db, piaId, serverId, tool, undefined, null, null);
+    const unattributed = await governedEvaluate(db, piaId, serverId, tool, undefined, null, null, undefined, undefined, undefined, undefined, { actor: null });
     expect(unattributed.decision.effect).toBe("allow");
     // clean up: abort so later tests see no lingering context
     const aborted = await app.inject({ method: "POST", headers: piaAuth, url: `/v1/workflows/instances/${instanceId}/abort`, payload: {} });
@@ -238,7 +239,7 @@ describe("(c) server-derived context + the rule deploy-mode endpoint", () => {
       method: "PATCH", headers: AUTH, url: `/v1/rules/approvals/${approvalRuleId}/deploy-mode`,
       payload: { deployMode: null },
     });
-    const cleared = await governedEvaluate(db, piaId, serverId, tool, undefined, null, null);
+    const cleared = await governedEvaluate(db, piaId, serverId, tool, undefined, null, null, undefined, undefined, undefined, undefined, { actor: null });
     expect(cleared.decision.effect).toBe("require_approval");
     // restore for the rest of the suite: re-scope to byoc so the plain path stays allow
     await app.inject({

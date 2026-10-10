@@ -24,7 +24,8 @@ import {
   type SQL,
   sql,
 } from "@regulait/db";
-import { evaluate, matchingApprovalRules, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import { evaluate, matchingApprovalRules, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { evaluateAbac } from "@regulait/policy-kernel/abac";
 import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-posture.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
@@ -40,7 +41,13 @@ import {
   type PreparedPiiApproval,
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
-import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
+import {
+  abacDelegationContextOf,
+  assembleAbacRequest,
+  evaluateAbacForChain,
+  loadActiveAbacPolicies,
+  type AbacPrincipalContext,
+} from "./abac.js";
 import { withLiteracyPosture, type GovernedCallOrigin } from "./ai-literacy.js";
 import {
   applyRuleVersions,
@@ -252,19 +259,19 @@ export async function governedEvaluate(
   userId: string,
   serverId: string,
   tool: ToolRef,
-  args?: Record<string, unknown>,
+  args: Record<string, unknown> | undefined,
   /** §5.1 Team-Lead ceiling: the tool NAMES this worker's lead chain permits.
    * null/undefined = no lead constraint. Only ever narrows a granted call. */
-  ceilingTools?: readonly string[] | null,
+  ceilingTools: readonly string[] | null | undefined,
   /** A4: pillar-5 attribution of this call, used ONLY to derive the deploy
    * context for mode-scoped rules — and only lazily, when a loaded rule
    * actually carries a deployMode, so the default path costs nothing. */
-  projectId?: string | null,
+  projectId: string | null | undefined,
   /** ADR-0040: the session facts the ABAC principal bag needs (origin,
    * authentication strength). Supplied by the route, because a session is a
    * property of the REQUEST, not of the user. Absent = the honest 'unknown'
    * defaults, never a silently-strong claim. */
-  principal?: AbacPrincipalContext,
+  principal: AbacPrincipalContext | undefined,
   /**
    * ADR-0120 — DRY-RUN MODE. Names ONE `config_versions` row to force as the
    * candidate, regardless of its status or canary bucket, and returns its
@@ -277,22 +284,28 @@ export async function governedEvaluate(
    * corrupt the very canary measurements an operator is relying on. A preview
    * must execute nothing.
    */
-  simulate?: { versionId: string; replay?: ReplayClock },
-  preparedPii?: PreparedPiiApproval,
+  simulate: { versionId: string; replay?: ReplayClock } | undefined,
+  preparedPii: PreparedPiiApproval | undefined,
   /**
    * AER-039 — the upstream this call will execute against, from the SAME
    * server row the caller connects with (the proxy passes it, so the consent
    * is bound to exactly the destination that receives the bytes). Omitted =
    * derived from the current server row, for callers that never execute.
    */
-  target?: ApprovalTargetRef | null,
+  target: ApprovalTargetRef | null | undefined,
   /**
    * ADR-0182 A14 — who originated this call, for the AI literacy gate. Absent = `human` (the strict reading):
    * a person's own call, or an agent or automation they run or own, evaluated AS them, which therefore inherits
    * their literacy status. `evaluation` (an evaluation or red-team dispatch) and `platform` (a platform sweep)
    * are exempt.
+   *
+   * ADR-0188 S2 — `actor` is REQUIRED (so `opts` is too), for the reason `execution` is required on the kernel
+   * input: the compiler, not a reviewer, finds every caller. `null` = a person acting directly, and the decision
+   * is byte-identical to the pre-ADR-0188 one. A `GovernedActor` (built by S3/S4 from the stored grant path,
+   * never from the request) is decided as the kernel's intersection, and each actor is also evaluated by Cedar
+   * as `Agent` against the active v4 policies — lazily, only when one is active.
    */
-  opts?: { origin?: GovernedCallOrigin },
+  opts: { origin?: GovernedCallOrigin; actor: GovernedActor | null },
 ): Promise<GovernedEvaluation> {
   if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
     throw new Error("Prepared PII action does not match the original arguments");
@@ -620,26 +633,30 @@ export async function governedEvaluate(
   // stays a pure function of its inputs, which is what lets the simulation
   // surface reproduce a decision exactly.
   const abacPolicies = await loadActiveAbacPolicies(db);
-  const abacDecision = abacPolicies.length
-    ? await evaluateAbacForToolCall(
-        db,
-        {
-          userId,
-          serverId,
-          toolName: tool.name,
-          toolKind: tool.kind,
-          projectId: projectId ?? null,
-          // the rate signal already computed at this call site — highest
-          // consumption across the limits that bind this call
-          rateLimitUsagePct: limitsWithCounts.reduce((max, l) => {
-            const pct = l.maxCalls > 0 ? Math.floor((l.currentCount * 100) / l.maxCalls) : 0;
-            return Math.max(max, Math.min(100, pct));
-          }, 0),
-          ...(principal ? { principal } : {}),
-        },
-        abacPolicies,
-      )
-    : null;
+  // ADR-0188 S2 — the sponsor is still evaluated as `User` against every version (decision 18); a v4 group also
+  // sees the chain in its context. Then, only when an actor is present AND a v4 policy is active, each actor is
+  // evaluated as `Agent` (v4 only) and its verdict rides on its link into the kernel's `abac-forbid` term.
+  let abacDecision = null as ReturnType<typeof evaluateAbac>;
+  let actor: GovernedActor | null = opts.actor;
+  if (abacPolicies.length) {
+    const sponsorRequest = await assembleAbacRequest(db, {
+      userId,
+      serverId,
+      toolName: tool.name,
+      toolKind: tool.kind,
+      projectId: projectId ?? null,
+      // the rate signal already computed at this call site — highest
+      // consumption across the limits that bind this call
+      rateLimitUsagePct: limitsWithCounts.reduce((max, l) => {
+        const pct = l.maxCalls > 0 ? Math.floor((l.currentCount * 100) / l.maxCalls) : 0;
+        return Math.max(max, Math.min(100, pct));
+      }, 0),
+      ...(principal ? { principal } : {}),
+      delegation: abacDelegationContextOf(opts.actor),
+    });
+    abacDecision = evaluateAbac(abacPolicies, sponsorRequest);
+    if (actor) actor = await evaluateAbacForChain(db, actor, sponsorRequest, abacPolicies);
+  }
 
   /** the kernel call, parameterised ONLY by the three rule sets — so the served
    * pass and the shadow pass differ in the rule bodies and in NOTHING ELSE.
@@ -655,7 +672,7 @@ export async function governedEvaluate(
   // person; otherwise the posture is exactly the one above, so a fresh install decides as before.
   const executionPosture = simulate
     ? resolvedPosture
-    : await withLiteracyPosture(db, resolvedPosture, userId, { origin: opts?.origin, principal });
+    : await withLiteracyPosture(db, resolvedPosture, userId, { origin: opts.origin, principal });
 
   const evaluateWith = (
     rules: typeof servedARules,
@@ -696,6 +713,7 @@ export async function governedEvaluate(
       ceilingTools: ceilingTools ?? null,
       deployContext,
       abacDecision,
+      actor,
     });
     const original = evaluateArguments(args);
     if (!preparedPii) return original;

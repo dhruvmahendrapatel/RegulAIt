@@ -1,0 +1,47 @@
+{
+ "cpu_count": 4,
+ "dmesg": [
+  "[    0.000000] Linux version 6.18.44-fc-v114 (builder@sandboxing) (gcc (GCC) 15.3.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC @0"
+ ],
+ "dns": "resolved:172.66.147.243",
+ "egress_host_listener": "connected",
+ "egress_public_literal": "connected",
+ "etc_write": "writable",
+ "home_listing": {
+  "entries": 24
+ },
+ "host_process": {
+  "cmdline_has_token": true,
+  "kill0": "exists",
+  "pids_visible": 148
+ },
+ "interfaces": [
+  "lo",
+  "ifb0",
+  "ifb1",
+  "eth0",
+  "docker0"
+ ],
+ "kernel": "Linux version 6.18.44-fc-v114 (builder@sandboxing) (gcc (GCC) 15.3.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT_DYNAMIC @0",
+ "meminfo": {
+  "MemFree": "1621884 kB",
+  "MemTotal": "16479424 kB"
+ },
+ "rlimit_nofile": [
+  20000,
+  20000
+ ],
+ "root_mount": "rw,relatime,discard,no_prefetch_block_bitmaps,resv_strict,resuid=65534,resgid=65534",
+ "rootfs_write": "writable",
+ "status": {
+  "CapBnd": "000001fffeffffff",
+  "CapEff": "000001fffeffffff",
+  "CapPrm": "000001fffeffffff",
+  "Gid": "0\t0\t0\t0",
+  "NoNewPrivs": "0",
+  "Seccomp": "0",
+  "Uid": "0\t0\t0\t0"
+ },
+ "uname_release": "6.18.44-fc-v114",
+ "work_write": "denied:2:No such file or directory"
+}

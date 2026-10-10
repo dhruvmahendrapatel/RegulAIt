@@ -427,7 +427,7 @@ describe("AER-039 — a consent names its MCP target", () => {
       // control: resyncing the SAME manifest re-derives the same digest, and the consent still matches
       await resyncManifest(serverId);
       expect(await manifestDigestOf(serverId)).toBe(admitted);
-      const evaluated = await governedEvaluate(db, callerId, serverId, { serverId, name: TOOL, kind: "write" }, { text }, null, null);
+      const evaluated = await governedEvaluate(db, callerId, serverId, { serverId, name: TOOL, kind: "write" }, { text }, null, null, undefined, undefined, undefined, undefined, { actor: null });
       expect(evaluated.approvedApprovalId).toBe(signed);
 
       // the upstream's tool input schema changes; the next real resync records the new manifest

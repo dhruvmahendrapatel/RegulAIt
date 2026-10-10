@@ -495,12 +495,12 @@ describe("F8: one count path, at the stored timestamps", () => {
     const single = await governedEvaluate(db, userId, serverId, tool, undefined, null, null, undefined, {
       versionId,
       replay: { asOf: base, lookbackHorizon: null, countAllowed: replayCounterFor(db, second) },
-    });
+    }, undefined, undefined, { actor: null });
     expect(single.candidateDecision?.effect).toBe("deny");
     const atFirst = await governedEvaluate(db, userId, serverId, tool, undefined, null, null, undefined, {
       versionId,
       replay: { asOf: base, lookbackHorizon: null, countAllowed: replayCounterFor(db, first) },
-    });
+    }, undefined, undefined, { actor: null });
     expect(atFirst.candidateDecision?.effect).toBe("allow");
 
     // and there is no second path: a replay clock without the counter is
@@ -510,7 +510,7 @@ describe("F8: one count path, at the stored timestamps", () => {
       governedEvaluate(db, userId, serverId, tool, undefined, null, null, undefined, {
         versionId,
         replay: { asOf: base, lookbackHorizon: null } as unknown as ReplayClock,
-      }),
+      }, undefined, undefined, { actor: null }),
     ).rejects.toThrow(/countAllowed/);
   });
 });
