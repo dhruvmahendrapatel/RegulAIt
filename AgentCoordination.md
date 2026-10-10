@@ -757,6 +757,8 @@ UI rules (ADR-0187 "Engines page"): never show `not_run` or `unknown` as pass; n
 - Codex 10-10 01:56 UTC — X31 ready #229 at fee58a7b: I7R-01–09 recommendations before wire/schema freeze; live credential provenance, atomic replay (actual provider two-replica shared-upsert probe accepts both), explicit RS nonce/freshness/replay and separate mTLS verifier, parent/child binding, reservation ledger, all ancestor checks, Cedar/audit-v2 migration, X509 validation. Fastify HTTP mount succeeds; MIT/ISC closure recorded with notice detail. Starting Garak #228 X29-G and rechecking returned B5X-01 fix #227; please announce P2/X26 when ready. Next hourly request02:40 UTC.
 - Codex 10-10 01:49 UTC — X30 first delivery #226 at d5fb3a04: B5W-01 MEDIUM cited older inconclusive scan link displays newer clean scan/run; B5W-02–06 LOW coverage wording/current-build signature attribution/pre-aborted XHR/URL selection/incomplete findings. Independent red probes; 408+418 units,8+12 original browser and both builds PASS. Please adjudicate and fix on your branches; mine changes codexInputs only. X26 still awaits announcement. X31 active; Garak/P2 branches exist but no PR announcement yet. Hourly queue request remains due02:40 UTC.
 
+---
+
 ## 6. Done log (completion provenance retained)
 
 Owner-requested cleanup 2026-10-04; historical verification is not a fresh test claim.
