@@ -50,6 +50,15 @@
 -- 10. `bom_auditor_grants`: the explicit auditor export grant (§7
 --     `bom_export_roles`), revocable, never edited otherwise.
 --
+-- SECURITY REVIEW (B1 fix round): every function here runs with
+-- `SET search_path = pg_catalog, public, pg_temp` and names its tables as
+-- `public.<table>`, so a TEMP table cannot shadow what a guard reads (F2);
+-- TRUNCATE is refused on every BOM table and on the receipt boundary (F3); a
+-- prune row cannot be future-dated (F1); a receipt v2 boundary can never sit at
+-- or below a stored or in-flight receipt (F4); facts and addenda hold only JSON
+-- that the SQL canonicaliser and RFC 8785 serialise identically (F5); the
+-- newest snapshot of a subject is never pruned, so versions are never reused (F7).
+--
 -- R16: NO foreign key to `audit_log` anywhere here. Every append-only table uses
 -- `regulait_refuse_mutation` (migration 0168) or a guard built on the same
 -- refusal, raised with the same ERRCODE.
@@ -94,7 +103,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "audit_anchors_request_facts_guard"
   BEFORE INSERT OR UPDATE ON "audit_anchors"
@@ -153,6 +162,10 @@ ALTER TABLE "org_settings" ADD COLUMN "cyclonedx_export_versions" jsonb DEFAULT 
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD COLUMN "bom_export_rate_limit_per_minute" integer DEFAULT 30 NOT NULL;
 --> statement-breakpoint
+-- F6 / #280: with UNBOUNDED retention no finite Object Lock covers the evidence;
+-- `anchored_finite_lock` is final only after an audited relaxation to `accept`
+ALTER TABLE "org_settings" ADD COLUMN "decision_bom_finite_lock_finality" text DEFAULT 'refuse' NOT NULL;
+--> statement-breakpoint
 ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_decision_facts_capture_check" CHECK ("decision_facts_capture" IN ('on', 'off'));
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_decision_bom_finality_check" CHECK ("decision_bom_finality" IN ('anchored', 'anchored_unverified_destination', 'chain_signed'));
@@ -173,6 +186,8 @@ ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_cyclonedx_export_version
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_bom_export_rate_limit_per_minute_check" CHECK ("bom_export_rate_limit_per_minute" BETWEEN 1 AND 600);
 --> statement-breakpoint
+ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_decision_bom_finite_lock_finality_check" CHECK ("decision_bom_finite_lock_finality" IN ('refuse', 'accept'));
+--> statement-breakpoint
 
 -- ===== shared: the retention guard of every BOM table (R16, R38, #280) ======
 CREATE TABLE "bom_retention_prunes" (
@@ -189,6 +204,25 @@ CREATE TABLE "bom_retention_prunes" (
 );
 --> statement-breakpoint
 CREATE INDEX "bom_retention_prunes_txid_idx" ON "bom_retention_prunes" ("txid");
+--> statement-breakpoint
+-- F1: a prune row records THIS transaction and the database's own time; its
+-- `as_of` can never be in the future, so no writer-chosen date can make an
+-- unexpired row look expired
+CREATE OR REPLACE FUNCTION "regulait_bom_prune_record_guard"() RETURNS trigger AS $$
+BEGIN
+  NEW."created_at" := now();
+  NEW."txid" := txid_current();
+  IF NEW."as_of" > now() THEN
+    RAISE EXCEPTION 'bom_retention_prunes: as_of in the future refused (% > %)', NEW."as_of", now()
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
+--> statement-breakpoint
+CREATE TRIGGER "bom_retention_prunes_record_guard"
+  BEFORE INSERT ON "bom_retention_prunes"
+  FOR EACH ROW EXECUTE FUNCTION "regulait_bom_prune_record_guard"();
 --> statement-breakpoint
 CREATE TRIGGER "bom_retention_prunes_append_only"
   BEFORE UPDATE OR DELETE ON "bom_retention_prunes"
@@ -227,7 +261,7 @@ BEGIN
   RAISE EXCEPTION 'bom_retention_holds: % refused (a hold is only ever released, once)', TG_OP
     USING ERRCODE = 'insufficient_privilege';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "bom_retention_holds_guard"
   BEFORE UPDATE OR DELETE ON "bom_retention_holds"
@@ -244,30 +278,30 @@ DECLARE
   held boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    SELECT max(p."as_of") INTO pass_as_of FROM "bom_retention_prunes" p WHERE p."txid" = txid_current();
+    SELECT max(p."as_of") INTO pass_as_of FROM public."bom_retention_prunes" p WHERE p."txid" = txid_current();
     IF pass_as_of IS NULL THEN
       RAISE EXCEPTION '% is append-only: DELETE refused outside a recorded retention prune', TG_TABLE_NAME
         USING ERRCODE = 'insufficient_privilege',
               HINT = 'BOM evidence is deleted only by the retention prune (ADR-0189 R16)';
     END IF;
     -- unbounded retention (null) keeps everything; otherwise the row must have expired
-    IF expires IS NULL OR expires > pass_as_of THEN
+    IF expires IS NULL OR expires > least(pass_as_of, now()) THEN
       RAISE EXCEPTION '% is append-only: DELETE refused, the row is within its retention', TG_TABLE_NAME
         USING ERRCODE = 'insufficient_privilege';
     END IF;
     IF TG_ARGV[0] = 'decision' THEN
       -- the 0168 "parent gone" test with audit_log as the parent: the audit row is pruned first
-      IF EXISTS (SELECT 1 FROM "audit_log" a WHERE a."id" = (o ->> 'audit_id')::uuid) THEN
+      IF EXISTS (SELECT 1 FROM public."audit_log" a WHERE a."id" = (o ->> 'audit_id')::uuid) THEN
         RAISE EXCEPTION '% is append-only: DELETE refused, the decision''s audit row still exists', TG_TABLE_NAME
           USING ERRCODE = 'insufficient_privilege';
       END IF;
       SELECT EXISTS (
-        SELECT 1 FROM "bom_retention_holds" h
+        SELECT 1 FROM public."bom_retention_holds" h
          WHERE h."released_at" IS NULL AND (h."scope" = 'all' OR (h."scope" = 'decision' AND h."audit_id" = (o ->> 'audit_id')::uuid))
       ) INTO held;
     ELSE
       SELECT EXISTS (
-        SELECT 1 FROM "bom_retention_holds" h
+        SELECT 1 FROM public."bom_retention_holds" h
          WHERE h."released_at" IS NULL AND (h."scope" = 'all' OR (h."scope" = 'ai_bom_subject'
                AND h."subject_kind" = o ->> 'subject_kind' AND h."subject_id" = (o ->> 'subject_id')::uuid))
       ) INTO held;
@@ -276,13 +310,21 @@ BEGIN
       RAISE EXCEPTION '% is append-only: DELETE refused, an evidence hold covers the row', TG_TABLE_NAME
         USING ERRCODE = 'insufficient_privilege';
     END IF;
+    -- F7: the newest snapshot of a subject is never pruned, so a version number is never reused
+    IF TG_ARGV[0] = 'ai_bom' AND NOT EXISTS (
+         SELECT 1 FROM public."ai_bom_snapshots" s
+          WHERE s."subject_kind" = o ->> 'subject_kind' AND s."subject_id" = (o ->> 'subject_id')::uuid
+            AND s."version" > (o ->> 'version')::integer) THEN
+      RAISE EXCEPTION '% is append-only: DELETE refused, the newest snapshot of its subject is kept', TG_TABLE_NAME
+        USING ERRCODE = 'insufficient_privilege';
+    END IF;
     RETURN OLD;
   END IF;
   RAISE EXCEPTION '% is append-only: % refused', TG_TABLE_NAME, TG_OP
     USING ERRCODE = 'insufficient_privilege',
           HINT = 'records here are evidence; write a new version instead (ADR-0189)';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 
 -- ===== 3. the receipt v2 boundary (R34, R42, R43) ==========================
@@ -324,11 +366,33 @@ CREATE TRIGGER "decision_capture_status_append_only"
   FOR EACH ROW EXECUTE FUNCTION "regulait_bom_prune_guard"('decision');
 --> statement-breakpoint
 
+-- ===== F5: JSON both canonicalisers agree on ===============================
+-- 0162's `regulait_canonical_json` and RFC 8785 (`canonicalize`) agree on
+-- strings, booleans, null, safe integers and printable-ASCII keys, and differ on
+-- non-integer numbers (1.0, 1e21, 1e-7), integers above 2^53 and non-ASCII key
+-- order. Facts and addenda admit only the agreeing shapes, so the SQL facts hash
+-- equals the TS hash by construction (the shared `bomJsonSafeIssues` mirrors this).
+CREATE OR REPLACE FUNCTION "regulait_bom_json_safe"(j jsonb) RETURNS boolean AS $$
+BEGIN
+  CASE jsonb_typeof(j)
+    WHEN 'number' THEN
+      RETURN j::text ~ '^(0|-?[1-9][0-9]{0,15})$' AND abs((j::text)::numeric) <= 9007199254740991;
+    WHEN 'object' THEN
+      RETURN NOT EXISTS (SELECT 1 FROM jsonb_each(j) AS e(k, v) WHERE e.k !~ '^[ -~]*$' OR NOT public."regulait_bom_json_safe"(e.v));
+    WHEN 'array' THEN
+      RETURN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(j) AS a(v) WHERE NOT public."regulait_bom_json_safe"(a.v));
+    ELSE
+      RETURN true;
+  END CASE;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, public, pg_temp;
+--> statement-breakpoint
+
 -- ===== 7a. AI BOM snapshots (before facts, which reference them) ============
 -- amendment 5: the CycloneDX serialNumber, an RFC 9562 v8 UUID from SHA-256 of
 -- `regulait:ai-bom:<snapshot id>` (the shared `aiBomSerialNumber` computes the same)
 CREATE OR REPLACE FUNCTION "regulait_ai_bom_serial"("snapshot_id" uuid) RETURNS uuid
-  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT encode(
            set_byte(set_byte(substring(h FROM 1 FOR 16), 6, (get_byte(h, 6) & 15) | 128), 8, (get_byte(h, 8) & 63) | 128),
            'hex')::uuid
@@ -341,7 +405,9 @@ CREATE TABLE "ai_bom_snapshots" (
   "subject_id" uuid NOT NULL,
   "version" integer NOT NULL,
   "serial_number" uuid NOT NULL,
-  "supersedes_id" uuid REFERENCES "ai_bom_snapshots"("id"),
+  -- no FK: the version guard checks it names the previous version at insert, and an
+  -- expired older version must stay prunable once a newer one supersedes it (F7)
+  "supersedes_id" uuid,
   "trigger" text NOT NULL,
   "basis" jsonb NOT NULL,
   "body" text NOT NULL,
@@ -388,7 +454,7 @@ DECLARE
   prev_id uuid;
   prev_version integer;
 BEGIN
-  SELECT s."id", s."version" INTO prev_id, prev_version FROM "ai_bom_snapshots" s
+  SELECT s."id", s."version" INTO prev_id, prev_version FROM public."ai_bom_snapshots" s
    WHERE s."subject_kind" = NEW."subject_kind" AND s."subject_id" = NEW."subject_id"
    ORDER BY s."version" DESC LIMIT 1;
   IF NEW."version" <> COALESCE(prev_version, 0) + 1 OR NEW."supersedes_id" IS DISTINCT FROM prev_id THEN
@@ -398,7 +464,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "ai_bom_snapshots_version_guard"
   BEFORE INSERT ON "ai_bom_snapshots"
@@ -432,6 +498,7 @@ CREATE TABLE "decision_facts" (
       false
     )
   ),
+  CONSTRAINT "decision_facts_json_safe_check" CHECK ("regulait_bom_json_safe"("facts")),
   -- the hash is over the canonical bytes, computed here (0162's regulait_canonical_json)
   CONSTRAINT "decision_facts_hash_check" CHECK ("facts_hash" = encode(sha256(convert_to("regulait_canonical_json"("facts"), 'UTF8')), 'hex'))
 );
@@ -443,7 +510,7 @@ CREATE OR REPLACE FUNCTION "regulait_decision_facts_marker_guard"() RETURNS trig
 DECLARE
   m record;
 BEGIN
-  SELECT * INTO m FROM "decision_capture_status" WHERE "audit_id" = NEW."audit_id";
+  SELECT * INTO m FROM public."decision_capture_status" WHERE "audit_id" = NEW."audit_id";
   IF m."status" IS DISTINCT FROM 'captured' OR m."facts_hash" IS DISTINCT FROM NEW."facts_hash"
      OR m."audit_seq" IS DISTINCT FROM NEW."audit_seq" OR m."expires_at" IS DISTINCT FROM NEW."expires_at" THEN
     RAISE EXCEPTION 'decision_facts: the facts of % do not match its capture-status marker', NEW."audit_id"
@@ -451,7 +518,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "decision_facts_marker_guard"
   BEFORE INSERT ON "decision_facts"
@@ -464,20 +531,20 @@ CREATE TRIGGER "decision_facts_append_only"
 -- at COMMIT: a `captured` marker has its facts row; a `capture_off` marker has none
 CREATE OR REPLACE FUNCTION "regulait_capture_status_consistent"() RETURNS trigger AS $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM "decision_capture_status" WHERE "audit_id" = NEW."audit_id") THEN
+  IF NOT EXISTS (SELECT 1 FROM public."decision_capture_status" WHERE "audit_id" = NEW."audit_id") THEN
     RETURN NULL; -- pruned in the same transaction
   END IF;
-  IF NEW."status" = 'captured' AND NOT EXISTS (SELECT 1 FROM "decision_facts" f WHERE f."audit_id" = NEW."audit_id" AND f."facts_hash" = NEW."facts_hash") THEN
+  IF NEW."status" = 'captured' AND NOT EXISTS (SELECT 1 FROM public."decision_facts" f WHERE f."audit_id" = NEW."audit_id" AND f."facts_hash" = NEW."facts_hash") THEN
     RAISE EXCEPTION 'decision_capture_status: % is marked captured but its facts were not written in the same transaction', NEW."audit_id"
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
-  IF NEW."status" = 'capture_off' AND EXISTS (SELECT 1 FROM "decision_facts" f WHERE f."audit_id" = NEW."audit_id") THEN
+  IF NEW."status" = 'capture_off' AND EXISTS (SELECT 1 FROM public."decision_facts" f WHERE f."audit_id" = NEW."audit_id") THEN
     RAISE EXCEPTION 'decision_capture_status: % is marked capture_off but has facts', NEW."audit_id"
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
   RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE CONSTRAINT TRIGGER "decision_capture_status_consistent"
   AFTER INSERT ON "decision_capture_status"
@@ -508,6 +575,7 @@ CREATE TABLE "decision_fact_addenda" (
       false
     )
   ),
+  CONSTRAINT "decision_fact_addenda_json_safe_check" CHECK ("regulait_bom_json_safe"("facts")),
   CONSTRAINT "decision_fact_addenda_hash_check" CHECK ("facts_hash" = encode(sha256(convert_to("regulait_canonical_json"("facts"), 'UTF8')), 'hex'))
 );
 --> statement-breakpoint
@@ -518,11 +586,11 @@ DECLARE
   want_prev text;
   want_expires timestamp with time zone;
 BEGIN
-  SELECT f."expires_at" INTO want_expires FROM "decision_facts" f WHERE f."audit_id" = NEW."audit_id";
+  SELECT f."expires_at" INTO want_expires FROM public."decision_facts" f WHERE f."audit_id" = NEW."audit_id";
   IF NEW."n" = 1 THEN
-    SELECT f."facts_hash" INTO want_prev FROM "decision_facts" f WHERE f."audit_id" = NEW."audit_id";
+    SELECT f."facts_hash" INTO want_prev FROM public."decision_facts" f WHERE f."audit_id" = NEW."audit_id";
   ELSE
-    SELECT a."facts_hash" INTO want_prev FROM "decision_fact_addenda" a WHERE a."audit_id" = NEW."audit_id" AND a."n" = NEW."n" - 1;
+    SELECT a."facts_hash" INTO want_prev FROM public."decision_fact_addenda" a WHERE a."audit_id" = NEW."audit_id" AND a."n" = NEW."n" - 1;
   END IF;
   IF want_prev IS NULL OR NEW."prev_hash" <> want_prev OR NEW."expires_at" IS DISTINCT FROM want_expires THEN
     RAISE EXCEPTION 'decision_fact_addenda: addendum % of % does not extend the chain', NEW."n", NEW."audit_id"
@@ -531,7 +599,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "decision_fact_addenda_chain_guard"
   BEFORE INSERT ON "decision_fact_addenda"
@@ -560,17 +628,17 @@ CREATE TABLE "decision_fact_addendum_signatures" (
 CREATE OR REPLACE FUNCTION "regulait_decision_fact_addendum_signature_guard"() RETURNS trigger AS $$
 BEGIN
   IF NEW."n" > 1 AND NOT EXISTS (
-       SELECT 1 FROM "decision_fact_addendum_signatures" s WHERE s."audit_id" = NEW."audit_id" AND s."n" = NEW."n" - 1) THEN
+       SELECT 1 FROM public."decision_fact_addendum_signatures" s WHERE s."audit_id" = NEW."audit_id" AND s."n" = NEW."n" - 1) THEN
     RAISE EXCEPTION 'decision_fact_addendum_signatures: addendum % of % is signed before addendum %', NEW."n", NEW."audit_id", NEW."n" - 1
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
-  IF NEW."expires_at" IS DISTINCT FROM (SELECT a."expires_at" FROM "decision_fact_addenda" a WHERE a."audit_id" = NEW."audit_id" AND a."n" = NEW."n") THEN
+  IF NEW."expires_at" IS DISTINCT FROM (SELECT a."expires_at" FROM public."decision_fact_addenda" a WHERE a."audit_id" = NEW."audit_id" AND a."n" = NEW."n") THEN
     RAISE EXCEPTION 'decision_fact_addendum_signatures: expires_at differs from the decision''s'
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "decision_fact_addendum_signatures_order_guard"
   BEFORE INSERT ON "decision_fact_addendum_signatures"
@@ -586,7 +654,9 @@ CREATE TABLE "decision_boms" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "audit_id" uuid NOT NULL,
   "version" integer NOT NULL,
-  "supersedes_id" uuid REFERENCES "decision_boms"("id"),
+  -- no FK: the version guard checks it names the previous version at insert, and an
+  -- expired older version must stay prunable once a newer one supersedes it (F7)
+  "supersedes_id" uuid,
   "finality" text NOT NULL,
   "body" text NOT NULL,
   "body_sha256" text NOT NULL,
@@ -627,21 +697,21 @@ DECLARE
   prev_version integer;
   m record;
 BEGIN
-  SELECT b."id", b."version" INTO prev_id, prev_version FROM "decision_boms" b
+  SELECT b."id", b."version" INTO prev_id, prev_version FROM public."decision_boms" b
    WHERE b."audit_id" = NEW."audit_id" ORDER BY b."version" DESC LIMIT 1;
   IF NEW."version" <> COALESCE(prev_version, 0) + 1 OR NEW."supersedes_id" IS DISTINCT FROM prev_id THEN
     RAISE EXCEPTION 'decision_boms: version % of % must be % and supersede the previous version', NEW."version", NEW."audit_id", COALESCE(prev_version, 0) + 1
       USING ERRCODE = 'integrity_constraint_violation',
             HINT = 'allocate the version under the per-decision lock (ADR-0189 R40, 4237344247)';
   END IF;
-  SELECT * INTO m FROM "decision_capture_status" WHERE "audit_id" = NEW."audit_id";
+  SELECT * INTO m FROM public."decision_capture_status" WHERE "audit_id" = NEW."audit_id";
   IF FOUND AND m."expires_at" IS DISTINCT FROM NEW."expires_at" THEN
     RAISE EXCEPTION 'decision_boms: expires_at differs from the decision''s'
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "decision_boms_version_guard"
   BEFORE INSERT ON "decision_boms"
@@ -676,10 +746,10 @@ CREATE UNIQUE INDEX "bom_renderings_snapshot_format_uq" ON "bom_renderings" ("ai
 CREATE OR REPLACE FUNCTION "regulait_bom_rendering_guard"() RETURNS trigger AS $$
 BEGIN
   IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
-    IF OLD."decision_bom_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "decision_boms" WHERE "id" = OLD."decision_bom_id") THEN
+    IF OLD."decision_bom_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public."decision_boms" WHERE "id" = OLD."decision_bom_id") THEN
       RETURN OLD;
     END IF;
-    IF OLD."ai_bom_snapshot_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "ai_bom_snapshots" WHERE "id" = OLD."ai_bom_snapshot_id") THEN
+    IF OLD."ai_bom_snapshot_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public."ai_bom_snapshots" WHERE "id" = OLD."ai_bom_snapshot_id") THEN
       RETURN OLD;
     END IF;
   END IF;
@@ -687,7 +757,7 @@ BEGIN
     USING ERRCODE = 'insufficient_privilege',
           HINT = 'a rendering goes only with its parent (ADR-0189 R36)';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "bom_renderings_append_only"
   BEFORE UPDATE OR DELETE ON "bom_renderings"
@@ -710,7 +780,7 @@ CREATE UNIQUE INDEX "bom_auditor_grants_active_uq" ON "bom_auditor_grants" ("use
 -- the only change is a revocation, once; a deleted user's grants go with the user
 CREATE OR REPLACE FUNCTION "regulait_bom_auditor_grant_guard"() RETURNS trigger AS $$
 BEGIN
-  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 AND NOT EXISTS (SELECT 1 FROM "users" WHERE "id" = OLD."user_id") THEN
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 AND NOT EXISTS (SELECT 1 FROM public."users" WHERE "id" = OLD."user_id") THEN
     RETURN OLD;
   END IF;
   IF TG_OP = 'UPDATE' AND OLD."revoked_at" IS NULL AND NEW."revoked_at" IS NOT NULL
@@ -720,7 +790,7 @@ BEGIN
   RAISE EXCEPTION 'bom_auditor_grants: % refused (a grant is only ever revoked, once)', TG_OP
     USING ERRCODE = 'insufficient_privilege';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 CREATE TRIGGER "bom_auditor_grants_guard"
   BEFORE UPDATE OR DELETE ON "bom_auditor_grants"
@@ -752,14 +822,14 @@ DECLARE
   boundary bigint;
   m record;
 BEGIN
-  SELECT min("from_audit_seq") INTO boundary FROM "receipt_payload_versions";
+  SELECT min("from_audit_seq") INTO boundary FROM public."receipt_payload_versions";
   IF NEW."payload" ->> 'v' = 'regulait.receipt.v2' THEN
     IF boundary IS NULL OR NEW."audit_seq" < boundary THEN
       RAISE EXCEPTION 'decision_receipts: a v2 receipt below the recorded boundary (audit seq %)', NEW."audit_seq"
         USING ERRCODE = 'integrity_constraint_violation',
               HINT = 'v2 is emitted only from receipt_payload_versions.from_audit_seq on (ADR-0189 R42)';
     END IF;
-    SELECT * INTO m FROM "decision_capture_status" WHERE "audit_id" = NEW."audit_id";
+    SELECT * INTO m FROM public."decision_capture_status" WHERE "audit_id" = NEW."audit_id";
     IF NOT FOUND OR m."status" <> NEW."payload" ->> 'factsStatus' OR m."facts_hash" IS DISTINCT FROM NEW."payload" ->> 'factsHash' THEN
       RAISE EXCEPTION 'decision_receipts: the v2 receipt of % does not match its capture-status marker', NEW."audit_id"
         USING ERRCODE = 'integrity_constraint_violation';
@@ -770,8 +840,89 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
+-- F4: this trigger reads the boundary with a fresh READ COMMITTED snapshot AFTER
+-- its INSERT has taken ROW EXCLUSIVE on decision_receipts, which conflicts with
+-- the SHARE ROW EXCLUSIVE lock a boundary insert holds (below): a receipt either
+-- commits before the boundary is checked, or waits and then sees the boundary.
 CREATE TRIGGER "decision_receipts_version_guard"
   BEFORE INSERT ON "decision_receipts"
   FOR EACH ROW EXECUTE FUNCTION "regulait_decision_receipt_version_guard"();
+--> statement-breakpoint
+-- F4: a boundary is set strictly above every stored receipt, and in-flight
+-- receipts are waited for (the table lock), so the sweep can never find a v1
+-- receipt at or above the boundary it must honour
+CREATE OR REPLACE FUNCTION "regulait_receipt_payload_version_guard"() RETURNS trigger AS $$
+DECLARE
+  top bigint;
+BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'receipt_payload_versions: set the boundary in a READ COMMITTED transaction (it must see every committed receipt)'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  LOCK TABLE public."decision_receipts" IN SHARE ROW EXCLUSIVE MODE;
+  SELECT max(r."audit_seq") INTO top FROM public."decision_receipts" r;
+  IF NEW."from_audit_seq" <= COALESCE(top, 0) THEN
+    RAISE EXCEPTION 'receipt_payload_versions: boundary % is at or below a stored receipt (audit seq %)', NEW."from_audit_seq", top
+      USING ERRCODE = 'integrity_constraint_violation',
+            HINT = 'the v2 boundary is the first audit seq after every receipt already signed (ADR-0189 R42)';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
+--> statement-breakpoint
+CREATE TRIGGER "receipt_payload_versions_boundary_guard"
+  BEFORE INSERT ON "receipt_payload_versions"
+  FOR EACH ROW EXECUTE FUNCTION "regulait_receipt_payload_version_guard"();
+--> statement-breakpoint
+
+-- ===== F3: TRUNCATE skips row triggers, so it is refused per statement ======
+-- the same function, body and name as migration 0185 (db-guard-hardening), so its
+-- invariant check (`<table>_no_truncate` triggers on this function) covers 0182
+CREATE OR REPLACE FUNCTION public.regulait_refuse_truncate() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$ BEGIN RAISE EXCEPTION '%: TRUNCATE refused (append-only)', TG_TABLE_NAME; END $$;
+
+--> statement-breakpoint
+CREATE TRIGGER "decision_capture_status_no_truncate"
+  BEFORE TRUNCATE ON "decision_capture_status"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "decision_facts_no_truncate"
+  BEFORE TRUNCATE ON "decision_facts"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "decision_fact_addenda_no_truncate"
+  BEFORE TRUNCATE ON "decision_fact_addenda"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "decision_fact_addendum_signatures_no_truncate"
+  BEFORE TRUNCATE ON "decision_fact_addendum_signatures"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "decision_boms_no_truncate"
+  BEFORE TRUNCATE ON "decision_boms"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "ai_bom_snapshots_no_truncate"
+  BEFORE TRUNCATE ON "ai_bom_snapshots"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "bom_renderings_no_truncate"
+  BEFORE TRUNCATE ON "bom_renderings"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "bom_retention_prunes_no_truncate"
+  BEFORE TRUNCATE ON "bom_retention_prunes"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "bom_retention_holds_no_truncate"
+  BEFORE TRUNCATE ON "bom_retention_holds"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "bom_auditor_grants_no_truncate"
+  BEFORE TRUNCATE ON "bom_auditor_grants"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+--> statement-breakpoint
+CREATE TRIGGER "receipt_payload_versions_no_truncate"
+  BEFORE TRUNCATE ON "receipt_payload_versions"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();

@@ -10,6 +10,8 @@
  *    Every writer of a decision's addenda (R35), and every Decision BOM assembly
  *    and version allocation (R40), takes THIS lock first; two concurrent first
  *    requests then serialise and return the same frozen BOM.
+ *    The same REPEATABLE READ gap applies here (see the caveat below): callers
+ *    use READ COMMITTED, or take a session lock on the decision before BEGIN.
  *  - PER SUBJECT: an advisory lock keyed by the AI BOM subject (kind and id),
  *    namespace `BOM_SUBJECT_LOCK_NAMESPACE`, key `hashtext('<kind>:<id>')`, held
  *    through the snapshot insert (R50). No row exists for every subject (the

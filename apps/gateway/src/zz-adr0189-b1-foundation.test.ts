@@ -142,7 +142,8 @@ const NEW_TABLES = [
 
 const STRICT_SQL = sql`UPDATE org_settings SET decision_facts_capture = 'on', decision_bom_finality = 'anchored',
   bom_export_roles = 'admins_only', bom_person_identifiers = 'id_only', ai_bom_snapshot_triggers = 'sign_off_events',
-  ai_bom_snapshot_without_key = 'refuse', cyclonedx_export_versions = '["1.7"]'::jsonb, bom_export_rate_limit_per_minute = 30`;
+  ai_bom_snapshot_without_key = 'refuse', cyclonedx_export_versions = '["1.7"]'::jsonb, bom_export_rate_limit_per_minute = 30,
+  decision_bom_finite_lock_finality = 'refuse'`;
 
 const RELAXED: Record<BomSettingKey, unknown> = {
   decisionFactsCapture: "off",
@@ -153,6 +154,7 @@ const RELAXED: Record<BomSettingKey, unknown> = {
   aiBomSnapshotWithoutKey: "skip_and_record",
   cyclonedxExportVersions: ["1.7", "1.6"],
   bomExportRateLimitPerMinute: 120,
+  decisionBomFiniteLockFinality: "accept",
 };
 
 const H = (c: string) => c.repeat(64);
@@ -619,7 +621,7 @@ describe("the capture-status marker (4237322635), decision facts and the common 
       await expectRefused(inSavepoint(tx, bom(v1, 2, null)), /decision_boms_supersedes_check|must be 1 and supersede/);
       await tx.execute(bom(v1, 1, null));
       await expectRefused(inSavepoint(tx, bom(randomUUID(), 3, v1)), /must be 2 and supersede/);
-      await expectRefused(inSavepoint(tx, bom(randomUUID(), 2, randomUUID())), /must be 2 and supersede|foreign key/);
+      await expectRefused(inSavepoint(tx, bom(randomUUID(), 2, randomUUID())), /must be 2 and supersede/);
       const v2 = randomUUID();
       await tx.execute(bom(v2, 2, v1));
       await expectRefused(inSavepoint(tx, sql`update decision_boms set finality = 'anchored' where id = ${v1}`), /append-only/);
@@ -720,7 +722,10 @@ describe("retention through the immutability rules (R16, R38, #280)", () => {
       await tx.execute(sql`insert into bom_retention_prunes (as_of, counts) values (now(), '{}'::jsonb)`);
       const key = await receiptKey(tx);
       const linked = await insertSnapshot(tx, key, { createdAt: "2020-01-01T00:00:00Z", expires: "2020-02-01T00:00:00Z" });
+      await insertSnapshot(tx, key, { subjectId: linked.subjectId, version: 2, supersedes: linked.id, createdAt: "2020-01-02T00:00:00Z", expires: "2020-02-02T00:00:00Z" });
       const free = await insertSnapshot(tx, key, { createdAt: "2020-01-01T00:00:00Z", expires: "2020-02-01T00:00:00Z" });
+      // F7: a subject's newest snapshot is never pruned, so `free` gets a newer version
+      await insertSnapshot(tx, key, { subjectId: free.subjectId, version: 2, supersedes: free.id, createdAt: "2020-01-02T00:00:00Z", expires: "2020-02-02T00:00:00Z" });
       const auditId = randomUUID();
       const f = factsFor(auditId, 900030, linked.id);
       await marker(tx, { auditId, seq: 900030, status: "captured", hash: bomDigestOf(f) });

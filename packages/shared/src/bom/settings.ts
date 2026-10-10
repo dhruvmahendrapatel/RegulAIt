@@ -25,6 +25,8 @@ export const AI_BOM_SNAPSHOT_TRIGGER_MODES = ["sign_off_events", "on_demand_only
 /** OWNER DECISION 12 / R25: no queue */
 export const AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES = ["refuse", "skip_and_record"] as const;
 export const CYCLONEDX_EXPORT_VERSIONS = ["1.7", "1.6"] as const;
+/** F6 / #280: whether `anchored_finite_lock` (unbounded retention, finite lock) is final */
+export const DECISION_BOM_FINITE_LOCK_FINALITY_MODES = ["refuse", "accept"] as const;
 
 /** the bounds (zod and the DB CHECKs of migration 0182 hold the same numbers) */
 export const BOM_SETTING_LIMITS = {
@@ -41,6 +43,7 @@ export const BOM_STRICT_DEFAULTS = Object.freeze({
   aiBomSnapshotWithoutKey: "refuse" as (typeof AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES)[number],
   cyclonedxExportVersions: ["1.7"] as (typeof CYCLONEDX_EXPORT_VERSIONS)[number][],
   bomExportRateLimitPerMinute: 30 as number,
+  decisionBomFiniteLockFinality: "refuse" as (typeof DECISION_BOM_FINITE_LOCK_FINALITY_MODES)[number],
 });
 export type BomSettings = { -readonly [K in keyof typeof BOM_STRICT_DEFAULTS]: (typeof BOM_STRICT_DEFAULTS)[K] };
 export type BomSettingKey = keyof BomSettings;
@@ -56,6 +59,7 @@ export const BOM_SETTING_COLUMNS: Readonly<Record<BomSettingKey, string>> = {
   aiBomSnapshotWithoutKey: "ai_bom_snapshot_without_key",
   cyclonedxExportVersions: "cyclonedx_export_versions",
   bomExportRateLimitPerMinute: "bom_export_rate_limit_per_minute",
+  decisionBomFiniteLockFinality: "decision_bom_finite_lock_finality",
 };
 
 /** What the strict default does, and what an admin gives up by relaxing it. */
@@ -106,6 +110,15 @@ export const BOM_SETTING_COPY: Readonly<Record<BomSettingKey, { label: string; s
     strict: "30 a minute.",
     relaxed: "A higher limit (up to 600) lets one person pull evidence in bulk faster.",
   },
+  decisionBomFiniteLockFinality: {
+    label: "Decision BOMs when audit retention has no end",
+    strict:
+      "Refuse: with no audit retention period, no time-limited lock can cover the evidence, so such a Decision BOM " +
+      "stays pending.",
+    relaxed:
+      "Accept: it becomes final when its anchor is locked until a future date; after that date the verifier reports " +
+      "the anchor lock as lapsed.",
+  },
 };
 
 /** Is `value` a RELAXATION of the strict default for `key`? */
@@ -154,6 +167,7 @@ export const bomOrgSettingsFields = {
     .refine((a) => new Set(a).size === a.length && a.includes("1.7"), "1.7 at most once and always present")
     .transform((a) => CYCLONEDX_EXPORT_VERSIONS.filter((v) => a.includes(v)))
     .optional(),
+  decisionBomFiniteLockFinality: z.enum(DECISION_BOM_FINITE_LOCK_FINALITY_MODES).optional(),
   bomExportRateLimitPerMinute: z
     .number()
     .int()

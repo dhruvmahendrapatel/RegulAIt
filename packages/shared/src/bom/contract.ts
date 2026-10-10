@@ -66,9 +66,10 @@ export type BomRenderingFormat = (typeof BOM_RENDERING_FORMATS)[number];
  *    the end of the decision's evidence retention;
  *  - `anchored_finite_lock`: the same, but the audit retention is UNBOUNDED, so no
  *    finite lock can cover it; the lock's `retain_until` is recorded and must
- *    still be in the future at freeze. Accepted by the strict default because
- *    nothing stronger is achievable (a BOM is never left pending forever); the
- *    verifier reports `anchored_lapsed` once `retain_until` has passed;
+ *    still be in the future at freeze. Ranked BELOW `anchored` and NOT accepted by
+ *    the strict default (ADR-0180); final only once an admin relaxes
+ *    `decision_bom_finite_lock_finality` to `accept` (audited). The verifier
+ *    reports `anchored_lapsed` once `retain_until` has passed;
  *  - `anchored_unverified_destination`: flushed, observation `false` or a lock
  *    shorter than the retention (an audited relaxation);
  *  - `chain_signed`: no anchor (an audited relaxation).
@@ -166,7 +167,8 @@ export const bomDigestOf = (value: unknown): string => bomSha256(bomCanonicalByt
 /** amendment 5: the CycloneDX `serialNumber` is an RFC 9562 v8 UUID from SHA-256 of `regulait:ai-bom:<snapshot id>`.
  * Migration 0182's `regulait_ai_bom_serial()` computes the same value; a test pins that. */
 export function aiBomSerialNumber(snapshotId: string): string {
-  const h = createHash("sha256").update(`regulait:ai-bom:${snapshotId}`, "utf8").digest();
+  // lower-cased like Postgres's uuid::text, so an upper-case id derives the same serial as the database (F7)
+  const h = createHash("sha256").update(`regulait:ai-bom:${snapshotId.toLowerCase()}`, "utf8").digest();
   h[6] = (h[6]! & 0x0f) | 0x80;
   h[8] = (h[8]! & 0x3f) | 0x80;
   const x = h.subarray(0, 16).toString("hex");
@@ -226,19 +228,35 @@ export function parseTrainingDatasetChecksum(checksum: string, storedRowCount?: 
 // R10 / R21: the whole-document email scan (keys and values); fail closed
 // ---------------------------------------------------------------------------
 
-const EMAIL_SHAPE = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
+/**
+ * An email shape: at least one local-part character immediately before an `@`,
+ * and a dotted domain immediately after it. Checked in LINEAR time (CodeQL
+ * js/polynomial-redos on the earlier unanchored regex): each `@` is visited
+ * once, and the domain is matched with a sticky regex whose runs are separated
+ * by literal dots, so it cannot backtrack across positions.
+ */
+const EMAIL_LOCAL_CHAR = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]$/;
+const EMAIL_DOMAIN_AT = /[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/y;
+export function hasEmailShape(text: string): boolean {
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    if (at === 0 || !EMAIL_LOCAL_CHAR.test(text[at - 1]!)) continue;
+    EMAIL_DOMAIN_AT.lastIndex = at + 1;
+    if (EMAIL_DOMAIN_AT.test(text)) return true;
+  }
+  return false;
+}
 
 /** every JSON path whose key or string value holds an email shape; empty means clean */
 export function findEmailShapes(value: unknown, at = "$"): string[] {
   const out: string[] = [];
   const walk = (v: unknown, p: string) => {
     if (typeof v === "string") {
-      if (EMAIL_SHAPE.test(v)) out.push(p);
+      if (hasEmailShape(v)) out.push(p);
     } else if (Array.isArray(v)) {
       v.forEach((x, i) => walk(x, `${p}[${i}]`));
     } else if (v !== null && typeof v === "object") {
       for (const [k, x] of Object.entries(v)) {
-        if (EMAIL_SHAPE.test(k)) out.push(`${p}{key}`);
+        if (hasEmailShape(k)) out.push(`${p}{key}`);
         walk(x, `${p}.${k}`);
       }
     }
@@ -380,6 +398,32 @@ export type BoundRow = z.infer<typeof boundRowSchema>;
 // regulait.decision-facts.v1 (§4, R5, R18, R37) and the addendum (R15, R35)
 // ---------------------------------------------------------------------------
 
+/**
+ * F5: the JSON shapes the SQL canonicaliser (0162 `regulait_canonical_json`)
+ * and RFC 8785 serialise identically: safe integers only (no fractions, no
+ * exponents, nothing above 2^53) and printable-ASCII object keys. Migration
+ * 0182's `regulait_bom_json_safe` holds the same rule on stored facts.
+ */
+export function bomJsonSafeIssues(value: unknown, at = "$"): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown, p: string) => {
+    if (typeof v === "number") {
+      if (!Number.isSafeInteger(v) || Object.is(v, -0)) out.push(`${p}: not a safe integer`);
+    } else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${p}[${i}]`));
+    else if (v !== null && typeof v === "object") {
+      for (const [k, x] of Object.entries(v)) {
+        if (!/^[\x20-\x7e]*$/.test(k)) out.push(`${p}: key is not printable ASCII`);
+        walk(x, `${p}.${k}`);
+      }
+    }
+  };
+  walk(value, at);
+  return out;
+}
+const jsonSafe = (value: unknown, ctx: z.RefinementCtx) => {
+  for (const issue of bomJsonSafeIssues(value)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue });
+};
+
 const nullableId = bomIdentifierSchema.nullable();
 const nullableUuid = bomUuidSchema.nullable();
 export const DECISION_INPUT_KINDS = ["prompt_commit", "dataset_version", "eval_dataset_version", "model_artifact", "config_version", "skill"] as const;
@@ -463,7 +507,8 @@ export const decisionFactsSchema = z
     outcome: decisionOutcomeFactsSchema,
     rows: z.array(boundRowSchema).max(512).refine(rowsHaveDistinctIds, "a row is bound at most once"),
   })
-  .strict();
+  .strict()
+  .superRefine(jsonSafe);
 export type DecisionFacts = z.infer<typeof decisionFactsSchema>;
 
 export const decisionFactsAddendumSchema = z
@@ -476,7 +521,8 @@ export const decisionFactsAddendumSchema = z
     rows: z.array(boundRowSchema).max(512).refine(rowsHaveDistinctIds, "a row is bound at most once"),
     postActionVerification: z.object({ result: z.enum(["passed", "failed", "inconclusive"]), stageId: nullableId }).strict().nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine(jsonSafe);
 export type DecisionFactsAddendum = z.infer<typeof decisionFactsAddendumSchema>;
 
 // ---------------------------------------------------------------------------
