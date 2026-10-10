@@ -120,77 +120,97 @@ for (const group of groups) {
 }
 for (const [id, reason] of [['encoded_payload','Needs decode and suspicious-keyword checks, not a literal shape match'],['exfiltration','Broad sample URLs/transfer words require local policy review before admission blocking'],['privilege_escalation','Broad sample admin/code words require local policy review before admission blocking'],['typosquatting','Requires approved reference-name/history context outside the stateless pattern seam'],['rug_pull','Requires prior fingerprints outside the stateless pattern seam'],['cross_server','Requires cross-server identity context outside the stateless pattern seam']]) omittedAgt.push({ id:`agt.mcp.${id}`,reason });
 manifest('agt-mcp-heuristics','agt',heuristics.length,omittedAgt);
-// Conservative proof for a candidate-only speed gate: every token capable
-// of consuming ASCII space must be a \s with a flexible quantifier. Then a
-// nonempty run of spaces can be collapsed to one without losing a match.
-function flexibleSpaces(pattern) {
-  for (let i=0;i<pattern.length;i++) {
-    const char=pattern[i];
-    if (char === '[') {
-      const end=pattern.indexOf(']',i+1); if(end<0) return false;
-      const body=pattern.slice(i+1,end);
-      if(body.includes('[') || body.includes(' ') || /\\[xupP0-9]/.test(body)) return false;
-      if(body.startsWith('^') && !body.includes('\\s')) return false;
-      if(!body.startsWith('^') && /\\[sDW]/.test(body)) return false;
-      for(const match of body.matchAll(/([^\\])-([^\\])/g)) if(match[1].charCodeAt(0)<=32 && match[2].charCodeAt(0)>=32) return false;
-      i=end;
-    } else if(char === '\\') {
-      const next=pattern[++i];
-      if(next === 's') { if(!['*','+','?'].includes(pattern[i+1])) return false; }
-      else if(['D','W','x','u','p','P',' '].includes(next) || /^[0-9]$/.test(next??'')) return false;
-    } else if(char === '.' || char === ' ') return false;
+// ADR-0186 decision 31 (B4I-02): per-rule scan plans derived from RE2's OWN compiled program, so the
+// proof follows the engine's parse, case folding and quantifier expansion rather than a second parser.
+//   prefilter: positions 1..k of every match, each a class that contains every code point RE2 can consume
+//     there (the union over all NFA states reachable after i runes; empty-width assertions pass through, so
+//     the class is a superset). k stops where a match could already end (minimum length) or at 24. Every
+//     match therefore starts at a prefilter hit, and a run without one needs no RE2 scan at all.
+//   maxLength: the longest path through the program in UTF-16 units (a rune that can be astral counts 2),
+//     or null when the program has a reachable loop. A bounded rule is matched in a window of maxLength + 1
+//     units after each hit plus one unit of left context, which reproduces the full-text leftmost-first
+//     match exactly; an unbounded rule falls back to one RE2 scan of the text when it has a hit.
+// The program layout is re2js's; the derivation is pinned to the exact version that defines it.
+const re2jsPackage = JSON.parse(readFileSync(path.join(path.dirname(createRequire(path.join(root, 'packages/shared/package.json')).resolve('re2js')), '..', 'package.json'), 'utf8'));
+if (re2jsPackage.version !== '2.8.6') throw Error(`Scan plans are derived from the re2js 2.8.6 program layout; review it for ${re2jsPackage.version}`);
+const OP = { ALT: 1, ALT_MATCH: 2, CAPTURE: 3, EMPTY_WIDTH: 4, FAIL: 5, MATCH: 6, NOP: 7, RUNE: 8, RUNE1: 9, RUNE_ANY: 10, RUNE_ANY_NOT_NL: 11 };
+const PREFILTER_POSITIONS = 24, MAX_RUNE = 0x10ffff;
+function runeRanges(inst) {
+  if (inst.op === OP.RUNE_ANY) return [[0, MAX_RUNE]];
+  if (inst.op === OP.RUNE_ANY_NOT_NL) return [[0, 9], [11, MAX_RUNE]];
+  const runes = inst.runes;
+  if (runes.length === 1) {
+    if ((inst.arg & 1) === 0) return [[runes[0], runes[0]]]; // RE2Flags.FOLD_CASE unset
+    const char = String.fromCodePoint(runes[0]);
+    // RE2 simple case folding of an ASCII letter: its two cases, plus U+017F for s and U+212A for k.
+    // Any other folded literal is widened to every code point (still a superset).
+    if (!/^[A-Za-z]$/.test(char)) return [[0, MAX_RUNE]];
+    const points = [char.toLowerCase(), char.toUpperCase()].map((c) => c.codePointAt(0));
+    if (/s/i.test(char)) points.push(0x17f);
+    if (/k/i.test(char)) points.push(0x212a);
+    return points.map((c) => [c, c]);
   }
-  return true;
+  const out = [];
+  for (let i = 0; i < runes.length; i += 2) out.push([runes[i], runes[i + 1]]);
+  return out;
 }
-// An initial literal is mandatory only when there is no top-level branch.
-// Unsupported syntax receives no prefilter. Never infer a literal from a
-// nested/optional branch or a class.
-function requiredPrefix(pattern) {
-  let depth=0, inClass=false, escaped=false;
-  for(const char of pattern) {
-    if(escaped){escaped=false;continue;}
-    if(char==='\\'){escaped=true;continue;}
-    if(char==='['){inClass=true;continue;}
-    if(char===']'){inClass=false;continue;}
-    if(inClass)continue;
-    if(char==='(')depth++;else if(char===')')depth--;else if(char==='|'&&depth===0)return null;
+function scanPlan(pattern, caseInsensitive) {
+  const prog = RE2JS.compile(pattern, caseInsensitive ? RE2JS.CASE_INSENSITIVE : 0).re2().prog;
+  const inst = prog.inst;
+  const closure = (pcs) => {
+    const seen = new Set(), runes = []; let match = false; const stack = [...pcs];
+    while (stack.length) {
+      const pc = stack.pop(); if (seen.has(pc)) continue; seen.add(pc);
+      const i = inst[pc];
+      if (i.op === OP.ALT || i.op === OP.ALT_MATCH) stack.push(i.out, i.arg);
+      else if (i.op === OP.CAPTURE || i.op === OP.EMPTY_WIDTH || i.op === OP.NOP) stack.push(i.out);
+      else if (i.op === OP.MATCH) match = true;
+      else if (i.op >= OP.RUNE && i.op <= OP.RUNE_ANY_NOT_NL) runes.push(i);
+      else if (i.op !== OP.FAIL) return null; // a lookbehind or unknown instruction: no plan, full scan
+    }
+    return { runes, match };
+  };
+  const classes = [];
+  let state = closure([prog.start]);
+  while (state && !state.match && state.runes.length && classes.length < PREFILTER_POSITIONS) {
+    const merged = [];
+    for (const [lo, hi] of state.runes.flatMap(runeRanges).sort((a, b) => a[0] - b[0])) {
+      const last = merged.at(-1);
+      if (last && lo <= last[1] + 1) last[1] = Math.max(last[1], hi); else merged.push([lo, hi]);
+    }
+    classes.push(merged);
+    state = closure(state.runes.map((i) => i.out));
   }
-  const start=pattern.startsWith('\\b')?pattern.slice(2):pattern;
-  const prefix=/^[A-Za-z0-9_"=:-]+/.exec(start)?.[0];
-  // A quantifier can make the last literal optional; omit it conservatively.
-  if(!prefix)return null;
-  const next=start[prefix.length];
-  const required=['?','*','{'].includes(next)?prefix.slice(0,-1):prefix;
-  return required.length>=3?required.toLowerCase():null;
+  if (!state || !classes.length) return null;
+  const memo = new Map(), active = new Set();
+  const longest = (pc) => {
+    if (memo.has(pc)) return memo.get(pc);
+    if (active.has(pc)) return Infinity;
+    active.add(pc);
+    const i = inst[pc]; let value;
+    if (i.op === OP.ALT || i.op === OP.ALT_MATCH) value = Math.max(longest(i.out), longest(i.arg));
+    else if (i.op === OP.CAPTURE || i.op === OP.EMPTY_WIDTH || i.op === OP.NOP) value = longest(i.out);
+    else if (i.op === OP.MATCH) value = 0;
+    else if (i.op === OP.FAIL) value = -Infinity;
+    else value = (runeRanges(i).some(([, hi]) => hi > 0xffff) ? 2 : 1) + longest(i.out);
+    active.delete(pc); memo.set(pc, value); return value;
+  };
+  const max = longest(prog.start);
+  const point = (c) => /^[A-Za-z0-9]$/.test(String.fromCodePoint(c)) ? String.fromCodePoint(c) : `\\u{${c.toString(16)}}`;
+  const prefilter = classes.map((ranges) => `[${ranges.map(([lo, hi]) => lo === hi ? point(lo) : `${point(lo)}-${point(hi)}`).join('')}]`).join('');
+  new RegExp(prefilter, 'gu'); // must compile in the runtime's flags
+  return { prefilter, maxLength: Number.isFinite(max) ? max : null };
 }
-// These gates are admitted only for the exact pinned pattern. Each listed
-// alternative contains a necessary ASCII fragment, including grouped/class
-// prefixes. A changed source receives no gate until its proof is reviewed.
-const provedFragments = {
-  stripe_key:['sk-live-','sk-test-','rk-live-','rk-test-','sk_live_','sk_test_','rk_live_','rk_test_'], github_token:['ghp_','gho_','ghu_','ghr_','ghs_'],
-  gitlab_service_token:['gl'], aws_secret_key:['secret'], discord_bot_token:['m','n'],
-  twilio_api_key:['sk'], sendgrid_api_key:['sg.'], vercel_token:['vercel_','vcp_','vci_','vca_','vcr_','vck_'],
-  jwt_token:['eyj','eya','ewo','ewk','ew0'], extended_private_key:['xprv','yprv','zprv','tprv'], ethereum_private_key:['0x'],
-  social_security_number:['-'],google_oauth_client_id:['.apps.googleusercontent.com'],
-  environment_variable_secret:['secret','password','passwd','token','api']
-};
-// Pin the complete proof inputs, independently of the Go parsing loop.
-const proofPatterns = JSON.parse(readFileSync(path.join(base,'prefix-proofs.json'),'utf8'));
-const requiredPrefixes=Object.fromEntries(secrets.map(rule=>{
-  const short=rule.id.replace('pipelock.secrets.',''), ordinary=requiredPrefix(rule.pattern);
-  const proved=proofPatterns[short]===rule.pattern?provedFragments[short]:undefined;
-  return [rule.id,ordinary?[ordinary]:proved];
-}).filter(([,prefix])=>prefix));
-// Ordinary extracted literals occur at match start. Reviewed exceptional
-// patterns have fixed preceding context, except two unbounded name/number forms.
-const manualStartContext={stripe_key:0,github_token:0,gitlab_service_token:0,aws_secret_key:4,discord_bot_token:0,twilio_api_key:0,sendgrid_api_key:0,vercel_token:0,jwt_token:0,extended_private_key:0,ethereum_private_key:0,social_security_number:3};
-const prefixStartContext=Object.fromEntries(secrets.flatMap(rule=>{
- const short=rule.id.replace('pipelock.secrets.','');
- const context=requiredPrefix(rule.pattern)?0:proofPatterns[short]===rule.pattern?manualStartContext[short]:undefined;
- return context===undefined?[]:[[rule.id,context]];
-}));
-const spaceRunSafeIds = secrets.filter((rule) => flexibleSpaces(rule.pattern)).map(rule=>rule.id);
-const outputs = { GENERATED_REQUIRED_PREFIXES:requiredPrefixes, GENERATED_PREFIX_START_CONTEXT:prefixStartContext, GENERATED_SPACE_RUN_SAFE_IDS:spaceRunSafeIds, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
+// Self-check of the derivation on shapes whose answers are known by hand.
+for (const [pattern, ci, prefilter, maxLength] of [
+  [String.raw`\b\d{3}-\d{2}-\d{4}\b`, false, '[0-9][0-9][0-9][\\u{2d}][0-9][0-9][\\u{2d}][0-9][0-9][0-9][0-9]', 11],
+  ['ab+', false, '[a][b]', null], ['(?:x|yz)', false, '[x-y]', 2], ['k', true, '[Kk\\u{212a}]', 1],
+]) {
+  const got = scanPlan(pattern, ci);
+  if (got?.prefilter !== prefilter || got?.maxLength !== maxLength) throw Error(`Scan plan self-check failed for ${pattern}: ${JSON.stringify(got)}`);
+}
+const scanPlans = Object.fromEntries(secrets.flatMap((rule) => { const plan = scanPlan(rule.pattern, rule.caseInsensitive); return plan ? [[rule.id, plan]] : []; }));
+const outputs = { GENERATED_SECRET_SCAN_PLANS:scanPlans, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
 const result = '// Generated offline by scripts/vendor/convert-detection-content.mjs; do not edit.\n' + Object.entries(outputs).map(([name,value]) => `export const ${name} = ${JSON.stringify(value,null,2)} as const;\n`).join('\n');
 const output = path.join(base,'generated.ts');
 if (process.argv.includes('--check')) { if (readFileSync(output,'utf8') !== result) throw Error('Generated detection content differs; rerun converter'); }

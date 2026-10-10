@@ -51,6 +51,7 @@ import {
   issuedTokens,
   orgSettings,
   ORG_SETTINGS_ID,
+  replayClaims,
   runMigrations,
   sql,
   type Db,
@@ -74,6 +75,7 @@ import {
 import {
   checkDelegationAuthorization,
   claimReplay,
+  sweepReplayClaims,
   deriveIdentitySecrets,
   issueDpopNonce,
   mintDelegatedToken,
@@ -217,7 +219,7 @@ beforeAll(async () => {
   restoreGates = await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
 
   keyDir = mkdtempSync(path.join(os.tmpdir(), "s3-issuer-"));
-  for (let i = 0; i < 3; i++) issuerKeys.push(generateKeyPairSync("ed25519").privateKey);
+  for (let i = 0; i < 4; i++) issuerKeys.push(generateKeyPairSync("ed25519").privateKey);
   writeIssuerKeys([issuerKeys[0]!]);
   const k0 = (await configuredIdentitySigningKeys())[0]!;
   // a shared database may already hold an active key from another run: make ours the signer
@@ -807,6 +809,25 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     await rotateIdentitySigningKey(db, { kid: next.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
     expect((await mint(rootExt)).kid).toBe(next.kid);
   });
+
+  it("revocation uses the database clock: a token minted by a replica whose clock runs ahead is still revoked, never rolled back", async () => {
+    writeIssuerKeys([issuerKeys[0]!, issuerKeys[1]!, issuerKeys[2]!, issuerKeys[3]!]);
+    const signer = await currentIssuerSigner(db);
+    // issued_at two minutes ahead of the database: the old gateway-clock revoked_at
+    // fell before it and the lifecycle check rolled the whole revocation back
+    const ahead = await mint(rootExt, new Date(Date.now() + 120_000));
+    const out = await revokeIdentitySigningKey(db, { kid: signer.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+    expect(out.tokensRevoked).toBeGreaterThanOrEqual(1);
+    const [key] = await db.select().from(identitySigningKeys).where(eq(identitySigningKeys.kid, signer.kid));
+    expect(key!.revokedAt).not.toBeNull();
+    const [tok] = await db.select().from(issuedTokens).where(eq(issuedTokens.jti, ahead.jti));
+    expect(tok!.revokedAt!.getTime()).toBeGreaterThanOrEqual(tok!.issuedAt.getTime());
+    // restore a signer for the suites below
+    const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
+    const fresh = (await configuredIdentitySigningKeys()).find((k) => !recorded.has(k.kid))!;
+    await rotateIdentitySigningKey(db, { kid: fresh.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+    expect((await mint(rootExt)).kid).toBe(fresh.kid);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -995,6 +1016,16 @@ describe("ADR-0188 S3 — decision 14: replay claims are one atomic insert", () 
     expect(await claimReplay(db2, "client_assertion", key, until)).toBe(false);
     // the same key in another namespace is a different claim
     expect(await claimReplay(db, "as_dpop", key, until)).toBe(true);
+  });
+
+  it("the sweep selects by the database clock: expired claims go, live ones stay, and the guard never aborts it", async () => {
+    const dead = `s3-${RUN}-dead-${randomUUID()}`;
+    const live = `s3-${RUN}-live-${randomUUID()}`;
+    await db.insert(replayClaims).values({ namespace: "client_assertion", key: dead, claimedAt: sql`now() - interval '2 minutes'`, expiresAt: sql`now() - interval '1 minute'` });
+    expect(await claimReplay(db, "client_assertion", live, new Date(Date.now() + 60_000))).toBe(true);
+    expect(await sweepReplayClaims(db)).toBeGreaterThanOrEqual(1);
+    const left = (await db.select({ key: replayClaims.key }).from(replayClaims).where(sql`${replayClaims.key} in (${dead}, ${live})`)).map((r) => r.key);
+    expect(left).toEqual([live]);
   });
 });
 

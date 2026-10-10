@@ -1,0 +1,17 @@
+{
+  "name": "regulait-bom-b0-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 spike.test.mjs",
+    "test:offline": "B0_EXPECT_OFFLINE=1 unshare -n node --test --test-concurrency=1 spike.test.mjs",
+    "licences": "node licences.mjs"
+  },
+  "dependencies": {
+    "@cyclonedx/cyclonedx-library": "10.3.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "canonicalize": "5.1.0"
+  }
+}
