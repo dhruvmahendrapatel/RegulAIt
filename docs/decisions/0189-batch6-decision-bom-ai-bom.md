@@ -961,6 +961,14 @@ implement exactly these shapes; a change to them is a contract change reviewed w
 changes no decision above. Amended 2026-10-10 (B4.7-1, master): `proof.anchor.record.payloadVersion` is the stored string, not an
 integer.
 
+**Contract round 2 (2026-10-10).** Codex's consumer review (#318, X48: B4C-01 to B4C-03) and an automated review of #327
+tightened the frozen contract without changing a decision above: required verify check sets and fixed results
+(B4.4), section aggregation (B4.4), source bound to subject, the manifest email scan and `installId` rules (B4.1),
+the export-key verification keyring (B4.2, master decision), `bundle.href` bound to the returned version, the global
+`mfa_enrollment_required` 403 in every B4 route's refusals, documented path-parameter schemas, and a per-route
+`bodyLimit` on `POST /v1/boms/verify` sized for the largest admitted request (`BOM_VERIFY_MAX_REQUEST_BYTES`), above
+which it answers 413 `bom_bundle_too_large`.
+
 ### B4 bundle and signature specification (pre-build, 2026-10-10)
 
 This section fixes the bytes slice B4 produces and the offline verifier checks, precisely enough that an implementer
@@ -985,7 +993,7 @@ characters unless written `sha256:<hex>`. Short file names: `contract.ts`, `cont
 #### B4.1 The `export-bundle/3` archive
 
 **Container.** A gzip-compressed USTAR archive written by ADR-0116's `buildTarGz` (`export-bundle.ts:453-465`) and
-served as `application/gzip` (`contract-b4.ts:278`). B4 reuses that writer and adds no tar dependency.
+served as `application/gzip` (`contract-b4.ts:286`). B4 reuses that writer and adds no tar dependency.
 
 **Root directory.** Every entry sits under one directory (`verify-export-bundle.sh:169` reads exactly one). Its name
 extends ADR-0116's `regulait-export-<kind>-<id>` (`export-bundle.ts:685`); **decided here**:
@@ -994,10 +1002,10 @@ extends ADR-0116's `regulait-export-<kind>-<id>` (`export-bundle.ts:685`); **dec
 - AI BOM, `…/bundle`: `regulait-export-ai-bom-<snapshotId>`;
 - AI BOM, `?format=<f>` (`native` included): `regulait-export-ai-bom-<snapshotId>-<f>`.
 
-UUIDs are lower case. `Content-Disposition` is `attachment; filename="<root>.tar.gz"` (`contract-b4.ts:279`).
+UUIDs are lower case. `Content-Disposition` is `attachment; filename="<root>.tar.gz"` (`contract-b4.ts:287`).
 
 **Files** (paths relative to the root). No other file and no directory entry exists; in particular there is no
-`audit/rows/` (R39, `contract-b4.ts:364`).
+`audit/rows/` (R39, `contract-b4.ts:374`).
 
 | Path | Exact bytes | In `manifest.files` | Fixed by |
 |---|---|---|---|
@@ -1005,7 +1013,7 @@ UUIDs are lower case. `Content-Disposition` is `attachment; filename="<root>.tar
 | `manifest.json.sig` | padded standard base64 of the 64-byte Ed25519 signature over `manifest.json`'s bytes (export key), then `\n` | no | `export-bundle.ts:682-689` |
 | `README.txt` | informational text; it must say that the bundled keys are not the trust root and that no audit payload is included | yes | ADR-0116; wording not normative |
 | `audit/chain.tsv` | Decision BOM only: one line per `proof.chain` row, ascending: `<seq>\t<contentHash>\t<prevHash>\t<rowHash>\n` | yes | the 4-column form, `export-bundle.ts:616-619`; equal to `proof.chain`, decided here |
-| `content/decision-bom.json` | the exact `decision_boms.body`, no trailing newline | yes | §5, `contract-b4.ts:213-214` |
+| `content/decision-bom.json` | the exact `decision_boms.body`, no trailing newline | yes | §5, `contract-b4.ts:220-221` |
 | `content/decision-bom.json.sig` | the body signature file (B4.2) | yes | decided here |
 | `content/decision-bom.<format>.json` | the exact `bom_renderings.bytes` of each rendering of this version (none in v1 unless in-toto is asked for) | yes | R7 |
 | `content/ai-bom.json` | the exact `ai_bom_snapshots.body`: the AI BOM bundle's own snapshot, or, in a Decision BOM bundle, the snapshot `basis.aiBomSnapshotId` names (when not null) | yes | R19; carrying the linked snapshot in a Decision BOM bundle decided here |
@@ -1016,23 +1024,23 @@ UUIDs are lower case. `Content-Disposition` is `attachment; filename="<root>.tar
 
 **AI BOM formats** (**decided here**). `?format=native` carries the native body, its `.sig`, `receipt-keys.json`,
 `README.txt` and `signing-key.pub`. `?format=<rendering>` adds `content/ai-bom.<rendering>.json`. `…/bundle` adds every
-format of `AI_BOM_DOWNLOAD_FORMATS` (`contract-b4.ts:65`) whose `renderings.<format>.status` is `rendered`; `in-toto`
+format of `AI_BOM_DOWNLOAD_FORMATS` (`contract-b4.ts:67`) whose `renderings.<format>.status` is `rendered`; `in-toto`
 is not a download format and is never added. `descriptor.formats` lists `native` and then the carried renderings, in
 `AI_BOM_DOWNLOAD_FORMATS` order. A superseded snapshot is never carried, so `supersedes` reports `unverifiable`
 `earlier_snapshot_not_in_bundle` for any version above 1.
 
-**The manifest** is exactly `exportBundleV3ManifestSchema` (`contract-b4.ts:327-365`) in canonical bytes (RFC 8785 via
+**The manifest** is exactly `exportBundleV3ManifestSchema` (`contract-b4.ts:335-381`) in canonical bytes (RFC 8785 via
 `bomCanonicalBytes` rather than ADR-0116's `canonicalJson`, **decided here**; the bytes are equal for this shape):
 
 - `installId`, `installIdSource`: ADR-0116's `resolveInstallIdentity` (`export-bundle.ts:242-271`), its sources mapped
   `environment` → `operator`, `license` → `license`, `none` → `absent`.
 - `exportedAt`: the database clock (`select now()`) in `toISOString()` form; `exportedAtSource: "database"`.
-- `exportedByUserId`: the caller's user id; no name and no email (`contract-b4.ts:321-326`).
-- `subject.id`: the `auditId` for a Decision BOM (as the #307 fixture, `contract-b4.test.ts:160`), the `snapshotId` for
-  an AI BOM. `descriptor` follows `contract-b4.ts:295-319`; its `bodySha256` is the SHA-256 of
+- `exportedByUserId`: the caller's user id; no name and no email (`contract-b4.ts:329-334`).
+- `subject.id`: the `auditId` for a Decision BOM (as the #307 fixture, `contract-b4.test.ts:172`), the `snapshotId` for
+  an AI BOM. `descriptor` follows `contract-b4.ts:303-327`; its `bodySha256` is the SHA-256 of
   `content/<subject>.json`.
 - `files`: every file in the table except `manifest.json` and `manifest.json.sig`, as `{path, sha256}`, sorted by path,
-  each once (`contract-b4.ts:362-363`).
+  each once (`contract-b4.ts:372-373`).
 - `audit`: for a Decision BOM `{payloadScope: "none", segmentFromSeq, segmentToSeq, segmentRowCount}`, the first and
   last `proof.chain` seq and the row count; `null` for an AI BOM.
 - `signingKeyId`, `signingKeyFingerprint`: the export key (`REGULAIT_EXPORT_SIGNING_KEY` and `…_ID`,
@@ -1051,13 +1059,16 @@ padding to a 10 240-byte record. The gzip stream is one member from `zlib` level
 The uncompressed tar is a pure function of the files. The compressed bytes are **not** a reproducibility claim: the
 gzip OS byte and the deflate output depend on the zlib build (the owner's Windows checkout among them). Only
 `x-regulait-bundle-sha256` covers them, as the SHA-256 of the bytes actually served (**decided here**). The other
-headers (`contract-b4.ts:264-289`): `x-regulait-bundle-manifest-sha256` is the SHA-256 of `manifest.json`;
+headers (`contract-b4.ts:272-297`): `x-regulait-bundle-manifest-sha256` is the SHA-256 of `manifest.json`;
 `x-regulait-bom-body-sha256` is `descriptor.bodySha256`.
 
-**Build order** (R21, **decided here**): write every file, then run the email scan over every entry, then write the
-manifest, then sign it. The scan runs `findEmailShapes` (`contract.ts:276-292`) on the parsed value of every `.json`
+**Build order** (R21, **decided here**; amended in contract round 2, 2026-10-10): write every file, then write the
+manifest, then run the email scan over every entry **including `manifest.json`**, then sign the manifest. The manifest
+holds the operator-set `installId` (`REGULAIT_INSTALL_ID`, verbatim), so scanning it is what keeps an email-shaped id
+out of a signed bundle; `exportBundleV3ManifestSchema` also refuses an email-shaped `installId` and any email shape in
+the manifest, and requires `installIdSource: "absent"` exactly when `installId` is null. The scan runs `findEmailShapes` (`contract.ts:276-292`) on the parsed value of every `.json`
 file and `hasEmailShape` (`contract.ts:264-273`) on the whole text of every file, JSON included. Any hit refuses the
-export with 422 `bom_export_refused`, naming the file and the JSON path, never the value (`contract-b4.ts:169`).
+export with 422 `bom_export_refused`, naming the file and the JSON path, never the value (`contract-b4.ts:173`).
 
 **What is signed.** Two keys sign two layers. The export key signs `manifest.json`, which authenticates every listed
 file's bytes (the envelope). The receipt key signs the BOM body, and the body embeds the receipt and each addendum with
@@ -1097,10 +1108,18 @@ the SHA-256 of `content/ai-bom.json`). A body never carries its own signature.
 
 **Finding the key.** By key id, never from the bundle alone:
 
-- Online (`POST /v1/boms/verify`, `trust: "deployment_registry"`, `contract-b4.ts:580`): a receipt key is the
+- Online (`POST /v1/boms/verify`, `trust: "deployment_registry"`, `contract-b4.ts:648`): a receipt key is the
   `receipt_signing_keys` row with that `key_id`, its `public_jwk` `{kty: "OKP", crv: "Ed25519", x}`
   (`schema.ts:11893-11907`), retired keys included (R6), exactly as `/v1/receipts/verify` does
-  (`decision-receipts.ts:178-183`). The export key is the deployment's configured export public key.
+  (`decision-receipts.ts:178-183`). The export key (**master decision, contract round 2, 2026-10-10**; supersedes the
+  earlier "pinned fingerprints only" answer for online verification) is looked up by the manifest's `signingKeyId` in
+  a public-only verification keyring loaded independently of the signing key: the JSON list
+  `bomExportVerifyKeyringSchema` (`[{keyId, publicKeyPem, fingerprint?}]`, SPKI PEM, each id once; a given
+  `fingerprint` must match its key or the keyring is refused at load), inline in `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS`
+  or in the file named by `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE` (air-gapped installs). When an export signing key
+  is configured, its derived public key is trusted as well, so a deployment verifies its own current bundles without
+  listing it; a deployment with no export private key verifies against the list alone. A `signingKeyId` in neither is
+  `bundle_manifest_signature` `invalid` `unknown_key`. B4 implements the loader.
 - Offline (`scripts/verify-bom.mjs`): the receipt trust root is an out-of-band keyring in the shape
   `GET /v1/receipts/keys` returns (`{"keys":[{"keyId","jwk",…}]}`, `decision-receipts.ts:168`), or a list of pinned
   receipt-key fingerprints, each matched against the `receipt-keys.json` entry of that id. A receipt-key fingerprint is
@@ -1108,7 +1127,7 @@ the SHA-256 of `content/ai-bom.json`). A body never carries its own signature.
   is ADR-0116's `--fingerprint` or `--keyring`.
 - A key id the trust root does not hold, or holds twice with different keys, makes that signature `invalid` with
   reason `unknown_key` (**decided here**; the contract has `unknown_key` only as an invalid reason,
-  `contract-b4.ts:439`).
+  `contract-b4.ts:507`).
 - The receipt v2 boundary (`receiptV2FromAuditSeq`) is a trust-root input as well: online from
   `receipt_payload_versions`, offline from the keyring file's field of that name (as `/v1/receipts/export` writes it,
   `decision-receipts.ts:176`). It is never read from the bundle.
@@ -1133,7 +1152,7 @@ stored payload, as a string) and `signature`.
   (`receiptVersionForAuditSeq`, `verify.ts:56-58`). Nothing emits v2 before the cutover
   (`RECEIPT_EMITTER_SUPPORTS_V2 = false`, `batch4.ts:125`).
 
-The verifier's receipt checks (`contract-b4.ts:412-414`):
+The verifier's receipt checks (`contract-b4.ts:463-465`):
 
 - `receipt_payload_hash`: the SHA-256 of `payload` is `payloadHash`; `payload` re-canonicalises to itself; it parses
   as v1 or v2 (`isDecisionReceiptPayload`).
@@ -1188,6 +1207,33 @@ below means `facts.rows`, then each addendum's `rows`, in `n` order.
 - A check that does not apply to a bundle is left out of `checks` (for example `ai_bom_link` when
   `basis.aiBomSnapshotId` is null, or the addendum checks when there are no addenda); the anchor checks of a
   `chain_signed` BOM are reported `unverifiable` `anchor_absent`.
+- **Required checks** (contract round 2, B4C-01; `contract-b4.ts` `DECISION_BOM_REQUIRED_CHECKS`,
+  `AI_BOM_REQUIRED_CHECKS`, `BOM_BUNDLE_REQUIRED_CHECKS`). A readable response whose outcome is not `invalid` reports
+  at least these; a response missing one can only be `invalid`:
+  - Decision BOM: `body_version`, `body_schema`, `body_signature`, `receipt_signature`, `receipt_payload_hash`,
+    `receipt_facts_binding`, `sections_projection`, `chain_links`, `decision_content_binding`, `anchor_record`,
+    `anchor_imprint`, `tsa_token`, `finality`. Conditional, left out when they do not apply: `facts_addenda_chain` and
+    `facts_addenda_signatures` (no addenda), `ai_bom_link` (no linked snapshot).
+  - AI BOM (bundle or stored): `body_version`, `body_schema`, `body_signature`, `serial_number`; `supersedes` exactly
+    when the snapshot's version is above 1 (left out for version 1); `rendering_hashes` once per carried rendering
+    (`ref` = the format), left out when none is carried.
+  - A `bundle` source adds `bundle_manifest_signature`, `bundle_manifest_files`, `bundle_subject` and
+    `bundle_email_scan`. A stored source has no envelope: it leaves those out or reports them `unverifiable`
+    `not_a_bundle`, never `valid`; `not_a_bundle` is never reported for a bundle.
+  - A check reported more than once carries a distinct, non-null `ref` each time.
+  - Fixed results: `decision_content_binding` is always `unverifiable` `preimage_not_exported` (R39). With a v1 receipt,
+    `receipt_facts_binding` is `unverifiable` `receipt_v1_no_factsHash`, or `invalid` `v1_receipt_after_boundary` at
+    or above a known boundary (B4.3, R46), never `valid`; a v2 receipt never takes either reason. `anchor_absent`
+    appears only on the anchor checks of a `chain_signed` BOM.
+  - A stored source names its own subject (B4C-03): `decision_bom` verifies a Decision BOM, `ai_bom_snapshot` an AI
+    BOM; a bundle may hold either.
+- **Sections** (contract round 2, B4C-02). A Decision BOM response lists every section in order. A section's `status`
+  is the `sections_projection` result for that section: `invalid` exactly when `sections_projection` is `invalid`
+  (`section_mismatch`), which makes the outcome `invalid`; `sections_projection` itself is never `unverifiable`. A
+  section is `unverifiable` only through an `unverifiable` check it depends on. `completeness` (`recorded`,
+  `not_applicable`, `not_recorded` with its reason) is separate from validity: a `not_recorded` section whose
+  recomputed gap matches the body is `valid`. The outcome aggregates checks and sections: any `invalid` gives
+  `invalid`, otherwise any `unverifiable` gives `valid_with_unverifiable`, otherwise `valid`.
 
 **Freezing** (§5, R15, R40, R44 and the round 8–10 entry conditions):
 
@@ -1235,7 +1281,7 @@ The verifier's `finality` check (**decided here**) is structural, because the re
 `anchored` and `anchored_finite_lock` also need `tamperResistant: true` and a non-null `retainUntil`. It reports
 `anchored_lapsed` for those two once `retainUntil` is not after the verification time, adding
 `commitment_after_retain_until`; `anchored_finite_lock` always adds `finite_lock_under_unbounded_retention`
-(`contract-b4.ts:503-536`). Whether a lock was shorter than the retention stays the server's recorded judgement.
+(`contract-b4.ts:571-604`). Whether a lock was shorter than the retention stays the server's recorded judgement.
 
 #### B4.6 The worked example (TEST-ONLY CANARY keys)
 
@@ -1372,7 +1418,7 @@ pinned (B4.1).
 `preimage_not_exported`; `anchor_record`, `anchor_imprint` and `tsa_token` are `unverifiable` `anchor_absent`;
 `ai_bom_link`, `facts_addenda_chain` and `facts_addenda_signatures` do not apply and are left out. The outcome is
 `valid_with_unverifiable`, the recorded and reported finality are `chain_signed`, `receiptPayloadVersion` is `v2`,
-and `cannotProve` is the five fixed Decision BOM entries (`contract-b4.ts:515-521`). Every section is `valid`; the
+and `cannotProve` is the five fixed Decision BOM entries (`contract-b4.ts:583-589`). Every section is `valid`; the
 completeness is as in the body (`model` `not_recorded` `not_captured_by_path`, `approval` `not_recorded`
 `no_bound_row`, `proof` `not_recorded` `anchor_absent`, the rest `recorded`).
 
