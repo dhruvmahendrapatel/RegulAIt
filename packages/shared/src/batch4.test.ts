@@ -24,6 +24,7 @@ import {
   VENDORED_INJECTION_RULES,
   VENDORED_MCP_HEURISTICS,
   VENDORED_SECRET_RULES,
+  VENDORED_PACK_MANIFESTS,
   approvalSigningChallenge,
   approvalSigningDigest,
   approvalSigningPayload,
@@ -59,11 +60,13 @@ describe("ADR-0186 strict defaults and relaxations", () => {
         "break_glass",
         "passkey_manage",
         "owner_change",
+        "identity_manage",
       ],
       toolApprovalSensitiveQuorum: 2,
       decisionReceiptsMode: "on",
       auditAnchorTimestampMode: "required",
       vendoredDetectionPacks: ["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"],
+      outboundCredentialAudience: "enforce",
       monitorMcpBaselineDays: 14,
       monitorJailbreakThreshold: 3,
       monitorJailbreakWindowHours: 24,
@@ -88,6 +91,7 @@ describe("ADR-0186 strict defaults and relaxations", () => {
       ["decisionReceiptsMode", "off", true],
       ["auditAnchorTimestampMode", "off", true],
       ["vendoredDetectionPacks", ["pipelock-secrets"], true],
+      ["outboundCredentialAudience", "off", true],
       ["monitorMcpBaselineDays", 30, true],
       ["monitorMcpBaselineDays", 7, false],
       ["monitorJailbreakThreshold", 4, true],
@@ -111,6 +115,9 @@ describe("ADR-0186 strict defaults and relaxations", () => {
     expect(ok({ stepUpActions: ["approval_decide", "approval_decide"] })).toBe(false);
     expect(ok({ stepUpActions: ["sudo"] })).toBe(false);
     expect(ok({ vendoredDetectionPacks: ["other-pack"] })).toBe(false);
+    expect(ok({ outboundCredentialAudience: "enforce" })).toBe(true);
+    expect(ok({ outboundCredentialAudience: "off" })).toBe(true);
+    expect(ok({ outboundCredentialAudience: "warn" })).toBe(false);
     expect(ok({ monitorMcpBaselineDays: 91 })).toBe(false);
     expect(ok({ monitorJailbreakWindowHours: 0 })).toBe(false);
     // stored in vocabulary order
@@ -151,7 +158,7 @@ describe("ADR-0186 vocabularies", () => {
     for (const id of DETECTION_MONITOR_RULE_IDS) expect(MONITOR_RULES[id].label.length).toBeGreaterThan(0);
     expect(RECEIPT_OBJECT_TYPES).toEqual(["mcp_tool", "agent", "connector", "approval"]);
     expect(VENDORED_DETECTION_PACKS).toHaveLength(4);
-    expect(STEP_UP_ACTION_KINDS).toHaveLength(6);
+    expect(STEP_UP_ACTION_KINDS).toHaveLength(7); // ADR-0188 added identity_manage
   });
   it("the receipt's signed bytes are the canonical payload", () => {
     const p: DecisionReceiptPayload = {
@@ -214,10 +221,12 @@ describe("ADR-0186 B: the approval signing payload", () => {
 
 describe("ADR-0186 V: the foundation ships no vendored content and changes nothing", () => {
   it("the packs are empty, normalisation is the identity, and nothing fails to compile", () => {
-    expect(VENDORED_SECRET_RULES).toEqual([]);
-    expect(VENDORED_INJECTION_RULES).toEqual([]);
-    expect(VENDORED_MCP_HEURISTICS).toEqual([]);
-    expect(normaliseForInjection("Ign​ore prev")).toBe("Ign​ore prev");
+    const m = (id: string) => VENDORED_PACK_MANIFESTS.find((x) => x.id === id)!;
+    expect(VENDORED_SECRET_RULES.length).toBe(m("pipelock-secrets").rules);
+    expect(VENDORED_INJECTION_RULES.length).toBe(m("nemo-yara-injection").rules);
+    expect(VENDORED_MCP_HEURISTICS.length).toBe(m("agt-mcp-heuristics").rules);
+    expect(normaliseForInjection("Ign​ore prev")).toBe("Ignore prev");
+    expect(normaliseForInjection("plain ascii prose, unchanged")).toBe("plain ascii prose, unchanged");
     expect(vendoredCompileProblems()).toEqual([]);
     const s = "token AKIAIOSFODNN7EXAMPLE and prose";
     // identity: the scrub returns the same string object when nothing matches

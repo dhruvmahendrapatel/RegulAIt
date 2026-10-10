@@ -101,6 +101,7 @@ import {
   protocolOutcomeResult,
 } from "./mcp-protocol.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import { CREDENTIAL_AUDIENCE_ERROR, CREDENTIAL_AUDIENCE_RULE_ID, refuseOutboundCredentialAudience } from "./outbound-audience.js";
 import {
   auditQuorumUnsatisfiableAtQueue,
   recheckApprovalSignatures,
@@ -244,7 +245,7 @@ export async function refuseStdioWithoutEntitlement(
     userId: args.userId,
     serverId: args.serverId,
     toolName: args.toolName ?? null,
-    detail: { phase: "stdio-entitlement", method: args.phase, projectId: args.projectId ?? null },
+    detail: { phase: "stdio-entitlement", method: args.phase, projectId: args.projectId ?? null, receiptClass: "decision" },
     ...decision,
   });
   return decision;
@@ -503,6 +504,7 @@ export async function supersedeStaleConsent(
         approvalId: row.id,
         retirementReason: row.reason,
         projectId: ctx.projectId,
+        receiptClass: "decision",
       },
       effect: "deny",
       ruleId: row.reason === "expired" ? "approval-expired" : "approval-context-stale",
@@ -630,7 +632,11 @@ export async function executeGovernedToolCall(
       // TOOL I/O. Arguments are what the model asked for; content is what the
       // governed path already decided the caller may see — on a PII/guardrail
       // withhold, that is the marker, not the payload.
-      inputText: capture && traceInput.value ? toolPayloadPreview(traceInput.value, max) : null,
+      // ADR-0186 decision 32: arguments refused for carrying a credential are not stored
+      inputText:
+        capture && traceInput.value && !(outcome.kind === "denied" && outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID)
+          ? toolPayloadPreview(traceInput.value, max)
+          : null,
       outputText:
         capture && outcome.kind === "allowed" ? toolPayloadPreview(outcome.content, max) : null,
       contentWithheld:
@@ -812,7 +818,7 @@ async function executeGovernedToolCallInner(
     let preparedPii: PreparedPiiApproval | undefined;
     const refuseTransformation = async (reason: string): Promise<GovernedToolCallOutcome> => {
       const decision: Decision = { effect: "deny", ruleId: "pii-transformation-refused", ruleChain: [], reason };
-      await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "pii" } });
+      await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "pii", receiptClass: "decision" } });
       return { kind: "denied", decision };
     };
     if (piiMode === "redact") {
@@ -856,10 +862,34 @@ async function executeGovernedToolCallInner(
       preparedPii,
       // AER-039: bind the consent to the row this call connects with
       approvalTargetForServer(serverId, serverRow),
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
       return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
+    }
+
+    // ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE. The caller's
+    // arguments, as they would be sent, against the registered upstream URL.
+    // After the entitlement decision (an unentitled caller is denied as such)
+    // and BEFORE the decision row: a refused call is recorded by this check's
+    // own row, which carries rule ids and counts only, so the ledger holds no
+    // ADR-0104 arguments digest of a payload refused for carrying a credential.
+    // Also before the compliance, budget and approval gates (no approver is
+    // asked to sign off a call that may not go out), admission/egress, the
+    // breaker and the connect. The upstream URL is admin configuration and is
+    // not scanned; stdio has no host and is out of scope.
+    if (decision.effect !== "deny" && serverRow.transport !== "stdio") {
+      const audience = await refuseOutboundCredentialAudience(db, {
+        userId,
+        surface: "mcp_tool",
+        content: [preparedPii?.effectiveArguments ?? args.arguments ?? {}],
+        destinations: [serverRow.url],
+        projectId,
+        subject: { serverId, toolName },
+        detail: { ...(args.detail ?? {}), approvalScope, contextDigest, target: auditTarget(serverRow) },
+      });
+      if (audience) return { kind: "denied", decision: credentialAudienceDecision(audience.reason) };
     }
 
     // ADR-0104 — THE FORENSIC HALF, and it is unconditional.
@@ -898,6 +928,7 @@ async function executeGovernedToolCallInner(
         contextDigest,
         projectId,
         target: auditTarget(serverRow),
+        receiptClass: "decision",
       },
       effect: decision.effect,
       ruleId: decision.ruleId,
@@ -936,6 +967,7 @@ async function executeGovernedToolCallInner(
             toolKind: kind,
             projectId,
             governingTags: mcpMode.governingTags,
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "mcp-default-mode",
@@ -992,6 +1024,7 @@ async function executeGovernedToolCallInner(
           projectId,
           toolKind: kind,
           pricePerCallUsd,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "project-budget-cap",
@@ -1050,6 +1083,7 @@ async function executeGovernedToolCallInner(
             // COUNTS ONLY — never the matched substrings
             pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
             projectId,
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "pii-blocked",
@@ -1324,6 +1358,7 @@ async function executeGovernedToolCallInner(
           phase: "pii",
           pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
           projectId,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "pii-blocked",
@@ -1343,6 +1378,7 @@ async function executeGovernedToolCallInner(
           phase: "pii",
           pii: { mode: piiMode, action: "warn", inputHits, outputHits },
           projectId,
+          receiptClass: "decision",
         },
         effect: "allow",
         ruleId: "pii-warned",
@@ -1833,6 +1869,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         phase: "tool-price",
         before: before.pricePerCallUsd,
         after: body.pricePerCallUsd,
+        receiptClass: "configuration",
       },
       effect: "allow",
       ruleId: "mcp-tool-price-set",
@@ -1898,7 +1935,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         await db.insert(auditLog).values({
           userId,
           serverId,
-          detail: { phase: "attribution", requireMcpAttribution: true },
+          detail: { phase: "attribution", requireMcpAttribution: true, receiptClass: "decision" },
           effect: "deny",
           ruleId: "mcp-attribution-required",
           ruleChain: [],
@@ -2300,6 +2337,11 @@ export function mcpErrorForGovernanceOutcome(
       return new McpError(
         ErrorCode.InvalidRequest,
         `Denied by policy: ${outcome.decision.reason}`,
+        // ADR-0186 decision 32: the connector route's 403 code, carried in the
+        // error data (a JSON-RPC answer has no HTTP status of its own)
+        outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID
+          ? { error: CREDENTIAL_AUDIENCE_ERROR, status: 403 }
+          : undefined,
       );
     // §8.4 input block: denied pre-call, nothing executed, nothing billed.
     // The message names CATEGORIES only, never the matched content.
@@ -2374,6 +2416,11 @@ export function mcpErrorForGovernanceOutcome(
 }
 
 /** AER-039 — the upstream a call was bound to, safe for the audit ledger */
+/** ADR-0186 decision 32: the refusal as a governed deny (every surface already maps `denied`) */
+export function credentialAudienceDecision(reason: string): Decision {
+  return { effect: "deny", ruleId: CREDENTIAL_AUDIENCE_RULE_ID, ruleChain: [], reason };
+}
+
 function auditTarget(row: { url: string; allowPrivateRanges: boolean | null; admissionManifestDigest: string | null }) {
   let host: string | null = null;
   try {

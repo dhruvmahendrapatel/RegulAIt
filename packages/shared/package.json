@@ -15,13 +15,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --dir src"
+    "test": "vitest run"
   },
   "dependencies": {
     "@arizeai/openinference-genai": "0.4.0",
     "@arizeai/openinference-semantic-conventions": "2.14.0",
+    "@cyclonedx/cyclonedx-library": "10.3.0",
+    "@humanwhocodes/momoa": "3.3.13",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/semantic-conventions": "1.43.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "canonicalize": "5.1.0",
     "csv-stringify": "6.9.0",
     "re2js": "2.8.6",

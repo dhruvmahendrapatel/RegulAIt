@@ -17,7 +17,7 @@ const readTool: ToolRef = { serverId: "s1", name: "query_database", kind: "read"
 const grant = { id: "tg-1", userId: "u1", serverId: "s1", toolName: "query_database" };
 const notCurrent: LiteracyPosture = { required: true, current: false, missing: ['"Acceptable use" (aup v2, missing)'], mode: "enforce" };
 const tool = (execution: ExecutionPosture) =>
-  evaluate({ userId: "u1", serverId: "s1", tool: readTool, toolGrants: [grant], serverGrants: [], execution });
+  evaluate({ actor: null, userId: "u1", serverId: "s1", tool: readTool, toolGrants: [grant], serverGrants: [], execution });
 
 describe("ADR-0182 A14: the literacy gate in the kernel", () => {
   it("enforce + required + not current: the tool call is refused and the reason names the document", () => {
@@ -68,7 +68,7 @@ describe("ADR-0182 A14: the literacy gate in the kernel", () => {
       execution: { mode: "normal", literacy: notCurrent },
     } as unknown as Parameters<typeof evaluateAgent>[0]);
     expect(agent.ruleId).toBe(LITERACY_RULE_ID);
-    const conn = evaluateConnector({
+    const conn = evaluateConnector({ actor: null,
       userId: "u1",
       connectorId: "c1",
       operation: "read",
@@ -85,7 +85,7 @@ describe("ADR-0182 A14: the literacy gate in the kernel", () => {
     const d = tool({ mode: "normal", literacy: exempt });
     expect(d.effect).toBe("allow");
     expect(d.ruleChain).toEqual([{ rule: "ai-literacy-break-glass-exempt", outcome: "allow" }, ...base.ruleChain]);
-    const conn = evaluateConnector({
+    const conn = evaluateConnector({ actor: null,
       userId: "u1",
       connectorId: "c1",
       operation: "read",
@@ -94,7 +94,7 @@ describe("ADR-0182 A14: the literacy gate in the kernel", () => {
     });
     expect(conn.effect).toBe("allow");
     expect(conn.ruleChain[0]).toEqual({ rule: "ai-literacy-break-glass-exempt", outcome: "allow" });
-    const warned = evaluateConnector({
+    const warned = evaluateConnector({ actor: null,
       userId: "u1",
       connectorId: "c1",
       operation: "read",

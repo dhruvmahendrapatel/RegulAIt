@@ -148,9 +148,10 @@ describe("the plan: only what this build admits reaches promptfoo", () => {
 
   it("the manifest classes every set that runs and lists the reduced set; the taxonomy maps promptfoo ids", () => {
     const m = ENGINE_MANIFEST.promptfoo;
-    expect(m.version).toBe("0.123.1");
+    expect(m.version).toBe("0.124.1");
     expect(m.imageDigest).toBeNull(); // not built here: the engine cannot be enabled
-    expect(m.usageDataEnv).toEqual(PROMPTFOO_USAGE_DATA_ENV);
+    // B5-P2: the documented switches plus the worker container's own isolation report
+    expect(m.usageDataEnv).toEqual({ ...PROMPTFOO_USAGE_DATA_ENV, REGULAIT_PROMPTFOO_WORKER_ISOLATED: "1" });
     expect(m.sets["prompt-extraction"]).toBe("standard");
     expect(m.sets["strategy:crescendo"]).toBe("offensive");
     expect(m.sets["excessive-agency"]).toBe("agentic");
@@ -551,6 +552,10 @@ describe("the adapter", () => {
 
   it("RED PROOF cancel: a cancel heartbeat aborts the engine and nothing is posted", async () => {
     let aborted = false;
+    // PR #228 review B5X-03 (ADR-0187 decision 162): the cancel is sent only once the fake engine has
+    // signalled that generation started, so the proof cannot race the scheduler (a heartbeat landing
+    // before the adapter reached the engine would cancel with nothing started, and prove nothing here)
+    let generationStarted = false;
     const steps: string[] = [];
     const adapter = promptfooAdapter({
       entrypoint: "/x/entrypoint.js",
@@ -559,6 +564,7 @@ describe("the adapter", () => {
       run: (_cmd, args, opts) =>
         new Promise((resolve) => {
           steps.push(String(args[1]));
+          generationStarted = true;
           const finished = async () => {
             aborted = true;
             const { writeFile } = await import("node:fs/promises");
@@ -570,10 +576,9 @@ describe("the adapter", () => {
         }),
     });
     const posted: unknown[] = [];
-    let beats = 0;
     const client = {
       lease: async () => lease(),
-      heartbeat: async () => ({ cancel: ++beats > 1 }),
+      heartbeat: async () => ({ cancel: generationStarted }),
       result: async (_id: string, env: unknown) => {
         posted.push(env);
         return 200;
@@ -584,6 +589,31 @@ describe("the adapter", () => {
     expect(aborted).toBe(true);
     // the engine is not started again after the cancel (no eval step), and nothing is posted
     expect(steps).toEqual(["redteam"]);
+    expect(posted).toEqual([]);
+  });
+
+  it("B5X-03: a cancel before generation starts runs nothing and posts nothing", async () => {
+    let starts = 0;
+    const adapter = promptfooAdapter({
+      entrypoint: "/x/entrypoint.js",
+      run: async () => {
+        starts += 1;
+        return { exitCode: 0, signal: null, killed: false, stdout: "", stderr: "" };
+      },
+    });
+    const posted: unknown[] = [];
+    const client = {
+      lease: async () => lease(),
+      // the very first (starting) heartbeat already carries the cancel
+      heartbeat: async () => ({ cancel: true }),
+      result: async (_id: string, env: unknown) => {
+        posted.push(env);
+        return 200;
+      },
+    } as unknown as RunnerClient;
+    const out = await runOnce(client, adapter, { engineId: "promptfoo", engineVersion: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}`, workRoot: await mkdtemp(path.join(tmpdir(), "pf-cancel0-")), heartbeatMs: 20 });
+    expect(out.outcome).toBe("cancelled");
+    expect(starts).toBe(0);
     expect(posted).toEqual([]);
   });
 });

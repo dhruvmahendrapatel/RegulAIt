@@ -14,9 +14,10 @@
  * (docs/research/R9-engine-reverification.md); G19 (R10) confirms or replaces
  * them per engine, and network denial stays the real control either way.
  */
+import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
-import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
+import { ENGINE_SELF_TEST_FUTURE_SKEW_MS, ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
 /** how a named plugin/probe set is classed for the approvals rule (owner decision 4) */
 export type EngineSetClass = "standard" | "agentic" | "offensive";
@@ -46,10 +47,17 @@ export interface EngineManifestEntry {
   /** PR #205 review round 6 [73]: must an agent run name a judge agent? (run validation refuses one without) */
   requiresJudge: boolean;
   /**
+   * ADR-0187 decision 203: the sets that need a judge agent even when the engine as a whole does not
+   * (`requiresJudge` false): a run selecting any of them is refused without a judge, exactly as an
+   * engine-wide `requiresJudge` run is (`engineRunNeedsJudge`). Empty when no set needs one.
+   */
+  judgeSets: readonly string[];
+  /**
    * PR #205 review round 9 [79]: does this build keep the runner credential out of the engine
    * process's reach (a distinct OS identity, or a separate container)? false = the engine process
    * runs as the runner's user and could read the credential; enabling then needs an explicit,
-   * stepped-up, audited acceptance (ADR-0187 decision 79). No build has it yet (B5-P2 splits it).
+   * stepped-up, audited acceptance (ADR-0187 decision 79). promptfoo's runner/worker split has it
+   * (B5-P2, decisions 170 on); modelscan's scanner split waits for its verified image (decision 104).
    */
   credentialIsolation: boolean;
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
@@ -79,30 +87,40 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
     version: PROMPTFOO_ENGINE_VERSION,
     // round 13 [95]: bump with every build change (version or digest)
-    generation: 1,
+    generation: 2, // B5-P2: 0.123.1 → 0.124.1 (decision 176)
     // B5-P: the image (engines/promptfoo/Dockerfile) has not been built anywhere that could
     // report a real digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "MIT",
     maintainerCount: null,
-    usageDataEnv: PROMPTFOO_USAGE_DATA_ENV,
+    // the documented switches, plus (B5-P2) the WORKER container's own self-test: the runner reports
+    // REGULAIT_PROMPTFOO_WORKER_ISOLATED true only when the worker's report is fresh, names the
+    // pinned version, reached nothing off the gateway and found no runner credential in reach
+    // (packages/engine-promptfoo/src/worker-selftest.ts; ADR-0187 decisions 170 on)
+    usageDataEnv: { ...PROMPTFOO_USAGE_DATA_ENV, REGULAIT_PROMPTFOO_WORKER_ISOLATED: "1" },
     needsModelAccess: true,
     // PR #205 review round 6 [73]: promptfoo grades with a judge behind the gateway (without one it
     // would fall back to a vendor default, which the config refuses)
     requiresJudge: true,
-    credentialIsolation: false,
+    // every promptfoo run needs the judge already (requiresJudge above)
+    judgeSets: [],
+    // B5-P2 (ADR-0187 decisions 170 on): promptfoo runs in its own container (the worker) with no
+    // state volume, no runner or enrolment token and its own PID namespace; it holds only the run's
+    // virtual key. The runner token stays in the runner container, which never runs promptfoo. The
+    // worker proves it at run time (the switch above), so decision 79's gate no longer applies.
+    credentialIsolation: true,
     // every set that runs here, by class; a set not listed is offensive (fail closed)
     sets: promptfooManifestSets(),
     // remote generation is off on every install, not only air-gapped ones: this never runs
     airGappedReducedSet: promptfooReducedSet(),
-    lastVerified: "2026-10-08",
+    lastVerified: "2026-10-10",
     reCheckBy: "2027-01-08",
     unverified: [
       "image digest and signature (the image is not built yet)",
       "maintainer count",
       "transitive licences: 11 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
-      "runtime behaviour inside the built image (egress test, air-gapped run)",
-      "the disabled-telemetry path still attempts a request in 0.123.1: the image patches it, and network denial stays the control",
+      "runtime behaviour inside the built image (egress test, air-gapped run, and the runner/worker two-container layout of B5-P2 with the worker's own self-test)",
+      "the disabled-telemetry path still attempts a request in 0.124.1 (as in 0.123.1): the image patches it, and network denial stays the control",
     ],
   },
   modelscan: {
@@ -125,6 +143,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     usageDataEnv: { REGULAIT_MODELSCAN_SCANNER_ISOLATED: "1" },
     needsModelAccess: false,
     requiresJudge: false,
+    judgeSets: [],
     // B5-M: the scanner already runs in its own container with no network and no runner token
     // (ADR-0187 decision 104), but the flag stays false until the built image is verified, so
     // decision 79's gate applies: enabling needs the audited, stepped-up acceptance
@@ -148,20 +167,46 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     id: "garak",
     kind: "redteam",
     displayName: "garak",
-    version: "0.17.0",
-    generation: 1,
+    // B5-G: pinned by hash in engines/garak/requirements.txt (image.test.ts keeps them in lockstep)
+    version: GARAK_ENGINE_VERSION,
+    // 2: the image changed (decisions 193-202: probes admitted, data restored, Hub assets pre-seeded)
+    generation: 2,
+    // B5-G: the image (engines/garak/Dockerfile) has not been built anywhere that could report a real
+    // digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "Apache-2.0",
+    // R10: about monthly releases and many contributors, but the merge-right count is unverified
     maintainerCount: null,
-    usageDataEnv: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
+    // the WORKER's switches (it runs garak), each confirmed by the worker's own fresh self-test, plus that
+    // self-test itself (ADR-0187 decisions 140-141; packages/engine-garak/src/selftest.ts)
+    usageDataEnv: { ...GARAK_USAGE_DATA_ENV, [GARAK_WORKER_SELF_TEST_SWITCH]: "1" },
     needsModelAccess: true,
+    // most of garak's admitted probes are judged by local detectors and need no judge model, so the engine
+    // as a whole does not require one (decision 146)...
     requiresJudge: false,
-    credentialIsolation: false,
-    sets: {},
-    airGappedReducedSet: [],
-    lastVerified: "2026-10-08",
-    reCheckBy: "2027-01-08",
-    unverified: [...UNVERIFIED_COMMON, "whether the offline environment fully localises the Hugging Face loaders"],
+    // ...but the probes whose detector (or attacker) is a model — `judge.*` and `agent_breaker.*` — run
+    // only with a judge agent behind the gateway, reached with the run's own key (owner decision on open
+    // question 24; ADR-0187 decisions 203-206). A run selecting one without a judge is refused.
+    judgeSets: garakJudgeSets(),
+    // B5-G (decision 140): two containers from the start. The runner holds the runner token and never
+    // runs garak; the worker runs garak with no runner token and no state volume, and holds only the
+    // run's own virtual key for the run's lifetime. Decision 79's acceptance therefore does not apply.
+    credentialIsolation: true,
+    // every probe that runs, by class; a probe not listed is offensive (fail closed)
+    sets: garakManifestSets(),
+    // planning-time exclusions (decision 61), keyed by the probe name the runner reports
+    airGappedReducedSet: garakReducedSet(),
+    lastVerified: "2026-10-10",
+    reCheckBy: "2027-01-10",
+    unverified: [
+      "image digest and signature (the image is not built yet)",
+      "maintainer count (the repository's merge rights could not be read)",
+      "transitive licences: the 20 outside the ADR-0176 list (PSF-2.0, MPL-2.0 while unmodified, ZPL-2.1, MIT-0, CNRI-Python, MIT-CMU, pillow's bundled image libraries, torch's BSL-1.0 and LLVM-exception terms) were accepted by the owner on 2026-10-10 (ADR-0187 decision 193); the native libraries inside the CPU torch wheel and the base image OS layer are not yet scanned (CI's image scan)",
+      "one fixable HIGH advisory is allow-listed until 2026-12-09: fsspec CVE-2026-104851, held at 2025.3.0 by garak 0.17.0's datasets<4.0 pin; reached only on the image's own read-only, hash-pinned Hub cache (ADR-0187 decisions 160 and 201)",
+      "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
+      "the pre-seeded Hugging Face assets (ADR-0187 decisions 198-200) are proven to load offline by the image build; the image itself has not been built yet",
+      "the judge path (agent_breaker's attacker, parser and judge re-pointed at the run's judge through the gateway) was measured with the pinned garak outside the image only (ADR-0187 decision 204)",
+    ],
   },
 });
 
@@ -173,6 +218,16 @@ export function engineSetClass(manifest: EngineManifestEntry, set: string): Engi
 /** does this run config use a set that needs approval (agentic, offensive or unclassified)? */
 export function engineConfigNeedsApproval(manifest: EngineManifestEntry, sets: readonly string[]): boolean {
   return sets.some((s) => engineSetClass(manifest, s) !== "standard");
+}
+
+/**
+ * ADR-0187 decision 203: must a run of these sets name a judge agent? Yes when the engine grades every run
+ * with one (`requiresJudge`), or when any selected set is one of the manifest's `judgeSets`. Run validation
+ * (and schedules) refuse such a run without a judge (422 `judge_required`); the lease checks it again and
+ * ends a judgeless run `not_run` before any key is minted.
+ */
+export function engineRunNeedsJudge(manifest: EngineManifestEntry, sets: readonly string[]): boolean {
+  return manifest.requiresJudge || sets.some((s) => manifest.judgeSets.includes(s));
 }
 
 export type SelfTestFailure =
@@ -217,7 +272,7 @@ export function evaluateRunnerSelfTest(
   if (!isPublicAddress(report.egress.address)) failures.push("egress_address_missing");
   else if (report.egress.addressConnected) failures.push("egress_address_connected");
   const at = Date.parse(report.at);
-  if (!Number.isFinite(at) || now.getTime() - at > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000 || at - now.getTime() > 300_000) {
+  if (!Number.isFinite(at) || now.getTime() - at > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000 || at - now.getTime() > ENGINE_SELF_TEST_FUTURE_SKEW_MS) {
     failures.push("stale");
   }
   return { passed: failures.length === 0, failures };

@@ -78,6 +78,7 @@ import {
   createEngineRunSchema,
   createEngineScheduleSchema,
   engineConfigNeedsApproval,
+  engineRunNeedsJudge,
   engineHeartbeatSchema,
   engineRunnerLeaseSchema,
   type EngineRunnerNext,
@@ -85,6 +86,7 @@ import {
   evaluateRunnerSelfTest,
   isTerminalEngineRunStatus,
   normaliseEngineResult,
+  garakConfigProblem,
   promptfooConfigProblem,
   updateEngineScheduleSchema,
   type CreateEngineRunInput,
@@ -210,7 +212,7 @@ async function entitlementRefusal(db: Db, userId: string, agentId: string, role:
       userId,
       objectType: "agent",
       objectId: a.id,
-      detail: { phase: "engine-run-entitlement", role },
+      detail: { phase: "engine-run-entitlement", role, receiptClass: "decision" },
       effect: "deny",
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
@@ -305,7 +307,9 @@ export async function validateEngineRunRequest(
   if (engineManifestOutdated(engine, manifest)) return { ok: false, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) };
   // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
   // plugin's test cases, so a plan of strategies alone would run nothing)
-  const configProblem = input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : null;
+  // B5-G (decision 149): garak takes no run params, so nothing can reach its config unseen
+  const configProblem =
+    input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : input.engineId === "garak" ? garakConfigProblem(input.config) : null;
   if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };
@@ -326,9 +330,19 @@ export async function validateEngineRunRequest(
       return { ok: false, status: 422, error: "project_required", detail: "an engine run's model calls are pinned to a project; name the project to bill" };
     }
     // PR #205 review round 6 [73]: an engine that grades with a judge (the manifest says so) is never
-    // queued without one — it would only fail at the runner (`judge_required`)
-    if (manifest.requiresJudge && !input.target.judgeAgentId) {
-      return { ok: false, status: 422, error: "judge_required", detail: `a ${input.engineId} run grades with a judge agent behind the gateway: name judgeAgentId` };
+    // queued without one — it would only fail at the runner (`judge_required`). ADR-0187 decision 203:
+    // the same holds for a run that selects one of the manifest's judge sets (garak's judge.* and
+    // agent_breaker.* probes), even though the engine as a whole needs no judge
+    if (engineRunNeedsJudge(manifest, input.config.sets) && !input.target.judgeAgentId) {
+      const sets = manifest.judgeSets.filter((s) => input.config.sets.includes(s));
+      return {
+        ok: false,
+        status: 422,
+        error: "judge_required",
+        detail: manifest.requiresJudge
+          ? `a ${input.engineId} run grades with a judge agent behind the gateway: name judgeAgentId`
+          : `the ${input.engineId} set(s) ${sets.join(", ")} call a judge model, reached only through the gateway: name judgeAgentId`,
+      };
     }
     const t = await entitlementRefusal(db, ctx.runAsUserId, input.target.agentId, "target");
     if ("ok" in t) return t;
@@ -1660,7 +1674,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         // PR #205 review round 9 [81]: the manifest's required judge is checked again here — a judge
         // agent deleted after queueing nulls `judge_agent_id`, and such a run must never be dispatched
         // with no judge: it ends `not_run` (audited), before any key is minted
-        else if (m.requiresJudge && !run.judgeAgentId) refusal = "judge_required";
+        // (ADR-0187 decision 203: also when the run selects one of the manifest's judge sets)
+        else if (engineRunNeedsJudge(m, run.config.sets) && !run.judgeAgentId) refusal = "judge_required";
         // PR #205 review round 5 [70]: an agent with no provider model is never dispatched under
         // another name (the display name is not a model): the run ends closed
         else if (!t.model || (run.judgeAgentId && !j!.model)) refusal = "agent_not_dispatchable";

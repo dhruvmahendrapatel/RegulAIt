@@ -13,7 +13,19 @@ export { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte
 export type { SQL } from "drizzle-orm";
 export type { PgColumn } from "drizzle-orm/pg-core";
 
-export { AUDIT_CHAIN_LOCK_KEY, appendChainedAuditRows, withAuditChain } from "./audit-chain.js";
+export {
+  AUDIT_CHAIN_LOCK_KEY,
+  AuditChainSchemaBehindError,
+  appendChainedAuditRows,
+  loadAuditChainBoundary,
+  readAuditV2Boundary,
+  withAuditChain,
+} from "./audit-chain.js";
+
+// ADR-0189 — the per-decision and per-subject lock targets of the BOM writers
+export { BOM_DECISION_LOCK_NAMESPACE, BOM_SUBJECT_LOCK_NAMESPACE, lockAiBomSubject, lockDecisionForBom } from "./bom-locks.js";
+// ADR-0189 B3 — the session-level per-subject lock taken before a REPEATABLE READ capture
+export { BOM_SUBJECT_LOCK_TIMEOUT_MS, BomSubjectBusyError, withAiBomSubjectSessionLock, type BoundBomDb } from "./bom-session-lock.js";
 
 // ADR-0102 — the operator-prose credential scrub for reason/note columns
 // OUTSIDE `audit_log`. Exported so the covered/not-covered inventory can be

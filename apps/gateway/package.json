@@ -46,6 +46,9 @@
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-prometheus": "0.223.0",
     "@opentelemetry/sdk-metrics": "2.12.0",
+    "@peculiar/asn1-ess": "2.10.0",
+    "@peculiar/asn1-schema": "2.10.0",
+    "@peculiar/asn1-x509": "2.10.0",
     "@regulait/api-client": "workspace:*",
     "@regulait/connector-provider": "workspace:*",
     "@regulait/db": "workspace:*",
@@ -67,6 +70,7 @@
     "diff": "9.0.0",
     "fastify": "^5.12.2",
     "jose": "6.2.12",
+    "oauth4webapi": "3.8.8",
     "openid-client": "^6.8.4",
     "otpauth": "9.5.2",
     "pkijs": "3.4.1",
@@ -76,6 +80,7 @@
     "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
+    "@regulait/engine-garak": "workspace:*",
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
     "@types/node": "26.1.1",

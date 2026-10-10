@@ -116,6 +116,31 @@ import {
 import { beginTrace, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
+import { CREDENTIAL_AUDIENCE_ERROR, CREDENTIAL_AUDIENCE_RULE_ID, refuseOutboundCredentialAudience } from "./outbound-audience.js";
+
+/**
+ * ADR-0186 decision 32 — every host a connector call can reach, as the egress
+ * branches below adjudicate it: the typed `baseUrl`; the credential-named and
+ * compiled hosts of a credential-derived kind; the compiled vendor default.
+ * `[]` = the call reaches no network host (the mock, or a kind that cannot be
+ * built without a `baseUrl`); `null` = the host cannot be named, so no
+ * credential audience exempts anything.
+ */
+function connectorDestinations(kind: string, baseUrl: string | null, token: string | null): string[] | null {
+  if (baseUrl) return [baseUrl];
+  if (CREDENTIAL_HOST_CONNECTOR_KINDS.has(kind)) {
+    try {
+      const hosts = connectorCredentialHosts(kind, token);
+      const all = [...(hosts.typed ? [hosts.typed] : []), ...hosts.compiled];
+      return all.length > 0 ? all : null;
+    } catch {
+      return null;
+    }
+  }
+  const compiled = connectorDefaultBaseUrl(kind);
+  if (compiled === null) return [];
+  return compiled === undefined ? null : [compiled];
+}
 
 /**
  * ADR-0070 amendment (2026-08-15) — what the governed connector body answers
@@ -349,7 +374,7 @@ export async function executeGovernedConnectorCall(
 
     if (preparationFailed) {
       await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
-        detail: { phase: "input", operation: body.operation, projectId }, effect: "deny",
+        detail: { phase: "input", operation: body.operation, projectId, receiptClass: "decision" }, effect: "deny",
         ruleId: "pii-transform-refused", ruleChain: [], reason: "Connector payload or routing identity cannot be safely transformed" });
       return out.status(403).send({ error: "pii_transform_refused", detail: "Connector payload or routing identity cannot be safely transformed." });
     }
@@ -362,7 +387,7 @@ export async function executeGovernedConnectorCall(
     const reserved = reservedChatControl(connector.providerKind ?? "", body.operation, originalInvocation.payload);
     if (reserved) {
       await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
-        detail: { phase: "input", operation: body.operation, code: reserved.code, projectId, ...(args.detail ?? {}) }, effect: "deny",
+        detail: { phase: "input", operation: body.operation, code: reserved.code, projectId, ...(args.detail ?? {}), receiptClass: "decision" }, effect: "deny",
         ruleId: "connector-reserved-chat-control", ruleChain: [], reason: `connector '${connector.name}': ${reserved.detail}` });
       return out.status(403).send({ error: reserved.code, detail: reserved.detail });
     }
@@ -393,6 +418,7 @@ export async function executeGovernedConnectorCall(
         : null;
     const decision = evaluateConnector({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — the kill switch on the connector path. A connector has no
       // per-subject halt of its own; the dial governs it.
       execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId, ...connectorLiteracy },
@@ -407,6 +433,53 @@ export async function executeGovernedConnectorCall(
       connectorRevocations: connectorRevocationsForUser,
     });
     recordDecision({ surface: "connector", effect: decision.effect });
+
+    // ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE. The caller's own
+    // `object` and `payload`, as they would be sent, against every host this
+    // call can reach. After the entitlement decision and BEFORE its row (a
+    // refused payload leaves no arguments digest, only this check's rule ids
+    // and counts), and before the budget gate, the hold, the egress guard and
+    // the adapter. The stored connector credential is what the gateway
+    // injects: it is never in the scanned content, which is built from the
+    // invocation alone; it is read here only to name a credential-derived host.
+    // A connector with no recognised provider executes nothing, so is skipped.
+    if (decision.effect !== "deny" && connector.providerKind && isConnectorProviderKind(connector.providerKind)) {
+      const [destCred] = await db
+        .select({ baseUrl: connectorCredentials.baseUrl, tokenCiphertext: connectorCredentials.tokenCiphertext })
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId));
+      const destBaseUrl = destCred?.baseUrl ?? connector.baseUrl ?? null;
+      let destToken: string | null = null;
+      if (!destBaseUrl && destCred && dataKey && CREDENTIAL_HOST_CONNECTOR_KINDS.has(connector.providerKind)) {
+        try {
+          destToken = decryptSecret(dataKey, destCred.tokenCiphertext);
+        } catch {
+          destToken = null; // unnamed host: no audience exemption (fails closed)
+        }
+      }
+      const audience = await refuseOutboundCredentialAudience(db, {
+        userId,
+        surface: "connector",
+        content: [effectiveInvocation.object, effectiveInvocation.payload],
+        destinations: connectorDestinations(connector.providerKind, destBaseUrl, destToken),
+        projectId,
+        subject: { objectType: "connector", objectId: connectorId },
+        detail: {
+          // not `object`: it is caller content and may be the carrier
+          operation: body.operation,
+          connectorKind: connector.providerKind,
+          ...(args.detail ?? {}),
+        },
+      });
+      if (audience) {
+        return out.status(403).send({
+          decision: { effect: "deny", ruleId: CREDENTIAL_AUDIENCE_RULE_ID, ruleChain: [], reason: audience.reason },
+          error: CREDENTIAL_AUDIENCE_ERROR,
+          detail: audience.reason,
+          violations: audience.violations,
+        });
+      }
+    }
 
     // Order evidence containing routing identity against policy activation.
     const audited = await db.transaction(async (tx) => {
@@ -429,6 +502,7 @@ export async function executeGovernedConnectorCall(
           // digests, whenever the write was under the dial's hold
           ...(binding ? { argumentsDigest: binding.argumentsDigest, approvalScope: "action", contextDigest: binding.contextDigest } : {}),
           ...(args.detail ?? {}),
+          receiptClass: "decision",
         },
         effect: decision.effect,
         ruleId: decision.ruleId,
@@ -468,6 +542,7 @@ export async function executeGovernedConnectorCall(
           operation: body.operation,
           ...(body.object ? { object: body.object } : {}),
           pricePerCallUsd: connector.pricePerCallUsd ?? null,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "project-budget-cap",
@@ -690,6 +765,7 @@ export async function executeGovernedConnectorCall(
             pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "pii-blocked",
@@ -942,6 +1018,7 @@ export async function executeGovernedConnectorCall(
             connectorKind: connector.providerKind,
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "connector-egress-blocked",
@@ -1095,6 +1172,7 @@ export async function executeGovernedConnectorCall(
             pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: policyChanged ? "connector-policy-changed" : transformRefused ? "pii-transform-refused" : "pii-blocked",
@@ -1113,6 +1191,7 @@ export async function executeGovernedConnectorCall(
             pii: { mode: piiMode, action: "warn", inputHits, outputHits },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "allow",
           ruleId: "pii-warned",
@@ -1185,7 +1264,9 @@ export async function executeGovernedConnectorCall(
       held ? "denied" : outcome.status < 400 ? "ok" : outcome.status >= 500 ? "error" : "denied";
     // A refusal ABOUT the input does not store the input — storing the very
     // payload a block refused would defeat the block (ADR-0070 rule 3).
-    const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused";
+    const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused" ||
+      // ADR-0186 decision 32: the refused input carries a credential
+      errCode === CREDENTIAL_AUDIENCE_ERROR;
     const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;
     const withheld =
       inputRefused || policyChanged ||
@@ -1210,7 +1291,7 @@ export async function executeGovernedConnectorCall(
       attributes: {
         operation: body.operation,
         httpStatus: outcome.status,
-        ...(!policyChanged && !preparationFailed && body.object ? { object: body.object } : {}),
+        ...(!policyChanged && !preparationFailed && errCode !== CREDENTIAL_AUDIENCE_ERROR && body.object ? { object: body.object } : {}),
         ...(connector.providerKind ? { providerKind: connector.providerKind } : {}),
         ...(projectId ? { projectId } : {}),
         ...(errCode ? { error: errCode } : {}),

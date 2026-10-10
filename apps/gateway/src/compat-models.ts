@@ -111,6 +111,7 @@ export async function listEntitledModels(
     // client sees listed and what it may call cannot drift.
     const kernelDecision = evaluateAgent({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       /**
        * ADR-0124 — VISIBILITY, not execution. This is the `/v1/models` listing
        * an IDE reads to populate its picker. Emptying it during a halt would
@@ -189,6 +190,7 @@ export function registerModelsDiscovery(app: FastifyInstance, db: Db) {
         shape: modelsShapeFor(req),
         count: models.length,
         ...(vk ? { virtualKeyId: vk.id } : {}),
+        receiptClass: "configuration",
       },
       effect: "allow",
       ruleId: "models-listed",

@@ -50,6 +50,7 @@ import {
   APPROVAL_SIGNATURE_MODES,
   AUDIT_ANCHOR_TIMESTAMP_MODES,
   DECISION_RECEIPTS_MODES,
+  OUTBOUND_CREDENTIAL_AUDIENCE_MODES,
   SSO_REAUTH_PROVIDER_KINDS,
   STEP_UP_ACTION_KINDS,
   STEP_UP_METHODS,
@@ -77,6 +78,49 @@ import {
   type McpProtocolMethod,
   type McpUpstreamTransport,
   type SeriousIncidentCriterion,
+  AGENT_ENTITLEMENT_MODES,
+  CONNECTOR_GRANT_MODES,
+  IDENTITY_PROPAGATION_MODES,
+  WORKLOAD_CLIENT_AUTH_METHODS,
+  WORKLOAD_IDENTITY_KINDS,
+  WORKLOAD_IDENTITY_STATUSES,
+  WORKLOAD_CREDENTIAL_KINDS,
+  DELEGATION_BINDING_KINDS,
+  DELEGATION_ALLOCATION_STATUSES,
+  DELEGATION_REVOKE_REASONS,
+  TOKEN_BINDING_KINDS,
+  REPLAY_NAMESPACES,
+  type DelegationScope,
+  type WorkloadClientAuthMethod,
+  type WorkloadPublicJwk,
+  // ADR-0189 (migration 0182): the BOM vocabularies, in lockstep with the CHECKs
+  AI_BOM_SNAPSHOT_TRIGGERS,
+  AI_BOM_SNAPSHOT_TRIGGER_MODES,
+  AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES,
+  AI_BOM_SUBJECT_KINDS,
+  ANCHOR_OBSERVATION_MODES,
+  BOM_EXPORT_ROLE_MODES,
+  BOM_PERSON_IDENTIFIER_MODES,
+  BOM_RENDERING_FORMATS,
+  BOM_RETENTION_HOLD_KINDS,
+  BOM_RETENTION_HOLD_SCOPES,
+  CYCLONEDX_EXPORT_VERSIONS,
+  DECISION_BOM_FINALITY_SETTINGS,
+  DECISION_BOM_FINALITY_STATES,
+  DECISION_CAPTURE_STATUSES,
+  DECISION_FACTS_CAPTURE_MODES,
+  DECISION_BOM_FINITE_LOCK_FINALITY_MODES,
+  // ADR-0190 (batch 6 item 3, migration 0183): isolation and execution profiles
+  APPLIED_ISOLATION_KINDS,
+  EXECUTION_REFUSAL_REASONS,
+  EXECUTOR_BACKENDS,
+  EXECUTOR_QUARANTINE_CODES,
+  EXECUTOR_STATUSES,
+  ISOLABLE_WORKLOAD_KINDS,
+  ISOLATION_ENFORCEMENT_MODES,
+  PLACEMENT_OUTCOMES,
+  REQUIRABLE_ISOLATION_CLASSES,
+  REQUIRED_CLASS_SOURCES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -91,6 +135,7 @@ import {
   numeric,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -689,6 +734,11 @@ export const mcpServers = pgTable("mcp_servers", {
   // never invented (agents' costPerMTok null-safety). A tool call is a discrete
   // governed unit of work, so it is priced per call rather than per token.
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  /** ADR-0188 decision 8 (migration 0180; OWNER DECISION 6): what identity the
+   * gateway sends this upstream on each call. `none` (the default) sends
+   * nothing; `signed_assertion` sends a 60 s gateway-signed JWT with a pairwise
+   * subject and the actor chain (slice S8). Turning it on is audited. */
+  identityPropagation: text("identity_propagation", { enum: IDENTITY_PROPAGATION_MODES }).notNull().default("none"),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
    * default (org_settings.mcpPrivateRangesDefault, false by default since
@@ -1409,6 +1459,11 @@ export const auditLog = pgTable(
         "engine_run",
         "engine_schedule",
         "model_artifact",
+        // ADR-0188 (batch 6 item 1) S3: the issuer's signing keys (activate,
+        // rotate, revoke; `object_id` NULL, the kid in `detail`) and
+        // delegation grants (cascade revocation). Plain text column — no DDL.
+        "identity_signing_key",
+        "delegation_grant",
       ],
     })
       .notNull()
@@ -1452,9 +1507,31 @@ export const auditLog = pgTable(
      * WORM anchor pins. Stored so the next append can link without recomputing,
      * and so editing it directly is itself detectable. */
     rowHash: text("row_hash"),
+    // --- ADR-0188 (migration 0180): who DID it, when an agent acted ---------
+    // `userId` stays the SPONSOR (the human the work is for). These name the
+    // agent principal, the delegation grant it acted under and the ordered
+    // chain (identity ids). All NULL on a human's own row, all set together
+    // (CHECK). Covered by `content_hash` only from the v2 boundary on
+    // (`audit_chain_versions`, decision 19); `chainVersion` is 2 on those rows
+    // and NULL on every v1 row. FK-free, like the rest of this table.
+    actorIdentityId: uuid("actor_identity_id"),
+    delegationGrantId: uuid("delegation_grant_id"),
+    actorChain: jsonb("actor_chain").$type<string[]>(),
+    chainVersion: smallint("chain_version"),
   },
   (t) => [
     index("audit_log_user_at_idx").on(t.userId, t.at),
+    check("audit_log_chain_version_check", sql`${t.chainVersion} IS NULL OR ${t.chainVersion} IN (1, 2)`),
+    check(
+      "audit_log_actor_chain_check",
+      sql`${t.actorChain} IS NULL OR (jsonb_typeof(${t.actorChain}) = 'array' AND jsonb_array_length(${t.actorChain}) BETWEEN 1 AND 9)`,
+    ),
+    check(
+      "audit_log_actor_fields_check",
+      sql`(${t.actorIdentityId} IS NULL AND ${t.delegationGrantId} IS NULL AND ${t.actorChain} IS NULL) OR (${t.actorIdentityId} IS NOT NULL AND ${t.delegationGrantId} IS NOT NULL AND ${t.actorChain} IS NOT NULL)`,
+    ),
+    index("audit_log_delegation_grant_idx").on(t.delegationGrantId).where(sql`${t.delegationGrantId} IS NOT NULL`),
+    index("audit_log_actor_identity_idx").on(t.actorIdentityId).where(sql`${t.actorIdentityId} IS NOT NULL`),
     uniqueIndex("audit_log_seq_uq").on(t.seq),
     // migration 0154: the retention prune's meta rows only, so the replay's
     // lookback horizon (`loadAuditLookbackHorizon`) never scans the trail
@@ -1534,6 +1611,17 @@ export const auditAnchors = pgTable(
     tsaAttempts: integer("tsa_attempts").notNull().default(0),
     tsaNextAttemptAt: timestamp("tsa_next_attempt_at", { withTimezone: true }),
     tsaLastError: text("tsa_last_error"),
+    // --- ADR-0189 (migration 0182) -------------------------------------------
+    /** R33: the database-clock time the TSA request was sent, recorded with the nonce */
+    tsaRequestSentAt: timestamp("tsa_request_sent_at", { withTimezone: true }),
+    /** #280: granted before 0182 recorded request facts; set by the migration only, never changed */
+    tsaRequestFactsLegacy: boolean("tsa_request_facts_legacy").notNull().default(false),
+    /** R4: the medium observed tamper-resistant AT FLUSH (never assumed; false = not observed) */
+    tamperResistant: boolean("tamper_resistant").notNull().default(false),
+    tamperObservationMode: text("tamper_observation_mode", { enum: ANCHOR_OBSERVATION_MODES }),
+    tamperObservedAt: timestamp("tamper_observed_at", { withTimezone: true }),
+    /** R44: the Object Lock retain-until read back from the written object version, null when none */
+    retainUntil: timestamp("retain_until", { withTimezone: true }),
   },
   (t) => [
     index("audit_anchors_seq_idx").on(t.seq),
@@ -1551,8 +1639,19 @@ export const auditAnchors = pgTable(
     ),
     check(
       "audit_anchors_tsa_granted_check",
-      sql`${t.tsaStatus} <> 'granted' OR (${t.tsaToken} IS NOT NULL AND ${t.tsaGenTime} IS NOT NULL AND ${t.tsaMessageImprint} IS NOT NULL AND ${t.tsaUrl} IS NOT NULL)`,
+      sql`${t.tsaStatus} <> 'granted' OR (${t.tsaToken} IS NOT NULL AND ${t.tsaGenTime} IS NOT NULL AND ${t.tsaMessageImprint} IS NOT NULL AND ${t.tsaUrl} IS NOT NULL AND (${t.tsaRequestFactsLegacy} OR (${t.tsaNonce} IS NOT NULL AND ${t.tsaRequestSentAt} IS NOT NULL)))`,
     ),
+    check("audit_anchors_tsa_legacy_check", sql`NOT ${t.tsaRequestFactsLegacy} OR ${t.tsaStatus} = 'granted'`),
+    check(
+      "audit_anchors_tamper_observation_mode_check",
+      sql`${t.tamperObservationMode} IS NULL OR ${t.tamperObservationMode} IN ('compliance', 'governance', 'no_default_retention', 'object_lock_absent', 'unobserved', 'sink_constant')`,
+    ),
+    check("audit_anchors_tamper_observed_check", sql`(${t.tamperObservationMode} IS NULL) = (${t.tamperObservedAt} IS NULL)`),
+    check(
+      "audit_anchors_tamper_resistant_check",
+      sql`NOT ${t.tamperResistant} OR (${t.status} = 'flushed' AND ${t.tamperObservationMode} = 'compliance' AND ${t.tamperObservedAt} IS NOT NULL)`,
+    ),
+    check("audit_anchors_retain_until_check", sql`${t.retainUntil} IS NULL OR ${t.status} = 'flushed'`),
   ],
 );
 
@@ -2933,8 +3032,12 @@ export const usageEvents = pgTable(
     agentConfigVersionId: uuid("agent_config_version_id"),
     agentConfigVersion: integer("agent_config_version"),
     detail: jsonb("detail"),
+    /** ADR-0188 (migration 0180): the agent principal and delegation grant this spend was made under (NULL = a human's own call) */
+    actorIdentityId: uuid("actor_identity_id"),
+    delegationGrantId: uuid("delegation_grant_id"),
   },
   (t) => [
+    index("usage_events_delegation_grant_idx").on(t.delegationGrantId).where(sql`${t.delegationGrantId} IS NOT NULL`),
     index("usage_events_user_idx").on(t.userId, t.at),
     index("usage_events_config_version_idx").on(t.configVersionId),
     index("usage_events_agent_config_version_idx").on(t.agentConfigVersionId),
@@ -3786,6 +3889,10 @@ export const orgSettings = pgTable(
       .$type<VendoredDetectionPack[]>()
       .notNull()
       .default(["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]),
+    /** V (decision 32, migration 0181): refuse caller-supplied credentials bound for a host outside their audience */
+    outboundCredentialAudience: text("outbound_credential_audience", { enum: OUTBOUND_CREDENTIAL_AUDIENCE_MODES })
+      .notNull()
+      .default("enforce"),
     /** M: the MCP server baseline window, 1–90 days; longer relaxes it */
     monitorMcpBaselineDays: integer("monitor_mcp_baseline_days").notNull().default(14),
     /** M: jailbreak findings before an alert, 1–100; higher relaxes it */
@@ -3806,6 +3913,73 @@ export const orgSettings = pgTable(
     engineSensitiveSetApproval: boolean("engine_sensitive_set_approval").notNull().default(true),
     /** B5-M (migration 0175): the largest model-artifact upload, in MiB; larger relaxes it */
     modelArtifactMaxMegabytes: integer("model_artifact_max_megabytes").notNull().default(512),
+    /** ADR-0187 decision 127 (migration 0176): what one uploader may keep stored, in MiB and artifacts; larger relaxes it */
+    modelArtifactUploaderQuotaMegabytes: integer("model_artifact_uploader_quota_megabytes").notNull().default(2048),
+    modelArtifactUploaderQuotaCount: integer("model_artifact_uploader_quota_count").notNull().default(20),
+    /** what the whole deployment may keep stored, in MiB and artifacts; larger relaxes it */
+    modelArtifactOrgQuotaMegabytes: integer("model_artifact_org_quota_megabytes").notNull().default(20480),
+    modelArtifactOrgQuotaCount: integer("model_artifact_org_quota_count").notNull().default(200),
+    /** an artifact nothing cites or is scanning is deleted this many days after upload; longer relaxes it */
+    modelArtifactRetentionDays: integer("model_artifact_retention_days").notNull().default(30),
+
+    // --- ADR-0188 (batch 6 item 1, migration 0180): all strict ------------------
+    /** own_grants = the agent's own grants ∩ the sponsor's; sponsor_only relaxes it (I7 off) */
+    agentEntitlementMode: text("agent_entitlement_mode", { enum: AGENT_ENTITLEMENT_MODES }).notNull().default("own_grants"),
+    /** a delegated access token's lifetime, 60–3600 s; longer relaxes it */
+    delegatedTokenTtlSeconds: integer("delegated_token_ttl_seconds").notNull().default(300),
+    /** how deep a delegation chain may go, 0–8; deeper relaxes it */
+    delegationMaxDepth: integer("delegation_max_depth").notNull().default(3),
+    /** how a workload may authenticate; removing one tightens it; client_secret_* is never a member */
+    workloadClientAuthMethods: jsonb("workload_client_auth_methods")
+      .$type<WorkloadClientAuthMethod[]>()
+      .notNull()
+      .default([...WORKLOAD_CLIENT_AUTH_METHODS]),
+    /** every DPoP proof carries a gateway nonce; off relaxes it */
+    dpopNonceRequired: boolean("dpop_nonce_required").notNull().default(true),
+    /** the longest a registered workload key is accepted, 1–90 days */
+    workloadKeyMaxAgeDays: integer("workload_key_max_age_days").notNull().default(90),
+
+    // --- ADR-0189 (batch 6 item 2, migration 0182): the BOM settings, all strict
+    /** facts captured for every receipt-eligible decision; off relaxes it */
+    decisionFactsCapture: text("decision_facts_capture", { enum: DECISION_FACTS_CAPTURE_MODES }).notNull().default("on"),
+    /** when a Decision BOM may freeze; each weaker state relaxes it (R4) */
+    decisionBomFinality: text("decision_bom_finality", { enum: DECISION_BOM_FINALITY_SETTINGS }).notNull().default("anchored"),
+    /** who may export; adding auditors relaxes it */
+    bomExportRoles: text("bom_export_roles", { enum: BOM_EXPORT_ROLE_MODES }).notNull().default("admins_only"),
+    /** R45: display names, AI BOMs only */
+    bomPersonIdentifiers: text("bom_person_identifiers", { enum: BOM_PERSON_IDENTIFIER_MODES }).notNull().default("id_only"),
+    /** OWNER DECISION 8 */
+    aiBomSnapshotTriggers: text("ai_bom_snapshot_triggers", { enum: AI_BOM_SNAPSHOT_TRIGGER_MODES }).notNull().default("sign_off_events"),
+    /** OWNER DECISION 12 / R25: refuse a triggering sign-off while no key exists */
+    aiBomSnapshotWithoutKey: text("ai_bom_snapshot_without_key", { enum: AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES }).notNull().default("refuse"),
+    /** OWNER DECISION 6: 1.7 always; adding 1.6 relaxes it */
+    cyclonedxExportVersions: jsonb("cyclonedx_export_versions")
+      .$type<(typeof CYCLONEDX_EXPORT_VERSIONS)[number][]>()
+      .notNull()
+      .default(["1.7"]),
+    /** exports per minute per person; higher relaxes it */
+    bomExportRateLimitPerMinute: integer("bom_export_rate_limit_per_minute").notNull().default(30),
+    /** F6 / #280: `accept` (an audited relaxation) makes `anchored_finite_lock` final under unbounded retention */
+    decisionBomFiniteLockFinality: text("decision_bom_finite_lock_finality", { enum: DECISION_BOM_FINITE_LOCK_FINALITY_MODES })
+      .notNull()
+      .default("refuse"),
+    // --- ADR-0190 (batch 6 item 3, migration 0183): all strict -----------------
+    /** enforce = refuse when no executor provides the required class; warn relaxes it */
+    isolationEnforcement: text("isolation_enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull().default("enforce"),
+    /** the data-sensitivity floors (OWNER DECISION 3): L2 / L2 / L2 / L3; lower (never below L1) relaxes them */
+    isolationFloorPublic: text("isolation_floor_public", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("user_space_kernel"),
+    isolationFloorInternal: text("isolation_floor_internal", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("user_space_kernel"),
+    isolationFloorConfidential: text("isolation_floor_confidential", { enum: REQUIRABLE_ISOLATION_CLASSES })
+      .notNull()
+      .default("user_space_kernel"),
+    isolationFloorRegulated: text("isolation_floor_regulated", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("microvm"),
+    /** the stdio MCP and engine worker floors (decision 3, OWNER DECISION 4): L2; L1 relaxes them */
+    isolationFloorMcpStdio: text("isolation_floor_mcp_stdio", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("user_space_kernel"),
+    isolationFloorEngineWorker: text("isolation_floor_engine_worker", { enum: REQUIRABLE_ISOLATION_CLASSES })
+      .notNull()
+      .default("user_space_kernel"),
+    /** an executor's self-test is fresh this long, 60–1440 minutes; longer relaxes it */
+    executorAttestationMaxAgeMinutes: integer("executor_attestation_max_age_minutes").notNull().default(120),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
@@ -4398,7 +4572,7 @@ export const orgSettings = pgTable(
     check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
     check(
       "org_settings_step_up_actions_check",
-      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb`,
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb`,
     ),
     check(
       "org_settings_tool_approval_sensitive_quorum_check",
@@ -4412,6 +4586,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_vendored_detection_packs_check",
       sql`jsonb_typeof(${t.vendoredDetectionPacks}) = 'array' AND ${t.vendoredDetectionPacks} <@ '["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]'::jsonb`,
+    ),
+    check(
+      "org_settings_outbound_credential_audience_check",
+      sql`${t.outboundCredentialAudience} IN ('enforce', 'off')`,
     ),
     check("org_settings_monitor_mcp_baseline_days_check", sql`${t.monitorMcpBaselineDays} BETWEEN 1 AND 90`),
     check("org_settings_monitor_jailbreak_threshold_check", sql`${t.monitorJailbreakThreshold} BETWEEN 1 AND 100`),
@@ -4434,6 +4612,45 @@ export const orgSettings = pgTable(
       sql`${t.engineRawReportRetentionDays} BETWEEN 1 AND 3650`,
     ),
     check("org_settings_model_artifact_max_megabytes_check", sql`${t.modelArtifactMaxMegabytes} BETWEEN 1 AND 8192`),
+    check("org_settings_model_artifact_uploader_quota_megabytes_check", sql`${t.modelArtifactUploaderQuotaMegabytes} BETWEEN 1 AND 1048576`),
+    check("org_settings_model_artifact_uploader_quota_count_check", sql`${t.modelArtifactUploaderQuotaCount} BETWEEN 1 AND 100000`),
+    check("org_settings_model_artifact_org_quota_megabytes_check", sql`${t.modelArtifactOrgQuotaMegabytes} BETWEEN 1 AND 10485760`),
+    check("org_settings_model_artifact_org_quota_count_check", sql`${t.modelArtifactOrgQuotaCount} BETWEEN 1 AND 1000000`),
+    check("org_settings_model_artifact_retention_days_check", sql`${t.modelArtifactRetentionDays} BETWEEN 1 AND 3650`),
+    // ADR-0188 (migration 0180)
+    check("org_settings_agent_entitlement_mode_check", sql`${t.agentEntitlementMode} IN ('own_grants', 'sponsor_only')`),
+    check("org_settings_delegated_token_ttl_seconds_check", sql`${t.delegatedTokenTtlSeconds} BETWEEN 60 AND 3600`),
+    check("org_settings_delegation_max_depth_check", sql`${t.delegationMaxDepth} BETWEEN 0 AND 8`),
+    check(
+      "org_settings_workload_client_auth_methods_check",
+      sql`jsonb_typeof(${t.workloadClientAuthMethods}) = 'array' AND ${t.workloadClientAuthMethods} <@ '["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"]'::jsonb`,
+    ),
+    check("org_settings_workload_key_max_age_days_check", sql`${t.workloadKeyMaxAgeDays} BETWEEN 1 AND 90`),
+    // ADR-0189 (migration 0182)
+    check("org_settings_decision_facts_capture_check", sql`${t.decisionFactsCapture} IN ('on', 'off')`),
+    check(
+      "org_settings_decision_bom_finality_check",
+      sql`${t.decisionBomFinality} IN ('anchored', 'anchored_unverified_destination', 'chain_signed')`,
+    ),
+    check("org_settings_bom_export_roles_check", sql`${t.bomExportRoles} IN ('admins_only', 'admins_and_auditors')`),
+    check("org_settings_bom_person_identifiers_check", sql`${t.bomPersonIdentifiers} IN ('id_only', 'display_name')`),
+    check("org_settings_ai_bom_snapshot_triggers_check", sql`${t.aiBomSnapshotTriggers} IN ('sign_off_events', 'on_demand_only')`),
+    check("org_settings_ai_bom_snapshot_without_key_check", sql`${t.aiBomSnapshotWithoutKey} IN ('refuse', 'skip_and_record')`),
+    check(
+      "org_settings_cyclonedx_export_versions_check",
+      sql`jsonb_typeof(${t.cyclonedxExportVersions}) = 'array' AND ${t.cyclonedxExportVersions} <@ '["1.7", "1.6"]'::jsonb AND ${t.cyclonedxExportVersions} @> '["1.7"]'::jsonb`,
+    ),
+    check("org_settings_bom_export_rate_limit_per_minute_check", sql`${t.bomExportRateLimitPerMinute} BETWEEN 1 AND 600`),
+    check("org_settings_decision_bom_finite_lock_finality_check", sql`${t.decisionBomFiniteLockFinality} IN ('refuse', 'accept')`),
+    check("org_settings_isolation_enforcement_check", sql`${t.isolationEnforcement} IN ('enforce', 'warn')`),
+    check(
+      "org_settings_isolation_floors_check",
+      sql`${t.isolationFloorPublic} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorInternal} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorConfidential} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorRegulated} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorMcpStdio} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorEngineWorker} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
+    ),
+    check(
+      "org_settings_executor_attestation_max_age_minutes_check",
+      sql`${t.executorAttestationMaxAgeMinutes} BETWEEN 60 AND 1440`,
+    ),
   ],
 );
 
@@ -8653,6 +8870,9 @@ export const traceSpans = pgTable(
 
     attributes: jsonb("attributes"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0188 (migration 0180): the agent principal and delegation grant behind this span (NULL = a human's own call) */
+    actorIdentityId: uuid("actor_identity_id"),
+    delegationGrantId: uuid("delegation_grant_id"),
   },
   (t) => [
     index("trace_spans_trace_idx").on(t.traceId, t.seq),
@@ -11510,7 +11730,7 @@ export const webauthnChallenges = pgTable(
     check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
     check(
       "webauthn_challenges_action_kind_check",
-      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change')`,
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
     ),
     check(
       "webauthn_challenges_action_digest_check",
@@ -11555,7 +11775,7 @@ export const stepUpGrants = pgTable(
     check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
     check(
       "step_up_grants_action_kind_check",
-      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change')`,
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
     ),
     check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
     check(
@@ -11720,11 +11940,338 @@ export const decisionReceipts = pgTable(
     check("decision_receipts_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
     check(
       "decision_receipts_payload_check",
-      sql`COALESCE(jsonb_typeof(${t.payload}) = 'object' AND ${t.payload} ->> 'v' = 'regulait.receipt.v1' AND jsonb_typeof(${t.payload} -> 'receiptSeq') = 'number' AND ${t.payload} ->> 'receiptSeq' = ${t.receiptSeq}::text AND ${t.payload} ->> 'keyId' = ${t.keyId} AND ${t.payload} ->> 'prev' = ${t.prevHash}, false)`,
+      // ADR-0189 (migration 0182): v1, or v2 with its facts binding (trigger
+      // `decision_receipts_version_guard` holds the boundary and the marker)
+      sql`COALESCE(jsonb_typeof(${t.payload}) = 'object' AND ${t.payload} ->> 'v' IN ('regulait.receipt.v1', 'regulait.receipt.v2') AND jsonb_typeof(${t.payload} -> 'receiptSeq') = 'number' AND ${t.payload} ->> 'receiptSeq' = ${t.receiptSeq}::text AND ${t.payload} ->> 'keyId' = ${t.keyId} AND ${t.payload} ->> 'prev' = ${t.prevHash} AND (${t.payload} ->> 'v' = 'regulait.receipt.v1' OR (${t.payload} ->> 'factsStatus' IN ('captured', 'capture_off') AND ((${t.payload} ->> 'factsStatus' = 'captured' AND ${t.payload} ->> 'factsHash' ~ '^[0-9a-f]{64}$') OR (${t.payload} ->> 'factsStatus' = 'capture_off' AND ${t.payload} -> 'factsHash' = 'null'::jsonb)))), false)`,
     ),
   ],
 );
 export type DecisionReceiptRow = typeof decisionReceipts.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0189 (batch 6 item 2, migration 0182) — THE DECISION BOM AND AI BOM
+// ---------------------------------------------------------------------------
+//
+// Every table here is APPEND-ONLY. Updates are refused; a delete is admitted
+// only by the retention prune (`regulait_bom_prune_guard`: inside a transaction
+// that wrote a `bom_retention_prunes` row, for an expired row whose audit row is
+// gone and that no hold covers). R16: no foreign key to `audit_log` anywhere.
+// Vocabularies live in `@regulait/shared` (`bom/contract.ts`).
+
+/** R34/R42: the receipt v2 boundary, append-only and verifier-trusted. Not set by 0182. */
+export const receiptPayloadVersions = pgTable(
+  "receipt_payload_versions",
+  {
+    version: smallint("version").primaryKey(),
+    fromAuditSeq: bigint("from_audit_seq", { mode: "number" }).notNull(),
+    setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+    setBy: uuid("set_by"),
+  },
+  (t) => [
+    unique("receipt_payload_versions_from_audit_seq_uq").on(t.fromAuditSeq),
+    check("receipt_payload_versions_version_check", sql`${t.version} = 2`),
+    check("receipt_payload_versions_from_audit_seq_check", sql`${t.fromAuditSeq} >= 1`),
+  ],
+);
+
+/** round 8: the receipt-bound capture-status marker, one per receipt-eligible
+ * decision, written in the decision's transaction; the per-decision lock target
+ * and the holder of the decision's one `expires_at`. */
+export const decisionCaptureStatus = pgTable(
+  "decision_capture_status",
+  {
+    auditId: uuid("audit_id").primaryKey(),
+    auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
+    auditAt: timestamp("audit_at", { withTimezone: true }).notNull(),
+    status: text("status", { enum: DECISION_CAPTURE_STATUSES }).notNull(),
+    factsHash: text("facts_hash"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("decision_capture_status_audit_seq_uq").on(t.auditSeq),
+    check("decision_capture_status_audit_seq_check", sql`${t.auditSeq} >= 1`),
+    check("decision_capture_status_status_check", sql`${t.status} IN ('captured', 'capture_off')`),
+    check(
+      "decision_capture_status_facts_hash_check",
+      sql`(${t.status} = 'captured' AND ${t.factsHash} ~ '^[0-9a-f]{64}$') OR (${t.status} = 'capture_off' AND ${t.factsHash} IS NULL)`,
+    ),
+    check("decision_capture_status_expires_check", sql`${t.expiresAt} IS NULL OR ${t.expiresAt} > ${t.auditAt}`),
+  ],
+);
+export type DecisionCaptureStatusRow = typeof decisionCaptureStatus.$inferSelect;
+
+/** §8: one signed, versioned AI BOM snapshot per subject version (R20: install = nil uuid). */
+export const aiBomSnapshots = pgTable(
+  "ai_bom_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: AI_BOM_SUBJECT_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    version: integer("version").notNull(),
+    /** amendment 5: `regulait_ai_bom_serial(id)`, checked in the database */
+    serialNumber: uuid("serial_number").notNull(),
+    /** no FK: checked at insert by the version guard; an older version stays prunable */
+    supersedesId: uuid("supersedes_id"),
+    trigger: text("trigger", { enum: AI_BOM_SNAPSHOT_TRIGGERS }).notNull(),
+    basis: jsonb("basis").notNull(),
+    /** the exact canonical bytes (text, never jsonb: jsonb would reorder keys) */
+    body: text("body").notNull(),
+    bodySha256: text("body_sha256").notNull(),
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("ai_bom_snapshots_subject_version_uq").on(t.subjectKind, t.subjectId, t.version),
+    unique("ai_bom_snapshots_serial_number_uq").on(t.serialNumber),
+    index("ai_bom_snapshots_expires_idx").on(t.expiresAt),
+    check("ai_bom_snapshots_subject_kind_check", sql`${t.subjectKind} IN ('use_case', 'agent', 'builder_agent', 'install')`),
+    check(
+      "ai_bom_snapshots_install_subject_check",
+      sql`${t.subjectKind} <> 'install' OR ${t.subjectId} = '00000000-0000-0000-0000-000000000000'`,
+    ),
+    check("ai_bom_snapshots_version_check", sql`${t.version} >= 1`),
+    check("ai_bom_snapshots_supersedes_check", sql`(${t.version} = 1) = (${t.supersedesId} IS NULL)`),
+    check("ai_bom_snapshots_serial_check", sql`${t.serialNumber} = "regulait_ai_bom_serial"(${t.id})`),
+    check(
+      "ai_bom_snapshots_trigger_check",
+      sql`${t.trigger} IN ('on_demand', 'use_case_approval', 'model_card_approval', 'prompt_promotion', 'evidence_attached', 'config_promotion', 'server_admission', 'skill_admission')`,
+    ),
+    check("ai_bom_snapshots_basis_check", sql`jsonb_typeof(${t.basis}) = 'object'`),
+    check("ai_bom_snapshots_body_sha256_check", sql`${t.bodySha256} = encode(sha256(convert_to(${t.body}, 'UTF8')), 'hex')`),
+    check(
+      "ai_bom_snapshots_body_check",
+      sql`COALESCE((${t.body}::jsonb ->> 'v') = 'regulait.ai-bom.v1' AND (${t.body}::jsonb #>> '{snapshot,id}') = ${t.id}::text AND (${t.body}::jsonb #>> '{snapshot,subjectKind}') = ${t.subjectKind} AND (${t.body}::jsonb #>> '{snapshot,subjectId}') = ${t.subjectId}::text AND (${t.body}::jsonb #> '{snapshot,version}') = to_jsonb(${t.version}) AND (${t.body}::jsonb ->> 'serialNumber') = 'urn:uuid:' || ${t.serialNumber}::text, false)`,
+    ),
+    check("ai_bom_snapshots_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+    check("ai_bom_snapshots_expires_check", sql`${t.expiresAt} IS NULL OR ${t.expiresAt} > ${t.createdAt}`),
+  ],
+);
+export type AiBomSnapshotRow = typeof aiBomSnapshots.$inferSelect;
+
+/** §4, R5, R18, R37: the facts captured in the decision's transaction (ids, digests, enums, integers, times). */
+export const decisionFacts = pgTable(
+  "decision_facts",
+  {
+    auditId: uuid("audit_id")
+      .primaryKey()
+      .references(() => decisionCaptureStatus.auditId),
+    auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
+    factsVersion: text("facts_version").notNull().default("regulait.decision-facts.v1"),
+    facts: jsonb("facts").notNull(),
+    /** SHA-256 of `regulait_canonical_json(facts)`, checked in the database */
+    factsHash: text("facts_hash").notNull(),
+    /** #280: RESTRICT — a snapshot referenced from retained facts is linked */
+    aiBomSnapshotId: uuid("ai_bom_snapshot_id").references(() => aiBomSnapshots.id, { onDelete: "restrict" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("decision_facts_snapshot_idx").on(t.aiBomSnapshotId).where(sql`${t.aiBomSnapshotId} IS NOT NULL`),
+    check("decision_facts_version_check", sql`${t.factsVersion} = 'regulait.decision-facts.v1'`),
+    check(
+      "decision_facts_payload_check",
+      sql`COALESCE(jsonb_typeof(${t.facts}) = 'object' AND ${t.facts} ->> 'v' = ${t.factsVersion} AND ${t.facts} ->> 'auditId' = ${t.auditId}::text AND ${t.facts} -> 'auditSeq' = to_jsonb(${t.auditSeq}) AND (${t.facts} #>> '{model,aiBomSnapshotId}') IS NOT DISTINCT FROM ${t.aiBomSnapshotId}::text, false)`,
+    ),
+    check("decision_facts_json_safe_check", sql`"regulait_bom_json_safe"(${t.facts})`),
+    check(
+      "decision_facts_hash_check",
+      sql`${t.factsHash} = encode(sha256(convert_to("regulait_canonical_json"(${t.facts}), 'UTF8')), 'hex')`,
+    ),
+  ],
+);
+export type DecisionFactsRow = typeof decisionFacts.$inferSelect;
+
+/** R15, R35: late facts, unsigned, hash-chained from the decision's `facts_hash`. */
+export const decisionFactAddenda = pgTable(
+  "decision_fact_addenda",
+  {
+    auditId: uuid("audit_id")
+      .notNull()
+      .references(() => decisionFacts.auditId),
+    n: integer("n").notNull(),
+    prevHash: text("prev_hash").notNull(),
+    facts: jsonb("facts").notNull(),
+    factsHash: text("facts_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "decision_fact_addenda_pk", columns: [t.auditId, t.n] }),
+    unique("decision_fact_addenda_hash_uq").on(t.auditId, t.n, t.factsHash),
+    check("decision_fact_addenda_n_check", sql`${t.n} >= 1`),
+    check("decision_fact_addenda_prev_hash_check", sql`${t.prevHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "decision_fact_addenda_payload_check",
+      sql`COALESCE(jsonb_typeof(${t.facts}) = 'object' AND ${t.facts} ->> 'v' = 'regulait.decision-facts-addendum.v1' AND ${t.facts} ->> 'auditId' = ${t.auditId}::text AND ${t.facts} -> 'n' = to_jsonb(${t.n}) AND ${t.facts} ->> 'prev' = ${t.prevHash}, false)`,
+    ),
+    check("decision_fact_addenda_json_safe_check", sql`"regulait_bom_json_safe"(${t.facts})`),
+    check(
+      "decision_fact_addenda_hash_check",
+      sql`${t.factsHash} = encode(sha256(convert_to("regulait_canonical_json"(${t.facts}), 'UTF8')), 'hex')`,
+    ),
+  ],
+);
+export type DecisionFactAddendumRow = typeof decisionFactAddenda.$inferSelect;
+
+/** R15: addendum signatures, written by the receipt sweep in `n` order. */
+export const decisionFactAddendumSignatures = pgTable(
+  "decision_fact_addendum_signatures",
+  {
+    auditId: uuid("audit_id").notNull(),
+    n: integer("n").notNull(),
+    factsHash: text("facts_hash").notNull(),
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "decision_fact_addendum_signatures_pk", columns: [t.auditId, t.n] }),
+    foreignKey({
+      name: "decision_fact_addendum_signatures_addendum_fk",
+      columns: [t.auditId, t.n, t.factsHash],
+      foreignColumns: [decisionFactAddenda.auditId, decisionFactAddenda.n, decisionFactAddenda.factsHash],
+    }),
+    check("decision_fact_addendum_signatures_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+  ],
+);
+
+/** §8, R40: a frozen, signed Decision BOM version. No FK to audit_log (R16). */
+export const decisionBoms = pgTable(
+  "decision_boms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    auditId: uuid("audit_id").notNull(),
+    version: integer("version").notNull(),
+    /** no FK: checked at insert by the version guard; an older version stays prunable */
+    supersedesId: uuid("supersedes_id"),
+    finality: text("finality", { enum: DECISION_BOM_FINALITY_STATES }).notNull(),
+    body: text("body").notNull(),
+    bodySha256: text("body_sha256").notNull(),
+    signature: text("signature").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => receiptSigningKeys.keyId),
+    basis: jsonb("basis").notNull(),
+    aiBomSnapshotId: uuid("ai_bom_snapshot_id").references(() => aiBomSnapshots.id, { onDelete: "restrict" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("decision_boms_audit_version_uq").on(t.auditId, t.version),
+    index("decision_boms_snapshot_idx").on(t.aiBomSnapshotId).where(sql`${t.aiBomSnapshotId} IS NOT NULL`),
+    check("decision_boms_version_check", sql`${t.version} >= 1`),
+    check("decision_boms_supersedes_check", sql`(${t.version} = 1) = (${t.supersedesId} IS NULL)`),
+    check(
+      "decision_boms_finality_check",
+      sql`${t.finality} IN ('anchored', 'anchored_finite_lock', 'anchored_unverified_destination', 'chain_signed')`,
+    ),
+    check("decision_boms_body_sha256_check", sql`${t.bodySha256} = encode(sha256(convert_to(${t.body}, 'UTF8')), 'hex')`),
+    check(
+      "decision_boms_body_check",
+      sql`COALESCE((${t.body}::jsonb ->> 'v') = 'regulait.decision-bom.v1' AND (${t.body}::jsonb ->> 'id') = ${t.id}::text AND (${t.body}::jsonb ->> 'auditId') = ${t.auditId}::text AND (${t.body}::jsonb -> 'version') = to_jsonb(${t.version}) AND (${t.body}::jsonb ->> 'finality') = ${t.finality}, false)`,
+    ),
+    check("decision_boms_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
+    check("decision_boms_basis_check", sql`jsonb_typeof(${t.basis}) = 'object'`),
+  ],
+);
+export type DecisionBomRow = typeof decisionBoms.$inferSelect;
+
+/** R36: a rendering of exactly one parent, deleted only with it. */
+export const bomRenderings = pgTable(
+  "bom_renderings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    decisionBomId: uuid("decision_bom_id").references(() => decisionBoms.id, { onDelete: "cascade" }),
+    aiBomSnapshotId: uuid("ai_bom_snapshot_id").references(() => aiBomSnapshots.id, { onDelete: "cascade" }),
+    format: text("format", { enum: BOM_RENDERING_FORMATS }).notNull(),
+    bytes: text("bytes").notNull(),
+    sha256: text("sha256").notNull(),
+    validator: text("validator").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("bom_renderings_decision_bom_format_uq").on(t.decisionBomId, t.format).where(sql`${t.decisionBomId} IS NOT NULL`),
+    uniqueIndex("bom_renderings_snapshot_format_uq").on(t.aiBomSnapshotId, t.format).where(sql`${t.aiBomSnapshotId} IS NOT NULL`),
+    check("bom_renderings_one_parent_check", sql`num_nonnulls(${t.decisionBomId}, ${t.aiBomSnapshotId}) = 1`),
+    check("bom_renderings_format_check", sql`${t.format} IN ('cyclonedx-1.7', 'cyclonedx-1.6', 'spdx-3.0.1', 'in-toto')`),
+    check("bom_renderings_sha256_check", sql`${t.sha256} = encode(sha256(convert_to(${t.bytes}, 'UTF8')), 'hex')`),
+    check("bom_renderings_validator_check", sql`${t.validator} ~ '^[A-Za-z0-9._:@/+ -]+$' AND char_length(${t.validator}) <= 256`),
+  ],
+);
+
+/** R16: the audited record of one retention prune pass (the guard admits deletes only inside its transaction). */
+export const bomRetentionPrunes = pgTable(
+  "bom_retention_prunes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    txid: bigint("txid", { mode: "number" }).notNull().default(sql`txid_current()`),
+    asOf: timestamp("as_of", { withTimezone: true }).notNull(),
+    counts: jsonb("counts").$type<Record<string, number>>().notNull().default({}),
+    actorUserId: uuid("actor_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("bom_retention_prunes_txid_idx").on(t.txid),
+    check("bom_retention_prunes_as_of_check", sql`${t.asOf} <= ${t.createdAt}`),
+    check("bom_retention_prunes_counts_check", sql`jsonb_typeof(${t.counts}) = 'object'`),
+  ],
+);
+
+/** R16 / OWNER DECISION 11: an evidence hold on BOM rows; only ever released, once. */
+export const bomRetentionHolds = pgTable(
+  "bom_retention_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scope: text("scope", { enum: BOM_RETENTION_HOLD_SCOPES }).notNull(),
+    auditId: uuid("audit_id"),
+    subjectKind: text("subject_kind", { enum: AI_BOM_SUBJECT_KINDS }),
+    subjectId: uuid("subject_id"),
+    holdKind: text("hold_kind", { enum: BOM_RETENTION_HOLD_KINDS }).notNull(),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    releasedBy: uuid("released_by"),
+  },
+  (t) => [
+    index("bom_retention_holds_active_idx").on(t.auditId, t.subjectKind, t.subjectId).where(sql`${t.releasedAt} IS NULL`),
+    check("bom_retention_holds_scope_check", sql`${t.scope} IN ('decision', 'ai_bom_subject', 'all')`),
+    check("bom_retention_holds_kind_check", sql`${t.holdKind} IN ('legal', 'incident', 'regulator_request', 'audit')`),
+    check(
+      "bom_retention_holds_shape_check",
+      sql`(${t.scope} = 'decision' AND ${t.auditId} IS NOT NULL AND ${t.subjectKind} IS NULL AND ${t.subjectId} IS NULL) OR (${t.scope} = 'ai_bom_subject' AND ${t.auditId} IS NULL AND ${t.subjectKind} IN ('use_case', 'agent', 'builder_agent', 'install') AND ${t.subjectId} IS NOT NULL) OR (${t.scope} = 'all' AND ${t.auditId} IS NULL AND ${t.subjectKind} IS NULL AND ${t.subjectId} IS NULL)`,
+    ),
+    check("bom_retention_holds_release_check", sql`(${t.releasedAt} IS NULL) = (${t.releasedBy} IS NULL)`),
+  ],
+);
+
+/** §7 `bom_export_roles`: an explicit auditor export grant; only ever revoked, once. */
+export const bomAuditorGrants = pgTable(
+  "bom_auditor_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    grantedBy: uuid("granted_by").notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by"),
+  },
+  (t) => [
+    uniqueIndex("bom_auditor_grants_active_uq").on(t.userId).where(sql`${t.revokedAt} IS NULL`),
+    check("bom_auditor_grants_revoke_check", sql`(${t.revokedAt} IS NULL) = (${t.revokedBy} IS NULL)`),
+  ],
+);
 
 // ---------------------------------------------------------------------------
 // ADR-0187 (batch 5, migration 0173) — THE SIDECAR ENGINES
@@ -11847,6 +12394,36 @@ export const modelArtifacts = pgTable(
     check("model_artifacts_format_check", sql`${t.format} IN (${sql.raw(ARTIFACT_FORMATS.map((f) => `'${f}'`).join(", "))})`),
     check("model_artifacts_storage_key_check", sql`${t.storageKey} = 'sha256/' || ${t.sha256}`),
     index("model_artifacts_sha256_idx").on(t.sha256),
+    // ADR-0187 decision 127 (migration 0176): the per-uploader quota sums by uploader
+    index("model_artifacts_uploader_idx").on(t.uploadedByUserId),
+  ],
+);
+
+/**
+ * ADR-0187 decision 127 (migration 0176): a stored object waiting to be deleted. Written in the
+ * transaction that removes the last artifact row naming the key (or ahead of an upload's object write);
+ * the object is deleted after that commits, under the storage lock, only while no row names the key.
+ * A failed delete keeps the row; the retention sweep retries it.
+ */
+export const modelArtifactObjectDeletions = pgTable(
+  "model_artifact_object_deletions",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    /** not attempted before this (an upload's write-ahead record waits for the upload to finish) */
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull().defaultNow(),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+  },
+  (t) => [
+    check("model_artifact_object_deletions_key_check", sql`${t.storageKey} ~ '^sha256/[0-9a-f]{64}$'`),
+    check("model_artifact_object_deletions_attempts_check", sql`${t.attempts} >= 0`),
+    check(
+      "model_artifact_object_deletions_error_code_check",
+      sql`${t.lastErrorCode} IS NULL OR ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$'`,
+    ),
+    index("model_artifact_object_deletions_due_idx").on(t.notBefore),
   ],
 );
 
@@ -12009,7 +12586,741 @@ export const artifactScans = pgTable(
     index("artifact_scans_artifact_idx").on(t.artifactId),
     check("artifact_scans_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
     // B5-M (migration 0175): clean only for a verified non-executable format; one scan per run
-    check("artifact_scans_clean_format_check", sql`${t.verdict} <> 'clean' OR ${t.format} = 'safetensors'`),
+    // migration 0176 (PR #212 review [4235322386]): a NULL format fails the clean branch explicitly
+    check("artifact_scans_clean_format_check", sql`${t.verdict} <> 'clean' OR (${t.format} IS NOT NULL AND ${t.format} = 'safetensors')`),
     uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );
+
+// ===========================================================================
+// ADR-0188 (batch 6 item 1, migration 0180) — per-agent and workload identity,
+// and constrained delegation. S1 creates the tables and their invariants
+// (CHECKs and guard triggers in the migration); nothing writes them yet.
+// ===========================================================================
+
+/**
+ * An agent principal (decision 2): one per subject, exactly the subject FK its
+ * kind names (none for an external `worker_runtime`/`pdp`), a SPIFFE ID as its
+ * identifier, one or more stewards. Kind, subject and identifier are immutable
+ * and `revoked` is terminal (trigger); a row is never deleted.
+ */
+export const workloadIdentities = pgTable(
+  "workload_identities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: WORKLOAD_IDENTITY_KINDS }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "restrict" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "restrict" }),
+    engineRunnerId: uuid("engine_runner_id").references(() => engineRunners.id, { onDelete: "restrict" }),
+    /** `spiffe://<trust-domain>/regulait/<kind>/<id>` by default, or an exact SPIFFE ID the customer's SPIRE issues */
+    identifier: text("identifier").notNull(),
+    /** the human stewards (one to ten); a delegation's sponsor is a separate, per-grant fact */
+    sponsorUserIds: uuid("sponsor_user_ids").array().notNull(),
+    /** the target environments and deploy modes it may act in (empty = none) */
+    environments: text("environments").array().notNull().default(sql`'{}'::text[]`),
+    status: text("status", { enum: WORKLOAD_IDENTITY_STATUSES }).notNull().default("active"),
+    /** the revision of the identity's own grant set: a replacing PUT names it and bumps it by one (X33) */
+    grantsRevision: integer("grants_revision").notNull().default(0),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("workload_identities_identifier_uq").on(t.identifier),
+    unique("workload_identities_agent_uq").on(t.agentId),
+    unique("workload_identities_builder_agent_uq").on(t.builderAgentId),
+    unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
+    check(
+      "workload_identities_kind_check",
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp')`,
+    ),
+    check(
+      "workload_identities_subject_check",
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+    ),
+    check(
+      "workload_identities_identifier_check",
+      sql`length(${t.identifier}) <= 2048 AND ${t.identifier} ~ '^spiffe://[a-z0-9._-]{1,255}(/[A-Za-z0-9._-]+)+$' AND ${t.identifier} !~ '/\\.\\.?(/|$)'`,
+    ),
+    check(
+      "workload_identities_sponsors_check",
+      sql`cardinality(${t.sponsorUserIds}) BETWEEN 1 AND 10 AND array_position(${t.sponsorUserIds}, NULL) IS NULL`,
+    ),
+    check(
+      "workload_identities_environments_check",
+      sql`cardinality(${t.environments}) <= 20 AND array_position(${t.environments}, NULL) IS NULL AND "regulait_text_array_matches"(${t.environments}, '^[a-z0-9][a-z0-9_.-]{0,63}$')`,
+    ),
+    check("workload_identities_status_check", sql`${t.status} IN ('active', 'suspended', 'revoked')`),
+    check("workload_identities_grants_revision_check", sql`${t.grantsRevision} >= 0`),
+    index("workload_identities_status_idx").on(t.status),
+    index("workload_identities_sponsors_gin").using("gin", t.sponsorUserIds),
+  ],
+);
+export type WorkloadIdentityRow = typeof workloadIdentities.$inferSelect;
+
+/**
+ * ADR-0188 decisions 3 and 24 (migration 0180) — an agent principal's OWN
+ * grants: the parallel twins of a user's `tool_grants`, `server_grants`,
+ * `agent_grants`, `connector_grants` and `role_assignments`, keyed by
+ * identity. Default-deny and empty at start (OWNER DECISION 1). Unlike a
+ * user's, `allowedModes` / `allowedObjects` are required lists (decision 27).
+ */
+export const identityToolGrants = pgTable(
+  "identity_tool_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_tool_grants_identity_server_tool_uq").on(t.identityId, t.serverId, t.toolName),
+    check("identity_tool_grants_tool_name_check", sql`length(${t.toolName}) BETWEEN 1 AND 200`),
+  ],
+);
+
+export const identityServerGrants = pgTable(
+  "identity_server_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    readOnlyAll: boolean("read_only_all").notNull().default(false),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("identity_server_grants_identity_server_uq").on(t.identityId, t.serverId)],
+);
+
+export const identityAgentGrants = pgTable(
+  "identity_agent_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** REQUIRED (an empty list allows no mode); never "every mode" */
+    allowedModes: jsonb("allowed_modes").$type<string[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_agent_grants_identity_agent_uq").on(t.identityId, t.agentId),
+    check(
+      "identity_agent_grants_allowed_modes_check",
+      sql`jsonb_typeof(${t.allowedModes}) = 'array' AND jsonb_array_length(${t.allowedModes}) <= 20`,
+    ),
+  ],
+);
+
+export const identityConnectorGrants = pgTable(
+  "identity_connector_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => connectors.id, { onDelete: "cascade" }),
+    mode: text("mode", { enum: CONNECTOR_GRANT_MODES }).notNull(),
+    /** REQUIRED (an empty list allows no object); never "every object" */
+    allowedObjects: jsonb("allowed_objects").$type<string[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_connector_grants_identity_connector_uq").on(t.identityId, t.connectorId),
+    check("identity_connector_grants_mode_check", sql`${t.mode} IN ('read', 'readwrite')`),
+    check(
+      "identity_connector_grants_allowed_objects_check",
+      sql`jsonb_typeof(${t.allowedObjects}) = 'array' AND jsonb_array_length(${t.allowedObjects}) <= 500`,
+    ),
+  ],
+);
+
+/** an agent role assignment: the identity holds the role's grants */
+export const identityRoleAssignments = pgTable(
+  "identity_role_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("identity_role_assignments_identity_role_uq").on(t.identityId, t.roleId)],
+);
+
+/**
+ * A workload's PUBLIC credential (decision 2): an Ed25519/P-256 JWK and its RFC
+ * 7638 thumbprint, an X.509 certificate's `x5t#S256` (plus SAN URI / subject),
+ * or a SPIFFE ID under a configured trust bundle. There is no secret column.
+ * At most 90 days; only `revoked_at` (once) and an earlier `not_after`
+ * (rotation) may change (trigger); never deleted.
+ */
+export const workloadCredentials = pgTable(
+  "workload_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    kind: text("kind", { enum: WORKLOAD_CREDENTIAL_KINDS }).notNull(),
+    publicJwk: jsonb("public_jwk").$type<WorkloadPublicJwk>(),
+    jwkThumbprint: text("jwk_thumbprint"),
+    x5tS256: text("x5t_s256"),
+    sanUri: text("san_uri"),
+    subjectDn: text("subject_dn"),
+    spiffeId: text("spiffe_id"),
+    /** `self_signed_tls_client_auth`: matched by thumbprint, no chain (decision 21) */
+    selfSigned: boolean("self_signed").notNull().default(false),
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull().defaultNow(),
+    notAfter: timestamp("not_after", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("workload_credentials_kind_check", sql`${t.kind} IN ('jwk', 'x509', 'spiffe_id')`),
+    check(
+      "workload_credentials_shape_check",
+      sql`(${t.kind} = 'jwk' AND ${t.publicJwk} IS NOT NULL AND ${t.jwkThumbprint} IS NOT NULL AND ${t.x5tS256} IS NULL AND ${t.sanUri} IS NULL AND ${t.subjectDn} IS NULL AND ${t.spiffeId} IS NULL AND NOT ${t.selfSigned}) OR (${t.kind} = 'x509' AND ${t.publicJwk} IS NULL AND ${t.jwkThumbprint} IS NULL AND ${t.x5tS256} IS NOT NULL AND ${t.spiffeId} IS NULL) OR (${t.kind} = 'spiffe_id' AND ${t.publicJwk} IS NULL AND ${t.jwkThumbprint} IS NULL AND ${t.x5tS256} IS NULL AND ${t.sanUri} IS NULL AND ${t.subjectDn} IS NULL AND ${t.spiffeId} IS NOT NULL AND NOT ${t.selfSigned})`,
+    ),
+    check(
+      "workload_credentials_public_only_check",
+      sql`${t.publicJwk} IS NULL OR COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ((${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string') OR (${t.publicJwk} ->> 'kty' = 'EC' AND ${t.publicJwk} ->> 'crv' = 'P-256' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND jsonb_typeof(${t.publicJwk} -> 'y') = 'string')) AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+    ),
+    check("workload_credentials_jwk_thumbprint_check", sql`${t.jwkThumbprint} IS NULL OR ${t.jwkThumbprint} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("workload_credentials_x5t_check", sql`${t.x5tS256} IS NULL OR ${t.x5tS256} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("workload_credentials_san_uri_check", sql`${t.sanUri} IS NULL OR length(${t.sanUri}) BETWEEN 1 AND 2048`),
+    check("workload_credentials_subject_dn_check", sql`${t.subjectDn} IS NULL OR length(${t.subjectDn}) BETWEEN 1 AND 1024`),
+    check(
+      "workload_credentials_spiffe_id_check",
+      sql`${t.spiffeId} IS NULL OR (length(${t.spiffeId}) <= 2048 AND ${t.spiffeId} ~ '^spiffe://[a-z0-9._-]{1,255}(/[A-Za-z0-9._-]+)+$' AND ${t.spiffeId} !~ '/\\.\\.?(/|$)')`,
+    ),
+    check(
+      "workload_credentials_window_check",
+      sql`${t.notAfter} > ${t.notBefore} AND ${t.notAfter} <= ${t.notBefore} + interval '90 days'`,
+    ),
+    check("workload_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    uniqueIndex("workload_credentials_jwk_thumbprint_uq").on(t.jwkThumbprint).where(sql`${t.jwkThumbprint} IS NOT NULL`),
+    uniqueIndex("workload_credentials_x5t_uq").on(t.x5tS256).where(sql`${t.x5tS256} IS NOT NULL`),
+    uniqueIndex("workload_credentials_spiffe_id_live_uq")
+      .on(t.spiffeId)
+      .where(sql`${t.spiffeId} IS NOT NULL AND ${t.revokedAt} IS NULL`),
+    index("workload_credentials_identity_idx").on(t.identityId),
+  ],
+);
+export type WorkloadCredentialRow = typeof workloadCredentials.$inferSelect;
+
+/**
+ * The gateway issuer's Ed25519 signing keys (decision 5): PUBLIC halves only
+ * (served as the JWKS); the private key is a deploy-time secret. At most one
+ * active signer; retired keys stay for verification; each lifecycle stamp is
+ * written once; never deleted (trigger).
+ */
+export const identitySigningKeys = pgTable(
+  "identity_signing_keys",
+  {
+    kid: text("kid").primaryKey(),
+    algorithm: text("algorithm", { enum: ["Ed25519"] }).notNull().default("Ed25519"),
+    publicJwk: jsonb("public_jwk").$type<{ kty: "OKP"; crv: "Ed25519"; x: string; kid?: string }>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("identity_signing_keys_kid_check", sql`${t.kid} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
+    check("identity_signing_keys_algorithm_check", sql`${t.algorithm} = 'Ed25519'`),
+    check(
+      "identity_signing_keys_public_only_check",
+      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+    ),
+    check(
+      "identity_signing_keys_order_check",
+      sql`(${t.activatedAt} IS NULL OR ${t.activatedAt} >= ${t.createdAt}) AND (${t.retiredAt} IS NULL OR (${t.activatedAt} IS NOT NULL AND ${t.retiredAt} >= ${t.activatedAt})) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
+    ),
+    uniqueIndex("identity_signing_keys_one_active_uq")
+      .on(sql`(true)`)
+      .where(sql`${t.activatedAt} IS NOT NULL AND ${t.retiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
+  ],
+);
+export type IdentitySigningKeyRow = typeof identitySigningKeys.$inferSelect;
+
+/**
+ * THE UNIT OF AUTHORITY (decisions 4, 12, 17, 22): one row per delegation.
+ * `path` = ancestor grant ids, root first; `depth` = cardinality(path). A
+ * child's path, depth, root, sponsor, project, environment and run context
+ * follow its parent row, its lifetime is inside the parent's, and its cap is
+ * no larger (trigger). Balances are integer micro-dollars, never negative.
+ * Changes only by revocation (once) or spend; never deleted.
+ */
+export const delegationGrants = pgTable(
+  "delegation_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    rootGrantId: uuid("root_grant_id")
+      .notNull()
+      .references((): AnyPgColumn => delegationGrants.id, { onDelete: "restrict" }),
+    parentGrantId: uuid("parent_grant_id").references((): AnyPgColumn => delegationGrants.id, { onDelete: "restrict" }),
+    path: uuid("path").array().notNull().default(sql`'{}'::uuid[]`),
+    depth: integer("depth").notNull(),
+    sponsorUserId: uuid("sponsor_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    actorIdentityId: uuid("actor_identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    /** the context it was made for: at most one (none = an external root from a human's delegation proof) */
+    runId: uuid("run_id"),
+    builderTurnId: uuid("builder_turn_id"),
+    engineRunId: uuid("engine_run_id"),
+    scheduleId: uuid("schedule_id"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    /** RFC 9396-style scope entries (`DelegationScopeItem`) */
+    scope: jsonb("scope").$type<DelegationScope>().notNull(),
+    /** this grant's allocation; NULL = uncapped (decision 16: an unpriced call under a CAPPED grant is refused) */
+    capMicros: bigint("cap_micros", { mode: "number" }),
+    /** measured spend by this grant and its whole subtree */
+    settledMicros: bigint("settled_micros", { mode: "number" }).notNull().default(0),
+    /** allocation held by its direct children and not yet spent */
+    reservedMicros: bigint("reserved_micros", { mode: "number" }).notNull().default(0),
+    environment: text("environment").notNull(),
+    /** RFC 8707 resource; required for an externally bound grant */
+    audience: text("audience"),
+    /** decision 12: the credential that authenticated the token request (NULL for in-process) */
+    authCredentialId: uuid("auth_credential_id").references(() => workloadCredentials.id, { onDelete: "restrict" }),
+    /** decision 12: for a child, the credential behind the parent's proof; for a root, the human delegation proof */
+    subjectCredentialId: uuid("subject_credential_id"),
+    bindingKind: text("binding_kind", { enum: DELEGATION_BINDING_KINDS }).notNull(),
+    /** `jkt` (DPoP) or `x5t#S256` (mTLS); NULL for in-process */
+    bindingThumbprint: text("binding_thumbprint"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /** a CODE from `DELEGATION_REVOKE_REASONS`, never prose */
+    revokedReason: text("revoked_reason", { enum: DELEGATION_REVOKE_REASONS }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
+    check(
+      "delegation_grants_parent_check",
+      sql`(${t.depth} = 0 AND ${t.parentGrantId} IS NULL AND ${t.rootGrantId} = ${t.id}) OR (${t.depth} > 0 AND ${t.parentGrantId} IS NOT NULL AND ${t.path}[cardinality(${t.path})] = ${t.parentGrantId} AND ${t.path}[1] = ${t.rootGrantId})`,
+    ),
+    check(
+      "delegation_grants_acyclic_check",
+      sql`NOT (${t.id} = ANY (${t.path})) AND array_position(${t.path}, NULL) IS NULL`,
+    ),
+    check(
+      "delegation_grants_context_check",
+      sql`num_nonnulls(${t.runId}, ${t.builderTurnId}, ${t.engineRunId}, ${t.scheduleId}) <= 1`,
+    ),
+    check("delegation_grants_scope_check", sql`jsonb_typeof(${t.scope}) = 'array' AND jsonb_array_length(${t.scope}) <= 100`),
+    check(
+      "delegation_grants_balances_check",
+      sql`(${t.capMicros} IS NULL OR ${t.capMicros} >= 0) AND ${t.settledMicros} >= 0 AND ${t.reservedMicros} >= 0 AND (${t.capMicros} IS NOT NULL OR ${t.reservedMicros} = 0) AND (${t.capMicros} IS NULL OR ${t.reservedMicros} <= ${t.capMicros})`,
+    ),
+    check("delegation_grants_environment_check", sql`${t.environment} ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'`),
+    check("delegation_grants_audience_check", sql`${t.audience} IS NULL OR length(${t.audience}) BETWEEN 1 AND 2048`),
+    check(
+      "delegation_grants_binding_check",
+      sql`(${t.bindingKind} = 'in_process' AND ${t.bindingThumbprint} IS NULL AND ${t.authCredentialId} IS NULL) OR (${t.bindingKind} IN ('dpop', 'mtls') AND ${t.bindingThumbprint} IS NOT NULL AND ${t.bindingThumbprint} ~ '^[A-Za-z0-9_-]{43}$' AND ${t.authCredentialId} IS NOT NULL AND ${t.audience} IS NOT NULL)`,
+    ),
+    check("delegation_grants_expiry_check", sql`${t.expiresAt} > ${t.createdAt}`),
+    check(
+      "delegation_grants_revoked_check",
+      sql`(${t.revokedAt} IS NULL AND ${t.revokedReason} IS NULL) OR (${t.revokedAt} IS NOT NULL AND ${t.revokedReason} IS NOT NULL AND ${t.revokedReason} IN ('admin', 'cascade', 'identity_revoked', 'credential_revoked', 'sponsor_disabled', 'agent_halted', 'run_ended'))`,
+    ),
+    index("delegation_grants_path_gin").using("gin", t.path),
+    index("delegation_grants_root_idx").on(t.rootGrantId),
+    index("delegation_grants_parent_idx").on(t.parentGrantId),
+    index("delegation_grants_actor_idx").on(t.actorIdentityId),
+    index("delegation_grants_sponsor_idx").on(t.sponsorUserId),
+    index("delegation_grants_auth_credential_idx").on(t.authCredentialId).where(sql`${t.authCredentialId} IS NOT NULL`),
+    index("delegation_grants_expires_idx").on(t.expiresAt).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+export type DelegationGrantRow = typeof delegationGrants.$inferSelect;
+
+/**
+ * Decision 22: the allocation on one parent→child edge. `amount` = the child's
+ * cap; `drawn` only grows; closing releases exactly `max(0, amount − drawn)`,
+ * once. Parties, amount and key are immutable; never deleted (trigger).
+ */
+export const delegationAllocations = pgTable(
+  "delegation_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    parentGrantId: uuid("parent_grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    childGrantId: uuid("child_grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    drawnMicros: bigint("drawn_micros", { mode: "number" }).notNull().default(0),
+    releasedMicros: bigint("released_micros", { mode: "number" }).notNull().default(0),
+    status: text("status", { enum: DELEGATION_ALLOCATION_STATUSES }).notNull().default("open"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("delegation_allocations_child_uq").on(t.childGrantId),
+    unique("delegation_allocations_idempotency_uq").on(t.parentGrantId, t.idempotencyKey),
+    check("delegation_allocations_edge_check", sql`${t.parentGrantId} <> ${t.childGrantId}`),
+    check("delegation_allocations_status_check", sql`${t.status} IN ('open', 'closed')`),
+    check(
+      "delegation_allocations_amounts_check",
+      sql`${t.amountMicros} >= 0 AND ${t.drawnMicros} >= 0 AND ${t.releasedMicros} >= 0 AND ${t.releasedMicros} <= ${t.amountMicros}`,
+    ),
+    check(
+      "delegation_allocations_close_check",
+      sql`(${t.status} = 'open' AND ${t.closedAt} IS NULL AND ${t.releasedMicros} = 0) OR (${t.status} = 'closed' AND ${t.closedAt} IS NOT NULL AND ${t.releasedMicros} = GREATEST(0, ${t.amountMicros} - ${t.drawnMicros}))`,
+    ),
+    check("delegation_allocations_idempotency_key_check", sql`length(${t.idempotencyKey}) BETWEEN 1 AND 200`),
+    index("delegation_allocations_open_idx").on(t.parentGrantId).where(sql`${t.status} = 'open'`),
+  ],
+);
+export type DelegationAllocationRow = typeof delegationAllocations.$inferSelect;
+
+/** Decision 22: one usage row settled along its path, exactly once (append-only). */
+export const delegationCharges = pgTable(
+  "delegation_charges",
+  {
+    usageEventId: uuid("usage_event_id").primaryKey(),
+    leafGrantId: uuid("leaf_grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("delegation_charges_amount_check", sql`${t.amountMicros} >= 0`),
+    index("delegation_charges_leaf_idx").on(t.leafGrantId, t.at),
+  ],
+);
+export type DelegationChargeRow = typeof delegationCharges.$inferSelect;
+
+/**
+ * Decision 12: one row per external token. The resource check finds it by
+ * `jti` and refuses when the presented binding differs from the stored one.
+ * Always sender-bound (no bearer kind exists), at most an hour long; only
+ * `revoked_at` changes (once); deleted only after expiry (trigger).
+ */
+export const issuedTokens = pgTable(
+  "issued_tokens",
+  {
+    jti: text("jti").primaryKey(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    authCredentialId: uuid("auth_credential_id")
+      .notNull()
+      .references(() => workloadCredentials.id, { onDelete: "restrict" }),
+    /** the issuer key that signed it (revoking a key refuses its tokens, decision 12) */
+    signingKid: text("signing_kid")
+      .notNull()
+      .references(() => identitySigningKeys.kid, { onDelete: "restrict" }),
+    bindingKind: text("binding_kind", { enum: TOKEN_BINDING_KINDS }).notNull(),
+    bindingThumbprint: text("binding_thumbprint").notNull(),
+    audience: text("audience").notNull(),
+    env: text("env").notNull(),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("issued_tokens_jti_check", sql`${t.jti} ~ '^[A-Za-z0-9_-]{16,128}$'`),
+    check(
+      "issued_tokens_binding_check",
+      sql`${t.bindingKind} IN ('dpop', 'mtls') AND ${t.bindingThumbprint} ~ '^[A-Za-z0-9_-]{43}$'`,
+    ),
+    check("issued_tokens_audience_check", sql`length(${t.audience}) BETWEEN 1 AND 2048`),
+    check("issued_tokens_env_check", sql`${t.env} ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'`),
+    check(
+      "issued_tokens_lifetime_check",
+      sql`${t.expiresAt} > ${t.issuedAt} AND ${t.expiresAt} <= ${t.issuedAt} + interval '3600 seconds'`,
+    ),
+    check("issued_tokens_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.issuedAt}`),
+    index("issued_tokens_grant_idx").on(t.grantId),
+    index("issued_tokens_binding_idx").on(t.bindingThumbprint),
+    index("issued_tokens_credential_idx").on(t.authCredentialId),
+    index("issued_tokens_expires_idx").on(t.expiresAt),
+  ],
+);
+export type IssuedTokenRow = typeof issuedTokens.$inferSelect;
+
+/**
+ * Decision 14: an atomic, namespaced replay claim — `INSERT … ON CONFLICT DO
+ * NOTHING RETURNING 1` (one row back = accepted). Never updated; removed only
+ * after `expires_at` (trigger).
+ */
+export const replayClaims = pgTable(
+  "replay_claims",
+  {
+    namespace: text("namespace", { enum: REPLAY_NAMESPACES }).notNull(),
+    key: text("key").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "replay_claims_pk", columns: [t.namespace, t.key] }),
+    check(
+      "replay_claims_namespace_check",
+      sql`${t.namespace} IN ('client_assertion', 'as_dpop', 'rs_dpop', 'human_delegation_proof', 'delegation_authz')`,
+    ),
+    check("replay_claims_key_check", sql`length(${t.key}) BETWEEN 1 AND 256`),
+    check("replay_claims_expiry_check", sql`${t.expiresAt} > ${t.claimedAt}`),
+    index("replay_claims_expires_idx").on(t.expiresAt),
+  ],
+);
+export type ReplayClaimRow = typeof replayClaims.$inferSelect;
+
+/**
+ * Decision 19: the audit canonical-serialisation boundary, APPEND-ONLY and
+ * trusted by the verifier (never a per-row flag alone). The cutover (S4)
+ * inserts the v2 row under the audit chain's append lock; the writer reads it
+ * under the same lock.
+ */
+export const auditChainVersions = pgTable(
+  "audit_chain_versions",
+  {
+    version: smallint("version").primaryKey(),
+    fromSeq: bigint("from_seq", { mode: "number" }).notNull(),
+    setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+    setBy: uuid("set_by"),
+  },
+  (t) => [
+    unique("audit_chain_versions_from_seq_uq").on(t.fromSeq),
+    check("audit_chain_versions_version_check", sql`${t.version} = 2`),
+    check("audit_chain_versions_from_seq_check", sql`${t.fromSeq} > 1`),
+  ],
+);
+export type AuditChainVersionRow = typeof auditChainVersions.$inferSelect;
+
+// ===========================================================================
+// ADR-0190 (batch 6 item 3) — isolation and execution profiles (migration 0183)
+// ===========================================================================
+
+/**
+ * Decision 2: an execution profile version — immutable (a change is version
+ * n+1), its body the canonical `regulait.execution-profile.v1` text and its
+ * digest that text's SHA-256 (a CHECK recomputes it). Never deleted; a row only
+ * gains its retirement, once (guard trigger). The three shipped profiles are
+ * seeded as version 1 (`shipped`).
+ */
+export const executionProfiles = pgTable(
+  "execution_profiles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull(),
+    /** the canonical JSON text (RFC 8785) */
+    body: text("body").notNull(),
+    /** SHA-256 of `body`, lowercase hex */
+    digest: text("digest").notNull(),
+    minClass: text("min_class", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull(),
+    shipped: boolean("shipped").notNull().default(false),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredBy: uuid("retired_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("execution_profiles_name_version_uq").on(t.name, t.version),
+    unique("execution_profiles_digest_uq").on(t.digest),
+    check("execution_profiles_name_check", sql`${t.name} ~ '^[a-z][a-z0-9-]{1,62}$'`),
+    check("execution_profiles_version_check", sql`${t.version} >= 1`),
+    check("execution_profiles_min_class_check", sql`${t.minClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`),
+    check(
+      "execution_profiles_digest_check",
+      sql`${t.digest} ~ '^[0-9a-f]{64}$' AND ${t.digest} = encode(sha256(convert_to(${t.body}, 'UTF8')), 'hex')`,
+    ),
+    check(
+      "execution_profiles_body_check",
+      sql`length(${t.body}) <= 65536 AND jsonb_typeof(${t.body}::jsonb) = 'object' AND (${t.body}::jsonb ->> 'schema') = 'regulait.execution-profile.v1' AND (${t.body}::jsonb ->> 'name') = ${t.name} AND (${t.body}::jsonb ->> 'minClass') = ${t.minClass}`,
+    ),
+    check("execution_profiles_retired_check", sql`${t.retiredAt} IS NULL OR ${t.retiredAt} >= ${t.createdAt}`),
+    check("execution_profiles_retired_by_check", sql`${t.retiredBy} IS NULL OR ${t.retiredAt} IS NOT NULL`),
+  ],
+);
+export type ExecutionProfileRow = typeof executionProfiles.$inferSelect;
+
+/**
+ * Decision 4: an executor — the only thing that starts sandboxes — bound to one
+ * ADR-0188 `worker_runtime` identity (guard trigger). The classes it declares
+ * count only once attested (decision 6). `declaredClass` is OWNER DECISION 6's
+ * mapping of a customer plane (null = maps to no class). Never deleted;
+ * `revoked` is terminal.
+ */
+export const executors = pgTable(
+  "executors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workloadIdentityId: uuid("workload_identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    backend: text("backend", { enum: EXECUTOR_BACKENDS }).notNull(),
+    runtimeVersion: text("runtime_version").notNull(),
+    classesDeclared: jsonb("classes_declared").$type<Array<(typeof APPLIED_ISOLATION_KINDS)[number]>>().notNull(),
+    declaredClass: text("declared_class", { enum: REQUIRABLE_ISOLATION_CLASSES }),
+    status: text("status", { enum: EXECUTOR_STATUSES }).notNull().default("active"),
+    quarantineCode: text("quarantine_code", { enum: EXECUTOR_QUARANTINE_CODES }),
+    quarantinedAt: timestamp("quarantined_at", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("executors_workload_identity_uq").on(t.workloadIdentityId),
+    unique("executors_name_uq").on(t.name),
+    check("executors_name_check", sql`${t.name} ~ '^[a-z][a-z0-9-]{1,62}$'`),
+    check("executors_backend_check", sql`${t.backend} IN ('runc', 'gvisor', 'kata', 'openshell', 'customer')`),
+    check("executors_runtime_version_check", sql`${t.runtimeVersion} ~ '^[A-Za-z0-9._+-]{1,128}$'`),
+    check(
+      "executors_classes_declared_check",
+      sql`jsonb_typeof(${t.classesDeclared}) = 'array' AND jsonb_array_length(${t.classesDeclared}) >= 1 AND ((${t.backend} = 'runc' AND ${t.classesDeclared} <@ '["hardened_container"]'::jsonb) OR (${t.backend} = 'gvisor' AND ${t.classesDeclared} <@ '["hardened_container", "user_space_kernel"]'::jsonb) OR (${t.backend} IN ('kata', 'openshell') AND ${t.classesDeclared} <@ '["hardened_container", "microvm"]'::jsonb) OR (${t.backend} = 'customer' AND ${t.classesDeclared} = '["customer_declared"]'::jsonb))`,
+    ),
+    check(
+      "executors_declared_class_check",
+      sql`${t.declaredClass} IS NULL OR (${t.backend} = 'customer' AND ${t.declaredClass} IN ('hardened_container', 'user_space_kernel', 'microvm'))`,
+    ),
+    check("executors_status_check", sql`${t.status} IN ('active', 'quarantined', 'revoked')`),
+    check(
+      "executors_quarantine_check",
+      sql`(${t.status} = 'active' AND ${t.quarantineCode} IS NULL AND ${t.quarantinedAt} IS NULL) OR (${t.status} = 'quarantined' AND ${t.quarantineCode} IS NOT NULL AND ${t.quarantinedAt} IS NOT NULL) OR ${t.status} = 'revoked'`,
+    ),
+    check(
+      "executors_quarantine_code_check",
+      sql`${t.quarantineCode} IS NULL OR ${t.quarantineCode} IN ('execution_profile_mismatch', 'attestation_failed', 'admin')`,
+    ),
+    index("executors_status_idx").on(t.status),
+  ],
+);
+export type ExecutorRow = typeof executors.$inferSelect;
+
+/**
+ * Decision 6: an executor self-test verdict for one profile and class,
+ * append-only. `report` holds the fixed probe vocabulary only (no secrets);
+ * `expiresAt` is at most 24 h after `observedAt` (the org ceiling).
+ */
+export const executorAttestations = pgTable(
+  "executor_attestations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    executorId: uuid("executor_id")
+      .notNull()
+      .references(() => executors.id, { onDelete: "restrict" }),
+    profileDigest: text("profile_digest")
+      .notNull()
+      .references(() => executionProfiles.digest, { onDelete: "restrict" }),
+    class: text("class", { enum: APPLIED_ISOLATION_KINDS }).notNull(),
+    reportSha256: text("report_sha256").notNull(),
+    report: jsonb("report").$type<Record<string, unknown>>().notNull(),
+    verdict: text("verdict", { enum: ["pass", "fail"] }).notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "executor_attestations_class_check",
+      sql`${t.class} IN ('hardened_container', 'user_space_kernel', 'microvm', 'customer_declared')`,
+    ),
+    check("executor_attestations_report_sha256_check", sql`${t.reportSha256} ~ '^[0-9a-f]{64}$'`),
+    check("executor_attestations_report_check", sql`jsonb_typeof(${t.report}) = 'object' AND pg_column_size(${t.report}) <= 65536`),
+    check("executor_attestations_verdict_check", sql`${t.verdict} IN ('pass', 'fail')`),
+    check(
+      "executor_attestations_expiry_check",
+      sql`${t.expiresAt} > ${t.observedAt} AND ${t.expiresAt} <= ${t.observedAt} + interval '24 hours'`,
+    ),
+    index("executor_attestations_fresh_idx").on(t.executorId, t.profileDigest, t.class, t.observedAt.desc()),
+  ],
+);
+export type ExecutorAttestationRow = typeof executorAttestations.$inferSelect;
+
+/**
+ * Decisions 7 and 13: one placement decision for an isolable call, append-only.
+ * A refusal starts nothing; a placement names its executor, applied class and
+ * per-placement report hash; a mismatch names the report that disagreed. Under
+ * `enforce` a placement is never below its requirement (CHECK: no fallback).
+ */
+export const executionPlacements = pgTable(
+  "execution_placements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    auditId: uuid("audit_id").notNull(),
+    workloadKind: text("workload_kind", { enum: ISOLABLE_WORKLOAD_KINDS }).notNull(),
+    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull(),
+    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }).notNull(),
+    enforcement: text("enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull(),
+    profileDigest: text("profile_digest")
+      .notNull()
+      .references(() => executionProfiles.digest, { onDelete: "restrict" }),
+    executorId: uuid("executor_id").references(() => executors.id, { onDelete: "restrict" }),
+    appliedClass: text("applied_class", { enum: APPLIED_ISOLATION_KINDS }),
+    reportSha256: text("report_sha256"),
+    outcome: text("outcome", { enum: PLACEMENT_OUTCOMES }).notNull(),
+    refusalCode: text("refusal_code", { enum: [...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("execution_placements_audit_id_uq").on(t.auditId),
+    check(
+      "execution_placements_workload_kind_check",
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`,
+    ),
+    check(
+      "execution_placements_required_class_check",
+      sql`${t.requiredClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
+    ),
+    check(
+      "execution_placements_required_by_check",
+      sql`${t.requiredBy} IN ('workload_kind', 'data_sensitivity', 'compliance_tag', 'autonomy_class', 'configured_profile', 'unknown_agent', 'parent_grant')`,
+    ),
+    check("execution_placements_enforcement_check", sql`${t.enforcement} IN ('enforce', 'warn')`),
+    check(
+      "execution_placements_applied_class_check",
+      sql`${t.appliedClass} IS NULL OR ${t.appliedClass} IN ('hardened_container', 'user_space_kernel', 'microvm', 'customer_declared')`,
+    ),
+    check("execution_placements_report_sha256_check", sql`${t.reportSha256} IS NULL OR ${t.reportSha256} ~ '^[0-9a-f]{64}$'`),
+    check("execution_placements_outcome_check", sql`${t.outcome} IN ('placed', 'refused', 'mismatch')`),
+    check(
+      "execution_placements_refusal_code_check",
+      sql`${t.refusalCode} IS NULL OR ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'execution_profile_mismatch')`,
+    ),
+    check(
+      "execution_placements_shape_check",
+      sql`(${t.outcome} = 'refused' AND ${t.executorId} IS NULL AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NOT NULL AND ${t.refusalCode} <> 'execution_profile_mismatch') OR (${t.outcome} = 'placed' AND ${t.executorId} IS NOT NULL AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} IS NULL) OR (${t.outcome} = 'mismatch' AND ${t.executorId} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} = 'execution_profile_mismatch')`,
+    ),
+    check(
+      "execution_placements_no_fallback_check",
+      sql`${t.outcome} <> 'placed' OR ${t.enforcement} = 'warn' OR ${t.appliedClass} = 'customer_declared' OR array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.appliedClass}) >= array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.requiredClass})`,
+    ),
+    index("execution_placements_executor_idx").on(t.executorId, t.createdAt),
+    index("execution_placements_created_idx").on(t.createdAt),
+  ],
+);
+export type ExecutionPlacementRow = typeof executionPlacements.$inferSelect;

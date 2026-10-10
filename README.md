@@ -200,7 +200,8 @@ Google SDKs build and run without them) and those two are named in
 about any newcomer that starts wanting a build script.
 
 The steps, for reading — run them by hand only if you cannot run the script.
-It is the same sequence CI's `build-and-test` job runs (`.github/workflows/ci.yml`)
+It is the same sequence CI's `build-and-test` jobs run (`.github/workflows/ci.yml`;
+since 2026-10-10 split into `build-and-test-base` and four `gateway-tests` shards)
 — build, test, and both pre-flights (the affordance census and the
 unique-constraint check) — plus a repo-wide `--noEmit` typecheck and an
 explicitly disposable database (the job's remaining step lints

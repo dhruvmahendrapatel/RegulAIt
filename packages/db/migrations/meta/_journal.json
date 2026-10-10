@@ -1184,6 +1184,41 @@
       "when": 1785110000000,
       "tag": "0175_model_artifact_scans",
       "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1785111000000,
+      "tag": "0176_model_artifact_quotas_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1785115000000,
+      "tag": "0180_agent_workload_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1785116000000,
+      "tag": "0181_outbound_credential_audience",
+      "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1785117000000,
+      "tag": "0182_decision_bom_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1785118000000,
+      "tag": "0183_isolation_execution_profiles",
+      "breakpoints": true
     }
   ]
 }

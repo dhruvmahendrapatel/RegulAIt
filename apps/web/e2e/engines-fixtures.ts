@@ -19,6 +19,12 @@
  * `executable_format` finding), `unsafe`, `unknown` and `not_run` — with the
  * gateway's chip wording, which never says "safe". The upload mock decides the
  * format from the first bytes as a stand-in for the gateway's detection.
+ *
+ * Decision 127 (bounded storage): the upload refuses 409 / 413
+ * `artifact_quota_exceeded` past the uploader's strict quotas (20 artifacts,
+ * 2048 MiB); DELETE answers 409 `artifact_in_use` for an artifact whose scan is
+ * cited as model-card evidence (the verified safetensors file here), 403
+ * `step_up_required` without `x-regulait-step-up`, and 200 `{deleted}` with it.
  */
 import type { Page, Route } from "@playwright/test";
 
@@ -81,7 +87,7 @@ export function enginesList(): Json {
         switches: { PROMPTFOO_DISABLE_TELEMETRY: "1", PROMPTFOO_DISABLE_UPDATE: "1" },
         selfTest: { passed: true, failures: [], runnerId: RUNNER_PF, imageDigest: DIGEST_PF, version: "0.123.1", egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false }, at: iso(30) },
         selfTestPassedAt: iso(30),
-        runners: [{ id: RUNNER_PF, name: "promptfoo-runner-1", reportedDigest: DIGEST_PF, reportedVersion: "0.123.1", selfTestPassed: true, selfTestFailures: [], registeredAt: iso(40), lastSeenAt: iso(1) }],
+        runners: [{ id: RUNNER_PF, name: "promptfoo-runner-1", reportedDigest: DIGEST_PF, reportedVersion: "0.123.1", selfTestPassed: true, selfTestFailures: [], selfTestReportedAt: iso(30), registeredAt: iso(40), lastSeenAt: iso(1) }],
         lastRun: { id: RUNS.completedFail.id, status: "completed", createdAt: iso(20) },
       }),
       engine({ id: "modelscan", kind: "model_scan", displayName: "modelscan", version: "0.8.8", licence: "Apache-2.0", imageDigest: null, signature: "not_built", needsModelAccess: false, reCheckBy: "2027-02-18", switches: { REGULAIT_MODELSCAN_SCANNER_ISOLATED: "1" }, airGappedReducedSet: [{ key: "format", reason: "unsupported_format" }, { key: "modelscan/scan", reason: "unsupported_format" }] }),
@@ -94,7 +100,7 @@ export function enginesList(): Json {
         signature: "unverified",
         switches: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
         selfTest: { passed: false, failures: ["egress_dns_resolved"], runnerId: RUNNER_GK, imageDigest: DIGEST_GK, version: "0.17.0", egress: { host: "example.com", dnsResolved: true, connected: false, address: "93.184.215.14", addressConnected: false }, at: iso(10) },
-        runners: [{ id: RUNNER_GK, name: "garak-runner-1", reportedDigest: DIGEST_GK, reportedVersion: "0.17.0", selfTestPassed: false, selfTestFailures: ["egress_dns_resolved"], registeredAt: iso(12), lastSeenAt: iso(11) }],
+        runners: [{ id: RUNNER_GK, name: "garak-runner-1", reportedDigest: DIGEST_GK, reportedVersion: "0.17.0", selfTestPassed: false, selfTestFailures: ["egress_dns_resolved"], selfTestReportedAt: iso(10), registeredAt: iso(12), lastSeenAt: iso(11) }],
       }),
     ],
   };
@@ -226,6 +232,12 @@ export const ARTIFACTS = {
   truncated: artifact("99999999-8888-4000-8000-000000000004", "pickle", true, "broken.pkl", 40),
   gguf: artifact("99999999-8888-4000-8000-000000000005", "gguf", false, "model.gguf", 8192),
 } as const;
+/** decision 127: the strict per-uploader quotas the gateway enforces (org settings, larger relaxes) */
+export const ARTIFACT_QUOTA = { uploaderCount: 20, uploaderMegabytes: 2048 } as const;
+/** decision 127: artifacts a model card cites a scan of (DELETE answers 409 `artifact_in_use`) */
+export const ARTIFACTS_IN_USE: Record<string, { citedScans: number; unfinishedRuns: number }> = {
+  "99999999-8888-4000-8000-000000000001": { citedScans: 1, unfinishedRuns: 0 },
+};
 export const ARTIFACT_SCANS: Record<string, Json[]> = {
   [ARTIFACTS.safetensors.id]: [scan(ARTIFACTS.safetensors.id, "clean", "safetensors", [])],
   [ARTIFACTS.cleanPickle.id]: [scan(ARTIFACTS.cleanPickle.id, "no_known_unsafe", "pickle", [{ kind: "executable_format", id: "pickle", severity: "high" }])],
@@ -315,7 +327,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       return json(route, 200, { runs: state.runs.filter((r) => (!engineId || r.engineId === engineId) && (!status || r.status === status)) });
     }
     if (p === "/v1/engine-runs" && method === "POST") {
-      const sensitive = (body.config?.sets ?? []).some((s: string) => s !== "basic");
+      // as the manifests class them: promptfoo's `basic` and modelscan's `scan` are standard, anything else waits for approval
+      const sensitive = (body.config?.sets ?? []).some((s: string) => s !== "basic" && !(body.engineId === "modelscan" && s === "scan"));
       if (sensitive && !body.approverUserId) return json(route, 422, { error: "engine_approver_required", detail: "this run uses an agentic, offensive or unclassified set, so it waits for approval" });
       const r = run(`99999999-7777-4000-8000-${String(state.runs.length).padStart(12, "0")}`, {
         engineId: body.engineId,
@@ -323,6 +336,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
         config: body.config,
         projectId: body.projectId ?? null,
         targetAgentId: body.target?.agentId ?? null,
+        targetKind: body.target?.artifactId ? "artifact" : "agent",
+        targetArtifactId: body.target?.artifactId ?? null,
         judgeAgentId: body.target?.judgeAgentId ?? null,
         createdAt: new Date().toISOString(),
       });
@@ -345,6 +360,14 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
     if (p === "/v1/model-artifacts" && method === "POST") {
       if ((headers["content-type"] ?? "") !== "application/octet-stream") return json(route, 415, { error: "artifact_content_type", detail: "send the artifact's bytes as application/octet-stream" });
       const bytes = req.postDataBuffer() ?? new Uint8Array(0);
+      const mine = state.artifacts.filter((x) => x.uploadedByUserId === ENGINE_USER);
+      const used = mine.reduce((n, x) => n + x.sizeBytes, 0);
+      if (mine.length + 1 > ARTIFACT_QUOTA.uploaderCount) {
+        return json(route, 409, { error: "artifact_quota_exceeded", scope: "uploader", measure: "count", setting: "modelArtifactUploaderQuotaCount", limit: ARTIFACT_QUOTA.uploaderCount, used: mine.length, detail: `this upload would take your model artifacts past ${ARTIFACT_QUOTA.uploaderCount} stored artifacts (modelArtifactUploaderQuotaCount): delete artifacts no longer needed, or an admin may raise the quota (the change needs a step-up)` });
+      }
+      if (used + bytes.length > ARTIFACT_QUOTA.uploaderMegabytes * 1024 * 1024) {
+        return json(route, 413, { error: "artifact_quota_exceeded", scope: "uploader", measure: "bytes", setting: "modelArtifactUploaderQuotaMegabytes", limit: ARTIFACT_QUOTA.uploaderMegabytes * 1024 * 1024, used, detail: `this upload would take your model artifacts past ${ARTIFACT_QUOTA.uploaderMegabytes} MiB of stored artifacts (modelArtifactUploaderQuotaMegabytes): delete artifacts no longer needed, or an admin may raise the quota (the change needs a step-up)` });
+      }
       // a stand-in for the gateway's content detection: never the file name
       const format = bytes.length === 0 ? "empty" : bytes[0] === 0x80 ? "pickle" : bytes[8] === 0x7b ? "safetensors" : "unrecognised";
       const a = artifact(`99999999-8888-4000-8000-${String(state.artifacts.length + 100).padStart(12, "0")}`, format, format !== "safetensors" && format !== "empty", url.searchParams.get("filename") ?? "artifact", bytes.length);
@@ -352,10 +375,35 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       return json(route, 201, { artifact: a });
     }
     const artifactMatch = /^\/v1\/model-artifacts\/([0-9a-f-]+)$/.exec(p);
+    // ADR-0187 decision 127: the uploader or an admin deletes, with a `settings_relax` step-up
+    if (artifactMatch && method === "DELETE") {
+      const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
+      if (!a) return json(route, 404, { error: "unknown_artifact" });
+      if (!headers["x-regulait-step-up"]) {
+        return json(route, 403, { error: "step_up_required", actionKind: "settings_relax", methods: ["passkey", "totp"], action: { kind: "settings_relax", facts: { modelArtifactId: a.id, values: { deleted: true } } } });
+      }
+      state.artifacts = state.artifacts.filter((x) => x.id !== a.id);
+      return json(route, 200, { deleted: { id: a.id, sha256: a.sha256, scansDeleted: (ARTIFACT_SCANS[a.id] ?? []).length, object: "deleted" } });
+    }
     if (artifactMatch && method === "GET") {
       const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
       if (!a) return json(route, 404, { error: "unknown_artifact" });
       return json(route, 200, { artifact: a, scans: ARTIFACT_SCANS[a.id] ?? [] });
+    }
+    if (artifactMatch && method === "DELETE") {
+      const i = state.artifacts.findIndex((x) => x.id === artifactMatch[1]);
+      if (i < 0) return json(route, 404, { error: "unknown_artifact" });
+      const a = state.artifacts[i];
+      const refs = ARTIFACTS_IN_USE[a.id];
+      if (refs) {
+        return json(route, 409, { error: "artifact_in_use", ...refs, detail: "a scan of this artifact is cited as model-card evidence, or a run on it has not finished: remove the citation or wait for the run, then delete it" });
+      }
+      if (!headers["x-regulait-step-up"]) {
+        const action = { kind: "settings_relax", body: { modelArtifactId: a.id, values: { deleted: true } } };
+        return json(route, 403, { error: "step_up_required", actionKind: "settings_relax", methods: ["passkey", "totp"], action });
+      }
+      state.artifacts.splice(i, 1);
+      return json(route, 200, { deleted: { id: a.id, sha256: a.sha256, scansDeleted: (ARTIFACT_SCANS[a.id] ?? []).length, object: "deleted" } });
     }
     return json(route, 404, { error: "not_found" });
   });

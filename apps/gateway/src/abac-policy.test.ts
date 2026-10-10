@@ -127,7 +127,7 @@ const evaluateTool = (toolName: string, kind: "read" | "write", projectId: strin
     { serverId, name: toolName, kind },
     undefined,
     null,
-    projectId,
+    projectId, undefined, undefined, undefined, undefined, { actor: null },
   );
 
 /**

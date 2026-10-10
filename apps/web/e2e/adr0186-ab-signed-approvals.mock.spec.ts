@@ -226,11 +226,13 @@ test.describe("ADR-0186 A2+B: dual control and passkey-signed approvals", () => 
     // the approver reviews the exact action, then signs it from the review
     await page.getByRole("button", { name: "Review action write_file" }).click();
     await page.getByRole("dialog", { name: "Review MCP action" }).getByRole("button", { name: "Approve" }).click();
-    await expect(page.getByText("Approved").first()).toBeVisible();
+    // poll: "Approved" also matches the earlier "Avery Approver approved" line (getByText is a
+    // case-insensitive substring match), so seeing it does not mean the signing round trip has finished
+    await expect.poll(() => cap.decides.length).toBe(1);
     expect(cap.signingOptions).toEqual([{ id: "a-tool-1", body: { decision: "approved" } }]);
     // the browser was handed the gateway's challenge untouched (the digest of the call)
     expect(await webauthn(page)).toEqual({ get: 1, challenges: [CHALLENGE] });
-    expect(cap.decides).toHaveLength(1);
+    await expect(page.getByText("Approved").first()).toBeVisible();
     expect(cap.decides[0]!.body).toMatchObject({
       decision: "approved",
       passkey: { challengeId: "33333333-3333-4333-8333-333333333333", response: { id: "Y3JlZC0x", type: "public-key" } },

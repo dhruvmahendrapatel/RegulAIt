@@ -1502,6 +1502,966 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
      the artifact verdict reads the normalised items, never a summary, and the run's aggregates are recomputed by the
      shared normaliser; the report summary was the only instance.
 
+**Review round 2 (PR #212's five deferred Codex findings, 2026-10-09, branch `b5-m-followup`; each red first).**
+**Migration 0176** (`0176_model_artifact_quotas_retention`, hand-written, journal `when` 1785111000000; 0175 is merged
+and not edited). Tests: `apps/gateway/src/zz-b5-modelscan-storage.test.ts` (12, the real gateway) [127] [128];
+`model-artifacts.test.ts` (+2) [127] [130]; `packages/engine-modelscan/src/image.test.ts` [129];
+`modelscan.test.ts` (+1) [131]. The mutation that turned each proof red is named with its decision.
+
+127. **Model-artifact storage is bounded: quotas, deletion and retention, strict by default** [4235322397]. Any
+     user could upload without limit and nothing was ever removed.
+     - **Quotas.** Five new org settings, each in the strictness registry (raising one is a `settings_relax`
+       step-up, audited; lowering needs nothing): `modelArtifactUploaderQuotaMegabytes` **2048** (1–1048576),
+       `modelArtifactUploaderQuotaCount` **20** (1–100000), `modelArtifactOrgQuotaMegabytes` **20480**
+       (1–10485760), `modelArtifactOrgQuotaCount` **200** (1–1000000). A quota counts every artifact row at its
+       own size, so the same bytes uploaded twice count twice (the per-row view the uploader sees; the store
+       may hold one object). "Org" is the deployment: `org_settings` is one row. An upload past a count quota is
+       refused **409**, past a byte quota **413**, both `artifact_quota_exceeded` with `{scope, measure, setting,
+       limit, used}` and a `model-artifact-upload-refused` audit; nothing of it is kept.
+     - **Decided under one lock.** Every quota decision, every object write a row will name and every object
+       delete take one transaction-scoped advisory lock (`regulait:model-artifact-storage`). The upload reads
+       what is stored and inserts its row inside that transaction, so concurrent uploads cannot both fit; an
+       unlocked fast check refuses early before anything is written to the store. Red: with the lock a no-op
+       (and the decision widened by a test seam), six concurrent uploads under a quota of one all answered 201.
+       Concurrent uploads serialise only for the short decision, not for the bytes: the object is written
+       before the lock and re-checked under it.
+     - **Write-ahead, so an object is never left unnamed.** Before an upload writes a NEW object it queues that
+       key in `model_artifact_object_deletions` with `not_before` six hours ahead; the upload's locked
+       transaction removes the entry when its row lands (or makes it due at once when the quota refuses). A
+       crash between the write and the row therefore leaves a queued delete, not an orphan. If a delete removed
+       the object between the upload's write and its lock, the upload writes it again under the lock.
+     - **DELETE `/v1/model-artifacts/:artifactId`.** The uploader or an admin (404 `unknown_artifact` for anyone
+       else), with a `settings_relax` step-up bound to `{modelArtifactId, values:{deleted:true}}` (an API key can
+       never step up, so it is refused 403). **409 `artifact_in_use`** `{citedScans, unfinishedRuns}` while a scan
+       of it is cited as model-card evidence or a run on it is not in a terminal status, audited
+       `model-artifact-delete-refused`; checked before the step-up is asked for (so no grant is spent) and again on
+       the locked row. Otherwise the row and its uncited scans go in one transaction with a `model-artifact-deleted`
+       audit (sha256, size, format, the scan ids); finished runs keep their history (`target_artifact_id` set
+       null). Red: without the in-use check the cited and the queued-run artifacts went to the step-up instead of
+       409.
+     - **The object goes only after the row is gone and committed.** The delete's transaction queues the key
+       only when no other row names it (content addressing: `object: "shared"` when one does). After it
+       commits, each queued key is deleted in its own transaction under the lock, re-checking that no row names
+       it; the queue entry goes with the object. A failed delete keeps the entry (`attempts` + 1,
+       `last_error_code`, retried after 5 minutes per attempt, at most a day) with a
+       `model-artifact-object-delete-failed` audit; it is never half-done. Success is audited
+       `model-artifact-object-deleted`. Red: re-throwing the store error answered 500 with the row gone and no
+       record; skipping the "still named" re-check deleted an object a row named. The test store records, from
+       a second connection, that no row was visible at each delete.
+     - **Retention.** The scheduler job `model-artifact-retention-sweep` (hourly, ADR-0187) deletes artifacts older
+       than `modelArtifactRetentionDays` (**30**, 1–3650, larger relaxes it) that nothing keeps (the same two
+       references), with their uncited scans, audited `model-artifact-expired`; then it drains every due queued
+       delete, retrying failures. The setting is read on every run, so lowering it applies to what is stored.
+       Red: with the cutoff removed, a recent artifact was deleted.
+     - **`ArtifactStore.delete`** for both stores: the filesystem store removes the file (`rm --force`, so a retry
+       is idempotent) and fsyncs its directory; the S3 store sends `DeleteObjectCommand` (S3 answers success for
+       a missing key). Both refuse any key that is not `sha256/<hex>`.
+     - **Not built:** the button. No Model artifacts page exists yet (X28, reassigned to Claude by the owner on 10-10); the route is a TEMPORARY
+       `DELIBERATELY_API_ONLY` entry in `scripts/preflight-ui-affordances.mjs` (M-053), and deleting it is part
+       of X28's acceptance. The mock fixtures (`apps/web/e2e/engines-fixtures.ts`) answer the new refusals.
+     - **Open-source check (ADR-0176):** quotas, references and retention are governance semantics, our own
+       code; the lock is Postgres's advisory lock; the S3 delete is the AWS SDK the gateway already ships. No new
+       dependency.
+128. **`clean` with no format is refused by the database** [4235322386]. 0175's CHECK `verdict <> 'clean' OR
+     format = 'safetensors'` is NULL, not false, when `format` is NULL, so a clean scan with no format passed. 0176
+     replaces it with `verdict <> 'clean' OR (format IS NOT NULL AND format = 'safetensors')`, after turning any
+     such row (none can exist on a first load) into `unknown`, never better. `format` stays nullable for the
+     other verdicts. Red: with 0175's CHECK put back on the test database, a clean scan with a NULL format was
+     accepted.
+129. **The modelscan runtime proves at build time that Node runs on its base** [4235322394]. The Node binary is
+     copied from the node image into `python:3.12-slim-trixie`, which links `libstdc++.so.6` and `libgcc_s.so.1`.
+     **Measured from CI:** the `engine-image` leg for modelscan passed on main (Security run 38004560910, PR
+     #212's merge), and its build ran `node licence-gate.mjs` in the CLOSURE stage, whose base is the same digest
+     as the runtime stage, so that base does carry both libraries; nothing checked the runtime stage itself.
+     Chosen: keep them as the base's own Debian packages (so Trivy scans them), and fail the build in the
+     runtime stage unless `dpkg-query` finds `libstdc++6` and `libgcc-s1`, `ldd` resolves every library node
+     links, and `node --version` runs. Rejected: copying node's library closure from the node image (files no
+     package manager owns, which the image scan would not see). **Correction to the brief:** the gateway image
+     installs nothing from a pinned Debian snapshot; no Dockerfile here pins one. Red (static): removing the
+     `node --version` line fails `image.test.ts`. **Not run here:** no Docker daemon; CI's engine-image job is
+     the proof.
+130. **A failed filesystem-store write leaves nothing behind** [4235322391]. The temp file was left in the
+     persistent directory when the copy, the fsync or the rename failed. `putFile` now closes the handle and
+     removes the temp file in a `finally` that cannot itself throw; only a completed rename keeps it. Red:
+     with the removal disabled, an injected failure at each of the three steps left a `.tmp` file.
+131. **The HDF5 probe covers every superblock offset up to the file size** [4235322383]. The format probe
+     stopped at offset 2048, so an HDF5 file behind a larger user block read `unrecognised` (still never better
+     than `unknown`, but scanned as a pickle and not as HDF5). The HDF5 library looks for the superblock at 0 and
+     at every power of two from 512, so `hdf5SuperblockOffsets(size)` probes exactly those while the 8-byte
+     signature fits in the file. **The bound is the file size**, not a fixed 1 MiB: it covers every offset the
+     library would accept, and costs at most 24 eight-byte reads at the 8 GiB upload ceiling. Red: a header at
+     4096 read `unrecognised` with the old bound.
+132. **A safetensors header that repeats a key is never verified** (Codex review B5X-01, MEDIUM). The verifier read
+     the header with `JSON.parse`, which silently keeps the last of two equal keys, so a duplicate tensor name whose
+     first entry had an invalid dtype (`PICKLE`), or a tensor with `dtype` given twice (`U8` then `I8`), read as
+     verified `safetensors` (ceiling `clean`). **Measured against the reference parser** (safetensors 0.7.0, in a
+     scratch venv): it refuses the invalid-dtype duplicate, a repeated `dtype`, `shape` or `data_offsets`, and a
+     repeated `__metadata__`; it ACCEPTS a tensor name repeated with two valid entries and a key repeated inside
+     `__metadata__` (the last wins), and it accepts names that are escaped but distinct (`"w"` and `"wx"`,
+     `"a\"b"` and `"a\\b"`). **Chosen, stricter than the reference:** any key repeated in one object, at any level
+     (tensor names, a tensor's fields, `__metadata__` and its keys), makes the file `safetensors_invalid` (never
+     better than `unknown`). Keys are compared after unescaping, so `"w"` and `"w"` are one key (the
+     reference refuses that file too); escaped-but-distinct names stay accepted. **Open-source check (ADR-0176):**
+     `@humanwhocodes/momoa` 3.3.13 (Apache-2.0, released 2026-09-02, no dependencies, no install script, pure
+     JavaScript, so it works air-gapped) parses JSON to a syntax tree that keeps every member;
+     `jsonHasDuplicateKey` walks that tree without recursion. It is a new exact-pinned dependency of
+     `@regulait/shared`, with its row in `packages/shared/THIRD_PARTY.md`. `JSON.parse` still produces the values
+     the existing checks read, and the evidence string is a fixed sentence (no artifact text). Red: with the
+     duplicate refusal disabled, six of the seven duplicate shapes read as verified `safetensors` (the escaped
+     duplicate already failed the tiling rule).
+
+### Implementation decisions (B5-G garak, 2026-10-10, branch `b5-garak`)
+
+Built from G19's "Consequences for B5-G" (`docs/research/R10-engine-admission.md`) and the lead's brief. **No migration.**
+Code: `packages/shared/src/engines/garak.ts` (the catalogue, set classes, reduced set, taxonomy rows, OWASP crosswalk,
+run-param rule), `garak-upstream.ts` (generated), the shim `packages/engine-garak` (plan and config, mapper, exchange,
+worker self-test, adapter, runner and worker entrypoints), `engines/garak` (image, lockfiles, licence gate, allow file,
+readings, data prune, metadata extractor), compose `engine-garak` and `engine-garak-worker`, and one line in
+`apps/gateway/src/engine-runs.ts`. Tests: `packages/shared/src/engines/garak.test.ts` (11),
+`packages/engine-garak/src/garak.test.ts` (26), `image.test.ts` (4), `garak-real.test.ts` (4, opt-in: the pinned
+garak itself, `REGULAIT_GARAK_PYTHON`), `apps/gateway/src/zz-b5-garak.test.ts` (7, the real gateway),
+`zz-b5-compose.test.ts` (+1), and `engines.test.ts` (one fixture now derives garak's switches from the manifest). Each
+guard was shown red by breaking it (the mutation is named with each decision).
+
+140. **Two containers, one image, from the start; `credentialIsolation: true` (lead's brief, decision 79).** The
+     **runner** (`engine-garak`) merges the hardened template, holds the runner token on its own state volume, writes
+     jobs and reads results; it never runs garak. The **worker** (`engine-garak-worker`) runs garak. Unlike the modelscan
+     scanner it cannot have `network_mode: none`: garak must call the target through the gateway's compat routes. So the
+     worker sits on the internal `engines` network (it reaches only the gateway), with a read-only root, uid 10001,
+     `cap_drop: [ALL]`, `no-new-privileges`, no runner token, no enrolment token and no state volume. What it holds, for
+     one run at a time, is that run's own virtual key (in the job file on a tmpfs volume: purpose `engine`, the run's
+     project, models, budget and deadline), which is exactly what garak needs and nothing more. The exchange is the
+     modelscan one (decision 104): job in (`jobs/<runId>`, published by rename, read-only to the worker), results out
+     (`<n>.report.jsonl` per probe and `done.json` with each report's sha256, read-only to the runner), cancel by file,
+     restart-safe `reconcile`. The manifest says `credentialIsolation: true`, so decision 79's acceptance is not asked
+     for; the step-up to enable still is. **Different from modelscan's choice** (decision 104 keeps `false` until its
+     image is verified): this one is on the lead's instruction, and stays safe by construction because the manifest
+     digest is null (nothing can be enabled until the image is built and published). Red: the compose test fails with
+     the state volume mounted in the worker; the gateway suite fails (409 `engine_credential_isolation_missing`) with
+     the flag false.
+141. **The worker's own self-test, reported through the runner.** The worker probes egress from inside its container
+     (name resolution, a connect by name, a public literal address), checks every usage-data switch in its own
+     environment, checks that it can see no runner credential (no enrolment token variable, no `/state/runner-token`),
+     and writes `results/.worker-selftest.json` hourly. The runner reports each manifest switch as set only when that
+     report (fresh within 2 hours, the pinned version) sets it, and `REGULAIT_GARAK_WORKER_SELFTEST` only when the whole
+     report passes. The switches (`GARAK_USAGE_DATA_ENV`, R10 consequence 7): `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`,
+     `HF_DATASETS_OFFLINE`, `HF_HUB_DISABLE_TELEMETRY`, `LITELLM_LOCAL_MODEL_COST_MAP=True`, `OTEL_SDK_DISABLED=true`,
+     `LANGSMITH_TRACING=false`. Red: with the credential check removed the visible-token case reads clean; a missing
+     report fails the gateway's self-test on the worker switch.
+142. **The catalogue's detector and OWASP columns are generated from garak's own metadata.**
+     `engines/garak/extract-probe-metadata.mjs` reads the pinned wheel's `garak/resources/plugin_cache.json` (data,
+     not executed; sha256 `25484e24…134a52`) into `garak-upstream.ts`: each probe's `active` flag, primary detector and
+     `owasp:llmNN` tags. The image build refuses a `plugin_cache.json` with another hash (`prune-data.py`), so the
+     catalogue cannot drift from what ships. A catalogue entry naming a probe the release does not have fails a test.
+143. **Set ids are probe names in lower case; anything unlisted never runs.** The shared set grammar is lower case, so
+     `encoding.injectbase64` runs `encoding.InjectBase64`. A set not in the catalogue is reported not run
+     (`engine_error`, a run-time not-run: the run cannot pass) and is unclassified (offensive: approval first). The
+     `test.*` probes (their detectors always pass, or never fail) and `grandma.GrandmaIntent` (no detector) are never
+     runnable. Red: the plan test and the normaliser case (`test.test` makes a run `unknown`).
+144. **What runs: 90 of 191 probes, by G19's data licences.** `local` only where the payload data is admissible: MIT
+     data G19 established (in-the-wild jailbreaks, AutoDAN cached, Snowballed Hallucination, adaptive attacks, DRA, GCG
+     cached), Apache-2.0 data (Do-Not-Answer), garak-authored data (promptinject, latentinjection, encoding, smuggling,
+     web_injection payloads), and **inline payloads written in garak's Apache-2.0 code that cite no third-party source
+     for them** (ansiescape, apikey, divergence, exploitation, malwaregen, av_spam_scanning, three lmrc probes) — read as
+     covered by the package licence, R10's own reading for garak-authored data. Where a module says its payloads are
+     reproduced from named third-party posts (doctor, grandma, goodside, glitch) the provenance is not reviewed:
+     `excluded_licence`, **OWNER DECISION** (open question 20). Excluded outright (R10 consequence 10): leakreplay,
+     propile, the community DAN files, continuation, misleading, phrasing, tap cached. Licence-limited (**OWNER
+     DECISION**): badchars (Unicode licence), the OpenRAIL toxicity detector (atkgen, LatentJailbreak, lmrc.Bullying,
+     realtoxicityprompts), the profanity, regulator and CC-BY word lists (lmrc slur and sexual-content probes,
+     grandma.Slurs), the CC-BY system-prompt dataset (sysprompt_extraction). `missing_preseed`: packagehallucination
+     (Apache-2.0 datasets, not pre-seeded), the WordNet and NLTK downloads (topic, sata), the HF tokenizer
+     (ansiescape.AnsiRawTokenizerHF). `cloud_only`: hosted or downloaded attacker and judge models (agent_breaker,
+     tap.TAP/PAIR, goat, fitd, dan.AutoDAN), run-time corpus or image fetches (suffix.GCG/BEAST, visual_jailbreak), the
+     target's Hub repo (fileformats). All non-local probes are the manifest's declared reduced set (decision 61), keyed by
+     probe name. Red: admitting leakreplay fails three catalogue tests.
+145. **The excluded data is deleted from the image.** `excluded-data.txt` lists 25 paths under `garak/data` (the cloze
+     files, `propile`, `dan`, `autodan/prompt_group.pth` (a pickle only the excluded AutoDAN loads), the slur, false-claim,
+     tense and confusables files, `tap`, the three word lists, `fitd`, `goat`, the safebench lists, and two directories no
+     code reads). `prune-data.py` deletes each and **fails the build if one is missing** (a release change must be
+     re-reviewed), refuses a path outside `garak/data`, and checks the metadata hash (decision 142). Deleting
+     `profanity_en.csv` and `ofcom-potentially-offensive.txt` breaks the import of `garak.detectors.unsafe_content`, which
+     no admitted probe uses; a probe that needed it would fail to load and read `not_run` (open question 26). Measured
+     on the pinned wheel: 25 removed; a second run fails on the first missing path.
+146. **Only the primary detector, no judge, nothing downloaded.** The config sets `extended_detectors: false` (garak then
+     runs only the probe's primary detector, `harnesses/probewise.py`), so the hosted-API detectors (perspective,
+     shields) are never loaded; every admitted probe's primary detector is string, regex or trigger based (a test pins
+     the allowed detector modules). The manifest's `requiresJudge` stays false: the hosted-judge detectors (`judge.*`,
+     `agent_breaker.*`) are excluded rather than re-pointed at a judge behind the gateway (**OWNER DECISION**, open
+     question 24). No Hugging Face model or dataset is pre-seeded in this slice (open question 22).
+147. **Classes (taxonomy v3).** Mapped: promptinject and latent injection → `prompt_injection` (an instruction hidden in
+     a document the prompt carries is still reached over the chat route, so it is never claimed as the agentic
+     `indirect_prompt_injection`, as decision 40 did for promptfoo); encoding and homoglyph smuggling →
+     `encoding_evasion`; the MIT jailbreak sets and smuggling's hypothetical and function-masking → `jailbreak`;
+     divergence.Repeat(Extended) → `data_exfiltration` (promptfoo's divergent-repetition class). Reported, never counted:
+     web_injection, ansiescape, apikey, exploitation, malwaregen, av_spam_scanning, snowball, donotanswer, lmrc,
+     divergence.RepeatedToken. No agentic class is claimed. Red: mapping divergence.Repeat to `excessive_agency` fails.
+148. **OWASP crosswalk (garak's 2023 tags → our 2025 ids), versioned by the garak release.** Mapped as R10 consequence 6
+     supports: llm01 → LLM01, llm02 → LLM05, llm03 → LLM04, llm04 → LLM10, llm05 → LLM03, llm06 → LLM02, llm08 →
+     LLM06, llm09 → LLM09. **OWNER DECISION** (no clean 2025 target; unmapped until decided): llm07 Insecure Plugin
+     Design, llm10 Model Theft. It is reported provenance only: what counts toward A3 is the per-probe class (decision
+     147), never an OWASP tag. Every 2025 id is a key of the vendored `OWASP_LLM_TOP_10_MAPPING`. Red: mapping 2023 llm06
+     to 2025 LLM06 fails.
+149. **Run configuration: no params; one probe per garak process.** garak takes no run params in this build
+     (`garakConfigProblem`; run creation and schedule validation answer 422 `engine_config_invalid`), so nothing reaches
+     its config unseen. Each probe is its own garak process (R10 consequence 4: one unloadable detector aborts garak's
+     whole remaining queue and still exits 0). The config, built from nothing and re-checked by `assertGatewayOnly` on
+     the runner AND the worker: one probe that the catalogue runs; `openai.OpenAICompatible` at the gateway's `/v1/`
+     only; the agent and project headers as `extra_params.extra_headers` (only `x-regulait-*`); one generation per prompt,
+     the prompt cap = the run's trials (≤ 25), threshold 0.5; an absolute report directory and fresh XDG directories per
+     probe (no `garak.site.yaml`, no data override); the key only in `OPENAICOMPATIBLE_API_KEY`; an environment
+     allow-list (a proxy, a vendor key or an unset switch is refused); `python -I` with `PYTHONSAFEPATH`. Red: dropping the
+     `extended_detectors` check, or the env allow-list, fails the invariant test; unwiring `garakConfigProblem` lets a
+     params run queue (gateway suite).
+150. **Approvals routing (owner decision 4; decision 9).** Standard: encoding, promptinject, latentinjection,
+     divergence, web_injection, ansiescape, apikey, snowball, three lmrc probes. Offensive: every jailbreak set, smuggling,
+     donotanswer, exploitation, malwaregen, av_spam_scanning. Unlisted, excluded and unknown sets are offensive too, so
+     asking for one waits for approval (and then reports it not run). An over-threshold budget waits as for every engine.
+     Pinned through the real gateway.
+151. **The worker's time limits.** The job's limit is the run's remaining time less 15 s; each probe gets what remains
+     of it; a probe killed at the limit has no usable report (`unknown`); the runner gives the worker a grace period and
+     then reports every probe timed out. A cancel stops the running process group and runs nothing more.
+152. **The mapper reads `report.jsonl` only; garak's exit code decides nothing** (G19: 0 on hits, on a 401, on an
+     unloadable detector). A probe's verdict needs exactly one `init` naming the pinned version, exactly one
+     `completion` for the same run, exactly one `eval` line for the planned probe and primary detector with
+     `passed + fails = total_evaluated` and `total_evaluated + nones = total_processed`, and the per-output scores in the
+     evaluated attempt lines agreeing with that line (the summary is never trusted over its list, the decision-122 rule).
+     Any hit is a `fail` even in a report that is otherwise unusable (a defeat is never hidden); otherwise a consistent
+     report with every output scored and none hit is a `pass`; anything else is `unknown`: no or empty report, over the
+     32 MiB bound, a killed process, an unparseable or non-object line, invalid UTF-8, another version, no completion (a
+     401), unscored outputs (`nones`, no response from the gateway), a second eval, a foreign probe or detector,
+     impossible counts. No model text leaves the runner: every reason is a fixed sentence with counts; the setup line
+     (the effective config) is never read. Red: making exit 0 a pass fails the real-engine suite (2 of 4) and the unit
+     suite; removing the list cross-check, the completion check or the `nones` rule each fails its case.
+153. **Counts over the per-item bound are scaled, never lost.** An item carries at most 25 attempts (decision 22): above
+     that, attempts are 25 and defeats `ceil(hits × 25 / evaluated)`, at least 1 when there was a hit; the reason says it
+     was scaled.
+154. **Run status.** `completed` when at least one probe gave a reading (pass or fail); `failed` (`no_usable_report`)
+     when none did; `not_run` (`nothing_runnable`) when no requested set is runnable (the worker is never asked); a run
+     with no model target, or a config the invariant refuses, is `not_run` for every planned probe with the refusal's
+     code. A probe garak completes without loading is a run-time not-run (`engine_error`), never pass.
+155. **No raw report leaves the runner.** The reports hold prompts and target outputs, so (as decision 52 for promptfoo)
+     `rawReport` carries only `bytes: 0` and the sha256 of the list of each probe's report sha256.
+156. **The image** (`engines/garak/Dockerfile`, from the repository root, the modelscan bases by digest). The closure is
+     our lockfile: 176 wheels, one sha256 each (resolved with `uv pip compile` for CPython 3.12 on x86_64 manylinux, each
+     file chosen from PyPI for that interpreter), torch as the CPU-only wheel **by direct URL** (the only package from the
+     CPU index; R10: the default resolution pulls 14 proprietary CUDA packages), and the two packages with no Python 3
+     wheel (`ecoji`, `langdetect`) from their hashed sdists with the pinned setuptools and no build isolation (no unhashed
+     build dependency); `pip check` must pass; then the prune (decision 145) and the licence gate; pip is removed; uid
+     10001; every switch and the egress-probe address in the image environment; no port. Measured outside a container:
+     the exact lockfiles installed into a CPython 3.12 venv with `--require-hashes` (all 178 verified) and `pip check`
+     clean.
+157. **The licence gate: the modelscan gate plus pinned readings.** The first inventory denied 61 rows; 28 of those were
+     distributions whose METADATA names no SPDX licence (none, or "Apache", "BSD", "PSFL"). Rather than admit them by
+     name, a person read each one's own licence file and recorded it in `licence-readings.json`, pinned to the exact version and the file's
+     sha256 (28 readings); the gate uses a reading only when the metadata alone does not pass, never for another version
+     or a changed file, and a reading that matches nothing fails the build (stale). Pillow's bundled native libraries are
+     added to the gate's table from pillow's own LICENSE sections. Run on the installed closure: **198 allowed, 23
+     admitted by the allow file, 0 denied**. Of the 23: numpy's three entries reuse the owner's acceptance (decision 106,
+     which says garak reuses it); 20 say "pending owner decision" (open question 21), so the image is not admissible
+     yet. Red: a reading for another version, or with another file hash, is not used and is reported stale.
+158. **Red proofs and what was not done here.** Exit 0 with hits → `fail` (real engine and unit); a 401 → `unknown`
+     (real engine: garak exits 0 with no eval and no completion); budget spent → 401 mid-run through the real gateway: the
+     probe measured before the crossing counts, the refused one is `unknown`, the run is never pass; engine error →
+     `unknown` (no report, hostile report, killed); unknown and licence-excluded sets never reach garak (plan, job schema
+     and config invariant each refuse). **Not done:** no Docker daemon here, so the image was not built: its digest,
+     signature, Trivy scans (OS layer, vulnerabilities, licences, the torch wheel's native libraries) and the in-image
+     self-test are not done, and the manifest digest stays null (the engine cannot be enabled). The real-engine suite ran
+     the pinned garak from the exact lockfiles in a CPython 3.12 venv, before the data prune; the admitted probes'
+     data was checked by reading the code, not by a post-prune run. Advisories (pip-audit or OSV) not run. CyberSecEval
+     is not vendored in this slice (open question 23).
+159. **Open-source check (ADR-0176).** garak is used, not rewritten: its report format is the only result source, its
+     own metadata generates the catalogue's columns, its own generator reaches the gateway. Our code is the governance
+     part (admission by licence, the not-clean mapper, the runner/worker split, the worker self-test). garak's report is
+     JSON Lines; `JSON.parse` per line with our consistency checks is the whole parser. `uv` (MIT/Apache-2.0, a
+     developer tool, not shipped) resolved the lockfile. `pip-licenses` was not taken for the gate, as for modelscan (it
+     does not see bundled native libraries).
+160. **One image finding allow-listed: fsspec CVE-2026-104851 (PR #228, CI run 38014936852, the engine-image gate).**
+     Reproduced locally with the pinned Trivy 0.74.0 and the job's flags (`--scanners vuln --severity HIGH,CRITICAL`,
+     the gate counting only findings with a fixed version) over the venv rebuilt exactly as the Dockerfile builds it
+     (both lockfiles, the prune, pip removed), the shim's production node closure and the pinned base image. The ONLY
+     fixable HIGH or CRITICAL is fsspec 2025.3.0 (fixed in 2026.6.0); the base image's OS findings (util-linux, ncurses,
+     systemd libraries, perl-base, acl) and nltk's CVE-2026-81726 have no fix, so the gate does not count them. **The
+     bump is impossible without breaking declared constraints:** garak 0.17.0 requires `datasets<4.0`, and every
+     datasets 3.x release caps fsspec at or below 2025.3.0 (3.6.0, the last 3.x, at `<=2025.3.0`); the build's
+     `pip check` would fail. So it is a dated entry in `security/image-allowlist.engine-garak.json` (reviewed
+     2026-10-10, expires 2026-12-09, the shortest window that covers about two garak releases), with the reachability
+     argument: fsspec is reached only through datasets and the hub client, which garak calls only from
+     packagehallucination, sysprompt_extraction, audio and goat, none of which this build plans; both libraries run
+     offline; the worker reaches only the gateway; no run-supplied file reaches fsspec. The repository's gate passes on
+     the local report with the entry and fails without it. **Fix path:** the first garak release that allows datasets 4.x
+     (or drops it) is pinned and the entry removed in that PR.
+
+### Implementation decisions (B5-P2 promptfoo runner/worker split and upgrade, 2026-10-10, branch `b5-p2-promptfoo-split`)
+
+Closes open question 13 for promptfoo (decision 79's gate stays for every other build). No migration. Code:
+`packages/engine-promptfoo/src/{job,exchange,worker-selftest,worker-main,version}.ts` (new), `adapter.ts`, `config.ts`,
+`main.ts`; the manifest entry; compose `engine-promptfoo` and `engine-promptfoo-worker`; `engines/promptfoo` (Dockerfile,
+lockfile, THIRD_PARTY.md). Tests: `packages/engine-promptfoo/src/split.test.ts` (11), `image.test.ts` (+1),
+`promptfoo-real.test.ts` (+1, opt-in), `zz-b5-compose.test.ts` (+1), `zz-b5-promptfoo.test.ts` [79] (rewritten, +1). Each
+guard was shown red by breaking it (recorded with each decision). `packages/engine-runner` is unchanged.
+
+170. **promptfoo runs in its own container; the runner never runs it.** One image, two compose services, the modelscan
+     pattern (decision 104) adapted to an engine that calls models. The **runner** (`engine-promptfoo`, the hardened
+     template, default CMD `dist/main.js`) keeps the runner token on its state volume, leases, heartbeats and posts
+     results; it mounts the job volume read-write and the result volume read-only. The **worker**
+     (`engine-promptfoo-worker`, `dist/worker-main.js`) runs promptfoo: on `engines`, read-only root, uid 10001,
+     `cap_drop: [ALL]`, `no-new-privileges`, the template's limits, its own `/work` tmpfs; **no state volume, no
+     enrolment or runner token, no gateway URL of the runner's, no `pid`/`ipc`/`network_mode`/`volumes_from` sharing**
+     (so its own PID namespace: it cannot read the runner's memory, environment or descriptors through `/proc` or
+     ptrace); the job volume read-only and the result volume (`/out`) its one shared writable place. It does not merge
+     `x-engine-runner`, because the template carries the enrolment token. Both exchange volumes are tmpfs-backed (a job
+     holds the run key, which never reaches a disk). Red: the compose test fails with the state volume added to the
+     worker.
+171. **The worker's credential is the run-scoped virtual key, the narrowest one that works.** promptfoo must call the
+     target, the generator and the grader, so whatever runs it can make model calls; the run key bounds exactly that
+     (the compat model routes only, one project, the run's budget, until its deadline, revoked at cancel, timeout or end;
+     decisions 4 and 5). The runner token can lease runs (each minting a key), post results and refresh the self-test;
+     none of that is in the worker's reach. **Rejected:** (A) a forwarding proxy in the runner, with the worker on
+     `network_mode: none` and no key: the worker could still make every model call the key allows through the proxy
+     (no capability removed), while the credential-holding runner would gain a listening port parsing requests from the
+     hostile process; (B) the worker on its own network with only the gateway: the gateway's routes are one listener,
+     so route-level authorisation (the key's purpose) is the boundary either way, and the runner has no port to reach on
+     `engines`; it would also change the gateway service, which other slices share.
+172. **The exchange** (`exchange.ts`; the job, `job.ts`). The runner writes `jobs/<runId>.staging/job.json` — exactly
+     `{runId, baseUrl, apiKey, config, deadlineAt}`, the run key and nothing else secret; the adapter is never given
+     the runner token — and renames it into place. The worker parses it strictly (an extra field is `job_invalid`),
+     re-builds the child environment for its own `/work/<runId>` from nothing (`promptfooEnvFor`) and re-runs
+     `assertGatewayOnly` before promptfoo starts; a refusal is answered (`done.json`, a fixed-vocabulary code) and maps
+     to `not_run` with every planned pair. It runs generate then eval under the run's deadline, writes
+     `results/<runId>/results.json` and, last and atomically, `done.json` with the results' sha256. A cancel (the
+     `cancel` file, or the job disappearing) kills promptfoo's process group; the runner gives up 15 s after the
+     deadline (never clean). The runner reads the results only if their sha256 is the one `done.json` names (else
+     `failed`, `results_inconsistent`), with the 64 MiB bound of decision 63 unchanged; it reconciles stale jobs at start
+     and before each run, and the worker drops results whose job is gone. Red: skipping the worker's invariant ran
+     promptfoo on an off-gateway job; a `passthrough` job schema ran a job carrying an extra field; dropping the sha256
+     check accepted a swapped results file.
+173. **The worker proves the isolation at run time** (`worker-selftest.ts`). Hourly, on its own timer (a long run never
+     lets it go stale, which would fail the runner's refresh and switch the engine off, decision 93), the worker writes
+     `.worker-selftest.json` to the result volume: the same egress probe as the runner's, run inside the worker, and
+     what of the runner's credential it can reach — environment variables named `REGULAIT_ENGINE_ENROLLMENT_TOKEN` or
+     holding an `rge_`/`rgee_` value, any entry in the runner state directory (the image ships `/state` empty; unreadable
+     counts as reachable), and any process in its `/proc` running the runner's `dist/main.js`. The runner reports it as
+     the manifest's new promptfoo usage-data entry `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, true only when the report is
+     fresh (2 h), names the pinned version, reached nothing and found nothing; a missing, stale or failing report fails
+     the self-test, so the engine cannot be enabled. Red: ignoring the state entries, or never flagging a visible runner
+     process, passed a worker that shared the runner's volume or PID namespace; reporting the switch true regardless
+     passed a self-test with no worker report.
+174. **`credentialIsolation` is true for promptfoo** (the manifest), so decision 79's acceptance no longer applies to it:
+     enabling needs the step-up for enabling alone and writes no `engine-credential-isolation-risk-accepted` audit. The
+     claim rests on the compose layout (decision 170, pinned by the compose test), on the job and adapter carrying no
+     runner credential (pinned by `split.test.ts`, which also checks promptfoo's environment against a runner token and
+     an enrolment token planted beside it), and on the worker's run-time proof (decision 173), which is a required
+     usage-data entry. The gate itself is unchanged and still proven on a build without isolation (`zz-b5-promptfoo`
+     [79], through a second app with that manifest; the test restores the module-wide engine runtime that `buildApp`
+     installs). modelscan and garak keep `false` (open question 18 unchanged). **Not verified here:** the image was not
+     built and neither container was run (this environment's disk could not hold the build; see the report), so the
+     layout's run-time behaviour, the worker's self-test inside a real container and the in-image egress test are first
+     exercised by CI's image build (decision 120) and a deployment; the manifest digest stays null, so the engine still
+     cannot be enabled. Red: with the shipped flag false, the "isolating build enables with the step-up alone" proof
+     fails.
+175. **No change to the runner core.** The split lives in the promptfoo shim. `promptfooAdapter` keeps its options and
+     gains `executor` (default: `LocalPromptfooExecutor`, the in-process path the existing tests and the gateway's
+     stand-in use); the image's runner always passes the exchange (a test reads `main.ts` and refuses the local path
+     there). The exchange is a candidate to move into `packages/engine-runner` once a second model-calling engine
+     (garak) needs it.
+176. **promptfoo 0.123.1 → 0.124.1** (released 2026-10-08, MIT, Node ≥ 22.22.0 as before; manifest generation 2,
+     decision 95). Re-checked on the published package, not assumed: the telemetry patch still finds exactly four
+     copies and the disabled path is the same code (measured with the real engine: unpatched, every run connects to
+     the vendor's event collector, blocked; patched, nothing); the extracted plugin and strategy lists are identical
+     (only the chunk name and hash change; `promptfoo-upstream.ts` regenerated, the drift test passes); the usage-data
+     switches are all still read (`PROMPTFOO_DISABLE_TEMPLATE_ENV_VARS` moved into one helper that still withholds
+     `process.env` from templates); `ResultFailureReason` is unchanged. The vendored OWASP file is byte-identical
+     (sha256 `9c78fc85…`) at tag `0.124.1` = commit `421e7959642c5d4cc1c983259a268de1c6f847b9` (this release publishes
+     no `gitHead`), so only its provenance moved. The real-engine suite (opt-in) passes on the patched 0.124.1, including
+     a new run through the exchange. The mapper fixtures stay the 0.123.1 captures (the real 0.124.1 runs agree).
+177. **npm advisories: what the upgrade does and does not clear.** `npm audit --omit=dev` on 0.123.1 reported 6 high
+     and 2 moderate and offered "promptfoo 0.116.7" — a downgrade (to a release before these dependencies), not a fix,
+     so it was not taken. On 0.124.1 the 2 moderate are gone (smol-toml left the closure; Dependabot PR #209 becomes
+     redundant), and 6 high remain: braces (≤ 3.0.3, its latest release) and node-forge (≤ 1.4.0, its latest release),
+     neither with a patched release, reached only through optional packages (chokidar 3 as nunjucks' optional peer, and
+     jks-js). The image installs with `npm ci --omit=optional`, so none of them ships: `npm audit --omit=optional`
+     reports 0, as it did at 0.123.1. A new `image.test.ts` case fails if any of them stops being optional. promptfoo
+     0.124.1 itself requires `simple-git ^4.0.2`, so that override is dropped; `basic-ftp` 6.2.2 stays (without it 5.3.1
+     resolves). The licence gate's result is unchanged (11 pending, open question 6).
+
+### Owner decisions (2026-10-10, garak open questions 19-26)
+
+Taken by the owner in session on 2026-10-10. The build follows in its own slices.
+
+- **Question 21, accepted:** the 20 licences in the garak image's allow-file are admitted: PSF-2.0, MPL-2.0, ZPL-2.1,
+  MIT-0, CNRI-Python, MIT-CMU, the FreeType, HarfBuzz, libjpeg-turbo, libpng and libtiff licences, and Boost BSL-1.0.
+  "BSL-1.0" is the Boost Software License, which is permissive; it is not the Business Source License that ADR-0176
+  bans. MPL-2.0 files are admitted only while unmodified. torch's terms are Apache-2.0 WITH LLVM-exception. This
+  amends the ADR-0176 list for these named licences in shipped engine images only. The image becomes admissible
+  once CI's scans of the OS layer and the native libraries are clean.
+- **Question 20, accepted:** every probe excluded under decision 144 is admitted:
+  - the inline third-party payloads: doctor, grandma, goodside, glitch;
+  - badchars (Unicode licence);
+  - the OpenRAIL toxicity classifier: atkgen.Tox, latentinjection.LatentJailbreak, lmrc.Bullying,
+    realtoxicityprompts.*;
+  - the CC-BY-4.0 word list and system-prompt dataset: the lmrc slur and sexual probes, sysprompt_extraction.
+
+  The required attribution and use-restriction notices go in THIRD_PARTY.md. The OpenRAIL use restrictions must
+  appear in the image notices.
+- **Question 19, decided: our own per-probe OWASP table.** We keep a table mapping each probe to its 2025 OWASP risk
+  and ignore garak's 2023 tags. Every row is reviewed at each garak pin change. A probe with no defensible 2025 risk
+  maps to none; we never overclaim coverage.
+- **Question 22, accepted: pre-seed now.** The licence-clear Hugging Face assets named in R10 are pre-seeded in the
+  image at pinned revisions, with the offline load proven in the image. This adds about 2 GB.
+- **Question 24, accepted: hosted-judge probes run through a gateway judge.** `judge.*` and `agent_breaker.*` are
+  re-pointed at a judge model reached only through the gateway, so the call is governed, costed and audited like any
+  other model call. Those probes become `requiresJudge`. Approvals apply as for agentic sets.
+- **Question 26, kept:** the two word lists stay deleted (strict default).
+- **Question 25 (coordinator, technical):** both engines keep `credentialIsolation` at its verified value only. garak
+  and modelscan are each re-checked against the CI-built image layout, and whichever has not been checked reads
+  `false`.
+
+**Review (X29-G, Codex, after #228 merged; 2 findings, each red first; branch `b5-garak-fix`).** Tests:
+`packages/engine-garak/src/garak.test.ts` [161], `packages/engine-promptfoo/src/promptfoo.test.ts` [162], and the
+garak gateway suite's report fixture (now paired records). No migration.
+
+161. **A pass needs complete detector coverage, reconciled by attempt UUID** (B5X-02, MEDIUM). The mapper counted only
+     the scores in completed (`status` 2) attempt lines and checked them against the eval line, so two partial lists
+     that agreed could pass: one scored output beside (a) another generated attempt that was never scored, or (b) a
+     completed attempt with two outputs and one score. garak 0.17.0 writes each attempt twice, generated (status 1)
+     then scored (status 2), with the same `uuid` (`probes/base.py`, `harnesses/base.py`). Now every attempt line of
+     the probe must carry a uuid, an `outputs` list and status 1 or 2; each generated uuid must have exactly one
+     completed record with the same number of outputs; every completed record must have its generation; and each
+     completed record must carry one score per output. A normal 1/2 pair is one attempt (never counted twice). An
+     unmatched generation, a missing or extra score, a duplicate generation or completed record, or a completed record
+     with no generation reads `unknown` (`coverage_incomplete`); a hit already observed still makes the item `fail`.
+     Counts only: no prompt or output text is read or copied. Red: with the check removed the new test fails (case
+     (a) reads `pass`). The opt-in real-engine suite passes against the pinned garak with the rule in place, now on a
+     venv pruned exactly as the image is (which also closes decision 158's "not a post-prune run" gap for the two
+     probes it runs: promptinject.HijackHateHumans and encoding.InjectBase64).
+162. **The promptfoo cancel proof no longer races the scheduler** (B5X-03, LOW). It cancelled on the second heartbeat
+     (20 ms), assuming the adapter had reached the fake engine by then; under load the cancel landed first, the runner
+     correctly posted nothing, but the "the engine saw the abort" assertion failed. The fake engine now signals that
+     generation started, and the heartbeat cancels only after that signal, so the proof is of a cancel DURING
+     generation (abort seen, the eval step never started, nothing posted) whatever the timing. A second test pins the
+     early cancel: the starting heartbeat already carries it, the engine is never started and nothing is posted.
+     Shown: with an 80 ms delay inserted before the adapter, the old timing fails the abort assertion (Codex's
+     reproduction) and the synchronised test passes.
+
+### Implementation decisions (B5-G OWASP table, owner decision on question 19, 2026-10-10, branch `b5-garak-owasp`)
+
+Built from the owner's decision on question 19. **No migration.** Code: `packages/shared/src/engines/garak-owasp-2025.ts`
+(the table, the review binding, `garakOwasp2025`, `garakOwasp2025Row`, `garakOwasp2025Coverage`); the 2023 crosswalk is
+removed from `garak.ts`; the extractor's header text (`engines/garak/extract-probe-metadata.mjs`) now points at the
+table. `garak-upstream.ts` is not edited. Tests: `packages/shared/src/engines/garak-owasp-2025.test.ts` (5) and its
+committed snapshot `__snapshots__/garak-owasp-2025.coverage.json`; the two crosswalk cases in `garak.test.ts` are
+removed. Open source first (ADR-0176): no maintained library maps garak's probes to the 2025 list, and the mapping is a
+RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
+
+213. **garak's 2023 tags are upstream data only; decision 148's crosswalk is retired.** The `owasp` field in
+     `garak-upstream.ts` stays as generated (garak's own `owasp:llmNN` tags, 2023 numbering), and nothing reads it to
+     map a probe. `garakOwaspTags2023` stays as a provenance accessor, documented as never used for mapping.
+     `GARAK_OWASP_CROSSWALK` and its row type are gone; `garakOwasp2025(probe)` keeps its name and now reads our table
+     (a probe with no row returns `[]`). Red: the test pins rows that a renumbering of garak's tags cannot produce
+     (`web_injection.MarkdownImageExfil` is LLM05 only, `suffix.GCGCached` is LLM01 though untagged upstream,
+     `continuation.*` is none though tagged llm01).
+214. **The evidence rule: never overclaim.** A probe counts toward a 2025 risk only when a failure of that probe, as
+     its primary detector scores it, is evidence of that risk. It maps to none when its failure shows a content harm
+     the 2025 list does not name (toxicity, slurs, sexual content, malware text), when it measures only a refusal gap
+     with no attack technique (`donotanswer.*`), or when its detector cannot tell the risk from a look-alike (a
+     key-shaped string is not a leaked key). LLM01 is claimed only where the prompt carries an attack technique:
+     injection, a persona or role-play jailbreak, encoding, obfuscation, an adversarial suffix, or an iterative
+     attacker model. The table is reported provenance; what counts toward A3 is still the attack class (decision 147).
+215. **The table: one row per probe of the pinned release, with a one-line rationale.** 191 rows (every probe in
+     `garak-upstream.ts` at garak 0.17.0, including the never-runnable `test.*` and `grandma.GrandmaIntent`). Ids and
+     names are the official 2025 OWASP Top 10 for LLM Applications, checked on 2026-10-10 against the primary source
+     (genai.owasp.org/llm-top-10), and equal the vendored `OWASP_LLM_TOP_10_MAPPING` keys and names, which the test
+     pins. Probes per 2025 risk (all rows / rows that run in this build today):
+
+     | 2025 risk | Probes | Run today |
+     | --- | --- | --- |
+     | LLM01 Prompt Injection | 94 | 51 |
+     | LLM02 Sensitive Information Disclosure | 22 | 2 |
+     | LLM03 Supply Chain | 1 | 0 |
+     | LLM04 Data and Model Poisoning | 0 | 0 |
+     | LLM05 Improper Output Handling | 17 | 16 |
+     | LLM06 Excessive Agency | 1 | 0 |
+     | LLM07 System Prompt Leakage | 1 | 0 |
+     | LLM08 Vector and Embedding Weaknesses | 0 | 0 |
+     | LLM09 Misinformation | 16 | 7 |
+     | LLM10 Unbounded Consumption | 0 | 0 |
+     | none | 40 | 14 |
+
+     One probe (`agent_breaker.AgentBreaker`) carries two risks, so the rows sum to 192. "Run today" is the catalogue's
+     `local` disposition before questions 20, 22 and 24 are built; it is not pinned by the test. The full table, with
+     every rationale, is the source file; the committed snapshot lists every probe under its risk.
+216. **Every row is re-reviewed at each garak pin change, and CI enforces it.** `GARAK_OWASP_2025_REVIEW` names the
+     release (`0.17.0`) and the `plugin_cache.json` sha256 the table was reviewed against, as literals. The test fails
+     (a) when a probe in `garak-upstream.ts` has no row, or a row names a probe the release does not have; (b) when a
+     row cites an id outside the 2025 list; (c) when the review binding differs from `GARAK_UPSTREAM_VERSION`, its
+     sha256 or the manifest's garak version, so a pin bump stops CI even when the probe set is unchanged; (d) when the
+     coverage summary differs from the committed snapshot. To pass after a bump, a person re-reads every row against the
+     new release's probes and detectors, then moves the binding and the snapshot in the same change. Red, each shown on
+     the branch: deleting the `tap.TAPCached` row fails (a) and (d); `owasp:llm:11` on `dra.DRA` fails (b) and (d); a
+     binding of `0.16.0` fails (c) and (d).
+217. **Judgement calls in the rows** (each read against the pinned wheel's probe and detector source, sha256 matching
+     decision 142):
+     - memorisation (`divergence.Repeat`, `divergence.RepeatExtended`, `leakreplay.*`) → LLM02 only; `propile.*`
+       (personal data completion) → LLM02;
+     - `divergence.RepeatedToken` → **none**, against the brief's "divergence.* → LLM02" default: its detector flags
+       long, repetitive or citation-like output (instability), not leaked data, and a 2,000-character reply is not
+       evidence of unbounded consumption;
+     - `agent_breaker.AgentBreaker` → LLM06 and LLM01 (it drives the agent's tools with crafted prompts);
+     - `web_injection.*` → LLM05 only: the output carries a payload a renderer acts on, but the exfiltrated text is
+       planted, so no disclosure is claimed, and the payload request is the prompt itself, not an injected instruction;
+       `ansiescape.*`, `exploitation.*` and `av_spam_scanning.*` → LLM05 on the same reading;
+     - `sysprompt_extraction.SystemPromptExtraction` → LLM07 only (the detector measures leakage, not an override);
+     - `apikey.*` → none, and `grandma.Win10`/`Win11` → LLM01 only (role-play jailbreak): key-shaped output is not
+       claimed as a leak;
+     - `packagehallucination.*` → LLM09 only (the 2025 LLM09 text names hallucinated packages; LLM03 is the
+       application's own supply chain); `fileformats.HF_Files` → LLM03 (an unsafe model artifact);
+     - `donotanswer.InformationHazard` and `.MisinformationHarms` → none (the detector measures only that the model did
+       not refuse);
+     - `topic.*`, `glitch.*`, `goodside.Davidjl`, `goodside.ThreatenJSON`, `lmrc.Anthropomorphisation`,
+       `lmrc.Deadnaming` → none;
+     - nothing maps to LLM04, LLM08 or LLM10: no garak probe in this release produces evidence of them over the chat
+       route.
+218. **Consumers.** Before this change the crosswalk had no runtime consumer: findings carry `sourceTaxonomy`
+     (`garak`, probe) and the attack class; the coverage view, model-card evidence and reports cite OWASP through the
+     evaluator catalog's per-class references (`evaluator-catalog.ts`), never through garak's tags; the gateway and the
+     Engines page read neither. Its only readers were the package export and two test cases. Those now read the new
+     table (exported from `@regulait/shared`), and any future reader that shows a garak probe's OWASP risks must call
+     `garakOwasp2025` or `garakOwasp2025Coverage`; reading `GarakUpstreamProbe.owasp` for that is a review finding.
+
+### Implementation decisions (B5-M `.npy` header check, 2026-10-10, branch `b5-modelscan-npy`)
+
+Closes open question 15(b) (decision 108). No migration, no new dependency, no change to the Python lockfile or the
+licence gate. Code: `engines/modelscan/npy-header.py` (new), `packages/shared/src/engines/modelscan.ts` (the check's
+answer and the mapper), `packages/engine-modelscan/src/{scan,exchange,adapter,settings}.ts`, the Dockerfile, the numpy
+row of `engines/modelscan/THIRD_PARTY.md`. Tests: `packages/engine-modelscan/src/npy.test.ts` (19, new),
+`image.test.ts` (+1), `modelscan-real.test.ts` (decision 108's pinned case replaced, +1; opt-in), and the gateway's
+`zz-b5-modelscan.test.ts` follows the outcome type.
+
+180. **Option B: the scanner checks the `.npy` header itself; pinning numpy 1.26 is rejected.** Option A fails ADR-0176:
+     numpy 1.26's last release is 1.26.4, uploaded 2024-02-05 (PyPI, read 2026-10-10), about 32 months ago, against the
+     rule of a release in roughly the last 12 months; the current line is 2.5.3 (2026-09-06). Option B, built: a
+     stdlib-only Python script, `engines/modelscan/npy-header.py`, baked read-only (0444) at `/opt/modelscan/npy-header.py`
+     and run by the **scanner** (decision 104: no network, no credential) on the venv's interpreter with `-I -S`, before
+     modelscan, for every job whose format is `numpy`. It never evaluates anything: the header is parsed with
+     `ast.parse(mode="eval")`, the node must be a dict display, and each value goes through `ast.literal_eval`.
+     **Open-source check (ADR-0176):** numpy's own `read_array_header_1_0`/`_2_0` were considered and not used: there is
+     no public reader for version 3.0 (only the private `_read_array_header`, the same kind of private call that broke
+     modelscan), and, measured on numpy 2.4.6, numpy keeps the LAST of a repeated key, so a header with `descr` `<f8`
+     then `|O` loads as an object array (ambiguous, refused here). They would also need numpy in the checking process,
+     which CI does not have. `ast` is the standard library; nothing is added.
+181. **What the check accepts, and every refusal's code.** In order: at least 8 bytes, else `npy_truncated`; the magic
+     `\x93NUMPY`, else `npy_magic_invalid`; version exactly 1.0, 2.0 or 3.0, else `npy_version_unsupported`; the length
+     field (2 bytes for 1.0, 4 for 2.0 and 3.0) present, else `npy_truncated`; a header length from 1 to 10000 bytes
+     (numpy's own default bound), else `npy_header_length`; the header within the file, else `npy_truncated`; ASCII
+     (every header we accept is), else `npy_header_encoding`; starting with `{`, ending with a newline and parsing as a
+     dict display of constants, else `npy_header_not_literal`; keys exactly `descr`, `fortran_order` and `shape`, each
+     once and each a string constant (no `**`), else `npy_header_keys`; `fortran_order` a bool and `shape` a tuple of at
+     most 64 non-negative ints (not bools), else `npy_header_value`; `descr` exactly `|O` (object) or one of the plain
+     numeric dtypes numpy's writer emits (`|b1 |i1 |u1`, and `<`/`>` with `i2 i4 i8 u2 u4 u8 f2 f4 f8 f16 c8 c16 c32`),
+     else `npy_dtype_unsupported` (strings, void, datetime, structured or subarray dtypes, `<O`: a structured dtype's
+     fields may hold objects). A numeric payload must be exactly itemsize × the product of `shape` (short:
+     `npy_truncated`; long: `npy_trailing_bytes`); an object payload must be non-empty (`npy_truncated`) and at most
+     48 MiB (`npy_payload_too_large`, decision 183). The script prints one JSON line of fixed codes and integers (no
+     artifact text) and exits 0; anything else is `npy_check_failed`.
+182. **The verdicts (decision 105 unchanged: numpy's ceiling stays `no_known_unsafe`, and it stays executable).**
+     - **Numeric:** modelscan is not started (there is no pickle and nothing for it to scan). The scan item passes
+       (`regulait-npy-header`/`numeric`), so the artifact reads `no_known_unsafe` with its `executable_format`
+       finding, exactly as a scanned pickle with no finding does. A report beside a numeric answer is
+       `report_inconsistent`.
+     - **Object:** exactly the payload bytes are copied to a new file (`artifact.pkl` in a directory of their own on the
+       result volume) and handed to modelscan under `.pkl`, so its PICKLE scanner reads every pickle in the stream. The
+       report must name `artifact.pkl`, else `report_inconsistent`. The copy is removed before `done.json` is written.
+       An `os.system` payload is `unsafe`; a benign one is `no_known_unsafe`.
+     - **Refused, or the check did not answer:** modelscan is not started; the run completes with the scan item
+       `unknown` and a `modelscan-error` item whose id is the problem code, so the artifact scan reads `unknown` with a
+       `scan_error` finding naming the code. Never `clean`.
+     - **A `numpy` run with no header check at all** (any scanner that did not run it) fails `npy_check_missing`
+       (`unknown`). A check cut off by the time limit is `engine_timeout`, as before.
+
+     The gateway's `deriveArtifactScanVerdict` and the DB's `clean`-only-for-safetensors CHECK are unchanged.
+183. **The exchange carries the answer; the payload copy is bounded by the result volume.** `done.json` gains a
+     required, nullable `npy` (strict zod, `npyCheckSchema`); `ScanExecutor.scan` returns a `ScanOutcome`
+     (`ModelscanOutcome` + `npy`); `runScanJob` is the one entry point both executors use. The script runs from a fresh
+     empty working directory with modelscan's environment built from nothing, its stdout bounded at 4 KiB and
+     validated as exactly one line. The object payload bound is `NPY_OBJECT_PAYLOAD_MAX_BYTES` = 48 MiB because the
+     copy lands on the result volume, a 64 MiB tmpfs that also holds the report (at most 4 MiB); compose is unchanged.
+     Larger object arrays read `unknown` (`npy_payload_too_large`), never better.
+184. **Proofs, red first.** `npy.test.ts` runs the real script with the host's `python3 -I -S` (stdlib only, so no numpy;
+     skipped where there is no `python3`, as for the patch test) and replays modelscan exactly as the pinned 0.8.8
+     answers for the file it is handed (measured 2026-10-10: a `.npy` is a `MODEL_SCAN` error, exit 3; `os.system` in a
+     `.pkl` a CRITICAL issue, exit 1; a benign `.pkl` exit 0). Synthetic fixtures only, written byte by byte
+     (`npyFile`, `numericNpy`, `objectNpy`). Covered: numeric and object files of versions 1.0, 2.0 and 3.0; a benign
+     object pickle; an `os.system` object pickle (`unsafe`); a header with a call, `**`, `dict(...)`, an unclosed dict
+     or deep nesting (nothing in it runs: a `touch MARK` call leaves no file); an extra, missing, repeated or
+     non-string key; a header length of 0, over 10000 and past the end of the file; a file cut at every part; versions
+     4.0, 1.1, 0.0 and 2.1 and a wrong magic; bad value types, unsupported dtypes, trailing bytes, the payload bound
+     and a non-ASCII header; a check that does not answer; the answer carried through the exchange; and the mapper's
+     rules. **Red:** against the code before this change, 17 of the file's 18 tests then written failed (the helper did
+     not exist; an `os.system` object `.npy` read `unknown`, not `unsafe`; a numeric `.npy` read `unknown`; modelscan
+     was handed `artifact.npy`; no problem code reached the verdict). **Real engine (opt-in,** a Python 3.11 venv with
+     modelscan 0.8.8 patched, numpy 2.4.6): decision 108's pinned case now reads `unsafe` for an `os.system` object
+     `.npy` of each version, `no_known_unsafe` for benign and numeric ones and `unknown` (`npy_truncated`) for a cut
+     one; and files numpy itself writes (versions 1.0, 2.0 and 3.0; float64, int64 and an object array of a dict and
+     None) all pass the check and read `no_known_unsafe`. Mutation: with the check bypassed (modelscan handed the
+     `.npy`, as before) both real tests fail, the `os.system` case reading `unknown`. `image.test.ts` fails without the
+     Dockerfile's COPY of the script, and pins it to the standard library with no `eval`, `exec`, `compile` or dynamic
+     import. **Not run here:** the image build (no Docker daemon); CI's engine-image leg is the first build with the
+     script. The image runs Python 3.12 with numpy 2.5.3; the script needs neither numpy nor any version-specific API.
+
+### Implementation decisions (B5-G2 garak admissions: owner questions 21, 20 and 22, 2026-10-10, branch `b5-garak-admit`)
+
+Builds the owner's decisions of 2026-10-10 on open questions 21, 20 and 22 (the section above). **No migration.** Code:
+`engines/garak` (allow file, licence gate, prune list, `hf-preseed.json`, `preseed-hf.py`, `IMAGE-NOTICES.txt`,
+Dockerfile, THIRD_PARTY.md), `packages/shared/src/engines/garak.ts` (dispositions only: the OWASP crosswalk and the
+`judge.*`/`agent_breaker.*` rows are untouched, other slices own them), the new `garak-preseed.ts`, the manifest's
+garak entry, `packages/engine-garak` (`config.ts`, `garak-run.ts`) and `security/image-allowlist.engine-garak.json`.
+Tests: `packages/shared/src/engines/garak.test.ts` (12), `packages/engine-garak/src/image.test.ts` (8),
+`garak.test.ts` (+2 cases and 6 refusal variants), `garak-real.test.ts` (9 with the opt-in pre-seed, 5 new).
+`garak-upstream.ts` is NOT edited: it is generated from the wheel's `plugin_cache.json` (decision 142), and its
+`active` flag is garak's own default, which the runner never reads; admission lives in `garak.ts`'s dispositions.
+
+193. **Question 21: the 20 allow-file entries are owner acceptances.** Each says `accepted by owner 2026-10-10
+     (ADR-0187 decision 193)` with its reason (PSF-2.0 ×4 including CPython, MPL-2.0 ×4, ZPL-2.1 ×2, MIT-0,
+     CNRI-Python, MIT-CMU, pillow's FreeType, HarfBuzz, libjpeg-turbo, libpng and libtiff libraries, torch's BSL-1.0
+     (Boost) and Apache-2.0 WITH LLVM-exception). No entry says "pending owner decision" any more; numpy's three stay
+     on decision 106. The acceptance covers these named licences in shipped engine images only; the gate still
+     DENIES any term the allow file does not name, including a second, unnamed term of an admitted subject. Run on
+     the exact closure (pruned, pip removed, as the Dockerfile does): **197 allowed, 23 admitted, 0 denied**. The
+     manifest's `unverified` entry for licences now records the acceptance; the image stays not admissible until
+     CI's OS-layer and native-library scans are clean. Red: an `EPL-2.0`, a `Unicode-3.0` and an
+     `LGPL-3.0-only` term next to an admitted one are each denied with the real allow file (image test).
+194. **MPL-2.0 is admitted only while unmodified, and the gate checks it.** An allow entry may carry
+     `"condition": "unmodified"`, and an MPL-2.0 entry must (`allowProblems` refuses one without it; an unknown
+     condition is refused). Such a row is admitted only when every hashed file in the distribution's RECORD (the
+     hashes pip wrote from the hash-pinned wheel) is present with that sha256 and size; a RECORD path outside the
+     venv is refused; with no checker, a conditional entry admits nothing. Red: appending one comment line to the
+     installed `certifi/core.py` made the real gate deny certifi ("certifi/core.py is modified"); restored, 0 denied.
+     The same case, a missing RECORD and a path escape are pinned in the image test.
+195. **Question 20: the probes whose only bar was the owner decision now run (`local`).** doctor.{Puppetry, Bypass,
+     BypassLeet} and grandma.{Substances, Win10, Win11}: offensive, `jailbreak`; goodside.Tag: standard,
+     `prompt_injection` (instructions hidden in Unicode tag characters, reached over the chat route as decision 147
+     reads latent injection); goodside.{WhoIsRiley, ThreatenJSON, Davidjl} and glitch.{Glitch, GlitchFull}: standard,
+     reported, never counted; badchars.BadCharacters: offensive, `encoding_evasion` (as smuggling's homoglyphs).
+     Every primary detector is a string, trigger or regex detector (mitigation, goodside, productkey, base). Measured
+     on the pruned venv through the worker: eight of them load and give a reading.
+196. **Admitted by licence, still not runnable here, and the reason says so.** atkgen.Tox,
+     latentinjection.LatentJailbreak(Full), lmrc.Bullying and realtoxicityprompts.* need
+     `unsafe_content.ToxicCommentModel`, whose OpenRAIL model is not pre-seeded (question 22 named only licence-clear
+     assets; its weights are also a pickle) and whose module reads, at import, the two word lists question 26 keeps
+     deleted: `missing_preseed` ("licence admitted; …"). lmrc.{SlurUsage, SexualContent, Sexualisation, Profanity}
+     read the profanity list that stays deleted, and grandma.Slurs reads the unlicensed slur list (continuation's
+     data, never admitted): `excluded_licence` with that sentence. None of these reaches garak; claiming them would
+     report a probe that cannot load as a run. (grandma.GrandmaIntent, which names no detector, is now unlisted, as
+     decision 143 already said.)
+197. **The admitted data ships, with its notices; the two word lists stay deleted.** `excluded-data.txt` no longer
+     lists `badchars` (Unicode License v3) or `ldnoobw-en.txt` (CC-BY-4.0); 23 paths are deleted, including
+     `profanity_en.csv` and `ofcom-potentially-offensive.txt` (question 26) and the slur lists. `IMAGE-NOTICES.txt`
+     is copied to `/opt/garak/NOTICES.txt`: the Unicode copyright and permission notice in full, the CC-BY-4.0
+     credit, the pre-seeded assets with their commits and licences, and, as the owner required, the OpenRAIL++-M
+     use restrictions (Attachment A, verbatim from the licence dated 2023-07-26) for the admitted toxicity model, plus
+     the CC-BY-4.0 credit for the admitted second system-prompt dataset; THIRD_PARTY.md records the same.
+198. **Question 22: the nine licence-clear assets R10 names are pre-seeded, pinned and verified.**
+     `hf-preseed.json` (mirrored by `GARAK_PRESEEDED_HF_ASSETS`; a test keeps them equal): the refutation detector
+     (Apache-2.0) and the NLI detector (MIT); the pypi, npm, rubygems, dart, perl and raku package lists and the drh
+     system-prompt set (Apache-2.0). Each is pinned to its full commit (R10's short revisions; each was still the
+     Hub's `main` on 2026-10-10), and each file (25, `.gitattributes` and helper scripts excluded) by sha256 and size,
+     1.89 GB in all. `preseed-hf.py fetch` downloads exactly the listed files at that commit, refuses any file whose
+     hash or size differs, reads the licence from the card at that commit (it must be the recorded MIT or
+     Apache-2.0), and writes `refs/main` = the commit. Licences were checked at the pinned commits: the cards say
+     `apache-2.0` (8) and `mit` (the NLI model). The NLI model's 1.43 GB weights were hashed by streaming
+     (`214cd01c…`, as pinned); the disk here could not hold them, so its offline load is proven by the build step only.
+199. **Materialised at build, proven offline in the build, read-only at run time.** An offline build of a dataset
+     from its raw snapshot is refused by datasets 3.6 (measured), so `materialise` runs `load_dataset(id,
+     split="train", revision=<commit>)` with network right after `fetch`, then requires every cached snapshot file to
+     be listed and still match and no other commit to be cached, and removes the download locks, transfer cache and
+     module cache. A `RUN --network=none` step with every offline switch then runs `verify`: every file's hash,
+     `refs/main`, each model loaded the way garak's HFDetector loads it (by id, no revision) and run once, each
+     dataset loaded the way garak loads it with its row count and column. Only the tree is copied into the runtime
+     image (root-owned, `chmod -R a-w`), not the venv the pre-seed ran in. Measured here, in a fresh network
+     namespace with the tree mounted read-only: the eight assets that fit on this disk load offline (the full verify
+     passes). A first attempt with the read-only tree as `HF_HOME` failed on the lock file datasets takes in its
+     cache root, which led to decision 200.
+200. **The worker's Hub layout.** Each garak process gets `HF_HUB_CACHE=/opt/garak/hf/hub` (the read-only tree),
+     a fresh `HF_HOME` (as before) and a fresh `HF_DATASETS_CACHE` under its own cache directory whose entries are
+     symlinks to the materialised datasets (`linkPreseededDatasets`): datasets takes a lock file in its cache root,
+     so the root must be writable, while the data stays read-only and cannot be overridden. The config invariant
+     requires exactly that: the hub cache is the image's tree; `HF_HOME` and `HF_DATASETS_CACHE` are under the
+     probe's fresh cache directory (no `..`). Red: a writable or foreign hub cache, a datasets cache in the image
+     tree, `HF_HOME` on the image tree or a traversal are each refused (`env_hf_cache`).
+201. **The packagehallucination and system-prompt probes run.** packagehallucination.{Python, JavaScript, Ruby,
+     Dart, Perl, RakuLand}: standard, reported, never counted (as promptfoo's hallucination plugins); Rust stays
+     excluded (its dataset declares no licence). sysprompt_extraction.SystemPromptExtraction: standard,
+     `system_prompt_extraction`. Its default sources include the CC-BY-4.0 dataset that is admitted but not
+     pre-seeded, so the worker writes `plugins.probes.sysprompt_extraction.SystemPromptExtraction.
+     system_prompt_sources = [the drh dataset]` (`GARAK_PROBE_SETTINGS`), and the invariant accepts exactly the
+     fixed settings for the probe being run (widening or dropping them is refused, `config_probe_settings`). garak
+     honours that setting (measured: a nonexistent source gives zero prompts). The two NLI detectors are pre-seeded
+     and loadable, but their only probe, misleading.FalseAssertion, stays excluded (its data has no licence), so no
+     admitted probe uses them yet. fsspec CVE-2026-104851's allow-list entry (decision 160) now states the new reach:
+     datasets and the hub client run only on the image's own read-only, hash-pinned TSV, JSON Lines and JSON files,
+     offline, with dataset ids fixed by our config; the expiry is unchanged. The manifest's garak `generation` is 2
+     (the image changed), and its sets and reduced set follow the catalogue.
+202. **Proofs and what was not done.** The opt-in real-engine suite ran against a venv built from the exact
+     lockfiles (`--require-hashes`, `pip check` clean), pruned with the new list and with pip removed (as decision
+     158, now after the prune), inside its own network namespace (loopback only; the suite's first case shows a
+     public address is unreachable) with the pre-seeded tree mounted read-only: 9 of 9 passed, among them every
+     pre-seeded asset loading offline (`verify`), a known package passing and an invented one failing, the
+     system-prompt probe loading its dataset and passing a refusal, and eight owner-admitted probes giving readings.
+     Red: pointed at an empty tree, the three pre-seed cases fail and the probes read `unknown`, never pass.
+     **Size:** about 1.9 GB of files plus about 0.25 GB of materialised datasets, about 2.1 GB in all (under the
+     owner's estimate plus the 2.5 GB ceiling). **Not done here:** there is no Docker daemon, so the image (and the
+     `--network=none` step, the read-only tree and the notices in it) is first built by CI; the NLI model was not
+     loaded locally (decision 198); the hub egress was allowed (no 403).
+
+### Implementation decisions (garak judge through the gateway, open question 24, 2026-10-10, branch `b5-garak-judge`)
+
+Builds the owner's decision on question 24. **No migration.** Code: `packages/shared/src/engines/garak.ts` (the
+judge flag, agent_breaker admitted), `manifest.ts` (`judgeSets`, `engineRunNeedsJudge`),
+`packages/engine-garak/src/{config,exchange,adapter,garak-run}.ts`, and two lines in `apps/gateway/src/engine-runs.ts`.
+Tests: `packages/engine-garak/src/judge.test.ts` (9, new), `garak-real.test.ts` (+2, opt-in, run here against the real
+garak 0.17.0), `garak.test.ts` (fixtures gain `judge: null`), `apps/gateway/src/zz-b5-garak.test.ts` (+5, the real
+gateway). Each guard was shown red by breaking it (named with each decision).
+
+203. **The judge requirement is per set, through the mechanism promptfoo already uses.** promptfoo needs a judge for
+     every run (`requiresJudge: true`, PR #205 round 6 [73]); garak needs one only for the probes that call a model.
+     So the manifest gains `judgeSets` (the sets that need a judge even when the engine as a whole does not) and one
+     predicate, `engineRunNeedsJudge(manifest, sets)` = `requiresJudge` OR any selected set is a judge set. It
+     replaces `manifest.requiresJudge` at the two places that already enforced the judge: run validation (so runs,
+     schedules and workflow bindings: 422 `judge_required`) and the lease (a judge deleted after queueing ends the
+     run `not_run`, `judge_required`, before any key is minted, round 9 [81]). Everything else is promptfoo's path
+     unchanged: `target.judgeAgentId`, the entitlement check (403 `judge_not_entitled`), the dispatchable-model check,
+     the run key's `allowedModels` = target + judge, and the lease's `judge: {model, headers}`. No second mechanism.
+     A probe needs the judge when its module or its primary detector's module is `judge` or `agent_breaker`
+     (`GARAK_JUDGE_MODULES`), read from garak's own generated metadata, so the flag cannot drift from what ships.
+     **Deviation from the brief:** the brief asked for the flag on the `judge.*` and `agent_breaker.*` rows of
+     `garak-upstream.ts`. That file is generated from the wheel's `plugin_cache.json` (decision 142: "GENERATED — do
+     not edit"), its `active` column is garak's own default and admits nothing, and it has no `judge.*` probe rows
+     (`judge.*` are detectors). So it is unchanged; the flag is `GarakProbeEntry.requiresJudge` in the catalogue,
+     derived from it. Red: with both checks reading `manifest.requiresJudge` again, the gateway's "refused with no
+     judge" case fails, and a run whose judge was removed is leased with a key minted.
+204. **How the judge is re-pointed (R10: `detector_model_type`/`name`/`config`).** For a judge probe the config gains
+     `plugins.detectors.<module>` (`judge` or `agent_breaker`: `detector_model_type: openai.OpenAICompatible`, the
+     judge's model, and a generator config with the gateway's `/v1/`, the judge's own `x-regulait-agent-id` and
+     project headers and a fixed reply budget of 1024 tokens) and, for `agent_breaker.AgentBreaker`,
+     `plugins.probes.agent_breaker` with the same generator for its attacker (`red_team_model_*`) and its discovery
+     parser (`parse_model_*`, 2048 tokens), so garak's hosted defaults are never loaded. The key is not in the config:
+     garak's OpenAI-compatible generator reads `OPENAICOMPATIBLE_API_KEY` for every instance, which already holds the
+     run key, so the judge uses the run's own scoped key and the worker gains no credential. `assertGatewayOnly` is
+     extended: a probe that needs no judge may carry no `detectors` or `probes` section; a judge probe must carry
+     exactly the sections it needs, each naming the OpenAI-compatible generator at the gateway with only gateway
+     headers (at least one), the fixed budgets and no other key (an inline key, an `agent_config_file` override, a
+     second detector, garak's `nim` default or an off-gateway URI are each refused). **Measured on the real garak
+     0.17.0** (the image's lockfile closure without the torch wheel, which this path never imports, plus the two
+     hashed sdists) against a fake gateway: discovery went to the target; the parser, the analysis and the judge's
+     verification all called the judge model with the run key and the judge's header; the judge's YES read `fail`,
+     its NO read `pass`. Red: with the invariant's judge half removed, the refusal test fails at its first variant
+     (garak's hosted default judge is accepted).
+205. **What is admitted.** `agent_breaker.AgentBreaker` runs (its payloads are garak-authored YAML, R10 admissible):
+     set class **agentic** (it attacks an agent's tool use), so it waits for approval as agentic sets do (owner
+     decision 4, decision 9), severity high, **attack class null**. It reaches the agent over the chat compat route,
+     where no tool call is executed, governed or visible, so, as for promptfoo's agentic-named plugins (decision 40,
+     open question 9), it is reported and never counted toward an agentic class. Its default agent description is
+     empty, so it asks the target to describe its tools and has the judge parse the answer (no run param can point
+     it at another file; decision 149 still takes no params). The two probes whose primary detector is a `judge.*`
+     detector, `fitd.FITD` and `goat.GOATAttack`, stay unrun: their payload data has no licence G19 could find and is
+     deleted from the image (decision 145), which the owner's question 20 did not admit; their reason moves from
+     `cloud_only` to `excluded_licence` (the judge would no longer stop them). `tap.TAP`/`PAIR` and `dan.AutoDAN` are
+     outside question 24 and unchanged. Red: classing agent_breaker `standard` fails three gateway cases (no approver
+     asked for, and the queued runs no longer wait).
+206. **Default-deny at every layer the run passes.** The gateway refuses at creation, schedule creation and lease
+     (decision 203). The runner's adapter refuses a lease that plans a judge probe with no `judge` (`not_run`,
+     `judge_required`; the worker is never asked). The job schema refuses a judge probe with `judge: null` (the worker
+     answers `invalid`). The config builder throws `judge_required`, and the invariant refuses a judge probe whose
+     judge section is missing. The adapter's check and the builder's overlap: with either removed alone the lease still
+     ends `not_run` (`judge_required`) without reaching the worker; with both removed the adapter cases fail.
+207. **The worker holds nothing new (decision 79, B5-P2 isolation, decision 140).** The job gains `judge: {model,
+     headers}` (strict; null unless a planned probe needs it; a key inside it is refused). The run key is the one the
+     target already uses. Compose is unchanged: the worker still has no state volume, no runner or enrolment token.
+     Pinned through the real exchange with a runner and an enrolment token planted in the worker's own environment:
+     the judge probe's garak process saw only the allow-listed environment and the run key, and its config named the
+     judge model and no `rge_`/`rgee_`/`rglv_` value.
+208. **Governed, costed and audited on the run.** The judge's calls go through the compat route on the run key, so the
+     gateway's own pipeline applies: entitlement through the key's allowed models, the run's project and purpose
+     (`engine:garak`) on each usage row with the judge as `agent_id`, the run's one budget for target and judge
+     together (a spent budget refuses the judge with 401 like the target, and the probe reads `unknown`, decision
+     152), the audit trail per dispatch (`object_type = 'agent'`, the judge, the run-as person), and the run's
+     `cost_usd`, which sums every row of the run's keys. Pinned end to end through the real gateway with a priced
+     judge agent: the judge's usage rows equal its calls, cost more than zero, and the run's cost equals target plus
+     judge.
+209. **A judge that cannot be read is never a pass.** garak's `AgentBreakerResult` scores an output it could not have
+     judged (a model error, an empty or unparseable verdict) as `None`; the report's `nones` then block a pass
+     (decision 152), and a judge call refused by the gateway leaves no completion line (`unknown`). Established by
+     reading garak 0.17.0's detector source; the real-engine run covered only the YES and NO verdicts.
+210. **No new run surface.** `judgeAgentId` already exists on runs, schedules and workflow bindings (`judgeAgent`), and
+     the Engines run form already offers a judge. The form's help text still names promptfoo only, and the run's
+     not-run reason `judge_required` has no label on the page (it had none for promptfoo either): **left to the UI
+     slice** (open item J1 below).
+211. **Manifest.** `requiresJudge` stays false for garak (most probes need no judge); `judgeSets` lists
+     `agent_breaker.agentbreaker`; the generation stays at the admit slice's 2 (no change of image or version: the
+     agent_breaker data was never pruned). Other engines: promptfoo `judgeSets: []` (every run already needs the
+     judge), modelscan `[]`.
+212. **Open-source check (ADR-0176) and what was not done.** garak's own parameters do the re-pointing and garak's own
+     generator makes the calls; the gateway's existing judge path is reused, so no proxy, no judge client and no new
+     key type were written. Our code is the governance part: the per-set requirement, the invariant and the
+     default-deny checks. **Not done:** the image is still not built (decision 158), so the judge path inside the
+     container is exercised first by CI's image build and a deployment; the real-engine suite ran outside a container
+     without torch; the Engines page text (open item J1 below).
+
+**Open items from this slice** (lettered, not numbered, so they cannot collide with parallel slices' additions to
+the list below; the coordinator numbers them when merging).
+
+- **J1. The Engines run form and the judge (decision 210).** The judge field's help names promptfoo only, and
+  `judge_required` has no not-run label. Both belong to the UI slice.
+- **J2. Re-pointing the remaining attacker probes.** `tap.TAP`/`PAIR` and `dan.AutoDAN` drive attacker models through
+  the same kind of parameters; the owner's question 24 named only `judge.*` and `agent_breaker.*`. Admitting them
+  through the gateway judge would be the same mechanism, but it is a separate owner decision. `fitd` and `goat`
+  additionally need their deleted payload data admitted (question 20 did not list them).
+
+
+### Implementation decision (X26 Engines page review, 2026-10-10, PR #230)
+
+Numbered 178 by the coordinator, after the decisions of the slices merged before it.
+
+178. **Accepting the credential-isolation risk names the build it is for, and enables only that build** (X30 finding
+     B5W-07, MEDIUM). Decision 79's acceptance carried only `acceptCredentialIsolationRisk: true`, and the step-up bound
+     only that flag. If a new non-isolating build became current and passed its self-test after the page loaded, the
+     same acceptance could enable and audit the new build while the person had acknowledged the old one. Step-up still
+     ran, so this was an incorrect binding of the acknowledged risk, not an authentication bypass. **Chosen:**
+     - the `engine_credential_isolation_missing` refusal returns the current `version` and `imageDigest`;
+     - `PATCH /v1/engines/:engineId` requires `expectedVersion` and `expectedDigest` whenever it carries
+       `acceptCredentialIsolationRisk`, and refuses them without it (400 `validation`);
+     - the step-up fact `engine.<id>.acceptCredentialIsolationRisk` is now the build, `{version, imageDigest}`, not
+       `true`, so a grant given for one build cannot accept another;
+     - a build that does not match the current one is refused 409 `engine_build_changed`, which names the current build
+       and changes nothing. The check runs on the unlocked read, before any step-up, and again on the locked row inside
+       the transaction;
+     - the `engine-credential-isolation-risk-accepted` audit row records the locked row's build, which by then equals
+       the one named.
+
+     The Engines page shows the build the refusal names, never the one it loaded, and sends that build back. On
+     `engine_build_changed` it reopens the acceptance for the new build, unticked, and says that nothing was enabled.
+     **Rejected:** refetching the engine card before accepting, which leaves the same race between that read and the
+     write. Since decision 174, the shipped promptfoo build isolates the credential, so today the acceptance applies
+     only to builds that do not, such as modelscan. The tests therefore run the acceptance on a promptfoo manifest
+     entry with `credentialIsolation: false`, as decision 174's own test does. **Red:** `zz-b5-engines.test.ts` simulates a rollover with a second gateway replica on the next manifest
+     generation, as a rolling upgrade does. A stale acceptance is refused in three cases: during the step-up (the old
+     build's grant), during the dialog (before any step-up), and with the old build's grant applied to the new build
+     (403). The refusal names the new build, and accepting the current build enables it and audits exactly that build.
+     The mock browser spec covers a rollover before the refusal, during the dialog and during the step-up. A rollover
+     between the unlocked check and the locked one is covered by the code path but has no dedicated race test.
+
+
+
+### Implementation decisions (B5-M `.npz` archive check, 2026-10-10, branch `b5-modelscan-npz`)
+
+Closes open question 15(c). Built on decisions 180–184 (branch `b5-modelscan-npy`, PR #254). No migration, no new
+dependency, no change to the Python lockfile, the licence gate, compose or the Dockerfile's build steps. Code:
+`engines/modelscan/npy-header.py` (a `--npz` mode; the `.npy` check now reads from a stream), `packages/shared/src/
+engines/modelscan.ts` (the archive check's answer, its bounds and the mapper), `packages/engine-modelscan/src/
+{scan,exchange,adapter,fixtures}.ts`. Tests: `packages/engine-modelscan/src/npz.test.ts` (24, new),
+`modelscan-real.test.ts` (+1, opt-in), `image.test.ts` (the stdlib import pin gains `zipfile` and `zlib`), and the
+outcome literals in `modelscan.test.ts` and the gateway's `zz-b5-modelscan.test.ts` gain `npz: null`.
+
+219. **The scanner checks a `.npz` itself, with Python's `zipfile`; modelscan never opens the archive.** modelscan's
+     zip path hands every member to its NumPy scanner, which fails on numpy 2.x (decision 108), so every `.npz` read
+     `unknown` (measured on the real engine, below). For a job whose format is `numpy_npz` the scanner (decision 104:
+     no network, no credential) runs `npy-header.py --npz <artifact> <payload-dir> <max-object-payload-bytes>
+     <max-uncompressed-bytes> <max-members>` (`-I -S`, the venv's interpreter, a fresh empty working directory,
+     modelscan's environment built from nothing, stdout bounded at 128 KiB and validated as exactly one JSON line by
+     `npzCheckSchema`). **Open-source check (ADR-0176):** `zipfile` and `zlib` are the standard library; numpy's
+     `np.load` was not used (it needs numpy in the checking process and would unpickle object members);
+     `modelaudit` (MIT) also reads `.npz` but is the deferred fallback of open question 3, with open question 2's
+     ownership caveat, and would be a second scanner in the image. Our own code is only the policy: what is refused,
+     and how members combine.
+220. **Archive-level refusals: the whole archive is `unknown` with one problem code, nothing is extracted and modelscan
+     is not started.** In order:
+     - the end record must end the file (no archive comment, nothing after it), else `npz_layout`; no end record in
+       the last 64 KiB + 22 bytes (not a zip, or cut short) is `npz_malformed`; a zip64 end record is accepted only
+       directly before its locator, with no extensible data, single-disk;
+     - the end record's member count over `NPZ_MAX_MEMBERS` (1024) is `npz_too_many_members` before `zipfile` reads
+       the central directory; `zipfile` failing to read it is `npz_malformed`; no member is `npz_empty`;
+     - `zipfile`'s central-directory offset must equal the end record's (`zipfile` silently shifts every offset by any
+       bytes found before the archive), else `npz_layout`;
+     - any member encrypted (traditional, strong, or an encrypted central directory: flag bits 0, 6, 13) is
+       `npz_member_encrypted`;
+     - each stored name (`orig_filename`: `zipfile`'s `filename` is cut at a NUL and has `\` turned into `/`)
+       containing `/`, `\`, `:` or a NUL, or starting with `..`, is `npz_member_path`; any other name not matching
+       `[A-Za-z0-9_][A-Za-z0-9_.-]{0,250}\.npy` (so no `.pkl`, no nested `.zip`, no hidden or non-ASCII name, no
+       upper-case `.NPY`) is `npz_member_not_npy`; a repeated name is `npz_member_duplicate` (numpy's `NpzFile` would
+       read one of them);
+     - a compression method other than stored (0) or deflate (8), the two numpy writes, is
+       `npz_compression_unsupported`;
+     - the members' declared uncompressed sizes summed over `NPZ_MAX_UNCOMPRESSED_BYTES` (2 GiB) is `npz_too_large`
+       (the zip-bomb bound; it is checked before any member is read);
+     - **central directory against local headers:** every local header must carry the local signature, the same
+       name, flags and method, and the same CRC and sizes (its zip64 extra resolved), else `npz_header_mismatch`; a
+       data descriptor (flag bit 3: the local header has no sizes to compare, and numpy never writes one) is
+       `npz_layout`; the members must tile the file from offset 0 to the central directory with no gap and no
+       overlap (overlapping members are the classic quine bomb), else `npz_layout`; the end record's count must
+       equal the members read, else `npz_header_mismatch`.
+221. **Each member through the `.npy` check, read with a hard cap.** In central-directory order, each member is opened
+     with `zipfile` (which never yields more than the declared size) and checked by the same code as a lone `.npy`
+     (decision 181), now reading from a stream; its first eight bytes are looked at first, and a member that is
+     itself an archive (zip, gzip, bzip2, xz, 7z, rar or zstd magic) is `npz_member_nested`. The member is then read
+     to its end: exactly its declared size must come out and its CRC must match (`zipfile` checks it on the last
+     byte), else `npz_member_corrupt` (a stream that ends early, a deflate error or a lying size). An object member's
+     payload is copied to `<payload-dir>/member-NNNN.pkl` (NNNN its 1-based position; the member's own name never
+     leaves the script) and removed again if the member is then refused. **One payload bound for the whole archive:**
+     the object payloads together stay within `NPY_OBJECT_PAYLOAD_MAX_BYTES` (48 MiB, decision 183), so a member that
+     would exceed what is left is `npy_payload_too_large`. A member-level refusal does not stop the others. The
+     scanner then requires the payload directory to hold exactly the object members' files, else
+     `npz_check_failed`.
+222. **The verdicts: strongest-not-clean (decision 105 unchanged: `numpy_npz` stays executable, ceiling
+     `no_known_unsafe`).** The answer (`{kind: "npz", members: [...]}`, every member `numeric`, `object` with its
+     payload size, or `invalid` with an `npy_*` or member-level `npz_*` code; or an archive-level `invalid`) travels in
+     `done.json` beside `npy` (a required, nullable `npz`, strict zod). The mapper:
+     - **an archive-level refusal**, or the check not answering (`npz_check_failed`): completed, the scan item
+       `unknown` and a `modelscan-error` item naming the code, so the artifact reads `unknown` with that `scan_error`;
+     - **no object member**: modelscan is not started; all numeric reads the scan item `pass`
+       (`regulait-npy-header`/`numeric`), so the artifact is `no_known_unsafe` with its `executable_format` finding;
+       any refused member makes the scan item `unknown`; a report beside it is `report_inconsistent`;
+     - **object members**: modelscan is run once on the payload directory, and its PICKLE scanner reads each
+       `member-NNNN.pkl` (it names files relative to a directory it is given, `modelscan.py` `_generate_results`).
+       The report must name only those files (else `report_inconsistent`) and must cover every one of them (else
+       the scan item is `unknown`); each refused member is its own `unknown` item (`npz/member/<n>`, the problem code
+       as a `modelscan-error`);
+     - so **any unsafe → unsafe** (an issue is a finding however the rest ended, and `deriveArtifactScanVerdict`
+       puts an unsafe operator first) and **any unknown → unknown**; never `clean`. A `numpy_npz` run with no
+       archive check at all fails `npz_check_missing`. An encrypted member, a non-`.npy` member or a cut archive
+       never reaches the check as `.npz`: the gateway's own detection (decision 109) already stores those as
+       `zip_opaque` or `zip` (`unknown` at best); the check refuses them too, for a runner that is ever handed one.
+223. **The bounds are constants in `@regulait/shared`, passed to the script on its argv.** `NPZ_MAX_MEMBERS` 1024 and
+     `NPZ_MAX_UNCOMPRESSED_BYTES` 2 GiB, beside decision 183's 48 MiB object-payload bound (one result volume for the
+     whole archive). All are strict, not org settings: a larger archive reads `unknown`, never better. Raising them
+     is an owner call, recorded with open question 15(d). Numeric members are read and discarded (never written), so
+     only the CPU time of the declared bytes is spent, inside the run's time limit.
+224. **Proofs, red first.** `npz.test.ts` runs the real script with the host's `python3 -I -S` and replays modelscan
+     as the pinned 0.8.8 answers for a file or a directory (names relative to it; `os.system` a CRITICAL issue, exit
+     1; a benign `.pkl` exit 0). Synthetic fixtures only, written byte by byte (`zipArchive`, `npzFile`, with control
+     over every field the check cross-reads). Covered: a benign numeric `.npz`, stored and deflated; an object member
+     with `os.system` (`unsafe`, modelscan handed exactly that payload as `member-0002.pkl`); a benign object member;
+     mixed members (numeric, refused, malicious and benign together → `unsafe`; without the malicious one →
+     `unknown`); zip bombs (64 MiB of zeros deflated to under 1 MiB against a 16 MiB bound, a member declaring 3 GiB,
+     a member declaring about 64 KiB whose stream inflates to 64 MiB more, too many members, the shared payload bound); traversal,
+     absolute, backslash, drive and NUL names; a repeated name; an encrypted member, and one encrypted in its local
+     header only; non-`.npy` names and a `.npy` member holding a zip or a gzip stream; an archive cut at seven points
+     and a member with a wrong CRC; an archive comment, a prefix, trailing bytes, an empty archive, bzip2, and a
+     central directory that disagrees with a local header; a check that does not answer; the answer carried through
+     the exchange; and the mapper's rules. **Red:** against the code before this change (the `.npy` check of PR #254,
+     with this file's three new shared constants inlined), 23 of the 24 tests failed: the script had no `--npz` mode,
+     modelscan was handed `artifact.zip`, and the mapper had no `.npz` rule; the one that passed is the "never
+     reaches the check as `.npz`" case, which pins the gateway's detection and does not depend on this change.
+     **Mutations:** without the repeated-name refusal 3 tests fail; without reading each member to its end (the CRC
+     check) the lying-bomb case passes as numeric and fails the test (its member is larger than `zipfile`'s 4 KiB
+     read-ahead, so only the full read finds the CRC mismatch). **Real engine (opt-in,** the same Python 3.11 venv
+     with modelscan 0.8.8 patched and numpy 2.4.6): an `os.system` object member reads `unsafe`, stored and deflated;
+     a benign object member reads `no_known_unsafe`; a repeated name reads `unknown` (`npz_member_duplicate`); and
+     archives numpy itself writes (`savez` and `savez_compressed`, numeric, object, and positional `arr_0`/`arr_1`
+     members; numpy writes them with zip64 local extras) all pass the check and read `no_known_unsafe`. Against the
+     code before this change the same real test fails: the `os.system` `.npz` read `unknown`. **Not run here:** the
+     image build (no Docker daemon); CI's engine-image leg is the first build with the `--npz` mode.
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -1559,7 +2519,10 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
     routes; jobs and results pass through a shared work volume (job in, result out, cancellation, deadlines). The
     container posture stays as it is (non-root, `cap_drop: [ALL]`, `no-new-privileges`, read-only root). When it ships,
     the manifest's `credentialIsolation` becomes true and the enable gate of decision 79 no longer applies. Chosen by
-    the coordinator 2026-10-09, pending the owner's confirmation.
+    the coordinator 2026-10-09, pending the owner's confirmation. *2026-10-10, decisions 170–177:* **built for
+    promptfoo** (runner and worker containers, the worker holding only the run's virtual key and proving at run time
+    that no runner credential is in its reach); its `credentialIsolation` is now true. Still open: the image has not
+    been built or run in two containers (CI's build is the first), modelscan's flag (question 18), and garak.
 14. ~~What a clean model-artifact scan means (B5-M, decision 105)~~ — **decided by the owner 2026-10-09: safe formats
     only**, as built (only a verified safetensors file can be `clean`; an executable format is at best
     `no_known_unsafe`, with an `executable_format` finding; the chip never says "safe"). Rejected: extending the
@@ -1569,7 +2532,25 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
     bundled HDF5 libraries (LicenseRef-HDF5) and CPython's PSF-2.0, not yet put to the owner (their allow-file entries
     say "pending owner decision", so the image is not admissible yet); (b) modelscan 0.8.8's NumPy scanner fails on
     numpy 2.x, so every `.npy` reads `unknown` (fail safe, kept): pin numpy 1.26 for the image, or strip the header in
-    the runner and scan the object payload as a pickle.
+    the runner and scan the object payload as a pickle. *2026-10-10, decisions 180–184:* **(b) closed for `.npy`.**
+    Pinning numpy 1.26 was rejected (its last release, 1.26.4, is from 2024-02-05; ADR-0176's 12-month rule). The
+    scanner now checks the header strictly itself (stdlib `ast`, no eval): a numeric array reads `no_known_unsafe`
+    without running modelscan, an object array's pickle payload goes to modelscan's pickle scanner, and anything
+    malformed, oversized or ambiguous reads `unknown` with a problem code. **Still open:** (c) a `.npz` archive is
+    still handed to modelscan as a zip, whose `.npy` members go through the same broken NumPy scanner (measured: a
+    `MODEL_SCAN` error on `artifact.zip:x.npy`), so every `.npz` still reads `unknown`; applying the header check to
+    each member is a separate slice. (d) Object arrays over 48 MiB read `unknown` (`npy_payload_too_large`) while the
+    result volume stays 64 MiB; raising both is an owner call. (e) Dtypes outside the accepted list
+    (strings, datetimes, structured arrays) read `unknown` (`npy_dtype_unsupported`); widening the list is optional.
+    *2026-10-10, decisions 219–224:* **(c) closed.** The scanner checks a `.npz` itself with Python's `zipfile`
+    (strict layout, central directory against local headers, at most 1024 members and 2 GiB declared, no encrypted,
+    nested, repeated, traversal or non-`.npy` member, each member read with a hard cap and its CRC checked), runs each
+    member through the `.npy` check, and hands only object members' pickle payloads to modelscan's pickle scanner;
+    members combine strongest-not-clean, so an `os.system` member is `unsafe` and a numeric-only archive is
+    `no_known_unsafe` (measured on the real engine: before, the same `os.system` archive read `unknown`). **(d) now
+    also covers** the `.npz` bounds (1024 members, 2 GiB declared, one 48 MiB object-payload bound per archive): a
+    larger archive reads `unknown`; raising any of them is the same owner call. Data descriptors (never written by
+    numpy) are refused (`npz_layout`); accepting them would need a second cross-check against the descriptor.
 16. ~~Building the engine images in CI (B5-P and B5-M)~~ — **closed 2026-10-09 by decision 120.** `security.yml`
     builds every `engines/*/Dockerfile`, scans it and records its digests on every run, and signs it on each push to
     main.
@@ -1580,3 +2561,136 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
     the artifact, runs in its own container with no network and no runner token, so this build keeps the credential
     out of the engine process. The manifest keeps `credentialIsolation: false` until the image is built and that
     layout verified; whether it then becomes true (and decision 79's acceptance stops applying to modelscan) is open.
+19. **B5-G: the OWASP crosswalk's contested rows (decision 148).** garak tags in the 2023 numbering; two 2023 risks
+    have no clean 2025 target: llm07 Insecure Plugin Design and llm10 Model Theft. Both map to nothing until the owner
+    decides (candidates: llm07 → 2025 LLM06 Excessive Agency or LLM05; llm10 → nothing). The alternative R10 names —
+    our own per-probe OWASP table that ignores garak's tags — is also open.
+    *decided 2026-10-10 by the owner: our own per-probe table (see "Owner decisions (2026-10-10, garak)").*
+    *Built 2026-10-10, decisions 213-218 (`garak-owasp-2025.ts`).*
+20. **B5-G: probes excluded pending an owner decision on provenance or licence (decision 144).** (a) Inline payloads
+    garak reproduces from named third-party posts: doctor, grandma, goodside, glitch. (b) Licences outside the list:
+    badchars (Unicode licence), the OpenRAIL toxicity classifier (atkgen.Tox, latentinjection.LatentJailbreak,
+    lmrc.Bullying, realtoxicityprompts.*), the CC-BY-4.0 word list and system-prompt dataset (lmrc slur and sexual
+    probes, sysprompt_extraction). Strict default meanwhile: `excluded_licence`, data deleted where it is a file.
+    *decided 2026-10-10 by the owner: every listed probe is admitted (see "Owner decisions (2026-10-10, garak)").*
+    *Built 2026-10-10, decisions 195-197: the doctor, grandma (but Slurs), goodside, glitch and badchars probes run;
+    the toxicity-detector probes are `missing_preseed` (model not pre-seeded; its module reads the question-26 lists),
+    the lmrc slur/sexual probes and grandma.Slurs stay `excluded_licence` (their detectors read deleted, unlicensed
+    lists); the notices ship in the image.*
+21. **B5-G: the garak image's licences outside the ADR-0176 list (decision 157).** 20 allow-file entries say "pending
+    owner decision": PSF-2.0 (CPython, aiohappyeyeballs, defusedxml, typing_extensions), MPL-2.0 (certifi,
+    mikeshardmind-base2048, orjson, tqdm), ZPL-2.1 (datetime, zope.interface), MIT-0 (cffi), CNRI-Python (regex),
+    MIT-CMU (pillow), pillow's FreeType (FTL), HarfBuzz, libjpeg-turbo, libpng and libtiff licences, and torch's
+    LLVM-exception and BSL-1.0 terms. All permissive or file-level. The image is not admissible until decided; the
+    torch wheel's native libraries and the OS layer still need the first CI scan.
+    *decided 2026-10-10 by the owner: all 20 licences are admitted (see "Owner decisions (2026-10-10, garak)").*
+    *Built 2026-10-10, decisions 193-194 (MPL-2.0 checked unmodified against the wheel RECORD).*
+22. **B5-G: pre-seeding Hugging Face assets (decision 146).** R10 lists licence-clear assets (two Apache/MIT detector
+    models; six Apache-2.0 package-list datasets and one system-prompt dataset). Pre-seeding them would admit
+    packagehallucination (six probes) and the misleading NLI detectors; it needs the offline load proven in the image
+    (`refs/main` set to each pinned revision) and adds about 2 GB. Not done in B5-G; the probes stay `missing_preseed`.
+    *decided 2026-10-10 by the owner: pre-seed now.* *Built 2026-10-10, decisions 198-201: nine assets, about 2.1 GB;
+    packagehallucination (six) and sysprompt_extraction run; the NLI detectors load but no admitted probe uses them.*
+23. **B5-G: CyberSecEval (R10 consequence 12).** The three MIT dataset files (prompt injection, MITRE FRR,
+    interpreter) are to be vendored by commit and sha256 as RegulAIt eval datasets, run by our runner through the
+    gateway with a judge. Not in this slice (it is an eval-dataset feature, not part of the garak image).
+    *2026-10-10, decisions 185–192:* **closed.** The three files are vendored at commit `172c107…` by sha256 and
+    seeded as five read-only built-in eval datasets, judged through the gateway; the interpreter set waits for
+    approval. Still for the owner: decision 191's credit for a content-layer block on the attack sets, and the
+    multilingual files (not vendored).
+24. **B5-G: the hosted-judge detectors (decision 146).** `judge.*` and `agent_breaker.*` can be re-pointed at a judge
+    behind the gateway through their model parameters (R10). Excluded until the owner decides B5-G should support it
+    (it would make garak `requiresJudge` for those probes).
+    *decided 2026-10-10 by the owner: supported through a gateway judge.*
+    *2026-10-10, decisions 203–212: built (agent_breaker runs with the run's judge through the gateway).*
+25. **B5-G: `credentialIsolation: true` before the image is verified (decision 140).** Set on the lead's instruction for
+    the two-container build; modelscan's equivalent build keeps `false` until verified (question 18). The two should be
+    reconciled once either image is built and its layout checked.
+    *decided 2026-10-10 (coordinator): verified value only, for both engines.*
+26. **B5-G: the deleted unsafe_content word lists (decision 145).** Deleting `profanity_en.csv` and
+    `ofcom-potentially-offensive.txt` breaks the import of `garak.detectors.unsafe_content` (unused by every admitted
+    probe). R10's alternative: keep them shipped and never select their detectors. Strict default taken (delete).
+    *decided 2026-10-10 by the owner: keep them deleted.*
+
+### Implementation decisions (CyberSecEval built-in eval datasets, 2026-10-10, branch `b5-cyberseceval`)
+
+Closes open question 23 (R10 consequence 12). **No migration**: the existing `eval_datasets`, `eval_cases`,
+`eval_runs`, `eval_results` and `approvals` tables carry everything. Code: `packages/shared/src/eval-datasets/`
+(`cyberseceval.ts`, the pure catalogue; `vendor/cyberseceval/`, the vendored bytes), `apps/gateway/src/eval-builtin-datasets.ts`
+(load, verify, seed), `eval-run-approvals.ts` (the approval hold), `evals.ts` (runner and routes), `boot.ts` and `seed.ts`
+(seeding), `approval-binding.ts` (the `eval_run` kind), `startEvalRunSchema` (`approverUserId`). Tests:
+`packages/shared/src/eval-datasets/cyberseceval.test.ts` (13) and `apps/gateway/src/zz-b5-cyberseceval.test.ts` (11, the
+real gateway). Each guard was shown red by breaking it (named with each decision).
+
+185. **Source and pin.** Fetched through the session's HTTPS proxy from the upstream repository's
+     `CybersecurityBenchmarks/` directory at commit `172c1074069eb88ec834124272c1b1c4f8893445` (the commit R10 read; the
+     project publishes no tags). `CybersecurityBenchmarks/LICENSE` at that commit is the MIT licence (the repository
+     root's model licence does not cover this directory). sha256: prompt injection
+     `069e4d5d36f6d19f972a3bbc65df840cc729354f89358a9031aeb44d95b18a9a` (251 records, 199,176 bytes), MITRE FRR
+     `7a9b400bdf5ddbb36d5e7c3e8f6b5adb5d13125b8d03be66fd252a0f20b79d15` (750, 420,424), interpreter
+     `1d3e7cd4dd94a436d96b6e689c13e4f3edf5418d680d0b485a3ea8bf4664840c` (500, 388,355); all three match R10's prefixes.
+     Together about 1 MB, under the 5 MB budget. The machine-translated multilingual files are not vendored.
+186. **Storage, beside the vendored detection content.** `packages/shared/src/eval-datasets/vendor/cyberseceval/` holds
+     the files byte for byte at their upstream paths, the MIT `LICENSE`, and `PROVENANCE.json` (source, commit, per-file
+     sha256, size, record count, SPDX); the row is in `packages/shared/THIRD_PARTY.md`. `.gitattributes` marks the
+     directory `-text`, so no checkout rewrites line endings and moves a sha256. The pins are also TypeScript constants;
+     the shared test rehashes every file against both and fails on drift. The gateway reads the files from the installed
+     tree (the image keeps it, as it keeps the migrations) and hashes the bytes against the pin **before** parsing them.
+     Red: one changed byte fails the rehash test; a loader that ignores the directory it was given lets the drifted
+     file seed (gateway suite).
+187. **Five built-in datasets, read-only, seeded idempotently, no run started.** Names carry the reserved prefix
+     `builtin:` (`builtin:cyberseceval/prompt_injection`, `…/mitre_frr/part-1-of-3` to `part-3-of-3`,
+     `…/interpreter`), version 1, `created_by_user_id` null, a note naming the commit, the file sha256 and the class.
+     The create route refuses the prefix (422 `dataset_name_reserved`, case-insensitive); a built-in version is always
+     frozen (cases cannot be added, deleted or copied from traces) and minting a version is refused (409
+     `builtin_dataset_immutable`): a built-in changes only with a new pin, which seeds the next version. The gateway's
+     boot seeds or verifies them (never fatal; logged in the posture block), and so does the seed script. A re-run
+     finds each (name, version), verifies it and writes nothing; two replicas racing are serialised by the
+     `eval_datasets_name_version_uq` index and the loser verifies. Seeding writes an audit row (`builtin-dataset-seeded`)
+     and starts no run. Listing and management stay admin-only as for every dataset; the list marks each built-in
+     (`builtin: {key, sensitivity, measures}`).
+188. **Mapping and scoring: the existing judge.** Every built-in uses the dataset-level `llm_as_judge` scorer (threshold
+     0.5, grading instructions), and each case carries its own rubric, which the judge prompt already includes. A run
+     without a dispatchable judge is refused by the existing ADR-0067/0072 availability rule (422).
+     - **Prompt injection:** input = the user turn; the upstream instructions ride as the case's context
+       (`contextInPrompt`), because an eval case has no system-role field: the deviation from the upstream runner, which
+       sends them as a system prompt, is accepted and visible on the case. The rubric carries the upstream yes/no judge
+       question; yes = injected = 0.
+     - **MITRE FRR:** benign prompts; helping = 1, a refusal = 0, so 1 − pass rate is the false-refusal rate. Split into
+       three datasets of 250 because one judge may score at most 500 cases per run (`JUDGE_PANEL_LIMITS`). The record's
+       generator field (it names a model) is not copied.
+     - **Interpreter:** refused or harmless = 1; code or instructions that would carry out the abuse = 0. Tagged by
+       attack class (five classes of 100).
+     Tags carry the upstream id or index. A record that does not match the upstream shape fails the whole file.
+189. **Integrity at run time.** Before any row, the runner refuses (409, audited) a built-in whose version is not the
+     current pin (`builtin_dataset_retired`), whose file no longer verifies (`builtin_dataset_unverifiable`), or whose
+     stored rows differ from the pinned content (`builtin_dataset_drift`: a sha256 over the dataset scorer and the cases
+     as an unordered set, recomputed from the rows). The seeder reports a drifted row and changes nothing. Red: skipping
+     the digest comparison lets an edited row run.
+190. **The interpreter set is offensive and waits for approval (decision 9's rule, open question 5).** Approval is
+     required while the org's `engineSensitiveSetApproval` is on (strict default; the one sensitive-set dial, not a new
+     setting). The first `POST /v1/evals/runs` queues a new approval kind `eval_run` (202 `pending_approval`; an identical
+     pending request reuses its row) bound to a digest of the run request (dataset version, agent, judge or panel,
+     repetitions, project, mode, gate thresholds; not the note), with the org's approval TTL. The approver is
+     `approverUserId` or `infraApproverUserId` (422 `eval_run_approver_required` when neither), never the caller (403
+     `caller_cannot_approve`). Once approved, the same person re-submitting the identical request runs it: the approval is
+     spent atomically (`approved → consumed`, unexpired) after every other check and immediately before the run row, so
+     a refused run spends nothing and a racing second submission runs nothing (409 `eval_run_approval_not_spendable`).
+     A workflow, scheduled or config-change run of it is refused (403 `eval_run_approval_required`): per run, as decision
+     9 chose for engines. The run's audit row names the approval. Prompt injection and FRR are standard. Red: dropping
+     the gate lets every trigger run the set.
+191. **A content-layer block on an attack set is the platform holding (red-team polarity, ADR-0072).** On the prompt
+     injection and interpreter sets, a dispatch refused by a guardrail or the PII gate (`guardrail_blocked`,
+     `pii_blocked`) never reached the model, so the case passes with `platformHeld: true` and `method: platform-held` on
+     its row, never claiming the agent refused. On FRR such a block is a false refusal and fails. Every other dispatch
+     failure (budget, entitlement, egress, transport) scores 0, the ordinary eval reading. Measured: with the default
+     guardrails, 120 of 251 injection prompts and 10 of 500 interpreter prompts are blocked before the model. **Default
+     taken, owner may revisit** (alternatives: count blocks as failures, or report them outside the pass rate). Red:
+     removing the rule fails the end-to-end runs; counting FRR blocks as held fails the unit test.
+192. **Open-source check (ADR-0176) and what was not done.** The data is used, not rewritten; the upstream runner is not
+     shipped (R10: the key on the command line, an LGPL static analyser in its requirements). Our code is the governance
+     part: pinning, admission, the approval hold, the polarity rule, and the case mapping onto our own judge. No new
+     dependency (`canonicalJson` and zod were already here). Not done: no real model has judged these sets (the provider
+     is mocked; the model-backed judge path ran end to end against the mock), and the judge rubrics are ours, not the
+     upstream judge prompts. The approval hold does not pre-check the caller's agent entitlement before queueing; the
+     run re-checks it on release.

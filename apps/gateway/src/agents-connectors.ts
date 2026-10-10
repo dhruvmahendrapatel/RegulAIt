@@ -328,6 +328,7 @@ async function enforceProjectInputPii(
       phase: "pii",
       pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
       ...(projectId ? { projectId } : {}),
+      receiptClass: "decision",
     },
     effect: "deny",
     ruleId: "pii-blocked",
@@ -651,6 +652,7 @@ export async function executeGovernedDispatch(
         ...(args.projectId ? { projectId: args.projectId } : {}),
         ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
         ...extra,
+        receiptClass: "decision",
       },
       effect,
       ruleId,
@@ -680,6 +682,7 @@ export async function executeGovernedDispatch(
     const hopLiteracy = await literacySlot(db, args.userId, { origin: args.evaluationSubject === true || args.modelFeature?.feature === "evals" ? "evaluation" : "human" });
     const decision = evaluateAgent({
       userId: args.userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
       // stop traffic being routed INTO it by somebody else's fallback chain.
@@ -1141,7 +1144,7 @@ async function dispatchAttempt(
           userId,
           objectType: "agent",
           objectId: served.id,
-          detail: { phase: "dispatch", artifactType: "agent_config", ...(args.projectId ? { projectId: args.projectId } : {}) },
+          detail: { phase: "dispatch", artifactType: "agent_config", ...(args.projectId ? { projectId: args.projectId } : {}), receiptClass: "decision" },
           effect: "deny",
           ruleId: "config-version-unresolvable",
           ruleChain: [],
@@ -1302,6 +1305,7 @@ async function dispatchAttempt(
           lifecycleReason: why,
           ...(requested ? { requestedAgent: true, servedAgentId: served.id, servedAgentName: served.name } : {}),
           ...(args.projectId ? { projectId: args.projectId } : {}),
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: status === "suspended" ? "agent-suspended-dispatch-refused" : "agent-retired-dispatch-refused",
@@ -1389,6 +1393,7 @@ async function dispatchAttempt(
             ...(args.modelFeature.dataClass ? { dataClass: args.modelFeature.dataClass } : {}),
             ...(served.id !== requestedAgentId ? { requestedAgentId } : {}),
             ...(args.projectId ? { projectId: args.projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: refusal.ruleId,
@@ -1537,6 +1542,7 @@ async function dispatchAttempt(
           phase: "pii",
           pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
           ...(args.projectId ? { projectId: args.projectId } : {}),
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "pii-blocked",
@@ -1615,6 +1621,7 @@ async function dispatchAttempt(
             pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
             semanticCache: { hit: true },
             ...(args.projectId ? { projectId: args.projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "pii-blocked",
@@ -1678,6 +1685,7 @@ async function dispatchAttempt(
           pii: { mode: piiMode, action: "warn", inputHits, outputHits },
           semanticCache: { hit: true },
           ...(args.projectId ? { projectId: args.projectId } : {}),
+          receiptClass: "decision",
         },
         effect: "allow",
         ruleId: "pii-warned",
@@ -2137,6 +2145,7 @@ async function dispatchAttempt(
             : {}),
           ...(customDestination ? { intendedHost: customDestination.host } : {}),
           ...(args.projectId ? { projectId: args.projectId } : {}),
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: viaCredential ? "model-credential-egress-blocked" : "custom-provider-egress-blocked",
@@ -2391,6 +2400,7 @@ async function dispatchAttempt(
         phase: "pii",
         pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
         ...(args.projectId ? { projectId: args.projectId } : {}),
+        receiptClass: "decision",
       },
       effect: "deny",
       ruleId: "pii-blocked",
@@ -2406,6 +2416,7 @@ async function dispatchAttempt(
         phase: "pii",
         pii: { mode: piiMode, action: "warn", inputHits, outputHits },
         ...(args.projectId ? { projectId: args.projectId } : {}),
+        receiptClass: "decision",
       },
       effect: "allow",
       ruleId: "pii-warned",
@@ -2828,7 +2839,7 @@ export function registerAgentConnectorRoutes(
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "agent",
         objectId: agentId,
-        detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel },
+        detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel, receiptClass: "configuration" },
         effect: "allow",
         ruleId: "agent-expected-served-model-set",
         ruleChain: [],
@@ -3322,7 +3333,7 @@ export function registerAgentConnectorRoutes(
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "agent",
         objectId: agentId,
-        detail: { phase: "fallback-chain", chain: body.fallbackAgentIds },
+        detail: { phase: "fallback-chain", chain: body.fallbackAgentIds, receiptClass: "configuration" },
         effect: "allow",
         ruleId: "fallback-chain-configured",
         ruleChain: [],
@@ -3377,7 +3388,7 @@ export function registerAgentConnectorRoutes(
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "agent",
       objectId: agentId,
-      detail: { from: before.enabled, to: body.enabled, via: req.authCtx.via },
+      detail: { from: before.enabled, to: body.enabled, via: req.authCtx.via, receiptClass: "configuration" },
       effect: body.enabled ? "allow" : "deny",
       ruleId: body.enabled ? "agent-enabled" : "agent-disabled",
       ruleChain: [],
@@ -3453,6 +3464,7 @@ export function registerAgentConnectorRoutes(
         to: body.ownerUserId,
         ...(ownerEmail ? { ownerEmail } : {}),
         ...(promotesSuccessor ? { promotedSuccessor: true } : {}),
+        receiptClass: "configuration",
       },
       effect: "allow",
       ruleId: body.ownerUserId ? "agent-owner-set" : "agent-owner-cleared",
@@ -3516,6 +3528,7 @@ export function registerAgentConnectorRoutes(
         from: agent.lifecycleStatus,
         to: body.status,
         ...(body.status !== "active" ? { reason: body.reason } : {}),
+        receiptClass: "configuration",
       },
       effect: "allow",
       ruleId: `agent-lifecycle-${body.status}`,
@@ -3885,6 +3898,7 @@ export function registerAgentConnectorRoutes(
     const invokeLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) });
     const kernelDecision = evaluateAgent({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — the kill switch on the native dispatch path.
       execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...invokeLiteracy },
       // the display name rides along so denial prose says "premium-mock
@@ -4078,6 +4092,7 @@ export function registerAgentConnectorRoutes(
               mode: body.mode,
               servedAgentId: agent.id,
               semanticCache: { hit: true, model: hit.model, cachedAt: hit.createdAt },
+              receiptClass: "decision",
             },
             effect: decision.effect,
             ruleId: decision.ruleId,
@@ -4138,6 +4153,7 @@ export function registerAgentConnectorRoutes(
           withModelPolicy(
             evaluateAgent({
               userId,
+              actor: null, // ADR-0188 S4 replaces
               execution: { ...postureOf(routingExecutionMode, agentHaltOf(a)), ...invokeLiteracy },
               agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
               mode: body.mode,
@@ -4744,6 +4760,7 @@ export function registerAgentConnectorRoutes(
                   refusal: outcome.result.refusal,
                 }
               : { error: outcome.error },
+            receiptClass: "decision",
           },
           effect: decision.effect,
           ruleId: decision.ruleId,
@@ -4817,6 +4834,7 @@ export function registerAgentConnectorRoutes(
                 : { error: dispatchOutcome.error },
             }
           : {}),
+        receiptClass: "decision",
       },
       effect: decision.effect,
       ruleId: decision.ruleId,

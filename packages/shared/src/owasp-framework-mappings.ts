@@ -3,8 +3,12 @@
  * ADR-0177 row 5, option C: "its framework mapping tables").
  *
  * Source:   github.com/promptfoo/promptfoo, file `src/redteam/constants/frameworks.ts`
- * Version:  npm `promptfoo@0.123.1`, whose published `gitHead` is commit
- *           34f74d34e140b5e17d23770dfb2340057b1936b8
+ * Version:  npm `promptfoo@0.124.1`, release tag `0.124.1` = commit
+ *           421e7959642c5d4cc1c983259a268de1c6f847b9 (this release publishes no
+ *           gitHead; the tag was read from the upstream repository). The file is
+ *           byte-identical at release 0.123.1 (commit
+ *           34f74d34e140b5e17d23770dfb2340057b1936b8, first vendored from there);
+ *           ADR-0187 decision 176.
  * File sha256 (the whole upstream file at that commit):
  *           9c78fc85fd9ca20d2b5dec59c8c3564663c2b7a6ed4121e5ebc27f22f2e7db45
  * Licence:  MIT (reproduced below). Recorded in packages/shared/THIRD_PARTY.md.
@@ -63,8 +67,8 @@ export const PROMPTFOO_FRAMEWORKS_SOURCE = {
   project: "promptfoo",
   repository: "https://github.com/promptfoo/promptfoo",
   file: "src/redteam/constants/frameworks.ts",
-  release: "0.123.1",
-  commit: "34f74d34e140b5e17d23770dfb2340057b1936b8",
+  release: "0.124.1",
+  commit: "421e7959642c5d4cc1c983259a268de1c6f847b9",
   fileSha256: "9c78fc85fd9ca20d2b5dec59c8c3564663c2b7a6ed4121e5ebc27f22f2e7db45",
   licence: "MIT",
 } as const;

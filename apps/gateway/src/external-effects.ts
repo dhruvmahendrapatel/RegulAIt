@@ -58,7 +58,7 @@ export async function runExternalWrite<T>(
       userId: audit.userId,
       objectType: audit.objectType,
       objectId: audit.objectId,
-      detail: { operation, outcome, ...(audit.detail ?? {}), ...extra },
+      detail: { operation, outcome, ...(audit.detail ?? {}), ...extra, receiptClass: "excluded" },
       effect: "allow",
       ruleId: `external-effect:${operation}`,
       ruleChain: [],

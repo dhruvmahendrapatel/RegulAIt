@@ -1,10 +1,10 @@
 ---
-phase: adr0187-batch-5-modelscan
-last_updated: 2026-10-09
+phase: batch-6-identity-bom-isolation-slices
+last_updated: 2026-10-10
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-03-session-02.md
+last_session: sessions/2026-10-10-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,36 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-10 (afternoon) - Batch 6 slices in parallel: S3 in CI, B1 merged, I1 next; CI sharded.** Full record:
+[sessions/2026-10-10-session-01.md](sessions/2026-10-10-session-01.md).
+- Merged: B1 BOM foundation (#283, migration 0182), spike B0 (#265), ADR-0189 (#253), outbound credential audience
+  (#273, 0181), gateway CI sharding (#284), and the Batch 4/5 tail (#264, #270, #272).
+- Merge order from here: #279 S3, then #286 I1 (0183), then S4 (0184), then #285 guard hardening (0185); #287 B3
+  after its security review. S5 (token endpoint) takes 0186 if it needs a migration.
+- Building: S4 in-process wiring, S5 token endpoint, B5 SPDX renderer. Next unblocked: I2 after S3+S4; B2 after S4;
+  B4 after B2+B3; B7/B8 after B4/B5.
+- Owner decision 12 (ADR-0189): snapshots fail closed without a signing key. Codex queue: X41, X43, X42, X38, X37, X34,
+  X39, X40, X33.
+
+**2026-10-10 - Parallel wave: Batch 5 engines and their UI merged; ADR-0188 (identity) accepted; garak open questions decided.**
+- Merged: #217 (ADR-0188), #227/#228 (modelscan follow-up, garak), #230 (Engines page), #231 (B5-P2 promptfoo split),
+  #234 (Batch 4 Codex integration), #237, #241, #243, #245 (board). Dependabot #239 was closed because garak 0.17.0
+  caps `datasets<4`, so the fsspec allow-list stays (decision 160).
+- In flight: #240 (artifacts UI fixes), #242 (garak coverage and the promptfoo cancel test), #244 (UI affordance census);
+  outbound credential-audience check; #234's fix round (`b4-codex-int-2`); B5W-07; modelscan `.npy` (decisions
+  180-184); CyberSecEval datasets (decisions 185-192, migration 0177 if needed); ADR-0188 S1 (migration 0180) then S2.
+- Owner, 2026-10-10: ADR-0188 accepted (all nine recommendations; the library choice depends on the S0 spike, and the
+  suite agent must confirm PF-02 before S5). garak open questions decided (ADR-0187, "Owner decisions (2026-10-10,
+  garak)"):
+  - all 20 image licences admitted;
+  - every excluded probe admitted;
+  - our own per-probe OWASP table;
+  - Hugging Face assets pre-seeded now;
+  - hosted-judge probes run through a gateway judge;
+  - the word lists stay deleted.
+- Codex queue: X32 (S0 spike), X33 (S6 UI), X36 (real-stack browser sweep), the re-checks, then X34/X35/X37 when
+  announced.
 
 **2026-10-09 - B5-P promptfoo merged (PR #205) with its follow-up (PR #210); G19 research merged (PR #208); B5-M started.**
 - Owner: "merge #205 once round 15 is green". Fifteen rounds of automated review produced ADR-0187 decisions 39-100.

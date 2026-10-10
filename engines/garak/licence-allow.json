@@ -1,0 +1,144 @@
+[
+  {
+    "subject": "numpy",
+    "licence": "Zlib",
+    "decision": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+    "why": "accepted (ADR-0187 decision 106, reused for garak per that decision): Zlib is a permissive licence on code numpy ships."
+  },
+  {
+    "subject": "numpy.libs/libgfortran",
+    "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
+    "decision": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+    "why": "accepted (decision 106, reused): the GCC runtime library under the GCC Runtime Library Exception, shipped unmodified inside numpy's wheel."
+  },
+  {
+    "subject": "numpy.libs/libquadmath",
+    "licence": "LGPL-2.1-or-later",
+    "decision": "accepted by owner 2026-10-09 (ADR-0187 decision 106)",
+    "why": "accepted (decision 106, reused): an unmodified, dynamically linked LGPL library shipped as its own shared object inside numpy's wheel."
+  },
+  {
+    "subject": "python",
+    "licence": "PSF-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the CPython runtime of the base image (permissive); PSF-2.0 is not on the ADR-0176 list."
+  },
+  {
+    "subject": "aiohappyeyeballs",
+    "licence": "PSF-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): a dependency of the async HTTP client in garak's closure; PSF-2.0, permissive, not on the list."
+  },
+  {
+    "subject": "defusedxml",
+    "licence": "PSF-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): a dependency in garak's closure (read from its LICENSE: PSF License version 2); permissive, not on the list."
+  },
+  {
+    "subject": "typing_extensions",
+    "licence": "PSF-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): a typing backport used throughout the closure; PSF-2.0, permissive, not on the list."
+  },
+  {
+    "subject": "certifi",
+    "licence": "MPL-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the CA bundle; MPL-2.0 is file-level copyleft (obligations only if its files are modified; they are not). Admitted only while unmodified: the gate checks every file of the distribution against its wheel RECORD hash (decision 194).",
+    "condition": "unmodified"
+  },
+  {
+    "subject": "mikeshardmind-base2048",
+    "licence": "MPL-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): a direct garak dependency (the Base2048 encoding probe); MPL-2.0, file-level copyleft, unmodified. Admitted only while unmodified: the gate checks every file of the distribution against its wheel RECORD hash (decision 194).",
+    "condition": "unmodified"
+  },
+  {
+    "subject": "orjson",
+    "licence": "MPL-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): a JSON library in the closure; MPL-2.0 for part of its code (file-level copyleft, unmodified), the rest MIT. Admitted only while unmodified: the gate checks every file of the distribution against its wheel RECORD hash (decision 194).",
+    "condition": "unmodified"
+  },
+  {
+    "subject": "tqdm",
+    "licence": "MPL-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the progress-bar library garak uses; MPL-2.0 for most files (file-level copyleft, unmodified), the rest MIT. Admitted only while unmodified: the gate checks every file of the distribution against its wheel RECORD hash (decision 194).",
+    "condition": "unmodified"
+  },
+  {
+    "subject": "cffi",
+    "licence": "MIT-0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): MIT No Attribution: more permissive than MIT, but not itself on the ADR-0176 list."
+  },
+  {
+    "subject": "datetime",
+    "licence": "ZPL-2.1",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): pulled by avidtools; the Zope Public License 2.1 is permissive, not on the list."
+  },
+  {
+    "subject": "zope.interface",
+    "licence": "ZPL-2.1",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): pulled by datetime; the Zope Public License 2.1 is permissive, not on the list."
+  },
+  {
+    "subject": "pillow",
+    "licence": "MIT-CMU",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the imaging library garak imports; MIT-CMU (the historical PIL licence) is permissive, not on the list."
+  },
+  {
+    "subject": "pillow.libs/libfreetype",
+    "licence": "FTL",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): FreeType bundled in pillow's wheel, dual FTL or GPL-2.0; the FTL (permissive, BSD-style with credit) is the one taken."
+  },
+  {
+    "subject": "pillow.libs/libharfbuzz",
+    "licence": "MIT-Modern-Variant",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): HarfBuzz bundled in pillow's wheel, under its \"Old MIT\" licence."
+  },
+  {
+    "subject": "pillow.libs/libjpeg",
+    "licence": "IJG AND BSD-3-Clause AND Zlib",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): libjpeg-turbo bundled in pillow's wheel: the IJG licence plus BSD-3-Clause and Zlib parts, all permissive."
+  },
+  {
+    "subject": "pillow.libs/libpng16",
+    "licence": "libpng-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): libpng bundled in pillow's wheel, PNG Reference Library License version 2 (permissive)."
+  },
+  {
+    "subject": "pillow.libs/libtiff",
+    "licence": "libtiff",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): libtiff bundled in pillow's wheel, its own permissive licence."
+  },
+  {
+    "subject": "regex",
+    "licence": "CNRI-Python",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the regex library (Apache-2.0 AND CNRI-Python); CNRI-Python is permissive, not on the list."
+  },
+  {
+    "subject": "torch",
+    "licence": "Apache-2.0 WITH LLVM-exception",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): part of the CPU-only torch wheel's declared expression; the LLVM exception only relaxes Apache-2.0."
+  },
+  {
+    "subject": "torch",
+    "licence": "BSL-1.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the Boost Software License part of the CPU-only torch wheel's declared expression (permissive). The native libraries inside the wheel are not yet scanned."
+  }
+]

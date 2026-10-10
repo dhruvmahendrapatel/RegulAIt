@@ -1,0 +1,2 @@
+{"mode": "cpu", "workers": 2, "seconds": 4, "iterations": 8542150}
+exit=0

@@ -1,0 +1,363 @@
+/**
+ * ADR-0187 X28 — the page's own clean check. Only a verified safetensors scan
+ * with no finding is clean; a pickle-family or other executable format, an
+ * unverified safetensors, not-run, unknown, an unrecognised verdict and "never
+ * scanned" are never clean — even when the server's record claims otherwise.
+ */
+import { describe, expect, it } from "vitest";
+import { ApiError } from "../../../api/client";
+import {
+  SCAN_CHIP,
+  findingSentence,
+  findingSeverity,
+  severityLabel,
+  chooseScan,
+  latestScan,
+  scanFindings,
+  nameMismatch,
+  preUploadRefusal,
+  refusalText,
+  retentionText,
+  safeFindingId,
+  scanStatus,
+  statusWord,
+  uploadModelArtifact,
+  uploadPath,
+  MIB,
+  type ArtifactScan,
+} from "./modelArtifacts";
+
+const scan = (over: Partial<ArtifactScan>): ArtifactScan => ({
+  id: "s1",
+  artifactId: "a1",
+  engineRunId: "r1",
+  sha256: "0".repeat(64),
+  format: "safetensors",
+  verdict: "clean",
+  chip: SCAN_CHIP.clean,
+  admissible: true,
+  findings: [],
+  scannerVersion: "0.8.8",
+  createdAt: "2026-10-09T10:00:00.000Z",
+  ...over,
+});
+const SAFETENSORS = { format: "safetensors", executable: false };
+const PICKLE = { format: "pickle", executable: true };
+const PICKLE_FAMILY = ["pickle", "pytorch_legacy", "pytorch_zip", "numpy", "numpy_npz", "keras_h5"];
+
+describe("scanStatus — what can be clean", () => {
+  it("a verified safetensors scan with no finding is clean and admissible", () => {
+    const s = scanStatus(scan({}), SAFETENSORS);
+    expect(s).toMatchObject({ clean: true, admissible: true, tone: "ok", label: SCAN_CHIP.clean, verdict: "clean" });
+    expect(statusWord(s)).toBe("Clean");
+  });
+
+  it("never scanned is not clean", () => {
+    for (const none of [undefined, null]) {
+      const s = scanStatus(none, SAFETENSORS);
+      expect(s.clean).toBe(false);
+      expect(s.admissible).toBe(false);
+      expect(s.label).toBe("Not scanned");
+      expect(statusWord(s)).toBe("Not scanned");
+    }
+  });
+
+  it("unknown and not_run are never clean, and say why", () => {
+    const unknown = scanStatus(scan({ verdict: "unknown", chip: SCAN_CHIP.unknown, admissible: false, format: "pickle" }), PICKLE);
+    expect(unknown).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown, tone: "warn" });
+    expect(unknown.reasons.join(" ")).toMatch(/inconclusive/);
+    const notRun = scanStatus(scan({ verdict: "not_run", chip: SCAN_CHIP.not_run, admissible: false, format: "gguf" }), { format: "gguf", executable: true });
+    expect(notRun).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.not_run });
+    expect(notRun.reasons[0]).toMatch(/not supported by the scanner/);
+    expect(statusWord(notRun)).toBe("Not clean");
+  });
+
+  it("an unrecognised verdict is inconclusive, never clean, and never shows the server's chip", () => {
+    const s = scanStatus(scan({ verdict: "pass", chip: "Looks fine" }), SAFETENSORS);
+    expect(s).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+    expect(s.label).not.toContain("fine");
+  });
+
+  it("a pickle-family format is never clean, even if the record claims clean and admissible", () => {
+    for (const format of PICKLE_FAMILY) {
+      const s = scanStatus(scan({ format, verdict: "clean", admissible: true }), { format, executable: true });
+      expect(s.clean, format).toBe(false);
+      expect(s.admissible, format).toBe(false);
+      expect(s.label, format).toBe(SCAN_CHIP.unknown);
+      expect(s.reasons[0], format).toMatch(/inconsistent/);
+    }
+  });
+
+  it("an executable artifact is never clean even when the scan row says safetensors (the artifact's content wins)", () => {
+    const s = scanStatus(scan({}), PICKLE);
+    expect(s.clean).toBe(false);
+    expect(s.reasons[0]).toMatch(/the artifact's content is Python pickle/);
+  });
+
+  it("an unverified safetensors (header did not verify) is never clean", () => {
+    const s = scanStatus(scan({ format: "safetensors_invalid" }), { format: "safetensors_invalid", executable: true });
+    expect(s.clean).toBe(false);
+  });
+
+  it("a clean claim that is not admissible, or that carries a finding, is not clean", () => {
+    expect(scanStatus(scan({ admissible: false }), SAFETENSORS).clean).toBe(false);
+    expect(scanStatus(scan({ findings: [{ kind: "scan_error", id: "X", severity: "medium" }] }), SAFETENSORS).clean).toBe(false);
+  });
+
+  it("no_known_unsafe is not clean and says an executable format cannot be", () => {
+    const s = scanStatus(
+      scan({ format: "pickle", verdict: "no_known_unsafe", chip: SCAN_CHIP.no_known_unsafe, admissible: false, findings: [{ kind: "executable_format", id: "pickle", severity: "high" }] }),
+      PICKLE,
+    );
+    expect(s).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.no_known_unsafe, tone: "warn" });
+    expect(s.reasons.join(" ")).toMatch(/can never be clean/);
+    // the same verdict without its finding still explains itself
+    const bare = scanStatus(scan({ format: "pickle", verdict: "no_known_unsafe", admissible: false }), PICKLE);
+    expect(bare.reasons.join(" ")).toMatch(/does not make it safe to load/);
+  });
+
+  it("unsafe names the operator from the finding's id, reduced to the display alphabet", () => {
+    const s = scanStatus(
+      scan({ format: "pickle", verdict: "unsafe", admissible: false, findings: [{ kind: "unsafe_operator", id: "os.system<script>", severity: "critical" }] }),
+      PICKLE,
+    );
+    expect(s).toMatchObject({ clean: false, tone: "danger", label: SCAN_CHIP.unsafe });
+    expect(statusWord(s)).toBe("Unsafe");
+    expect(s.reasons[0]).toBe("An unsafe operator was found: os.system?script? (critical).");
+  });
+
+  it("no label the page produces ever says safe", () => {
+    const verdicts = ["clean", "no_known_unsafe", "unsafe", "unknown", "not_run", "weird"];
+    for (const v of verdicts) {
+      const s = scanStatus(scan({ verdict: v, format: v === "clean" ? "safetensors" : "pickle" }), v === "clean" ? SAFETENSORS : PICKLE);
+      expect(s.label.toLowerCase()).not.toMatch(/\bsafe\b/);
+    }
+  });
+});
+
+describe("structured reasons", () => {
+  it("finding ids are bounded and reduced; an unknown kind is not clean", () => {
+    expect(safeFindingId("a".repeat(300))).toHaveLength(120);
+    expect(safeFindingId(42)).toBe("?");
+    expect(findingSentence({ kind: "mystery", id: "z", severity: "low" })).toMatch(/treated as not clean/);
+  });
+
+  it("calls out a name that disagrees with the content", () => {
+    expect(nameMismatch({ filename: "model.safetensors", format: "pickle" })).toMatch(/ends in \.safetensors, but its content is Python pickle/);
+    expect(nameMismatch({ filename: "weights.safetensors", format: "safetensors" })).toBeNull();
+    expect(nameMismatch({ filename: "model.pt", format: "pytorch_legacy" })).toBeNull();
+    expect(nameMismatch({ filename: "artifact", format: "pickle" })).toBeNull();
+  });
+
+  it("latestScan picks the newest whatever the order", () => {
+    const old = scan({ id: "old", createdAt: "2026-10-01T00:00:00Z" });
+    const nu = scan({ id: "new", createdAt: "2026-10-09T00:00:00Z" });
+    expect(latestScan([old, nu])?.id).toBe("new");
+    expect(latestScan([])).toBeNull();
+  });
+});
+
+describe("the upload", () => {
+  it("refuses a file over the declared limit before sending anything", () => {
+    expect(preUploadRefusal(512 * MIB, 512)).toBeNull();
+    expect(preUploadRefusal(512 * MIB + 1, 512)).toMatch(/limit is 512 MiB\. Nothing was sent/);
+  });
+
+  it("sends the name as a display-only query parameter, without a path", () => {
+    expect(uploadPath("C:\\models\\a b.pkl")).toBe("/v1/model-artifacts?filename=a%20b.pkl");
+    expect(uploadPath("")).toBe("/v1/model-artifacts?filename=artifact");
+  });
+
+  it("refusal sentences: known codes get ours, others the client's", () => {
+    expect(refusalText(new ApiError(413, { error: "artifact_too_large", detail: "the limit is 512 MiB" }))).toMatch(/over the organisation's model-artifact size limit.*\(the limit is 512 MiB\)/);
+    expect(refusalText(new ApiError(503, { error: "artifact_store_unavailable" }))).toMatch(/no model-artifact store/);
+    expect(refusalText(new ApiError(409, { error: "artifact_shelf_full" }))).toMatch(/Artifact shelf full/i);
+  });
+
+  it("quota refusals: separate wording for a count and for bytes, for the uploader and the deployment", () => {
+    const q = (status: number, p: Record<string, unknown>) => refusalText(new ApiError(status, { error: "artifact_quota_exceeded", detail: "raw detail", ...p }));
+    expect(q(409, { scope: "uploader", measure: "count", limit: 20, used: 20 })).toBe(
+      "Storing this would take your model artifacts past the limit of 20 artifacts (20 stored). Delete artifacts you no longer need, or an admin may raise the quota (the change needs a step-up). Nothing of this upload was kept.",
+    );
+    expect(q(413, { scope: "uploader", measure: "bytes", limit: 2048 * MIB, used: 2000 * MIB })).toMatch(/^Storing this would take your model artifacts past the limit of 2\.00 GiB \(1\.95 GiB stored\)\./);
+    expect(q(409, { scope: "org", measure: "count", limit: 1000, used: 1000 })).toMatch(/^Storing this would take this deployment's model artifacts past the limit of 1000 artifacts/);
+    expect(q(413, { scope: "org", measure: "bytes", limit: 10 * MIB, used: "x" })).toMatch(/past the limit of 10\.0 MiB\. Delete/);
+    // a shape this page does not know still reads as a quota refusal, never the raw detail
+    expect(q(409, {})).toMatch(/^Storing this would exceed a model-artifact storage quota\./);
+    expect(q(409, {})).not.toContain("raw detail");
+  });
+
+  it("artifact_in_use is a fixed sentence", () => {
+    expect(refusalText(new ApiError(409, { error: "artifact_in_use", citedScans: 1, unfinishedRuns: 0, detail: "server words" }))).toBe(
+      "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",
+    );
+  });
+
+  it("retention states the setting and the first date the sweep may delete it", () => {
+    expect(retentionText("2026-10-01T12:00:00.000Z", 30, true)).toMatch(/^Kept for 30 days\. It may be deleted from Oct 31, 2026, unless a scan of it is cited/);
+    // B5W-09: an unread setting promises no lifetime and no date
+    const unread = retentionText("2026-10-01T12:00:00.000Z", 30, false);
+    expect(unread).toMatch(/^The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here\./);
+    expect(unread).toMatch(/the strict default is 30 days/);
+    expect(unread).not.toMatch(/Kept for/);
+    expect(unread).not.toMatch(/Oct 31, 2026|deleted from/);
+    expect(unread).toMatch(/never deletes an artifact while a scan of it is cited as model-card evidence or a run on it is unfinished/);
+  });
+
+  it("posts raw bytes as octet-stream with the CSRF header, reports progress, and turns a refusal into an ApiError", async () => {
+    const sent: Record<string, unknown> = { headers: {} as Record<string, string> };
+    let status = 201;
+    let body = JSON.stringify({ artifact: { id: "a9", format: "pickle" } });
+    const fake = () => {
+      const x = {
+        upload: {} as { onprogress?: (e: { loaded: number; total: number; lengthComputable: boolean }) => void },
+        withCredentials: false,
+        status: 0,
+        responseText: "",
+        onload: null as null | (() => void),
+        onerror: null as null | (() => void),
+        onabort: null as null | (() => void),
+        open: (method: string, url: string) => Object.assign(sent, { method, url }),
+        setRequestHeader: (k: string, v: string) => ((sent.headers as Record<string, string>)[k] = v),
+        abort: () => x.onabort?.(),
+        send: (b: unknown) => {
+          sent.body = b;
+          sent.withCredentials = x.withCredentials;
+          x.upload.onprogress?.({ loaded: 2, total: 4, lengthComputable: true });
+          x.status = status;
+          x.responseText = body;
+          x.onload?.();
+        },
+      };
+      return x as unknown as XMLHttpRequest;
+    };
+    const progress: number[] = [];
+    const blob = new Blob([new Uint8Array([0x80, 4, 0, 0])]);
+    const ok = await uploadModelArtifact(blob, { filename: "m.pkl", xhr: fake, onProgress: (s) => progress.push(s) });
+    expect(ok.artifact.id).toBe("a9");
+    expect(sent).toMatchObject({ method: "POST", url: "/v1/model-artifacts?filename=m.pkl", withCredentials: true, body: blob });
+    expect(sent.headers).toEqual({ "x-regulait-csrf": "1", "content-type": "application/octet-stream" });
+    expect(progress).toEqual([2]);
+
+    status = 413;
+    body = JSON.stringify({ error: "artifact_too_large", detail: "the limit is 1 MiB" });
+    const refused = await uploadModelArtifact(blob, { filename: "m.pkl", xhr: fake }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ApiError);
+    expect((refused as ApiError).status).toBe(413);
+  });
+});
+
+describe("X30 review: B5W-01 the cited scan, never the newest in its place", () => {
+  const r1 = scan({ id: "11111111-r1", engineRunId: "run-1", verdict: "unknown", format: "pickle", admissible: false, createdAt: "2026-10-01T00:00:00Z" });
+  const r2 = scan({ id: "22222222-r2", engineRunId: "run-2", createdAt: "2026-10-09T00:00:00Z" });
+  it("a link naming the older inconclusive scan shows that scan, not the newer clean one", () => {
+    const c = chooseScan([r2, r1], { scanId: r1.id, runId: "run-1" });
+    expect(c).toEqual({ kind: "cited", scan: r1 });
+    expect(scanStatus(c.kind === "cited" ? c.scan : null, SAFETENSORS).clean).toBe(false);
+  });
+  it("an older link that carries only the run is matched by it", () => {
+    expect(chooseScan([r2, r1], { runId: "run-1" })).toEqual({ kind: "cited", scan: r1 });
+  });
+  it("a citation that matches nothing is unavailable, never the latest", () => {
+    expect(chooseScan([r2, r1], { scanId: "gone" })).toEqual({ kind: "cited_missing", scanId: "gone", runId: null });
+    expect(chooseScan([r2, r1], { runId: "run-9" }).kind).toBe("cited_missing");
+    expect(chooseScan(undefined, { scanId: "gone" }).kind).toBe("cited_missing");
+  });
+  it("with nothing cited, the newest", () => {
+    expect(chooseScan([r1, r2], {})).toEqual({ kind: "latest", scan: r2 });
+  });
+});
+
+describe("X30 review: B5W-06 a malformed scan record is inconclusive, never clean, and never throws", () => {
+  const bad: unknown[] = [undefined, null, "none", {}, [null], [{ kind: 1, id: "x" }], [{ kind: "unsafe_operator" }]];
+  for (const findings of bad) {
+    it(`findings = ${JSON.stringify(findings) ?? "undefined"}`, () => {
+      const s = scan({ findings: findings as never });
+      const st = scanStatus(s, SAFETENSORS);
+      expect(st).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+      expect(st.reasons[0]).toMatch(/incomplete or malformed/);
+      expect(scanFindings(s)).toEqual([]);
+    });
+  }
+  it("a record with no verdict is inconclusive too", () => {
+    expect(scanStatus(scan({ verdict: undefined as never }), SAFETENSORS).clean).toBe(false);
+  });
+});
+
+describe("X30 review: B5W-08 a finding's severity is validated, never rendered raw", () => {
+  const bad: unknown[] = [{ untrusted: "synthetic" }, ["high"], undefined, null, 3, "HIGH", "severe", "info"];
+  for (const severity of bad) {
+    it(`severity = ${JSON.stringify(severity) ?? "undefined"} reads as "unknown severity" and the scan is inconclusive`, () => {
+      expect(findingSeverity(severity)).toBeNull();
+      expect(severityLabel(severity)).toBe("unknown severity");
+      const st = scanStatus(scan({ verdict: "clean", findings: [{ kind: "scan_error", id: "synthetic_error", severity } as never] }), SAFETENSORS);
+      expect(st).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+      expect(st.reasons[0]).toBe("A finding has an unknown or malformed severity, so the scan is treated as inconclusive.");
+      expect(st.reasons.join(" ")).not.toContain("synthetic\"");
+      // the finding still lists (the record is not dropped)
+      expect(scanFindings(scan({ findings: [{ kind: "scan_error", id: "synthetic_error", severity } as never] }))).toHaveLength(1);
+    });
+  }
+  it("an unsafe verdict stays unsafe, with the severity in fixed words", () => {
+    const st = scanStatus(scan({ verdict: "unsafe", format: "pickle", admissible: false, findings: [{ kind: "unsafe_operator", id: "os.system", severity: { x: 1 } } as never] }), PICKLE);
+    expect(st).toMatchObject({ clean: false, label: SCAN_CHIP.unsafe });
+    expect(st.reasons[0]).toBe("An unsafe operator was found: os.system (unknown severity).");
+  });
+  it("valid severities stay readable", () => {
+    for (const s of ["critical", "high", "medium", "low"]) expect(severityLabel(s)).toBe(s);
+  });
+});
+
+describe("X30 review: B5W-04 the upload and its abort signal", () => {
+  it("a signal already aborted rejects at once and sends nothing", async () => {
+    let made = 0;
+    const ctl = new AbortController();
+    ctl.abort();
+    const started = Date.now();
+    const out = await Promise.race([
+      uploadModelArtifact(new Blob([new Uint8Array([1])]), {
+        filename: "x",
+        signal: ctl.signal,
+        xhr: () => {
+          made += 1;
+          throw new Error("no request may be made");
+        },
+      }).catch((e: unknown) => e),
+      new Promise((r) => setTimeout(() => r("pending"), 500)),
+    ]);
+    expect(out).toBeInstanceOf(Error);
+    expect((out as Error).message).toMatch(/Upload cancelled/);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(made).toBe(0);
+  });
+
+  it("the abort listener is removed once the upload settles", async () => {
+    let aborts = 0;
+    const fake = () => {
+      const x = {
+        upload: {} as Record<string, unknown>,
+        withCredentials: false,
+        status: 0,
+        responseText: "",
+        onload: null as null | (() => void),
+        onerror: null as null | (() => void),
+        onabort: null as null | (() => void),
+        open: () => undefined,
+        setRequestHeader: () => undefined,
+        abort: () => {
+          aborts += 1;
+        },
+        send: () => {
+          x.status = 201;
+          x.responseText = JSON.stringify({ artifact: { id: "a1" } });
+          x.onload?.();
+        },
+      };
+      return x as unknown as XMLHttpRequest;
+    };
+    const ctl = new AbortController();
+    await uploadModelArtifact(new Blob([new Uint8Array([1])]), { filename: "x", signal: ctl.signal, xhr: fake });
+    ctl.abort();
+    expect(aborts).toBe(0);
+  });
+});

@@ -20,7 +20,10 @@
 #     the Python runtime: anything outside the ADR-0176 list fails the build unless licence-allow.json
 #     admits it, and every entry there must be a recorded owner acceptance (numpy's runtime code, ADR-0187
 #     decision 106) or say "pending owner decision" (HDF5, CPython);
-#   - our settings file baked read-only at /opt/modelscan/modelscan-settings.toml.
+#   - our settings file baked read-only at /opt/modelscan/modelscan-settings.toml;
+#   - the strict .npy header check (npy-header.py, stdlib only, ADR-0187 decision 180) baked
+#     read-only at /opt/modelscan/npy-header.py: the scanner runs it before modelscan on every .npy, and
+#     with `--npz` on every .npz (decisions 219-224: zipfile, strict, each member through the .npy check).
 # Signing, the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) and the image
 # SBOM join publish-image.yml / security.yml when the image is first built in CI (ADR-0184), as for
 # promptfoo. The manifest (packages/shared/src/engines/manifest.ts) carries NO digest until an image
@@ -43,6 +46,7 @@ RUN python -m venv /opt/modelscan/venv \
  && node licence-gate.mjs /opt/modelscan/venv/lib/python3.12/site-packages licence-allow.json --runtime python=PSF-2.0 \
  && find /opt/modelscan/venv -name '__pycache__' -prune -exec rm -rf {} +
 COPY engines/modelscan/modelscan-settings.toml /opt/modelscan/modelscan-settings.toml
+COPY engines/modelscan/npy-header.py /opt/modelscan/npy-header.py
 
 # ---- stage 2: the runner and scanner shim -------------------------------------------------------
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS shim
@@ -65,11 +69,18 @@ LABEL org.opencontainers.image.title="regulait-engine-modelscan" \
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+# PR #212 review [4235322394] (ADR-0187 decision 129): the Node binary comes from the node image, but its
+# shared libraries (libstdc++.so.6, libgcc_s.so.1) must come from THIS base, as Debian packages Trivy
+# sees and scans. Fail the build, here, if either package is missing, if any library node links
+# against does not resolve, or if node cannot start; never at the first run.
+RUN dpkg-query -W -f='${Package} ${Version}\n' libstdc++6 libgcc-s1 \
+ && if ldd /usr/local/bin/node | grep -q 'not found'; then ldd /usr/local/bin/node; exit 1; fi \
+ && node --version
 COPY --from=closure /opt/modelscan /opt/modelscan
 COPY --from=shim /out /app
 # the settings are read-only for everyone; the runner's state volume is its own (0700, uid 10001),
 # and the two exchange mount points exist for the volumes compose mounts on them
-RUN chmod 0444 /opt/modelscan/modelscan-settings.toml \
+RUN chmod 0444 /opt/modelscan/modelscan-settings.toml /opt/modelscan/npy-header.py \
  && mkdir -p /state /work /jobs /out /results \
  && chown 10001:10001 /state /work /jobs /out /results \
  && chmod 0700 /state

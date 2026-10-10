@@ -76,7 +76,8 @@ maintained pure-JS engine); NeMo YARA rules are converted to data.
 - `org_settings`, all strict: `approval_signature_mode` passkey; `step_up_mode` required; `step_up_max_age_seconds` 120
   (30–900); `step_up_actions` = approval_decide, settings_relax, evidence_hold_override, break_glass, passkey_manage,
   owner_change (removing one is a relaxation); `tool_approval_sensitive_quorum` 2; `decision_receipts_mode` on;
-  `audit_anchor_timestamp_mode` required; `vendored_detection_packs` all four; `monitor_mcp_baseline_days` 14;
+  `audit_anchor_timestamp_mode` required; `vendored_detection_packs` all four; `outbound_credential_audience`
+  enforce (decision 32, migration 0181); `monitor_mcp_baseline_days` 14;
   `monitor_jailbreak_threshold` 3; `monitor_jailbreak_window_hours` 24. Every relaxation is audited through
   `org-settings-updated` with `detail.transitions` and needs a `settings_relax` step-up.
 
@@ -574,11 +575,146 @@ unless stated.
 
       Both web writers (the profiles page, the first-run pack) go through `withStepUp` and the census covers them.
 
+30. **PR #234 review fixes, Batch 4 integration of X21-X23 (2026-10-10, branch `b4-codex-int-2`)** (each red first
+    on the integration head; merges `codex/x21` f69db5e and `codex/x23` bedc91a, which contains 30a730c):
+    - **Item 1, receipt classification.** Only governed-call allow/deny/refuse rows and approval approve/deny/expire
+      outcomes are `receiptClass: "decision"`. Reclassified as `"excluded"` (a new value, never signed, kept in the
+      audit chain): approval routing, SLA warning and breach, claims, refused decide attempts (bulk item,
+      `approval-signature-refused`), the advisory `/v1/evaluate` preview, `builder-tool-step-resume-failed`, red-team
+      adjudications, playground evaluation summaries, external-effect records and chatops channel events. Agent halt
+      and resume are operator controls, `"configuration"`. Kept as decisions: the decide-path rows that carry an
+      outcome (`approval-decision-recorded`, `-quorum-reached`, `-vetoed`, `-pool-unsatisfiable`, the signature
+      recheck refusal, admin-override, self-review, delegated and bulk decisions) and every call-path allow/deny
+      including compaction and dispatch records. `receipt-writer-classification.test.ts` now also fails when a writer
+      in a known non-decision family is classified `decision` (red: 14 writers).
+    - **Item 2, retired keys (B4I-01): no `retiredAt`/`decision.at` check.** `decision.at` is signer-controlled, so a
+      forger with a retired key would backdate it, and a backlog sweep legitimately signs decisions older than the
+      key's first use; the check would be false assurance. Retirement stops the sweep from signing with the key and
+      is not revocation; `RECEIPT_CANNOT_PROVE` says so and both the API and the offline CLI return it (tests pin
+      both). Proposed follow-up, not built: a signed revocation record (key id, reason, effective time) whose time is
+      covered by an anchored RFC 3161 timestamp, so a verifier can reject receipts not covered by an earlier anchor.
+    - **Item 3, gate-dense scrub CPU (B4I-02) and budget flakes (B4I-03).** B4I-02 is closed by decision 31; as first
+      found, with Codex's 30a730c the gate-dense value (`"sk gl m n secret mysql: redis postgres mongodb xox sig= key- tok_ dapi hf_ r8_ "` x 5300,
+      418,700 characters) still takes 290-360 ms on the development box (CPU 290-300 ms), against 100 ms: 17 rules
+      pass their gates and each runs one RE2 scan of the remainder. Measured alternatives in re2js 2.8.6: a combined
+      `RE2Set` of the 17 rules 440-590 ms (whatever the DFA memory), one alternation 440 ms, per-gate windows with a
+      result cache 120 ms (single-letter gates give 116,600 hits) and still inexact for unbounded rules. B4I-03: the files
+      that bound wall time (eight budgets, plus `pii-conformance` under the 5 s test timeout and, from decision 31, the
+      scan-plan differential) form a Vitest `timing` project
+      (`fileParallelism: false`, run after the parallel `unit` project by `sequence.groupOrder`), CI runs
+      `@regulait/shared` alone before the other packages, and `timing-isolation.test.ts` keeps the list complete.
+      No budget or timeout changed.
+    - **Item 4, TSA policy OID.** `REGULAIT_TSA_POLICY_OID` must be the canonical dotted form that asn1js (the encoder
+      pkijs uses for `reqPolicy`) encodes and decodes back unchanged: first arc 0-2, second arc 0-39 under 0 or 1, no
+      leading zeros, two or more arcs. A configuration error no longer consumes an attempt or schedules backoff: the
+      anchor stays `pending` with `timestamp_configuration_invalid` and the manual retry answers 409
+      `configuration_invalid`.
+    - **Item 5, CMS signature hash.** The signer's effective `signatureAlgorithm` is validated: `rsaEncryption` (the
+      hash is `digestAlgorithm`'s), sha256/384/512WithRSAEncryption, ecdsa-with-SHA256/384/512, or RSASSA-PSS whose
+      hash and MGF1 hash are the same SHA-2 function (absent parameters are the SHA-1 defaults and refuse). Its hash
+      must equal the digest hash (`timestamp_signature_hash_mismatch`); anything else is
+      `timestamp_signature_algorithm_unsupported`. Red: a real SHA-1-signed token with a SHA-256 digestAlgorithm
+      verified. Ed25519 tokens are refused until a TSA needs them.
+
+31. **B4I-02 closed: vendored-secret scan plans derived from RE2's compiled program (2026-10-10, branch
+    `b4-codex-int-2`).** The literal gates (hand-proved, some a single letter: `m`/`n` for Discord, `sk` for Twilio,
+    `-` for SSNs) let a gate-dense value send 17 rules into a full RE2 scan each. The converter now derives, per rule
+    and from re2js's own compiled program rather than a second regex parser:
+    - a **prefilter**: positions 1..k of every match (k = the minimum match length, at most 24), each a class holding
+      every code point RE2 can consume there (the union over the NFA states reachable after i runes; empty-width
+      assertions pass through and folded ASCII literals add U+017F/U+212A, so each class is a superset). The
+      shortest shipped prefilter pins 11 positions; no rule has a single-character gate and none needs to be
+      always-scan.
+    - a **maximum match length** in UTF-16 units (a possibly astral rune counts 2), or none when the program loops.
+    At runtime a native `RegExp` (`gu`) scans for the prefilter. It is a fixed sequence of classes with no alternation
+    or repetition, so there is nothing to backtrack. Every match starts at a hit, and a rule with no hit costs no RE2
+    work. A bounded rule is matched by RE2 in a window at each hit: one unit of left context for `\b`, then
+    maxLength + 1 units. This reproduces the full-text leftmost-first match, because no match from the hit can
+    reach beyond the window and every boundary RE2 reads is inside it. Results are memoised per call by window
+    content (256 entries). An unbounded rule gets one RE2 scan from its first hit. Custom rule lists keep the
+    combined RE2 set. The derivation is pinned to re2js 2.8.6 (the converter refuses another version) and
+    self-checks four hand-computed plans. It replaces `prefix-proofs.json`, the reviewed fragments, start contexts
+    and the unused space-run proof. The patterns themselves still run only on RE2; the native engine sees only the
+    generated class sequences. ADR-0176: no maintained library computes RE2 prefilters or match bounds, and using
+    RE2's own program avoids a second parse that could disagree with the engine.
+    Two output-preserving `audit-scrub.ts` changes: the second pass skips the marker scan for pieces without
+    `[redacted:`, and a single-rule span keys the marker cache by its rule id. Proof (`scan-plans.test.ts`): spans
+    and candidate rules equal a full RE2 scan of every rule on the 400k dense inputs, on 5,005 corpus inputs (forged
+    markers, tokens, random fragments, near misses; `src/__fixtures__/scrub-equivalence-corpus.ts`) and on 1,500
+    seeded Unicode-noise inputs (astral, lone surrogates, case-fold lookalikes). `scrubAuditText` output on the
+    corpus is pinned to main 20e11ee by per-group digests in `scrub-equivalence.snapshot.json`, generated from
+    main's build and not from this code; Codex's 30a730c produced the same digests. A probe shrinking Google's
+    maxLength fails three of those tests. Budget (`scrub-dense.test.ts`, timing project, 100 ms unchanged), CPU
+    on the loaded development box before -> after: gate-dense 273 -> 11 ms, dense Slack 91 -> about 55-70 ms (its
+    rest is marker work in `audit-scrub.ts`), dense Google 209 -> 24-32 ms. On the previous code the new
+    gate-dense test failed at 334 ms (Slack 219 ms, Google 228 ms in the same run). Worst case: a bounded rule
+    pays one RE2 window per prefilter hit, so a non-periodic input built to hit one rule's first 24 positions
+    every few characters without matching costs a few microseconds per hit. That is still far below the previous
+    worst case (every gated rule scanning the whole value), but it is not a universal 100 ms bound.
+
+32. **Outbound credential audience (V; owner decision 2026-10-10, branch `b4-outbound-audience`; migration 0181;
+    `zz-b4o-outbound-audience.test.ts`, 14 tests, shown red by disabling the check).** An implementation decision
+    recording the owner's choice for the `pipelock-secrets` audience hosts that X23 left unconsumed.
+    - **Refuse.** A `pipelock-secrets` match in the caller's content, bound for a host outside that rule's audience, is
+      refused before anything is sent: `403 credential_audience_violation` on the connector route (with `violations`,
+      rule ids and counts); on the MCP surfaces, where a JSON-RPC answer has no HTTP status, a governed deny whose
+      error message names `credential_audience_violation` and whose error data is
+      `{ error: "credential_audience_violation", status: 403 }`. One audit row, rule `credential-audience-violation`,
+      `detail.violations` = rule ids and counts, `detail.destinationHosts` = host only. The credential, a fragment
+      and a hash of it are never written: the check runs after the entitlement decision and **before** the decision
+      row, so a refused call leaves no ADR-0104 arguments digest (an unentitled caller is still denied as such, with
+      its usual row). The trace span stores no input for it, and the connector span drops `object`.
+    - **What is scanned.** The caller's content only, decoded to strings recursively (every string value and object
+      key; a string with `%` escapes also percent-decoded), joined once and scanned once per destination with the
+      pack matcher (RE2, linear). MCP tool calls: the arguments as sent (the PII-redacted arguments when redact is in
+      force). MCP protocol calls (`prompts/get`, `resources/read`, `completion/complete`, ...): the decided params,
+      exactly what is sent. Connector calls: `object` and `payload`. Neither path forwards a caller-set upstream
+      header or URL, so these are every caller-controlled URL, query, header and body surface.
+    - **Gateway-injected credentials are exempt structurally.** The connector credential the gateway decrypts and the
+      registered MCP upstream URL (and any credential in it) are never inputs to the scan, which is built from the
+      invocation alone before the adapter or transport exists. Nothing is exempted by matching on a value.
+    - **Destinations.** MCP: the registered upstream URL. Connector: the typed `baseUrl` (credential's, else the
+      connector's); for a credential-derived kind (`teams`, `outlook`, `snowflake`) every host the credential names
+      plus the compiled hosts, a match being permitted only if every one is in its audience; else the compiled vendor
+      default. No network destination (the mock, or a kind that cannot be built without a `baseUrl`) is not scanned;
+      a destination that cannot be named grants no exemption. Audience = the pack's host list over https only.
+    - **Order.** MCP tool and protocol: after the entitlement decision, before the decision row, the compliance
+      read-only gate, the budget gate, approval queueing, admission/egress, the breaker and the connect. Connector:
+      after the entitlement decision, before its row, the budget gate, the hold, the egress guard and the adapter. No
+      approver is asked to sign off a call that may not go out.
+    - **stdio MCP is out of scope:** it has no host to have an audience.
+    - **Setting** `outboundCredentialAudience: "enforce" | "off"` (`org_settings.outbound_credential_audience`), strict
+      `enforce` (ADR-0180). It is a batch-4 key, so `off` is a relaxation: a `settings_relax` step-up and
+      `org-settings-updated` with `detail.relaxed`. `GET /v1/detection-content` reports `outboundAudienceEnforced` =
+      setting `enforce` AND the `pipelock-secrets` pack enabled (the pack off matches nothing), plus the raw setting.
+    - **Personal data is not a credential.** The pack's `social_security_number` rule is excluded
+      (`NON_CREDENTIAL_RULES` in `outbound-audience.ts`): personal data in a call is governed by the §8.4 piiMode
+      cascade, which a project may set below block, and refusing it here would silently override that choice. The
+      audit scrub and the DLP guardrail still see it. (Found by the full gateway suite: three suites whose fixtures
+      carry a synthetic SSN were refused before the PII and egress checks they test.)
+    - **What the pack refuses (consequence, pending owner confirmation).** Rules with no audience hosts are refused for
+      every destination: the GitHub and GitLab tokens and JWTs (their upstream exemptions are path or carrier based
+      and are not representable, so none is granted), private keys, cloud keys, database connection strings and
+      `environment_variable_secret`. So under `enforce` a caller cannot pass, for example, their own GitHub token as a
+      tool argument to a GitHub MCP server.
+    - **Cost (B4I-02).** One linear pass of the pack matcher per destination, the same order as the input DLP
+      guardrail's scan of the same arguments; gate-dense content costs about 0.25 s per 400k characters on the
+      development machine (the existing matcher's cost, measured), bounded by the 1 MiB body limit on the proxy and
+      connector routes.
+    - **Web.** The detection-content panel already renders `outboundAudienceEnforced`. The org settings page does not
+      list the batch-4 toggles; showing this one there is a follow-up.
+
 **Two notes on B4S-09 (no code change)**
-- **Tool-scoped approvals in passkey mode.** The recheck rebuilds the signed payload from the arguments of the call
-  actually run. A tool-scoped approval (ADR-0104) still matches a call with other arguments at the database lookup, but
-  the signature then fails to verify: the approval is superseded and that call refused. In passkey mode a tool-scoped
-  approval therefore releases only the exact call that was signed.
+- **Tool-scoped approvals in passkey mode** (corrected 2026-10-10, B4X-01; decision 29, finding 51). The recheck
+  rebuilds the signed payload from the call actually run. For a tool-scoped approval (ADR-0104 `approvalScope: "tool"`)
+  the signed `argumentsDigest` is the fixed `TOOL_SCOPE_ARGUMENTS_DIGEST` wildcard (`signedArgumentsDigest` in
+  `approval-signing.ts`, used by `signingPayloadForRow` and `recheckApprovalSignatures` in `approval-signatures.ts`),
+  so a call with other arguments for the same tool verifies and runs, as the approver was told ("Other arguments for
+  this tool are permitted"). The consent stays bound to everything else in the payload: the approval id, the server or
+  connector, the tool name, the nonce and `contextDigest`, whose ADR-0105 fingerprint includes `approvalScope`; a call
+  under a different policy context fails the recheck, is refused and the approval superseded. An action-scoped approval
+  signs and rechecks the exact arguments digest. A tool-scoped decision signed before decision 29 does not verify: it
+  fails closed and is superseded.
 - **MCP opens the upstream session before the recheck.** `executeGovernedToolCall` connects to the upstream (the MCP
   `initialize`; for stdio, the process start) before it consumes the approval. A failed recheck refuses the call before
   `tools/call` and the session is closed, so the tool never runs, but the upstream sees a connection.
@@ -603,9 +739,11 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
   need position semantics that `any`/`N of them` conditions cannot express. Importing them would need a hand-written
   evaluator, which ADR-0176 bars. The pack stays empty; revisit only through a new ADR.
-- **V, credential audience.** Outbound enforcement of `pipelock-secrets` audience hosts is not wired yet (no
-  `credential_audience_violation` in the code); Claude owns it.
-- **S:** no network revocation checking on the TSA chain (no CRL or OCSP fetch, which suits air-gapped installs).
+- **V, credential audience** — wired in decision 32. Residuals: stdio MCP is out of scope (no host); rules with no
+  audience hosts refuse every destination, including GitHub tokens and JWTs (pending owner confirmation that this
+  breadth is intended); the SSN shape is excluded as personal data; the matcher's gate-dense cost (B4I-02) is linear but not capped below the body limit.
+- **S (R22-07):** no network certificate-revocation checking (OCSP/CRL) on the TSA chain: no CRL, OCSP or AIA fetch,
+  which suits air-gapped installs. A revoked TSA certificate still verifies while its chain ends at a certificate in the configured trust bundle.
 - **M:** `mcp_server_baseline_drift` sees only calls attributed to a builder agent.
 - **B4S-03 target binding.** No table binds a server or connector to a project, so the target of a call cannot make it
   sensitive. Follow-up needing a migration.

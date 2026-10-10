@@ -63,13 +63,16 @@
  */
 import { randomUUID } from "node:crypto";
 import { desc, isNotNull } from "drizzle-orm";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import {
   AUDIT_GENESIS_PREV_HASH,
   AUDIT_GENESIS_SEQ,
-  auditContentHash,
+  auditChainVersionAt,
+  auditContentHashFor,
   auditRowHash,
+  resolveAuditChainBoundary,
   scrubAuditRow,
+  type AuditChainBoundary,
   type AuditChainFields,
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
@@ -174,6 +177,10 @@ export async function appendChainedAuditRows(
   let prevHash = tip[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   let nextSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;
 
+  // ADR-0188 decision 19: the canonical-serialisation boundary, read UNDER THE
+  // SAME LOCK, so no append can race the cutover and land a v1 row past it.
+  const v2FromSeq = await readAuditV2Boundary(tx);
+
   const rows = values.map((raw) => {
     // ADR-0099 — SCRUB, THEN HASH. The order is the whole correctness argument
     // and it is not stylistic: `content_hash` is taken over the row's immutable
@@ -188,8 +195,18 @@ export async function appendChainedAuditRows(
     // helpers, for the same reason chaining is (see this file's header): a
     // raw `db.insert(auditLog)` written next month is scrubbed without its
     // author knowing this line exists. Convention could not promise that.
-    const fields = scrubAuditRow(resolveDefaults(raw));
-    const contentHash = auditContentHash(fields);
+    const resolved = resolveDefaults(raw);
+    // ADR-0188 decision 19: the boundary decides the version, never the caller
+    const version = auditChainVersionAt(nextSeq, v2FromSeq);
+    if (version === 1 && (resolved.actorIdentityId != null || resolved.delegationGrantId != null || resolved.actorChain != null)) {
+      // a v1 hash does not cover the actor fields: writing them unprotected would be worse than refusing
+      throw new Error(
+        "audit-chain: actor fields (ADR-0188) can be written only from the v2 boundary on; run the audit v2 cutover first",
+      );
+    }
+    resolved.chainVersion = version === 2 ? 2 : null;
+    const fields = scrubAuditRow(resolved);
+    const contentHash = auditContentHashFor(fields, version);
     const rowHash = auditRowHash(prevHash, contentHash);
     const row = { ...fields, seq: nextSeq, contentHash, prevHash, rowHash };
     prevHash = rowHash;
@@ -206,6 +223,62 @@ export async function appendChainedAuditRows(
   if (returning !== undefined) return returning === ALL_COLUMNS ? insert.returning() : insert.returning(returning);
   await insert;
   return undefined;
+}
+
+/**
+ * Thrown when the database has no `audit_chain_versions` table: its schema is
+ * older than this build (migration 0180 not applied). The writer FAILS CLOSED
+ * here rather than assuming "v1 only": it cannot know whether a boundary was
+ * recorded, and this build's insert names columns such a database lacks.
+ */
+export class AuditChainSchemaBehindError extends Error {
+  constructor() {
+    super(
+      "audit-chain: the database has no audit_chain_versions table (migration 0180 not applied); this build refuses to append to or verify a chain whose version boundary it cannot read",
+    );
+    this.name = "AuditChainSchemaBehindError";
+  }
+}
+
+function isUndefinedTable(err: unknown): boolean {
+  for (let e: unknown = err, i = 0; e && i < 5; e = (e as { cause?: unknown }).cause, i += 1) {
+    if ((e as { code?: unknown }).code === "42P01") return true;
+  }
+  return false;
+}
+
+/**
+ * ADR-0188 decision 19 (X35 I7S-02): the ONE loader of the canonical-
+ * serialisation boundary, shared by the writer, the verifier and the receipt
+ * sweep. Reads every row of the append-only `audit_chain_versions` table and
+ * resolves it with `resolveAuditChainBoundary`: `{supported: true, v2FromSeq}`
+ * (null = no boundary yet: every row is v1), or the first boundary of a version
+ * this build does not know. A missing table throws `AuditChainSchemaBehindError`.
+ */
+export async function loadAuditChainBoundary(tx: { execute: (query: SQL) => PromiseLike<unknown> }): Promise<AuditChainBoundary> {
+  let res: { rows?: Array<{ version: number | string; from_seq: number | string }> };
+  try {
+    res = (await tx.execute(
+      sql`select "version", "from_seq" from "audit_chain_versions" order by "from_seq" asc`,
+    )) as typeof res;
+  } catch (err) {
+    if (isUndefinedTable(err)) throw new AuditChainSchemaBehindError();
+    throw err;
+  }
+  return resolveAuditChainBoundary((res.rows ?? []).map((r) => ({ version: Number(r.version), fromSeq: Number(r.from_seq) })));
+}
+
+/**
+ * The writer's view of the boundary: the first `seq` written under v2 (null =
+ * none yet). A boundary for a version this build does not know refuses the
+ * append: a writer that cannot produce the current version must not extend the chain.
+ */
+export async function readAuditV2Boundary(tx: { execute: (query: SQL) => PromiseLike<unknown> }): Promise<number | null> {
+  const boundary = await loadAuditChainBoundary(tx);
+  if (!boundary.supported) {
+    throw new Error(`audit-chain: the chain is at serialisation version ${boundary.version}, which this build cannot write`);
+  }
+  return boundary.v2FromSeq;
 }
 
 /** Sentinel for `.returning()` called with no projection. */

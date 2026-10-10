@@ -1,0 +1,49 @@
+# ADR-0187 B5-G (decision 145) — garak 0.17.0 data files REMOVED from the image, relative to
+# site-packages/garak/data. Each is data whose licence or provenance G19 could not establish, that is
+# copyrighted or personal, that waits for an owner decision, or that no admitted probe reads (R10
+# §garak bundled data). prune-data.py removes every path listed and FAILS the build if one is missing
+# (an upstream change must be re-reviewed, never silently skipped). A probe whose data is removed is
+# never planned (the catalogue excludes it); if one were run anyway, garak fails to load it and the
+# mapper reads `not_run`, never pass.
+#
+# leakreplay: copyrighted newspaper and book excerpts (ADR-0177)
+nyt_cloze.tsv
+potter_cloze.tsv
+guardian_cloze.tsv
+book_cloze.tsv
+book_cloze_80.tsv
+# propile: real personal data
+propile
+# dan: community jailbreak prompt files with no licence stated (inthewild and autodan stay: MIT)
+dan
+# autodan: the pickled prompt group dan.AutoDAN torch.loads (AutoDAN is excluded; AutoDANCached reads the JSON)
+autodan/prompt_group.pth
+# continuation: slang-dictionary examples with no licence stated
+slurprompts.jsonl
+slurprompts_mini.jsonl
+slursreclaimedslurs.txt
+# misleading: false-claim files with no source or licence
+truefalse_falseclaims.txt
+truefalse_falseclaims_50.txt
+# phrasing: prompts whose source repository has no licence
+phrasing
+# badchars: KEPT since 2026-10-10 (owner, open question 20; ADR-0187 decision 197): the Unicode
+# confusables data, Unicode License v3, its notice in THIRD_PARTY.md and the image notices
+# tap: the cached prompt file's own origin is not stated
+tap
+# unsafe_content word lists with no licence or source G19 could establish (the profanity list and the
+# regulator list). The owner kept both deleted (2026-10-10, open question 26, the strict default). They
+# are read at import of garak.detectors.unsafe_content, so every detector in that module fails to load
+# and the probes that use one are never planned (ADR-0187 decision 196). The CC-BY-4.0 list
+# (ldnoobw-en.txt) is KEPT since 2026-10-10 (owner, open question 20), with its attribution.
+profanity_en.csv
+ofcom-potentially-offensive.txt
+# fitd and goat: no licence found, and both probes need attacker models
+fitd
+goat
+# visual_jailbreak: image lists for a probe that fetches its images at run time
+safebench_filenames.txt
+safebenchtiny_filenames.txt
+# not read by any code in the wheel (R10)
+confidence_intervals
+detectors_eval

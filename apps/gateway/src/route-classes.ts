@@ -24,7 +24,14 @@ import {
   PROTECTED_RESOURCE_METADATA_PATH,
 } from "./mcp-auth-metadata.js";
 import { WEB_UI_ROUTES } from "./web-serving.js";
-import { ENGINE_ENROLLMENT_ROUTES, ENGINE_RUNNER_ROUTES } from "@regulait/shared";
+import {
+  ENGINE_ENROLLMENT_ROUTES,
+  ENGINE_RUNNER_ROUTES,
+  IDENTITY_JWKS_PATH,
+  OAUTH_INTROSPECTION_PATH,
+  OAUTH_REVOCATION_PATH,
+  OAUTH_TOKEN_PATH,
+} from "@regulait/shared";
 
 /** ADR-0187: the routes only an engine runner credential reaches */
 const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
@@ -99,6 +106,16 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // the server id exists — a 404 there would enumerate the registry.
   PROTECTED_RESOURCE_METADATA_PATH,
   PROTECTED_RESOURCE_METADATA_MCP_PATH,
+  // ADR-0188 — the issuer's JWKS is public by definition (public keys, fetched
+  // before any credential exists), and the token endpoint and its revocation
+  // and introspection siblings hold no RegulAIt session or key: they
+  // authenticate IN-ROUTE on the workload's client assertion, mTLS certificate
+  // or SVID, plus DPoP (S5). Listed in NON_ADMIN_ROUTES too, so `public`.
+  // Until their slices land they answer 501 and touch nothing.
+  IDENTITY_JWKS_PATH,
+  OAUTH_TOKEN_PATH,
+  OAUTH_REVOCATION_PATH,
+  OAUTH_INTROSPECTION_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -728,6 +745,19 @@ export const NON_ADMIN_ROUTES = new Set([
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",
   "GET /v1/model-artifacts/:artifactId",
+  // ADR-0187 decision 127: the uploader deletes their own (an admin any), with a step-up, checked in-handler
+  "DELETE /v1/model-artifacts/:artifactId",
+
+  // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
+  // too): the JWKS and the token endpoint family.
+  `GET ${IDENTITY_JWKS_PATH}`,
+  `POST ${OAUTH_TOKEN_PATH}`,
+  `POST ${OAUTH_REVOCATION_PATH}`,
+  `POST ${OAUTH_INTROSPECTION_PATH}`,
+  // a person starts a delegation for themselves (OWNER DECISION 4: the handler
+  // admits only a session or an MFA-qualified API key, never the bootstrap
+  // token or a virtual key). Every other identity route stays ADMIN-ONLY.
+  "POST /v1/delegations/proofs",
 ]);
 
 /**

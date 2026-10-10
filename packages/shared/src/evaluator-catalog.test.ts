@@ -142,7 +142,7 @@ describe("the vendored OWASP data", () => {
   });
 
   it("records its source commit and file hash, and THIRD_PARTY.md carries the same", () => {
-    expect(PROMPTFOO_FRAMEWORKS_SOURCE.release).toBe("0.123.1");
+    expect(PROMPTFOO_FRAMEWORKS_SOURCE.release).toBe("0.124.1");
     expect(PROMPTFOO_FRAMEWORKS_SOURCE.licence).toBe("MIT");
     expect(PROMPTFOO_FRAMEWORKS_SOURCE.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(PROMPTFOO_FRAMEWORKS_SOURCE.fileSha256).toMatch(/^[0-9a-f]{64}$/);

@@ -89,6 +89,7 @@ const RELAXED: { [K in Batch4SettingKey]: unknown } = {
   decisionReceiptsMode: "off",
   auditAnchorTimestampMode: "off",
   vendoredDetectionPacks: ["pipelock-secrets"],
+  outboundCredentialAudience: "off",
   monitorMcpBaselineDays: 90,
   monitorJailbreakThreshold: 100,
   monitorJailbreakWindowHours: 1,
@@ -96,9 +97,10 @@ const RELAXED: { [K in Batch4SettingKey]: unknown } = {
 
 const STRICT_SQL = sql`UPDATE org_settings SET approval_signature_mode = 'passkey', step_up_mode = 'required',
   step_up_max_age_seconds = 120,
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb,
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb,
   tool_approval_sensitive_quorum = 2, decision_receipts_mode = 'on', audit_anchor_timestamp_mode = 'required',
   vendored_detection_packs = '["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]'::jsonb,
+  outbound_credential_audience = 'enforce',
   monitor_mcp_baseline_days = 14, monitor_jailbreak_threshold = 3, monitor_jailbreak_window_hours = 24`;
 
 function refusalText(e: unknown): string {
@@ -290,6 +292,7 @@ describe("ADR-0186 secure by default: the batch-4 org settings", () => {
       { decisionReceiptsMode: "sometimes" },
       { auditAnchorTimestampMode: "best_effort" },
       { vendoredDetectionPacks: ["yara-rules"] },
+      { outboundCredentialAudience: "warn" },
       { monitorMcpBaselineDays: 0 },
       { monitorJailbreakThreshold: 101 },
       { monitorJailbreakWindowHours: 169 },
@@ -305,6 +308,7 @@ describe("ADR-0186 secure by default: the batch-4 org settings", () => {
       [sql`UPDATE org_settings SET step_up_actions = '["sudo"]'::jsonb`, "org_settings_step_up_actions_check"],
       [sql`UPDATE org_settings SET tool_approval_sensitive_quorum = 0`, "org_settings_tool_approval_sensitive_quorum_check"],
       [sql`UPDATE org_settings SET vendored_detection_packs = '"pipelock-secrets"'::jsonb`, "org_settings_vendored_detection_packs_check"],
+      [sql`UPDATE org_settings SET outbound_credential_audience = 'warn'`, "org_settings_outbound_credential_audience_check"],
       [sql`UPDATE org_settings SET monitor_jailbreak_window_hours = 0`, "org_settings_monitor_jailbreak_window_hours_check"],
     ] as const) {
       await expectRefused(db.execute(stmt), new RegExp(constraint));
@@ -749,12 +753,27 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
     expect(admin.statusCode, admin.body).toBe(200);
   });
 
-  it("every admin route refuses a non-admin (403) and answers 501 not_built to an admin", async () => {
+  it("every admin route refuses a non-admin (403) and answers an admin with the built slice (R, S, V)", async () => {
     for (const [m, url] of ADMIN) {
       const payload = m === "POST" ? {} : undefined;
       const member = await inject(m, url, users.member.auth, payload);
       expect(member.statusCode, `${m} ${url} (member): ${member.body}`).toBe(403);
       const admin = await inject(m, url, users.admin.auth, payload);
+      if(url.startsWith("/v1/receipts")){
+        const expected=m==="POST"?400:200;
+        expect(admin.statusCode,admin.body).toBe(expected);expect(admin.json().error).not.toBe("not_built");continue;
+      }
+      if(url.startsWith("/v1/audit/anchors/")){
+        expect(admin.statusCode,admin.body).toBe(404);expect(admin.json()).toEqual({error:"anchor_not_found"});continue;
+      }
+      if (url === "/v1/detection-content") {
+        // X23 built: the real manifest; decision 32: outbound audience enforcement is wired and reported
+        // from the strict setting (zz-b4o-outbound-audience.test.ts proves both dispatch paths)
+        expect(admin.statusCode, admin.body).toBe(200);
+        expect(admin.json().packs).toHaveLength(4);
+        expect(admin.json().outboundAudienceEnforced).toBe(true);
+        continue;
+      }
       expect(admin.statusCode, `${m} ${url} (admin): ${admin.body}`).toBe(501);
       expect(admin.json()).toEqual({ error: "not_built" });
     }
@@ -768,7 +787,12 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       expect(def!.adr).toBe("ADR-0186");
       const out = await def!.run({ db, actorUserId: null, now: new Date(), runId: `a186-${RUN}` });
       expect(out.itemsProcessed, name).toBe(0);
-      expect(out.detail, name).toMatchObject({ state: "not_built" });
+      // One map of each implemented sweep's honest unconfigured state (X21 receipts, X22 timestamps).
+      const unconfiguredState: Record<string, string> = {
+        "decision-receipt-sign-sweep": "no_key",
+        "anchor-timestamp-sweep": "not_configured",
+      };
+      expect(out.detail, name).toMatchObject({ state: unconfiguredState[name] });
     }
   });
 

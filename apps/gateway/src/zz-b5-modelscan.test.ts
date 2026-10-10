@@ -35,7 +35,7 @@ import {
 } from "@regulait/db";
 import { ARTIFACT_SCAN_CHIP, BATCH5_STRICT_DEFAULTS, ENGINE_MANIFEST, ENGINE_RESULT_VERSION, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
 import { buildSelfTest, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
-import { modelscanAdapter, type ModelscanOutcome, type ScanExecutor, type ScanJob } from "@regulait/engine-modelscan";
+import { modelscanAdapter, type ScanExecutor, type ScanOutcome, type ScanJob } from "@regulait/engine-modelscan";
 import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, safetensorsFile, truncatedMaliciousPickle } from "@regulait/engine-modelscan/fixtures";
 import { buildApp } from "./app.js";
 import { FileArtifactStore } from "./model-artifacts.js";
@@ -122,11 +122,11 @@ function answering(a: { exitCode: number | null; report?: unknown; timedOut?: bo
   return {
     jobs,
     stage: async () => mkdtemp(path.join(tmpdir(), "b5m-gw-")),
-    async scan(job): Promise<ModelscanOutcome> {
+    async scan(job): Promise<ScanOutcome> {
       jobs.push(job);
       await onScan?.(job);
       const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false };
+      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false, npy: null, npz: null };
     },
     async release() {},
     async reconcile() {
@@ -171,6 +171,10 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
+  // this suite uploads more artifacts as one person than the strict per-uploader quota (20, ADR-0187
+  // decision 127) allows; the quotas themselves are proven in zz-b5-modelscan-storage.test.ts.
+  // afterAll restores every batch-5 setting to its strict default.
+  await db.update(orgSettings).set({ modelArtifactUploaderQuotaCount: 1000 }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   storeDir = await mkdtemp(path.join(tmpdir(), "b5m-store-"));
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), engines: { manifest: MANIFEST }, artifactStore: new FileArtifactStore(storeDir) });
   await app.ready();
@@ -207,9 +211,9 @@ beforeAll(async () => {
   const reg = await client.register(t.json().token, runnerSecret, { name: `modelscan-${RUN}`, ...MS_BUILD, selfTest });
   expect(reg.selfTest).toEqual({ passed: true, failures: [] });
   expect((await inject("POST", "/v1/engines/modelscan/self-test", admin.key)).json().passed).toBe(true);
-  const refused = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true });
+  const refused = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.modelscan.version, expectedDigest: MS_DIGEST });
   expect(refused.statusCode, refused.body).toBe(403);
-  const ok = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+  const ok = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.modelscan.version, expectedDigest: MS_DIGEST }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
   expect(ok.statusCode, ok.body).toBe(200);
 }, 180_000);
 

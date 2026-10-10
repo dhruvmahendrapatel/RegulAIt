@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import { CREDENTIAL_MATERIAL_RULES, semanticDlpDetector } from "./guardrails.js";
 import { scrubAuditText } from "./audit-scrub.js";
+import { evaluateTraceContent } from "./trace-evaluation.js";
 
 const body = (alphabet: string, n: number) => alphabet.repeat(Math.ceil(n / alphabet.length)).slice(0, n);
 const B64 = "aZ09_-Kq";
@@ -69,6 +70,18 @@ const NEGATIVE: string[] = [
   `sk_test_${"BQokikJOvBiI" + "2HlWgH4olfQ2"}`,
 ];
 
+/** ADR-0186 V: the vendored upstream rule is broader than the native one; the
+ * native rule still rejects these, the audit scrub redacts exactly this span */
+const UPSTREAM_BROADER = new Map<string, { rule: string; keep: string }>([
+  [`sk-ant-${body(B64, 60)}`, { rule: "anthropic_api_key", keep: "" }],
+  [`github_pat_${body("aZ09Kq_x", 60)}`, { rule: "github_fine_grained_pat", keep: "" }],
+  [`risk_live_${body(ALNUM, 24)}`, { rule: "stripe_key", keep: "ri" }],
+  [`sk_live_${"x".repeat(24)}`, { rule: "stripe_key", keep: "" }],
+  [`rk_live_${"X".repeat(32)}`, { rule: "stripe_key", keep: "" }],
+  [`sk_test_${"4eC39HqLyjWD" + "arjtT1zdp7dc"}`, { rule: "stripe_key", keep: "" }],
+  [`sk_test_${"BQokikJOvBiI" + "2HlWgH4olfQ2"}`, { rule: "stripe_key", keep: "" }],
+]);
+
 const ruleIdsMatching = (text: string): string[] =>
   CREDENTIAL_MATERIAL_RULES.filter((r) => {
     r.re.lastIndex = 0;
@@ -87,7 +100,8 @@ describe("current provider token formats are credential material", () => {
         const scrubbed = scrubAuditText(text);
         expect(scrubbed).not.toContain(sample);
         const short = id.slice("dlp.secret.".length);
-        expect(scrubbed).toMatch(new RegExp(`^the key \\[redacted:[a-z_+]*${short}[a-z_+]*:\\d+:[0-9a-f]{12}\\], pasted into a reason$`));
+        expect(evaluateTraceContent({ inputPreview: null, outputPreview: scrubbed, contentWithheld: false }).flagged).toBe(true);
+        expect(scrubbed).toMatch(new RegExp(`^the key \\[redacted:(?:[a-z0-9_.]+\\+)*${short}(?:\\+[a-z0-9_.]+)*:\\d+:[0-9a-f]{12}\\], pasted into a reason$`));
       });
     }
   }
@@ -111,7 +125,12 @@ describe("near misses are left alone", () => {
     it(`does not flag ${sample.slice(0, 24)}…`, () => {
       const newRules = ruleIdsMatching(sample).filter((id) => Object.keys(POSITIVE).includes(id));
       expect(newRules).toEqual([]);
-      expect(scrubAuditText(`note: ${sample} end`)).toBe(`note: ${sample} end`);
+      const broader = UPSTREAM_BROADER.get(sample);
+      if (!broader) expect(scrubAuditText(`note: ${sample} end`)).toBe(`note: ${sample} end`);
+      else {
+        const removed = sample.slice(broader.keep.length);
+        expect(scrubAuditText(`note: ${sample} end`)).toMatch(new RegExp(`^note: ${broader.keep}\\[redacted:pipelock\\.secrets\\.${broader.rule}:${removed.length}:[0-9a-f]{12}\\] end$`));
+      }
     });
   }
 });

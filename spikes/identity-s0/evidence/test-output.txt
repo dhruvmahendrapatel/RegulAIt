@@ -1,0 +1,73 @@
+
+> regulait-identity-s0-spike@0.0.0 test
+> node --test --test-concurrency=1 spike.test.mjs
+
+✔ exact-pinned provider/helper contract and workspace isolation (2577.940026ms)
+oidc-provider NOTICE: default ttl.Grant function called, you SHOULD change it in order to define the expiration for Grant artifacts.
+✔ red control: ordinary Postgres upsert accepts the same jti on two providers (22.63ms)
+✔ provider grant state persists across independent Postgres adapters and replicas (11.79288ms)
+✔ provider assertion replay race: exactly one 200 and one invalid_client across replicas (122.595337ms)
+✔ provider AS DPoP replay race: exactly one success and one invalid_dpop_proof (39.290749ms)
+✔ root proof race is one-use independently of client assertions and DPoP (32.7805ms)
+✔ later grant failure cannot roll back the winning replay claim (379.015646ms)
+✔ bounded callback timeout closes the request and prevents late token creation (1548.634745ms)
+✔ root exchange binds output to the child key and rebuilds actor chain (46.223306ms)
+✔ EdDSA client assertion and output DPoP binding work through the provider and RS HTTP wrapper (70.258774ms)
+✔ AS refuses missing nonce (16.951997ms)
+✔ AS refuses stale nonce (14.662435ms)
+✔ AS refuses 61-second-old proof (14.823028ms)
+✔ AS refuses future proof (17.313451ms)
+✔ AS refuses wrong method (17.101422ms)
+✔ AS refuses wrong endpoint (19.624528ms)
+✔ nonce challenge from replica A retries successfully at replica B without consuming the assertion (72.325632ms)
+✔ duplicate OAuth parameter is refused before custom grant (7.938496ms)
+✔ 5-minute assertion bound is enforced by provider callback (9.786131ms)
+✔ real gateway auth and body-size hooks precede the Koa callback (16.803944ms)
+✔ real gateway route class and session CSRF hooks remain in force (30.964813ms)
+✔ real Postgres-backed gateway IP limiter rejects before provider (4517.188597ms)
+✔ local issuer keys and stricter RS wrapper reject the old permissive proof control (27.810402ms)
+✔ same RS proof across HTTP replicas has one winner; no nonce secret divergence (27.328403ms)
+✔ independent OS processes share assertion/AS/RS replay claims and child authorization via Postgres (4781.371125ms)
+✔ RS refuses missing nonce over HTTP (26.200932ms)
+✔ RS refuses 61 seconds old over HTTP (18.581956ms)
+✔ RS refuses wrong ath over HTTP (21.808175ms)
+✔ RS refuses wrong method over HTTP (20.743566ms)
+✔ RS refuses wrong endpoint over HTTP (17.714851ms)
+✔ RS refuses a proof signed by another child (22.195595ms)
+✔ RS rereads credential, identity, sponsor and issued binding at the next use (112.657183ms)
+✔ child exchange checks parent authorization, binds child output and rebuilds nested actor chain (105.415519ms)
+✔ unused genuine parent authorization rejects changed authorization_details before authorization claim (68.663089ms)
+✔ unused genuine parent authorization rejects changed resource before authorization claim (51.656249ms)
+✔ unused genuine parent authorization rejects changed project_id before authorization claim (53.747311ms)
+✔ unused genuine parent authorization rejects changed env before authorization claim (50.739384ms)
+✔ unused genuine parent authorization rejects changed cap_micros before authorization claim (46.501648ms)
+✔ unused genuine parent authorization rejects changed max_depth before authorization claim (54.063129ms)
+✔ unused genuine parent authorization rejects changed expires_at before authorization claim (43.546887ms)
+✔ unused genuine parent authorization rejects changed idempotency_key before authorization claim (51.478867ms)
+✔ genuine unused parent authorization rejects a different authenticated child (50.803204ms)
+✔ genuine unused parent authorization refuses a substituted output DPoP key before any claim (145.41355ms)
+✔ parent authorization is one-use across replicas even with fresh client assertion and DPoP (47.680228ms)
+✔ caller-supplied actor chain cannot replace the stored root actor (15.57994ms)
+✔ offline uploaded CA validates actual ECDSA certificate and SPIFFE profile (17.414964ms)
+✔ offline path validator follows a supplied intermediate without fetching a bundle (17.429195ms)
+✔ offline certificate validation refuses wrong SAN (13.745095ms)
+✔ offline certificate validation refuses wrong trust domain (5.768034ms)
+✔ offline certificate validation refuses two URI SANs (6.411382ms)
+✔ offline certificate validation refuses expired (6.082052ms)
+✔ offline certificate validation refuses not yet valid (4.210871ms)
+✔ offline certificate validation refuses leaf CA (7.501754ms)
+✔ offline certificate validation refuses no digitalSignature (7.328047ms)
+✔ offline certificate validation refuses unknown trust anchor (4.427333ms)
+✔ JWT-SVID signature and audience verified using locally uploaded public key only (2.04639ms)
+✔ actual TLS client certificate reaches the same offline SPIFFE path validator (25.970967ms)
+✔ forwarded certificate fixture refuses default-off, untrusted peer and unauthenticated proxy (0.558563ms)
+✔ mTLS branch signature and certificate binding, no bearer or DPoP fallback (26.70221ms)
+✔ token responses and refusals reach the real chained audit without token bytes (2.811643ms)
+ℹ tests 60
+ℹ suites 0
+ℹ pass 60
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 17934.375493

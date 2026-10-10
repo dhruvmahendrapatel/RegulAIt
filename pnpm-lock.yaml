@@ -92,6 +92,15 @@ importers:
       '@opentelemetry/sdk-metrics':
         specifier: 2.12.0
         version: 2.12.0(@opentelemetry/api@1.9.1)
+      '@peculiar/asn1-ess':
+        specifier: 2.10.0
+        version: 2.10.0
+      '@peculiar/asn1-schema':
+        specifier: 2.10.0
+        version: 2.10.0
+      '@peculiar/asn1-x509':
+        specifier: 2.10.0
+        version: 2.10.0
       '@regulait/api-client':
         specifier: workspace:*
         version: link:../../packages/api-client
@@ -155,6 +164,9 @@ importers:
       jose:
         specifier: 6.2.12
         version: 6.2.12
+      oauth4webapi:
+        specifier: 3.8.8
+        version: 3.8.8
       openid-client:
         specifier: ^6.8.4
         version: 6.8.8
@@ -177,6 +189,9 @@ importers:
         specifier: 3.25.2
         version: 3.25.2(zod@3.25.76)
     devDependencies:
+      '@regulait/engine-garak':
+        specifier: workspace:*
+        version: link:../../packages/engine-garak
       '@regulait/engine-modelscan':
         specifier: workspace:*
         version: link:../../packages/engine-modelscan
@@ -297,6 +312,25 @@ importers:
       drizzle-kit:
         specifier: ^0.31.4
         version: 0.31.11
+
+  packages/engine-garak:
+    dependencies:
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../engine-runner
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.15))
 
   packages/engine-modelscan:
     dependencies:
@@ -447,6 +481,9 @@ importers:
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
+      fast-check:
+        specifier: 4.10.2
+        version: 4.10.2
       vitest:
         specifier: ^4.1.11
         version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.15))
@@ -459,12 +496,24 @@ importers:
       '@arizeai/openinference-semantic-conventions':
         specifier: 2.14.0
         version: 2.14.0
+      '@cyclonedx/cyclonedx-library':
+        specifier: 10.3.0
+        version: 10.3.0(ajv-formats@3.0.1(ajv@8.20.0))(ajv@8.20.0)
+      '@humanwhocodes/momoa':
+        specifier: 3.3.13
+        version: 3.3.13
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
       '@opentelemetry/semantic-conventions':
         specifier: 1.43.0
         version: 1.43.0
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.20.0)
       canonicalize:
         specifier: 5.1.0
         version: 5.1.0
@@ -822,6 +871,33 @@ packages:
 
   '@cedar-policy/cedar-wasm@4.12.0':
     resolution: {integrity: sha512-tCSj92hh4fnmas4ojO4tjx8wAAW3mKVgQ7M388NsSpXp64FVeYY6xwhKtJRaaYGK0qLiN2jnq8/SNIU2r5fdPw==}
+
+  '@cyclonedx/cyclonedx-library@10.3.0':
+    resolution: {integrity: sha512-RIT28sp1U0PCHaaeF3yNRwk6Jig/XJ8UsYAVOMYaHQ+0VVOvsjcp0PTWQFLUqJFF8XMud+Kdq6G+wtDAh+QJFA==}
+    engines: {node: '>=20.18.0'}
+    peerDependencies:
+      ajv: ^8.12.0
+      ajv-formats: ^3.0.1
+      ajv-formats-draft2019: ^1.6.1
+      libxmljs2: ^0.35||^0.37
+      packageurl-js: '*'
+      spdx-expression-parse: '*'
+      xmlbuilder2: ^3.0.2||^4.0.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
+      ajv-formats:
+        optional: true
+      ajv-formats-draft2019:
+        optional: true
+      libxmljs2:
+        optional: true
+      packageurl-js:
+        optional: true
+      spdx-expression-parse:
+        optional: true
+      xmlbuilder2:
+        optional: true
 
   '@dagrejs/dagre@3.1.1':
     resolution: {integrity: sha512-zroZB1dFOFiGgv4Xcrn1DckB1o4aOikPqD2NDQPV0WM//CXGcS6xiD0rNkqHmw6FEg4tabt4nxPLwgCWT+Vb2A==}
@@ -1207,6 +1283,10 @@ packages:
     peerDependencies:
       hono: ^4
 
+  '@humanwhocodes/momoa@3.3.13':
+    resolution: {integrity: sha512-AbKq3EW41+HY6pNMJgAOrz68iyiTTf0Nr1JRHHfuG5zwniJ9Dw8J3U7oa1I2ptpqYwmEf1sXKOGK6lbdZ9eqmg==}
+    engines: {node: '>=18'}
+
   '@isaacs/cliui@8.0.2':
     resolution: {integrity: sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA==}
     engines: {node: '>=12'}
@@ -1331,6 +1411,10 @@ packages:
 
   '@peculiar/asn1-ecc@2.10.0':
     resolution: {integrity: sha512-GFd3iOjFrWX+QWH2R2dO5QSJyyRGv9CIBKtRlGlPNCvb2RvmCbBDexe91MJgV76c69d998Xsa+CvuQ98seoiPg==}
+    engines: {node: '>=14'}
+
+  '@peculiar/asn1-ess@2.10.0':
+    resolution: {integrity: sha512-h2auGLn6DqhBdfu+bozFHZ7IM56/SkZoCS0EAdfHOuQQjG1FHRpJC64/54XSFi7pEPrMOG3buZ8hJMO/O9I0Hg==}
     engines: {node: '>=14'}
 
   '@peculiar/asn1-pfx@2.10.0':
@@ -2345,6 +2429,10 @@ packages:
   extend@3.0.2:
     resolution: {integrity: sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==}
 
+  fast-check@4.10.2:
+    resolution: {integrity: sha512-iK2f+YrcmoeGqk6fA0ea2bptcu/itMIm4NfEozq6N25+aG6h7s5HZbB/k1aV7b5w5sFLMCbbtRUsTVR+BgC3xw==}
+    engines: {node: '>=12.17.0'}
+
   fast-decode-uri-component@1.0.1:
     resolution: {integrity: sha512-WKgKWg5eUxvRZGwW8FvfbaH7AXSh2cL+3j5fMGzUMCxWBJ3dV3a7Wz8y2f/uQ0e3B6WmodD3oS54jTQ9HVTIIg==}
 
@@ -2944,6 +3032,9 @@ packages:
 
   pump@3.0.4:
     resolution: {integrity: sha512-VS7sjc6KR7e1ukRFhQSY5LM2uBWAUPiOPa/A3mkKmiMwSmRFUITt0xuj+/lesgnCv+dPIEYlkzrcyXgquIHMcA==}
+
+  pure-rand@8.4.2:
+    resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
 
   pvtsutils@1.3.6:
     resolution: {integrity: sha512-PLgQXQ6H2FWCaeRak8vvk1GW462lMxB5s3Jm673N82zI4vqtVUPuZdffdZbPDFRoU8kAhItWFtPCWiPpp4/EDg==}
@@ -4155,6 +4246,11 @@ snapshots:
 
   '@cedar-policy/cedar-wasm@4.12.0': {}
 
+  '@cyclonedx/cyclonedx-library@10.3.0(ajv-formats@3.0.1(ajv@8.20.0))(ajv@8.20.0)':
+    optionalDependencies:
+      ajv: 8.20.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
+
   '@dagrejs/dagre@3.1.1':
     dependencies:
       '@dagrejs/graphlib': 4.0.5
@@ -4401,6 +4497,8 @@ snapshots:
     dependencies:
       hono: 4.13.12
 
+  '@humanwhocodes/momoa@3.3.13': {}
+
   '@isaacs/cliui@8.0.2':
     dependencies:
       string-width: 5.1.2
@@ -4576,6 +4674,16 @@ snapshots:
 
   '@peculiar/asn1-ecc@2.10.0':
     dependencies:
+      '@peculiar/asn1-schema': 2.10.0
+      '@peculiar/asn1-x509': 2.10.0
+      asn1js: 3.0.10
+      tslib: 2.8.1
+
+  '@peculiar/asn1-ess@2.10.0':
+    dependencies:
+      '@peculiar/asn1-cms': 2.10.0
+      '@peculiar/asn1-pkcs9': 2.10.0
+      '@peculiar/asn1-rsa': 2.10.0
       '@peculiar/asn1-schema': 2.10.0
       '@peculiar/asn1-x509': 2.10.0
       asn1js: 3.0.10
@@ -5535,6 +5643,10 @@ snapshots:
 
   extend@3.0.2: {}
 
+  fast-check@4.10.2:
+    dependencies:
+      pure-rand: 8.4.2
+
   fast-decode-uri-component@1.0.1: {}
 
   fast-deep-equal@3.1.3: {}
@@ -6155,6 +6267,8 @@ snapshots:
     dependencies:
       end-of-stream: 1.4.5
       once: 1.4.0
+
+  pure-rand@8.4.2: {}
 
   pvtsutils@1.3.6:
     dependencies:

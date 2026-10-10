@@ -1,0 +1,1 @@
+W1010 05:19:57.766198       1 filter.go:43] *** SECCOMP WARNING: host filesystem enabled: syscall filters less restrictive!

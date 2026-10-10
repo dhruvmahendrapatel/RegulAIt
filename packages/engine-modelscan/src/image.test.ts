@@ -66,6 +66,16 @@ describe("the modelscan image's inputs", () => {
     expect(dockerfile).toContain(`COPY engines/modelscan/modelscan-settings.toml ${MODELSCAN_IMAGE_PATHS.settingsFile}`);
     expect(dockerfile).toContain(`chmod 0444 ${MODELSCAN_IMAGE_PATHS.settingsFile}`);
     expect(dockerfile).toMatch(/\nUSER 10001:10001\n/);
+    // PR #212 review [4235322394]: the runtime stage proves at build time that node runs on its base,
+    // with libstdc++ and libgcc from that base's own packages
+    const runtime = dockerfile.slice(dockerfile.indexOf("AS runtime"));
+    const nodeCopy = runtime.indexOf("COPY --from=node /usr/local/bin/node /usr/local/bin/node");
+    const nodeCheck = runtime.indexOf("&& node --version");
+    expect(nodeCopy).toBeGreaterThan(0);
+    expect(nodeCheck).toBeGreaterThan(nodeCopy);
+    expect(runtime.slice(nodeCopy, nodeCheck)).toContain("dpkg-query -W -f='${Package} ${Version}\\n' libstdc++6 libgcc-s1");
+    expect(runtime.slice(nodeCopy, nodeCheck)).toContain("ldd /usr/local/bin/node | grep -q 'not found'");
+    expect(nodeCheck).toBeLessThan(runtime.indexOf("\nUSER "));
     expect(dockerfile).not.toMatch(/docker\.sock|EXPOSE/);
     const env = /\nENV ([\s\S]*?)\nUSER/.exec(dockerfile.slice(dockerfile.indexOf("AS runtime")))![1]!;
     expect(isPublicAddress(/REGULAIT_EGRESS_PROBE_ADDRESS=(\S+)/.exec(env)?.[1])).toBe(true);
@@ -136,6 +146,20 @@ describe("the modelscan image's inputs", () => {
     expect(some.stale).toHaveLength(1);
     // an allow entry that is not pending admits nothing
     expect(gate.judge(rows, [{ ...allow[0], decision: "approved" }]).denied.map((r) => r.subject)).toContain("numpy");
+  });
+
+  it("ADR-0187 decision 180: the .npy header check is baked read-only where the scanner runs it, on the venv's interpreter", () => {
+    expect(MODELSCAN_IMAGE_PATHS.npyHelper).toBe("/opt/modelscan/npy-header.py");
+    expect(MODELSCAN_IMAGE_PATHS.python).toBe(`${MODELSCAN_IMAGE_PATHS.venvBin}/python`);
+    expect(dockerfile).toContain(`COPY engines/modelscan/npy-header.py ${MODELSCAN_IMAGE_PATHS.npyHelper}`);
+    expect(dockerfile).toMatch(new RegExp(`^RUN chmod 0444 \\S+ ${MODELSCAN_IMAGE_PATHS.npyHelper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `, "m"));
+    // stdlib only: it imports nothing outside the standard library (it runs with -I -S)
+    const helper = readFileSync(path.join(dir, "npy-header.py"), "utf8");
+    const imports = [...helper.matchAll(/^(?:import|from) (\S+)/gm)].map((m) => m[1]);
+    // decisions 219–224 add zipfile and zlib (the .npz check), both the standard library
+    expect(imports.sort()).toEqual(["ast", "json", "os", "re", "sys", "zipfile", "zlib"]);
+    // no builtin eval, exec or compile (re.compile is a method), no dynamic import
+    expect(helper).not.toMatch(/(?<![\w.])(?:eval|exec|compile)\(|__import__|importlib/);
   });
 
   it.skipIf(spawnSync("python3", ["--version"]).status !== 0)("the settings patch applies only to exactly the expected code", async () => {

@@ -1483,3 +1483,41 @@ Rule: before relaying a tool or environment notice to the owner, check it agains
 and the summary, and relay it only if the current work depends on it. "The harness says to tell the user" does not
 override an owner instruction not to raise a topic.
 
+
+### M-072 (2026-10-10) - A node_modules symlink was committed with `git add -A`
+
+An agent worktree had `node_modules` symlinked to the main checkout to skip an install. A broad `git add -A` staged the
+symlink and it was committed, so the branch carried a link to a path that exists only on this machine.
+
+Rule: never `git add -A` or `git add .` in a worktree that has symlinks or `node_modules`. Stage the files you changed
+by path, and check `git diff --cached --stat` for anything outside them before committing.
+
+### M-073 (2026-10-10) - A subagent killed processes by name pattern
+
+The judge agent stopped a stuck test run by killing processes by name pattern instead of by PID. On a shared machine a
+pattern can also match processes owned by other sessions (test servers, the merge loop), which is why the standing
+constraint "never kill processes by pattern" exists.
+
+Rule: stop only processes you started, by the PID you recorded when you started them. Every agent prompt repeats the
+constraint, and a run that needs stopping is stopped through its own task handle.
+
+### M-074 (2026-10-10) - Agent-written regexes failed the CodeQL ReDoS gate three times
+
+B1 shipped two regexes on caller input with overlapping repeated groups (`js/polynomial-redos`), and I1 shipped one
+with exponential backtracking (`js/redos`). Each was caught only by CI's SAST gate, costing a fix round per slice. The
+agent briefs did not mention the rule, although the gate already existed.
+
+Rule: every agent brief that may add input validation states the rule up front: regexes on caller or record input
+must be linear (anchored, no nested or overlapping quantifiers, or a length cap plus a non-regex check), and the CodeQL
+alert is never allowlisted. Prefer a parser (URL, the library) or existing helpers over a new regex.
+
+### M-075 (2026-10-10) - S3 mixed the process clock with the database clock and spread liveness checks
+
+ADR-0188 S3 needed four Codex review rounds. Most findings were the same two faults: timestamps written or compared
+with the gateway's clock against rows stamped by the database's clock (revocation rolled back under skew, sweeps
+aborted, fresh tokens rejected), and "is this live" checks that each tested a different subset of conditions (disabled
+agents, credential windows, current entitlements).
+
+Rule: any timestamp written to, or compared with, a database row uses the database clock (`now()`), and each "is it
+live" question has one shared predicate used by every path. Ask for a sweep of both classes after the first such
+finding, not after the fourth.

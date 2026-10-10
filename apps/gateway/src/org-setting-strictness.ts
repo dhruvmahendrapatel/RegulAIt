@@ -58,6 +58,18 @@ import {
   batch5SettingRelaxed,
   BATCH5_SETTING_KEYS,
   BATCH5_STRICT_DEFAULTS,
+  identitySettingLooser,
+  bomSettingLooser,
+  bomSettingRelaxed,
+  BOM_SETTING_KEYS,
+  BOM_STRICT_DEFAULTS,
+  identitySettingRelaxed,
+  IDENTITY_SETTING_KEYS,
+  IDENTITY_STRICT_DEFAULTS,
+  isolationSettingLooser,
+  isolationSettingRelaxed,
+  ISOLATION_SETTING_KEYS,
+  ISOLATION_STRICT_DEFAULTS,
   type UpdateOrgSettings,
 } from "@regulait/shared";
 
@@ -180,6 +192,23 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of BATCH5_SETTING_KEYS) {
     out[k] = rule(BATCH5_STRICT_DEFAULTS[k], (v) => batch5SettingRelaxed(k, v as never), (v, b) => batch5SettingLooser(k, v, b));
   }
+  // ADR-0188 (batch 6 item 1): sponsor-only mode, a longer token, a deeper chain and the nonce off are looser than
+  // the default; the auth-method list and the key age are judged against the stored value (adding a method back,
+  // lengthening a shortened key age)
+  for (const k of IDENTITY_SETTING_KEYS) {
+    out[k] = rule(IDENTITY_STRICT_DEFAULTS[k], (v) => identitySettingRelaxed(k, v as never), (v, b) => identitySettingLooser(k, v, b));
+  }
+  // ADR-0189 (batch 6 item 2): capture off, a weaker finality, auditors, display names, on-demand snapshots,
+  // skip-and-record, an added CycloneDX version and a higher export rate are looser than the default; finality,
+  // versions and the rate are also judged against the stored value
+  for (const k of BOM_SETTING_KEYS) {
+    out[k] = rule(BOM_STRICT_DEFAULTS[k], (v) => bomSettingRelaxed(k, v as never), (v, b) => bomSettingLooser(k, v, b));
+  }
+  // ADR-0190 (batch 6 item 3): warn mode, a lower class floor and a longer attestation lifetime are looser than the
+  // default; a floor an admin raised is lowered back (or a shortened lifetime lengthened) only with the step-up
+  for (const k of ISOLATION_SETTING_KEYS) {
+    out[k] = rule(ISOLATION_STRICT_DEFAULTS[k], (v) => isolationSettingRelaxed(k, v as never), (v, b) => isolationSettingLooser(k, v, b));
+  }
   return out;
 }
 
@@ -187,7 +216,10 @@ type BatchKey =
   | (typeof ACCOUNTABILITY_SETTING_KEYS)[number]
   | (typeof BATCH3_SETTING_KEYS)[number]
   | (typeof BATCH4_SETTING_KEYS)[number]
-  | (typeof BATCH5_SETTING_KEYS)[number];
+  | (typeof BATCH5_SETTING_KEYS)[number]
+  | (typeof IDENTITY_SETTING_KEYS)[number]
+  | (typeof BOM_SETTING_KEYS)[number]
+  | (typeof ISOLATION_SETTING_KEYS)[number];
 
 /** THE REGISTRY (see the header). Typed over every writable key. */
 export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: StrictnessEntry } = {

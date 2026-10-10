@@ -103,10 +103,12 @@ import { breakerAdmits, recordUpstreamFailure, recordUpstreamSuccess } from "./u
 import {
   connectUpstream,
   consumeApprovalOrRetire,
+  credentialAudienceDecision,
   preflightUpstream,
   queueGovernedApproval,
   type GovernedToolCallOutcome,
 } from "./mcp-proxy.js";
+import { refuseOutboundCredentialAudience } from "./outbound-audience.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -265,7 +267,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     await db.insert(auditLog).values({
       userId,
       serverId,
-      detail: { phase: "protocol", method: methodLabel(method), projectId },
+      detail: { receiptClass:"decision", phase: "protocol", method: methodLabel(method), projectId },
       effect: "deny",
       ruleId: "mcp-method-unsupported",
       ruleChain: [],
@@ -293,7 +295,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       userId,
       serverId,
       toolName: grant,
-      detail: { phase: "protocol", method, projectId },
+      detail: { receiptClass:"decision", phase: "protocol", method, projectId },
       ...decision,
     });
     recordDecision({ surface: "mcp_protocol", effect: "deny" });
@@ -332,12 +334,33 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       undefined,
       undefined,
       approvalTargetForServer(serverId, serverRow),
+      { actor: null }, // ADR-0188 S4 replaces
     );
+  // ADR-0186 V, decision 32 — the decided params (EXACTLY what is sent) against
+  // the registered upstream URL, after the entitlement decision and before its
+  // row (see the tool path in mcp-proxy.ts: a refused payload leaves no
+  // arguments digest); stdio has no host and is out of scope
+  if (decision.effect !== "deny" && serverRow.transport !== "stdio") {
+    const audience = await refuseOutboundCredentialAudience(db, {
+      userId,
+      surface: "mcp_protocol",
+      content: [decided],
+      destinations: [serverRow.url],
+      projectId,
+      subject: { serverId, toolName: grant },
+      detail: { method, approvalScope, contextDigest, target: auditTarget(serverRow) },
+    });
+    if (audience) {
+      recordDecision({ surface: "mcp_protocol", effect: "deny" });
+      return { kind: "denied", decision: credentialAudienceDecision(audience.reason) };
+    }
+  }
   await db.insert(auditLog).values({
     userId,
     serverId,
     toolName: grant,
     detail: {
+      receiptClass:"decision",
       phase: "protocol",
       method,
       argumentsDigest,
@@ -366,7 +389,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
         userId,
         serverId,
         toolName: grant,
-        detail: { phase: "compliance", method, mcpDefaultMode: "read_only", projectId, governingTags: mcpMode.governingTags },
+        detail: { receiptClass:"decision", phase: "compliance", method, mcpDefaultMode: "read_only", projectId, governingTags: mcpMode.governingTags },
         ...deny,
       });
       return { kind: "denied", decision: deny };
@@ -380,7 +403,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       userId,
       serverId,
       toolName: grant,
-      detail: { phase: "project-budget", method, projectId },
+      detail: { receiptClass:"decision", phase: "project-budget", method, projectId },
       effect: "deny",
       ruleId: "project-budget-cap",
       ruleChain: [],
@@ -430,7 +453,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
         userId,
         serverId,
         toolName: grant,
-        detail: { phase: "pii", method, pii: { mode: piiMode, action: "block", phase: "input", inputHits, outputHits: [] }, projectId },
+        detail: { receiptClass:"decision", phase: "pii", method, pii: { mode: piiMode, action: "block", phase: "input", inputHits, outputHits: [] }, projectId },
         effect: "deny",
         ruleId: "pii-blocked",
         ruleChain: [],
@@ -589,7 +612,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
         userId,
         serverId,
         toolName: grant,
-        detail: { phase: "pii", method, pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits }, projectId },
+        detail: { receiptClass:"decision", phase: "pii", method, pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits }, projectId },
         effect: "deny",
         ruleId: "pii-blocked",
         ruleChain: [],
@@ -602,7 +625,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
         userId,
         serverId,
         toolName: grant,
-        detail: { phase: "pii", method, pii: { mode: piiMode, action: "warn", inputHits, outputHits }, projectId },
+        detail: { receiptClass:"decision", phase: "pii", method, pii: { mode: piiMode, action: "warn", inputHits, outputHits }, projectId },
         effect: "allow",
         ruleId: "pii-warned",
         ruleChain: [],
@@ -668,12 +691,14 @@ async function loggingRelayAllowed(
     undefined,
     undefined,
     approvalTargetForServer(a.serverId, a.serverRow),
+    { actor: null }, // ADR-0188 S4 replaces
   );
   await db.insert(auditLog).values({
     userId: a.userId,
     serverId: a.serverId,
     toolName: grant,
     detail: {
+      receiptClass:"decision",
       phase: "protocol-relay",
       method: "notifications/message",
       forMethod: methodLabel(a.forMethod),
@@ -813,7 +838,7 @@ export function installProtocolSurface(
       await ctx.db.insert(auditLog).values({
         userId: ctx.userId,
         serverId: ctx.serverId,
-        detail: { phase: "protocol", notifications: [...new Set(dropped)].slice(0, 20), count: dropped.length, projectId: ctx.projectId },
+        detail: { receiptClass:"decision", phase: "protocol", notifications: [...new Set(dropped)].slice(0, 20), count: dropped.length, projectId: ctx.projectId },
         effect: "deny",
         ruleId: "mcp-notification-dropped",
         ruleChain: [],

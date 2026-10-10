@@ -1,0 +1,22 @@
+{
+  "repo": "https://github.com/microsoft/agent-governance-toolkit",
+  "commit": "f68f2cf312c7e1366d6fd5654c51d8380c815222",
+  "retrievedAt": "2026-10-07T21:28:48.565775Z",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "7df20dcdf9197e9945c14858d41c60f11b52b93e5b69e2b63416b874d598d322",
+      "spdx": "MIT"
+    },
+    {
+      "path": "agent-governance-python/agent-os/LICENSE",
+      "sha256": "7df20dcdf9197e9945c14858d41c60f11b52b93e5b69e2b63416b874d598d322",
+      "spdx": "MIT"
+    },
+    {
+      "path": "agent-governance-python/agent-os/src/agent_os/mcp_security.py",
+      "sha256": "0a943f58610f68b455a0093d6383e5c3cf4332eb5d245e8dde1c93ad1283763f",
+      "spdx": "MIT"
+    }
+  ]
+}

@@ -13,7 +13,10 @@
  *      at all);
  *   2. the scanner runs modelscan on it (scan.ts) into `results/<runId>/report.json` and writes
  *      `results/<runId>/done.json` last (atomically): the exit code, whether it was killed at its
- *      time limit or cancelled, and the report's sha256;
+ *      time limit or cancelled, and the report's sha256 (for a `.npy`, also the strict header check's
+ *      answer, ADR-0187 decisions 180–184: modelscan then sees only an object array's pickle payload;
+ *      for a `.npz`, the archive check's answer, decisions 219–224: modelscan sees only the object
+ *      members' payloads);
  *   3. a cancel is the file `jobs/<runId>/cancel`: the scanner kills the process group;
  *   4. the runner reads the report, checks it against done.json's sha256, and removes its job; the
  *      scanner removes any result whose job is gone.
@@ -28,8 +31,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { ARTIFACT_FORMATS, MODELSCAN_MAX_REPORT_BYTES, type ArtifactFormat } from "@regulait/shared";
-import { runModelscan, type ModelscanOutcome, type ModelscanRunnerOptions } from "./scan.js";
+import { ARTIFACT_FORMATS, MODELSCAN_MAX_REPORT_BYTES, npyCheckSchema, npzCheckSchema, type ArtifactFormat } from "@regulait/shared";
+import { runScanJob, type ModelscanRunnerOptions, type ScanOutcome } from "./scan.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const ARTIFACT_NAME = /^artifact\.(pkl|pt|npy|zip|h5)$/;
@@ -51,6 +54,10 @@ const doneSchema = z
     cancelled: z.boolean(),
     reportSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     reportTooLarge: z.boolean(),
+    // ADR-0187 decisions 180–184: the scanner's `.npy` header check (null for every other format)
+    npy: npyCheckSchema.nullable(),
+    // ADR-0187 decisions 219–224: the scanner's `.npz` archive check (null for every other format)
+    npz: npzCheckSchema.nullable(),
   })
   .strict();
 
@@ -58,7 +65,7 @@ const doneSchema = z
 export interface ScanExecutor {
   /** a fresh directory to write the artifact into */
   stage(runId: string): Promise<string>;
-  scan(job: ScanJob, signal: AbortSignal): Promise<ModelscanOutcome>;
+  scan(job: ScanJob, signal: AbortSignal): Promise<ScanOutcome>;
   /** remove everything of this run */
   release(runId: string): Promise<void>;
   /**
@@ -88,10 +95,10 @@ export class LocalScanExecutor implements ScanExecutor {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     return dir;
   }
-  async scan(job: ScanJob, signal: AbortSignal): Promise<ModelscanOutcome> {
+  async scan(job: ScanJob, signal: AbortSignal): Promise<ScanOutcome> {
     const outDir = path.join(this.root, job.runId, "out");
     await mkdir(outDir, { recursive: true, mode: 0o700 });
-    return runModelscan({ artifactPath: path.join(this.root, job.runId, "in", job.artifactName), outDir, timeoutMs: job.timeoutMs, signal }, this.opts);
+    return runScanJob({ format: job.format, artifactPath: path.join(this.root, job.runId, "in", job.artifactName), outDir, timeoutMs: job.timeoutMs, signal }, this.opts);
   }
   async release(runId: string): Promise<void> {
     if (UUID.test(runId)) await rm(path.join(this.root, runId), { recursive: true, force: true });
@@ -131,10 +138,10 @@ export class ExchangeScanExecutor implements ScanExecutor {
     await mkdir(dir, { mode: 0o750 });
     return dir;
   }
-  async scan(job: ScanJob, signal: AbortSignal): Promise<ModelscanOutcome> {
+  async scan(job: ScanJob, signal: AbortSignal): Promise<ScanOutcome> {
     scanJobSchema.parse(job);
     // PR #212 review sweep [4234946096]: an already-aborted signal publishes nothing
-    if (signal.aborted) return { exitCode: null, timedOut: false, cancelled: true, report: null, reportSha256: null, reportTooLarge: false };
+    if (signal.aborted) return { exitCode: null, timedOut: false, cancelled: true, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null };
     const dir = this.staging(job.runId);
     await writeFile(path.join(dir, "job.json"), JSON.stringify(job), { mode: 0o640 });
     const live = path.join(this.jobsRoot, job.runId);
@@ -149,16 +156,16 @@ export class ExchangeScanExecutor implements ScanExecutor {
         await writeFile(path.join(live, "cancel"), "", { mode: 0o640 }).catch(() => undefined);
         cancelSentAt = Date.now();
       }
-      if (cancelSentAt !== null && Date.now() - cancelSentAt > 5000) return { exitCode: null, timedOut: false, cancelled: true, report: null, reportSha256: null, reportTooLarge: false };
+      if (cancelSentAt !== null && Date.now() - cancelSentAt > 5000) return { exitCode: null, timedOut: false, cancelled: true, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null };
       if (Date.now() > give) {
         await writeFile(path.join(live, "cancel"), "", { mode: 0o640 }).catch(() => undefined);
-        return { exitCode: null, timedOut: true, cancelled: false, report: null, reportSha256: null, reportTooLarge: false };
+        return { exitCode: null, timedOut: true, cancelled: false, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null };
       }
       await new Promise((r) => setTimeout(r, poll));
     }
   }
-  private async collect(runId: string, donePath: string): Promise<ModelscanOutcome> {
-    const fail = (): ModelscanOutcome => ({ exitCode: null, timedOut: false, cancelled: false, report: null, reportSha256: null, reportTooLarge: false });
+  private async collect(runId: string, donePath: string): Promise<ScanOutcome> {
+    const fail = (): ScanOutcome => ({ exitCode: null, timedOut: false, cancelled: false, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null });
     let done: z.infer<typeof doneSchema>;
     try {
       const parsed = doneSchema.safeParse(JSON.parse(await readFile(donePath, "utf8")));
@@ -239,7 +246,7 @@ export async function scannerTick(
     } catch {
       // an unreadable job is answered (exit unknown), so the runner is not left waiting
       await mkdir(outDir, { recursive: true, mode: 0o750 });
-      await writeAtomic(path.join(outDir, "done.json"), JSON.stringify({ exitCode: null, timedOut: false, cancelled: false, reportSha256: null, reportTooLarge: false }));
+      await writeAtomic(path.join(outDir, "done.json"), JSON.stringify({ exitCode: null, timedOut: false, cancelled: false, reportSha256: null, reportTooLarge: false, npy: null, npz: null }));
       log(`scanner: job ${runId} is invalid; answered without scanning`);
       continue;
     }
@@ -249,9 +256,9 @@ export async function scannerTick(
     const watch = setInterval(() => {
       if (existsSync(cancelFile) || !existsSync(path.join(opts.jobsRoot, runId))) abort.abort();
     }, opts.pollMs ?? 250);
-    let outcome: ModelscanOutcome;
+    let outcome: ScanOutcome;
     try {
-      outcome = await runModelscan({ artifactPath: path.join(opts.jobsRoot, runId, job.artifactName), outDir, timeoutMs: job.timeoutMs, signal: abort.signal }, opts.modelscan);
+      outcome = await runScanJob({ format: job.format, artifactPath: path.join(opts.jobsRoot, runId, job.artifactName), outDir, timeoutMs: job.timeoutMs, signal: abort.signal }, opts.modelscan);
     } finally {
       clearInterval(watch);
     }
@@ -263,6 +270,8 @@ export async function scannerTick(
         cancelled: outcome.cancelled,
         reportSha256: outcome.reportSha256,
         reportTooLarge: outcome.reportTooLarge,
+        npy: outcome.npy,
+        npz: outcome.npz,
       }),
     );
     ran += 1;
