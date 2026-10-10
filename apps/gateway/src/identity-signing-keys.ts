@@ -35,6 +35,7 @@ import { createPrivateKey, createPublicKey, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { calculateJwkThumbprint } from "jose";
 import { and, auditLog, desc, eq, identitySigningKeys, isNull, issuedTokens, sql, type Db, type IdentitySigningKeyRow } from "@regulait/db";
+import { databaseNow } from "./delegation.js";
 import {
   IDENTITY_SETTING_LIMITS,
   IDENTITY_SIGNING_KEY_ENV,
@@ -159,17 +160,20 @@ export async function listIdentitySigningKeys(db: Db): Promise<IdentitySigningKe
 export function signingKeyAccepts(row: IdentitySigningKeyRow, iatSeconds: number, now: Date): boolean {
   if (row.revokedAt || !row.activatedAt) return false;
   const iatMs = iatSeconds * 1000;
-  // one second of slack: a JWT `iat` is whole seconds and the activation stamp is not
+  // one second of slack at BOTH ends of the key's stretch: a JWT `iat` is whole seconds and the stamps are
+  // not, and a mint racing a rotation (it read the signer, then the rotation committed) can sit a fraction of
+  // a second past the retirement stamp. iat and both stamps are all database-clock values (see mint).
   if (iatMs < row.activatedAt.getTime() - 1000) return false;
   if (row.retiredAt) {
-    if (iatMs > row.retiredAt.getTime()) return false;
+    if (iatMs > row.retiredAt.getTime() + 1000) return false;
     if (now.getTime() >= row.retiredAt.getTime() + SIGNING_KEY_OVERLAP_SECONDS * 1000) return false;
   }
   return true;
 }
 
-/** the keys a verifier may use right now: activated, unrevoked, and (if retired) inside the overlap */
-export async function publishedSigningKeys(db: Db, now: Date = new Date()): Promise<IdentitySigningKeyRow[]> {
+/** the keys a verifier may use right now (database clock unless pinned): activated, unrevoked, and (if retired) inside the overlap */
+export async function publishedSigningKeys(db: Db, nowIn?: Date): Promise<IdentitySigningKeyRow[]> {
+  const now = nowIn ?? (await databaseNow(db));
   const rows = await db.select().from(identitySigningKeys).where(isNull(identitySigningKeys.revokedAt));
   return rows.filter(
     (r) => r.activatedAt !== null && (r.retiredAt === null || now.getTime() < r.retiredAt.getTime() + SIGNING_KEY_OVERLAP_SECONDS * 1000),

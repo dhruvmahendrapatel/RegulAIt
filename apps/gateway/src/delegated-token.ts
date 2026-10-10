@@ -57,7 +57,7 @@ import {
   type DelegationBody,
   type ReplayNamespace,
 } from "@regulait/shared";
-import { loadLiveChain, type LiveChain } from "./delegation.js";
+import { databaseNow, loadLiveChain, type LiveChain } from "./delegation.js";
 import { currentIssuerSigner, ISSUER_JWS_ALG, publishedSigningKeys, signingKeyAccepts } from "./identity-signing-keys.js";
 import { loadOrgSettings } from "./org-settings.js";
 
@@ -124,11 +124,11 @@ export function dpopNonceValid(value: unknown, nonceKey: Buffer, now: Date = new
  */
 export async function claimReplay(db: Db, namespace: ReplayNamespace, key: string, expiresAt: Date): Promise<boolean> {
   const k = key.length <= 256 ? key : b64urlSha256(key);
-  const now = new Date();
-  const until = expiresAt.getTime() > now.getTime() + 1000 ? expiresAt : new Date(now.getTime() + 1000);
+  // at least one second past `claimed_at` (the database's now()), computed BY the database: a minimum taken
+  // from this replica's clock could land at or before claimed_at and break replay_claims_expiry_check
   const rows = await db
     .insert(replayClaims)
-    .values({ namespace, key: k, expiresAt: until })
+    .values({ namespace, key: k, expiresAt: sql`GREATEST(${expiresAt.toISOString()}::timestamptz, now() + interval '1 second')` })
     .onConflictDoNothing()
     .returning({ key: replayClaims.key });
   return rows.length === 1;
@@ -172,7 +172,9 @@ export async function mintDelegatedToken(
   db: Db,
   opts: { grantId: string; issuer: string; secrets: IdentitySecrets; now?: Date; env?: NodeJS.ProcessEnv },
 ): Promise<MintedToken> {
-  const now = opts.now ?? new Date();
+  // the database clock (a test may pin `now`): the token's iat/exp and the issued_tokens row are compared
+  // with database rows by every replica's verifier
+  const now = opts.now ?? (await databaseNow(db));
   const live = await loadLiveChain(db, opts.grantId, now);
   if (!live) throw new TokenMintError("grant_not_found", "no such delegation grant");
   const grant = live.leaf;
@@ -182,11 +184,12 @@ export async function mintDelegatedToken(
   if (live.failure) throw new TokenMintError("chain_not_live", `the delegation chain is not live (${live.failure.code})`);
   const org = await loadOrgSettings(db);
   const signer = await currentIssuerSigner(db, opts.env ?? process.env);
-  // `iat` is this replica's clock, but never earlier than the signer's activation (a database-clock
-  // stamp): a replica whose clock trails the database would otherwise mint, right after a rotation,
-  // tokens the verifier refuses as "issued before the key was the signer". Clamping forward keeps the
-  // verifier's check strict and only ever shortens the token's life on the lagging replica's own clock.
-  const iat = Math.max(Math.floor(now.getTime() / 1000), Math.ceil(signer.activatedAt.getTime() / 1000));
+  // `iat` is the DATABASE clock (`now` above), the clock the key's activated_at / retired_at stamps come from,
+  // so the verifier compares one clock domain with itself. A process-clock iat ran up to the replica's skew
+  // ahead or behind those stamps: a token minted just before a rotation by a replica 500 ms ahead had an
+  // iat after retired_at and stopped verifying (CI on 2d2645e). Whole seconds round DOWN (never past the
+  // retirement stamp); the activation clamp also rounds down and sits inside the verifier's 1 s allowance.
+  const iat = Math.max(Math.floor(now.getTime() / 1000), Math.floor(signer.activatedAt.getTime() / 1000));
   const grantLeft = Math.floor(grant.expiresAt.getTime() / 1000) - iat;
   const ttl = Math.min(org.delegatedTokenTtlSeconds, grantLeft);
   if (ttl < 1) throw new TokenMintError("grant_expiring", "the grant expires before a token could be used");
@@ -363,11 +366,13 @@ async function storedAndLive(
  * code; `use_dpop_nonce` carries a fresh nonce to retry with.
  */
 export async function verifyDelegatedToken(db: Db, input: VerifyDelegatedTokenInput): Promise<VerifySuccess | VerifyFailure> {
-  const now = input.now ?? new Date();
+  const now = input.now ?? (await databaseNow(db));
   const auth = input.request.headers.get("authorization") ?? "";
-  const m = /^(DPoP|Bearer) ([A-Za-z0-9_\-.]+)$/.exec(auth);
+  // RFC 9110 §11.1: an auth-scheme is case-insensitive; normalise it before branching
+  const m = /^(DPoP|Bearer) ([A-Za-z0-9_\-.]+)$/i.exec(auth);
   if (!m) return fail("no_token");
-  const [, scheme, token] = m as unknown as [string, "DPoP" | "Bearer", string];
+  const scheme: "DPoP" | "Bearer" = m[1]!.toLowerCase() === "dpop" ? "DPoP" : "Bearer";
+  const token = m[2]!;
   let unverified: JWTPayload;
   try {
     unverified = decodeJwt(token);
@@ -390,6 +395,8 @@ export async function verifyDelegatedToken(db: Db, input: VerifyDelegatedTokenIn
       claims = await oauth.validateJwtAccessToken({ issuer: input.issuer, jwks_uri: LOCAL_JWKS_URI }, input.request, input.audience, {
         requireDPoP: true,
         signingAlgorithms: [...WORKLOAD_PROOF_ALGS],
+        // the library reads the process clock; shift it to ours (the database's) so its exp/iat checks agree
+        [oauth.clockSkew]: Math.round((now.getTime() - Date.now()) / 1000),
         // local keys only: the placeholder URI is answered here and no request ever leaves the process
         [oauth.customFetch]: async (url: string) => {
           if (url !== LOCAL_JWKS_URI) throw new Error("no remote key fetch");
@@ -498,7 +505,7 @@ export type DelegationAuthorizationResult =
  * (`admitChildGrant`) with exactly this body.
  */
 export async function checkDelegationAuthorization(db: Db, input: DelegationAuthorizationInput): Promise<DelegationAuthorizationResult> {
-  const now = input.now ?? new Date();
+  const now = input.now ?? (await databaseNow(db));
   const no = (code: string, error: "invalid_grant" | "invalid_request" | "use_dpop_nonce" = "invalid_grant", extra: { dpopNonce?: string } = {}) =>
     ({ ok: false, error, code, ...extra }) as const;
 

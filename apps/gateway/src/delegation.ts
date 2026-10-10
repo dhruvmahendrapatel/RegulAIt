@@ -138,8 +138,89 @@ export type LiveFailureCode =
   | "agent_halted"
   | "environment_not_allowed"
   | "credential_revoked"
+  | "credential_not_live"
   | "sponsor_disabled"
   | "org_halted";
+
+// ---------------------------------------------------------------------------
+// The clock and the shared liveness predicates (PR #279 review, rounds 3-4)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE clock of every S3 decision: the database's `now()`. Every timestamp S3
+ * writes to, or compares with, a database row (grant creation and expiry,
+ * credential windows, revocation, token issue and expiry, key lifecycle,
+ * DPoP freshness and nonce slots) is taken from here unless a caller passes
+ * an explicit `now` (tests). One replica's clock running ahead or behind then
+ * changes nothing. Inside a transaction this is that transaction's `now()`.
+ */
+export async function databaseNow(db: DbOrTx): Promise<Date> {
+  const r = await db.execute<{ ms: number | string }>(sql`select (extract(epoch from now()) * 1000)::float8 as ms`);
+  return new Date(Number(r.rows[0]!.ms));
+}
+
+/** the facts about an identity and its subject that decide whether it is in service */
+export interface IdentityServiceFacts {
+  kind: string;
+  status: string;
+  environments: readonly string[];
+  agentHaltedAt: Date | null;
+  agentLifecycle: string | null;
+  agentEnabled: boolean | null;
+  builderArchivedAt: Date | null;
+  runnerRevokedAt: Date | null;
+}
+
+/**
+ * ONE predicate for "is this identity in service in `environment`", used by
+ * the live chain (governed use, minting, verification, admission's parent
+ * check) and by creation/admission of a new link, so the two can never drift:
+ * active (not suspended or revoked); not halted (ADR-0124); its subject in
+ * service — an agent enabled in the registry and not suspended or retired (a
+ * missing agent row is not in service), a builder agent not archived, an
+ * engine runner not revoked; and allowed in the environment.
+ */
+export function identityServiceFailure(
+  f: IdentityServiceFacts,
+  environment: string,
+): "identity_revoked" | "identity_suspended" | "agent_halted" | "subject_not_in_service" | "environment_not_allowed" | null {
+  if (f.status === "revoked") return "identity_revoked";
+  if (f.status !== "active") return "identity_suspended";
+  if (f.agentHaltedAt) return "agent_halted";
+  if (
+    (f.kind === "agent" && (f.agentEnabled !== true || f.agentLifecycle === "suspended" || f.agentLifecycle === "retired")) ||
+    (f.kind === "builder_agent" && f.builderArchivedAt) ||
+    (f.kind === "engine_runner" && f.runnerRevokedAt)
+  ) {
+    return "subject_not_in_service";
+  }
+  if (!f.environments.includes(environment)) return "environment_not_allowed";
+  return null;
+}
+
+/** a workload credential row's lifecycle facts */
+export interface CredentialFacts {
+  identityId: string;
+  revokedAt: Date | null;
+  notBefore: Date;
+  notAfter: Date;
+}
+
+/**
+ * ONE predicate for "is this credential live for `identityId` at `now`":
+ * it exists, belongs to that identity, is not revoked, and `now` is inside
+ * [not_before, not_after). Used for a grant's authenticating credential and a
+ * child's subject credential, at creation, admission and every use.
+ */
+export function credentialLiveAt(c: CredentialFacts | null | undefined, identityId: string | null, now: Date): boolean {
+  return (
+    !!c &&
+    (identityId === null || c.identityId === identityId) &&
+    c.revokedAt === null &&
+    c.notBefore.getTime() <= now.getTime() &&
+    c.notAfter.getTime() > now.getTime()
+  );
+}
 
 export interface LiveLink {
   grant: DelegationGrantRow;
@@ -171,7 +252,9 @@ const sameArray = (a: readonly string[], b: readonly string[]) => a.length === b
  * read from the leaf row, never from a caller. Returns null when the leaf does
  * not exist. Liveness is judged here; nothing is cached.
  */
-export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date = new Date()): Promise<LiveChain | null> {
+export async function loadLiveChain(db: DbOrTx, leafGrantId: string, nowIn?: Date): Promise<LiveChain | null> {
+  const now = nowIn ?? (await databaseNow(db));
+  const at = sql`${now.toISOString()}::timestamptz`;
   const rows = await db
     .select({
       grant: delegationGrants,
@@ -188,9 +271,16 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
       builderArchivedAt: builderAgents.archivedAt,
       runnerRevokedAt: engineRunners.revokedAt,
       sponsorDisabledAt: users.disabledAt,
-      authCredentialIdentityId: workloadCredentials.identityId,
-      authCredentialRevokedAt: workloadCredentials.revokedAt,
+      authCredential: {
+        id: workloadCredentials.id,
+        identityId: workloadCredentials.identityId,
+        revokedAt: workloadCredentials.revokedAt,
+        notBefore: workloadCredentials.notBefore,
+        notAfter: workloadCredentials.notAfter,
+      },
+      // the subject credential (decision 12): a workload credential that is revoked or outside its window
       subjectCredentialRevoked: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} sc WHERE sc.id = ${delegationGrants.subjectCredentialId} AND sc.revoked_at IS NOT NULL)`,
+      subjectCredentialOutsideWindow: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} sc WHERE sc.id = ${delegationGrants.subjectCredentialId} AND sc.revoked_at IS NULL AND (sc.not_before > ${at} OR sc.not_after <= ${at}))`,
     })
     .from(delegationGrants)
     .innerJoin(workloadIdentities, eq(workloadIdentities.id, delegationGrants.actorIdentityId))
@@ -236,26 +326,19 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
           g.scheduleId === parent.scheduleId &&
           g.depthLimit <= parent.depthLimit &&
           g.expiresAt.getTime() <= parent.expiresAt.getTime());
+    const authCred = r.authCredential?.id ? r.authCredential : null;
+    const serviceFailure = identityServiceFailure(
+      { ...r.identity, agentHaltedAt: r.agentHaltedAt, agentLifecycle: r.agentLifecycle, agentEnabled: r.agentEnabled, builderArchivedAt: r.builderArchivedAt, runnerRevokedAt: r.runnerRevokedAt },
+      g.environment,
+    );
     if (!consistent) code = "chain_inconsistent";
     else if (g.revokedAt) code = "grant_revoked";
     else if (g.expiresAt.getTime() <= now.getTime()) code = "grant_expired";
-    else if (r.identity.status === "revoked") code = "identity_revoked";
-    else if (r.identity.status !== "active") code = "identity_suspended";
-    else if (r.agentHaltedAt) code = "agent_halted";
-    // "in service": an agent the registry disabled (`agents.enabled = false`) is out of service exactly
-    // like a suspended or retired one, so it can use no existing grant or token (PR #279 review)
-    else if (
-      (r.identity.kind === "agent" && (r.agentEnabled !== true || r.agentLifecycle === "suspended" || r.agentLifecycle === "retired")) ||
-      (r.identity.kind === "builder_agent" && r.builderArchivedAt) ||
-      (r.identity.kind === "engine_runner" && r.runnerRevokedAt)
-    ) {
-      code = "subject_not_in_service";
-    } else if (!r.identity.environments.includes(g.environment)) code = "environment_not_allowed";
-    else if (
-      (g.authCredentialId !== null && (r.authCredentialRevokedAt !== null || r.authCredentialIdentityId !== r.identity.id)) ||
-      r.subjectCredentialRevoked === true
-    ) {
-      code = "credential_revoked";
+    else if (serviceFailure) code = serviceFailure;
+    else if ((g.authCredentialId !== null && authCred?.revokedAt) || r.subjectCredentialRevoked === true) code = "credential_revoked";
+    // the full credential predicate: this identity's, unrevoked, and inside its [not_before, not_after) window
+    else if ((g.authCredentialId !== null && !credentialLiveAt(authCred, r.identity.id, now)) || r.subjectCredentialOutsideWindow === true) {
+      code = "credential_not_live";
     } else if (r.sponsorDisabledAt) code = "sponsor_disabled";
     else if (org.executionMode === "halted") code = "org_halted";
     if (code && !failure) failure = { index: i, code };
@@ -288,7 +371,7 @@ export async function governedActorFor(
   leafGrantId: string,
   opts: { costKnown: boolean; now?: Date },
 ): Promise<{ actor: GovernedActor; live: LiveChain } | null> {
-  const live = await loadLiveChain(db, leafGrantId, opts.now ?? new Date());
+  const live = await loadLiveChain(db, leafGrantId, opts.now);
   if (!live) return null;
   const [entitlements, org] = await Promise.all([
     loadActorEntitlements(db, live.links.map((l) => l.identity.id)),
@@ -489,11 +572,31 @@ function validateCommon(input: CommonGrantInput, now: Date): void {
 }
 
 /**
+ * The first atom of `atoms` that some identity's CURRENT own grants do not
+ * reach (I7), or null. Applies only under `own_grants`, the mode in which the
+ * kernel checks every link's own grants at use (`actor-allow-list`), so
+ * creation, admission and use apply one rule.
+ */
+async function ownGrantsMiss(db: DbOrTx, identityIds: readonly string[], atoms: readonly ScopeCall[]): Promise<{ identityId: string; atom: ScopeCall } | null> {
+  const org = await loadOrgSettings(db as Db);
+  if (org.agentEntitlementMode !== "own_grants" || identityIds.length === 0) return null;
+  const ents = await loadActorEntitlements(db as Db, [...identityIds]);
+  for (const id of identityIds) {
+    const own = ents.get(id)!;
+    const miss = atoms.find((a) => !actorEntitlementsReach(own, a));
+    if (miss) return { identityId: id, atom: miss };
+  }
+  return null;
+}
+
+/**
  * Everything a grant's actor, sponsor and binding must satisfy at creation,
- * whether root or child: the actor active and in service in this environment,
- * the authenticating credential this identity's and live, the sponsor not
- * disabled, and the scope inside the actor's own grants (under `own_grants`),
- * the sponsor's grants and the ceiling.
+ * whether root or child — the SAME predicates the live chain applies at use
+ * (`identityServiceFailure`, `credentialLiveAt`, sponsor, org halt): the actor
+ * active and in service in this environment, the authenticating credential
+ * this identity's and live, the sponsor not disabled, the organisation not
+ * halted, and the scope inside the actor's own grants (under `own_grants`),
+ * the sponsor's grants and the ceiling. `now` is the database clock.
  */
 async function checkActorSponsorScope(
   db: DbOrTx,
@@ -516,41 +619,33 @@ async function checkActorSponsorScope(
     .where(eq(workloadIdentities.id, input.actorIdentityId));
   if (!idRow) return refuse("actor-chain-invalid", "identity_not_found", `no workload identity ${input.actorIdentityId}`);
   const ident = idRow.identity;
-  if (ident.status !== "active") refuse("actor-chain-invalid", ident.status === "revoked" ? "identity_revoked" : "identity_suspended", `identity ${ident.id} is ${ident.status}`);
-  if (
-    idRow.agentHaltedAt ||
-    (ident.kind === "agent" && (idRow.agentEnabled !== true || idRow.agentLifecycle === "suspended" || idRow.agentLifecycle === "retired")) ||
-    (ident.kind === "builder_agent" && idRow.builderArchivedAt) ||
-    (ident.kind === "engine_runner" && idRow.runnerRevokedAt)
-  ) {
-    refuse("actor-chain-invalid", idRow.agentHaltedAt ? "agent_halted" : "subject_not_in_service", `the subject of identity ${ident.id} is not in service`);
-  }
-  if (!ident.environments.includes(input.environment)) {
-    refuse("actor-chain-invalid", "environment_not_allowed", `identity ${ident.id} is not allowed in environment '${input.environment}'`);
+  const serviceFailure = identityServiceFailure({ ...ident, ...idRow }, input.environment);
+  if (serviceFailure) {
+    refuse(
+      "actor-chain-invalid",
+      serviceFailure,
+      serviceFailure === "environment_not_allowed"
+        ? `identity ${ident.id} is not allowed in environment '${input.environment}'`
+        : serviceFailure === "identity_revoked" || serviceFailure === "identity_suspended"
+          ? `identity ${ident.id} is ${ident.status}`
+          : `the subject of identity ${ident.id} is not in service`,
+    );
   }
   if (input.binding.kind !== "in_process") {
     const [cred] = await db.select().from(workloadCredentials).where(eq(workloadCredentials.id, input.binding.authCredentialId));
-    if (
-      !cred ||
-      cred.identityId !== ident.id ||
-      cred.revokedAt !== null ||
-      cred.notBefore.getTime() > now.getTime() ||
-      cred.notAfter.getTime() <= now.getTime()
-    ) {
+    if (!credentialLiveAt(cred, ident.id, now)) {
       refuse("actor-chain-invalid", "credential_not_live", "the authenticating credential is not a live credential of this identity");
     }
   }
   const [sponsor] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, input.sponsorUserId));
   if (!sponsor) refuse("actor-chain-invalid", "sponsor_not_found", "a delegation needs a sponsor (decision 10: never without one)");
   if (sponsor!.disabledAt) refuse("actor-chain-invalid", "sponsor_disabled", "the sponsor is disabled");
+  const org = await loadOrgSettings(db as Db);
+  if (org.executionMode === "halted") refuse("actor-chain-invalid", "org_halted", "the organisation's execution is halted");
 
   const atoms = scopeAtoms(input.scope);
-  const org = await loadOrgSettings(db as Db);
-  if (org.agentEntitlementMode === "own_grants") {
-    const own = (await loadActorEntitlements(db as Db, [ident.id])).get(ident.id)!;
-    const miss = atoms.find((a) => !actorEntitlementsReach(own, a));
-    if (miss) refuse("actor-allow-list", "actor_not_entitled", `identity ${ident.id}'s own grants do not cover ${atomLabel(miss)}`);
-  }
+  const own = await ownGrantsMiss(db, [ident.id], atoms);
+  if (own) refuse("actor-allow-list", "actor_not_entitled", `identity ${ident.id}'s own grants do not cover ${atomLabel(own.atom)}`);
   const sponsorMiss = await sponsorGrantsMiss(db, input.sponsorUserId, atoms);
   if (sponsorMiss) refuse("delegation-scope", "sponsor_not_entitled", `the sponsor is not granted ${atomLabel(sponsorMiss)}`);
   if (input.ceiling && !scopeSubset(input.scope, input.ceiling)) {
@@ -570,13 +665,14 @@ function bindingColumns(b: GrantBinding) {
  * human delegation proof, decision 15). Refuses over-scope; never narrows.
  */
 export async function createRootGrant(db: Db, input: CreateRootGrantInput): Promise<DelegationGrantRow> {
-  const now = input.now ?? new Date();
-  validateCommon(input, now);
   const ctx = input.context ?? {};
   if ([ctx.runId, ctx.builderTurnId, ctx.engineRunId, ctx.scheduleId].filter((v) => v != null).length > 1) {
     refuse("delegation-request-invalid", "context_invalid", "a grant is made for at most one run context");
   }
   return db.transaction(async (tx) => {
+    // the database clock: `created_at` and every window below are judged by it (a test may pin `now`)
+    const now = input.now ?? (await databaseNow(tx));
+    validateCommon(input, now);
     await checkActorSponsorScope(tx, input, now);
     const org = await loadOrgSettings(tx as unknown as Db);
     let depthLimit = Math.min(org.delegationMaxDepth, DELEGATION_DEPTH_CEILING);
@@ -682,12 +778,12 @@ export async function admitChildGrant(
   db: Db,
   input: AdmitChildGrantInput,
 ): Promise<{ grant: DelegationGrantRow; allocation: DelegationAllocationRow; replayed: boolean }> {
-  const now = input.now ?? new Date();
-  validateCommon(input, now);
   if (!input.idempotencyKey || input.idempotencyKey.length > 200) {
     refuse("delegation-request-invalid", "idempotency_key_invalid", "an idempotency key is 1 to 200 characters");
   }
   return db.transaction(async (tx) => {
+    const now = input.now ?? (await databaseNow(tx));
+    validateCommon(input, now);
     const [parent] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.parentGrantId)).for("update");
     if (!parent) return refuse("actor-chain-invalid", "parent_not_found", `no delegation grant ${input.parentGrantId}`);
     if (input.environment !== parent.environment || input.projectId !== parent.projectId) {
@@ -714,6 +810,21 @@ export async function admitChildGrant(
     }
     if (live.links.some((l) => l.identity.id === input.actorIdentityId)) {
       refuse("actor-chain-invalid", "identity_in_chain", "an identity appears at most once in a chain");
+    }
+    // every EXISTING link's current own grants must still cover what the child is given: the kernel refuses
+    // any call one of them does not cover (actor-allow-list), so admitting it would reserve budget for authority
+    // nobody on the chain still holds (PR #279 review)
+    const chainMiss = await ownGrantsMiss(tx, live.links.map((l) => l.identity.id), scopeAtoms(input.scope));
+    if (chainMiss) {
+      refuse("actor-allow-list", "chain_actor_not_entitled", `identity ${chainMiss.identityId}'s own grants no longer cover ${atomLabel(chainMiss.atom)}`);
+    }
+    // a child's subject credential is the credential behind the PARENT's proof (decision 12): when named it must
+    // be a live credential of the parent's actor, never an arbitrary id the live chain could not judge
+    if (input.subjectCredentialId) {
+      const [sc] = await tx.select().from(workloadCredentials).where(sql`${workloadCredentials.id}::text = lower(${input.subjectCredentialId})`);
+      if (!credentialLiveAt(sc, parent.actorIdentityId, now)) {
+        refuse("actor-chain-invalid", "subject_credential_not_live", "the subject credential is not a live credential of the parent's actor");
+      }
     }
 
     const org = await loadOrgSettings(tx as unknown as Db);
@@ -898,8 +1009,9 @@ export async function revokeDelegationGrant(
   db: Db,
   input: { grantId: string; reason: DelegationRevokeReason; actorUserId?: string | null; now?: Date },
 ): Promise<{ revokedGrantIds: string[]; releasedMicros: number }> {
-  const now = input.now ?? new Date();
   return db.transaction(async (tx) => {
+    const now = input.now ?? (await databaseNow(tx));
+    const at = sql`${now.toISOString()}::timestamptz`;
     const [g] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.grantId));
     if (!g) throw new DelegationRefusedError("actor-chain-invalid", "grant_not_found", `no delegation grant ${input.grantId}`);
     // lock the parent and the whole subtree in one order (depth, then id)
@@ -915,6 +1027,8 @@ export async function revokeDelegationGrant(
       )
       .orderBy(asc(delegationGrants.depth), asc(delegationGrants.id))
       .for("update");
+    // a grant that has already EXPIRED (database clock) ended on its own: it is not stamped revoked, so its
+    // record keeps saying how it really ended; only its edges are closed below (PR #279 review)
     const revoked = await tx
       .update(delegationGrants)
       .set({
@@ -925,9 +1039,20 @@ export async function revokeDelegationGrant(
         and(
           or(eq(delegationGrants.id, g.id), sql`${delegationGrants.path} @> ARRAY[${g.id}]::uuid[]`),
           isNull(delegationGrants.revokedAt),
+          sql`${delegationGrants.expiresAt} > ${at}`,
         ),
       )
       .returning({ id: delegationGrants.id });
+    const alreadyExpired = await tx
+      .select({ id: delegationGrants.id })
+      .from(delegationGrants)
+      .where(
+        and(
+          or(eq(delegationGrants.id, g.id), sql`${delegationGrants.path} @> ARRAY[${g.id}]::uuid[]`),
+          isNull(delegationGrants.revokedAt),
+          sql`${delegationGrants.expiresAt} <= ${at}`,
+        ),
+      );
     // the subtree's open edges, deepest child first, then the grant's own incoming edge
     const open = await tx
       .select({ id: delegationAllocations.id, depth: delegationGrants.depth })
@@ -946,11 +1071,21 @@ export async function revokeDelegationGrant(
       userId: input.actorUserId ?? SYSTEM_USER_ID,
       objectType: "delegation_grant",
       objectId: g.id,
-      detail: { phase: "revoke", reason: input.reason, revokedGrantIds: revoked.map((r) => r.id), edgesClosed: open.length, releasedMicros },
+      detail: {
+        phase: "revoke",
+        reason: input.reason,
+        revokedGrantIds: revoked.map((r) => r.id),
+        alreadyExpiredGrantIds: alreadyExpired.map((r) => r.id),
+        edgesClosed: open.length,
+        releasedMicros,
+      },
       effect: "allow",
       ruleId: "delegation-revoke",
       ruleChain: [],
-      reason: `delegation grant ended (${input.reason}); ${revoked.length} grant(s) revoked including descendants; unspent allocation returned to each parent`,
+      reason:
+        `delegation grant ended (${input.reason}); ${revoked.length} grant(s) revoked including descendants` +
+        (alreadyExpired.length > 0 ? `; ${alreadyExpired.length} had already expired and were left unrevoked` : "") +
+        "; unspent allocation returned to each parent",
     });
     return { revokedGrantIds: revoked.map((r) => r.id), releasedMicros };
   });
