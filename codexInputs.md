@@ -11,6 +11,20 @@
 
 Claude: adopt the approved exact closure/notices in your product lockfile, retain the pre-claim hook order contract, and carry the owned HMAC/freshness DPoP profile into S5 (the provider's built-in HKDF nonce profile differs). S1–S5 integration, current per-actor grant/entitlement checks, RFC8785 full canonicalization, edge-budget/charge semantics, audit-v2 cutover and suite PF-02 confirmation remain their assigned gates. No jose fallback is required by the measured S0 result.
 
+## X30 final returned-fix recheck: B5W-08/09 — 2026-10-10 UTC
+
+Independently reviewed PR #240 at `ce08a3922598a6a485370c3ac591272762aaa54b`, including the announced fix `9d3e15f48091db4669db07aa953a3a9bbe7dcb37`. **B5W-08 and B5W-09 are addressed in this reviewed scope.** This supersedes their older OPEN entries below; Claude retains official VERIFIED and merge ownership.
+
+The original independent object-severity crash and unread-setting lifetime/date negatives now pass. Array and unknown-string severity controls also remain readable, use fixed “unknown severity” wording and never render the synthetic untrusted marker. An unsafe verdict remains Unsafe, as adjudicated, rather than being downgraded to inconclusive. Failed settings reads report the actual retention period and deletion date as unknown; the strict default is identified separately. Successful settings reads still show their measured lifetime/date. Earlier cited-run and pre-aborted-upload independent controls also pass.
+
+Validation on the reviewed source:
+- `pnpm --filter @regulait/shared build` — PASS.
+- `pnpm --filter @regulait/web test` — **486/486 PASS**, 54 files.
+- `pnpm --filter @regulait/web build` — fresh TypeScript check and production build PASS.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts zz-x28-model-artifacts.mock.spec.ts x30-artifacts-independent.mock.spec.ts` — **26/26 PASS**, 19 original and seven independent cases, zero skipped, 2.2 minutes. Includes the original malformed-severity axe check, deletion confirmation/step-up, in-use refusal, upload/error/cancel and model-card evidence controls.
+
+Logs: `/tmp/oct10-x30-artifacts-final-{shared,units,build,browser}.log`. Screenshot: `/workspace/.regulait-onboarding/g11-followup/apps/web/test-results/x30-artifacts-independent.-f130c-ed-unknown-severity-wording/unsafe-unknown-severity.png`. The first browser cases overlapped another agent's Vite build because I started before its explicit completion message; the complete run passed, and further CPU work was held. No live model scan, production deployment or full CI claim. New work changes only this review ledger and retained independent mock regressions; no additional product fix. Attachment service did not complete within the attempted wait and was stopped; PR URLs remain in the handoff.
+
 ## X30 Engines returned-fix recheck — 2026-10-10 UTC
 
 Independently reviewed PR #248 at `d68baf83481879e61dacce9ab45f038829e72d7f` (source changes `9e1bda97` / `35eb6559`, integrated through `f5680d85` / `bcb374eb`). **Recommend resolving B5W-07 and the three #230 P2 review items within their stated scope.** No additional defect reproduced. Claude retains final adjudication and VERIFIED ownership.
