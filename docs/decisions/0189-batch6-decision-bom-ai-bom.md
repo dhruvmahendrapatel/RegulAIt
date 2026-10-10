@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (owner, 2026-10-10)
 - **Date:** 2026-10-10
-- **Deciders:** owner (the eleven OWNER DECISION items below); the rest follows ADR-0180 (secure by default) and ADR-0176
+- **Deciders:** owner (the twelve OWNER DECISION items below; decision 12 added after review); the rest follows ADR-0180 (secure by default) and ADR-0176
   (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 2 (DELIVERY_PLAN_2026-10-06 §Batch 6: "Decision BOM and AI BOM v1 (PF-09,
   CycloneDX ML), including training-data sources and per-model data flow"), PathForward **PF-09** (and its extension
@@ -291,7 +291,8 @@ needs the ADR-0102 scrub (M-055 check done at B1 anyway).
 | `decision_bom_finality` | `anchored`: flushed to a destination **observed** tamper-resistant (and timestamped when `audit_anchor_timestamp_mode = required`) | `anchored_unverified_destination` (flushed to a destination not observed tamper-resistant; the BOM and the verifier say so), then `chain_signed` (freeze once the receipt is signed, before the anchor; the BOM records `proof.anchor: absent`) | audited; amendment R4 |
 | `bom_export_roles` | admins only | admins plus an explicit auditor grant | granting is an admin act, audited |
 | `bom_person_identifiers` | `id_only` (user and workload ids) | `display_name`, **AI BOMs only** (Decision BOMs are always `id_only`, R45) | audited; emails are never included (see invariants) |
-| `ai_bom_snapshot_triggers` | on sign-off events (OWNER DECISION 8; queued durably when no key, R25) | on demand only | audited |
+| `ai_bom_snapshot_triggers` | on sign-off events (OWNER DECISION 8) | on demand only | audited |
+| `ai_bom_snapshot_without_key` | `refuse`: a triggering approval or promotion gets 409 `bom_signing_unavailable` (OWNER DECISION 12, R25) | `skip_and_record` (proceeds; audited `snapshot_skipped_no_key` gap) | audited, `settings_relax` step-up; no queue |
 | `cyclonedx_export_versions` | `1.7` | add `1.6` | audited |
 | BOM export rate limit | 30 per minute per user | admin may raise | audited |
 | Unsigned BOM | **never** | not relaxable | invariant, like ADR-0116 "no key means no bundle" |
@@ -410,7 +411,8 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
 
 ## Owner decisions (accepted 2026-10-10)
 
-The owner accepted all eleven recommendations on 2026-10-10, as written below. Spike B0 may start now; B1 onward waits
+The owner accepted all eleven recommendations on 2026-10-10, as written below, and decided a twelfth (from review
+owner item 3) the same day. Spike B0 may start now; B1 onward waits
 for ADR-0188 S1 and S4, as the slice plan says.
 
 1. **OWNER DECISION — Decision BOM format.** *Recommended:* our own `regulait.decision-bom.v1` (no standard defines a
@@ -443,6 +445,12 @@ for ADR-0188 S1 and S4, as the slice plan says.
     declared (from the model card's `data_claims`), marked supplier-declared, and `unknown` otherwise; never infer.
 11. **OWNER DECISION — retention.** *Recommended:* Decision BOMs and AI BOM snapshots follow the compliance profile's
     audit retention and are kept under evidence holds; renderings are deleted with their parent.
+12. **OWNER DECISION — automatic AI BOM snapshots while no signing key is configured (accepted 2026-10-10, review
+    owner item 3).** *Chosen:* (b) fail closed. An approval or promotion that would trigger an automatic snapshot is
+    refused while no receipt signing key is configured (409 `bom_signing_unavailable`), the strict default under
+    ADR-0180; an admin may relax it, audited, to proceed and record an audited `snapshot_skipped_no_key` gap. There is
+    no queue. Rejected: (a) a durable queue of captured record sets (seven review findings across rounds 7–9), and (c)
+    skip-and-record as the default. Amendment R25 states the rule.
 
 ## Amendments after spike B0 (2026-10-10)
 
@@ -704,21 +712,20 @@ R24. **Evaluation datasets map only what is recorded.** `eval_datasets` has no c
     `checksum` (the column default) means no hash, not a hash of nothing. Each such gap puts the dataset in the
     `incomplete` composition.
 
-R25. **Automatic snapshots survive a signing-key outage** (open: owner item 3 may replace this queue with a fail-closed
-    trigger or a recorded skip; B3 does not build the queue until the owner decides). With no receipt key, an OWNER DECISION 8 trigger
-    (use-case approval, model card approval, prompt promotion, evidence attached, config promotion, admission) could
-    neither sign its snapshot nor be retried later without reading state that has since changed. The triggering
-    operation does not fail; instead, in its own transaction, B3 writes an append-only
-    `ai_bom_snapshot_requests` row (subject, trigger, the triggering record's id, `created_at`) together with the
-    loaded record set captured under R22's consistency rules (the R18 projections and the row-level basis), with
-    no key involved. This queued path is **read-write**: it runs inside the triggering operation's own transaction,
-    which B3 sets to `REPEATABLE READ` (set before its first query), so the triggering write, the captured records and
-    the request row commit or roll back together, and the capture sees exactly the state that write produced. A
-    serialization failure retries the whole triggering operation. R22's `READ ONLY` applies only to the on-demand
-    loader, which writes nothing. A sweep freezes and signs pending requests in order once a key is present, from the captured
-    record set only, never by reloading live tables; each snapshot's `created_at` and `trigger` are the request's.
-    The posture page shows the count of pending requests. Requests are written only after the R17 switch has flipped;
-    before that a trigger records nothing, as R2 says.
+R25. **Automatic snapshots fail closed without a signing key (OWNER DECISION 12).** With no receipt key, an
+    OWNER DECISION 8 trigger (use-case approval, model card approval, prompt promotion, evidence attached, config
+    promotion, admission) cannot sign its snapshot. There is **no queue** (the earlier queued-request design is
+    withdrawn):
+    - Under the strict default `ai_bom_snapshot_without_key = refuse` (ADR-0180), the approval or promotion that would
+      trigger an automatic snapshot is refused before it writes anything, with 409 `bom_signing_unavailable` and a
+      message naming the missing key. Nothing is half-done.
+    - An admin may relax the setting to `skip_and_record`; the relaxation is audited (`settings_relax` step-up). While
+      relaxed, the trigger proceeds and an audited `snapshot_skipped_no_key` row records the gap for that subject and
+      trigger, shown on the posture page and in the drift view. No snapshot is taken later on its behalf.
+    - With a key present, the automatic snapshot is taken after the triggering transaction commits, through the same
+      path as an on-demand snapshot (R22's read-only capture, then the insert, under the per-subject lock). If that
+      snapshot fails, an audited `snapshot_failed` row records the gap; an admin can take an on-demand snapshot.
+    - Triggers do nothing before the R17 switch has flipped, as R2 says.
 
 R26. **Every dataset hash is a valid, honest digest.** CycloneDX hashes carry an algorithm and a bare digest.
     - `training_datasets.checksum` is self-describing (`datasetChecksum`, `packages/training-provider`):
@@ -864,11 +871,8 @@ R40. **Assembly holds the per-decision lock.** The freeze transaction takes the 
     `decision_boms` insert. A late fact therefore commits either before the recheck, so it is included or the freeze
     waits for its signature, or after the insert, so it is covered by a new version with `supersedes`.
 
-R41. **Queued snapshot requests are drained before any new snapshot of the subject.** This is the simpler strict
-    option. While a subject has pending `ai_bom_snapshot_requests`, an on-demand snapshot is refused with 409
-    `bom_snapshot_requests_pending`, and an automatic trigger enqueues a request rather than freezing directly. The
-    sweep freezes requests per subject in request order. A captured record set can therefore never supersede a newer
-    live snapshot.
+R41. **Withdrawn (OWNER DECISION 12).** It ordered queued snapshot requests; with no queue (R25) there is nothing to
+    drain, and snapshot ordering is the per-subject lock of the round 8–9 entry conditions.
 
 R42. **The receipt v2 boundary is an audit sequence.** R34's boundary is redefined. Under the audit append lock and
     the receipt sign lock, the cutover records `from_audit_seq`, the first audit `seq` that v2 governs. A
@@ -906,8 +910,7 @@ R45. **Decision BOMs are id-only; no display-name relaxation.** `principal` and 
     decision-time payloads that hold no free text (R18, R37), so a display name could only come from a live read and
     would sign today's name as if it were historical. `bom_person_identifiers = display_name` therefore no longer
     applies to Decision BOMs, which are `id_only` without exception. For AI BOMs the relaxation remains, and only for
-    a name read inside the snapshot's own R22 capture (and held in a queued request's capture, if owner item 3 keeps
-    the queue), length-capped and email-scanned like every string.
+    a name read inside the snapshot's own R22 capture, length-capped and email-scanned like every string.
 
 R46. **Facts captured under v1 receipts are shown but not claimed as receipt-bound.** Between B2 and the R42 cutover,
     decisions get `decision_facts` while their receipts are still v1, with no `factsHash`. Their Decision BOM still
@@ -927,17 +930,8 @@ R46. **Facts captured under v1 receipts are shown but not claimed as receipt-bou
 2. **Trust root for the release's SBOM identity file in air-gapped installs** (R9): verify the release's existing
    keyless signature offline against a trusted-root file shipped with the release, or an owner-held release key.
    Recommended: the existing signature with the shipped trusted root, so no new key needs custody.
-3. **Automatic AI BOM snapshots while no signing key is configured** (R25; seven findings across review rounds 7–9:
-   ordering, fulfilment after pruning, full-field capture, terminal failures, binding outage-time decisions, lock
-   scope, writable capture). Options:
-   (a) keep the R25 queue, with the B3 queue entry conditions listed under "Entry conditions from review rounds 8–9";
-   (b) fail closed: an automatic snapshot trigger (use-case approval, model card approval, prompt promotion and the
-   other OWNER DECISION 8 events) is refused while no signing key is configured. Strict by default under ADR-0180,
-   relaxable by an admin with an audit row, and it removes the queue entirely;
-   (c) skip and record: no snapshot is taken, and an audited `snapshot_skipped_no_key` gap is recorded for the
-   subject. Recommended: (b), because it removes the whole class of queue findings and keeps every snapshot taken
-   from live state at sign-off. The B3 queue entry conditions apply only if the owner chooses (a). Until the owner
-   decides, B3 does not build the queue.
+
+Owner item 3 (automatic snapshots without a signing key) was decided on 2026-10-10: OWNER DECISION 12 under "Owner decisions".
 
 ## Further design review happens at slice level
 
@@ -948,11 +942,7 @@ an accepted decision or needs an owner choice.
 
 ### Entry conditions from review rounds 8–9
 
-In this list, the B3 queue conditions apply only if owner item 3 chooses (a).
 
-
-- **B3, B5** (4237322631): request fulfilment is idempotent; `ai_bom_snapshots` carries the `request_id` of the
-  `ai_bom_snapshot_requests` row it fulfils, UNIQUE, so a retried sweep cannot freeze one request twice.
 - **B3** (4237322637): the agent's active and canary system-prompt config versions are components, each with its id,
   version and content digest only, never the prompt text.
 - **B1, B3** (4237322632): snapshot `version` is allocated under a per-subject lock, as R35 does for addenda.
@@ -965,9 +955,6 @@ In this list, the B3 queue conditions apply only if owner item 3 chooses (a).
 - **B1, B4** (4237344247): Decision BOM assembly and version allocation lock a row that exists for every decision:
   the round-8 capture-status marker row (`SELECT … FOR UPDATE`), or, for a decision older than that marker, an
   advisory lock keyed by the audit id. Two concurrent first requests then return the same frozen BOM.
-- **B2, B3** (4237344250): a decision made while an AI BOM request is queued for its subject records that request's id
-  in its facts, and assembly links the request's unique fulfilled snapshot (by `request_id`), never the last frozen
-  one or a later pick.
 - **B3** (4237344238): `model_cards.data_claims` is an arbitrary record, so the loader projects it to a typed safe
   shape before signing: allowlisted keys only, scalar strings (length-capped), numbers and booleans; any nested
   object or array, or unknown key, is refused, never copied.
@@ -978,11 +965,9 @@ In this list, the B3 queue conditions apply only if owner item 3 chooses (a).
   the shared writer.
 - **B3** (4237346650): the per-subject lock is taken before the repeatable-read capture and held through the snapshot
   insert, so an older capture can never take the next version after a newer one.
-- **B3, queued path only if owner item 3 chooses (a)**: an immutable fulfilment tombstone per request that survives
-  snapshot pruning (4237346647); a full immutable field projection for queued snapshots, including the mapped
-  free-text model-card fields, length-capped and email-scanned (4237346653); a terminal `failed` or `cancelled`
-  outcome that removes a request from the pending queue (4237346644); and binding outage-time decisions to the
-  request (4237346659, with 4237344250 above).
+- **Moot under OWNER DECISION 12** (fail closed, no queue): the queued-path conditions from 4237322631, 4237344250,
+  4237346647, 4237346653, 4237346644 and 4237346659 (request idempotency, binding decisions to a request, fulfilment
+  tombstones, full-field capture, terminal outcomes, outage-time binding) were removed.
 
 ## Open questions
 
