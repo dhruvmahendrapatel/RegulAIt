@@ -283,7 +283,7 @@ const fail = (code: string, error: VerifyFailure["error"] = "invalid_token", ext
   ...extra,
 });
 
-function exactlyOneCnf(payload: JWTPayload): { kind: "dpop" | "mtls"; thumbprint: string } | null {
+export function exactlyOneCnf(payload: JWTPayload): { kind: "dpop" | "mtls"; thumbprint: string } | null {
   const cnf = payload.cnf as Record<string, unknown> | undefined;
   if (!cnf || typeof cnf !== "object" || Array.isArray(cnf) || Object.keys(cnf).length !== 1) return null;
   if (typeof cnf.jkt === "string" && cnf.jkt) return { kind: "dpop", thumbprint: cnf.jkt };
@@ -292,7 +292,7 @@ function exactlyOneCnf(payload: JWTPayload): { kind: "dpop" | "mtls"; thumbprint
 }
 
 /** the issuer key a token names, if it is published right now (unknown kid: refuse; no external fallback) */
-async function issuerKeyFor(db: Db, token: string, now: Date): Promise<{ row: IdentitySigningKeyRow; published: IdentitySigningKeyRow[] } | null> {
+export async function issuerKeyFor(db: Db, token: string, now: Date): Promise<{ row: IdentitySigningKeyRow; published: IdentitySigningKeyRow[] } | null> {
   let header;
   try {
     header = decodeProtectedHeader(token);
@@ -305,14 +305,14 @@ async function issuerKeyFor(db: Db, token: string, now: Date): Promise<{ row: Id
   return row ? { row, published } : null;
 }
 
-const jwkOf = (r: IdentitySigningKeyRow) => ({ kty: "OKP", crv: "Ed25519", x: r.publicJwk.x, kid: r.kid, alg: ISSUER_JWS_ALG, use: "sig" });
+export const jwkOf = (r: IdentitySigningKeyRow) => ({ kty: "OKP", crv: "Ed25519", x: r.publicJwk.x, kid: r.kid, alg: ISSUER_JWS_ALG, use: "sig" });
 
 /**
  * The checks after the signature (step 4): `env`, `aud`, the stored token row
  * and binding, the signing key's lifecycle, then the live chain. Shared by the
  * resource verifier and the parent check of a hand-off.
  */
-async function storedAndLive(
+export async function storedAndLive(
   db: Db,
   claims: JWTPayload,
   binding: { kind: "dpop" | "mtls"; thumbprint: string },
@@ -485,9 +485,23 @@ export interface DelegationAuthorizationInput {
   env: string;
   secrets: Pick<IdentitySecrets, "nonceKey">;
   now?: Date;
+  /**
+   * S5 (R11 integration rule 1): check everything but claim NOTHING. The token
+   * endpoint runs this inside `assertJwtClientAuthClaimsAndHeader`, before the
+   * provider claims the client assertion, and makes the `delegation_authz`
+   * claim itself afterwards with the returned `claim` (namespace, key, expiry).
+   */
+  deferClaim?: boolean;
 }
 export type DelegationAuthorizationResult =
-  | { ok: true; parentGrantId: string; parentLive: LiveChain; jti: string }
+  | {
+      ok: true;
+      parentGrantId: string;
+      parentLive: LiveChain;
+      jti: string;
+      /** the replay claim still to make, when `deferClaim` was set */
+      claim?: { namespace: "delegation_authz"; key: string; expiresAt: Date };
+    }
   | { ok: false; error: "invalid_grant" | "invalid_request" | "use_dpop_nonce"; code: string; dpopNonce?: string };
 
 /**
@@ -600,12 +614,13 @@ export async function checkDelegationAuthorization(db: Db, input: DelegationAuth
   if (a.idempotency_key !== input.idempotencyKey) return no("authz_idempotency_mismatch");
 
   // everything matched: only now is A's authorization consumed (once, atomically)
-  const claimed = await claimReplay(
-    db,
-    "delegation_authz",
-    `${binding.thumbprint}:${a.jti}`,
-    new Date((a.iat + DPOP_PROOF_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000),
-  );
+  const claim = {
+    namespace: "delegation_authz" as const,
+    key: `${binding.thumbprint}:${a.jti}`,
+    expiresAt: new Date((a.iat + DPOP_PROOF_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000),
+  };
+  if (input.deferClaim) return { ok: true, parentGrantId: stored.live.leaf.id, parentLive: stored.live, jti: a.jti, claim };
+  const claimed = await claimReplay(db, claim.namespace, claim.key, claim.expiresAt);
   if (!claimed) return no("authz_replayed");
   return { ok: true, parentGrantId: stored.live.leaf.id, parentLive: stored.live, jti: a.jti };
 }

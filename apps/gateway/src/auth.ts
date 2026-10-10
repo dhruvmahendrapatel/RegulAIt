@@ -83,6 +83,7 @@ import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 import { hashToken } from "./token-hash.js";
 import { isVirtualKeyToken, resolveVirtualKey, touchVirtualKey } from "./virtual-keys.js";
 import { resolveEngineCredential } from "./engine-runner-auth.js";
+import { authenticateWorkloadRequest, sendWorkloadRefusal } from "./oauth/resource.js";
 import {
   anchorLinkedUser,
   anchorOfRequest,
@@ -142,7 +143,9 @@ export interface AuthContext {
   /** ADR-0188 (S5): a workload presenting a gateway-issued, sender-bound
    * delegated token (`via === "workload"`). `userId` is then the SPONSOR (the
    * human the work is for), `isAdmin` is always false, and the agent principal
-   * and the delegation grant are named here. Nothing produces this yet (S1). */
+   * (the chain's LEAF actor) and the delegation grant are named here. Produced
+   * only by `workloadPreHandler` (`oauth/resource.ts`), only on the routes in
+   * `WORKLOAD_ROUTES`. */
   workloadIdentityId?: string;
   delegationGrantId?: string;
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
@@ -228,7 +231,8 @@ export async function authenticate(
   bootstrapToken: string | undefined,
   authorizationHeader: string | undefined,
 ): Promise<AuthContext | null | AuthRefusal> {
-  if (!authorizationHeader?.startsWith("Bearer ")) return null;
+  // RFC 9110 §11.1: the auth-scheme is case-insensitive ("bearer" and "BEARER" are "Bearer")
+  if (typeof authorizationHeader !== "string" || authorizationHeader.slice(0, 7).toLowerCase() !== "bearer ") return null;
   const token = authorizationHeader.slice("Bearer ".length).trim();
   if (token.length === 0) return null;
 
@@ -313,6 +317,37 @@ export async function authenticate(
 
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.keyId));
   return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key", apiKeyId: row.keyId, totpEnabled: row.totpEnabled };
+}
+
+/**
+ * ADR-0188 (S5) — THE WORKLOAD CREDENTIAL PATH, run by the route hook BEFORE
+ * `authenticate()`. A gateway-issued delegated token (`DPoP <jwt>`, or a
+ * certificate-bound `Bearer <jwt>` of `typ` `at+jwt`) is verified by the
+ * decision 13 verifier with the decision 21 certificate rules
+ * (`oauth/resource.ts`); every other header returns "none" and the existing
+ * paths below run byte for byte as before (a `rgl_`/`rglv_`/`rge_` token is
+ * never a JWT). "refused" means the reply has been sent.
+ */
+export async function workloadPreHandler(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  opts: { dataKey?: string | undefined },
+): Promise<"none" | "authenticated" | "refused"> {
+  const out = await authenticateWorkloadRequest(db, req, opts);
+  if (out.kind === "none") return "none";
+  if (out.kind === "refused") {
+    await sendWorkloadRefusal(reply, out);
+    return "refused";
+  }
+  // a delegated token is a programmatic header credential: the same network envelope as an API key (ADR-0039)
+  const org = await loadOrgSettings(db);
+  if (org.apiKeyIpPolicy !== "off" && !evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null).allowed) {
+    await reply.status(401).send({ error: "ip_not_allowed", detail: "requests from this network address are not permitted by organization policy" });
+    return "refused";
+  }
+  req.authCtx = out.ctx;
+  return "authenticated";
 }
 
 /**
