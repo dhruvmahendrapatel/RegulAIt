@@ -912,6 +912,43 @@ covering. Eight deliberate kernel mutations were each shown to turn unit tests a
 grants, a union of grants, a spent leaf allowed, depth off by one, liveness ignored, write implies read, actor Cedar
 ignored and unknown cost ignored.
 
+### Amendments from the S3 build and its reviews (2026-10-10)
+
+S3 (issuer, signing keys and delegation grants) is PR #279. Its security review and the Codex review of the PR
+settled the points below. None changes a decision; items 1 to 3 record deviations or limits, and item 4 records two
+fixes that later slices must keep.
+
+1. **`max_depth` is not stored by S3. Hard blocker for S5; built in S4.** A parent's signed `max_depth` is checked
+   when its child is admitted but is not persisted, so a later admission under that child consults only the org-wide
+   `delegation_max_depth` (strict default 3). Until S4, a grandchild can be deeper than its parent allowed, but never
+   deeper than the org limit and never wider in scope or budget. S4 adds a per-grant `depth_limit` (migration 0184):
+   the child stores the smaller of its parent's remaining depth minus one and the signed `max_depth`, and every
+   descendant admission enforces it. S4 carries the test: a parent signs `max_depth: 0`, the child is admitted, and a
+   grandchild under it is refused `delegation-depth` although the org limit would allow it.
+2. **The DPoP nonce key and the pairwise-subject key are derived from the data key.** S3 derives both with HKDF-SHA-256
+   from the gateway data key (`regulait/adr0188/dpop-nonce/v1`, `regulait/adr0188/pairwise-sub/v1`) rather than from
+   separately held secrets. Rotating the data key therefore invalidates outstanding nonces (clients retry with the new
+   nonce, as RFC 9449 expects) and changes every pairwise `sub` (a resource server sees a new subject for the same
+   person). Data-key rotation runbooks must say so; a separate, independently rotatable identity secret is a later
+   option if that cost proves real.
+3. **No caller may pass a client certificate to the verifier until the `pkijs` path validator lands.** The S3 mTLS
+   branch compares the certificate's thumbprint with the token's `cnf` only; it does not validate the chain or the
+   SPIFFE profile (decision 21). No route passes `clientCertificateDer` today. S5 must add the `pkijs` validation and
+   the forwarded-header rules before any route does.
+4. **Lifecycle and replay times come from the database clock.** On several replicas, a revocation on one whose clock
+   trailed the one that made the key or minted a token wrote a `revoked_at` earlier than `created_at` or `issued_at`;
+   the lifecycle checks then rolled the whole revocation back and left a compromised key live. Revoke and retire now
+   write `GREATEST(now(), <row start>)` and select unexpired tokens by `now()`. The replay-claim sweep likewise
+   selects by `now()`, the clock its delete guard uses. Later slices writing lifecycle timestamps on these tables
+   follow the same rule.
+
+Open questions carried to S5 and S6:
+
+- Must a child's resource (audience) equal its parent's, or may it narrow to a subset? S3 requires the environment
+  and project to match and leaves the audience to the binding.
+- The S6 admin screens for grants (list, revoke, tree) have no backend routes yet. S5 or S6 must add them with the
+  `identity_manage` step-up.
+
 ## Spike S0 result (2026-10-10)
 
 S0 ([R11](../research/R11-identity-s0-spike.md), Codex X32, PR #250) returned **GO** for owner decision 2:
