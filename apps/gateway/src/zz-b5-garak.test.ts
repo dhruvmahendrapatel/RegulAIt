@@ -110,7 +110,9 @@ async function grantFor(action: { kind: string; body: Record<string, unknown> })
 function reportOf(probe: string, detector: string, scores: number[], completed: boolean): Buffer {
   const run = "r-" + probe;
   const lines: unknown[] = [{ entry_type: "init", garak_version: "0.17.0", run }];
-  scores.forEach((s, i) => lines.push({ entry_type: "attempt", seq: i, status: 2, probe_classname: probe, detector_results: { [detector]: [s] } }));
+  // garak writes each attempt twice: generated (status 1), then scored (status 2), with the same uuid (decision 161)
+  scores.forEach((_, i) => lines.push({ entry_type: "attempt", uuid: `u${i}`, seq: i, status: 1, probe_classname: probe, outputs: [{ text: "t" }], detector_results: {} }));
+  scores.forEach((s, i) => lines.push({ entry_type: "attempt", uuid: `u${i}`, seq: i, status: 2, probe_classname: probe, outputs: [{ text: "t" }], detector_results: { [detector]: [s] } }));
   if (completed) {
     const fails = scores.filter((s) => s >= 0.5).length;
     lines.push({ entry_type: "eval", probe, detector, passed: scores.length - fails, fails, nones: 0, total_evaluated: scores.length, total_processed: scores.length });
