@@ -57,6 +57,7 @@ import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
+import { assertReceiptEmitterBootable } from "./decision-receipts.js";
 
 /** ADR-0035: how often the chain head is captured when anchoring is on. */
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
@@ -116,6 +117,9 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // migrations are idempotent — booting always converges the schema
   await runMigrations(db, migrationsFolder);
 
+  // ADR-0189 R43: a build that cannot emit v2 receipts with facts refuses to
+  // start once a receipt v2 boundary is recorded (a v1 receipt there is
+  // invalid). Before listen, like the data-key gate, so nothing is left behind.
   // ADR-0188 decision 19 (slice S4) — THE AUDIT v2 BOOT CHECK. A chain whose recorded boundary is a
   // version this build cannot write refuses the boot (nothing is appended by a binary that would fork
   // the chain). The cutover itself is an operator act, run ONCE after every replica runs v2-aware code
@@ -123,6 +127,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // database trigger `audit_log_v2_floor` (migration 0184) refuses a v1 row past the boundary from any
   // writer that was not drained.
   try {
+    await assertReceiptEmitterBootable(db);
     await assertAuditChainWritable(db);
     if (env[AUDIT_V2_CUTOVER_ENV]?.trim() === "run") {
       const cut = await runAuditV2Cutover(db, { setBy: null });
