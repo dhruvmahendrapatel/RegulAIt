@@ -43,6 +43,9 @@ import {
   bomJsonSafeIssues,
   findEmailShapes,
   hasEmailShape,
+  isBomDottedOid,
+  isBomExportEndpoint,
+  isBomSpiffeId,
   parseTrainingDatasetChecksum,
   projectBomRow,
   type DecisionBomBody,
@@ -334,17 +337,20 @@ describe("regulait.ai-bom.v1 (the signed native body)", () => {
     for (const [v, want] of [["x@y.z", true], ["a.b+c@d-e.fg.hi", true], ["@y.z", false], ["x@y", false], ["x @y.z", false], ["x@.z", false], ["a@b@c.d", true]] as const) {
       expect(hasEmailShape(v), v).toBe(want);
     }
+    // the linear shape checks keep their meaning (timing cases are in bom-timing.test.ts)
+    for (const [v, want] of [["spiffe://td.example/regulait/agent/a1", true], ["spiffe://td/a", true], ["spiffe://td", false], ["spiffe://td//a", false], ["spiffe://TD/a", false], ["http://td/a", false]] as const) {
+      expect(isBomSpiffeId(v), v).toBe(want);
+    }
+    for (const [v, want] of [["1.2.3", true], ["2.5", true], ["3.1", false], ["1", false], ["1..2", false], ["1.2.", false], ["1.a", false]] as const) {
+      expect(isBomDottedOid(v), v).toBe(want);
+    }
+    for (const [v, want] of [["https://api.example/v1/chat", true], ["http://h:8080", true], ["wss://h/", true], ["https://h:/x", false], ["https://h:123456/x", false], ["ftp://h/x", false], ["https://h/x y", false]] as const) {
+      expect(isBomExportEndpoint(v), v).toBe(want);
+    }
     for (const url of ["https://api.example/v1?token=abc", "https://api.example/v1#secret", "https://user:pass@api.example/v1"]) {
       const b = aiBom();
       b.records.endpoints[0]!.url = url;
       expect(aiBomNativeBodySchema.safeParse(b).success, url).toBe(false);
-    }
-  });
-  it("CodeQL js/polynomial-redos: the email scan is linear on 100k adversarial characters", () => {
-    for (const evil of ["!".repeat(100_000) + "@", "!".repeat(100_000) + "@a", "a@".repeat(50_000) + "!", "!@".repeat(50_000), "@" + "a.".repeat(50_000) + "!"]) {
-      const t0 = performance.now();
-      expect(findEmailShapes({ v: evil })).toEqual([]);
-      expect(performance.now() - t0, `${evil.slice(0, 8)}…`).toBeLessThan(50);
     }
   });
   it("the install subject is the nil uuid (R20)", () => {
