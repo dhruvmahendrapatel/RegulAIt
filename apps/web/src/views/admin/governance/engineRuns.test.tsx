@@ -15,7 +15,9 @@ import {
   runFormProblem,
   runProvenance,
   runRequestBody,
+  runCoverage,
   runVerdict,
+  withEngineRun,
   verdictDisplay,
   type EngineInfo,
   type EngineRun,
@@ -256,5 +258,80 @@ describe("the run form", () => {
   it("builds the §4.10 request body, omitting blank optionals", () => {
     expect(runRequestBody(base)).toEqual({ engineId: "promptfoo", target: { agentId: "a" }, config: { sets: ["basic", "agentic"], params: {} }, projectId: "p", trials: 3 });
     expect(runRequestBody({ ...base, judgeAgentId: "j", budgetUsd: "4.5", approverUserId: "u" })).toMatchObject({ target: { agentId: "a", judgeAgentId: "j" }, budgetUsd: 4.5, approverUserId: "u" });
+  });
+});
+
+describe("B5W-02: coverage is claimed only when established", () => {
+  const detail = (over: Partial<EngineRun>, items: Array<Record<string, unknown>>) =>
+    html(<EngineRunDetailView surface="redteam" run={run(over)} items={items.map(apiItem).map(engineRunItemView)} engine={engine} now={NOW} />);
+
+  it("a failure before any result, a timeout and a cancellation never say every item ran", () => {
+    const cases: Array<Partial<EngineRun>> = [
+      { status: "failed", errorCode: "runner_failed", summary: null },
+      { status: "timeout", errorCode: "deadline_passed", summary: { verdict: "unknown", counts: { pass: 0, fail: 0, unknown: 0, not_run: 0 } } },
+      { status: "cancelled", errorCode: "cancelled", summary: { verdict: "unknown", counts: { pass: 0, fail: 0, unknown: 0, not_run: 0 } } },
+    ];
+    for (const over of cases) {
+      const markup = detail(over, []);
+      expect(markup, over.status).not.toMatch(/Every (recorded )?item ran/);
+      expect(markup, over.status).toContain('data-coverage="none"');
+      expect(markup, over.status).toContain("No item measurements were recorded");
+    }
+  });
+
+  it("a run that ended early with recorded items is incomplete, not complete", () => {
+    const markup = detail({ status: "timeout", summary: { verdict: "unknown", counts: { pass: 1, fail: 0, unknown: 0, not_run: 0 } } }, [{}]);
+    expect(markup).toContain('data-coverage="incomplete"');
+    expect(markup).not.toMatch(/Every (recorded )?item ran/);
+  });
+
+  it("complete coverage needs a completed run, every item measured, and counts that agree", () => {
+    const counts = { pass: 1, fail: 1, unknown: 0, not_run: 0 };
+    const items = [{ verdict: "pass" }, { verdict: "fail" }];
+    expect(runCoverage({ status: "completed", summary: { verdict: "fail", counts } }, items).kind).toBe("complete");
+    expect(runCoverage({ status: "completed", summary: { verdict: "fail", counts: { ...counts, pass: 5 } } }, items).kind).toBe("incomplete");
+    expect(runCoverage({ status: "completed", summary: null }, items).kind).toBe("incomplete");
+    expect(runCoverage({ status: "completed", summary: { verdict: "unknown", counts } }, [{ verdict: "pass" }, { verdict: "unknown" }]).kind).toBe("incomplete");
+    expect(runCoverage({ status: "completed", summary: { verdict: "pass", counts } }, []).kind).toBe("none");
+    expect(runCoverage({ status: "leased", summary: null }, []).kind).toBe("pending");
+  });
+});
+
+describe("B5W-03: a run's signature state is never borrowed from the current image", () => {
+  const signature = (e: EngineInfo, r: EngineRun) =>
+    html(<EngineProvenanceChip provenance={runProvenance(r, e)} />).match(/data-testid="engine-run-signature">([^<]*)</)?.[1];
+  const historical = run({ engineVersion: "0.122.0", runnerId: "old", imageDigest: `sha256:${"b".repeat(64)}` });
+  const current = (sig: string, digest: string): EngineInfo => ({ ...engine, version: "0.123.1", imageDigest: digest, signature: sig, runners: [] });
+
+  it("a historical run says its signature is not recorded, whatever the current engine says", () => {
+    const states = ["verified", "unverified", "not_built"].flatMap((sig) =>
+      [`sha256:${"c".repeat(64)}`, `sha256:${"d".repeat(64)}`].map((d) => signature(current(sig, d), historical)),
+    );
+    expect(new Set(states)).toEqual(new Set(["signature not recorded for this run"]));
+    expect(runProvenance(historical, current("verified", `sha256:${"c".repeat(64)}`)).signature).toBeNull();
+    const chip = html(<EngineProvenanceChip provenance={runProvenance(historical, current("verified", `sha256:${"c".repeat(64)}`))} />);
+    expect(chip).toContain("current engine build, not this run&#x27;s: 0.123.1, signature verified)");
+  });
+
+  it("the same version with a different digest is not the same build", () => {
+    const sameVersion = run({ engineVersion: "0.123.1", imageDigest: `sha256:${"b".repeat(64)}` });
+    expect(runProvenance(sameVersion, current("verified", `sha256:${"c".repeat(64)}`)).signature).toBeNull();
+  });
+
+  it("a run whose recorded digest and version are the current image's shows that image's state", () => {
+    const tied = run({ engineVersion: "0.123.1", imageDigest: `sha256:${"c".repeat(64)}` });
+    expect(signature(current("unverified", `sha256:${"c".repeat(64)}`), tied)).toBe("signature of this run&#x27;s build: unverified");
+  });
+});
+
+describe("B5W-05: the open run lives in the URL", () => {
+  it("sets the run, keeps unrelated fields, and pins the Evaluations tab", () => {
+    const next = withEngineRun(new URLSearchParams("q=x&tab=runs"), "abc", "evals");
+    expect(next.get("run")).toBe("abc");
+    expect(next.get("tab")).toBe("engines");
+    expect(next.get("q")).toBe("x");
+    const red = withEngineRun(new URLSearchParams("q=x"), "abc", "redteam");
+    expect(red.toString()).toBe("q=x&run=abc");
+    expect(withEngineRun(red, null, "redteam").toString()).toBe("q=x");
   });
 });

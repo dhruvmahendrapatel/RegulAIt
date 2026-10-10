@@ -2900,7 +2900,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ruleId: "unknown_subject",
         ruleChain: [],
         reason: "no user has this id: the callout refuses a subject it cannot name",
-        detail: advisoryDetail({ ...calloutProvenance, contextApplied: [] }),
+        detail: { ...(advisoryDetail({ ...calloutProvenance, contextApplied: [] })), receiptClass: "decision" },
       });
       return reply.status(200).send({
         decision: "deny" satisfies AuthzDecision,
@@ -2916,7 +2916,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ruleId: "subject_disabled",
         ruleChain: [],
         reason: `subject deactivated at ${subject.disabledAt.toISOString()}: the callout refuses what sign-in refuses`,
-        detail: advisoryDetail({ ...calloutProvenance, contextApplied: [] }),
+        detail: { ...(advisoryDetail({ ...calloutProvenance, contextApplied: [] })), receiptClass: "decision" },
       });
       return reply.status(200).send({
         decision: "deny" satisfies AuthzDecision,
@@ -3000,7 +3000,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-      detail: advisoryDetail({
+      detail: { ...(advisoryDetail({
         ...calloutProvenance,
         contextApplied,
         // AER-036: the VALUE the decision ran on, not just that a field was
@@ -3016,7 +3016,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               },
             }
           : {}),
-      }),
+      })), receiptClass: "decision" },
     });
 
     // `reason` here is the RULE ID, not the prose. It is stable, it is enough
@@ -3068,7 +3068,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-      detail: advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" }),
+      detail: { ...(advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" })), receiptClass: "decision" },
     });
 
     return decision;
@@ -3915,7 +3915,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ...(updated.objectType === "connector_call"
             ? { objectType: "connector" as const, objectId: updated.connectorId }
             : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
-          detail: { approvalId: updated.id, phase: "builder-resume" },
+          detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "decision" },
           effect: "deny",
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],
@@ -4328,6 +4328,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             namedApproverUserId: row.approverUserId,
             decision: body.decision,
             stageId: updated.stageId,
+            receiptClass: "decision",
           },
           effect: body.decision === "approved" ? "allow" : "deny",
           ruleId: "approval-admin-override",
@@ -4347,6 +4348,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             selfReview: true,
             decision: body.decision,
             stageId: updated.stageId,
+            receiptClass: "decision",
           },
           effect: body.decision === "approved" ? "allow" : "deny",
           ruleId: "approval-self-review",
@@ -4371,6 +4373,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             delegationId: delegation.id,
             decision: body.decision,
             stageId: updated.stageId,
+            receiptClass: "decision",
           },
           effect: body.decision === "approved" ? "allow" : "deny",
           ruleId: "approval-delegated-decision",
@@ -5153,7 +5156,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // construction would slow every one of them and make some flaky — which is
   // why "constructing the app starts no timer" is itself asserted in
   // scheduler.test.ts rather than left as an intention.
-  registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey }) });
+  registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey, ...(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }) }) });
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
   // after-the-response work (a resumed builder turn, a channel reply) finishes first

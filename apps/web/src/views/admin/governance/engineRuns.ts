@@ -309,7 +309,14 @@ export interface Provenance {
   digest: string | null;
   digestSource: "run" | "runner" | null;
   generation: number | null;
+  /**
+   * B5W-03: the signature state of THE BUILD THAT RAN IT, or null when the page
+   * cannot tie one to this run's digest and version. Never the current engine's
+   * state borrowed for a historical run.
+   */
   signature: string | null;
+  /** the engine's CURRENT build, shown separately and labelled as current */
+  current: { version: string; signature: string } | null;
 }
 
 /**
@@ -328,8 +335,74 @@ export function runProvenance(run: EngineRun, engine: EngineInfo | undefined): P
     digest: fromRun ?? fromRunner ?? null,
     digestSource: fromRun ? "run" : fromRunner ? "runner" : null,
     generation: run.manifestGeneration ?? null,
-    signature: engine?.signature ?? null,
+    signature: signatureTiedToRun(run.engineVersion, fromRun ?? fromRunner ?? null, engine),
+    current: engine ? { version: engine.version, signature: engine.signature } : null,
   };
+}
+
+/**
+ * B5W-03: the engine's signature state describes its CURRENT image. It applies
+ * to a run only when the run's recorded digest and version are exactly that
+ * image's; otherwise the run has no recorded signature state.
+ */
+function signatureTiedToRun(version: string, digest: string | null, engine: EngineInfo | undefined): string | null {
+  if (!engine || !digest || !engine.imageDigest) return null;
+  return engine.imageDigest === digest && engine.version === version ? engine.signature : null;
+}
+
+// ---- the open run in the URL (B5W-05) ----------------------------------------
+
+/** the query parameter that names the open engine run */
+export const ENGINE_RUN_PARAM = "run";
+/** the Evaluations tab that holds engine runs (`?tab=engines`) */
+export const EVALS_ENGINE_TAB = "engines";
+
+/**
+ * The next query string with the open run set (or cleared), every unrelated
+ * field kept. On Evaluations it also pins the Engine runs tab, so a deep link
+ * lands where the run is shown.
+ */
+export function withEngineRun(prev: URLSearchParams, runId: string | null, surface: "redteam" | "evals"): URLSearchParams {
+  const next = new URLSearchParams(prev);
+  if (runId) next.set(ENGINE_RUN_PARAM, runId);
+  else next.delete(ENGINE_RUN_PARAM);
+  if (surface === "evals" && runId) next.set("tab", EVALS_ENGINE_TAB);
+  return next;
+}
+
+// ---- coverage (B5W-02)---------------------------------------------------------
+
+export type CoverageKind = "pending" | "run_not_run" | "none" | "incomplete" | "complete" | "has_not_run";
+export interface Coverage {
+  kind: CoverageKind;
+  text: string;
+}
+
+/**
+ * What the run's items say about coverage. "Every recorded item ran" is said
+ * ONLY for a completed run whose recorded items all have a pass or fail
+ * measurement and agree with the summary's counts. No items means nothing was
+ * recorded, never full coverage; a run that ended any other way is incomplete.
+ */
+export function runCoverage(run: Pick<EngineRun, "status" | "summary">, items: ReadonlyArray<Pick<EngineRunItem, "verdict">>): Coverage {
+  const notRun = items.filter((i) => i.verdict === "not_run").length;
+  if (isLiveStatus(run.status)) return { kind: "pending", text: "No result yet." };
+  if (run.status === "not_run") return { kind: "run_not_run", text: "The whole run did not run; nothing it lists was measured." };
+  if (notRun > 0) return { kind: "has_not_run", text: `${notRun} item(s) did not run; they are not a pass.` };
+  if (items.length === 0)
+    return { kind: "none", text: "No item measurements were recorded for this run, so nothing is known about what it covered." };
+  if (run.status !== "completed")
+    return {
+      kind: "incomplete",
+      text: `The run ended ${runStatusDisplay(run.status).label} before it finished: the recorded items are not a complete measurement.`,
+    };
+  const unmeasured = items.filter((i) => i.verdict !== "pass" && i.verdict !== "fail").length;
+  if (unmeasured > 0) return { kind: "incomplete", text: `${unmeasured} item(s) have no trustworthy result, so coverage is incomplete.` };
+  const c = run.summary?.counts;
+  const total = c ? c.pass + c.fail + c.unknown + c.not_run : null;
+  if (total === null || total !== items.length)
+    return { kind: "incomplete", text: "The summary's counts do not match the recorded items, so complete coverage is not established." };
+  return { kind: "complete", text: `Every recorded item ran and was measured (${items.length}).` };
 }
 
 export const shortDigest = (d: string): string => {

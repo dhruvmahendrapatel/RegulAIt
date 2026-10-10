@@ -422,7 +422,7 @@ export function registerDecomposeRoutes(
         userId,
         objectType: "agent",
         objectId: lead.id,
-        detail: { purpose: "decompose", phase: "lead-entitlement", mode: LEAD_MODE },
+        detail: { purpose: "decompose", phase: "lead-entitlement", mode: LEAD_MODE, receiptClass: "decision" },
         effect: "deny",
         ruleId: decision.ruleId,
         ruleChain: decision.ruleChain,

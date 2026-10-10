@@ -24,7 +24,7 @@ export const TRACE_OUTPUT_DETECTORS: readonly GuardrailDetectorId[] = ["pii", "s
 export const TRACE_INPUT_DETECTORS: readonly GuardrailDetectorId[] = ["prompt_injection", "jailbreak"];
 
 /** the ADR-0099 scrub marker — `[redacted:aws_key:20:0123456789ab]` */
-const SCRUB_MARKER = /\[redacted:[a-z0-9_+]+:\d+:[0-9a-f]{12}\]/g;
+const SCRUB_MARKER = /\[redacted:[a-z0-9_.+]+:\d+:[0-9a-f]{12}\]/g;
 
 export const TRACE_EVALUATION_OUTCOMES = ["evaluated", "withheld", "no_content"] as const;
 export type TraceEvaluationOutcome = (typeof TRACE_EVALUATION_OUTCOMES)[number];

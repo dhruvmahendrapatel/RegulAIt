@@ -96,6 +96,7 @@ import McpServersPage from "./views/admin/integrations/McpServersPage";
 import GitConnectionsPage from "./views/admin/integrations/GitConnectionsPage";
 import PmConnectionsPage from "./views/admin/integrations/PmConnectionsPage";
 import DeployTargetsPage from "./views/admin/integrations/DeployTargetsPage";
+import EnginesPage from "./views/admin/integrations/EnginesPage";
 import CostDashboardPage from "./views/admin/cost/CostDashboardPage";
 import CostConsolidationPage from "./views/admin/cost/CostConsolidationPage";
 import SpendMonitorPage from "./views/admin/cost/SpendMonitorPage";
@@ -285,6 +286,8 @@ function ApplicationRoutes() {
                 <Route path="git-connections" element={<GitConnectionsPage />} />
                 <Route path="pm-connections" element={<PmConnectionsPage />} />
                 <Route path="deploy-targets" element={<DeployTargetsPage />} />
+                {/* ADR-0187 (X26) */}
+                <Route path="engines" element={<EnginesPage />} />
                 <Route path="cost" element={<CostDashboardPage />} />
                 {/* ADR-0069 */}
                 <Route path="cost-consolidation" element={<CostConsolidationPage />} />

@@ -1,15 +1,14 @@
 {
   "name": "regulait-engine-promptfoo-runtime",
-  "version": "0.123.1",
+  "version": "0.124.1",
   "private": true,
   "license": "UNLICENSED",
-  "description": "ADR-0187 B5-P: the pinned promptfoo release the engine image installs (npm ci --omit=optional --ignore-scripts). Overrides lift two transitive packages past published advisories (see engines/promptfoo/THIRD_PARTY.md).",
+  "description": "ADR-0187 B5-P: the pinned promptfoo release the engine image installs (npm ci --omit=optional --ignore-scripts). An override lifts one transitive package past a published advisory (see engines/promptfoo/THIRD_PARTY.md).",
   "dependencies": {
     "@libsql/linux-x64-gnu": "0.5.29",
-    "promptfoo": "0.123.1"
+    "promptfoo": "0.124.1"
   },
   "overrides": {
-    "simple-git": "4.0.2",
     "basic-ftp": "6.2.2"
   }
 }

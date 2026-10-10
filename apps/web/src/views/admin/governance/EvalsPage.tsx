@@ -25,6 +25,7 @@
  * PANEL with repetitions and the observe-only JUDGE CALIBRATION card.
  */
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
@@ -195,7 +196,21 @@ interface PanelRow {
 }
 
 export default function EvalsPage() {
-  const [tab, setTab] = useState("runs");
+  // B5W-05: the tab lives in the URL (`?tab=`), so a link to an engine run
+  // (`?tab=engines&run=<id>`) opens on the tab that shows it; other fields are kept
+  const [params, setParams] = useSearchParams();
+  const tab = TABS.some((t) => t.id === params.get("tab")) ? params.get("tab")! : params.has("run") ? "engines" : "runs";
+  const setTab = (id: string) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id === "runs") next.delete("tab");
+        else next.set("tab", id);
+        if (id !== "engines") next.delete("run");
+        return next;
+      },
+      { replace: true },
+    );
   const agents = useAgents();
   const projects = useProjects();
   const act = useAction();

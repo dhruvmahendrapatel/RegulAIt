@@ -289,7 +289,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // The job DEFINITIONS are synced either way, so an operator with the
   // scheduler off can still see on the admin screen exactly what would run.
   const schedulerConfig = resolveSchedulerConfig(env);
-  const registry = schedulerJobRegistry({ dataKey: appOpts.dataKey });
+  const registry = schedulerJobRegistry({ dataKey: appOpts.dataKey, ...(appOpts.artifactStore === undefined ? {} : { artifactStore: appOpts.artifactStore }) });
   try {
     await syncSchedulerJobs(db, registry);
   } catch (err) {

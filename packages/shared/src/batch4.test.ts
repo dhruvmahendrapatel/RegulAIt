@@ -24,6 +24,7 @@ import {
   VENDORED_INJECTION_RULES,
   VENDORED_MCP_HEURISTICS,
   VENDORED_SECRET_RULES,
+  VENDORED_PACK_MANIFESTS,
   approvalSigningChallenge,
   approvalSigningDigest,
   approvalSigningPayload,
@@ -214,10 +215,12 @@ describe("ADR-0186 B: the approval signing payload", () => {
 
 describe("ADR-0186 V: the foundation ships no vendored content and changes nothing", () => {
   it("the packs are empty, normalisation is the identity, and nothing fails to compile", () => {
-    expect(VENDORED_SECRET_RULES).toEqual([]);
-    expect(VENDORED_INJECTION_RULES).toEqual([]);
-    expect(VENDORED_MCP_HEURISTICS).toEqual([]);
-    expect(normaliseForInjection("Ign​ore prev")).toBe("Ign​ore prev");
+    const m = (id: string) => VENDORED_PACK_MANIFESTS.find((x) => x.id === id)!;
+    expect(VENDORED_SECRET_RULES.length).toBe(m("pipelock-secrets").rules);
+    expect(VENDORED_INJECTION_RULES.length).toBe(m("nemo-yara-injection").rules);
+    expect(VENDORED_MCP_HEURISTICS.length).toBe(m("agt-mcp-heuristics").rules);
+    expect(normaliseForInjection("Ign​ore prev")).toBe("Ignore prev");
+    expect(normaliseForInjection("plain ascii prose, unchanged")).toBe("plain ascii prose, unchanged");
     expect(vendoredCompileProblems()).toEqual([]);
     const s = "token AKIAIOSFODNN7EXAMPLE and prose";
     // identity: the scrub returns the same string object when nothing matches

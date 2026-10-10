@@ -163,6 +163,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/connectors": "plug",
   "/admin/mcp-servers": "server",
   "/admin/webhooks": "sync",
+  "/admin/engines": "box", // ADR-0187
   "/admin/admission": "shield",
   "/admin/git-connections": "branch",
   "/admin/pm-connections": "kanban",
