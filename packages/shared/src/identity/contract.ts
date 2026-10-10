@@ -784,6 +784,31 @@ export interface IdentitySigningKeyView {
   revokedAt: string | null;
 }
 
+/** `GET /v1/identity/signing-keys` (S3): every issuer key ever recorded, newest first; public halves only */
+export interface IdentitySigningKeyListView {
+  items: IdentitySigningKeyView[];
+}
+
+/** an issuer key id: the RFC 7638 thumbprint of its public JWK (migration 0180 CHECK allows this alphabet) */
+export const IDENTITY_SIGNING_KID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * `POST /v1/identity/signing-keys/rotate` (S3; admin, `identity_manage`
+ * step-up, audited). The new key's PRIVATE half is a deploy-time secret
+ * (`REGULAIT_IDENTITY_SIGNING_KEY`), never sent here: the operator deploys it
+ * first, then this activates it and retires the current signer (overlap keeps
+ * the retired key's public half in the JWKS until every token it signed has
+ * expired). `kid` names the configured key to activate; it may be omitted only
+ * when exactly one configured key has never been recorded.
+ */
+export const rotateIdentitySigningKeySchema = z
+  .object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN).optional() })
+  .strict();
+export type RotateIdentitySigningKey = z.infer<typeof rotateIdentitySigningKeySchema>;
+
+/** `POST /v1/identity/signing-keys/:kid/revoke` (S3): compromise; every token it signed is refused; never undone */
+export const revokeIdentitySigningKeySchema = z.object({}).strict();
+
 // ---------------------------------------------------------------------------
 // The routes (S1 registers every one as a 501 stub)
 // ---------------------------------------------------------------------------
