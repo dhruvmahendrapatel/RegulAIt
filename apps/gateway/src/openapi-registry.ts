@@ -1045,6 +1045,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/executors/:executorId/declared-class": "internal",
   "GET /v1/execution-placements": "internal",
   "GET /v1/execution-placements/:placementId": "internal",
+  "POST /v1/executor-channel/announce": "internal",
+  "POST /v1/executor-channel/self-test": "internal",
+  "GET /v1/executor-channel/stream": "internal",
+  "POST /v1/executor-channel/offers/:offerId/accept": "internal",
+  "POST /v1/executor-channel/offers/:offerId/decline": "internal",
+  "POST /v1/executor-channel/offers/:offerId/report": "internal",
+  "POST /v1/executor-channel/offers/:offerId/end": "internal",
 };
 
 /**
@@ -1970,4 +1977,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/executors/:executorId/declared-class": "isolation",
   "GET /v1/execution-placements": "isolation",
   "GET /v1/execution-placements/:placementId": "isolation",
+  "POST /v1/executor-channel/announce": "executor-channel",
+  "POST /v1/executor-channel/self-test": "executor-channel",
+  "GET /v1/executor-channel/stream": "executor-channel",
+  "POST /v1/executor-channel/offers/:offerId/accept": "executor-channel",
+  "POST /v1/executor-channel/offers/:offerId/decline": "executor-channel",
+  "POST /v1/executor-channel/offers/:offerId/report": "executor-channel",
+  "POST /v1/executor-channel/offers/:offerId/end": "executor-channel",
 };

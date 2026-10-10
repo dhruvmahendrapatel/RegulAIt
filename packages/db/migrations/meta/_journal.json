@@ -1219,6 +1219,20 @@
       "when": 1785118000000,
       "tag": "0183_isolation_execution_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 187,
+      "version": "7",
+      "when": 1785122000000,
+      "tag": "0187_execution_offers",
+      "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1785123000000,
+      "tag": "0188_delegation_root_strict_and_abort",
+      "breakpoints": true
     }
   ]
 }

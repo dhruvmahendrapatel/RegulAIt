@@ -88,6 +88,10 @@ const RELAXED: Partial<Record<IdentitySettingKey, unknown>> = {
   delegatedTokenTtlSeconds: 3600,
   delegationMaxDepth: 8,
   dpopNonceRequired: false,
+  // S5 security review item 6 (migration 0188)
+  delegationUncappedRootAllowed: true,
+  delegationRootDefaultCapMicros: 1_000_000,
+  delegationRootMaxLifetimeSeconds: 86_400,
 };
 
 function refusalText(e: unknown): string {
@@ -873,8 +877,9 @@ describe("ADR-0188 the stubs: every route answers 501 under its auth class", () 
   });
 
   it("each route not yet built answers 501 not_built to an authorised caller", async () => {
-    // S3 built its routes (the JWKS and the signing keys); zz-adr0188-s3-issuer-grants.test.ts covers them
-    for (const r of IDENTITY_ROUTES.filter((x) => x.slice !== "S3")) {
+    // S3 built its routes (the JWKS and the signing keys); zz-adr0188-s3-issuer-grants.test.ts covers them.
+    // S5 built the token family, the delegation proof and the grant admin routes; zz-adr0188-s5-*.test.ts cover them
+    for (const r of IDENTITY_ROUTES.filter((x) => x.slice !== "S3" && x.slice !== "S5")) {
       const headers = r.cls === "public" ? {} : r.cls === "user" ? users.member.auth : users.admin.auth;
       const res = await inject(r.method, url(r.path), headers, r.method === "GET" || r.method === "DELETE" ? undefined : {});
       expect(res.statusCode, `${r.method} ${r.path}: ${res.body}`).toBe(501);

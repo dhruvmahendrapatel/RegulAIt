@@ -181,6 +181,8 @@ export const DELEGATION_REVOKE_REASONS = [
   "sponsor_disabled",
   "agent_halted",
   "run_ended",
+  /** S5 review item 5 (migration 0188): the token request timed out after its grant was made */
+  "request_aborted",
 ] as const;
 export type DelegationRevokeReason = (typeof DELEGATION_REVOKE_REASONS)[number];
 
@@ -284,13 +286,15 @@ export type ActorChain = z.infer<typeof actorChainSchema>;
 // Replay claims (decision 14) and the audit chain version (decision 19)
 // ---------------------------------------------------------------------------
 
-/** `replay_claims.namespace` (migration 0180 CHECK) */
+/** `replay_claims.namespace` (migration 0180 CHECK, widened by 0187) */
 export const REPLAY_NAMESPACES = [
   "client_assertion",
   "as_dpop",
   "rs_dpop",
   "human_delegation_proof",
   "delegation_authz",
+  // ADR-0190 I3: the executor channel's one-use request proofs (migration 0187 widens the CHECK)
+  "executor_channel",
 ] as const;
 export type ReplayNamespace = (typeof REPLAY_NAMESPACES)[number];
 
@@ -358,7 +362,15 @@ export const TOKEN_ENDPOINT_ERRORS = [
   "use_dpop_nonce",
 ] as const;
 /** RegulAIt `error_code`s riding `invalid_grant` (decisions 15, 23) */
-export const DELEGATION_ERROR_CODES = ["delegation_budget", "delegation_depth", "mtls_parent_handoff_unsupported"] as const;
+export const DELEGATION_ERROR_CODES = [
+  "delegation_budget",
+  "delegation_depth",
+  "mtls_parent_handoff_unsupported",
+  // S5 security review (ADR-0188 amendments): items 1 and 6
+  "delegation_depth_unenforced",
+  "delegation_cap_required",
+  "delegation_lifetime",
+] as const;
 
 /** the form fields of `POST /oauth/token` (decisions 15 and 23); S5 validates the semantics */
 export const tokenExchangeRequestSchema = z
@@ -373,6 +385,16 @@ export const tokenExchangeRequestSchema = z
     authorization_details: z.string().min(2).max(65_536),
     client_assertion_type: z.literal(CLIENT_ASSERTION_TYPE_JWT_BEARER).optional(),
     client_assertion: z.string().min(1).max(16_384).optional(),
+    /** RFC 8705: an mTLS client names itself (no assertion carries the id) */
+    client_id: z.string().min(1).max(2048).optional(),
+    // S5 — a CHILD exchange restates the rest of the body its parent signed (decision 23), so the token
+    // endpoint can rebuild the RFC 8785 form and compare it byte for byte; a root takes these from the proof
+    project_id: z.string().max(64).optional(),
+    env: z.string().max(64).optional(),
+    cap_micros: z.string().max(20).optional(),
+    max_depth: z.string().max(2).optional(),
+    expires_at: z.string().max(16).optional(),
+    idempotency_key: z.string().min(1).max(200).optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -383,6 +405,11 @@ export const tokenExchangeRequestSchema = z
     }
     if (!root && (v.actor_token === undefined || v.actor_token_type === undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a child exchange needs the parent's delegation authorization", path: ["actor_token"] });
+    }
+    const childFields = ["project_id", "env", "cap_micros", "max_depth", "expires_at", "idempotency_key"] as const;
+    for (const k of childFields) {
+      if (root && v[k] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `a root exchange takes ${k} from the delegation proof`, path: [k] });
+      if (!root && v[k] === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `a child exchange restates ${k}`, path: [k] });
     }
     if ((v.client_assertion === undefined) !== (v.client_assertion_type === undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "client_assertion and client_assertion_type go together", path: ["client_assertion"] });
@@ -584,6 +611,14 @@ export const createDelegationProofSchema = z
     env: environmentName,
     /** the agent's key thumbprint, when known: binds the proof to that key */
     agentKeyThumbprint: z.string().regex(SHA256_B64URL_PATTERN).optional(),
+    /** S5: the root grant's cap in integer micro-dollars; omitted = the org's default root cap, and with none set (the
+     *  strict default) the request is refused unless the org allows uncapped roots (S5 review item 6) */
+    capMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    /** S5: how long the root grant lives (60 s to 24 h; default 15 min, at most the org's `delegation_root_max_lifetime_seconds`).
+     *  Its tokens still live `delegated_token_ttl_seconds`. */
+    lifetimeSeconds: z.number().int().min(60).max(86_400).optional(),
+    /** S5: how many further delegations the agent may make below itself (default and ceiling: the org's `delegation_max_depth`) */
+    maxDepth: z.number().int().min(0).max(DELEGATION_DEPTH_CEILING).optional(),
   })
   .strict();
 export type CreateDelegationProof = z.infer<typeof createDelegationProofSchema>;
@@ -850,9 +885,9 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "PUT", path: "/v1/workload-identities/:identityId/grants", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId/grant-proposals", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/identity/picker-sources", cls: "admin", slice: "S6" },
-  { method: "GET", path: "/v1/delegation-grants", cls: "admin", slice: "S6" },
-  { method: "GET", path: "/v1/delegation-grants/:grantId", cls: "admin", slice: "S6" },
-  { method: "POST", path: "/v1/delegation-grants/:grantId/revoke", cls: "admin", slice: "S6" },
+  { method: "GET", path: "/v1/delegation-grants", cls: "admin", slice: "S5" },
+  { method: "GET", path: "/v1/delegation-grants/:grantId", cls: "admin", slice: "S5" },
+  { method: "POST", path: "/v1/delegation-grants/:grantId/revoke", cls: "admin", slice: "S5" },
   { method: "GET", path: "/v1/identity/signing-keys", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/rotate", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/:kid/revoke", cls: "admin", slice: "S3" },

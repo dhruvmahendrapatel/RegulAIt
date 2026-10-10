@@ -413,6 +413,110 @@ Still to run on a real host or in CI (R13, "Needs a real host or CI"): the ADR-0
 the decision 19 egress probe (I4), the Kata and MicroVM probes (I6/I7), Kubernetes `RuntimeClass` (I6), timings on a
 quiet host, cgroup v2 behaviour, and the OpenShell kernel floor on our CI runners.
 
+## Amendments after slice I3 (2026-10-10)
+
+Slice I3 built `packages/sandbox-executor` and the gateway's executor channel (PR "ADR-0190 I3 executor core"). The
+decisions it had to make, each recorded here; none relaxes a strict default.
+
+- **K. The executor authenticates every channel request with a one-use signed proof, not a token (decision 4).**
+  ADR-0188 S5's token endpoint issues a token only from a human delegation proof (decision 15), which a long-running
+  service workload does not have; the service-workload token path is S7's. Until S7 lands, every request on
+  `/v1/executor-channel/*` carries one `Executor-Proof` header: a compact JWS under a LIVE `jwk` credential of the
+  executor's `worker_runtime` identity (`iss` = `sub` = the identity, `aud` = the issuer, `htm`, `htu`, `iat` within
+  60 s and at most 5 s ahead on the database clock, a one-use `jti` claimed atomically in `replay_claims` namespace
+  `executor_channel`, and `bh` = SHA-256 of the exact raw body). It is RFC 7523 client authentication carrying RFC
+  9449's request binding: nothing bearer, nothing reusable, nothing that outlives one request, and no secret in the
+  executor's environment (the key is a 0600 file on its own volume). The two files that build and check it are the
+  one adapter S5/S7 changes touch: `packages/sandbox-executor/src/channel-credential.ts` and
+  `apps/gateway/src/executor-channel-auth.ts`. **Open question for S7:** whether the executor moves to a DPoP-bound
+  access token from `/oauth/token` (a client-credentials-shaped exchange for `worker_runtime` identities) or keeps the
+  per-request proof; both satisfy ADR-0188 decision 5's "sender-constrained, short-lived, audience-bound", and the
+  proof is the stricter of the two.
+- **L. The outbound stream is newline-delimited JSON over a bounded HTTP window (decision 4).** `GET
+  /v1/executor-channel/stream?window=1..60` answers `hello`, then offers and status changes as they happen, keepalives
+  and `bye`; the executor reconnects at once. Offers are rows (`execution_offers`, migration 0187), so a placement
+  decided on one gateway replica reaches the executor's stream held by another; a sent-set per connection and the
+  offer id keep a re-sent offer harmless. A WebSocket was not adopted: it would add a dependency (ADR-0176) for no
+  property the bounded window lacks, and the per-request proof fits a request. Slice I4 decides whether MCP stdio
+  bytes ride this stream or a sibling stream on the same proof.
+- **M. The attestation report is `regulait.executor-report.v1` (decision 6, amendment D).** A fixed probe
+  vocabulary with a bounded observation shape per probe (`packages/shared/src/isolation/attestation.ts`), canonical
+  text by RFC 8785 (as the profile body) and its SHA-256 as the report hash, signed by the executor as a DETACHED JWS
+  (RFC 7797) so the stored body can be re-verified later against the identity's public key. The executor never judges
+  its own report: the gateway evaluates every observation against the profile, the executor's registered backend and
+  declared classes, and (for a placement) the required class and the offer's image digest; any failure fails the
+  whole report. The same evaluator runs on the executor so a host that fails its own profile is logged where someone
+  can fix it. `strength: software_attested` is in every report (OWNER DECISION 5).
+- **N. The latest verdict decides freshness (decision 6).** An executor's attestation for a profile is its most recent
+  self-test row: a `fail` after a `pass` withdraws the class until the next `pass`; a `pass` is fresh until
+  `observed_at + min(profile.attestation.executorMaxAgeMinutes, org.executor_attestation_max_age_minutes)`, both
+  stamped by the database. The executor remembers only the gateway's verdict and expiry, never its own opinion, and
+  declines an offer whose attestation has expired on the gateway's clock.
+- **O. Quarantine is one atomic transition (decision 6).** `active → quarantined` is a single conditional UPDATE; of
+  two concurrent mismatches, the one whose UPDATE moved the row writes the audit row (`executor-quarantined`), raises
+  the governance alert (`execution-profile-mismatch`, severity high) and withdraws the executor's open offers, each
+  under its row lock (an offer whose report is being judged at that moment keeps that outcome). Re-enable is an
+  admin's `settings_relax` step-up (it restores withdrawn classes) and is audited; the executor then runs a full
+  self-test before taking work. Revoke is terminal: the row never changes again and the identity's proofs answer
+  `403 executor_revoked`.
+- **P. The broker refuses before any sandbox, with the most specific reason (decision 7).** `offerPlacement` picks one
+  active executor whose latest attestation for the profile is a fresh `pass` at or above the required class (a
+  customer plane only through its admin mapping) and the fewest open offers; otherwise it writes a refused placement
+  row under an `execution-refused` audit row with `profile_retired` (also for a digest no row names, where the
+  refusal is audited without a placement row), `executor_quarantined` (every executor quarantined), `attestation_stale`
+  (an attestation exists but none is fresh), `class_below_required` (fresh but below) or `no_executor`. A declined or
+  expired offer is a refused placement too (`no_executor`, or the executor's reason). The requirement is raised to
+  the profile's own `minClass` where that is higher (decision 7 item 5).
+- **Q. Audit actions added:** `executor-announced`, `executor-revoked`, `executor-declared-class-set`, and the channel
+  refusal row `executor-channel-refused` (decision 13's list in `ISOLATION_AUDIT_ACTIONS`). Audit object types
+  `executor` and `execution_placement`. Placement reports are kept in the `execution-placed` /
+  `execution-profile-mismatch` audit rows' detail (with their signature); self-test reports in
+  `executor_attestations.report`.
+- **R. The fake backend is test-only.** `@regulait/sandbox-executor/testing` exports it; `main.ts` cannot name it and
+  refuses to start without a real backend (I3 ships none: I4 adds `gvisor`). A fake that attests isolation that does
+  not exist is the one thing the gateway cannot tell from the real thing.
+- **S. Migration 0187** (`execution_offers`, the widened `replay_claims` namespace CHECK), `when` 1785122000000; the
+  journal is re-ordered at merge time against 0184–0186 and S5's 0188.
+
+Amendments from the independent review of the I3 PR (#323, reviewed at 985f5b3; master decisions, 2026-10-10). Each
+tightens amendments K–S; none relaxes a strict default.
+
+- **T. Quarantine voids every earlier attestation; re-enable needs a NEW pass (decision 6, ADR-0180; review M1).** This
+  answers open question 4 below. The self-test route answers `409 executor_quarantined` (`next: quarantined`) unless
+  the executor's status is `active`. The status is re-checked under a share lock on the executor row, in the same
+  transaction that writes the verdicts, so a quarantine or a re-enable cannot cross a self-test while it is being
+  judged. Re-enable stamps `executors.reenabled_at = now()` (database clock; migration 0187 adds the column).
+  `freshAttestation`, the broker's refusal-reason query and the admin view share one predicate: they count only
+  attestation rows with `observed_at > reenabled_at`. A pass written before the quarantine, or while it lasted, never
+  counts again, even when its `expires_at` has not passed. Until the executor's next `pass`, the broker refuses and
+  offers nothing.
+- **U. The runtime probes cannot be dropped by a profile (decision 6, amendment D; review M3).** The evaluator
+  requires `runtime_identity` in every report. It also requires `runtime_config` whenever the backend is `gvisor` or
+  the claimed class is `user_space_kernel` (`requiredReportProbes`). This holds whatever `attestation.probes` lists,
+  so a report with no runtime evidence fails `probe_missing`. The profile schema also refuses a body whose
+  `attestation.probes` omits `runtime_identity` or `runtime_config`: every profile carries a `runsc` section, so any
+  profile can be placed on gVisor.
+- **V. The executor reaches the gateway over `https:` only (decision 4; review L1).** `REGULAIT_GATEWAY_URL` must be
+  `https:`. A plain `http:` URL is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), or when
+  `REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP=1` is set. That development flag defaults off and is logged at start.
+- **W. Refusals before authentication (review L6; accepted, partly narrowed).** A refused channel request writes one
+  `executor-channel-refused` audit row before any identity is proven, so an unauthenticated caller can add audit rows.
+  Request bodies of up to 4 MiB (self-test, report) used to be read before the proof was checked. Both are bounded by
+  the ADR-0031 global per-IP rate limit, so no extra limiter is added. The body read is also narrowed: the proof's
+  header, signature, identity, credential, `htm`, `htu` and `iat` are now verified in an `onRequest` hook BEFORE the
+  body is read. Only the body hash (`bh`), the one-use `jti` claim and the executor lookup wait for the body. An
+  unproven caller can therefore no longer make the gateway buffer a large body. Re-check both if the channel moves
+  behind a proxy that hides client addresses from the per-IP limit.
+
+Open questions I3 leaves to the master (also in the PR):
+
+1. S7's service-workload token path (amendment K) and whether the proof stays as the stricter option.
+2. Whether a quarantined executor's withdrawn offers should be RE-OFFERED to another executor by the broker (today the
+   placement is refused `executor_quarantined` and the caller decides); I4's governed path is the natural place.
+3. The stream's transport for stdio bytes (amendment L): the same window, or a sibling stream.
+4. ~~Whether re-enable should also require a fresh self-test on the gateway side before the executor's classes count
+   again.~~ Answered by amendment T: yes. The gateway counts only attestations observed after the re-enable.
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches (`schema.ts`, migrations, `app.ts`, `route-classes.ts`, `openapi-registry.ts`, the
