@@ -29,7 +29,9 @@ import {
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
-import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import { scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { actorEntitlementsReach, DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
+import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import {
@@ -532,6 +534,30 @@ export interface McpPii {
 }
 
 
+/**
+ * ADR-0188 S4 — the tools a delegated caller may be OFFERED on a server: those every live link of its chain
+ * covers in its grant scope and, under `own_grants`, in its own grants. Listing is a courtesy; every
+ * `tools/call` is still decided by the kernel with the chain read fresh.
+ */
+export async function delegatedToolNames(db: Db, grantId: string, refs: readonly ToolRef[]): Promise<Set<string>> {
+  let actor: GovernedActor;
+  try {
+    actor = await actorForGrant(db, grantId, { costKnown: true });
+  } catch (err) {
+    if (err instanceof DelegationRefusedError) return new Set();
+    throw err;
+  }
+  const out = new Set<string>();
+  for (const r of refs) {
+    const call = { type: "mcp_tool" as const, serverId: r.serverId, toolName: r.name, kind: r.kind };
+    const ok = actor.links.every(
+      (l) => l.live && scopeCovers(l.scope, call) && (actor.entitlementMode !== "own_grants" || actorEntitlementsReach(l.entitlements, call)),
+    );
+    if (ok) out.add(r.name);
+  }
+  return out;
+}
+
 export async function executeGovernedToolCall(
   db: Db,
   _dataKey: string | undefined,
@@ -570,6 +596,14 @@ export async function executeGovernedToolCall(
      * governed call is findable from the caller's own record. Never decides
      * anything; absent = byte-identical. */
     detail?: Record<string, unknown> | undefined;
+    /**
+     * ADR-0188 S4 (decision 6) — the delegation grant an in-process agent makes
+     * this call under. When set, the call is decided for the sponsor `userId`
+     * AND the stored actor chain, read fresh here (decision 17), and its price
+     * is settled along the chain with the usage row (decision 22). Absent = a
+     * person's own call (`actor: null`), byte-identical.
+     */
+    delegationGrantId?: string | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -836,8 +870,20 @@ async function executeGovernedToolCallInner(
       traceInput.value = args.arguments ?? {};
     }
 
+    // ADR-0188 S4: the actor chain of a delegated call; a grant that cannot be read is a refusal
+    let delegatedActor: GovernedActor | null = null;
+    if (args.delegationGrantId) {
+      try {
+        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: pricePerCallUsd != null });
+      } catch (err) {
+        if (!(err instanceof DelegationRefusedError)) throw err;
+        const decision = delegationRefusalDecision(err);
+        await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "delegation", delegationGrantId: args.delegationGrantId, receiptClass: "decision" } });
+        return { kind: "denied", decision };
+      }
+    }
     const {
-      decision,
+      decision: evaluated,
       approvedApprovalId,
       argumentsDigest,
       approvalScope,
@@ -862,8 +908,20 @@ async function executeGovernedToolCallInner(
       preparedPii,
       // AER-039: bind the consent to the row this call connects with
       approvalTargetForServer(serverId, serverRow),
-      { actor: null }, // ADR-0188 S4 replaces
+      // ADR-0188 S4: a delegated call is decided with the stored chain, read now; a person's own call is `null`
+      { actor: delegatedActor },
     );
+    // ADR-0188 S4 (decision 30): when the delegation's scope refuses a call the PERSON could not make either,
+    // the reason shown is the person's own (their grant, or the §5.1 lead ceiling folded into the worker's
+    // scope keeps its `lead-ceiling` rule id). Only a deny is ever substituted, and only by a deny.
+    let decision: Decision = evaluated;
+    if (delegatedActor && evaluated.effect === "deny" && evaluated.ruleId === "delegation-scope") {
+      const own = await governedEvaluate(
+        db, userId, serverId, { serverId, name: toolName, kind }, args.arguments, args.ceilingTools ?? null, projectId,
+        args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null },
+      );
+      if (own.decision.effect === "deny") decision = own.decision;
+    }
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
       return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
@@ -1305,7 +1363,9 @@ async function executeGovernedToolCallInner(
     // can never hit a project budget — every project rollup and the budget
     // gate filter on projectId. Unpriced server → null, never an invented
     // figure. Denied calls and upstream failures still bill nothing.
-    await db.insert(usageEvents).values({
+    // ADR-0188 S4: stamped with the acting agent; settled along its chain in the same transaction
+    const toolUsageWrite = (h: Db) => h.insert(usageEvents).values({
+      ...actorColumns(),
       userId,
       objectType: "mcp_tool",
       // usage_events has no server column; `operation` carries the tool name
@@ -1331,7 +1391,16 @@ async function executeGovernedToolCallInner(
             }
           : {}),
       },
-    });
+    }).returning({ id: usageEvents.id });
+    const toolGrantId = args.delegationGrantId;
+    if (toolGrantId) {
+      await db.transaction(async (tx) => {
+        const [u] = await toolUsageWrite(tx as unknown as Db);
+        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(pricePerCallUsd) });
+      });
+    } else {
+      await toolUsageWrite(db);
+    }
     if (mgOutput) {
       const outcome = guardrailOutcome(mgOutput);
       if (outcome) {
@@ -2120,6 +2189,11 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // ADR-0185 G3: `tools` always; resources / prompts / completions / logging
     // only when the org has enabled a method under them (none by default)
     const orgForProtocol = await loadOrgSettings(db);
+    // ADR-0188 S4 (for S5): a WORKLOAD caller (a delegated token) acts under its leaf grant on every method
+    // of this route; a workload context with no grant resolves to the nil id, which no grant has, so every
+    // method refuses (never decided as the person alone)
+    const workloadGrantId =
+      req.authCtx.via === "workload" ? (req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000") : undefined;
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
       { capabilities: protocolCapabilities(orgForProtocol.mcpProtocolMethods ?? []) },
@@ -2150,6 +2224,8 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           trace: protocolTrace,
           relay: extra.relay,
           progressToken: extra.progressToken,
+          // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
+          ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
         }).catch(async (err: unknown) => {
           // the same named policy refusal a tools/call raises post-hijack
           if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
@@ -2204,6 +2280,12 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       const visible = new Set(
         visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
       );
+      // ADR-0188 S4: a workload caller is offered only the tools its whole chain may call (each link's grant
+      // scope, and its own grants under `own_grants`), read now; an unreadable chain lists nothing
+      if (workloadGrantId) {
+        const offered = await delegatedToolNames(db, workloadGrantId, refs);
+        for (const name of [...visible]) if (!offered.has(name)) visible.delete(name);
+      }
       const entitled = upstreamTools.filter((t) => visible.has(t.name));
 
       // OPTIMIZATION §8: lazy tool-loading. Governance filtering above decides
@@ -2276,6 +2358,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // session row, never from a header the caller could set.
         principal: abacPrincipalFromRequest(req),
         trace: toolTrace,
+        // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
+        // with no grant resolves to no grant and is refused in the core (never decided as the person)
+        ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
       }).catch(async (err: unknown) => {
         // AER-024: the reply is already hijacked, so the primitive's admission
         // hold / egress refusal cannot be the pre-hijack 403 the manifest path

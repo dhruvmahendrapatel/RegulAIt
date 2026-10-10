@@ -18,7 +18,8 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { asSteppedUpAdmin, signedInContext } from "./admin-api";
+import { ADMIN_EMAIL, asSteppedUpAdmin, grantBuilderAgentAsAdmin, signedInContext } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -37,8 +38,15 @@ const DANA_PASSWORD = "E2e-Rewrite-2026!";
 const AVERY_PASSWORD = "E2e-Avery-Custody!";
 const CSRF = { "x-regulait-csrf": "1" };
 /** an org-settings write as Ada, stepped up with her authenticator (B4S-06: the
- * bootstrap credential passes a step-up only until an admin can give one) */
+ * bootstrap credential passes a step-up only until an admin can give one). From her
+ * signed-in page when it is open: each sign-in and each step-up spends one TOTP step
+ * and the gateway takes a step once, so a second sign-in per write waits out a window. */
 async function bootSettings(payload: Record<string, unknown>) {
+  if (admin && !admin.isClosed()) {
+    const res = await steppedUpAs(admin.request, ADMIN_EMAIL, "PUT", "/v1/org/settings", payload);
+    expect(res.ok(), `PUT /v1/org/settings: ${res.status()} ${await res.text()}`).toBe(true);
+    return;
+  }
   const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "PUT", "/v1/org/settings", payload);
   expect(res.ok(), `PUT /v1/org/settings: ${res.status()} ${res.bodyText}`).toBe(true);
 }
@@ -105,6 +113,8 @@ let modelId = "";
 let projectId = "";
 let averyId = "";
 const toolIds = { branches: "", schemas: "" };
+/** ADR-0188 S4: which server and tool name each tool id is, for the admin's grant to the builder agent */
+const toolRefs = new Map<string, { serverId: string; toolName: string }>();
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
   test.setTimeout(240_000);
@@ -139,14 +149,15 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   // for them through the real, audited route, with a reason (per server, at the
   // registration release; nothing global changes).
   // Lifting a quarantine asks for the same step-up as a grant (ADR-0186 decision 24).
+  // Ada's signed-in page answers it (one TOTP code per step-up, no second sign-in).
   for (const id of [repo.id, wh.id]) {
-    const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "POST", "/v1/release-quarantine/override", {
+    const res = await steppedUpAs(admin.request, ADMIN_EMAIL, "POST", "/v1/release-quarantine/override", {
       kind: "mcp_server",
       id,
       digest: "registration",
       reason: "e2e: the spec's own local MCP fixture; the cooldown is not what this journey tests",
     });
-    expect(res.status(), `/v1/release-quarantine/override: ${res.bodyText}`).toBe(201);
+    expect(res.status(), `/v1/release-quarantine/override: ${await res.text()}`).toBe(201);
   }
   const branches = await post(`/v1/servers/${repo.id}/tools`, { name: "list_branches", kind: "read", description: "list branches and their heads" });
   const schemas = await post(`/v1/servers/${wh.id}/tools`, { name: "list_schemas", kind: "read", description: "list schemas" });
@@ -186,6 +197,8 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   expect(modelId).toBeTruthy();
   toolIds.branches = branches.id as string;
   toolIds.schemas = schemas.id as string;
+  toolRefs.set(toolIds.branches, { serverId: repo.id as string, toolName: "list_branches" });
+  toolRefs.set(toolIds.schemas, { serverId: wh.id as string, toolName: "list_schemas" });
 });
 
 test.afterAll(async () => {
@@ -209,6 +222,15 @@ async function agentWith(toolId: string, askFirst: boolean): Promise<{ id: strin
     data: { tools: [{ kind: "mcp_tool", refId: toolId, requiresApproval: askFirst }] },
   });
   expect(put.status(), await put.text()).toBe(200);
+  // ADR-0188 S4: the agent acts only within grants of its own (strict default) — Ada grants it its model and
+  // its tool, as an admin does, through the identity grants route (stepped up, from Ada's signed-in page)
+  await grantBuilderAgentAsAdmin(
+    state.baseUrl,
+    state.passwords.admin,
+    id,
+    { agents: [{ agentId: modelId, allowedModes: ["chat"] }], tools: [toolRefs.get(toolId)!] },
+    admin.request,
+  );
   return { id, name };
 }
 
