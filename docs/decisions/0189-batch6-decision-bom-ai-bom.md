@@ -707,8 +707,12 @@ R25. **Automatic snapshots survive a signing-key outage.** With no receipt key, 
     neither sign its snapshot nor be retried later without reading state that has since changed. The triggering
     operation does not fail; instead, in its own transaction, B3 writes an append-only
     `ai_bom_snapshot_requests` row (subject, trigger, the triggering record's id, `created_at`) together with the
-    loaded record set captured under R22's repeatable-read rules (the R18 projections and the row-level basis), with
-    no key involved. A sweep freezes and signs pending requests in order once a key is present, from the captured
+    loaded record set captured under R22's consistency rules (the R18 projections and the row-level basis), with
+    no key involved. This queued path is **read-write**: it runs inside the triggering operation's own transaction,
+    which B3 sets to `REPEATABLE READ` (set before its first query), so the triggering write, the captured records and
+    the request row commit or roll back together, and the capture sees exactly the state that write produced. A
+    serialization failure retries the whole triggering operation. R22's `READ ONLY` applies only to the on-demand
+    loader, which writes nothing. A sweep freezes and signs pending requests in order once a key is present, from the captured
     record set only, never by reloading live tables; each snapshot's `created_at` and `trigger` are the request's.
     The posture page shows the count of pending requests. Requests are written only after the R17 switch has flipped;
     before that a trigger records nothing, as R2 says.
