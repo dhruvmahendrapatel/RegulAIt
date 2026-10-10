@@ -58,7 +58,6 @@ import {
   eq,
   inArray,
   isNull,
-  lte,
   or,
   revocations,
   roleAgentGrants,
@@ -74,6 +73,7 @@ import {
   workloadIdentities,
   type Db,
   type DelegationAllocationRow,
+  type SQL,
   type DelegationGrantRow,
 } from "@regulait/db";
 import {
@@ -184,6 +184,7 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
       },
       agentHaltedAt: agents.haltedAt,
       agentLifecycle: agents.lifecycleStatus,
+      agentEnabled: agents.enabled,
       builderArchivedAt: builderAgents.archivedAt,
       runnerRevokedAt: engineRunners.revokedAt,
       sponsorDisabledAt: users.disabledAt,
@@ -239,8 +240,10 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
     else if (r.identity.status === "revoked") code = "identity_revoked";
     else if (r.identity.status !== "active") code = "identity_suspended";
     else if (r.agentHaltedAt) code = "agent_halted";
+    // "in service": an agent the registry disabled (`agents.enabled = false`) is out of service exactly
+    // like a suspended or retired one, so it can use no existing grant or token (PR #279 review)
     else if (
-      (r.identity.kind === "agent" && (r.agentLifecycle === "suspended" || r.agentLifecycle === "retired")) ||
+      (r.identity.kind === "agent" && (r.agentEnabled !== true || r.agentLifecycle === "suspended" || r.agentLifecycle === "retired")) ||
       (r.identity.kind === "builder_agent" && r.builderArchivedAt) ||
       (r.identity.kind === "engine_runner" && r.runnerRevokedAt)
     ) {
@@ -493,6 +496,7 @@ async function checkActorSponsorScope(
       identity: workloadIdentities,
       agentHaltedAt: agents.haltedAt,
       agentLifecycle: agents.lifecycleStatus,
+      agentEnabled: agents.enabled,
       builderArchivedAt: builderAgents.archivedAt,
       runnerRevokedAt: engineRunners.revokedAt,
     })
@@ -506,7 +510,7 @@ async function checkActorSponsorScope(
   if (ident.status !== "active") refuse("actor-chain-invalid", ident.status === "revoked" ? "identity_revoked" : "identity_suspended", `identity ${ident.id} is ${ident.status}`);
   if (
     idRow.agentHaltedAt ||
-    (ident.kind === "agent" && (idRow.agentLifecycle === "suspended" || idRow.agentLifecycle === "retired")) ||
+    (ident.kind === "agent" && (idRow.agentEnabled !== true || idRow.agentLifecycle === "suspended" || idRow.agentLifecycle === "retired")) ||
     (ident.kind === "builder_agent" && idRow.builderArchivedAt) ||
     (ident.kind === "engine_runner" && idRow.runnerRevokedAt)
   ) {
@@ -629,8 +633,11 @@ async function auditGrantCreated(tx: Tx, g: DelegationGrantRow, phase: "create" 
 /** does a stored child answer this (retried) request exactly? */
 function sameChildRequest(child: DelegationGrantRow, input: AdmitChildGrantInput): boolean {
   const b = bindingColumns(input.binding);
+  // a uuid compares case-insensitively; absent and null are the same "no subject credential"
+  const subjectCredential = input.subjectCredentialId ? input.subjectCredentialId.toLowerCase() : null;
   return (
     child.actorIdentityId === input.actorIdentityId &&
+    (child.subjectCredentialId?.toLowerCase() ?? null) === subjectCredential &&
     // the same authority (jsonb does not keep key order, so compare meaning, both ways)
     scopeSubset(child.scope, input.scope) &&
     scopeSubset(input.scope, child.scope) &&
@@ -835,13 +842,13 @@ export async function settleDelegationCharge(
  * PARENT only (`parent.reserved −= released`). Idempotent: a closed edge is
  * left alone (the trigger also refuses a second release).
  */
-async function closeEdge(tx: Tx, edgeId: string, now: Date): Promise<number> {
+async function closeEdge(tx: Tx, edgeId: string, closedAt: Date | SQL): Promise<number> {
   const [edge] = await tx.select().from(delegationAllocations).where(eq(delegationAllocations.id, edgeId)).for("update");
   if (!edge || edge.status !== "open") return 0;
   const released = Math.max(0, edge.amountMicros - edge.drawnMicros);
   await tx
     .update(delegationAllocations)
-    .set({ status: "closed", releasedMicros: released, closedAt: now })
+    .set({ status: "closed", releasedMicros: released, closedAt })
     .where(eq(delegationAllocations.id, edge.id));
   if (released > 0) {
     await tx
@@ -927,9 +934,14 @@ export async function revokeDelegationGrant(
  * has expired or been revoked, deepest first, each in its own short
  * transaction. Idempotent; safe on every replica at once (each edge is
  * re-read under its lock and a closed edge is skipped).
+ *
+ * "Expired" is judged by the DATABASE clock (`now()`), both in the selection
+ * and again under the lock, never by this replica's clock: a replica whose
+ * clock runs ahead would otherwise release a live child's reservation, and one
+ * that runs behind would hold an expired one (PR #279 review; the same rule as
+ * the signing-key lifecycle and the replay sweep).
  */
-export async function sweepDelegationAllocations(db: Db, opts: { now?: Date; limit?: number } = {}): Promise<{ closed: number; releasedMicros: number }> {
-  const now = opts.now ?? new Date();
+export async function sweepDelegationAllocations(db: Db, opts: { limit?: number } = {}): Promise<{ closed: number; releasedMicros: number }> {
   const due = await db
     .select({ id: delegationAllocations.id, parentGrantId: delegationAllocations.parentGrantId })
     .from(delegationAllocations)
@@ -937,7 +949,7 @@ export async function sweepDelegationAllocations(db: Db, opts: { now?: Date; lim
     .where(
       and(
         eq(delegationAllocations.status, "open"),
-        or(sql`${delegationGrants.revokedAt} IS NOT NULL`, lte(delegationGrants.expiresAt, now)),
+        or(sql`${delegationGrants.revokedAt} IS NOT NULL`, sql`${delegationGrants.expiresAt} <= now()`),
       ),
     )
     .orderBy(desc(delegationGrants.depth), asc(delegationAllocations.id))
@@ -947,9 +959,20 @@ export async function sweepDelegationAllocations(db: Db, opts: { now?: Date; lim
   for (const e of due) {
     await db.transaction(async (tx) => {
       await tx.select({ id: delegationGrants.id }).from(delegationGrants).where(eq(delegationGrants.id, e.parentGrantId)).for("update");
-      const [before] = await tx.select({ status: delegationAllocations.status }).from(delegationAllocations).where(eq(delegationAllocations.id, e.id));
-      if (before?.status !== "open") return;
-      releasedMicros += await closeEdge(tx, e.id, now);
+      // re-check under the lock, by the database clock: still open, and the child really ended
+      const [still] = await tx
+        .select({ id: delegationAllocations.id })
+        .from(delegationAllocations)
+        .innerJoin(delegationGrants, eq(delegationGrants.id, delegationAllocations.childGrantId))
+        .where(
+          and(
+            eq(delegationAllocations.id, e.id),
+            eq(delegationAllocations.status, "open"),
+            or(sql`${delegationGrants.revokedAt} IS NOT NULL`, sql`${delegationGrants.expiresAt} <= now()`),
+          ),
+        );
+      if (!still) return;
+      releasedMicros += await closeEdge(tx, e.id, sql`now()`);
       closed += 1;
     });
   }

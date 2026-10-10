@@ -181,12 +181,16 @@ export async function mintDelegatedToken(
   }
   if (live.failure) throw new TokenMintError("chain_not_live", `the delegation chain is not live (${live.failure.code})`);
   const org = await loadOrgSettings(db);
-  const iat = Math.floor(now.getTime() / 1000);
+  const signer = await currentIssuerSigner(db, opts.env ?? process.env);
+  // `iat` is this replica's clock, but never earlier than the signer's activation (a database-clock
+  // stamp): a replica whose clock trails the database would otherwise mint, right after a rotation,
+  // tokens the verifier refuses as "issued before the key was the signer". Clamping forward keeps the
+  // verifier's check strict and only ever shortens the token's life on the lagging replica's own clock.
+  const iat = Math.max(Math.floor(now.getTime() / 1000), Math.ceil(signer.activatedAt.getTime() / 1000));
   const grantLeft = Math.floor(grant.expiresAt.getTime() / 1000) - iat;
   const ttl = Math.min(org.delegatedTokenTtlSeconds, grantLeft);
   if (ttl < 1) throw new TokenMintError("grant_expiring", "the grant expires before a token could be used");
   const exp = iat + ttl;
-  const signer = await currentIssuerSigner(db, opts.env ?? process.env);
   const jti = randomBytes(32).toString("base64url");
   const cnf = grant.bindingKind === "dpop" ? { jkt: grant.bindingThumbprint } : { "x5t#S256": grant.bindingThumbprint };
   await db.insert(issuedTokens).values({

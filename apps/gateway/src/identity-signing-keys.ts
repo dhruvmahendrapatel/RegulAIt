@@ -211,13 +211,20 @@ const isUniqueViolation = (err: unknown): boolean => {
   return e?.code === "23505" || e?.cause?.code === "23505";
 };
 
+/** the signer of a new token: its private half and when (database clock) it became the signer */
+export interface ActiveIssuerSigner extends ConfiguredSigningKey {
+  activatedAt: Date;
+}
+
 /**
  * The key that signs now: the active row, whose private half must be
  * configured. With no active row, a FIRST LOAD records and activates the
  * single configured key that was never recorded (audited, system actor);
  * concurrent replicas converge on one (the one-active unique index).
+ * `activatedAt` is returned so a minting replica never stamps a token as
+ * issued before its key's activation (see `mintDelegatedToken`).
  */
-export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = process.env): Promise<ConfiguredSigningKey> {
+export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = process.env): Promise<ActiveIssuerSigner> {
   const configured = await configuredIdentitySigningKeys(env);
   const active = async () =>
     (
@@ -243,8 +250,8 @@ export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = proce
     const k = fresh[0]!;
     try {
       await db.transaction(async (tx) => {
-        const now = new Date();
-        await tx.insert(identitySigningKeys).values({ kid: k.kid, publicJwk: k.publicJwk, createdAt: now, activatedAt: now });
+        // database clock (one `now()` per transaction), like every other lifecycle stamp of this table
+        await tx.insert(identitySigningKeys).values({ kid: k.kid, publicJwk: k.publicJwk, createdAt: sql`now()`, activatedAt: sql`now()` });
         await auditSigningKey(tx, SYSTEM_USER_ID, { phase: "activate", kid: k.kid, previousKid: null }, "first issuer signing key activated on first use (ADR-0188 decision 5)");
       });
     } catch (err) {
@@ -256,7 +263,7 @@ export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = proce
   }
   const key = configured.find((k) => k.kid === row!.kid);
   if (!key) throw new IdentitySigningKeyError("signing_key_unavailable", "the active issuer signing key's private half is not configured on this replica");
-  return key;
+  return { ...key, activatedAt: row.activatedAt! };
 }
 
 /**
@@ -287,7 +294,6 @@ export async function rotateIdentitySigningKey(
       if (fresh.length > 1) throw new IdentitySigningKeyError("signing_key_ambiguous", "more than one configured key is available: name one with `kid`");
       target = fresh[0]!;
     }
-    const now = new Date();
     const [previous] = await tx
       .update(identitySigningKeys)
       // database clock, never earlier than activation: a replica whose clock trails
@@ -295,7 +301,8 @@ export async function rotateIdentitySigningKey(
       .set({ retiredAt: sql`GREATEST(now(), ${identitySigningKeys.activatedAt})` })
       .where(and(sql`${identitySigningKeys.activatedAt} IS NOT NULL`, isNull(identitySigningKeys.retiredAt), isNull(identitySigningKeys.revokedAt)))
       .returning({ kid: identitySigningKeys.kid });
-    await tx.insert(identitySigningKeys).values({ kid: target.kid, publicJwk: target.publicJwk, createdAt: now, activatedAt: now });
+    // the new key's stamps are the database's too, the same `now()` the previous key was retired at
+    await tx.insert(identitySigningKeys).values({ kid: target.kid, publicJwk: target.publicJwk, createdAt: sql`now()`, activatedAt: sql`now()` });
     await auditSigningKey(
       tx,
       opts.actorUserId,
