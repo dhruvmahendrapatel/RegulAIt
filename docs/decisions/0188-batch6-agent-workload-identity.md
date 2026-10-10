@@ -1,10 +1,11 @@
 # ADR-0188: Batch 6 item 1 — per-agent and workload identity, and constrained delegation
 
-- **Status:** Proposed (design only; nine OWNER DECISION items below, each with a recommended answer). Amended
+- **Status:** Accepted 2026-10-10. The owner accepted all nine OWNER DECISION items with their recommended answers
+  ("accept all on ADR-0188"). Design only until the build slices land. Amended
   2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table; amended again
   after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23.
 - **Date:** 2026-10-10
-- **Deciders:** owner (pending); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
+- **Deciders:** owner (accepted all nine recommendations, 2026-10-10); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
   PathForward **PF-02** (and the PF-01 envelope item it unblocks), ENTERPRISE_READINESS_PLAN **C1**, ADR-0015 (deploy
   modes and the control-plane / agent-execution-plane boundary), ADR-0019 (revocations), ADR-0040 (Cedar ABAC),
@@ -142,7 +143,7 @@ engine we would have to configure from outside, adds a hard runtime dependency t
 audit trail. Customers may still front us with their own IdP for **human** sign-in (ADR-0174); agent delegation stays
 in the gateway.
 
-## Decision (recommended; becomes Accepted when the owner signs off the OWNER DECISION items)
+## Decision (Accepted 2026-10-10)
 
 ### 1. Two facts on every agent action: who it is for, and who is doing it
 
@@ -836,7 +837,14 @@ to the new tables).
 - A per-call grant lookup adds one indexed query to every agent-made call. S4 measures it; it does not get a cache,
   because a cache is what would make revocation non-immediate.
 
-## Open questions (OWNER DECISION items, each with a recommendation)
+## Owner decisions (accepted 2026-10-10)
+
+The owner accepted every recommendation below as written ("accept all on ADR-0188", 2026-10-10). Each item is now a
+decision, not an open question. Two of them still carry a dependency the acceptance does not remove: item 2's library
+choice stands only if spike S0 passes (otherwise the written `jose` fallback with its ADR-0176 §4 exception applies),
+and item 5 still needs the suite agent to confirm RegulAIt owns PF-02 before S5 freezes the identifier and claims
+contract; S1–S4 proceed meanwhile.
+
 
 1. **OWNER DECISION — first grants for existing agents.** Under `own_grants`, every `agents` and `builder_agents` row
    starts with an identity but no grants, so agent calls are refused until an admin grants. *Recommended:* keep the
