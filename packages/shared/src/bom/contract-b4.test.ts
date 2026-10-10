@@ -654,6 +654,15 @@ describe("B4 contract: ADR-0189 B4.8 outcome and cannotProve (B4.10)", () => {
     expect(accepts(aiResponse("ai_bom_snapshot", 2, "unverifiable", fixed))).toBe(true);
     expect(accepts(aiResponse("ai_bom_snapshot", 2, "valid", fixed))).toBe(false);
     expect(accepts(aiResponse("ai_bom_snapshot", 2, "unverifiable", withSuperseded))).toBe(false);
+    // a bundle above version 1 reports supersedes only as unverifiable earlier_snapshot_not_in_bundle
+    const bundled = aiResponse("bundle", 2, "valid", withSuperseded);
+    const supersedesAs = (to: BomVerifyCheckResult) => ({ ...bundled, checks: bundled.checks.map((c) => (c.check === "supersedes" ? to : c)) });
+    expect(accepts(supersedesAs(valid("supersedes")))).toBe(false);
+    expect(accepts({ ...supersedesAs(unv("supersedes", "snapshot_not_in_bundle")), outcome: "unverifiable" })).toBe(false);
+    expect(accepts({ ...supersedesAs({ check: "supersedes", status: "invalid", reason: "supersedes_mismatch", ref: null }), outcome: "invalid" })).toBe(false);
+    // a stored source may still verify it
+    const stored = aiResponse("ai_bom_snapshot", 2, "valid", fixed);
+    expect(accepts({ ...stored, checks: stored.checks.map((c) => (c.check === "supersedes" ? valid("supersedes") : c)) })).toBe(true);
   });
   it("a stored source's not_a_bundle envelope is by design", () => {
     const stored = { ...verifyResponse("chain_signed", { receipt: "v2" }), source: "decision_bom" as const, manifest: null };

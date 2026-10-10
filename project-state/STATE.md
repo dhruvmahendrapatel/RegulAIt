@@ -29,6 +29,8 @@ paragraph supersedes the queue and number plan in the dated paragraphs below, wh
 - Pending, in migration order: **0184** S4 in-process wiring (#326), **0185** guard hardening (#285), **0186** B9
   SPDX fields (#322; 0186 is B9's, not S5's), **0187** ADR-0190 I3 executor core (#323), **0188** S5 token endpoint
   (#302). Each is checked again at its own head and in this order before it merges.
+- 2026-10-10: #333 (B4.8-B4.10 spec gaps and vectors) merged; the B4.10 contract change (outcomes `valid`/
+  `unverifiable`/`invalid`, `isUnverifiableByDesign`, exact `cannotProve`) is on branch `b4-contract-outcomes`, PR pending.
 - Builder: Claude only ([ADR-0191](../docs/decisions/0191-claude-sole-builder.md)); Codex is retired and
   `codexInputs.md` is frozen, appended only as history.
 

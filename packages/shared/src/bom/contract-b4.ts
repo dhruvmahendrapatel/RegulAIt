@@ -773,6 +773,11 @@ export const bomVerifyResponseSchema = z
       if (r.source === "bundle" && r.checks.some((c) => c.reason === "not_a_bundle")) issue("not_a_bundle is never reported for a bundle");
       if (r.checks.some((c) => c.reason === "not_a_bundle" && !(BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(c.check))) issue("not_a_bundle applies to the bundle_* checks only");
       if (r.identity.subject === "ai-bom" && r.identity.version === 1 && of("supersedes").length) issue("version 1 supersedes nothing: the supersedes check is left out");
+      // B4.8: a bundle never carries the superseded snapshot (B4.1), so above version 1 its supersedes check is
+      // unverifiable earlier_snapshot_not_in_bundle, as a chain_signed BOM's anchor checks are anchor_absent
+      if (r.identity.subject === "ai-bom" && r.identity.version > 1 && r.source === "bundle" && !all("supersedes", "unverifiable", "earlier_snapshot_not_in_bundle")) {
+        issue("supersedes: unverifiable earlier_snapshot_not_in_bundle for a bundle above version 1");
+      }
       if (r.identity.subject === "decision-bom") {
         const id = r.identity;
         // R39: the decision row's preimage is never exported, so its content binding is never claimed
