@@ -59,6 +59,10 @@ import {
   BATCH5_SETTING_KEYS,
   BATCH5_STRICT_DEFAULTS,
   identitySettingLooser,
+  bomSettingLooser,
+  bomSettingRelaxed,
+  BOM_SETTING_KEYS,
+  BOM_STRICT_DEFAULTS,
   identitySettingRelaxed,
   IDENTITY_SETTING_KEYS,
   IDENTITY_STRICT_DEFAULTS,
@@ -190,6 +194,12 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of IDENTITY_SETTING_KEYS) {
     out[k] = rule(IDENTITY_STRICT_DEFAULTS[k], (v) => identitySettingRelaxed(k, v as never), (v, b) => identitySettingLooser(k, v, b));
   }
+  // ADR-0189 (batch 6 item 2): capture off, a weaker finality, auditors, display names, on-demand snapshots,
+  // skip-and-record, an added CycloneDX version and a higher export rate are looser than the default; finality,
+  // versions and the rate are also judged against the stored value
+  for (const k of BOM_SETTING_KEYS) {
+    out[k] = rule(BOM_STRICT_DEFAULTS[k], (v) => bomSettingRelaxed(k, v as never), (v, b) => bomSettingLooser(k, v, b));
+  }
   return out;
 }
 
@@ -198,7 +208,8 @@ type BatchKey =
   | (typeof BATCH3_SETTING_KEYS)[number]
   | (typeof BATCH4_SETTING_KEYS)[number]
   | (typeof BATCH5_SETTING_KEYS)[number]
-  | (typeof IDENTITY_SETTING_KEYS)[number];
+  | (typeof IDENTITY_SETTING_KEYS)[number]
+  | (typeof BOM_SETTING_KEYS)[number];
 
 /** THE REGISTRY (see the header). Typed over every writable key. */
 export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: StrictnessEntry } = {

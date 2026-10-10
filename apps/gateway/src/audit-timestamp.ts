@@ -132,7 +132,14 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
       if (config.policyOid) request.request.reqPolicy = config.policyOid;
       const signal=AbortSignal.timeout(DEADLINE_MS);
       const fetch = createGuardedFetch({ beforeSend:async()=>signal.throwIfAborted(), allowList: await loadEgressAllowList(tx as unknown as Db), providerAllowsPlaintextHttp: false });
-      const sentAt=new Date();
+      // ADR-0189 R33: the nonce and the DATABASE-clock send time are recorded in one statement BEFORE the
+      // request leaves, and that recorded time is the `sentAt` the response is checked against, so the
+      // offline verifier can re-run exactly this check from the stored row.
+      const [recordedRequest] = await tx.update(auditAnchors).set({ tsaNonce: request.nonceHex, tsaRequestSentAt: sql`clock_timestamp()` }).where(eq(auditAnchors.id, id)).returning({ sentAt: auditAnchors.tsaRequestSentAt });
+      const recordedSentAt = recordedRequest?.sentAt ?? (() => { throw new Error("timestamp_request_not_recorded"); })();
+      // the live check uses the LATER of the recorded database time and this process's clock (never looser
+      // than either); the stored database time is what the offline verifier re-checks against
+      const sentAt = new Date(Math.max(recordedSentAt.getTime(), Date.now()));
       let onAbort:()=>void=()=>{};
       const aborted=new Promise<never>((_,reject)=>{onAbort=()=>reject(signal.reason);signal.addEventListener("abort",onAbort,{once:true});if(signal.aborted)onAbort();});
       const bytes=await Promise.race([(async()=>await boundedResponse(await fetch(config.url, { method: "POST", headers: { "content-type": "application/timestamp-query", accept: "application/timestamp-reply" }, body: new Uint8Array(request.request.toSchema().toBER(false)), signal: signal })))(),aborted]).finally(()=>signal.removeEventListener("abort",onAbort));

@@ -112,6 +112,17 @@ export type ReceiptVerifyStatus = (typeof RECEIPT_VERIFY_STATUSES)[number];
 
 /** R: the receipt payload's version tag (and the export bundle's `verifier`) */
 export const RECEIPT_PAYLOAD_VERSION = "regulait.receipt.v1";
+/**
+ * ADR-0189 R34 / R42 / R48 (shared with ADR-0188 decision 9, open question 1):
+ * receipt payload v2 adds the actor chain and `factsHash`. B1 VERIFIES v2 but
+ * still EMITS v1: nothing emits v2 because a binary was deployed. From the
+ * recorded boundary (`receipt_payload_versions.from_audit_seq`) on, every
+ * receipt is v2 and a v1 receipt there is invalid; below it, always v1.
+ */
+export const RECEIPT_PAYLOAD_VERSION_V2 = "regulait.receipt.v2";
+export const RECEIPT_PAYLOAD_VERSIONS = [RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2] as const;
+/** R43: can this build emit v2 receipts with facts? A build that cannot refuses to start once a boundary exists. */
+export const RECEIPT_EMITTER_SUPPORTS_V2 = false;
 /** R: `prev` of the first receipt */
 export const RECEIPT_GENESIS_PREV = "0".repeat(64);
 
@@ -268,8 +279,29 @@ export interface DecisionReceiptPayload {
   keyId: string;
 }
 
+/**
+ * ADR-0189 R34: the v2 payload. Everything v1 carries, plus ADR-0188 decision
+ * 9's actor fields and the decision's facts binding. `factsHash` is null only
+ * when `decision_facts_capture` was off for that decision, and then
+ * `factsStatus` says so inside the signed bytes.
+ */
+export interface DecisionReceiptPayloadV2 extends Omit<DecisionReceiptPayload, "v"> {
+  v: typeof RECEIPT_PAYLOAD_VERSION_V2;
+  actor: {
+    /** the acting workload identity (ADR-0188), null when a person acted directly */
+    identityId: string | null;
+    delegationGrantId: string | null;
+    /** ordered identity ids, root first; null when there is no chain */
+    chain: string[] | null;
+  };
+  factsStatus: "captured" | "capture_off";
+  /** `decision_facts.facts_hash`; null exactly when `factsStatus` is `capture_off` */
+  factsHash: string | null;
+}
+export type AnyDecisionReceiptPayload = DecisionReceiptPayload | DecisionReceiptPayloadV2;
+
 /** the bytes a receipt signature covers */
-export function receiptCanonicalBytes(payload: DecisionReceiptPayload): string {
+export function receiptCanonicalBytes(payload: AnyDecisionReceiptPayload): string {
   return canonicalJson(payload);
 }
 
