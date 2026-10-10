@@ -24,6 +24,7 @@
  *
  * The mapper reads only modelscan's `-o` JSON report and its exit code, never stdout (G19 3).
  */
+import { parse as parseJsonSyntax, type ValueNode } from "@humanwhocodes/momoa";
 import { z } from "zod";
 import type { EngineItemVerdict, EngineNotRunReason, EngineResultEnvelope, EngineResultItem, EngineTerminalRunStatus } from "./contract.js";
 import type { RedTeamSeverity } from "../redteam.js";
@@ -241,6 +242,32 @@ function u64le(b: Uint8Array, at: number): number {
 }
 
 /**
+ * Does any JSON object in `text` name the same key twice (compared after unescaping, as a parser sees
+ * it: `"w"` and `"w"` are the same key; `"a\"b"` and `"a\\b"` are not)? Read from momoa's syntax
+ * tree, which keeps every member, walked without recursion. Throws on text that is not JSON.
+ * Open-source check (ADR-0176): `@humanwhocodes/momoa` 3.3.13 (Apache-2.0, no dependencies, no
+ * network) reports every member; JSON.parse silently keeps the last.
+ */
+export function jsonHasDuplicateKey(text: string): boolean {
+  const stack: ValueNode[] = [parseJsonSyntax(text, { mode: "json" }).body];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.type === "Object") {
+      const seen = new Set<string>();
+      for (const m of node.members) {
+        const key = m.name.type === "String" ? m.name.value : m.name.name;
+        if (seen.has(key)) return true;
+        seen.add(key);
+        stack.push(m.value);
+      }
+    } else if (node.type === "Array") {
+      for (const el of node.elements) stack.push(el.value);
+    }
+  }
+  return false;
+}
+
+/**
  * A safetensors file: an 8-byte little-endian header length N, N bytes of JSON, then the data. It is
  * a CANDIDATE when N is plausible and the header starts with `{`; it is `safetensors` only when the
  * header is valid UTF-8 JSON, every entry is `{dtype, shape, data_offsets}` with a known byte-sized
@@ -258,11 +285,18 @@ export async function verifySafetensors(reader: ArtifactReader, head?: Uint8Arra
   const raw = n + 8 <= h.length ? h.subarray(8, 8 + n) : await reader.read(8, n);
   if (raw.length !== n) return invalid("header shorter than its declared length");
   let parsed: unknown;
+  let duplicate: boolean;
   try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    duplicate = jsonHasDuplicateKey(text);
+    parsed = JSON.parse(text);
   } catch {
     return invalid("header is not valid UTF-8 JSON");
   }
+  // Codex review B5X-01 (ADR-0187 decision 132): JSON.parse keeps the LAST of two equal keys, so a
+  // duplicate could hide a tensor or field the reference parser judges; any duplicate, at any level
+  // (tensor names, a tensor's fields, `__metadata__` and its keys), is refused
+  if (duplicate) return invalid("the header repeats a key in one object");
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return invalid("header is not a JSON object");
   const dataBytes = reader.size - 8 - n;
   const spans: Array<[number, number]> = [];

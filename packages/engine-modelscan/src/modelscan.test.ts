@@ -12,6 +12,7 @@ import {
   deriveArtifactScanVerdict,
   detectArtifactFormat,
   hdf5SuperblockOffsets,
+  jsonHasDuplicateKey,
   mapModelscanReport,
   modelscanArtifactName,
   type ArtifactFormat,
@@ -131,6 +132,45 @@ describe("B5-M format detection: from the bytes, never the name", () => {
     expect(await detect(extraField)).toBe("safetensors_invalid");
     const unknownDtype = safetensorsFile([["w", "F32", [1]]], { header: { w: { dtype: "PICKLE", shape: [1], data_offsets: [0, 4] } } });
     expect(await detect(unknownDtype)).toBe("safetensors_invalid");
+  });
+
+  it("Codex review B5X-01: a header that repeats a key at any level is never verified safetensors", async () => {
+    // an 8-byte little-endian header length, the header exactly as written, then zeroed data
+    const raw = (header: string, dataBytes: number) => {
+      const h = Buffer.from(header, "utf8");
+      const len = Buffer.alloc(8);
+      len.writeBigUInt64LE(BigInt(h.length));
+      return Buffer.concat([len, h, Buffer.alloc(dataBytes)]);
+    };
+    const t = (b: number, e: number) => `{"dtype":"F32","shape":[1],"data_offsets":[${b},${e}]}`;
+    // the control: one tensor, nothing repeated
+    expect(await detect(raw(`{"w":${t(0, 4)}}`, 4))).toBe("safetensors");
+    // the reference parser (safetensors 0.7.0, measured) refuses each of these four; JSON.parse kept
+    // the last value, so each read as verified safetensors (ceiling clean)
+    const refused = {
+      "duplicate tensor whose first entry has an invalid dtype": `{"w":{"dtype":"PICKLE","shape":[1],"data_offsets":[0,4]},"w":${t(0, 4)}}`,
+      "duplicate dtype field (U8 then I8)": `{"w":{"dtype":"U8","dtype":"I8","shape":[4],"data_offsets":[0,4]}}`,
+      "duplicate shape field": `{"w":{"dtype":"F32","shape":[1],"shape":[1],"data_offsets":[0,4]}}`,
+      "duplicate __metadata__": `{"__metadata__":{"a":"x"},"__metadata__":{"a":"y"},"w":${t(0, 4)}}`,
+      // stricter than the reference parser, which accepts these two (last wins): fail closed
+      "duplicate tensor, both entries valid": `{"w":${t(0, 4)},"w":${t(0, 4)}}`,
+      "duplicate key inside __metadata__": `{"__metadata__":{"a":"x","a":"y"},"w":${t(0, 4)}}`,
+      // the same name once plain and once escaped is one key (the reference parser refuses it too)
+      "the same name escaped": `{"w":${t(0, 4)},"\\u0077":${t(4, 8)}}`,
+    };
+    const judged: Record<string, string> = {};
+    for (const [why, header] of Object.entries(refused)) {
+      const d = await detectArtifactFormat(bufferReader(raw(header, header.includes("\\u0077") ? 8 : 4)));
+      judged[why] = `${d.format} (ceiling ${ARTIFACT_FORMAT_PLANS[d.format].ceiling})`;
+    }
+    expect(judged).toEqual(Object.fromEntries(Object.keys(refused).map((k) => [k, "safetensors_invalid (ceiling unknown)"])));
+    // escaped but DISTINCT names stay accepted, as the reference parser accepts them
+    expect(await detect(raw(`{"w":${t(0, 4)},"\\u0077x":${t(4, 8)}}`, 8))).toBe("safetensors");
+    expect(await detect(raw(`{"a\\"b":${t(0, 4)},"a\\\\b":${t(4, 8)}}`, 8))).toBe("safetensors");
+    // the walk sees every level, and only objects' own keys
+    expect(jsonHasDuplicateKey(`{"a":[{"b":1,"b":2}]}`)).toBe(true);
+    expect(jsonHasDuplicateKey(`{"a":{"b":1},"c":{"b":2}}`)).toBe(false);
+    expect(() => jsonHasDuplicateKey("{")).toThrow();
   });
 
   it("PR #212 review [4234946089]: anything not proven safetensors is executable", () => {
