@@ -1,0 +1,279 @@
+
+> regulait-bom-b0-spike@0.0.0 test:offline
+> B0_EXPECT_OFFLINE=1 unshare -n node --test --test-concurrency=1 spike.test.mjs
+
+TAP version 13
+# {"processes":6,"nodes":["v20.20.2","v21.7.3","v22.22.2"],"sha256":{"native":"2663180cf6d01e9f0cf93713b7268013a69f5ba4c653d2af8772b7c2caf6b64c","cyclonedx-1.7":"b978c93a082820cfa5d30df399e0b357152bbdd084aeaa573e40c023d3f1ed76","cyclonedx-1.6":"9db1e93673f5e57bf1b57521195976392f9a30a96562c11e47d534575c681f62","spdx-3.0.1":"14b380aa053ff10111920994287f46d7191909b6753e1d2bf631878341260a3b"}}
+# Subtest: offline: when B0_EXPECT_OFFLINE=1 the process has no network at all
+ok 1 - offline: when B0_EXPECT_OFFLINE=1 the process has no network at all
+  ---
+  duration_ms: 4.98069
+  type: 'test'
+  ...
+# Subtest: item 1: cyclonedx-library 10.3.0 model lacks the ML-BOM fields, and its serializer drops them
+ok 2 - item 1: cyclonedx-library 10.3.0 model lacks the ML-BOM fields, and its serializer drops them
+  ---
+  duration_ms: 193.880445
+  type: 'test'
+  ...
+# Subtest: item 2: the sample renders validate against the bundled 1.7, 1.6 and vendored SPDX 3.0.1 schemas
+ok 3 - item 2: the sample renders validate against the bundled 1.7, 1.6 and vendored SPDX 3.0.1 schemas
+  ---
+  duration_ms: 81.215048
+  type: 'test'
+  ...
+# Subtest: item 2: the vendored SPDX schema is the recorded file
+ok 4 - item 2: the vendored SPDX schema is the recorded file
+  ---
+  duration_ms: 2.324741
+  type: 'test'
+  ...
+# Subtest: item 2: negative controls: every one of these is REJECTED by both CycloneDX validators
+ok 5 - item 2: negative controls: every one of these is REJECTED by both CycloneDX validators
+  ---
+  duration_ms: 24.730492
+  type: 'test'
+  ...
+# Subtest: item 2: the upstream library's iri-reference choice (accept every value) would let a non-IRI through
+ok 6 - item 2: the upstream library's iri-reference choice (accept every value) would let a non-IRI through
+  ---
+  duration_ms: 901.720777
+  type: 'test'
+  ...
+# Subtest: item 2: negative controls: each is REJECTED by the SPDX 3.0.1 schema
+ok 7 - item 2: negative controls: each is REJECTED by the SPDX 3.0.1 schema
+  ---
+  duration_ms: 48.943442
+  type: 'test'
+  ...
+# Subtest: item 2: the sample carries no email-shaped string at all
+ok 8 - item 2: the sample carries no email-shaped string at all
+  ---
+  duration_ms: 3.099066
+  type: 'test'
+  ...
+# Subtest: item 3: canonicalize is byte-identical to canonicalJson on BOM shapes (Decision BOM, native AI BOM, renderings)
+ok 9 - item 3: canonicalize is byte-identical to canonicalJson on BOM shapes (Decision BOM, native AI BOM, renderings)
+  ---
+  duration_ms: 462.213804
+  type: 'test'
+  ...
+# Subtest: item 3: what canonicalisation does NOT protect: floats and the jsonb hazard (why money is integer micro-USD and bodies are stored as text)
+ok 10 - item 3: what canonicalisation does NOT protect: floats and the jsonb hazard (why money is integer micro-USD and bodies are stored as text)
+  ---
+  duration_ms: 0.921759
+  type: 'test'
+  ...
+# Subtest: item 4: same records twice in one process -> identical bytes and signature
+ok 11 - item 4: same records twice in one process -> identical bytes and signature
+  ---
+  duration_ms: 7.836393
+  type: 'test'
+  ...
+# Subtest: item 4: a second replica's row/key order (records-b) -> identical bytes
+ok 12 - item 4: a second replica's row/key order (records-b) -> identical bytes
+  ---
+  duration_ms: 4.5592
+  type: 'test'
+  ...
+# Subtest: item 4: non-vacuity: one changed fact changes the bytes; skipping normalisation changes them for records-b
+ok 13 - item 4: non-vacuity: one changed fact changes the bytes; skipping normalisation changes them for records-b
+  ---
+  duration_ms: 9.589791
+  type: 'test'
+  ...
+# Subtest: item 4: fresh processes, both inputs, every available Node major -> identical hashes and signature
+ok 14 - item 4: fresh processes, both inputs, every available Node major -> identical hashes and signature
+  ---
+  duration_ms: 1431.505582
+  type: 'test'
+  ...
+# Subtest: review R10: an email in ANY string or key is refused by the whole-document scan, naming the path
+ok 15 - review R10: an email in ANY string or key is refused by the whole-document scan, naming the path
+  ---
+  duration_ms: 35.425219
+  type: 'test'
+  ...
+# Subtest: review R10: the scan also checks object keys (no record type admits a free key any more, so this is unit-level)
+ok 16 - review R10: the scan also checks object keys (no record type admits a free key any more, so this is unit-level)
+  ---
+  duration_ms: 0.628586
+  type: 'test'
+  ...
+# Subtest: review R10: non-vacuity: the schema validators alone ACCEPT an email in an ordinary string field
+ok 17 - review R10: non-vacuity: the schema validators alone ACCEPT an email in an ordinary string field
+  ---
+  duration_ms: 4.115659
+  type: 'test'
+  ...
+# Subtest: review: a model card with no dataClaims renders, as provenance unknown, and validates
+ok 18 - review: a model card with no dataClaims renders, as provenance unknown, and validates
+  ---
+  duration_ms: 31.278639
+  type: 'test'
+  ...
+# Subtest: review R11: PII verdicts map from the persisted vocabulary clean | flagged | blocked
+ok 19 - review R11: PII verdicts map from the persisted vocabulary clean | flagged | blocked
+  ---
+  duration_ms: 39.587817
+  type: 'test'
+  ...
+# Subtest: review R12: two scans by one engine at different versions stay two scanner components, each attested exactly
+ok 20 - review R12: two scans by one engine at different versions stay two scanner components, each attested exactly
+  ---
+  duration_ms: 0.720501
+  type: 'test'
+  ...
+# Subtest: review R12: every model_card_evidence kind (eval_run, external, engine_scan) becomes a claim, evidence and attestation
+ok 21 - review R12: every model_card_evidence kind (eval_run, external, engine_scan) becomes a claim, evidence and attestation
+  ---
+  duration_ms: 2.756917
+  type: 'test'
+  ...
+# Subtest: review R13: the offline SPDX driver FAILS when given no documents
+ok 22 - review R13: the offline SPDX driver FAILS when given no documents
+  ---
+  duration_ms: 85.46003
+  type: 'test'
+  ...
+# Subtest: review: a clean dataset carries no sensitiveData key at all, and still validates
+ok 23 - review: a clean dataset carries no sensitiveData key at all, and still validates
+  ---
+  duration_ms: 1.260091
+  type: 'test'
+  ...
+# Subtest: review: SPDX lists EVERY model artifact hash of an agent, as CycloneDX does
+ok 24 - review: SPDX lists EVERY model artifact hash of an agent, as CycloneDX does
+  ---
+  duration_ms: 23.385533
+  type: 'test'
+  ...
+# Subtest: review: a provider name with spaces never reaches an SPDX IRI
+ok 25 - review: a provider name with spaces never reaches an SPDX IRI
+  ---
+  duration_ms: 23.108607
+  type: 'test'
+  ...
+# Subtest: review: a persisted model_cards row maps without splitting text or dropping claims
+ok 26 - review: a persisted model_cards row maps without splitting text or dropping claims
+  ---
+  duration_ms: 22.320634
+  type: 'test'
+  ...
+# Subtest: review: every model component states a licence; unknown is explicit and the composition is incomplete
+ok 27 - review: every model component states a licence; unknown is explicit and the composition is incomplete
+  ---
+  duration_ms: 23.523378
+  type: 'test'
+  ...
+# Subtest: review: unknown loader keys are refused before signing (no raw prompt, template or skill body)
+ok 28 - review: unknown loader keys are refused before signing (no raw prompt, template or skill body)
+  ---
+  duration_ms: 8.173063
+  type: 'test'
+  ...
+# Subtest: review: absent values are omitted, never written as "null" or "undefined"
+ok 29 - review: absent values are omitted, never written as "null" or "undefined"
+  ---
+  duration_ms: 45.960432
+  type: 'test'
+  ...
+# Subtest: review: a number that is not a safe integer is refused before canonicalisation
+ok 30 - review: a number that is not a safe integer is refused before canonicalisation
+  ---
+  duration_ms: 12.830777
+  type: 'test'
+  ...
+# Subtest: review R24/R26: dataset hashes are honest per kind
+ok 31 - review R24/R26: dataset hashes are honest per kind
+  ---
+  duration_ms: 44.821371
+  type: 'test'
+  ...
+# Subtest: review: no evidence digest is fabricated (model_card_evidence and artifact_scans persist none)
+ok 32 - review: no evidence digest is fabricated (model_card_evidence and artifact_scans persist none)
+  ---
+  duration_ms: 13.933095
+  type: 'test'
+  ...
+# Subtest: review: standard_refs are display text, rendered as properties and never as URLs
+ok 33 - review: standard_refs are display text, rendered as properties and never as URLs
+  ---
+  duration_ms: 32.026122
+  type: 'test'
+  ...
+# Subtest: review: `authenticated` comes only from the recorded credential state
+ok 34 - review: `authenticated` comes only from the recorded credential state
+  ---
+  duration_ms: 1.495195
+  type: 'test'
+  ...
+# Subtest: review: a null service owner (ON DELETE SET NULL) is not_recorded, never user:null
+ok 35 - review: a null service owner (ON DELETE SET NULL) is not_recorded, never user:null
+  ---
+  duration_ms: 18.019807
+  type: 'test'
+  ...
+# Subtest: review: every persisted data sensitivity maps to an SPDX confidentiality level; others are refused
+ok 36 - review: every persisted data sensitivity maps to an SPDX confidentiality level; others are refused
+  ---
+  duration_ms: 71.661436
+  type: 'test'
+  ...
+# Subtest: review: a stdio MCP server has no endpoint (its url is the stdio:<name> sentinel)
+ok 37 - review: a stdio MCP server has no endpoint (its url is the stdio:<name> sentinel)
+  ---
+  duration_ms: 21.225506
+  type: 'test'
+  ...
+# Subtest: review: data_claims is projected to allowlisted scalars; nested values and unknown keys are refused
+ok 38 - review: data_claims is projected to allowlisted scalars; nested values and unknown keys are refused
+  ---
+  duration_ms: 17.220518
+  type: 'test'
+  ...
+# Subtest: review: bias assessments are totally ordered (equal dimension and method, any input order)
+ok 39 - review: bias assessments are totally ordered (equal dimension and method, any input order)
+  ---
+  duration_ms: 6.869943
+  type: 'test'
+  ...
+# Subtest: review: release SBOM BOM-links appear only on an install-scope snapshot
+ok 40 - review: release SBOM BOM-links appear only on an install-scope snapshot
+  ---
+  duration_ms: 25.9704
+  type: 'test'
+  ...
+# Subtest: review: evaluation metrics are totally ordered (equal type and slice, any input order)
+ok 41 - review: evaluation metrics are totally ordered (equal type and slice, any input order)
+  ---
+  duration_ms: 7.89343
+  type: 'test'
+  ...
+# Subtest: review: a builder skill is hashed from its pinned snapshot digest, with its admission state
+ok 42 - review: a builder skill is hashed from its pinned snapshot digest, with its admission state
+  ---
+  duration_ms: 18.67701
+  type: 'test'
+  ...
+# Subtest: review: a governance-only connector (no base_url) has no endpoints and validates
+ok 43 - review: a governance-only connector (no base_url) has no endpoints and validates
+  ---
+  duration_ms: 15.314796
+  type: 'test'
+  ...
+# Subtest: review R47: endpoints lose query and fragment; userinfo refuses the snapshot
+ok 44 - review R47: endpoints lose query and fragment; userinfo refuses the snapshot
+  ---
+  duration_ms: 17.538169
+  type: 'test'
+  ...
+1..44
+# tests 44
+# suites 0
+# pass 44
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5588.636879
