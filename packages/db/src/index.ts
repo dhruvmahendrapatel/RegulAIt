@@ -24,6 +24,8 @@ export {
 
 // ADR-0189 — the per-decision and per-subject lock targets of the BOM writers
 export { BOM_DECISION_LOCK_NAMESPACE, BOM_SUBJECT_LOCK_NAMESPACE, lockAiBomSubject, lockDecisionForBom } from "./bom-locks.js";
+// ADR-0189 B3 — the session-level per-subject lock taken before a REPEATABLE READ capture
+export { withAiBomSubjectSessionLock, type BoundBomDb } from "./bom-session-lock.js";
 
 // ADR-0102 — the operator-prose credential scrub for reason/note columns
 // OUTSIDE `audit_log`. Exported so the covered/not-covered inventory can be

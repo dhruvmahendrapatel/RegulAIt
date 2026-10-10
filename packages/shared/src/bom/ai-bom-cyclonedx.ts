@@ -447,7 +447,8 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
     });
     dep(ref);
     gap(ref, "owner", "no_owner_column");
-    if (!d.projectDataSensitivity) gap(ref, "classification", "no_project");
+    // `projects` has no classification column today: a linked project gives none either (R24, R30)
+    if (!d.projectDataSensitivity) gap(ref, "classification", d.projectId ? "project_classification_not_recorded" : "no_project");
     if (parsed.kind !== "sha256") gap(ref, "hash", parsed.kind === "legacy" ? "legacy_checksum" : "empty_checksum");
   }
   for (const d of n.evalDatasets) {
