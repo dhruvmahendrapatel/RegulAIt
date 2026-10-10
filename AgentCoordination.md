@@ -642,6 +642,7 @@ New settings ride `GET/PUT /v1/org/settings` (camelCase of ADR-0186's columns). 
 
 Added in the build (ADR-0186 "Implementation decisions"):
 - Refusals: 403 `caller_cannot_approve`, 409 `approval_not_signable`, 422 `unknown_role`, 403 `approval_quorum_unsatisfiable`, 403 `approval_signature_recheck_failed`, 403 `approver_not_eligible`, 403 `browser_session_required`, 403 `fresh_sign_in_required`, 422 `passkey_attestation_refused`, 409 `passkey_already_registered`, 404 `unknown_challenge`, 404 `unknown_step_up`, 413 `step_up_action_too_large`.
+- Anchor timestamps (S, R22-07): no network certificate-revocation checking (OCSP/CRL). The TSA chain is checked against the configured trust bundle at the token's generation time only; no AIA, OCSP or CRL URL is ever fetched (this suits air-gapped installs). See ADR-0186 Residuals.
 - `x-regulait-step-up` may carry two tokens, comma-separated, when one write needs two step-ups. `sso` is offered only over https.
 - The bootstrap credential, once an admin has a step-up method: 403 `{error:"step_up_required", actionKind, methods:[], credential:"bootstrap"}`.
 - GET /v1/org/posture gains `approvalSigning:{mode, rpConfigured, failClosed, finding?}` and `bootstrap:{configured, adminWithStepUpMethod, passesStepUp, findings:[{code:"bootstrap_token_configured", detail}]}`.
