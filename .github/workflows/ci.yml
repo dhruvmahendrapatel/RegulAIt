@@ -59,26 +59,31 @@ name: CI
 #   build, the shared and other package suites and the static pre-flights run
 #   once in `build-and-test-base`; `gateway-coverage` proves the split; the
 #   aggregate `build-and-test` keeps the required check name.
-#     MEASURED locally (4-core dev container shared with other sessions, load
-#     average 6–10, so ~2–3x slower than a runner): shards 1–4 = 13.2 / 16.4 /
-#     18.8 / 20.9 min wall (shard 4 re-run green: 23.4, load avg 12), 93
-#     files each, run one after another. Vitest splits
-#     by file COUNT (SHA-1 of the path), not duration: per-file test time was
-#     241 / 322 / 323 / 444 s, so the slowest shard carries ~33% of the suite,
-#     not 25%. With three shards the slowest would carry ~43%; that is why four.
-#     ESTIMATE on a runner (NOT YET MEASURED — replace after the first runs),
-#     from ~25 min of serial gateway test time:
-#       gateway-tests        ~4 min setup (install, object store, gateway build)
-#                            + 5–9 min tests -> 9–13 min each, ~44 min for four
-#       build-and-test-base  install + `pnpm -r build` + packages, ~8 min
-#       gateway-coverage ~2 min; build-and-test (the aggregate) ~1 min
-#     => ~55 billed min for what was one ~25–33 min job, for a wall clock of
-#     ~13 min instead of 20–30+. The extra ~20 billed minutes are three more
-#     runner setups and the split's own small jobs — the price of a run that
-#     finishes inside its cap; at 2,000 min/month, ~25 fewer PR pushes a month.
+#     MEASURED ON RUNNERS (2026-10-10). Five sharded runs (38058734225,
+#     38060596512, 38060625616, 38061521561, 38063555799) compared with six
+#     single-job runs from the same day (38050764985, 38050760465, 38050780799,
+#     38054625037, 38055879349, 38059685751). Every job in all eleven succeeded:
+#       build-and-test-base  2m48s–3m47s  -> 3–4 billed min
+#       gateway shard 1..4   5m54s–9m49s  -> 6–10 each (test step 4:01–7:41;
+#                            ~2m15s of setup per shard outside the test step)
+#       coverage + aggregate  ~17 s + ~4 s -> 1 + 1
+#       => build-and-test family 40–44 billed min (mean 42), slowest job 9m49s
+#     versus the single job: 20m45s–31m42s -> 21–32 billed min (mean 28), with
+#     its gateway `pnpm -r` test step at 18:41–28:09.
+#     Whole run: wall clock 12:49–16:14 sharded vs 26:02–31:42 single; ALL jobs
+#     81–94 billed min (mean 86) vs 71–83 (mean 77). spa-journeys (~12.5 min)
+#     now sets the run's wall clock, not the gateway.
+#     So sharding costs ~+14 billed min a PR push for ~-14 min of wall clock and
+#     ~10 min of headroom under each 20-min cap. At 2,000 min/month and ~87 per
+#     push, weekly ~90 x 4 = ~360 => (2,000 - 360) / 87 ~= 19 PR pushes a month
+#     (single-job: (2,000 - 330) / 77 ~= 22). The 2026-10-02 figures above
+#     predate spa-mock and the suite's growth; this paragraph supersedes them.
+#     Vitest splits by file COUNT (SHA-1 of the path), not duration, so shards
+#     are uneven (locally 241 / 322 / 323 / 444 s of test time); that is why four
+#     and not three.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
-# cap, is a fifth matrix entry (one more ~4-min setup), not a higher cap.
+# cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
 # If that ceiling is ever actually hit, the next lever is narrowing
 # `pull_request` to `types: [ready_for_review]` so draft iterations stop
 # billing — NOT taken now, because this repo's agents open drafts and a draft
