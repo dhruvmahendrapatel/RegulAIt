@@ -45,6 +45,7 @@ import {
 import EvalsCatalogTab from "./EvalsCatalogTab";
 import EvalsCompareTab from "./EvalsCompareTab";
 import EvalsJudgeCalibration from "./EvalsJudgeCalibration";
+import { EngineRunsPanel } from "./EngineRunsPanel";
 import {
   QueryGate,
   RemoveButton,
@@ -184,6 +185,7 @@ const TABS = [
   { id: "runs", label: "Datasets and runs" },
   { id: "catalog", label: "Catalog" },
   { id: "compare", label: "Compare" },
+  { id: "engines", label: "Engine runs" },
 ];
 
 /** ADR-0173 batch 2c: the panel editor's rows (2–5 judges, positive weights) */
@@ -297,6 +299,11 @@ export default function EvalsPage() {
       ) : tab === "compare" ? (
         <div className={v.stack}>
           <EvalsCompareTab runs={runs.data?.runs ?? []} />
+        </div>
+      ) : tab === "engines" ? (
+        <div className={v.stack}>
+          {/* ADR-0187 (X27): sidecar engine runs, normalised into the evaluation ledger */}
+          <EngineRunsPanel surface="evals" />
         </div>
       ) : (
       <div className={v.stack}>
