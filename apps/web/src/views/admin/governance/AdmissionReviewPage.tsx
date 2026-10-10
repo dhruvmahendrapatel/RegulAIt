@@ -161,6 +161,8 @@ export default function AdmissionReviewPage() {
       {tab === "artifacts" ? (
         <ModelArtifactsTab
           selected={params.get("artifact")}
+          citedScanId={params.get("scan")}
+          citedRunId={params.get("run")}
           onSelect={(id) => setParams(id ? { tab: "artifacts", artifact: id } : { tab: "artifacts" }, { replace: true })}
         />
       ) : (

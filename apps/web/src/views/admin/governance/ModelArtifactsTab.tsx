@@ -35,6 +35,7 @@ import {
   formatBytes,
   formatName,
   isLiveRun,
+  chooseScan,
   latestScan,
   nameMismatch,
   preUploadRefusal,
@@ -42,6 +43,7 @@ import {
   retentionText,
   runStatusText,
   safeFindingId,
+  scanFindings,
   scanStatus,
   SCAN_ENGINE_ID,
   uploadModelArtifact,
@@ -62,7 +64,13 @@ interface EngineLite {
   signature?: string;
 }
 
-export default function ModelArtifactsTab(props: { selected: string | null; onSelect: (id: string | null) => void }) {
+export default function ModelArtifactsTab(props: {
+  selected: string | null;
+  /** B5W-01: the scan (and run) a model card cites; shown instead of the newest, never replaced by it */
+  citedScanId?: string | null;
+  citedRunId?: string | null;
+  onSelect: (id: string | null) => void;
+}) {
   const qc = useQueryClient();
   const settings = useQuery({
     queryKey: [...KEY, "limit"],
@@ -193,6 +201,9 @@ export default function ModelArtifactsTab(props: { selected: string | null; onSe
           engineError={engine.error}
           liveRun={liveRunOf.get(selected.id) ?? null}
           onScanStarted={() => void qc.invalidateQueries({ queryKey: [...KEY, "runs"] })}
+          citedScanId={props.citedScanId ?? null}
+          citedRunId={props.citedRunId ?? null}
+          onShowLatest={() => props.onSelect(selected.id)}
           retentionDays={retentionDays}
           retentionKnown={retentionKnown}
           onDeleted={() => {
@@ -302,6 +313,9 @@ function ArtifactDetail(props: {
   engineError: unknown;
   liveRun: EngineRunLite | null;
   onScanStarted: () => void;
+  citedScanId: string | null;
+  citedRunId: string | null;
+  onShowLatest: () => void;
   retentionDays: number;
   retentionKnown: boolean;
   onDeleted: () => void;
@@ -312,12 +326,16 @@ function ArtifactDetail(props: {
     queryKey: [...KEY, "detail", a.id],
     queryFn: () => api.get<{ artifact: ModelArtifact; scans: ArtifactScan[] }>(`/v1/model-artifacts/${a.id}`),
   });
-  const scans = useMemo(
-    () => [...(detail.data?.scans ?? [])].sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt)),
-    [detail.data],
-  );
-  const latest = latestScan(scans);
+  const scans = useMemo(() => {
+    const list = Array.isArray(detail.data?.scans) ? detail.data!.scans : [];
+    const at = (s: ArtifactScan) => (Number.isFinite(Date.parse(s?.createdAt)) ? Date.parse(s.createdAt) : -Infinity);
+    return [...list].sort((x, y) => at(y) - at(x));
+  }, [detail.data]);
+  const choice = chooseScan(scans, { scanId: props.citedScanId, runId: props.citedRunId });
+  // the scan this view is about: the cited one when a model card links here, else the newest
+  const latest = choice.kind === "cited_missing" ? null : choice.scan;
   const status = scanStatus(latest, a);
+  const findings = scanFindings(latest);
   const run = useQuery({
     queryKey: [...KEY, "run", latest?.engineRunId ?? null],
     enabled: Boolean(latest?.engineRunId),
@@ -401,15 +419,37 @@ function ArtifactDetail(props: {
         )}
 
         <div>
-          <div className={v.sectionTitle}>Latest scan</div>
+          <div className={v.sectionTitle}>{choice.kind === "latest" ? "Latest scan" : "Cited scan"}</div>
           {detail.isLoading ? (
             <span className={v.dim}>Loading…</span>
           ) : detail.error ? (
             <div className={v.errLine} role="alert">
               Couldn't read this artifact's scans — {refusalText(detail.error)}
             </div>
+          ) : choice.kind === "cited_missing" ? (
+            <div data-testid="cited-scan-missing">
+              <div role="alert" className={v.errLine}>
+                The cited scan is unavailable: no scan of this artifact matches it. It may have been deleted. The newest scan is not
+                shown in its place.
+              </div>
+              <span className={m.status}>
+                <Badge tone="warn">Not clean</Badge>
+                <span>Scan record unavailable</span>
+              </span>{" "}
+              <Button size="sm" onClick={props.onShowLatest}>
+                Show the latest scan
+              </Button>
+            </div>
           ) : (
             <div data-testid="latest-scan">
+              {choice.kind === "cited" && (
+                <p className={v.dim} style={{ marginTop: 0 }} data-testid="cited-note">
+                  This is the scan a model card cites. It may not be the newest scan of this artifact.{" "}
+                  <Button size="sm" onClick={props.onShowLatest}>
+                    Show the latest scan
+                  </Button>
+                </p>
+              )}
               <ScanStatusBadge status={status} />{" "}
               <Badge tone={status.admissible ? "ok" : "neutral"}>{status.admissible ? "Admissible" : "Not admissible"}</Badge>
               <ScanReasons status={status} />
@@ -417,9 +457,9 @@ function ArtifactDetail(props: {
           )}
         </div>
 
-        {latest && latest.findings.length > 0 && (
+        {findings.length > 0 && (
           <Table<{ i: number; kind: string; id: string; severity: string }>
-            rows={latest.findings.map((f, i) => ({ i, kind: f.kind, id: f.id, severity: f.severity }))}
+            rows={findings.map((f, i) => ({ i, kind: f.kind, id: f.id, severity: f.severity }))}
             rowKey={(f) => String(f.i)}
             columns={[
               { key: "kind", header: "Finding", render: (f) => findingKindLabel(f.kind) },
@@ -514,17 +554,17 @@ function ArtifactDetail(props: {
           />
         </div>
 
-        {scans.length > 1 && (
+        {scans.filter((s) => s !== latest).length > 0 && (
           <div>
-            <div className={v.sectionTitle}>Earlier scans</div>
+            <div className={v.sectionTitle}>{choice.kind === "latest" ? "Earlier scans" : "Other scans of this artifact"}</div>
             <Table<ArtifactScan>
-              rows={scans.slice(1)}
+              rows={scans.filter((s) => s !== latest)}
               rowKey={(s) => s.id}
               columns={[
                 { key: "at", header: "Scanned", render: (s) => ago(s.createdAt) },
                 { key: "status", header: "Result", render: (s) => <ScanStatusBadge status={scanStatus(s, a)} /> },
                 { key: "v", header: "Engine version", render: (s) => s.scannerVersion ?? "—" },
-                { key: "id", header: "Scan ID", render: (s) => <IdChip id={s.id} /> },
+                { key: "id", header: "Scan ID", render: (s) => <IdChip id={typeof s.id === "string" ? s.id : null} /> },
               ]}
             />
           </div>

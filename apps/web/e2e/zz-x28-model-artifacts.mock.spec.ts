@@ -230,6 +230,52 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     expect(eng.calls.filter((c) => c.method === "DELETE").map((c) => c.headers["x-regulait-step-up"] ?? null)).toEqual(["rgsu_1"]);
   });
 
+  test("X30 B5W-01: a link to an older inconclusive scan shows that scan, never the newer clean one; an unmatched citation is unavailable", async ({ page }) => {
+    await setup(page);
+    const base = ARTIFACT_SCANS[ARTIFACTS.safetensors.id]![0];
+    const r1 = { ...base, id: "aaaaaaaa-1111-4000-8000-000000000001", engineRunId: "aaaaaaaa-7777-4000-8000-000000000001", verdict: "unknown", chip: ARTIFACT_CHIP.unknown, admissible: false, findings: [{ kind: "scan_error", id: "TIMEOUT", severity: "medium" }], createdAt: "2026-10-01T09:00:00.000Z" };
+    const r2 = { ...base, id: "bbbbbbbb-2222-4000-8000-000000000002", engineRunId: "bbbbbbbb-7777-4000-8000-000000000002", createdAt: "2026-10-09T09:00:00.000Z" };
+    await page.route(`**/v1/model-artifacts/${ARTIFACTS.safetensors.id}`, (route) =>
+      route.request().method() === "GET" ? json(route, { artifact: ARTIFACTS.safetensors, scans: [r2, r1] }) : route.fallback(),
+    );
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}&scan=${r1.id}&run=${r1.engineRunId}`);
+    const shown = page.getByTestId("latest-scan");
+    await expect(page.getByTestId("cited-note")).toContainText("This is the scan a model card cites");
+    await expect(shown.getByTestId("scan-status")).toHaveAttribute("data-clean", "false");
+    await expect(shown.getByTestId("scan-status")).toContainText(ARTIFACT_CHIP.unknown);
+    await expect(shown).toContainText("Not admissible");
+    await expect(page.getByTestId("scan-run")).toContainText("aaaaaaaa…");
+    await expect(page.getByTestId("scan-run")).not.toContainText("bbbbbbbb…");
+    await expect(page).toHaveURL(new RegExp(`scan=${r1.id}`));
+    await expectAxeClean(page, "cited older scan");
+    // the reader may then ask for the newest, explicitly
+    await page.getByTestId("cited-note").getByRole("button", { name: "Show the latest scan" }).click();
+    await expect(page).not.toHaveURL(/scan=/);
+    await expect(page.getByTestId("latest-scan").getByTestId("scan-status")).toHaveAttribute("data-clean", "true");
+
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}&scan=cccccccc-0000-4000-8000-000000000009`);
+    await expect(page.getByTestId("cited-scan-missing")).toContainText("The cited scan is unavailable");
+    await expect(page.getByTestId("cited-scan-missing")).toContainText("Scan record unavailable");
+    await expect(page.locator('[data-testid="latest-scan"]')).toHaveCount(0);
+    await expect(page.getByTestId("scan-run")).toHaveCount(0);
+  });
+
+  test("X30 B5W-06: a scan record with no findings list renders as inconclusive, not clean, without breaking the page", async ({ page }) => {
+    await setup(page);
+    const base = ARTIFACT_SCANS[ARTIFACTS.safetensors.id]![0];
+    const { findings: _drop, ...noFindings } = base;
+    void _drop;
+    await page.route(`**/v1/model-artifacts/${ARTIFACTS.safetensors.id}`, (route) =>
+      route.request().method() === "GET" ? json(route, { artifact: ARTIFACTS.safetensors, scans: [noFindings] }) : route.fallback(),
+    );
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}`);
+    const shown = page.getByTestId("latest-scan");
+    await expect(shown.getByTestId("scan-status")).toHaveAttribute("data-clean", "false");
+    await expect(shown.getByRole("list", { name: "Why it is not clean" })).toContainText("incomplete or malformed");
+    await expect(row(page, "weights.safetensors").getByTestId("scan-status")).toHaveAttribute("data-clean", "false");
+    await expect(page.locator('[data-testid="scan-status"][data-clean="true"]')).toHaveCount(0);
+  });
+
   test("delete refused while in use: the fixed sentence, and the artifact stays", async ({ page }) => {
     await setup(page);
     await page.route(`**/v1/model-artifacts/${ARTIFACTS.safetensors.id}`, (route) =>
@@ -343,7 +389,7 @@ test.describe("ADR-0187 X28: the engine-scan evidence chip on a model card", () 
 
     // the link opens the artifact's scan in Admission review
     await clean.getByRole("link", { name: "View the scan and its run" }).click();
-    await expect(page).toHaveURL(new RegExp(`/ui/admin/admission\\?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}&run=`));
+    await expect(page).toHaveURL(new RegExp(`/ui/admin/admission\\?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}&scan=${scanOf("safetensors").id}&run=`));
     await expect(page.getByText("Artifact: weights.safetensors")).toBeVisible();
     await expect(page.getByTestId("latest-scan").getByTestId("scan-status")).toHaveAttribute("data-clean", "true");
   });

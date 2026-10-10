@@ -183,6 +183,21 @@ export function findingSentence(f: ArtifactScanFinding): string {
   return (FINDING_SENTENCE[f.kind] ?? ((x) => `A finding of an unrecognised kind was recorded (${safeFindingId(x.id)}); it is treated as not clean.`))(f);
 }
 
+const isFinding = (f: unknown): f is ArtifactScanFinding =>
+  typeof f === "object" && f !== null && typeof (f as ArtifactScanFinding).kind === "string" && typeof (f as ArtifactScanFinding).id === "string";
+
+/** does a scan record have the shape this page reads? (findings a list of findings, a verdict, an id) */
+export function scanRecordValid(scan: unknown): scan is ArtifactScan {
+  if (typeof scan !== "object" || scan === null) return false;
+  const x = scan as Partial<ArtifactScan>;
+  return typeof x.id === "string" && typeof x.verdict === "string" && typeof x.format === "string" && Array.isArray(x.findings) && x.findings.every(isFinding);
+}
+
+/** the findings to list: a malformed record lists none (its status already says it is inconclusive) */
+export function scanFindings(scan: ArtifactScan | null | undefined): ArtifactScanFinding[] {
+  return scan && scanRecordValid(scan) ? scan.findings : [];
+}
+
 /**
  * The status of an artifact from its latest scan. `scan` undefined = never
  * scanned. `artifact` (when known) is cross-checked: its format and its
@@ -192,9 +207,21 @@ export function scanStatus(scan: ArtifactScan | null | undefined, artifact?: Pic
   if (!scan) {
     return { label: "Not scanned", tone: "neutral", clean: false, admissible: false, verdict: "none", reasons: ["No scan has been recorded for this artifact, so it is not clean."] };
   }
+  // B5W-06: a record whose shape does not hold (findings absent or not a list of findings, no verdict) is
+  // inconclusive. It is never clean, and reading it never throws
+  if (!scanRecordValid(scan)) {
+    return {
+      label: SCAN_CHIP.unknown,
+      tone: "warn",
+      clean: false,
+      admissible: false,
+      verdict: "unknown",
+      reasons: ["The scan record is incomplete or malformed (its findings are missing or unreadable), so it is treated as inconclusive."],
+    };
+  }
   const known = (KNOWN_VERDICTS as string[]).includes(scan.verdict);
   const verdict: ArtifactScanVerdict = known ? (scan.verdict as ArtifactScanVerdict) : "unknown";
-  const findings = Array.isArray(scan.findings) ? scan.findings : [];
+  const findings = scan.findings;
   const reasons = findings.map(findingSentence);
 
   if (verdict === "clean") {
@@ -244,9 +271,34 @@ export function statusWord(s: ScanStatus): string {
 }
 
 /** the newest scan (the gateway orders newest first; this does not trust that) */
-export function latestScan(scans: ArtifactScan[] | undefined): ArtifactScan | null {
-  if (!scans || scans.length === 0) return null;
-  return [...scans].sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0] ?? null;
+const createdMs = (s: ArtifactScan) => {
+  const t = typeof s?.createdAt === "string" ? Date.parse(s.createdAt) : NaN;
+  return Number.isFinite(t) ? t : -Infinity;
+};
+
+export function latestScan(scans: ArtifactScan[] | undefined | null): ArtifactScan | null {
+  if (!Array.isArray(scans) || scans.length === 0) return null;
+  return [...scans].sort((x, y) => createdMs(y) - createdMs(x))[0] ?? null;
+}
+
+export type ScanChoice =
+  | { kind: "latest"; scan: ArtifactScan | null }
+  | { kind: "cited"; scan: ArtifactScan }
+  | { kind: "cited_missing"; scanId: string | null; runId: string | null };
+
+/**
+ * B5W-01: which scan the detail shows. A link from a model card names the CITED scan (and its run); that
+ * scan is shown, never the newest one in its place. A citation that matches nothing is unavailable.
+ * With nothing cited, the newest scan.
+ */
+export function chooseScan(scans: ArtifactScan[] | undefined | null, cited: { scanId?: string | null; runId?: string | null }): ScanChoice {
+  const list = Array.isArray(scans) ? scans : [];
+  const scanId = cited.scanId || null;
+  const runId = cited.runId || null;
+  if (!scanId && !runId) return { kind: "latest", scan: latestScan(list) };
+  // the scan id names one scan; a link that carries only a run (an older link) is matched by its run
+  const hit = list.find((x) => (scanId ? x?.id === scanId : x?.engineRunId === runId));
+  return hit ? { kind: "cited", scan: hit } : { kind: "cited_missing", scanId, runId };
 }
 
 /** a run's status as words (structured: status + error code only) */
@@ -382,7 +434,26 @@ export function uploadPath(filename: string): string {
  */
 export function uploadModelArtifact(file: Blob, opts: UploadOptions): Promise<{ artifact: ModelArtifact }> {
   const path = uploadPath(opts.filename);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolveOuter, rejectOuter) => {
+    const cancelled = () => new Error("Upload cancelled. Check the list: an artifact is recorded only if the server received the whole file.");
+    // B5W-04: an XMLHttpRequest aborted before send() fires no event, so a signal already aborted rejects here
+    if (opts.signal?.aborted) {
+      rejectOuter(cancelled());
+      return;
+    }
+    let onAbort: (() => void) | null = null;
+    const settle = () => {
+      if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
+      onAbort = null;
+    };
+    const resolve = (v: { artifact: ModelArtifact }) => {
+      settle();
+      resolveOuter(v);
+    };
+    const reject = (e: unknown) => {
+      settle();
+      rejectOuter(e);
+    };
     const xhr = opts.xhr ? opts.xhr() : new XMLHttpRequest();
     xhr.open("POST", path);
     xhr.withCredentials = true;
@@ -411,13 +482,10 @@ export function uploadModelArtifact(file: Blob, opts: UploadOptions): Promise<{ 
           "The upload was cut off before the server answered. The file may be over the size limit, or the connection dropped. Nothing is recorded unless the artifact appears in the list.",
         ),
       );
-    xhr.onabort = () => reject(new Error("Upload cancelled. Check the list: an artifact is recorded only if the server received the whole file."));
+    xhr.onabort = () => reject(cancelled());
     if (opts.signal) {
-      if (opts.signal.aborted) {
-        xhr.abort();
-        return;
-      }
-      opts.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      onAbort = () => xhr.abort();
+      opts.signal.addEventListener("abort", onAbort, { once: true });
     }
     xhr.send(file);
   });

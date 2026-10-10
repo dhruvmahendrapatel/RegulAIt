@@ -9,7 +9,9 @@ import { ApiError } from "../../../api/client";
 import {
   SCAN_CHIP,
   findingSentence,
+  chooseScan,
   latestScan,
+  scanFindings,
   nameMismatch,
   preUploadRefusal,
   refusalText,
@@ -234,5 +236,96 @@ describe("the upload", () => {
     const refused = await uploadModelArtifact(blob, { filename: "m.pkl", xhr: fake }).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(ApiError);
     expect((refused as ApiError).status).toBe(413);
+  });
+});
+
+describe("X30 review: B5W-01 the cited scan, never the newest in its place", () => {
+  const r1 = scan({ id: "11111111-r1", engineRunId: "run-1", verdict: "unknown", format: "pickle", admissible: false, createdAt: "2026-10-01T00:00:00Z" });
+  const r2 = scan({ id: "22222222-r2", engineRunId: "run-2", createdAt: "2026-10-09T00:00:00Z" });
+  it("a link naming the older inconclusive scan shows that scan, not the newer clean one", () => {
+    const c = chooseScan([r2, r1], { scanId: r1.id, runId: "run-1" });
+    expect(c).toEqual({ kind: "cited", scan: r1 });
+    expect(scanStatus(c.kind === "cited" ? c.scan : null, SAFETENSORS).clean).toBe(false);
+  });
+  it("an older link that carries only the run is matched by it", () => {
+    expect(chooseScan([r2, r1], { runId: "run-1" })).toEqual({ kind: "cited", scan: r1 });
+  });
+  it("a citation that matches nothing is unavailable, never the latest", () => {
+    expect(chooseScan([r2, r1], { scanId: "gone" })).toEqual({ kind: "cited_missing", scanId: "gone", runId: null });
+    expect(chooseScan([r2, r1], { runId: "run-9" }).kind).toBe("cited_missing");
+    expect(chooseScan(undefined, { scanId: "gone" }).kind).toBe("cited_missing");
+  });
+  it("with nothing cited, the newest", () => {
+    expect(chooseScan([r1, r2], {})).toEqual({ kind: "latest", scan: r2 });
+  });
+});
+
+describe("X30 review: B5W-06 a malformed scan record is inconclusive, never clean, and never throws", () => {
+  const bad: unknown[] = [undefined, null, "none", {}, [null], [{ kind: 1, id: "x" }], [{ kind: "unsafe_operator" }]];
+  for (const findings of bad) {
+    it(`findings = ${JSON.stringify(findings) ?? "undefined"}`, () => {
+      const s = scan({ findings: findings as never });
+      const st = scanStatus(s, SAFETENSORS);
+      expect(st).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+      expect(st.reasons[0]).toMatch(/incomplete or malformed/);
+      expect(scanFindings(s)).toEqual([]);
+    });
+  }
+  it("a record with no verdict is inconclusive too", () => {
+    expect(scanStatus(scan({ verdict: undefined as never }), SAFETENSORS).clean).toBe(false);
+  });
+});
+
+describe("X30 review: B5W-04 the upload and its abort signal", () => {
+  it("a signal already aborted rejects at once and sends nothing", async () => {
+    let made = 0;
+    const ctl = new AbortController();
+    ctl.abort();
+    const started = Date.now();
+    const out = await Promise.race([
+      uploadModelArtifact(new Blob([new Uint8Array([1])]), {
+        filename: "x",
+        signal: ctl.signal,
+        xhr: () => {
+          made += 1;
+          throw new Error("no request may be made");
+        },
+      }).catch((e: unknown) => e),
+      new Promise((r) => setTimeout(() => r("pending"), 500)),
+    ]);
+    expect(out).toBeInstanceOf(Error);
+    expect((out as Error).message).toMatch(/Upload cancelled/);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(made).toBe(0);
+  });
+
+  it("the abort listener is removed once the upload settles", async () => {
+    let aborts = 0;
+    const fake = () => {
+      const x = {
+        upload: {} as Record<string, unknown>,
+        withCredentials: false,
+        status: 0,
+        responseText: "",
+        onload: null as null | (() => void),
+        onerror: null as null | (() => void),
+        onabort: null as null | (() => void),
+        open: () => undefined,
+        setRequestHeader: () => undefined,
+        abort: () => {
+          aborts += 1;
+        },
+        send: () => {
+          x.status = 201;
+          x.responseText = JSON.stringify({ artifact: { id: "a1" } });
+          x.onload?.();
+        },
+      };
+      return x as unknown as XMLHttpRequest;
+    };
+    const ctl = new AbortController();
+    await uploadModelArtifact(new Blob([new Uint8Array([1])]), { filename: "x", signal: ctl.signal, xhr: fake });
+    ctl.abort();
+    expect(aborts).toBe(0);
   });
 });
