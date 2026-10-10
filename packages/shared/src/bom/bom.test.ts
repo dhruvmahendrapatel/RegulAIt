@@ -384,8 +384,15 @@ describe("finality (R4, R44) and #280's unbounded-retention policy", () => {
     expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, retainUntil: null } })).toEqual({ freeze: false, reason: "lock_not_recorded" });
     expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, retainUntil: new Date(now.getTime() - 1) } })).toEqual({ freeze: false, reason: "lock_lapsed" });
     expect(decisionBomFinality({ ...accept, anchor: { ...base.anchor!, tsaGranted: false } })).toEqual({ freeze: false, reason: "timestamp_pending" });
-    // a weaker floor already accepts it (it ranks above unverified destination, below anchored)
-    expect(decisionBomFinality({ ...unbounded, setting: "anchored_unverified_destination" })).toEqual({ freeze: true, state: "anchored_finite_lock" });
+    // a weaker floor accepts it only when the finite-lock relaxation is also `accept`
+    expect(decisionBomFinality({ ...accept, setting: "anchored_unverified_destination" })).toEqual({ freeze: true, state: "anchored_finite_lock" });
+  });
+  it("F6: `refuse` never yields anchored_finite_lock, whatever the floor (R44: an uncovered lock freezes at most as anchored_unverified_destination)", () => {
+    const unbounded = { ...base, retainedDays: null };
+    for (const setting of ["anchored_unverified_destination", "chain_signed"] as const) {
+      expect(decisionBomFinality({ ...unbounded, setting })).toEqual({ freeze: true, state: "anchored_unverified_destination" });
+    }
+    expect(decisionBomFinality({ ...unbounded, setting: "anchored" })).toEqual({ freeze: false, reason: "retention_unbounded" });
   });
   it("the verifier reports anchored_lapsed once retain_until passes; a frozen state is never edited", () => {
     const until = base.anchor!.retainUntil!;
