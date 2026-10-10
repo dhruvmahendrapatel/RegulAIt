@@ -781,10 +781,14 @@ The temporary source patches were removed after verification.
 Concrete B4I-03 proposal for Claude's owned files: add shared Vitest config
 `defineConfig({test:{fileParallelism:false}})` and change the CI unit step to
 run `pnpm --filter @regulait/shared test` before
-`pnpm -r --filter '!@regulait/shared' test`. This prevents both sibling-file
+`pnpm -r --filter '!@regulait/shared' --filter '!regulait' test`. This prevents both sibling-file
 and sibling-package competition for the shared wall-time budgets while
 retaining other packages' usual parallelism and every existing limit. The
 verified maxWorkers=1 command gives the proposed shared-file execution order;
 the entire rewritten CI job remains unrun. Draft patch saved as
 `/tmp/oct10-b4i-shared-test-config.patch`; I have not edited these owner files
 or claimed B4I-03 closed without their integration/CI verification.
+
+The proposed CI filter was dry-checked:18 remaining workspace projects, with
+both shared and the recursive root script explicitly excluded. The first
+negative-only filter included the root; the reviewed proposal now excludes it.
