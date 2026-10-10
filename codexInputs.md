@@ -1,3 +1,35 @@
+## X42 — ADR-0190 I1 and migration 0185 independent review (2026-10-10)
+
+**READY FOR OWNER REVIEW with two findings.** Reviewed merged I1 #286 at `94fffb656cbc505468a7b8e43c478ca4ad499a08` (I1 head `a79e47e792cc52b33201e84f3576b2838cb75b19`) and exact guard-hardening #285 `6f6de2bc4cc8d69a810c0a30d1acb29da420a316`. Product implementation is unchanged. Independent synthetic probes live in `apps/web/review/x42-isolation.probe.ts`.
+
+### DBG-01 — HIGH merge blocker: exact migration 0185 cannot run after merged 0182/0183
+
+Both merged migrations create `public.regulait_refuse_truncate()` with `CREATE OR REPLACE`. Exact #285 migration 0185 uses `CREATE FUNCTION` for that same signature. After a fresh migration through main's 0183, executing the exact 0185 SQL inside a rollback-only transaction fails with PostgreSQL **42723 (duplicate_function)**. The preceding 15 ALTER FUNCTION statements roll back, so the existing old-function search-path and old-table TRUNCATE gaps remain. This is a migration integration blocker, not evidence that the intended guard fails after successful installation.
+
+The attempted dependency merge was aborted: its journal conflicts with main's 0182/0183. No journal/owner-file resolution is included here, and no complete merged migration-0185 success is claimed. Please reconcile the journal preserving all existing entries and the frozen 0185 `when=1785120000000`, and make the function definition compatible with the already-created signature. Retain the 0185 refusal behavior/error text so its own acceptance assertions agree. Recheck the composed migration before merging.
+
+### I1R-01 — LOW: profile body CHECK accepts missing/null required identity fields
+
+`packages/db/migrations/0183_isolation_execution_profiles.sql`'s `execution_profiles_body_check` claims the body is a v1 profile and restates `schema`, `name`, and `minClass`. On real Postgres, both `{}` and `{"schema":null,"name":null,"minClass":null}` insert successfully with a correctly computed body digest and otherwise valid, non-null row columns. Missing/JSON-null `->>` values turn the CHECK expression into SQL NULL, which passes. Both rows were created only in a transaction that was rolled back.
+
+Please require those comparisons to evaluate TRUE, e.g. `COALESCE((whole existing body predicate), false)` or explicit required-field checks, and add absent/null negatives. This is an invariant gap for trusted SQL writers; all profile routes still return 501 and shared zod rejects incomplete bodies. No exposed HTTP exploit, full database-level equivalent of zod, or need to duplicate every profile constraint in SQL is claimed.
+
+### Independent evidence and scope
+
+- **28/28 real-Postgres focused tests PASS, zero skipped:** all 16 existing I1 foundation cases plus 12 independent review cases. The review assertions deliberately reproduce DBG-01/I1R-01; their green result does not mean those findings are fixed.
+- Independent nonpublic hostile-schema negative control deletes a synthetic append-only incident event before search-path pinning. Applying the exact intended ALTER/trigger statements inside one rolled-back transaction, explicitly excluding the colliding CREATE FUNCTION, refuses that deletion and preserves the event. Every discovered public SQL/plpgsql function then has the pinned path; every discovered append-only table has a TRUNCATE guard. All guarded tables (more than 25) refuse `TRUNCATE ... CASCADE`, with a savepoint rollback after every attempt. This is partial statement-level evidence, **not a successful migration 0185**.
+- Future-migration controls create an unpinned public SQL function and a new append-only row-guarded table lacking a TRUNCATE guard. The same catalog predicates used by the owner's invariants detect both omissions. Both controls roll back. The current I1 functions/tables introduce no new omission.
+- A hostile temporary `execution_profiles` table and caller search path cannot bypass I1's one-step version guard. All four I1 tables refuse TRUNCATE under the hostile search path.
+- Independent shared checks cover amendments A–D: fixed OCI seccomp/sidecar flags, directfs as an explicit relaxation, workload-vs-host pids headroom, executor-side vs in-sandbox probe definitions; order-independent profile digests and changed security flags; backend class claims; and relaxation against both defaults and stricter stored settings. Existing I1 tests additionally prove placement outcome shapes/no fallback and audited org-setting relaxations through the real app.
+- **51/51 existing shared isolation cases PASS, zero skipped.** Gateway dependency-closure build and web typecheck/production build PASS. The existing Vite large-chunk advisory remains.
+- Scratch database `regulait_review_x42_oct10b` was created and dropped without FORCE; base database untouched. Temporary gateway test copy removed. Logs: `/tmp/x42-{install,gateway-build,web-build,pg-tests,shared-tests}.log`.
+
+Reproduction: activate the cloud environment; fetch the exact #285 head; `git show 6f6de2bc4cc8d69a810c0a30d1acb29da420a316:packages/db/migrations/0185_guard_search_path_and_truncate.sql > /tmp/x42-0185.sql`; create only the named scratch database; copy the owned probe to `apps/gateway/src/x42-isolation-independent.test.ts`; from the repository root run `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_review_x42_oct10b pnpm --filter @regulait/gateway test x42-isolation-independent.test.ts zz-adr0190-i1-foundation.test.ts`; remove the temporary test and drop only that scratch database. Run shared with `pnpm --filter @regulait/shared test isolation/isolation.test.ts`.
+
+**Limits:** no runsc/Kata/OpenShell execution, real escape probe, deployed executor, placement admission, complete guard-hardening migration, browser sweep, full gateway/shared/monorepo suite, or production designation. Actual runtime attestation and required-class placement are later I2–I4 slices. Amendment D evidence here checks the contract's probe definitions, not an operating sandbox's EROFS/host quotas.
+
+---
+
 ## X38 real-stack model-artifact delete/retention sweep — 2026-10-10 UTC
 
 Reviewed merged #240 on main `94fffb65` with a fresh, disposable
