@@ -81,6 +81,7 @@ import {
 import {
   AI_BOM_INSTALL_SUBJECT_ID,
   AI_BOM_MAX_RECORDS_PER_LIST,
+  AI_BOM_RETIRED_DATA_CLAIM_KEYS,
   aiBomInventoryIndex,
   bomDigestOf,
   bomExpiresAt,
@@ -94,15 +95,18 @@ import {
   type AiBomSubjectKind,
   type CycloneDxSpecVersion,
 } from "@regulait/shared";
+import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
+import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
 
 /**
- * R2/R17: NOT RELEASED. A code constant, never a setting. The PR that merges
- * second of B4 (export-bundle/3) and B5 (SPDX) sets it to true, with tests
- * that download every format as a verified bundle.
+ * R2/R17: NOT RELEASED. A code constant, never a setting, defined ONCE in
+ * `packages/shared/src/bom/release-switch.ts` (B7's release step reads the same
+ * one). The PR that merges second of B4 (export-bundle/3) and B5 (SPDX) flips it
+ * there, with tests that download every format as a verified bundle.
  */
-export const AI_BOM_SNAPSHOTS_RELEASED = false as boolean;
+export { AI_BOM_SNAPSHOTS_RELEASED };
 
 export class AiBomError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -112,6 +116,16 @@ export class AiBomError extends Error {
 }
 
 type Tx = Db;
+/**
+ * ADR-0189 R51: `releaseTime` and `downloadLocation` are retired as `data_claims` keys. The governed SPDX
+ * declarations are their only source, so the loader drops exactly these two keys from a card's claims (any OTHER
+ * unknown key still reaches the normaliser and is refused, never copied).
+ */
+function withoutRetiredClaims(claims: Record<string, unknown> | null): Record<string, unknown> {
+  const out = { ...(claims ?? {}) };
+  for (const k of AI_BOM_RETIRED_DATA_CLAIM_KEYS) delete out[k];
+  return out;
+}
 const uniq = <T>(xs: Iterable<T>): T[] => [...new Set(xs)];
 /** PR #287: an install-wide read is bounded; over the cap the snapshot is refused, never truncated */
 const CAP = AI_BOM_MAX_RECORDS_PER_LIST;
@@ -338,6 +352,14 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   const nameOf = (id: string | null) => (id ? names.get(id) ?? null : null);
   const identityOf = (k: "agentId" | "builderAgentId", id: string) => identities.find((i) => i[k] === id)?.identifier ?? null;
 
+  // ---- B9 (R51): the current supplier-declared SPDX properties of the loaded cards and dataset versions,
+  // read in this same snapshot, so the signed body and the SPDX rendering agree with what was declared
+  const spdxFields = [
+    ...(await loadSpdxFieldsRecords(tx, "model_card", cardIds)),
+    ...(await loadSpdxFieldsRecords(tx, "training_dataset", dsRows.map((d) => d.id))),
+    ...(await loadSpdxFieldsRecords(tx, "eval_dataset", evalDatasetRows.map((d) => d.id))),
+  ];
+
   return {
     subject: { kind: subject.kind, id: subject.id },
     install: install ? { installId: opts.installId } : null,
@@ -347,7 +369,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
       return { ...a, ownerDisplayName: nameOf(a.ownerUserId), workloadIdentity: identityOf("agentId", a.id), observedLastSeen: iso(o?.lastSeen ?? null), observedCount: o?.n ?? 0 };
     }),
     customProviders: providerRows,
-    modelCards: cardRows.map((c) => ({ ...c, biasFairness: (c.biasFairness ?? []).map((b) => ({ dimension: b.dimension, method: b.method, status: b.status, resultRef: b.resultRef ?? null, assessedAt: b.assessedAt ?? null })), dataClaims: c.dataClaims as never, standardRefs: c.standardRefs ?? [] })),
+    modelCards: cardRows.map((c) => ({ ...c, biasFairness: (c.biasFairness ?? []).map((b) => ({ dimension: b.dimension, method: b.method, status: b.status, resultRef: b.resultRef ?? null, assessedAt: b.assessedAt ?? null })), dataClaims: withoutRetiredClaims(c.dataClaims) as never, standardRefs: c.standardRefs ?? [] })),
     modelCardApprovals: approvalRows.map((a) => ({ ...a, decidedAt: iso(a.decidedAt), validUntil: iso(a.validUntil) })),
     modelCardEvidence: evidenceRows.map((e) => ({ ...e, attachedAt: iso(e.attachedAt)! })),
     evalRuns: runRows,
@@ -368,6 +390,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
     builderAgents: builderRows.map((b) => ({ ...b, ownerDisplayName: nameOf(b.ownerUserId), workloadIdentity: identityOf("builderAgentId", b.id) })),
     builderSkills: skillRows,
     memoryStores,
+    spdxFields,
   } as AiBomRecordSet;
 }
 

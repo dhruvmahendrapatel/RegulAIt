@@ -4,8 +4,20 @@
 export * from "./contract.js";
 export * from "./finality.js";
 export * from "./settings.js";
+// slice B4 API contract (frozen for B6; B4 implements it exactly)
+export * from "./contract-b4.js";
 // slice B3: the AI BOM record set, builder, CycloneDX renderer and validator
 export * from "./ai-bom-records.js";
 export * from "./ai-bom-cyclonedx.js";
 export * from "./ai-bom-cyclonedx-schema.js";
 export * from "./ai-bom-builder.js";
+// slice B7: our own install-scope AI BOM per release (R9, R28)
+export * from "./release-switch.js";
+export * from "./ai-dev-stack.js";
+export * from "./release-sbom-identity.js";
+export * from "./release-ai-bom.js";
+// slice B5: the SPDX 3.0.1 renderer and its offline validator
+export * from "./ai-bom-spdx.js";
+export * from "./ai-bom-spdx-schema.js";
+// slice B9: the supplier-declared SPDX properties (R51)
+export * from "./ai-bom-spdx-fields.js";

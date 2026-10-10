@@ -1300,6 +1300,10 @@ export const auditLog = pgTable(
         "training_dataset",
         "training_job",
         "training_artifact",
+        // ADR-0189 B9 (R51): a supplier-declared SPDX property of an evaluation
+        // dataset version was declared or withdrawn (model cards and training
+        // datasets use their own types above). Plain text column — no DDL needed.
+        "eval_dataset",
         // ADR-0066 (gateway parity): a virtual key's whole lifecycle — issued,
         // updated, revoked — plus every dispatch it was REFUSED, by its own
         // allow-list or its own budget. Kept as its own object type rather than
@@ -1471,6 +1475,9 @@ export const auditLog = pgTable(
         // the customer mapping) and a placement offer (placed, refused, mismatch). Plain text column — no DDL.
         "executor",
         "execution_placement",
+        // ADR-0188 S4: an internal workload identity created at first load, and
+        // an admin replacing an identity's own grant set. Plain text — no DDL.
+        "workload_identity",
       ],
     })
       .notNull()
@@ -12244,6 +12251,44 @@ export const bomRetentionPrunes = pgTable(
   ],
 );
 
+/**
+ * ADR-0189 slice B9 (OWNER DECISION 13, amendment R51; migration 0186): the
+ * supplier-declared SPDX 3.0.1 properties no other table records. One row per
+ * declared value of ONE parent (a model card or a dataset version row); the
+ * current value is the newest row (`seq`) for that parent and property, and a
+ * `withdrawn` row clears it. APPEND-ONLY in the database (UPDATE, DELETE except
+ * the parent's cascade, and TRUNCATE are refused); `declared_at` is stamped by a
+ * trigger from the database clock. Value shapes: `@regulait/shared`
+ * `ai-bom-spdx-fields.ts`, repeated in the migration's CHECKs.
+ */
+export const aiBomSpdxDeclarations = pgTable(
+  "ai_bom_spdx_declarations",
+  {
+    seq: bigint("seq", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    modelCardId: uuid("model_card_id").references(() => modelCards.id, { onDelete: "cascade" }),
+    trainingDatasetId: uuid("training_dataset_id").references(() => trainingDatasets.id, { onDelete: "cascade" }),
+    evalDatasetId: uuid("eval_dataset_id").references(() => evalDatasets.id, { onDelete: "cascade" }),
+    property: text("property", { enum: ["releaseTime", "downloadLocation", "packageVersion", "builtTime", "originatedBy", "datasetType"] }).notNull(),
+    withdrawn: boolean("withdrawn").notNull().default(false),
+    valueTime: timestamp("value_time", { withTimezone: true }),
+    valueText: text("value_text"),
+    valueList: text("value_list").array(),
+    source: text("source", { enum: ["supplier_declared", "admin_entered"] }).notNull(),
+    /** no FK: a declaration outlives its author, like the audit row that records it */
+    declaredByUserId: uuid("declared_by_user_id").notNull(),
+    /** always the database clock (a BEFORE INSERT trigger overwrites any value sent) */
+    declaredAt: timestamp("declared_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_bom_spdx_declarations_model_card_idx").on(t.modelCardId, t.property, t.seq.desc()).where(sql`${t.modelCardId} IS NOT NULL`),
+    index("ai_bom_spdx_declarations_training_dataset_idx").on(t.trainingDatasetId, t.property, t.seq.desc()).where(sql`${t.trainingDatasetId} IS NOT NULL`),
+    index("ai_bom_spdx_declarations_eval_dataset_idx").on(t.evalDatasetId, t.property, t.seq.desc()).where(sql`${t.evalDatasetId} IS NOT NULL`),
+    check("ai_bom_spdx_declarations_one_parent_check", sql`num_nonnulls(${t.modelCardId}, ${t.trainingDatasetId}, ${t.evalDatasetId}) = 1`),
+    check("ai_bom_spdx_declarations_source_check", sql`${t.source} IN ('supplier_declared', 'admin_entered')`),
+    check("ai_bom_spdx_declarations_time_check", sql`${t.valueTime} IS NULL OR ${t.valueTime} = date_trunc('second', ${t.valueTime})`),
+  ],
+);
+
 /** R16 / OWNER DECISION 11: an evidence hold on BOM rows; only ever released, once. */
 export const bomRetentionHolds = pgTable(
   "bom_retention_holds",
@@ -12901,6 +12946,11 @@ export const delegationGrants = pgTable(
     parentGrantId: uuid("parent_grant_id").references((): AnyPgColumn => delegationGrants.id, { onDelete: "restrict" }),
     path: uuid("path").array().notNull().default(sql`'{}'::uuid[]`),
     depth: integer("depth").notNull(),
+    /**
+     * ADR-0188 S4 (migration 0184): the ABSOLUTE deepest `depth` any grant in this subtree may have — the stored
+     * decision 23 `max_depth`. Root: the org's `delegation_max_depth`; child: min(parent.depthLimit, depth + max_depth).
+     */
+    depthLimit: integer("depth_limit").notNull(),
     sponsorUserId: uuid("sponsor_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
@@ -12939,6 +12989,7 @@ export const delegationGrants = pgTable(
   },
   (t) => [
     check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
+    check("delegation_grants_depth_limit_check", sql`${t.depthLimit} BETWEEN ${t.depth} AND 8`),
     check(
       "delegation_grants_parent_check",
       sql`(${t.depth} = 0 AND ${t.parentGrantId} IS NULL AND ${t.rootGrantId} = ${t.id}) OR (${t.depth} > 0 AND ${t.parentGrantId} IS NOT NULL AND ${t.path}[cardinality(${t.path})] = ${t.parentGrantId} AND ${t.path}[1] = ${t.rootGrantId})`,

@@ -461,6 +461,7 @@ import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 import { registerIdentityRoutes } from "./identity-routes.js";
 // ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
 import { registerBomRoutes } from "./bom-routes.js";
+import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
 // ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
 import { registerIsolationRoutes } from "./isolation-routes.js";
 // ADR-0190 I3 — the executor channel (in-route ADR-0188 proof) and the placement broker
@@ -2973,7 +2974,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       undefined,
       undefined,
-      { actor: null }, // ADR-0188 S4 replaces
+      { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
 
     // What the decision was actually computed ON. A proxy that believes it is
@@ -3073,7 +3074,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       undefined,
       undefined,
-      { actor: null }, // ADR-0188 S4 replaces
+      { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
@@ -5256,6 +5257,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
   registerBomRoutes(app, db);
+  // ADR-0189 B9 (R51): supplier-declared SPDX properties of models and datasets (admin-only, audited)
+  registerAiBomSpdxFieldRoutes(app, db);
   registerIsolationRoutes(app, db);
   registerExecutorChannelRoutes(app, db, opts.executorChannel ?? {});
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any

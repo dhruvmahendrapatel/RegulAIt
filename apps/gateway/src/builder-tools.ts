@@ -57,6 +57,8 @@ export interface ToolEntry {
   def: ModelToolDef;
   serverId?: string;
   toolName?: string;
+  /** an MCP tool's manifest kind (ADR-0188 S4: the delegation scope entry is per kind) */
+  toolKind?: "read" | "write";
   operations?: Array<"read" | "write">;
 }
 
@@ -252,6 +254,7 @@ export async function resolveToolbox(db: Db, agent: BuilderAgentRow, userId: str
         provider: m.serverName,
         serverId: m.serverId,
         toolName: m.name,
+        toolKind: m.kind === "read" ? "read" : "write",
         def: {
           name,
           description:
@@ -364,6 +367,8 @@ export interface ToolRunContext {
   toolCallId: string;
   /** correlation for the governed call's own audit row */
   detail: Record<string, unknown>;
+  /** ADR-0188 S4: the delegation grant the builder agent acts under (decided with its stored chain) */
+  delegationGrantId?: string | undefined;
 }
 
 function refused(code: string, detail: string, opts: Partial<ToolRun> = {}): ToolRun {
@@ -433,6 +438,7 @@ export async function runGovernedTool(
       trace: ctx.trace,
       toolCallId: ctx.toolCallId,
       detail: ctx.detail,
+      delegationGrantId: ctx.delegationGrantId,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -536,6 +542,7 @@ async function runConnector(
       projectId: ctx.projectId,
       trace: ctx.trace,
       detail: ctx.detail,
+      delegationGrantId: ctx.delegationGrantId,
     });
   } catch {
     return {

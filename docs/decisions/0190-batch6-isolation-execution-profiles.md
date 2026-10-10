@@ -628,9 +628,14 @@ and a 2-hour attestation age as listed. Slice I0 may start now; I1 onward follow
    I0 spike reports whether the demo can show L2 there.
 7. **pipelock's Apache core** as an egress-containment option (PathForward extension row): evaluate after I7, since
    OpenShell's supervisor covers the same need where it runs.
-8. **Unverified facts from the survey** (GitHub unreachable): Kata's latest tag and date, Firecracker's and nsjail's
-   upstream release dates, `go-landlock`'s licence, OpenShell's telemetry defaults, and OpenSandbox's repository
-   provenance. I0 re-checks each before any slice depends on it.
+8. **Unverified facts from the survey** (GitHub unreachable when the survey was written). *Narrowed by I0
+   (amendments G and H):* R13 §4 verified Kata's latest tags (4.2.0, 2026-09-15; 3.32.0 on the 3.x line), Firecracker's
+   upstream `v1.17.0` (2026-09-04), nsjail's tag date (2026-03-18) and `go-landlock`'s licence (MIT), each from the
+   upstream git repository; R13 §3 read OpenShell's telemetry defaults from source (compiled in and on by default; the
+   telemetry-free build of amendment G is the admissible form). **Still unverified:** OpenSandbox's repository
+   provenance and the Landlock UDP ABI number (neither re-checked by R13), and OpenShell's run-time egress with
+   telemetry off (the egress test needs Docker and was not run; I7 runs it). Platform questions stay with open
+   question 6.
 
 ## Consequences
 

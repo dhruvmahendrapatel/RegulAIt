@@ -247,7 +247,7 @@ export async function adjudicateInducedCall(
     ]);
     const decision = evaluateConnector({
       userId: input.userId,
-      actor: null, // ADR-0188 S4 replaces
+      actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
       /**
        * ADR-0124 — EVALUATION ONLY, and this one matters.
        *
@@ -325,7 +325,7 @@ export async function adjudicateInducedCall(
     undefined,
     undefined,
     // ADR-0182 A14: an evaluation dispatch is exempt from the literacy gate
-    { origin: "evaluation", actor: null }, // ADR-0188 S4 replaces
+    { origin: "evaluation", actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
   );
   const held = decision.effect !== "allow";
   return {

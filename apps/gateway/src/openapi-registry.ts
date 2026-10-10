@@ -1024,11 +1024,17 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
   "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
   "GET /v1/ai-bom/:subjectKind/:subjectId/drift": "internal",
+  // the five B4 routes below are still 501 stubs; their request/response bodies are FROZEN in
+  // `@regulait/shared` `bom/contract-b4.ts` (BOM_B4_ROUTE_CONTRACT), bound in openapi.ts ROUTE_DOCS
   "GET /v1/ai-bom/snapshots/:snapshotId": "internal",
   "GET /v1/ai-bom/snapshots/:snapshotId/bundle": "internal",
   "GET /v1/decisions/:auditId/bom": "internal",
   "GET /v1/decisions/:auditId/bom/bundle": "internal",
   "POST /v1/boms/verify": "internal",
+  // --- ADR-0189 B9 (R51): supplier-declared SPDX properties (admin-only, audited)
+  "GET /v1/ai-bom/spdx-fields/:subjectKind/:subjectId": "internal",
+  "PUT /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property": "internal",
+  "POST /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property/withdraw": "internal",
   // --- ADR-0190 (batch 6 item 3) I1: 501 stubs until their slices land
   "GET /v1/execution-profiles": "internal",
   "POST /v1/execution-profiles": "internal",
@@ -1961,6 +1967,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/decisions/:auditId/bom": "audit",
   "GET /v1/decisions/:auditId/bom/bundle": "audit",
   "POST /v1/boms/verify": "audit",
+  "GET /v1/ai-bom/spdx-fields/:subjectKind/:subjectId": "audit",
+  "PUT /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property": "audit",
+  "POST /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property/withdraw": "audit",
   // --- ADR-0190 (batch 6 item 3) I1: 501 stubs until their slices land
   "GET /v1/execution-profiles": "isolation",
   "POST /v1/execution-profiles": "isolation",
