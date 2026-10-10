@@ -961,6 +961,13 @@ owner decision.
    the list, detail and grant-set read; `identity_manage` step-up). The demo seed grants each demo agent itself that
    way. Identities and delegation grants are never deleted, so an agent, person or project they name can no longer be
    hard-deleted (tests skip them in cleanup).
+   **Stewards bound what may be granted (S4 amendment 1, follow-up N1 from the #326 review):** a grant-set write is refused 422
+   `grant_exceeds_stewards`, audited, when an item is held by none of the identity's stewards (`sponsor_user_ids`:
+   their own direct or role grants minus revocations; a connector in its mode and for every listed object). The
+   system principal holds nothing, so an unowned agent's identity is granted nothing until an admin names a person
+   (`PATCH /v1/workload-identities/:id`, built for this; `identity_manage` step-up bound to the change). The
+   at-use intersection (decision 3) is unchanged. The PUT's step-up is bound to the identity, the revision and a
+   canonical digest of the set (N2), so a step-up for one set is never good for another.
 2. **One chain per piece of work.** A pillar-7 node dispatch gets a root grant from the initiating user to the top
    lead's agent and one child per lead down to the worker (consecutive same-agent hops collapse); a builder turn or
    resumed segment, and each schedule firing, gets a root to the builder agent (context: the turn, or the schedule); an

@@ -841,7 +841,7 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "GET", path: "/v1/workload-identities", cls: "admin", slice: "S4" },
   { method: "POST", path: "/v1/workload-identities", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S4" },
-  { method: "PATCH", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S6" },
+  { method: "PATCH", path: "/v1/workload-identities/:identityId", cls: "admin", slice: "S4" },
   { method: "POST", path: "/v1/workload-identities/:identityId/revoke", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId/credentials", cls: "admin", slice: "S6" },
   { method: "POST", path: "/v1/workload-identities/:identityId/credentials", cls: "admin", slice: "S6" },
