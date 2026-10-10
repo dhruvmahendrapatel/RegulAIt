@@ -53,6 +53,7 @@ import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-se
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 
 /** ADR-0035: how often the chain head is captured when anchoring is on. */
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
@@ -165,6 +166,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     } catch (err) {
       log(`[regulait] OTLP header envelope backfill failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // ADR-0187 decisions 185–192: the built-in eval datasets are seeded (or
+  // verified) from the pinned vendored files. Idempotent, starts no run, and
+  // never fatal: a drifted file is audited and its datasets refuse to run.
+  try {
+    const seeded = await seedBuiltinEvalDatasets(db);
+    const by = (o: string) => seeded.datasets.filter((d) => d.outcome === o).length;
+    log(
+      `[regulait] built-in eval datasets: ${by("seeded")} seeded, ${by("unchanged")} unchanged, ` +
+        `${by("drifted")} drifted, ${by("unverifiable")} unverifiable`,
+    );
+  } catch (err) {
+    log(`[regulait] built-in eval dataset seeding failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // ADR-0064 — the scheduler's shutdown hook MUST be registered BEFORE listen.

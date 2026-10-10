@@ -25,6 +25,107 @@ Validation on the reviewed source:
 
 Logs: `/tmp/oct10-x30-artifacts-final-{shared,units,build,browser}.log`. Screenshot: `/workspace/.regulait-onboarding/g11-followup/apps/web/test-results/x30-artifacts-independent.-f130c-ed-unknown-severity-wording/unsafe-unknown-severity.png`. The first browser cases overlapped another agent's Vite build because I started before its explicit completion message; the complete run passed, and further CPU work was held. No live model scan, production deployment or full CI claim. New work changes only this review ledger and retained independent mock regressions; no additional product fix. Attachment service did not complete within the attempted wait and was stopped; PR URLs remain in the handoff.
 
+## X29 returned Garak / Promptfoo fixes — independent recheck, 2026-10-10 UTC
+
+Reviewed PR #242's returned B5X-02/B5X-03 fixes at merged main `20e11eeb8ca37959e05bff7f02c1e62e6e39cf19` (original fix `7adbb97b`; PR's final source head `da3e459`). **B5X-02 and B5X-03 are independently resolved; no new finding.** This is review evidence only; no product code or ownership change.
+
+**B5X-02:** the mapper now reconciles generated status-1 and scored terminal status-2 records by UUID, output cardinality and exactly one terminal per generation. Every output requires a score. Missing generations/terminals, duplicates and conflicting lengths cannot pass; a measured hit remains fail despite other incomplete evidence. Independent probes use a correctly paired pinned-0.17.0 report as the positive control, rather than the previous review helper that omitted status-1 records. Ten probes PASS: paired pass, unmatched generated UUID, two outputs/one score, terminal without generation, duplicate generation, duplicate terminal, changed terminal output count, absent terminal/completion, hit plus an unmatched generation, and conflicting terminal plus missing completion. Against `git show 7adbb97b^:packages/engine-garak/src/mapper.ts`, seven probes fail: six defects return pass and the hit-with-incomplete-coverage retains fail but omits the new coverage problem. Three controls still pass. The fixed source was restored before final validation; no mutation is committed.
+
+**B5X-03:** cancellation is sent after the fake generation function signals entry, rather than after an assumed 20 ms scheduling interval. A distinct test proves cancellation before generation starts produces no start or result. An independent delayed run adds 80 ms before invoking the adapter and another 80 ms before fake generation entry: the fixed entry-bound cancellation still aborts generation, never starts evaluation and posts nothing (2/2 PASS including early cancellation). The old delayed-adapter test genuinely fails with `aborted=false`, because legitimate early cancellation prevented generation entry; that was a test synchronization defect, not evidence that the production adapter ignored cancellation.
+
+Validation (all commands use the onboarding activation helper; frozen install PASS):
+
+- `pnpm --filter @regulait/engine-garak test`: 31 PASS, four real-upstream opt-in SKIP.
+- `pnpm --filter @regulait/engine-promptfoo test`: 41 PASS, five real-upstream opt-in SKIP.
+- Independent Garak probes: 10/10 PASS; pre-fix mutation: 7 FAIL / 3 PASS as described above.
+- Delayed entry cancellation / early cancel: 2/2 PASS; old delayed proof: 1 genuine FAIL.
+- `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_garak_final_oct10 pnpm --filter @regulait/gateway test zz-b5-garak.test.ts`: 7/7 actual PostgreSQL/gateway PASS, real runner protocol/step-up/admission/budget with synthetic worker executor. Only this disposable database was created and dropped; no base database reset.
+- Engine dependency closure builds, both engine typechecks and gateway dependency closure build PASS. `git diff --check` PASS.
+
+Local retained evidence: `/tmp/oct10-garak-final-{install,build,clean-tests,typecheck,gateway-build,gateway}.log`, `/tmp/oct10-promptfoo-final-{build,clean-tests,typecheck}.log`, `/tmp/oct10-garak-independent-{green,red}.log`, `/tmp/oct10-promptfoo-delayed-{green,red}.log`; temporary independent probes preserved in `/tmp/oct10-garak-final-probes/` and removed from the source checkout. The review does not rerun or freshly claim prior Docker/upstream checks, deployed egress isolation, live cloud models or the unmeasured public-egress positive control. The four/five opt-in tests remain explicit skips.
+
+## X36 real Batch 5 browser sweep — 2026-10-10 UTC
+
+**READY-FOR-REVIEW for states reachable on the shipped unbuilt-engine install.**
+Reviewed main `20e11eeb` with a real PostgreSQL scratch database
+`regulait_review_x36_oct10`, gateway on127.0.0.1:3147, built SPA and filesystem
+artifact store `/tmp/oct10-x36-model-artifacts`. No HTTP mocks and no external
+model calls. Frozen install, gateway dependency closure and production web build
+PASS. `demo:prepare` created its fixtures and reached demo:check; that check first
+reported18 PASS/1 FAIL because this scratch environment had no deployment export
+signing key. After the documented demo-only key generation in
+`/tmp/oct10-x36-export-keys`, the same database's final `demo:check` passed19/19.
+This is not a claim that the initial command exited successfully.
+
+**3/3 Chromium journeys PASS in the final combined run (1.8 minutes).**
+All three engines are off with no image digest and the page says Off — not built.
+Actual enable returns409 `engine_self_test_required`; actual self-test states that
+no live runner exists. Confirmation and keyboard focus trapping/return are checked.
+Red-teaming and Evaluations show no enabled engine and no runs, with no verdict
+badge; a real404 selected run is unavailable, never passed. Actual synthetic-file
+upload returns201 `format:unrecognised`; it stays Not scanned / Not admissible,
+modelscan's start button is disabled, a direct start request is409 `engine_disabled`
+and the recorded scans remain empty. Raw synthetic file bytes never enter the DOM.
+The execution kill switch confirms an audited reason; restoring normal mode opens
+the real identity step-up dialog and the gateway stays halted until an actual TOTP
+verification authorizes the retried change. The final mode is normal.
+
+**14 axe analyses PASS** (seven surfaces in light/dark) and keyboard actions cover
+enabling/refusal, self-test, opening artifact detail/upload and halt/resume. Choosing
+the local file uses Playwright's native file input fixture. No page exception or
+unexpected console error after sign-in. Chromium's deliberately generated
+403/404/409/501 resource refusals are separately asserted; the unauthenticated
+sign-in401 precedes the reviewed pages and is outside the page error collection.
+
+Limits: an unbuilt/off install cannot admit a runner, a successful enabled run,
+runner revocation or an approval-waiting engine run. Thus no actual runner-revoke,
+not_run/unknown **completed run**, approval or kill-during-live-run claim is made.
+Unrecognised format and a never-scanned artifact are distinct from a measured
+unknown scan. The existing mock/unit tests pin those remaining rendering branches;
+a real runner acceptance sweep remains a gate when its image is enabled. PR#240's
+artifact delete/retention changes were not merged at this main SHA, so those belong
+to the separately assigned returned-fix review. No new production defect found in
+the reachable states; Claude retains VERIFIED and merge authority.
+
+Initial harness corrections: collect console errors after the real login's expected
+401; use the gateway's actual unrecognised vocabulary; avoid toggling closed an
+artifact that upload already selected. Final unchanged-file combined run passed
+all3; these are not waived product failures. Read-only inspection and own disposable
+fixture mutations only. Commands are captured by the dedicated
+`playwright.x36-real.config.ts`; it requires an already-running prepared gateway
+and `E2E_DEMO_PREPARE_LOG`, and is not silently collected into the normal reset suite.
+
+Evidence logs: `/tmp/oct10-x36-{install,gateway-build,web-build,demo-prepare,demo-check-final,browser-final}.log`.
+Screenshots (local evidence only):
+
+[artifact-unknown-not-scanned-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-dark.png)
+
+[artifact-unknown-not-scanned-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-light.png)
+
+[execution-halted-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-dark.png)
+
+[execution-halted-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-light.png)
+
+[execution-restored-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-dark.png)
+
+[execution-restored-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-light.png)
+
+[engines-off-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-dark.png)
+
+[engines-off-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-light.png)
+
+[engines-refused-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-dark.png)
+
+[engines-refused-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-light.png)
+
+[evals-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-dark.png)
+
+[evals-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-light.png)
+
+[redteam-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-dark.png)
+
+[redteam-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-light.png)
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.

@@ -20,7 +20,9 @@
 #     the Python runtime: anything outside the ADR-0176 list fails the build unless licence-allow.json
 #     admits it, and every entry there must be a recorded owner acceptance (numpy's runtime code, ADR-0187
 #     decision 106) or say "pending owner decision" (HDF5, CPython);
-#   - our settings file baked read-only at /opt/modelscan/modelscan-settings.toml.
+#   - our settings file baked read-only at /opt/modelscan/modelscan-settings.toml;
+#   - the strict .npy header check (npy-header.py, stdlib only, ADR-0187 decision 180) baked
+#     read-only at /opt/modelscan/npy-header.py: the scanner runs it before modelscan on every .npy.
 # Signing, the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) and the image
 # SBOM join publish-image.yml / security.yml when the image is first built in CI (ADR-0184), as for
 # promptfoo. The manifest (packages/shared/src/engines/manifest.ts) carries NO digest until an image
@@ -43,6 +45,7 @@ RUN python -m venv /opt/modelscan/venv \
  && node licence-gate.mjs /opt/modelscan/venv/lib/python3.12/site-packages licence-allow.json --runtime python=PSF-2.0 \
  && find /opt/modelscan/venv -name '__pycache__' -prune -exec rm -rf {} +
 COPY engines/modelscan/modelscan-settings.toml /opt/modelscan/modelscan-settings.toml
+COPY engines/modelscan/npy-header.py /opt/modelscan/npy-header.py
 
 # ---- stage 2: the runner and scanner shim -------------------------------------------------------
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS shim
@@ -76,7 +79,7 @@ COPY --from=closure /opt/modelscan /opt/modelscan
 COPY --from=shim /out /app
 # the settings are read-only for everyone; the runner's state volume is its own (0700, uid 10001),
 # and the two exchange mount points exist for the volumes compose mounts on them
-RUN chmod 0444 /opt/modelscan/modelscan-settings.toml \
+RUN chmod 0444 /opt/modelscan/modelscan-settings.toml /opt/modelscan/npy-header.py \
  && mkdir -p /state /work /jobs /out /results \
  && chown 10001:10001 /state /work /jobs /out /results \
  && chmod 0700 /state

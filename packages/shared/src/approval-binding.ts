@@ -93,6 +93,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "connector_call",
   // ADR-0187: an engine run that uses an agentic or offensive set, or whose budget is over the org threshold
   "engine_run",
+  // ADR-0187 decision 190: an eval run of an offensive built-in dataset (bound to the run request's digest)
+  "eval_run",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -112,6 +114,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   prompt_promotion: "prompt promotion to prod",
   connector_call: "connector write",
   engine_run: "engine run (sensitive set or large budget)",
+  eval_run: "eval run (offensive built-in dataset)",
 };
 
 /**
