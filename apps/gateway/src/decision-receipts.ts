@@ -189,3 +189,6 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     return { receipts: rows.map(envelope) };
   });
 }
+
+/** ADR-0189 B3: the AI BOM snapshot signer reuses the receipt key (OWNER DECISION 2), read the same way */
+export { signingKey as loadReceiptSigningKey, ReceiptKeyError, samePublicKey as sameReceiptPublicKey };
