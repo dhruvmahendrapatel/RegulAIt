@@ -177,13 +177,30 @@ describe("B9: model cards (releaseTime, downloadLocation, packageVersion)", () =
 });
 
 describe("B9: the write-side validators (R51), each refusal named", () => {
-  it("times: whole seconds, Z or an offset, normalised to UTC xsd:dateTime", () => {
+  it("times: ONLY YYYY-MM-DDThh:mm:ssZ is accepted, and it is stored unchanged", () => {
     expect(normaliseSpdxDeclaration("training_dataset", "builtTime", "2026-03-15T08:00:00Z")).toBe("2026-03-15T08:00:00Z");
-    expect(normaliseSpdxDeclaration("training_dataset", "builtTime", "2026-03-15T10:30:00+02:30")).toBe("2026-03-15T08:00:00Z");
-    for (const bad of ["2026-03-15T08:00:00.5Z", "2026-03-15", "2026-02-30T00:00:00Z", "2026-03-15T08:00:00", "yesterday", 1_700_000_000, null]) {
-      expect(refusal(() => normaliseSpdxDeclaration("model_card", "releaseTime", bad)), String(bad)).toBe("spdx_time_invalid");
-    }
+    expect(normaliseSpdxDeclaration("model_card", "releaseTime", "2024-02-29T23:59:59Z")).toBe("2024-02-29T23:59:59Z");
   });
+  for (const [what, bad] of [
+    ["a minutes-only time", "2026-03-15T08:00Z"],
+    ["a positive offset (never normalised to UTC)", "2026-03-15T10:30:00+02:30"],
+    ["a zero offset written as +00:00", "2026-03-15T08:00:00+00:00"],
+    ["a negative offset", "2026-03-15T03:00:00-05:00"],
+    ["fractional seconds", "2026-03-15T08:00:00.5Z"],
+    ["fractional seconds of zero", "2026-03-15T08:00:00.000Z"],
+    ["a date only", "2026-03-15"],
+    ["no zone", "2026-03-15T08:00:00"],
+    ["a lower-case z", "2026-03-15T08:00:00z"],
+    ["an impossible date", "2026-02-30T00:00:00Z"],
+    ["prose", "yesterday"],
+    ["a number", 1_700_000_000],
+    ["null", null],
+  ] as const) {
+    it(`times: refuses ${what}`, () => {
+      expect(refusal(() => normaliseSpdxDeclaration("model_card", "releaseTime", bad))).toBe("spdx_time_invalid");
+      expect(refusal(() => normaliseSpdxDeclaration("eval_dataset", "builtTime", bad))).toBe("spdx_time_invalid");
+    });
+  }
 
   it("download locations: an https origin only; refused, never cut down", () => {
     expect(normaliseSpdxDeclaration("eval_dataset", "downloadLocation", "https://evals.supplier-c.example:8443")).toBe("https://evals.supplier-c.example:8443");

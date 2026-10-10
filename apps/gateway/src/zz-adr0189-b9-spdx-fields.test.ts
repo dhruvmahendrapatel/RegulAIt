@@ -149,7 +149,7 @@ describe("B9: the write routes are governed (default-deny, audited)", () => {
   it("an admin write is stored with database-clock provenance and exactly one audit row", async () => {
     const audits = await auditCount("ai-bom-spdx-field-declared");
     const t0 = rowsOf<{ now: string }>(await db.execute(sql`select now()::text as now`))[0]!.now;
-    const r = await inject("PUT", field("model_card", ids.card, "releaseTime"), users.admin.auth, { value: "2026-01-02T05:04:05+02:00", source: "supplier_declared" });
+    const r = await inject("PUT", field("model_card", ids.card, "releaseTime"), users.admin.auth, { value: "2026-01-02T03:04:05Z", source: "supplier_declared" });
     expect(r.statusCode, r.body).toBe(200);
     const d = r.json().declaration;
     expect(d).toMatchObject({ property: "releaseTime", value: "2026-01-02T03:04:05Z", source: "supplier_declared", withdrawn: false, declaredByUserId: users.admin.id });
@@ -177,6 +177,9 @@ describe("B9: strict values, refused and never echoed", () => {
     ["path with a token", "model_card", "downloadLocation", "https://models.supplier-b9.example/bot1:sk-live-CANARY0123456789abcdefABCD/w", 422, "download_location_not_origin"],
     ["query", "training_dataset", "downloadLocation", "https://data.supplier-b9.example?token=CANARY_B9_QS", 422, "download_location_not_origin"],
     ["fractional seconds", "training_dataset", "builtTime", "2026-03-15T08:00:00.250Z", 422, "spdx_time_invalid"],
+    ["an offset (never normalised to UTC)", "training_dataset", "builtTime", "2026-03-15T10:00:00+02:00", 422, "spdx_time_invalid"],
+    ["a +00:00 offset", "model_card", "releaseTime", "2026-03-15T08:00:00+00:00", 422, "spdx_time_invalid"],
+    ["a minutes-only time", "eval_dataset", "releaseTime", "2026-03-15T08:00Z", 422, "spdx_time_invalid"],
     ["credential-shaped version", "model_card", "packageVersion", "sk-live-CANARY0123456789abcdefABCD", 422, "credential_shaped"],
     ["email-shaped originator", "eval_dataset", "originatedBy", "ops@supplier-b9.example", 422, "originated_by_invalid"],
     ["unknown dataset type", "eval_dataset", "datasetType", ["tabular"], 422, "dataset_type_invalid"],
@@ -260,6 +263,9 @@ describe("B9: the loader and the SPDX renderer (R3, R51)", () => {
     const corr = await inject("PUT", field("model_card", ids.card, "releaseTime"), users.admin.auth, { value: "2026-01-03T00:00:00Z", source: "admin_entered" });
     expect(corr.statusCode).toBe(200);
     const get = (await inject("GET", field("model_card", ids.card), users.admin.auth)).json();
+    // the confirmation screen's display name: "<agent> · <intended use>" for a card, "<name> v<version>" for a dataset
+    expect(get.subject).toEqual({ kind: "model_card", id: ids.card, displayName: `b9-agent-${RUN} · B9 synthetic triage` });
+    expect((await inject("GET", field("eval_dataset", ids.eval), users.admin.auth)).json().subject.displayName).toBe(`b9-golden-${RUN} v1`);
     expect(get.current.find((c: { property: string }) => c.property === "releaseTime")).toMatchObject({ value: "2026-01-03T00:00:00Z", source: "admin_entered" });
     expect(get.history.filter((h: { property: string }) => h.property === "releaseTime")).toHaveLength(2);
     expect(get.undeclared).toEqual([]);
@@ -273,6 +279,16 @@ describe("B9: the loader and the SPDX renderer (R3, R51)", () => {
     expect((await inject("GET", field("training_dataset", ids.training), users.admin.auth)).json().undeclared).toEqual(["originatedBy"]);
     const s = await snapshotSpdx();
     expect(s.status).toEqual({ status: "not_producible", missing: ["dataset_DatasetPackage.originatedBy"] });
+  });
+});
+
+describe("B9: the display name is scrubbed like every presented name", () => {
+  it("a credential-shaped dataset name is redacted in the GET response (PRESENTATION_SCRUB)", async () => {
+    const [d] = await db.insert(evalDatasets).values({ name: `b9 sk-live-CANARY0123456789abcdefABCD ${RUN}`, version: 1 }).returning({ id: evalDatasets.id });
+    const r = await inject("GET", field("eval_dataset", d!.id), users.admin.auth);
+    expect(r.statusCode).toBe(200);
+    expect(r.body).not.toContain("sk-live-CANARY");
+    expect(r.json().subject.displayName).toMatch(/^b9 .* v1$/);
   });
 });
 

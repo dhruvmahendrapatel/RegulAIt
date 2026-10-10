@@ -8,9 +8,11 @@
  * The database repeats the shape checks in CHECK constraints (migration 0186).
  *
  * Rules (R51), each a refusal, never a repair:
- *  - a TIME is a real instant in whole seconds, given with `Z` or an explicit
- *    offset (zod's ISO-8601 datetime check, ADR-0176: no hand-written date
- *    parser); it is stored and rendered in UTC as `YYYY-MM-DDThh:mm:ssZ`.
+ *  - a TIME is accepted ONLY as `YYYY-MM-DDThh:mm:ssZ`, a real instant in
+ *    whole seconds in UTC: exactly what is stored and rendered. A minutes-only
+ *    time, an offset (even `+00:00`) or fractional seconds is refused, never
+ *    normalised (zod's ISO-8601 datetime check, then B5's `isSpdxDateTime`;
+ *    ADR-0176: no hand-written date parser).
  *  - a DOWNLOAD LOCATION is an `https` ORIGIN only, exactly what B3's endpoint
  *    rule (R47, #280 4237493036) and B5's `isSpdxDownloadLocation` export. A
  *    path, query, fragment, userinfo, another scheme or a non-ASCII host is
@@ -65,21 +67,18 @@ const refuse = (property: string, rule: string, message: string): never => {
 };
 
 /** ISO-8601 with `Z` or an offset, whole seconds only (`precision: 0`) */
-const isoWholeSeconds = z.string().max(40).datetime({ offset: true, precision: 0 });
+/** ISO-8601 with `Z` only (no offset) and whole seconds only (`precision: 0`) */
+const isoUtcWholeSeconds = z.string().max(20).datetime({ precision: 0 });
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
 const SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]{0,31}:/;
 const VERSION = /^[!-~]+$/;
 
-/** a time value -> its UTC SPDX DateTime (`YYYY-MM-DDThh:mm:ssZ`), or refused */
+/** a time value, accepted only when it is already a UTC SPDX DateTime (`YYYY-MM-DDThh:mm:ssZ`); never rewritten */
 export function normaliseSpdxTime(property: string, v: unknown): string {
-  if (typeof v !== "string" || !isoWholeSeconds.safeParse(v).success) {
-    return refuse(property, "spdx_time_invalid", "not an ISO-8601 date-time in whole seconds with Z or an offset");
+  if (typeof v !== "string" || !isoUtcWholeSeconds.safeParse(v).success || !isSpdxDateTime(v)) {
+    return refuse(property, "spdx_time_invalid", "only YYYY-MM-DDThh:mm:ssZ is accepted: a real instant, whole seconds, UTC with Z (no offset, no fractional seconds)");
   }
-  const t = Date.parse(v);
-  if (!Number.isFinite(t)) return refuse(property, "spdx_time_invalid", "not a real instant");
-  const out = `${new Date(t).toISOString().slice(0, 19)}Z`;
-  if (!isSpdxDateTime(out)) return refuse(property, "spdx_time_invalid", "outside the SPDX DateTime range");
-  return out;
+  return v;
 }
 
 /** a download location -> unchanged when it is already an https origin, else refused */
