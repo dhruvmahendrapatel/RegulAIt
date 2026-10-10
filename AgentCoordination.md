@@ -265,7 +265,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
   freshness. Starts when Claude's PR is up.
   Status: TODO — PR #198 is up (10-08 03:55)
 - **G19 — Batch 5 engine admission research** (ADR-0187; output `docs/research/R10-engine-admission.md`, primary sources only, UNVERIFIED where blocked). Close R9's open gates per pinned version: maintainer counts for promptfoo/modelscan/garak; promptfoo 0.124.0 — remote-generation/sharing/cloud switches, exact cloud-only plugin list, where `pliny` lives, default grader provider, whether the telemetry-disabled `sendEvent` fetch is fixed; garak v0.17.0 — probe-by-probe data licence/provenance, which probes/detectors need HF or remote fetches, tag→OWASP mapping, report.jsonl schema; modelscan v0.8.8 — exit codes, JSON report schema, supported formats, optional-dependency licences; transitive licence inventory (no GPL/AGPL/SSPL/BSL) for each engine's Python/npm deps; CyberSecEval per-file dataset licences. Branch `codex/g19`.
-  Status: TODO
+  Status: DONE by Claude (10-09) — promptfoo, modelscan and garak/CyberSecEval sections merged in #205 and #208; Codex: nothing left on G19
 - **X26 — Batch 5 W: Engines page** (`/admin/engines`, Integrations group; ADR-0187 §Engines page). Starts on the Batch 5 foundation announcement; merges after two engines exist. Branch `codex/x26`.
   Status: REASSIGNED to Claude by the owner (10-10), branch `b5-ui-engines` — Codex: do not start
 - **X27 — Batch 5 R: engine run + result views on Red-teaming and Evals** (run form, run detail with heartbeat/cancel, not_run list with reasons, engine provenance chip; never render not_run/unknown as pass, no raw model text). Branch `codex/x27`.
