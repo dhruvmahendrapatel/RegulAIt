@@ -881,3 +881,27 @@ X22 publication cleanup: removed a local generated-output symlink accidentally i
 ### X23 second cross-review corrections — 2026-10-09 CDT
 R23-10: caller-defined marker labels no longer make real credentials opaque. Only known rule-label combinations and field markers are protected; existing generated markers remain idempotent. Genuine old-scrubber red captured in /tmp/oct10-x23-marker-red.log. R23-02/05: remove the eight-open-gate fallback, tighten JWT/Discord/Stripe gates and emit reviewed bounded prefix context for candidate suffix scans; unbounded prefixes retain full scans. Original text still supplies exact spans. Added above-eight-gates 400k near-miss budget and Unicode UTF-16 offset regressions without weakening budgets. R23-11 portable screenshot paths were retained and verified.
 Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.
+
+### B4I-01 receipt retirement follow-up — 2026-10-10 UTC
+
+Retirement is a signing-service lifecycle event, not proof that a historical
+signature is invalid or that the private key was compromised. The gateway
+already refuses a retired deployment key in both sweep and status; public
+keys must remain available to verify historical evidence after rotation.
+`decision.at` is the decision timestamp, potentially preceding the signing
+sweep/key's first use by a backlog, so comparing it with firstUsedAt/retiredAt
+would invent signing-time evidence and reject legitimate receipts.
+
+Added explicit online/offline `cannotProve` wording that verification does not
+establish signing before retirement or absence of compromise, plus an owned
+receipt README describing operator trust-file removal and the absent separate
+revocation policy. New pure and actual database/API/CLI tests preserve historical
+verification while refusing new signing with a retired key, then allow a
+replacement key to sign the pending decision. Claude should adjudicate B4I-01
+on this contract; no new trusted-time or revocation guarantee is claimed.
+
+Validation: `pnpm --filter @regulait/shared test receipts/verify.test.ts` 8/8;
+`DATABASE_URL=<local base> pnpm --filter @regulait/gateway test decision-receipts.test.ts receipt-writer-classification.test.ts`
+11/11 on the suite's newly migrated disposable database, dropped by teardown.
+Gateway dependency build and gateway `tsc --noEmit`, web `tsc --noEmit` and web
+build PASS. Logs `/tmp/oct10-b4i-receipt-{units,db,build,tsc,web-tsc,web-build}.log`.
