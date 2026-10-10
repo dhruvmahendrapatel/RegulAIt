@@ -68,7 +68,6 @@ import {
   lockDecisionForBom,
   orgSettings,
   ORG_SETTINGS_ID,
-  runAuditV2Cutover,
   runMigrations,
   sql,
   traceSpans,
@@ -828,7 +827,7 @@ describe("the lock targets (4237322632, 4237344247)", () => {
 });
 
 // ---------------------------------------------------------------------------
-describe("receipt payload v2 (R34, R42, R43) on a scratch database: never emitted before the boundary, emitted with the facts from it on (B2)", () => {
+describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, never emitted", () => {
   const RECEIPT_DB = `a189_receipts_${RUN}`;
   let admin: Db;
   let rdb: Db;
@@ -872,23 +871,20 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: never emitte
     await assertReceiptEmitterBootable(rdb);
   });
 
-  it("after a recorded boundary: v1 below it, v2 bound to the decision's facts from it on (B2), the database refuses the wrong version, and only an emitter without v2 refuses to boot", async () => {
+  it("after a recorded boundary: v1 only below it, nothing at or above it (no throw), the database refuses the wrong version, and the gateway refuses to boot", async () => {
     const below = await decision();
-    // ADR-0188 decision 19 first: a v2 receipt's actor binding is read from columns only an audit v2 hash covers
-    await runAuditV2Cutover(rdb, { setBy: author });
     const tip = await one<{ s: string }>(rdb, sql`select max(seq)::bigint as s from audit_log`);
     const boundary = Number(tip.s) + 1;
     await rdb.execute(sql`insert into receipt_payload_versions (version, from_audit_seq) values (2, ${boundary})`);
     await expectRefused(rdb.execute(sql`delete from receipt_payload_versions`), /append-only/);
     const above = await decision();
     expect(above.seq!).toBeGreaterThanOrEqual(boundary);
-    await runDecisionReceiptSignSweep(rdb);
+    // B2 review: this build emits v1 only; a decision above the boundary (an audit v1 row here) is left
+    // unsigned for the cutover slice, and the sweep neither throws nor wedges on it
+    await expect(runDecisionReceiptSignSweep(rdb)).resolves.toMatchObject({ state: "signing" });
+    await expect(runDecisionReceiptSignSweep(rdb)).resolves.toEqual({ signed: 0, state: "signing" });
     expect(((await receiptOf(below.id))!.payload as { v: string }).v).toBe(RECEIPT_PAYLOAD_VERSION);
-    // B2: the receipt of a decision at or above the boundary is v2 and commits to the facts written with it
-    const aboveMarker = await one<{ status: string; facts_hash: string }>(rdb, sql`select status, facts_hash from decision_capture_status where audit_id = ${above.id}`);
-    const aboveFacts = await one<{ facts_hash: string }>(rdb, sql`select facts_hash from decision_facts where audit_id = ${above.id}`);
-    expect(aboveMarker.status).toBe("captured");
-    expect((await receiptOf(above.id))!.payload).toMatchObject({ v: RECEIPT_PAYLOAD_VERSION_V2, factsStatus: "captured", factsHash: aboveFacts.facts_hash, actor: { identityId: null, delegationGrantId: null, chain: null } });
+    expect(await receiptOf(above.id)).toBeUndefined();
 
     // the export carries the boundary the offline verifier needs
     const exported = buildApp(rdb, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
@@ -900,41 +896,39 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: never emitte
       await exported.close();
     }
 
-    // a decision the sweep has not reached yet: the database itself refuses the wrong version for it
-    const pending = await decision();
-    const pendingMarker = await one<{ facts_hash: string }>(rdb, sql`select facts_hash from decision_capture_status where audit_id = ${pending.id}`);
+    // EXPLICIT v2 FIXTURES at the database: B2 wrote `above`'s captured marker in its own transaction
+    const aboveMarker = await one<{ status: string; facts_hash: string }>(rdb, sql`select status, facts_hash from decision_capture_status where audit_id = ${above.id}`);
+    expect(aboveMarker.status).toBe("captured");
     const [last] = await rdb.select().from(decisionReceipts).orderBy(desc(decisionReceipts.receiptSeq)).limit(1);
     const payload = (v: string, seq: number, extra: Record<string, unknown> = {}) => ({
-      v, receiptSeq: last!.receiptSeq + 1, audit: { id: pending.id, seq, rowHash: H("1"), contentHash: H("2") },
+      v, receiptSeq: last!.receiptSeq + 1, audit: { id: above.id, seq, rowHash: H("1"), contentHash: H("2") },
       decision: {}, prev: last!.payloadHash, keyId: last!.keyId, ...extra,
     });
     const insert = (p: Record<string, unknown>, seq: number) =>
       sql`insert into decision_receipts (receipt_seq, audit_id, audit_seq, payload, payload_hash, prev_hash, signature, key_id)
-          values (${last!.receiptSeq + 1}, ${pending.id}, ${seq}, ${jsonb(p)}, ${H("7")}, ${last!.payloadHash}, ${SIG}, ${last!.keyId})`;
+          values (${last!.receiptSeq + 1}, ${above.id}, ${seq}, ${jsonb(p)}, ${H("7")}, ${last!.payloadHash}, ${SIG}, ${last!.keyId})`;
     const v2 = (status: "captured" | "capture_off", hash: string | null) => ({ actor: { identityId: null, delegationGrantId: null, chain: null }, factsStatus: status, factsHash: hash });
     await inRolledBackTx(async (tx) => {
-      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION, pending.seq!), pending.seq!)), /v1 receipt at or above the recorded v2 boundary/);
-      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, pending.seq!, v2("capture_off", null)), pending.seq!)), /does not match its capture-status marker/);
+      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION, above.seq!), above.seq!)), /v1 receipt at or above the recorded v2 boundary/);
+      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("capture_off", null)), above.seq!)), /does not match its capture-status marker/);
       await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, below.seq!, v2("capture_off", null)), below.seq!)), /below the recorded boundary/);
-      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, pending.seq!, v2("captured", null)), pending.seq!)), /decision_receipts_payload_check|does not match its capture-status marker/);
-      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, pending.seq!, v2("captured", H("e"))), pending.seq!)), /does not match its capture-status marker/);
-      await tx.execute(insert(payload(RECEIPT_PAYLOAD_VERSION_V2, pending.seq!, v2("captured", pendingMarker.facts_hash)), pending.seq!));
+      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("captured", null)), above.seq!)), /decision_receipts_payload_check|does not match its capture-status marker/);
+      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("captured", H("e"))), above.seq!)), /does not match its capture-status marker/);
+      await tx.execute(insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("captured", aboveMarker.facts_hash)), above.seq!));
     }, rdb);
 
-    // R43: an emitter that cannot produce v2 refuses to start; this build (B2) can, and boots
-    await expectRefused(assertReceiptEmitterBootable(rdb, false), /refusing to start/i);
-    await expect(assertReceiptEmitterBootable(rdb)).resolves.toBeUndefined();
+    // R43: this build cannot emit v2, so it refuses to boot
+    await expectRefused(assertReceiptEmitterBootable(rdb), /refusing to start/i);
+    await expect(assertReceiptEmitterBootable(rdb, true)).resolves.toBeUndefined();
     const lines: string[] = [];
     const started = await startGateway({ db: rdb, migrationsFolder, port: 0, host: "127.0.0.1", log: (l) => lines.push(l), env: { NODE_ENV: "test" }, bootstrapToken: BOOT, dataKey: "a".repeat(64) }).then(
       (g) => g,
       (e: unknown) => e,
     );
-    try {
-      expect(started).not.toBeInstanceOf(ReceiptV2BootError);
-      expect(started instanceof Error ? started.message : "started").toBe("started");
-    } finally {
+    if (!(started instanceof ReceiptV2BootError)) {
       if (started && typeof started === "object" && "app" in started) await (started as { app: { close: () => Promise<void> } }).app.close();
     }
+    expect(started).toBeInstanceOf(ReceiptV2BootError);
   });
 });
 

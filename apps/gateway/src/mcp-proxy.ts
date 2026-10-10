@@ -889,6 +889,7 @@ async function executeGovernedToolCallInner(
       approvalScope,
       contextDigest,
       policyEpoch,
+      killSwitch,
       retiredApprovals,
       matchedApprovalRuleIds,
     } = await governedEvaluate(
@@ -986,8 +987,11 @@ async function executeGovernedToolCallInner(
         contextDigest,
         projectId,
         target: auditTarget(serverRow),
-        // ADR-0189 B2: the approved queue row this decision relied on, so its facts bind that row (R5)
+        // ADR-0189 B2: the approved queue row this decision relied on, so its facts bind that row (R5),
+        // and the policy generation and kill-switch state it was decided under (§4 policy facts)
         ...(approvedApprovalId ? { approvedApprovalId } : {}),
+        policyEpoch,
+        killSwitch,
         receiptClass: "decision",
       },
       effect: decision.effect,

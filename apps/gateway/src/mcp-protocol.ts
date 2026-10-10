@@ -348,6 +348,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     approvalScope,
     contextDigest,
     policyEpoch,
+    killSwitch,
     retiredApprovals,
     matchedApprovalRuleIds,
   } = await governedEvaluate(
@@ -397,6 +398,11 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       contextDigest,
       projectId,
       target: auditTarget(serverRow),
+      // ADR-0189 B2: the approved queue row this decision relied on (R5), and the policy generation and
+      // kill-switch state it was decided under (§4 policy facts)
+      ...(approvedApprovalId ? { approvedApprovalId } : {}),
+      policyEpoch,
+      killSwitch,
     },
     effect: decision.effect,
     ruleId: decision.ruleId,

@@ -117,14 +117,17 @@ export const RECEIPT_PAYLOAD_VERSION = "regulait.receipt.v1";
  * receipt payload v2 adds the actor chain and `factsHash`. Nothing emits v2
  * because a binary was deployed: only from the recorded boundary
  * (`receipt_payload_versions.from_audit_seq`) on is every receipt v2, and a v1
- * receipt there is invalid; below it, always v1. B1 verified v2; B2 captures the
- * facts in every decision's transaction and can emit v2, so a build from B2 on
- * starts when a boundary exists (R43).
+ * receipt there is invalid; below it, always v1. B1 verifies v2; B2 captures the
+ * facts in every decision's transaction but still EMITS v1 (R34); the cutover
+ * slice turns emission on.
  */
 export const RECEIPT_PAYLOAD_VERSION_V2 = "regulait.receipt.v2";
 export const RECEIPT_PAYLOAD_VERSIONS = [RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2] as const;
-/** R43: can this build emit v2 receipts with facts? A build that cannot refuses to start once a boundary exists. B2: yes. */
-export const RECEIPT_EMITTER_SUPPORTS_V2 = true;
+/** R43: can this build emit v2 receipts with facts? A build that cannot refuses to start once a boundary exists.
+ * Still false after B2 (owner decision, B2 review): B2 captures the facts and ships the v2 payload builder; the
+ * cutover slice flips this together with the boundary command, so a boundary set above an unsigned pre-B2 or
+ * audit v1 backlog can never wedge the sweep (R42). */
+export const RECEIPT_EMITTER_SUPPORTS_V2: boolean = false;
 /** R: `prev` of the first receipt */
 export const RECEIPT_GENESIS_PREV = "0".repeat(64);
 

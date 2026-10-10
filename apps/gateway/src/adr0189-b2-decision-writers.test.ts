@@ -46,17 +46,56 @@ const DECISION_WRITERS = [
   "workbench.ts",
 ].sort();
 
-const sources = (dir: string) =>
-  readdirSync(dir)
-    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
-    .map((f) => ({ file: f, text: readFileSync(path.join(dir, f), "utf8") }));
+/** every production .ts file under `dir`, RECURSIVELY (paths relative to `dir`); tests are not writers */
+function sources(dir: string, rel = ""): Array<{ file: string; text: string }> {
+  const out: Array<{ file: string; text: string }> = [];
+  for (const entry of readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+    const name = rel ? `${rel}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (entry.name !== "node_modules" && entry.name !== "dist") out.push(...sources(dir, name));
+    } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+      out.push({ file: name, text: readFileSync(path.join(dir, name), "utf8") });
+    }
+  }
+  return out;
+}
 
-it("the decision writers are exactly the listed modules", () => {
-  const found = sources(gatewaySrc)
+/**
+ * A `receiptClass` the scan cannot read: a computed value (`receiptClass: cls`), a shorthand
+ * (`receiptClass,` / `{ receiptClass }`), or a computed key (`["receiptClass"]`). Each would let a
+ * module become a decision writer without appearing in the list, so each is refused. The one SQL read
+ * of the field (`detail->>'receiptClass'` in the receipt sweep) is not a writer.
+ */
+function unreadableReceiptClass(text: string): string[] {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    if (/->>\s*'receiptClass'/.test(line)) continue;
+    if (/\[\s*["'`]receiptClass["'`]\s*\]/.test(line)) out.push(line.trim());
+    else if (/\breceiptClass\s*:/.test(line) && !/\breceiptClass\s*:\s*"(?:decision|configuration|excluded)"/.test(line)) out.push(line.trim());
+    else if (/[{,]\s*receiptClass\s*[,}]/.test(line)) out.push(line.trim());
+  }
+  return out;
+}
+
+it("the decision writers are exactly the listed modules, found recursively", () => {
+  const all = sources(gatewaySrc);
+  expect(all.some((s) => s.file.includes("/")), "the scan reaches subdirectories").toBe(true);
+  const found = all
     .filter((s) => /receiptClass:\s*"decision"/.test(s.text))
     .map((s) => s.file)
     .sort();
   expect(found).toEqual(DECISION_WRITERS);
+});
+
+it("every receiptClass in production code is a literal the scan can read", () => {
+  const offenders = sources(gatewaySrc).flatMap((s) => unreadableReceiptClass(s.text).map((l) => `${s.file}: ${l}`));
+  expect(offenders).toEqual([]);
+  // NEGATIVE CONTROLS: the scan does flag each unreadable form, and passes the literal ones
+  expect(unreadableReceiptClass('detail: { receiptClass: cls },')).toHaveLength(1);
+  expect(unreadableReceiptClass('detail: { phase, receiptClass },')).toHaveLength(1);
+  expect(unreadableReceiptClass('detail["receiptClass"] = "decision";')).toHaveLength(1);
+  expect(unreadableReceiptClass('detail: { receiptClass: "decision" },')).toEqual([]);
+  expect(unreadableReceiptClass("sql`${auditLog.detail}->>'receiptClass' = 'decision'`")).toEqual([]);
 });
 
 it("no production module writes audit_log with raw SQL or builds a handle that skips the shared writer", () => {

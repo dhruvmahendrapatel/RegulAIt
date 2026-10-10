@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  bomCanonicalBytes,
   bomDigestOf,
   bomRowDigest,
   buildDecisionFacts,
@@ -9,6 +10,7 @@ import {
   decisionFactRefs,
   decisionFactsHash,
   DecisionFactsCaptureError,
+  decisionFactsSchema,
   isReceiptEligibleAuditRow,
   type DecisionAuditRow,
   type DecisionFactReads,
@@ -57,10 +59,29 @@ describe("buildDecisionFacts", () => {
     const f = buildDecisionFacts(row(), reads());
     expect(f).toMatchObject({
       v: "regulait.decision-facts.v1", auditId: U(100), auditSeq: 42, actors: null, policy: null, model: null, rows: [],
-      action: { argumentsDigest: D, contextDigest: null, target: { kind: "mcp_tool", serverId: SERVER, toolName: "search", toolNameHash: null, connectorId: null, agentId: null }, inputs: [], dataSensitivity: null, complianceTags: [] },
+      action: { argumentsDigest: D, contextDigest: null, target: { kind: "mcp_tool", serverId: SERVER, toolName: "search", toolNameHash: null, connectorId: null, agentId: null }, inputs: null, dataSensitivity: null, complianceTags: [] },
       outcome: { effect: "allow", refusalCode: null, upstreamStatusClass: null },
     });
     expect(decisionFactsHash(f)).toBe(bomDigestOf(f));
+  });
+  it("inputs the path does not record are NOT RECORDED (null), never a claimed empty list; the contract keeps both apart", () => {
+    const f = buildDecisionFacts(row(), reads());
+    expect(f.action!.inputs).toBeNull();
+    // `[]` stays a valid, distinct claim ("recorded: none"), and the two hash differently
+    const none = decisionFactsSchema.parse({ ...f, action: { ...f.action!, inputs: [] } });
+    expect(none.action!.inputs).toEqual([]);
+    expect(decisionFactsHash(none)).not.toBe(decisionFactsHash(f));
+    expect(bomCanonicalBytes(f)).toContain('"inputs":null');
+  });
+  it("policy: the epoch and kill-switch state the path recorded; every list it did not record is null; no epoch, no section", () => {
+    const f = buildDecisionFacts(row({ detail: { receiptClass: "decision", policyEpoch: 7, killSwitch: "engaged" } }), reads());
+    expect(f.policy).toEqual({ governancePolicyEpoch: 7, abacPolicyVersions: null, configVersions: null, guardrailConfigDigest: null, modelPolicyRuleIds: null, killSwitch: "engaged" });
+    expect(buildDecisionFacts(row({ detail: { receiptClass: "decision", policyEpoch: 0 } }), reads()).policy!.killSwitch).toBeNull();
+    expect(buildDecisionFacts(row({ detail: { receiptClass: "decision", policyEpoch: 7, killSwitch: "maybe" } }), reads()).policy!.killSwitch).toBeNull();
+    // NEGATIVE CONTROLS: a path that recorded no epoch (or not an integer one) gets no policy section
+    expect(buildDecisionFacts(row(), reads()).policy).toBeNull();
+    expect(buildDecisionFacts(row({ detail: { receiptClass: "decision", policyEpoch: "7", killSwitch: "off" } }), reads()).policy).toBeNull();
+    expect(buildDecisionFacts(row({ detail: { receiptClass: "decision", policyEpoch: 1.5 } }), reads()).policy).toBeNull();
   });
   it("a digest that is not one is not recorded; an unrepresentable tool name is recorded by its SHA-256", () => {
     const f = buildDecisionFacts(row({ toolName: "tool with spaces", detail: { receiptClass: "decision", argumentsDigest: "not-a-digest" } }), reads());

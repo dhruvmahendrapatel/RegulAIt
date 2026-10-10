@@ -1,7 +1,7 @@
 -- ADR-0189 (batch 6 item 2) slice B2 — decision fact capture: the commit-time guard.
 --
--- Hand-written (never drizzle-kit generate); journal `when` 1785124000000. 0186,
--- 0187 and 0188 are held by pending PRs.
+-- Hand-written (never drizzle-kit generate); journal `when` 1785124000000, after
+-- 0188's 1785123000000.
 --
 -- B2 writes every receipt-eligible decision's capture-status marker (and, with
 -- capture on, its `decision_facts` row) in the decision's own transaction,

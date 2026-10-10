@@ -24,12 +24,17 @@
  *    ADR-0105; open question 7: a path that never computes the digest records
  *    null); `complianceTags` from the attributed project's classifications, read
  *    in the decision's transaction. `dataSensitivity` is null: projects have no
- *    such column (see the B2 PR's gap list).
- *  - `policy`: null on every path (`not_captured_by_path`). The contract's
- *    `abacPolicyVersions[].schemaVersion` is an integer while
- *    `abac_policy_versions.schema_version` is text, and no path records its config
- *    versions, guardrail digest, model policy rule ids or kill-switch state on the
- *    decision; an empty list would claim "none", so nothing is claimed.
+ *    such column. `inputs` is null (NOT RECORDED): no path records its inputs, and
+ *    `[]` would claim "none".
+ *  - `policy`: recorded where the path wrote, on the decision row, the
+ *    governance policy epoch it decided under (`detail.policyEpoch`, the
+ *    `advance_governance_policy_epoch` generation) and the kill-switch state it
+ *    decided under (`detail.killSwitch`): the MCP tool, MCP protocol and
+ *    connector paths. Every list the path does not record is null (NOT
+ *    RECORDED), never `[]`; the ABAC versions cannot be held at all while the
+ *    contract's `schemaVersion` is an integer and `abac_policy_versions.schema_version`
+ *    is text. A path that records no epoch has `policy: null`
+ *    (`not_captured_by_path`).
  *  - `model`: for an `agent` decision, the agent id only; every other field is
  *    null (unknown at decision time), never filled from a live read.
  *  - `outcome`: the row's `effect`; the refusal code and upstream status class
@@ -111,6 +116,7 @@ export function composeAuditRetentionDays(profileDays: ReadonlyArray<number | nu
 const isUuid = (v: unknown): v is string => typeof v === "string" && bomUuidSchema.safeParse(v).success;
 const isDigest = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 const isIdentifier = (v: unknown): v is string => typeof v === "string" && bomIdentifierSchema.safeParse(v).success;
+const isEpoch = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 /** what a decision row asks the loader to read in its own transaction */
 export interface DecisionFactRefs {
@@ -211,11 +217,23 @@ export function buildDecisionFacts(row: DecisionAuditRow, reads: DecisionFactRea
         connectorId: kind === "connector" && isUuid(row.objectId) ? row.objectId : null,
         agentId: kind === "agent" && isUuid(row.objectId) ? row.objectId : null,
       },
-      inputs: [],
+      inputs: null, // NOT RECORDED: no decision path records its inputs yet
       dataSensitivity: null,
       complianceTags: [...new Set(tags ?? [])].sort(),
     };
   }
+
+  // --- policy (what the path recorded on the decision row; lists it did not record are null) ---
+  const policy: DecisionFacts["policy"] = isEpoch(detail.policyEpoch)
+    ? {
+        governancePolicyEpoch: detail.policyEpoch,
+        abacPolicyVersions: null,
+        configVersions: null,
+        guardrailConfigDigest: null,
+        modelPolicyRuleIds: null,
+        killSwitch: detail.killSwitch === "off" || detail.killSwitch === "engaged" ? detail.killSwitch : null,
+      }
+    : null;
 
   // --- model (an agent decision names its agent; nothing else is known yet) --
   const model: DecisionFacts["model"] =
@@ -240,7 +258,7 @@ export function buildDecisionFacts(row: DecisionAuditRow, reads: DecisionFactRea
     auditId: row.id,
     auditSeq: row.seq,
     action,
-    policy: null,
+    policy,
     model,
     actors,
     outcome: { effect: row.effect, refusalCode: null, upstreamStatusClass: null },

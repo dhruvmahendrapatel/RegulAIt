@@ -26,7 +26,7 @@ import {
 } from "@regulait/db";
 import { evaluate, matchingApprovalRules, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 import { evaluateAbac } from "@regulait/policy-kernel/abac";
-import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-posture.js";
+import { EVALUATION_ONLY_EXECUTION, killSwitchState, resolveExecutionPosture } from "./execution-posture.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
 import {
@@ -123,6 +123,9 @@ export interface GovernedEvaluation {
   contextDigest: string;
   /** DB policy generation read before the evaluation's policy snapshot. */
   policyEpoch: number;
+  /** ADR-0189 B2: the kill-switch state this call was decided under (`killSwitchState` of the resolved posture);
+   * null on the indeterminate-config refusal, which is decided before the posture is resolved (not recorded) */
+  killSwitch: "off" | "engaged" | null;
   /**
    * ADR-0186 A — the ids of the approval rules that MATCHED this call (the
    * kernel's own predicate, the same set `approvalScope` and `contextDigest`
@@ -473,6 +476,7 @@ export async function governedEvaluate(
           (unresolvable.length > 1 ? ` (and ${unresolvable.length - 1} more)` : ""),
       },
       approvedApprovalId: null,
+      killSwitch: null,
       // ADR-0104: the fingerprint is a fact about the CALL, not about the
       // decision, so it is still reported on a refusal — the audit row for an
       // indeterminate-config deny records which payload was attempted.
@@ -1002,6 +1006,7 @@ export async function governedEvaluate(
     approvalScope,
     contextDigest,
     policyEpoch,
+    killSwitch: killSwitchState(resolvedPosture),
     retiredApprovals,
     matchedApprovalRuleIds: matchedARules.map((r) => r.id),
     ...(candidateDecision ? { candidateDecision } : {}),
