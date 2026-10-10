@@ -694,7 +694,11 @@ R24. **Evaluation datasets map only what is recorded.** `eval_datasets` has no c
     frozen once a run references them, ADR-0067), labelled `regulait:dataset:digestOf = eval_cases`; no
     classification, governance owner or `sensitiveData`; the property `regulait:dataset:piiVerdict = not_scanned`;
     SPDX `hasSensitivePersonalInformation: noAssertion` and no confidentiality level; and the dataset listed in an
-    `incomplete` composition. The creator is never presented as the owner. Training datasets keep the §3 mapping.
+    `incomplete` composition. The creator is never presented as the owner. `training_datasets` has `checksum` and
+    `pii_verdict` but no classification or owner column either: its classification is the linked project's
+    `data_sensitivity` when `project_id` is set and absent otherwise, it has no governance owner, and an empty
+    `checksum` (the column default) means no hash, not a hash of nothing. Each such gap puts the dataset in the
+    `incomplete` composition.
 
 ### Owner items from the review (not decided here)
 
