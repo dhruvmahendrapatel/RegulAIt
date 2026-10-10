@@ -2318,6 +2318,38 @@ the list below; the coordinator numbers them when merging).
   through the gateway judge would be the same mechanism, but it is a separate owner decision. `fitd` and `goat`
   additionally need their deleted payload data admitted (question 20 did not list them).
 
+### Implementation decision (X26 Engines page review, 2026-10-10, PR #230)
+
+Numbered 178 by the coordinator, after the decisions of the slices merged before it.
+
+178. **Accepting the credential-isolation risk names the build it is for, and enables only that build** (X30 finding
+     B5W-07, MEDIUM). Decision 79's acceptance carried only `acceptCredentialIsolationRisk: true`, and the step-up bound
+     only that flag. If a new non-isolating build became current and passed its self-test after the page loaded, the
+     same acceptance could enable and audit the new build while the person had acknowledged the old one. Step-up still
+     ran, so this was an incorrect binding of the acknowledged risk, not an authentication bypass. **Chosen:**
+     - the `engine_credential_isolation_missing` refusal returns the current `version` and `imageDigest`;
+     - `PATCH /v1/engines/:engineId` requires `expectedVersion` and `expectedDigest` whenever it carries
+       `acceptCredentialIsolationRisk`, and refuses them without it (400 `validation`);
+     - the step-up fact `engine.<id>.acceptCredentialIsolationRisk` is now the build, `{version, imageDigest}`, not
+       `true`, so a grant given for one build cannot accept another;
+     - a build that does not match the current one is refused 409 `engine_build_changed`, which names the current build
+       and changes nothing. The check runs on the unlocked read, before any step-up, and again on the locked row inside
+       the transaction;
+     - the `engine-credential-isolation-risk-accepted` audit row records the locked row's build, which by then equals
+       the one named.
+
+     The Engines page shows the build the refusal names, never the one it loaded, and sends that build back. On
+     `engine_build_changed` it reopens the acceptance for the new build, unticked, and says that nothing was enabled.
+     **Rejected:** refetching the engine card before accepting, which leaves the same race between that read and the
+     write. Since decision 174, the shipped promptfoo build isolates the credential, so today the acceptance applies
+     only to builds that do not, such as modelscan. The tests therefore run the acceptance on a promptfoo manifest
+     entry with `credentialIsolation: false`, as decision 174's own test does. **Red:** `zz-b5-engines.test.ts` simulates a rollover with a second gateway replica on the next manifest
+     generation, as a rolling upgrade does. A stale acceptance is refused in three cases: during the step-up (the old
+     build's grant), during the dialog (before any step-up), and with the old build's grant applied to the new build
+     (403). The refusal names the new build, and accepting the current build enables it and audits exactly that build.
+     The mock browser spec covers a rollover before the refusal, during the dialog and during the step-up. A rollover
+     between the unlocked check and the locked one is covered by the code path but has no dedicated race test.
+
 
 
 ### Implementation decisions (B5-M `.npz` archive check, 2026-10-10, branch `b5-modelscan-npz`)

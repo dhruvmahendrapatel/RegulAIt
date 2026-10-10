@@ -1,0 +1,3 @@
+W1010 05:20:31.511544       1 log.go:371] WARNING: BUG on pkg/sentry/platform/systrap/subprocess.go:240
+
+handlePtraceSyscallRequest failed: error initializing thread: resource temporarily unavailable

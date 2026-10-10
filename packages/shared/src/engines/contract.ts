@@ -135,6 +135,8 @@ export const ENGINE_LEASE_TTL_SECONDS = 90;
 export const ENGINE_QUEUE_TTL_SECONDS = 24 * 3600;
 /** a runner self-test older than this does not admit enabling the engine (seconds) */
 export const ENGINE_SELF_TEST_MAX_AGE_SECONDS = 24 * 3600;
+/** a runner report dated further ahead of the gateway's clock than this is stale too (clock skew bound) */
+export const ENGINE_SELF_TEST_FUTURE_SKEW_MS = 300_000;
 /** an enrolment token's lifetime bounds (minutes) */
 export const ENGINE_ENROLLMENT_TTL_MINUTES = { min: 1, max: 60, default: 15 } as const;
 
@@ -517,8 +519,25 @@ export const updateEngineSchema = z
      * and it is audited. Only meaningful with `enabled: true`.
      */
     acceptCredentialIsolationRisk: z.literal(true).optional(),
+    /**
+     * B5W-07 (ADR-0187 decision 178): the build the acceptance is for, exactly as the
+     * `engine_credential_isolation_missing` refusal named it. Required with
+     * `acceptCredentialIsolationRisk` and refused without it; bound into the step-up, and
+     * a build that is no longer current is refused 409 `engine_build_changed`.
+     */
+    expectedVersion: z.string().min(1).max(100).optional(),
+    expectedDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((b, ctx) => {
+    const named = b.expectedVersion !== undefined && b.expectedDigest !== undefined;
+    if (b.acceptCredentialIsolationRisk === true && !named) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedVersion"], message: "accepting the credential-isolation risk names the build it is for: send expectedVersion and expectedDigest" });
+    }
+    if (b.acceptCredentialIsolationRisk !== true && (b.expectedVersion !== undefined || b.expectedDigest !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedVersion"], message: "expectedVersion and expectedDigest go only with acceptCredentialIsolationRisk" });
+    }
+  });
 export type UpdateEngineInput = z.infer<typeof updateEngineSchema>;
 
 /**
@@ -536,7 +555,10 @@ export function engineRowRelaxations(
   const k = (f: string) => `engine.${engineId}.${f}`;
   if (next.enabled === true && !stored.enabled) out[k("enabled")] = true;
   // round 9 [79]: accepting the credential-isolation risk is part of what the step-up approves
-  if (next.enabled === true && !stored.enabled && next.acceptCredentialIsolationRisk === true) out[k("acceptCredentialIsolationRisk")] = true;
+  // B5W-07 (decision 178): the fact is the BUILD accepted, so a grant for one build cannot accept another
+  if (next.enabled === true && !stored.enabled && next.acceptCredentialIsolationRisk === true) {
+    out[k("acceptCredentialIsolationRisk")] = { version: next.expectedVersion ?? null, imageDigest: next.expectedDigest ?? null };
+  }
   if (next.timeoutSeconds !== undefined && next.timeoutSeconds > stored.timeoutSeconds) out[k("timeoutSeconds")] = next.timeoutSeconds;
   if (next.maxBudgetUsd !== undefined && next.maxBudgetUsd > stored.maxBudgetUsd) out[k("maxBudgetUsd")] = next.maxBudgetUsd;
   if (next.maxConcurrent !== undefined && next.maxConcurrent > stored.maxConcurrent) out[k("maxConcurrent")] = next.maxConcurrent;
@@ -556,11 +578,14 @@ export const createEnrollmentTokenSchema = z
   })
   .strict();
 
+/** the longest audited reason a runner revocation or a run cancel may carry (mirrored by the Engines page) */
+export const ENGINE_REASON_MAX_LENGTH = 500;
+
 /** DELETE /v1/engine-runners/:runnerId (optional body) */
-export const revokeRunnerSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() }).strict();
+export const revokeRunnerSchema = z.object({ reason: z.string().trim().min(1).max(ENGINE_REASON_MAX_LENGTH).optional() }).strict();
 
 /** POST /v1/engine-runs/:runId/cancel (optional body) */
-export const cancelEngineRunSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() }).strict();
+export const cancelEngineRunSchema = z.object({ reason: z.string().trim().min(1).max(ENGINE_REASON_MAX_LENGTH).optional() }).strict();
 
 /** POST /v1/engine-schedules — a scheduled run, executed as the person who configured it */
 export const createEngineScheduleSchema = z

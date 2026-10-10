@@ -438,6 +438,7 @@ async function agentDecider(db: Db, userId: string) {
   function kernelEvalDecision(agent: AgentRow, mode: string): AgentDecision {
     return evaluateAgent({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — an eval run really dispatches to the agent under test, so a
       // halt stops it. A halted deployment that kept grading models would be
       // spending money on the one thing an operator just said to stop.
