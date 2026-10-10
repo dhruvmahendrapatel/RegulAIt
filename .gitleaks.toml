@@ -214,3 +214,15 @@ condition = "AND"
 paths = ['''^packages/shared/src/bom/ai-bom\.test\.ts$''']
 regexTarget = "match"
 regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0189 B4 specification worked example: TEST-ONLY keys derived from published seed strings, with key ids and seed texts that contain CANARY (no private key is checked in). Scoped to these four files and to matches containing CANARY."
+condition = "AND"
+paths = [
+  '''^docs/decisions/0189-batch6-decision-bom-ai-bom\.md$''',
+  '''^apps/gateway/src/testing/bom-b4-spec-example\.ts$''',
+  '''^apps/gateway/src/adr0189-b4-spec-example\.test\.ts$''',
+  '''^scripts/bom-b4-spec-example\.mjs$''',
+]
+regexTarget = "match"
+regexes = ['''CANARY''']
