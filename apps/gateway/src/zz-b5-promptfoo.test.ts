@@ -284,9 +284,9 @@ beforeAll(async () => {
   firstRunnerId = reg.runnerId;
   const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
   expect(st.json().passed, st.body).toBe(true);
-  const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+  const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST });
   expect(refused.statusCode, refused.body).toBe(403);
-  const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+  const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
   expect(ok.statusCode, ok.body).toBe(200);
 }, 180_000);
 
@@ -473,8 +473,8 @@ describe("PR #205 review: the runner's life", () => {
     // the admin enables it again (a step-up); a run is queued
     const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
     expect(st.json().passed, st.body).toBe(true);
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
-    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) })).statusCode).toBe(200);
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST });
+    expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) })).statusCode).toBe(200);
     const runId = await startRun();
     // [49] a RESTART: a new client, the same volume, the same (spent) enrolment token in the env —
     // the stored token is used, the enrolment token is not, and the run is leased and posted
@@ -1285,10 +1285,10 @@ describe("PR #205 review round 9: credential-isolation gate, the judge at lease,
     expect(plain.json().detail).toMatch(/runner token/);
     expect(await enabled()).toBe(false);
     // accepting it is a relaxation: the step-up binds to it
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST });
     expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json().action.body.values).toMatchObject({ "engine.promptfoo.acceptCredentialIsolationRisk": true });
-    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+    expect(refused.json().action.body.values).toMatchObject({ "engine.promptfoo.acceptCredentialIsolationRisk": { version: MANIFEST.promptfoo.version, imageDigest: PF_DIGEST } });
+    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
     expect(ok.statusCode, ok.body).toBe(200);
     expect(await enabled()).toBe(true);
     const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-credential-isolation-risk-accepted' ORDER BY seq DESC LIMIT 1`)) as unknown as {
@@ -1677,7 +1677,7 @@ describe("PR #205 review round 12: only current-build runners count; a failing r
     const row = await engineRow();
     expect(row.self_test_passed_at).toBeNull();
     expect(row.self_test).toMatchObject({ passed: false, runnerId: r.runnerId });
-    const again = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    const again = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST });
     expect(again.statusCode, again.body).toBe(409);
     expect(again.json().error).toBe("engine_self_test_required");
     await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test cleanup' WHERE id = ${r.runnerId}`);
@@ -1939,7 +1939,7 @@ describe("PR #205 review round 13: an idempotent lease; a monotonic manifest syn
       expect((await audits("engine-manifest-outdated")) - auditsBefore).toBe(1);
       // an admin of the newer replica switched it off (its pass kept): this replica will not switch it back on
       await db.execute(sql`UPDATE engines SET enabled = false WHERE id = 'promptfoo'`);
-      const enable = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+      const enable = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST });
       expect(enable.statusCode, enable.body).toBe(409);
       expect(enable.json().error).toBe("engine_manifest_outdated");
       expect(((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled).toBe(false);

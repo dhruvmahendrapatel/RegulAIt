@@ -168,6 +168,26 @@ export function isCredentialIsolationRefusal(err: unknown): err is ApiError {
   return err instanceof ApiError && err.status === 409 && err.payload.error === "engine_credential_isolation_missing";
 }
 
+/** B5W-07: the gateway refused an acceptance because the engine's current build is not the one it named */
+export function isBuildChangedRefusal(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 409 && err.payload.error === "engine_build_changed";
+}
+
+/** a build identity, as an isolation or build-changed refusal names it */
+export interface EngineBuild {
+  version: string;
+  imageDigest: string;
+}
+
+/**
+ * B5W-07: the build a refusal is about, or null when it names none. The
+ * acceptance names exactly this build back, never the one the page loaded.
+ */
+export function buildOfRefusal(err: ApiError): EngineBuild | null {
+  const { version, imageDigest } = err.payload;
+  return typeof version === "string" && version && typeof imageDigest === "string" && imageDigest ? { version, imageDigest } : null;
+}
+
 /** the existing pages that use an engine (ADR-0177 §3: run surfaces live there, not here) */
 export function pagesUsing(kind: string): Array<{ label: string; to: string }> {
   if (kind === "model_scan") return [{ label: "Admission review (model artifacts)", to: "/admin/admission" }, { label: "Model risk (model cards)", to: "/admin/model-risk" }];

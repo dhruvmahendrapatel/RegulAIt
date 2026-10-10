@@ -51,6 +51,8 @@ import {
   egressReadings,
   engineHealth,
   failureText,
+  buildOfRefusal,
+  isBuildChangedRefusal,
   isCredentialIsolationRefusal,
   lastRunText,
   pagesUsing,
@@ -61,6 +63,7 @@ import {
   runnerSelfTestReading,
   shortDigest,
   startFreshnessClock,
+  type EngineBuild,
   type EngineDial,
 } from "./engineModel";
 import type {
@@ -91,7 +94,7 @@ const useDetectionContent = () =>
 
 type ModalState =
   | { kind: "enable"; engine: Engine }
-  | { kind: "accept-risk"; engine: Engine; detail: string }
+  | { kind: "accept-risk"; engine: Engine; detail: string; build: EngineBuild | null; notice: string | null }
   | { kind: "disable"; engine: Engine }
   | { kind: "self-test"; engine: Engine }
   | { kind: "enrol"; engine: Engine; minted?: EnrollmentTokenMinted }
@@ -155,18 +158,43 @@ export default function EnginesPage() {
   }, [engines.data]);
   const now = Date.now();
 
-  const enable = async (engine: Engine, acceptRisk: boolean) => {
+  /**
+   * `accepted` is the build the person ticked the acknowledgement for — always the
+   * one a gateway refusal named, never the one this page loaded (B5W-07).
+   */
+  const enable = async (engine: Engine, accepted: EngineBuild | null, isolationDetail?: string) => {
     close();
     const res = await act.run(
       engine.id,
-      () => patchEngine(engine.id, acceptRisk ? { enabled: true, acceptCredentialIsolationRisk: true } : { enabled: true }),
+      () =>
+        patchEngine(
+          engine.id,
+          accepted
+            ? { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: accepted.version, expectedDigest: accepted.imageDigest }
+            : { enabled: true },
+        ),
       () => `${engine.displayName} enabled`,
     );
     if (res.ok) return;
     // decision 79: the gateway's refusal opens the explicit acceptance, never a silent resend
-    if (!acceptRisk && isCredentialIsolationRefusal(res.err)) {
+    if (!accepted && isCredentialIsolationRefusal(res.err)) {
       const detail = typeof res.err.payload.detail === "string" ? res.err.payload.detail : res.err.message;
-      setModal({ kind: "accept-risk", engine, detail });
+      setModal({ kind: "accept-risk", engine, detail, build: buildOfRefusal(res.err), notice: null });
+      return;
+    }
+    // B5W-07: the build rolled over (before the step-up or during it): nothing was enabled;
+    // the acceptance comes back, unticked, for the build that is current now
+    if (accepted && isBuildChangedRefusal(res.err)) {
+      const build = buildOfRefusal(res.err);
+      setModal({
+        kind: "accept-risk",
+        engine,
+        detail: isolationDetail ?? "",
+        build,
+        notice:
+          `The build changed since you reviewed it: it is now ${build ? `${build.version} (${shortDigest(build.imageDigest)})` : "a build the gateway did not name"}. ` +
+          "Nothing was enabled. Review the current build and accept again only if you still want it.",
+      });
       return;
     }
     act.fail(engine.id, res.err);
@@ -215,10 +243,19 @@ export default function EnginesPage() {
         confirmLabel="Enable"
         body={modal?.kind === "enable" ? <EnableBody engine={modal.engine} /> : null}
         onCancel={close}
-        onConfirm={() => modal?.kind === "enable" && void enable(modal.engine, false)}
+        onConfirm={() => modal?.kind === "enable" && void enable(modal.engine, null)}
       />
       {modal?.kind === "accept-risk" && (
-        <AcceptRiskModal engine={modal.engine} detail={modal.detail} onCancel={close} onAccept={() => void enable(modal.engine, true)} />
+        <AcceptRiskModal
+          // a new build is a new acknowledgement: remount, so the tick never carries over
+          key={modal.build ? `${modal.build.version}@${modal.build.imageDigest}` : "unnamed"}
+          engine={modal.engine}
+          detail={modal.detail}
+          build={modal.build}
+          notice={modal.notice}
+          onCancel={close}
+          onAccept={(build) => void enable(modal.engine, build, modal.detail)}
+        />
       )}
       <ConfirmModal
         open={modal?.kind === "disable"}
@@ -708,8 +745,17 @@ function EnableBody(props: { engine: Engine }) {
   );
 }
 
-function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () => void; onAccept: () => void }) {
+function AcceptRiskModal(props: {
+  engine: Engine;
+  detail: string;
+  /** B5W-07: the build the gateway's refusal named; the acknowledgement and the request name exactly this one */
+  build: EngineBuild | null;
+  notice: string | null;
+  onCancel: () => void;
+  onAccept: (build: EngineBuild) => void;
+}) {
   const e = props.engine;
+  const build = props.build;
   const [ack, setAck] = useState(false);
   const id = `accept-risk-${e.id}`;
   return (
@@ -720,13 +766,18 @@ function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () =
       actions={
         <>
           <Button onClick={props.onCancel}>Keep it off</Button>
-          <Button variant="danger" disabled={!ack} onClick={props.onAccept}>
+          <Button variant="danger" disabled={!ack || build === null} onClick={() => build && props.onAccept(build)}>
             Accept risk and enable
           </Button>
         </>
       }
     >
       <div className={v.stack}>
+        {props.notice && (
+          <div className={v.errLine} role="alert" data-testid="build-changed-notice">
+            {props.notice}
+          </div>
+        )}
         <p>The gateway refused to enable this engine:</p>
         <blockquote className={v.dim} data-testid="credential-isolation-reason" style={{ margin: 0, paddingLeft: "var(--s2)", borderLeft: "3px solid var(--border)" }}>
           {props.detail}
@@ -736,13 +787,20 @@ function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () =
           and this build, and you will be asked to confirm it&apos;s you. A build that keeps the token out of the engine
           process removes the need for this acceptance.
         </p>
-        <div style={{ display: "flex", gap: "var(--s2)", alignItems: "flex-start" }}>
-          <input id={id} type="checkbox" checked={ack} onChange={(ev) => setAck(ev.target.checked)} />
-          <label htmlFor={id}>
-            I accept that a compromised {e.displayName} engine could read its runner token for build {e.version} (
-            {shortDigest(e.imageDigest)}), lease this engine&apos;s runs and post their results.
-          </label>
-        </div>
+        {build ? (
+          <div style={{ display: "flex", gap: "var(--s2)", alignItems: "flex-start" }}>
+            <input id={id} type="checkbox" checked={ack} onChange={(ev) => setAck(ev.target.checked)} />
+            <label htmlFor={id}>
+              I accept that a compromised {e.displayName} engine could read its runner token for build {build.version} (
+              {shortDigest(build.imageDigest)}), lease this engine&apos;s runs and post their results.
+            </label>
+          </div>
+        ) : (
+          <p className={v.errLine}>
+            The gateway did not name the build this refusal is about, so its risk cannot be accepted here. Reload the page and
+            try again.
+          </p>
+        )}
       </div>
     </Modal>
   );

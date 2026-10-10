@@ -519,8 +519,25 @@ export const updateEngineSchema = z
      * and it is audited. Only meaningful with `enabled: true`.
      */
     acceptCredentialIsolationRisk: z.literal(true).optional(),
+    /**
+     * B5W-07 (ADR-0187 decision 178): the build the acceptance is for, exactly as the
+     * `engine_credential_isolation_missing` refusal named it. Required with
+     * `acceptCredentialIsolationRisk` and refused without it; bound into the step-up, and
+     * a build that is no longer current is refused 409 `engine_build_changed`.
+     */
+    expectedVersion: z.string().min(1).max(100).optional(),
+    expectedDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((b, ctx) => {
+    const named = b.expectedVersion !== undefined && b.expectedDigest !== undefined;
+    if (b.acceptCredentialIsolationRisk === true && !named) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedVersion"], message: "accepting the credential-isolation risk names the build it is for: send expectedVersion and expectedDigest" });
+    }
+    if (b.acceptCredentialIsolationRisk !== true && (b.expectedVersion !== undefined || b.expectedDigest !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedVersion"], message: "expectedVersion and expectedDigest go only with acceptCredentialIsolationRisk" });
+    }
+  });
 export type UpdateEngineInput = z.infer<typeof updateEngineSchema>;
 
 /**
@@ -538,7 +555,10 @@ export function engineRowRelaxations(
   const k = (f: string) => `engine.${engineId}.${f}`;
   if (next.enabled === true && !stored.enabled) out[k("enabled")] = true;
   // round 9 [79]: accepting the credential-isolation risk is part of what the step-up approves
-  if (next.enabled === true && !stored.enabled && next.acceptCredentialIsolationRisk === true) out[k("acceptCredentialIsolationRisk")] = true;
+  // B5W-07 (decision 178): the fact is the BUILD accepted, so a grant for one build cannot accept another
+  if (next.enabled === true && !stored.enabled && next.acceptCredentialIsolationRisk === true) {
+    out[k("acceptCredentialIsolationRisk")] = { version: next.expectedVersion ?? null, imageDigest: next.expectedDigest ?? null };
+  }
   if (next.timeoutSeconds !== undefined && next.timeoutSeconds > stored.timeoutSeconds) out[k("timeoutSeconds")] = next.timeoutSeconds;
   if (next.maxBudgetUsd !== undefined && next.maxBudgetUsd > stored.maxBudgetUsd) out[k("maxBudgetUsd")] = next.maxBudgetUsd;
   if (next.maxConcurrent !== undefined && next.maxConcurrent > stored.maxConcurrent) out[k("maxConcurrent")] = next.maxConcurrent;

@@ -255,6 +255,23 @@ export function selfTestAdmitsEnable(row: EngineRow, manifest: EngineManifestEnt
 }
 
 const engineParam = z.object({ engineId: z.enum(ENGINE_IDS) });
+
+/** B5W-07 (ADR-0187 decision 178): does this acceptance name the engine's current build? */
+function acceptsBuild(body: { expectedVersion?: string; expectedDigest?: string }, row: Pick<EngineRow, "version" | "imageDigest">): boolean {
+  return body.expectedVersion === row.version && body.expectedDigest === row.imageDigest;
+}
+
+/** the refusal for an acceptance of a build that is no longer current; it names the current one */
+function buildChangedRefusal(engineId: EngineId, row: Pick<EngineRow, "version" | "imageDigest">) {
+  return {
+    error: "engine_build_changed",
+    version: row.version,
+    imageDigest: row.imageDigest,
+    detail:
+      `engine ${engineId}'s current build is ${row.version} (${row.imageDigest ?? "not built"}), not the one this acceptance names. ` +
+      "Nothing was changed; review the current build and accept its risk again if you still want it enabled.",
+  };
+}
 const runnerParam = z.object({ runnerId: z.string().uuid() });
 
 function publicEngine(row: EngineRow, manifest: EngineManifestEntry, runners: Array<typeof engineRunners.$inferSelect>, lastRun: { id: string; status: string; createdAt: Date } | null) {
@@ -358,9 +375,17 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       // PR #205 review round 9 [79]: a build whose engine process can read the runner credential
       // (no separate OS identity or container yet) is OFF until an admin accepts that risk
       // explicitly — a relaxation, so it rides the step-up below and is audited (ADR-0180)
+      // B5W-07 (ADR-0187 decision 178): an acceptance names a build; one that is no longer
+      // current is refused (here, before any step-up, and again under the row lock below)
+      if (body.acceptCredentialIsolationRisk === true && !acceptsBuild(body, current)) {
+        return reply.status(409).send(buildChangedRefusal(engineId, current));
+      }
       if (!manifest[engineId].credentialIsolation && body.acceptCredentialIsolationRisk !== true) {
         return reply.status(409).send({
           error: "engine_credential_isolation_missing",
+          // B5W-07: the build this refusal is about, which an acceptance must name back
+          version: current.version,
+          imageDigest: current.imageDigest,
           detail:
             `engine ${engineId}'s build runs the engine process as the runner's own user, so a compromised engine could read the runner token ` +
             "(it can lease this engine's runs and post their results; it cannot reach any other route). " +
@@ -375,6 +400,8 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       const [locked] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("update");
       if (!locked) return { kind: "missing" as const };
       if (body.enabled === true && engineManifestOutdated(locked, manifest[engineId])) return { kind: "outdated" as const, row: locked };
+      // B5W-07: the build may have rolled over since the unlocked read; the acceptance is for the one it names
+      if (body.acceptCredentialIsolationRisk === true && !acceptsBuild(body, locked)) return { kind: "build_changed" as const, row: locked };
       // the step-up was decided on `current`: anything it rested on that moved is refused, never overwritten
       if (JSON.stringify(engineRowRelaxations(engineId, body, locked)) !== JSON.stringify(relaxed)) return { kind: "moved" as const };
       if (body.enabled === true && !locked.enabled && !selfTestAdmitsEnable(locked, manifest[engineId], now).ok) {
@@ -397,7 +424,8 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           userId: actor ?? NO_IDENTITY,
           objectType: "engine",
           objectId: null,
-          detail: { engineId, version: manifest[engineId].version, imageDigest: manifest[engineId].imageDigest, credentialIsolation: false },
+          // B5W-07: the build accepted is the locked row's, which equals the one the request named
+          detail: { engineId, version: locked.version, imageDigest: locked.imageDigest, credentialIsolation: false },
           effect: "allow",
           ruleId: "engine-credential-isolation-risk-accepted",
           ruleChain: [],
@@ -425,6 +453,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     });
     if (out.kind === "missing") return reply.status(404).send({ error: "engine_not_found" });
     if (out.kind === "outdated") return reply.status(409).send(engineManifestOutdatedRefusal(engineId, out.row, manifest[engineId]));
+    if (out.kind === "build_changed") return reply.status(409).send(buildChangedRefusal(engineId, out.row));
     if (out.kind === "moved") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await notifyWorkflowsOfEndedRuns(db, out.ended);
     return view(engineId);

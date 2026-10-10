@@ -35,6 +35,7 @@ import {
   authSessions,
   createDb,
   desc,
+  engines,
   engineRunItems,
   engineRuns,
   engineSchedules,
@@ -197,14 +198,19 @@ function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
+/** B5W-07 (ADR-0187 decision 178): an acceptance names the build it is for */
+function acceptBuild(engineId: EngineId) {
+  return { enabled: true, acceptCredentialIsolationRisk: true as const, expectedVersion: MANIFEST[engineId].version, expectedDigest: MANIFEST[engineId].imageDigest! };
+}
+
 async function enableEngine(engineId: EngineId) {
   const st = await inject("POST", `/v1/engines/${engineId}/self-test`, admin.key);
   expect(st.statusCode, st.body).toBe(200);
   expect(st.json().passed, st.body).toBe(true);
-  const refused = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true, acceptCredentialIsolationRisk: true });
+  const refused = await asAdmin("PATCH", `/v1/engines/${engineId}`, acceptBuild(engineId));
   expect(refused.statusCode, refused.body).toBe(403);
   const token = await grantFor(refused.json().action);
-  const ok = await asAdmin("PATCH", `/v1/engines/${engineId}`, { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: token });
+  const ok = await asAdmin("PATCH", `/v1/engines/${engineId}`, acceptBuild(engineId), { [STEP_UP_HEADER]: token });
   expect(ok.statusCode, ok.body).toBe(200);
   expect(ok.json().enabled).toBe(true);
 }
@@ -448,16 +454,16 @@ describe("secure by default", () => {
     const st = await inject("POST", "/v1/engines/promptfoo/self-test", admin.key);
     expect(st.json().passed, st.body).toBe(true);
     // an API key can never give a step-up
-    const viaKey = await inject("PATCH", "/v1/engines/promptfoo", admin.key, { enabled: true, acceptCredentialIsolationRisk: true });
+    const viaKey = await inject("PATCH", "/v1/engines/promptfoo", admin.key, acceptBuild("promptfoo"));
     expect(viaKey.statusCode, viaKey.body).toBe(403);
     expect(viaKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", acceptBuild("promptfoo"));
     expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { "engine.promptfoo.enabled": true, "engine.promptfoo.acceptCredentialIsolationRisk": true } } });
+    expect(refused.json().action).toEqual({ kind: "settings_relax", body: { values: { "engine.promptfoo.enabled": true, "engine.promptfoo.acceptCredentialIsolationRisk": { version: MANIFEST.promptfoo.version, imageDigest: PF_DIGEST } } } });
     const [still] = await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`).then((r) => (r as unknown as { rows: Array<{ enabled: boolean }> }).rows);
     expect(still!.enabled).toBe(false);
     const token = await grantFor(refused.json().action);
-    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: token });
+    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", acceptBuild("promptfoo"), { [STEP_UP_HEADER]: token });
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json().enabled).toBe(true);
     const [audit] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "engine-updated")).orderBy(desc(auditLog.seq)).limit(1);
@@ -1288,6 +1294,103 @@ describe("route classes", () => {
     ] as const) {
       const r = await inject(method, url, alice.key, method === "DELETE" ? undefined : {});
       expect(r.statusCode, `${method} ${url}`).toBe(403);
+    }
+  });
+});
+
+// ===========================================================================
+// B5W-07 (X30, PR #230): accepting the credential-isolation risk names a build,
+// and only that build can be enabled by it. A rollover is a second replica with
+// the next manifest generation, as in a rolling upgrade; the row is restored
+// exactly afterwards (generations only move forward, so later suites would
+// otherwise see this file's manifest as outdated).
+describe("B5W-07: the credential-isolation acceptance is bound to the build it names", () => {
+  const NEXT_DIGEST = `sha256:${"c".repeat(64)}`;
+  const NEXT_VERSION = "99.0.0";
+  const NEXT: Record<EngineId, EngineManifestEntry> = {
+    ...MANIFEST,
+    promptfoo: { ...MANIFEST.promptfoo, version: NEXT_VERSION, imageDigest: NEXT_DIGEST, generation: MANIFEST.promptfoo.generation + 1 },
+  };
+  const accept = (version: string, digest: string) => ({ enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: version, expectedDigest: digest });
+  const enabledNow = async () => (await db.select({ enabled: engines.enabled }).from(engines).where(eq(engines.id, "promptfoo")))[0]!.enabled;
+  const acceptances = async () =>
+    db.select().from(auditLog).where(eq(auditLog.ruleId, "engine-credential-isolation-risk-accepted")).orderBy(desc(auditLog.seq));
+
+  it("a rollover before the refusal, during the risk dialog or during the step-up refuses the stale acceptance", async () => {
+    const [snap] = await db.select().from(engines).where(eq(engines.id, "promptfoo"));
+    const app1 = app;
+    let app2: ReturnType<typeof buildApp> | undefined;
+    try {
+      // the build the admin is shown: the current one, off, freshly self-tested
+      expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false })).statusCode).toBe(200);
+      await enrol("promptfoo", PF_DIGEST, MANIFEST.promptfoo.version);
+      expect((await inject("POST", "/v1/engines/promptfoo/self-test", admin.key)).json().passed).toBe(true);
+      const before = (await acceptances()).length;
+
+      // the refusal carries the build it refers to
+      const plain = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+      expect(plain.statusCode, plain.body).toBe(409);
+      expect(plain.json()).toMatchObject({ error: "engine_credential_isolation_missing", version: MANIFEST.promptfoo.version, imageDigest: PF_DIGEST });
+      // an acceptance that names no build is refused outright
+      const bare = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+      expect(bare.statusCode, bare.body).toBe(400);
+      // the step-up asked for names that build
+      const stepA = await asAdmin("PATCH", "/v1/engines/promptfoo", accept(MANIFEST.promptfoo.version, PF_DIGEST));
+      expect(stepA.statusCode, stepA.body).toBe(403);
+      expect(stepA.json().action.body.values["engine.promptfoo.acceptCredentialIsolationRisk"]).toEqual({
+        version: MANIFEST.promptfoo.version,
+        imageDigest: PF_DIGEST,
+      });
+      const grantA = await grantFor(stepA.json().action);
+
+      // ROLLOVER: the next build becomes current and its runner passes its self-test
+      app2 = buildApp(db, {
+        bootstrapToken: BOOT,
+        dataKey: DATA_KEY,
+        engines: { manifest: NEXT, taxonomy: TAXONOMY, gatewayBaseUrl: "http://gateway.test/v1" },
+      });
+      await app2.ready();
+      app = app2;
+      expect((await inject("GET", "/v1/engines", admin.key)).statusCode).toBe(200);
+      await enrol("promptfoo", NEXT_DIGEST, NEXT_VERSION);
+      expect((await inject("POST", "/v1/engines/promptfoo/self-test", admin.key)).json().passed).toBe(true);
+
+      // during the step-up: the grant for the old build, resent naming it, enables nothing
+      const during = await asAdmin("PATCH", "/v1/engines/promptfoo", accept(MANIFEST.promptfoo.version, PF_DIGEST), { [STEP_UP_HEADER]: grantA });
+      expect(during.statusCode, during.body).toBe(409);
+      expect(during.json()).toMatchObject({ error: "engine_build_changed", version: NEXT_VERSION, imageDigest: NEXT_DIGEST });
+      // during the risk dialog: an acceptance naming the old build is refused before any step-up
+      const dialog = await asAdmin("PATCH", "/v1/engines/promptfoo", accept(MANIFEST.promptfoo.version, PF_DIGEST));
+      expect(dialog.statusCode, dialog.body).toBe(409);
+      expect(dialog.json().error).toBe("engine_build_changed");
+      // before the refusal: the refusal now names the new build
+      const again = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
+      expect(again.json()).toMatchObject({ error: "engine_credential_isolation_missing", version: NEXT_VERSION, imageDigest: NEXT_DIGEST });
+      // the old build's grant cannot accept the new one
+      const swapped = await asAdmin("PATCH", "/v1/engines/promptfoo", accept(NEXT_VERSION, NEXT_DIGEST), { [STEP_UP_HEADER]: grantA });
+      expect(swapped.statusCode, swapped.body).toBe(403);
+      expect(await enabledNow()).toBe(false);
+      expect((await acceptances()).length).toBe(before);
+
+      // accepting the build shown now works, and the audit names exactly that build
+      const stepC = await asAdmin("PATCH", "/v1/engines/promptfoo", accept(NEXT_VERSION, NEXT_DIGEST));
+      expect(stepC.statusCode, stepC.body).toBe(403);
+      const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", accept(NEXT_VERSION, NEXT_DIGEST), { [STEP_UP_HEADER]: await grantFor(stepC.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect(await enabledNow()).toBe(true);
+      const after = await acceptances();
+      expect(after.length).toBe(before + 1);
+      expect(after[0]!.detail).toMatchObject({ engineId: "promptfoo", version: NEXT_VERSION, imageDigest: NEXT_DIGEST });
+    } finally {
+      app = app1;
+      if (app2) {
+        app2.server.closeAllConnections();
+        await app2.close();
+      }
+      await db.update(engines).set(snap!).where(eq(engines.id, "promptfoo"));
+      await db.execute(
+        sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'B5W-07 test' WHERE engine_id = 'promptfoo' AND reported_digest = ${NEXT_DIGEST} AND revoked_at IS NULL`,
+      );
     }
   });
 });

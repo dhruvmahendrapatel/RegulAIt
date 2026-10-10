@@ -12,6 +12,8 @@ import {
   pagesUsing,
   raisedDials,
   RUNNER_REVOKE_REASON_MAX,
+  buildOfRefusal,
+  isBuildChangedRefusal,
   revokeReasonProblem,
   runnerOnCurrentBuild,
   runnerSelfTestReading,
@@ -250,6 +252,21 @@ describe("a runner's self-test reading (PR #230 review: a stale report never rea
       runners: [{ id: "r", name: "r", reportedDigest: DIGEST, reportedVersion: "0.124.0", selfTestPassed: true, selfTestFailures: [], selfTestReportedAt: hoursAgo(23), registeredAt: hoursAgo(30), lastSeenAt: null }],
     });
     expect(nextFreshnessExpiry([e], NOW)).toBe(NOW + 3600_000);
+  });
+});
+
+describe("B5W-07: the build a refusal names", () => {
+  it("is read from the refusal, never from the page", () => {
+    const iso = new ApiError(409, { error: "engine_credential_isolation_missing", version: "99.0.0", imageDigest: `sha256:${"c".repeat(64)}` });
+    expect(buildOfRefusal(iso)).toEqual({ version: "99.0.0", imageDigest: `sha256:${"c".repeat(64)}` });
+    expect(buildOfRefusal(new ApiError(409, { error: "engine_credential_isolation_missing" }))).toBeNull();
+    expect(buildOfRefusal(new ApiError(409, { error: "engine_build_changed", version: "", imageDigest: "x" }))).toBeNull();
+  });
+
+  it("recognises only the build-changed refusal", () => {
+    expect(isBuildChangedRefusal(new ApiError(409, { error: "engine_build_changed" }))).toBe(true);
+    expect(isBuildChangedRefusal(new ApiError(409, { error: "engine_credential_isolation_missing" }))).toBe(false);
+    expect(isBuildChangedRefusal(new ApiError(400, { error: "engine_build_changed" }))).toBe(false);
   });
 });
 
