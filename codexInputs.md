@@ -1,3 +1,50 @@
+## X30 returned fixes recheck: model artifacts — 2026-10-10 UTC
+
+Independently reviewed #240 at `25370e508640a2e72b758191e2935a8185a7f543`.
+The original B5W-01/04/06 reproductions are addressed: a cited older inconclusive
+scan/run stays selected instead of being replaced by a newer clean result;
+a pre-aborted native XHR rejects before any request; absent/non-array findings
+produce an inconclusive scan and keep the page readable. Both original independent
+browser negatives now PASS unchanged. The additional confirmation/step-up delete,
+in-use refusal, quota wording and retention-setting success cases pass their
+original browser assertions. Claude owns official VERIFIED and implementation.
+
+**B5W-08 — LOW, OPEN: malformed finding severity still crashes the artifact
+page.** `modelArtifacts.ts:isFinding` checks kind/id but not severity;
+`ModelArtifactsTab` then passes severity straight to `SeverityBadge`, whose
+unknown fallback renders it as a React child. A mocked inconclusive scan with
+`{kind:"scan_error",id:"synthetic_error",severity:{untrusted:"synthetic"}}`
+passes the record guard and renders the router error page, “Objects are not
+valid as a React child”, instead of readable artifact detail. The independent
+readable-detail assertion genuinely fails. Current gateway results use a closed
+severity vocabulary, so this is response-shape hardening, not a demonstrated
+live scanner or execution exploit. Acceptance: validate/normalize severity
+before admitting a finding and render a fixed unrated/inconclusive fallback;
+cover object/array/absent and unrecognized string severities without showing
+arbitrary scanner prose or breaking the page. Keep valid findings readable.
+
+**B5W-09 — LOW, OPEN: an unread retention setting still promises a concrete
+lifetime/deletion date.** `retentionText(...,known:false)` says “Kept for 30 days”
+and computes a date despite the settings request failing. A mocked503 reproduces
+this wording and date; the negative assertion against that unmeasured lifetime
+genuinely fails. The appended default disclaimer is useful but cannot establish
+the actual sweep setting (the server reads the live setting, range1–3650).
+Unlike the upload-size fallback, this browser cannot enforce that lifetime.
+Acceptance: say actual retention/deletion date is unknown until the setting is
+read; the shipped30-day default may be labelled separately, without presenting
+its calculated date as the artifact's current retention. Known-setting45-day
+copy and the cited-scan/unfinished-run exclusions should still pass.
+
+Validation: frozen install, shared build, web typecheck/production build PASS;
+**449/449 web units**. Browser run: **17/17 original artifact/evidence cases and
+2/2 original independent probes PASS**, including the original suite's axe
+analyses; **2/2 new negative assertions genuinely FAIL** for B5W-08/09. This is
+19 passed/2 failed on the extended review run, not a claimed fully green run.
+The appended probes were removed; the exact reviewed product source is clean.
+Logs `/tmp/oct10-x30-artifacts-fix-{install,shared-build,units,tsc,build,browser}.log`;
+probe copy `/tmp/oct10-x30-review-probes/artifacts-fix-with-probes.mock.spec.ts`;
+traces in the reviewed checkout's `apps/web/test-results/zz-x28-model-artifacts.moc-{c6038-es-artifact-detail-readable,ac3cc-promise-a-measured-lifetime}/trace.zip`.
+
 ## X30 returned fixes recheck: engine runs — 2026-10-10 UTC
 
 Independently rechecked #236 at `170ca98e453a351e6a7f5cf71429a1d54ff1c1ad`. **B5W-02/03/05 reported acceptance is satisfied:** failed/timeout/cancelled empty runs no longer claim complete measurements; signature attribution requires matching recorded version AND digest, with the current build labelled separately; the selected run and Evaluations tab survive reload and navigation through query state, with explicit invalid/unavailable handling. Claude retains official VERIFIED and integration ownership.
