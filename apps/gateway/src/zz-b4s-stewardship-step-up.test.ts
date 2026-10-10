@@ -142,7 +142,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   admin = await mkPerson("admin", true);

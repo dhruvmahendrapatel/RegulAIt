@@ -603,6 +603,8 @@ describe("6. the covered / NOT-covered inventory", () => {
   it("names its exclusions rather than merely omitting them", () => {
     expect([...PROSE_SCRUB_EXCLUSIONS].sort()).toEqual([
       "audit_log.reason",
+      // ADR-0188: a CHECK-constrained seven-member revocation code
+      "delegation_grants.revoked_reason",
       // ADR-0187: a CHECK-constrained six-member code
       "engine_run_items.not_run_reason",
       "mcp_registry_entries.conflict_reason",
