@@ -56,9 +56,12 @@
  * So even on a deployment with a configured, enabled OIDC provider, listing
  * that provider's issuer under `authorization_servers` would tell a conformant
  * client "go get an access token there and present it" — and the very next
- * request would be a 401. The field is therefore omitted UNCONDITIONALLY,
- * including when a provider is configured, and the reason is stated in the
- * document itself so an operator reading it does not think it is a bug.
+ * request would be a 401. An identity provider's issuer is therefore never
+ * listed, including when a provider is configured. The one issuer listed is
+ * the gateway's OWN (ADR-0188 S5), and only once delegated tokens are governed
+ * on the routes they reach (`DELEGATED_ROUTES_WIRED`, true since the S4+S5
+ * follow-up) and `REGULAIT_PUBLIC_URL` names it; otherwise the omission and
+ * its reason stand in the document.
  *
  * Accepting IdP-issued access tokens, dynamic client registration (RFC 7591)
  * and standing up an authorization-server surface of our own are all
@@ -120,7 +123,8 @@ export function protectedResourceMetadata(resource: string, baseUrl: string) {
     // operator who notices the omission deserves the reason without having to
     // find an ADR.
     //
-    //   `authorization_servers` — omitted UNCONDITIONALLY. This gateway
+    //   `authorization_servers` — never an identity provider's issuer
+    //   (see `delegatedTokenMetadata` for the gateway's own). This gateway
     //   accepts no IdP-issued access token on any route. Its OIDC/SAML support
     //   is a browser login flow that mints a local session; naming an issuer
     //   here would advertise a mechanism the next request would refuse.

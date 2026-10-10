@@ -17,6 +17,11 @@
  * `{via: "workload", userId: <sponsor>, isAdmin: false, workloadIdentityId,
  * delegationGrantId}` and reaches ONLY the routes in `WORKLOAD_ROUTES`.
  *
+ * WIRED (S4+S5 follow-up): `DELEGATED_ROUTES_WIRED` is true, because every
+ * route in `WORKLOAD_ROUTES` now passes the grant into the governed core, and a
+ * workload call must name exactly its grant's project. The history below is
+ * kept because it states the invariant the switch guards.
+ *
  * FAIL CLOSED UNTIL THE GOVERNED PATHS READ THE GRANT. Authority under a
  * delegated token is the INTERSECTION of the sponsor, every actor and the
  * grant (decision 3); a route that ran the call as the sponsor alone would
@@ -45,6 +50,9 @@ import type { AuthContext } from "../auth.js";
 export const WORKLOAD_ROUTES: ReadonlySet<string> = new Set(["POST /mcp/:serverId", "POST /v1/messages", "POST /v1/chat/completions", "GET /v1/models"]);
 
 export { DELEGATED_ROUTES_WIRED } from "./wiring.js";
+
+/** the project header the MCP proxy and the compat routes read (mcp-proxy's PROJECT_HEADER; the S5 test pins them equal) */
+export const WORKLOAD_PROJECT_HEADER = "x-regulait-project-id";
 
 export type WorkloadAuthOutcome =
   | { kind: "none" }
@@ -145,6 +153,20 @@ export async function authenticateWorkloadRequest(db: Db, req: FastifyRequest, o
   if (!DELEGATED_ROUTES_WIRED) {
     await auditRefusal(db, "delegated_route_not_wired", route, v.grantId);
     return { kind: "refused", status: 403, body: { error: "delegated_route_not_wired", detail: "this route does not yet govern calls under a delegation grant" } };
+  }
+  // S4+S5 follow-up: the grant names its project (decision 4), so a workload call is attributed to that project and
+  // no other. The routes read the project from this header; it must name exactly the grant's project (absent only
+  // when the grant has none), or the call would be decided and billed under another project's facts.
+  const projectHeader = req.headers[WORKLOAD_PROJECT_HEADER];
+  const named = typeof projectHeader === "string" && projectHeader.length > 0 ? projectHeader.toLowerCase() : null;
+  const grantProject = v.live.leaf.projectId ? v.live.leaf.projectId.toLowerCase() : null;
+  if (Array.isArray(projectHeader) || named !== grantProject) {
+    await auditRefusal(db, "delegation_project_mismatch", route, v.grantId);
+    return {
+      kind: "refused",
+      status: 403,
+      body: { error: "delegation_project_mismatch", detail: `send ${WORKLOAD_PROJECT_HEADER} naming exactly the project the delegation grant was made for` },
+    };
   }
   return {
     kind: "ok",

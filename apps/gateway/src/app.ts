@@ -459,6 +459,7 @@ import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 // ADR-0188 (batch 6 item 1) S1 — every identity route, a 501 stub until its slice lands
 import { registerIdentityRoutes } from "./identity-routes.js";
+import { lockPersonForRevocation } from "./workload-identity-admin.js";
 // ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
 import { registerBomRoutes } from "./bom-routes.js";
 import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
@@ -2591,10 +2592,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // Deleting the revocation reverses it — overrides are independently reversible.
   app.post("/v1/revocations", async (req, reply) => {
     const body = createRevocationSchema.parse(req.body);
-    const [row] = await db
-      .insert(revocations)
-      .values({ userId: body.userId, serverId: body.serverId, toolName: body.toolName ?? null })
-      .returning();
+    // ADR-0188 S4+S5 follow-up (review L5): serialized with the workload-identity steward check on the person's row
+    const [row] = await db.transaction(async (tx) => {
+      await lockPersonForRevocation(tx as unknown as Db, body.userId);
+      return tx
+        .insert(revocations)
+        .values({ userId: body.userId, serverId: body.serverId, toolName: body.toolName ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2631,10 +2636,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/revocations/agents", async (req, reply) => {
     const { userId } = revocationUserParam.parse(req.params);
     const body = createAgentRevocationSchema.parse(req.body);
-    const [row] = await db
-      .insert(agentRevocations)
-      .values({ userId, agentId: body.agentId, reason: body.reason ?? null })
-      .returning();
+    // ADR-0188 S4+S5 follow-up (review L5): serialized with the workload-identity steward check on the person's row
+    const [row] = await db.transaction(async (tx) => {
+      await lockPersonForRevocation(tx as unknown as Db, userId);
+      return tx
+        .insert(agentRevocations)
+        .values({ userId, agentId: body.agentId, reason: body.reason ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2675,10 +2684,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/revocations/connectors", async (req, reply) => {
     const { userId } = revocationUserParam.parse(req.params);
     const body = createConnectorRevocationSchema.parse(req.body);
-    const [row] = await db
-      .insert(connectorRevocations)
-      .values({ userId, connectorId: body.connectorId, reason: body.reason ?? null })
-      .returning();
+    // ADR-0188 S4+S5 follow-up (review L5): serialized with the workload-identity steward check on the person's row
+    const [row] = await db.transaction(async (tx) => {
+      await lockPersonForRevocation(tx as unknown as Db, userId);
+      return tx
+        .insert(connectorRevocations)
+        .values({ userId, connectorId: body.connectorId, reason: body.reason ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
