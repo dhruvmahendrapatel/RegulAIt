@@ -63,14 +63,16 @@
  */
 import { randomUUID } from "node:crypto";
 import { desc, isNotNull } from "drizzle-orm";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import {
   AUDIT_GENESIS_PREV_HASH,
   AUDIT_GENESIS_SEQ,
   auditChainVersionAt,
   auditContentHashFor,
   auditRowHash,
+  resolveAuditChainBoundary,
   scrubAuditRow,
+  type AuditChainBoundary,
   type AuditChainFields,
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
@@ -224,22 +226,59 @@ export async function appendChainedAuditRows(
 }
 
 /**
- * ADR-0188 decision 19: the first `seq` written under canonical serialisation
- * v2, from the append-only `audit_chain_versions` table (null = no boundary
- * yet: every row is v1). A boundary for a version this build does not know
- * refuses the append: a writer that cannot produce the current version must
- * not extend the chain.
+ * Thrown when the database has no `audit_chain_versions` table: its schema is
+ * older than this build (migration 0180 not applied). The writer FAILS CLOSED
+ * here rather than assuming "v1 only": it cannot know whether a boundary was
+ * recorded, and this build's insert names columns such a database lacks.
  */
-export async function readAuditV2Boundary(tx: { execute: (query: unknown) => Promise<unknown> }): Promise<number | null> {
-  const res = (await tx.execute(
-    sql`select "version", "from_seq" from "audit_chain_versions" order by "from_seq" desc limit 1`,
-  )) as { rows?: Array<{ version: number | string; from_seq: number | string }> };
-  const row = res.rows?.[0];
-  if (!row) return null;
-  if (Number(row.version) !== 2) {
-    throw new Error(`audit-chain: the chain is at serialisation version ${row.version}, which this build cannot write`);
+export class AuditChainSchemaBehindError extends Error {
+  constructor() {
+    super(
+      "audit-chain: the database has no audit_chain_versions table (migration 0180 not applied); this build refuses to append to or verify a chain whose version boundary it cannot read",
+    );
+    this.name = "AuditChainSchemaBehindError";
   }
-  return Number(row.from_seq);
+}
+
+function isUndefinedTable(err: unknown): boolean {
+  for (let e: unknown = err, i = 0; e && i < 5; e = (e as { cause?: unknown }).cause, i += 1) {
+    if ((e as { code?: unknown }).code === "42P01") return true;
+  }
+  return false;
+}
+
+/**
+ * ADR-0188 decision 19 (X35 I7S-02): the ONE loader of the canonical-
+ * serialisation boundary, shared by the writer, the verifier and the receipt
+ * sweep. Reads every row of the append-only `audit_chain_versions` table and
+ * resolves it with `resolveAuditChainBoundary`: `{supported: true, v2FromSeq}`
+ * (null = no boundary yet: every row is v1), or the first boundary of a version
+ * this build does not know. A missing table throws `AuditChainSchemaBehindError`.
+ */
+export async function loadAuditChainBoundary(tx: { execute: (query: SQL) => PromiseLike<unknown> }): Promise<AuditChainBoundary> {
+  let res: { rows?: Array<{ version: number | string; from_seq: number | string }> };
+  try {
+    res = (await tx.execute(
+      sql`select "version", "from_seq" from "audit_chain_versions" order by "from_seq" asc`,
+    )) as typeof res;
+  } catch (err) {
+    if (isUndefinedTable(err)) throw new AuditChainSchemaBehindError();
+    throw err;
+  }
+  return resolveAuditChainBoundary((res.rows ?? []).map((r) => ({ version: Number(r.version), fromSeq: Number(r.from_seq) })));
+}
+
+/**
+ * The writer's view of the boundary: the first `seq` written under v2 (null =
+ * none yet). A boundary for a version this build does not know refuses the
+ * append: a writer that cannot produce the current version must not extend the chain.
+ */
+export async function readAuditV2Boundary(tx: { execute: (query: SQL) => PromiseLike<unknown> }): Promise<number | null> {
+  const boundary = await loadAuditChainBoundary(tx);
+  if (!boundary.supported) {
+    throw new Error(`audit-chain: the chain is at serialisation version ${boundary.version}, which this build cannot write`);
+  }
+  return boundary.v2FromSeq;
 }
 
 /** Sentinel for `.returning()` called with no projection. */

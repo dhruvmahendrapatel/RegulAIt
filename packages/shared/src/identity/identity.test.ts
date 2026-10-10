@@ -37,6 +37,7 @@ import {
   auditRowHash,
   AUDIT_GENESIS_PREV_HASH,
   canonicalAuditPayloadV2,
+  resolveAuditChainBoundary,
   verifyChainBatch,
   type ChainedAuditRow,
 } from "../audit-chain.js";
@@ -140,8 +141,12 @@ describe("ADR-0188 scope and grants: absence is denial (decision 27)", () => {
   });
 
   it("an agent's own grants: modes and objects are explicit lists, never null = everything", () => {
-    const base = { tools: [], servers: [], agents: [], connectors: [], roleIds: [] };
+    const base = { tools: [], servers: [], agents: [], connectors: [], roleIds: [], revision: 0 };
     expect(putAgentGrantsSchema.safeParse(base).success).toBe(true);
+    // X33: the whole-set replacement names the revision it read
+    const { revision: _r, ...noRevision } = base;
+    expect(putAgentGrantsSchema.safeParse(noRevision).success).toBe(false);
+    expect(putAgentGrantsSchema.safeParse({ ...base, revision: -1 }).success).toBe(false);
     expect(putAgentGrantsSchema.safeParse({ ...base, agents: [{ agentId: U(1), allowedModes: null }] }).success).toBe(false);
     expect(putAgentGrantsSchema.safeParse({ ...base, connectors: [{ connectorId: U(1), mode: "read", allowedObjects: null }] }).success).toBe(false);
     expect(putAgentGrantsSchema.safeParse({ ...base, tools: [{ serverId: U(1), toolName: "a" }, { serverId: U(1), toolName: "a" }] }).success).toBe(false);
@@ -292,5 +297,34 @@ describe("ADR-0188 decision 19: the audit v2 serialisation", () => {
     const rows = chain(6, null);
     for (const r of rows.slice(3)) r.chainVersion = 2;
     expect(verify(rows, 4)).toMatchObject({ seq: 4, kind: "content_mismatch" });
+  });
+
+  it("X35 I7S-01: actor fields on a v1 row are a break, though its v1 hash still matches", () => {
+    for (const extra of [
+      { actorIdentityId: U(50), delegationGrantId: U(51), actorChain: [U(50)] },
+      { actorChain: [U(50)] },
+    ]) {
+      const rows = chain(6, null);
+      const tampered = { ...rows[2]!, ...extra };
+      // the v1 hash does not cover the actor fields: content alone would pass
+      expect(auditContentHashFor(tampered, 1)).toBe(rows[2]!.contentHash);
+      rows[2] = tampered;
+      expect(verify(rows, null)).toMatchObject({ seq: 3, kind: "actor_on_v1" });
+    }
+    // a v1 row before a recorded boundary is checked the same way
+    const spanning = chain(6, 4);
+    spanning[1] = { ...spanning[1]!, actorIdentityId: U(50), delegationGrantId: U(51), actorChain: [U(50)] };
+    expect(verify(spanning, 4)).toMatchObject({ seq: 2, kind: "actor_on_v1" });
+  });
+
+  it("X35 I7S-02: one boundary interpretation; an unknown version is unsupported, never skipped", () => {
+    expect(resolveAuditChainBoundary([])).toEqual({ supported: true, v2FromSeq: null });
+    expect(resolveAuditChainBoundary([{ version: 2, fromSeq: 9 }])).toEqual({ supported: true, v2FromSeq: 9 });
+    expect(resolveAuditChainBoundary([{ version: 3, fromSeq: 2 }])).toMatchObject({ supported: false, version: 3, fromSeq: 2 });
+    expect(resolveAuditChainBoundary([{ version: 2, fromSeq: 9 }, { version: 3, fromSeq: 20 }])).toMatchObject({
+      supported: false,
+      version: 3,
+      fromSeq: 20,
+    });
   });
 });
