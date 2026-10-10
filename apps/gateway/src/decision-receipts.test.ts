@@ -214,7 +214,12 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     const checked = await app.inject({ method: "POST", url: "/v1/receipts/verify", headers: admin, payload: historical });
     expect(checked.json().results.every((row: { status: string }) => row.status === "valid")).toBe(true);
     expect(checked.json().cannotProve.join(" ")).toContain("signed before key retirement");
-    expect(offline(historical, true).status).toBe(0);
+    const cli = offline(historical, true);
+    expect(cli.status).toBe(0);
+    // ADR-0186 decision 30 item 2: the offline CLI surfaces the same limit as the API
+    expect(cli.output.cannotProve.join(" ")).toContain("signed before key retirement");
+    expect(cli.output.cannotProve.join(" ")).toContain("not a revocation attestation");
+    expect(checked.json().cannotProve.join(" ")).toContain("not a revocation attestation");
     useKey("fixture-2", secondKey);
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(1);
   });
