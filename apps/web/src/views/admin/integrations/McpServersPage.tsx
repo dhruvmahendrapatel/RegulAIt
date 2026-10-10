@@ -14,6 +14,7 @@
  */
 import { useState } from "react";
 import { McpCoverage, StdioArguments } from "./Batch3Mcp";
+import { ExecutionProfileSelector } from './isolation/IsolationPanel';
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { api } from "../../../api/client";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
@@ -48,6 +49,7 @@ export default function McpServersPage() {
   const servers = useServers();
   const users = useUsers();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedServer = (servers.data?.servers ?? []).find(server => server.id === selectedId);
 
   return (
     <>
@@ -98,6 +100,7 @@ export default function McpServersPage() {
           />
         </Card>
 
+        <Card title="Local MCP execution profile">{selectedServer?.transport === "stdio" ? <ExecutionProfileSelector context={selectedServer.name} workloadKind="mcp_stdio" /> : <p>{selectedServer?.transport === "streamable_http" || selectedServer?.transport === "sse" ? "Remote MCP servers run externally; their host isolation is not verified by this gateway." : selectedServer ? "Server transport is unmeasured; no isolation assignment is available." : "Select a local (stdio) MCP server to inspect its execution profile assignment."}</p>}</Card>
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
 

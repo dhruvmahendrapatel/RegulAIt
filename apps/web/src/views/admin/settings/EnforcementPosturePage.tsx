@@ -45,6 +45,7 @@ import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { IsolationSettingsCard } from '../integrations/isolation/IsolationSettings';
 
 interface PostureControl {
   key: string;
@@ -261,6 +262,7 @@ export default function EnforcementPosturePage() {
             {act.error && <div className={v.errLine}>{act.error}</div>}
           </Card>
 
+          <IsolationSettingsCard />
           <Card title="Enforcement">
             <Table
               rows={enforcement}
