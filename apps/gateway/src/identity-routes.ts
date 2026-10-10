@@ -88,7 +88,7 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   app.get("/v1/workload-identities", s4.list);
   app.post("/v1/workload-identities", notBuilt);
   app.get("/v1/workload-identities/:identityId", s4.get);
-  app.patch("/v1/workload-identities/:identityId", notBuilt);
+  app.patch("/v1/workload-identities/:identityId", s4.patch);
   app.post("/v1/workload-identities/:identityId/revoke", notBuilt);
   app.get("/v1/workload-identities/:identityId/credentials", notBuilt);
   app.post("/v1/workload-identities/:identityId/credentials", notBuilt);
