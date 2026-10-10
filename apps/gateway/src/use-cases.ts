@@ -1504,6 +1504,7 @@ export function registerUseCaseRoutes(
           });
           narrative = { status: "refused", reason: decision.reason };
         } else {
+          // ADR-0188 S4: one intake-assist narrative the person asked for: a direct call, no agent principal acts — decided as the person (no delegation grant).
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
             userId,
             served: agent,

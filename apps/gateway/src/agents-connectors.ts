@@ -119,6 +119,9 @@ import {
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
+import { auditDelegatedAgentRefusal, evaluateDelegatedAgentCall } from "./delegated-evaluate.js";
+import { settleDelegationCharge } from "./delegation.js";
+import { actorColumns, usdToMicros } from "./in-process-delegation.js";
 import { loadVersions, newVersion, resolveAgentPromptVersion } from "./config-versions.js";
 // B1.5 — the agent model/pricing edit goes through ADR-0074's ONE choke point,
 // so a versioned agent's edit mints + activates an agent_config version.
@@ -406,6 +409,8 @@ export type DispatchOutcome =
       /** ADR-0070: a REFUSAL gets a trace reference too — that is the whole
        * point. The span it names carries `status: 'denied'` and the reason. */
       trace?: DispatchTraceRef;
+      /** ADR-0188 S4: the kernel rule that refused a DELEGATED dispatch (`error: "delegation_denied"`) */
+      ruleId?: string;
     };
 
 /** ADR-0070 — the trace coordinates of one dispatch attempt. */
@@ -520,6 +525,18 @@ export interface GovernedDispatchArgs {
   /** ADR-0070 — the span kind this attempt records as. Defaults to `llm`; the
    * fallback driver passes `fallback_hop`. */
   traceSpanKind?: "llm" | "fallback_hop" | undefined;
+  /**
+   * ADR-0188 S4 (decision 6) — the delegation grant an IN-PROCESS agent makes
+   * this call under (a pillar-7 worker, a builder turn or schedule). When set,
+   * the core decides the served agent for the sponsor `userId` AND the stored
+   * actor chain, read fresh right before the provider call (decision 17), and
+   * refuses with the deciding rule id; every fallback hop is decided the same
+   * way; and the measured cost is settled along the chain in the usage row's
+   * transaction (decision 22). Absent = a person's own call, unchanged.
+   */
+  delegationGrantId?: string | undefined;
+  /** §5.1 lead ceiling (agent ids) for the delegated decision; null/absent = none */
+  delegationCeilingAgentIds?: readonly string[] | null | undefined;
 }
 
 /**
@@ -680,9 +697,23 @@ export async function executeGovernedDispatch(
     const hopExecutionMode = await loadExecutionMode(db);
     // ADR-0182 A14 — the hop runs for the same person: same literacy slot (an eval or red-team dispatch is exempt)
     const hopLiteracy = await literacySlot(db, args.userId, { origin: args.evaluationSubject === true || args.modelFeature?.feature === "evals" ? "evaluation" : "human" });
-    const decision = evaluateAgent({
+    // ADR-0188 S4: a delegated call's hop is decided with the stored chain too — a
+    // fallback may not route an agent's call to an agent outside its grant
+    const decision = args.delegationGrantId
+      ? (
+          await evaluateDelegatedAgentCall(db, {
+            userId: args.userId,
+            agent: hopAgent,
+            mode: hopMode,
+            grantId: args.delegationGrantId,
+            ceilingAgentIds: args.delegationCeilingAgentIds ?? null,
+            sponsor: { grants, roleGrants, revocations: revocationRows, ceilingTier },
+            ...(args.evaluationSubject === true || args.modelFeature?.feature === "evals" ? { origin: "evaluation" as const } : {}),
+          })
+        ).decision
+      : evaluateAgent({
       userId: args.userId,
-      actor: null, // ADR-0188 S4 replaces
+      actor: null, // a person's own call (no delegation grant)
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
       // stop traffic being routed INTO it by somebody else's fallback chain.
@@ -1067,6 +1098,30 @@ async function dispatchAttempt(
   sink: DispatchTraceSink = {},
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, baseline } = args;
+
+  // ADR-0188 S4 — an in-process agent's call is decided for the sponsor AND the
+  // stored actor chain, read now, before anything else happens (decision 17).
+  if (args.delegationGrantId && args.served) {
+    const { decision } = await evaluateDelegatedAgentCall(db, {
+      userId,
+      agent: args.served,
+      mode: args.mode ?? "execute",
+      grantId: args.delegationGrantId,
+      ceilingAgentIds: args.delegationCeilingAgentIds ?? null,
+      ...(args.evaluationSubject === true ? { origin: "evaluation" as const } : {}),
+    });
+    if (decision.effect !== "allow") {
+      await auditDelegatedAgentRefusal(db, {
+        userId,
+        agentId: args.served.id,
+        mode: args.mode ?? "execute",
+        grantId: args.delegationGrantId,
+        decision,
+        detail: { ...(args.projectId ? { projectId: args.projectId } : {}), ...(args.detail ?? {}) },
+      });
+      return { ok: false, status: 403, error: "delegation_denied", detail: decision.reason, ruleId: decision.ruleId };
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Batch B1 (ADR-0073 residual / ADR-0048 deviation 2) — `agent_config`
@@ -2280,7 +2335,10 @@ async function dispatchAttempt(
       }
     : {};
 
-  const [usageRow] = await db.insert(usageEvents).values({
+  // ADR-0188 S4 (decisions 9, 22): the usage row names the acting agent, and its
+  // measured cost is settled along the delegation chain IN THE SAME transaction
+  const usageWrite = async (h: Db) => h.insert(usageEvents).values({
+    ...actorColumns(),
     userId,
     objectType: "agent",
     agentId: served.id,
@@ -2338,6 +2396,20 @@ async function dispatchAttempt(
       ...guardrailDetail,
     },
   }).returning({ id: usageEvents.id });
+  const delegationGrantId = args.delegationGrantId;
+  const [usageRow] = delegationGrantId
+    ? await db.transaction(async (tx) => {
+        const rows = await usageWrite(tx as unknown as Db);
+        if (rows[0]) {
+          await settleDelegationCharge(tx, {
+            usageEventId: rows[0].id,
+            leafGrantId: delegationGrantId,
+            amountMicros: usdToMicros(costUsd),
+          });
+        }
+        return rows;
+      })
+    : await usageWrite(db);
   // ADR-0070 — THE REFERENCE. The span's provider/model/token/cost fields are
   // copied from THIS row, and `tracing.test.ts` joins on this id and asserts
   // they still agree rather than trusting the copy.
@@ -3898,7 +3970,7 @@ export function registerAgentConnectorRoutes(
     const invokeLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) });
     const kernelDecision = evaluateAgent({
       userId,
-      actor: null, // ADR-0188 S4 replaces
+      actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
       // ADR-0124 — the kill switch on the native dispatch path.
       execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...invokeLiteracy },
       // the display name rides along so denial prose says "premium-mock
@@ -4153,7 +4225,7 @@ export function registerAgentConnectorRoutes(
           withModelPolicy(
             evaluateAgent({
               userId,
-              actor: null, // ADR-0188 S4 replaces
+              actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
               execution: { ...postureOf(routingExecutionMode, agentHaltOf(a)), ...invokeLiteracy },
               agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
               mode: body.mode,
