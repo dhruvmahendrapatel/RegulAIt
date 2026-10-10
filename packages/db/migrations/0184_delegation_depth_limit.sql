@@ -22,7 +22,7 @@ ALTER TABLE "delegation_grants" ALTER COLUMN "depth_limit" SET NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "delegation_grants" ADD CONSTRAINT "delegation_grants_depth_limit_check" CHECK ("depth_limit" BETWEEN "depth" AND 8);
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION "regulait_delegation_grant_guard"() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION "regulait_delegation_grant_guard"() RETURNS trigger SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   p "delegation_grants"%ROWTYPE;
 BEGIN
@@ -97,7 +97,7 @@ $$ LANGUAGE plpgsql;
 -- that does not say `chain_version = 2`. This is the refusal a v1-only writer meets (a binary older than S1, a
 -- raw client): it cannot land a v1 row past the boundary even if it was never drained. A row below the boundary
 -- (or with no seq: never written by the chained writer) is untouched.
-CREATE OR REPLACE FUNCTION "regulait_audit_v2_floor"() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION "regulait_audit_v2_floor"() RETURNS trigger SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   boundary bigint;
 BEGIN
@@ -114,3 +114,11 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "audit_log_v2_floor"
   BEFORE INSERT ON "audit_log"
   FOR EACH ROW EXECUTE FUNCTION "regulait_audit_v2_floor"();
+--> statement-breakpoint
+-- repo rule (db-guard hardening): a table protected by a row-level refusal trigger also refuses TRUNCATE,
+-- which bypasses row triggers. `regulait_refuse_truncate` is the shared body (migration 0185 uses the same).
+CREATE OR REPLACE FUNCTION public.regulait_refuse_truncate() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$ BEGIN RAISE EXCEPTION '%: TRUNCATE refused (append-only)', TG_TABLE_NAME; END $$;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "delegation_grants_no_truncate" ON public."delegation_grants";
+--> statement-breakpoint
+CREATE TRIGGER "delegation_grants_no_truncate" BEFORE TRUNCATE ON public."delegation_grants" FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();

@@ -155,8 +155,6 @@ export async function revokeRunKey(
   cause: string,
   actorUserId: string,
 ): Promise<boolean> {
-  // ADR-0188 S4: the run's delegation grant ends with its key (cascade; unspent allocation returned)
-  await endEngineRunDelegation(db, run.id);
   if (!run.virtualKeyId) return false;
   const revoked = await db
     .update(virtualKeys)
@@ -578,6 +576,8 @@ export async function finishEngineRun(
 /** the terminal write itself, for a run the caller holds locked (`FOR UPDATE`) in `tx` */
 async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now: Date) {
   const opts = runtime;
+  // ADR-0188 S4: the run's delegation grant ends with the run (a re-issued lease rotates the key, not the grant)
+  await endEngineRunDelegation(tx, locked.id);
   const runId = locked.id;
   let args = given;
   // PR #203 review [8]: a result is accepted only while the run is live, decided

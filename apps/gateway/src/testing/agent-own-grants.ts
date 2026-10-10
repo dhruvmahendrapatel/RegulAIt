@@ -124,3 +124,23 @@ export async function grantBuilderAgentConfiguredForTest(
       .map((t) => ({ connectorId: t.refId, mode: "readwrite" as const, allowedObjects: [...(opts.connectorObjects ?? TEST_CONNECTOR_OBJECTS)] })),
   });
 }
+
+/**
+ * For a suite whose agents are created inline in many places (no one `mkAgent`): every agent created
+ * through `POST /v1/agents` on this app is then granted ITSELF in every test mode, through the same
+ * service an admin's PUT runs, so the suite's pillar-7 workers act under the strict `own_grants`
+ * default. Tools are NOT granted here (a tool-using worker needs `grantAgentOwnGrantsForTest` with its
+ * tools). The wrapper applies to the object form of `app.inject`, the only form the suites use.
+ */
+export function autoGrantCreatedAgentsForTest(app: { inject: unknown }, db: Db): void {
+  type Res = { statusCode: number; json: () => unknown };
+  const original = (app.inject as (o: unknown) => Promise<Res>).bind(app);
+  (app as { inject: unknown }).inject = async (o: { method?: string; url?: string }) => {
+    const res = await original(o);
+    if (o && typeof o === "object" && o.method === "POST" && o.url === "/v1/agents" && res.statusCode === 201) {
+      const id = (res.json() as { id?: string }).id;
+      if (id) await grantAgentOwnGrantsForTest(db, id);
+    }
+    return res;
+  };
+}
