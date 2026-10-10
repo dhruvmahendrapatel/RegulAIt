@@ -19,6 +19,12 @@
  * `executable_format` finding), `unsafe`, `unknown` and `not_run` — with the
  * gateway's chip wording, which never says "safe". The upload mock decides the
  * format from the first bytes as a stand-in for the gateway's detection.
+ *
+ * Decision 127 (bounded storage): the upload refuses 409 / 413
+ * `artifact_quota_exceeded` past the uploader's strict quotas (20 artifacts,
+ * 2048 MiB); DELETE answers 409 `artifact_in_use` for an artifact whose scan is
+ * cited as model-card evidence (the verified safetensors file here), 403
+ * `step_up_required` without `x-regulait-step-up`, and 200 `{deleted}` with it.
  */
 import type { Page, Route } from "@playwright/test";
 
@@ -226,6 +232,12 @@ export const ARTIFACTS = {
   truncated: artifact("99999999-8888-4000-8000-000000000004", "pickle", true, "broken.pkl", 40),
   gguf: artifact("99999999-8888-4000-8000-000000000005", "gguf", false, "model.gguf", 8192),
 } as const;
+/** decision 127: the strict per-uploader quotas the gateway enforces (org settings, larger relaxes) */
+export const ARTIFACT_QUOTA = { uploaderCount: 20, uploaderMegabytes: 2048 } as const;
+/** decision 127: artifacts a model card cites a scan of (DELETE answers 409 `artifact_in_use`) */
+export const ARTIFACTS_IN_USE: Record<string, { citedScans: number; unfinishedRuns: number }> = {
+  "99999999-8888-4000-8000-000000000001": { citedScans: 1, unfinishedRuns: 0 },
+};
 export const ARTIFACT_SCANS: Record<string, Json[]> = {
   [ARTIFACTS.safetensors.id]: [scan(ARTIFACTS.safetensors.id, "clean", "safetensors", [])],
   [ARTIFACTS.cleanPickle.id]: [scan(ARTIFACTS.cleanPickle.id, "no_known_unsafe", "pickle", [{ kind: "executable_format", id: "pickle", severity: "high" }])],
@@ -345,6 +357,14 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
     if (p === "/v1/model-artifacts" && method === "POST") {
       if ((headers["content-type"] ?? "") !== "application/octet-stream") return json(route, 415, { error: "artifact_content_type", detail: "send the artifact's bytes as application/octet-stream" });
       const bytes = req.postDataBuffer() ?? new Uint8Array(0);
+      const mine = state.artifacts.filter((x) => x.uploadedByUserId === ENGINE_USER);
+      const used = mine.reduce((n, x) => n + x.sizeBytes, 0);
+      if (mine.length + 1 > ARTIFACT_QUOTA.uploaderCount) {
+        return json(route, 409, { error: "artifact_quota_exceeded", scope: "uploader", measure: "count", setting: "modelArtifactUploaderQuotaCount", limit: ARTIFACT_QUOTA.uploaderCount, used: mine.length, detail: `this upload would take your model artifacts past ${ARTIFACT_QUOTA.uploaderCount} stored artifacts (modelArtifactUploaderQuotaCount): delete artifacts no longer needed, or an admin may raise the quota (the change needs a step-up)` });
+      }
+      if (used + bytes.length > ARTIFACT_QUOTA.uploaderMegabytes * 1024 * 1024) {
+        return json(route, 413, { error: "artifact_quota_exceeded", scope: "uploader", measure: "bytes", setting: "modelArtifactUploaderQuotaMegabytes", limit: ARTIFACT_QUOTA.uploaderMegabytes * 1024 * 1024, used, detail: `this upload would take your model artifacts past ${ARTIFACT_QUOTA.uploaderMegabytes} MiB of stored artifacts (modelArtifactUploaderQuotaMegabytes): delete artifacts no longer needed, or an admin may raise the quota (the change needs a step-up)` });
+      }
       // a stand-in for the gateway's content detection: never the file name
       const format = bytes.length === 0 ? "empty" : bytes[0] === 0x80 ? "pickle" : bytes[8] === 0x7b ? "safetensors" : "unrecognised";
       const a = artifact(`99999999-8888-4000-8000-${String(state.artifacts.length + 100).padStart(12, "0")}`, format, format !== "safetensors" && format !== "empty", url.searchParams.get("filename") ?? "artifact", bytes.length);
@@ -356,6 +376,21 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
       if (!a) return json(route, 404, { error: "unknown_artifact" });
       return json(route, 200, { artifact: a, scans: ARTIFACT_SCANS[a.id] ?? [] });
+    }
+    if (artifactMatch && method === "DELETE") {
+      const i = state.artifacts.findIndex((x) => x.id === artifactMatch[1]);
+      if (i < 0) return json(route, 404, { error: "unknown_artifact" });
+      const a = state.artifacts[i];
+      const refs = ARTIFACTS_IN_USE[a.id];
+      if (refs) {
+        return json(route, 409, { error: "artifact_in_use", ...refs, detail: "a scan of this artifact is cited as model-card evidence, or a run on it has not finished: remove the citation or wait for the run, then delete it" });
+      }
+      if (!headers["x-regulait-step-up"]) {
+        const action = { kind: "settings_relax", body: { modelArtifactId: a.id, values: { deleted: true } } };
+        return json(route, 403, { error: "step_up_required", actionKind: "settings_relax", methods: ["passkey", "totp"], action });
+      }
+      state.artifacts.splice(i, 1);
+      return json(route, 200, { deleted: { id: a.id, sha256: a.sha256, scansDeleted: (ARTIFACT_SCANS[a.id] ?? []).length, object: "deleted" } });
     }
     return json(route, 404, { error: "not_found" });
   });

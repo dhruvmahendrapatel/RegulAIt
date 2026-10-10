@@ -18,9 +18,9 @@
  */
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { api } from "../../../api/client";
-import { ago, fmtUsd } from "../../../api/format";
+import { Link, useSearchParams } from "react-router-dom";
+import { ApiError, api } from "../../../api/client";
+import { UUID_RE, ago, fmtUsd } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Meter, Select, SeverityBadge, Table } from "../../../ui/kit";
 import {
   KV,
@@ -44,7 +44,10 @@ import {
   runFormProblem,
   runProvenance,
   runRequestBody,
+  ENGINE_RUN_PARAM,
+  runCoverage,
   runVerdict,
+  withEngineRun,
   until,
   type EngineInfo,
   type EngineRun,
@@ -95,10 +98,15 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
     queryFn: () => api.get<{ runs: EngineRun[] }>("/v1/engine-runs?limit=100"),
     refetchInterval: (q) => ((q.state.data?.runs ?? []).some((r) => isLiveStatus(r.status)) ? LIST_POLL_MS : false),
   });
-  const [selectedRun, setSelectedRun] = useState("");
+  // B5W-05: the open run lives in the URL (`?run=<id>`), so it can be linked,
+  // reloaded and walked with Back/Forward; other query fields are kept
+  const [params, setParams] = useSearchParams();
+  const selectedRun = params.get(ENGINE_RUN_PARAM) ?? "";
+  const selectedValid = UUID_RE.test(selectedRun);
+  const setSelectedRun = (id: string) => setParams((prev) => withEngineRun(prev, id, props.surface));
   const detail = useQuery({
     queryKey: engineRunKeys.run(selectedRun),
-    enabled: Boolean(selectedRun),
+    enabled: selectedValid,
     queryFn: () => api.get<{ run: EngineRun; items: unknown[] }>(`/v1/engine-runs/${selectedRun}`),
     refetchInterval: (q) => (q.state.data && isLiveStatus(q.state.data.run.status) ? DETAIL_POLL_MS : false),
   });
@@ -271,7 +279,14 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
             </span>
           }
         >
-          {detail.isLoading ? (
+          {!selectedValid || (detail.error instanceof ApiError && (detail.error.status === 404 || detail.error.status === 403)) ? (
+            <div className={v.errLine} role="alert" data-testid="engine-run-unavailable">
+              This engine run is unavailable: {selectedValid ? "it does not exist or you cannot see it" : "the link does not name a valid run"}.{" "}
+              <Button size="sm" onClick={() => setParams((prev) => withEngineRun(prev, null, props.surface))}>
+                Close
+              </Button>
+            </div>
+          ) : detail.isLoading ? (
             <p className={v.faint}>Loading the run…</p>
           ) : detail.error ? (
             <div className={v.errLine} role="alert">
@@ -374,6 +389,7 @@ export function EngineRunDetailView(props: {
   const live = isLiveStatus(run.status);
   const counts = run.summary?.counts;
   const notRunItems = items.filter((i) => i.verdict === "not_run");
+  const coverage = runCoverage(run, items);
   const name = (m: Map<string, string> | undefined, id: string | null) => (id ? (m?.get(id) ?? id.slice(0, 8)) : "—");
   const endCode = run.errorCode;
   const rows: Array<[ReactNode, ReactNode]> = [
@@ -493,15 +509,11 @@ export function EngineRunDetailView(props: {
 
       <div data-testid="engine-not-run-list">
         <div className={v.sectionTitle}>Not run ({notRunItems.length})</div>
-        {notRunItems.length === 0 ? (
-          <p className={v.faint}>
-            {run.status === "not_run"
-              ? "The whole run did not run; nothing it lists was measured."
-              : isLiveStatus(run.status)
-                ? "No result yet."
-                : "Every item ran."}
-          </p>
-        ) : (
+        {/* B5W-02: coverage is claimed only when it is established, never from an absence of rows */}
+        <p className={v.faint} data-testid="engine-run-coverage" data-coverage={coverage.kind}>
+          {coverage.text}
+        </p>
+        {notRunItems.length > 0 && (
           <Table
             rows={notRunItems}
             rowKey={(i) => i.key}

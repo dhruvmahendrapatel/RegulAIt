@@ -4,12 +4,13 @@
  * display name never carries a path.
  */
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { artifactStorageKey, artifactStoreFromEnv, displayFilename, FileArtifactStore, S3ArtifactStore, streamBounded } from "./model-artifacts.js";
+import { artifactStorageKey, artifactStoreFromEnv, displayFilename, FileArtifactStore, S3ArtifactStore, streamBounded, type FileStoreIo } from "./model-artifacts.js";
 
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -50,6 +51,73 @@ describe("B5-M artifact stores", () => {
     await writeFile(src, Buffer.from("b"));
     await store.putFile(artifactStorageKey(sha(Buffer.from("b"))), src);
     expect(synced).toEqual([path.join(dir, "sha256")]);
+  });
+
+  it("PR #212 review [4235322391]: a write that fails at the copy, the fsync or the rename leaves no temporary file", async () => {
+    const fail = (what: string) => {
+      throw new Error(`injected ${what} failure`);
+    };
+    const cases: Array<[string, Partial<FileStoreIo>]> = [
+      [
+        "pipeline",
+        {
+          // the copy writes (so the temporary file exists), then fails
+          pipeline: async (src, dst) => {
+            await pipeline(src, dst);
+            fail("pipeline");
+          },
+        },
+      ],
+      [
+        "fsync",
+        {
+          open: async (f, flags) => {
+            const fh = await open(f, flags);
+            return Object.assign(fh, { sync: async () => fail("fsync") });
+          },
+        },
+      ],
+      ["rename", { rename: async () => fail("rename") }],
+    ];
+    const leftovers: Record<string, string[]> = {};
+    for (const [what, io] of cases) {
+      const dir = await mkdtemp(path.join(tmpdir(), `b5m-fail-${what}-`));
+      const store = new FileArtifactStore(dir, async () => undefined, io);
+      const bytes = Buffer.from(`bytes for ${what}`);
+      const src = path.join(dir, "src.bin");
+      await writeFile(src, bytes);
+      const key = artifactStorageKey(sha(bytes));
+      await expect(store.putFile(key, src), what).rejects.toThrow(`injected ${what} failure`);
+      leftovers[what] = await readdir(path.join(dir, "sha256"));
+      expect(await store.has(key), what).toBe(false);
+    }
+    expect(leftovers).toEqual({ pipeline: [], fsync: [], rename: [] });
+  });
+
+  it("delete removes an object, and deleting a missing one is not an error (the sweep retries)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "b5m-del-"));
+    const synced: string[] = [];
+    const store = new FileArtifactStore(dir, async (d) => {
+      synced.push(d);
+    });
+    const bytes = Buffer.from("to delete");
+    const src = path.join(dir, "src.bin");
+    await writeFile(src, bytes);
+    const key = artifactStorageKey(sha(bytes));
+    await store.putFile(key, src);
+    synced.length = 0;
+    await store.delete(key);
+    expect(await store.has(key)).toBe(false);
+    expect(synced).toEqual([path.join(dir, "sha256")]);
+    await store.delete(key);
+    await expect(store.delete("sha256/../../x")).rejects.toThrow(/invalid artifact key/);
+    // the S3 store deletes under its prefix, and only a valid key
+    const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const client = { send: async (cmd: { constructor: { name: string }; input: Record<string, unknown> }) => (sent.push({ name: cmd.constructor.name, input: cmd.input }), {}) };
+    const s3 = new S3ArtifactStore("bucket", client as never);
+    await s3.delete(key);
+    expect(sent).toEqual([{ name: "DeleteObjectCommand", input: { Bucket: "bucket", Key: `model-artifacts/${key}` } }]);
+    await expect(s3.delete("sha256/xyz")).rejects.toThrow(/invalid artifact key/);
   });
 
   it("the S3 store sends our sha256 for the bucket to verify, under a fixed prefix", async () => {

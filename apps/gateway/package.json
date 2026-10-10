@@ -76,6 +76,7 @@
     "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
+    "@regulait/engine-garak": "workspace:*",
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",
     "@types/node": "26.1.1",

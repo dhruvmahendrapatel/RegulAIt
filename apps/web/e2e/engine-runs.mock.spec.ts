@@ -144,7 +144,9 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
     await expect(chip).toContainText("engine: promptfoo 0.123.1");
     // the run records no runner it still knows, so no digest is claimed for it
     await expect(chip).toContainText("image digest not recorded on this run");
-    await expect(chip).toContainText("signature unverified");
+    // B5W-03: the current image's signature state is not this run's
+    await expect(chip.getByTestId("engine-run-signature")).toHaveText("signature not recorded for this run");
+    await expect(chip.getByTestId("engine-current-build")).toContainText("current engine build, not this run's: 0.123.1, signature unverified");
     await expect(detail.getByTestId("engine-run-counts")).toContainText("1 pass · 1 fail · 0 unknown · 2 not run");
     await expect(detail).toContainText("1 of 3 attempts defeated the target");
     await expect(detail).toContainText("Attack success rate 16.7%");
@@ -220,5 +222,59 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
     await expect(page.getByRole("link", { name: "Engines page" }).first()).toHaveAttribute("href", "/ui/admin/engines");
     await expect(page.getByText("No engine runs yet")).toBeVisible();
     await expectAxeClean(page, "no engine enabled");
+  });
+
+  test("B5W-02: a failed, timed-out or cancelled run with no items never claims every item ran", async ({ page }) => {
+    await open(page, "redteam");
+    for (const r of [RUNS.failedUnknown, RUNS.timeout, RUNS.cancelled]) {
+      await runRow(page, r.id).click();
+      const coverage = page.getByTestId("engine-run-coverage");
+      await expect(coverage).toHaveAttribute("data-coverage", "none");
+      await expect(coverage).toContainText("No item measurements were recorded");
+      await expect(page.getByTestId("engine-run-detail")).not.toContainText(/Every (recorded )?item ran/);
+    }
+  });
+
+  test("B5W-05: the open run is in the URL — deep link, reload, Back/Forward, unrelated fields kept", async ({ page }) => {
+    await mockShell(page);
+    await installEnginesMock(page);
+    await page.goto(`/ui/admin/redteam?keep=1&run=${RUNS.completedFail.id}`);
+    const detail = page.getByTestId("engine-run-detail");
+    await expect(detail.getByTestId("engine-run-counts")).toContainText("1 pass · 1 fail", { timeout: 30_000 });
+    await page.reload();
+    await expect(detail.getByTestId("engine-run-counts")).toContainText("1 pass · 1 fail", { timeout: 30_000 });
+    await runRow(page, RUNS.notRun.id).click();
+    await expect(detail.getByTestId("engine-run-status")).toHaveText("not run");
+    expect(new URL(page.url()).searchParams.get("keep")).toBe("1");
+    expect(new URL(page.url()).searchParams.get("run")).toBe(RUNS.notRun.id);
+    await page.goBack();
+    await expect(detail.getByTestId("engine-run-counts")).toContainText("1 pass · 1 fail");
+    await page.goForward();
+    await expect(detail.getByTestId("engine-run-status")).toHaveText("not run");
+  });
+
+  test("B5W-05: an Evaluations deep link opens on the Engine runs tab", async ({ page }) => {
+    await mockShell(page);
+    await installEnginesMock(page);
+    await page.goto(`/ui/admin/evals?keep=1&run=${RUNS.failedUnknown.id}`);
+    await expect(page.getByRole("tab", { name: "Engine runs" })).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+    await expect(page.getByTestId("engine-run-detail").getByTestId("engine-run-status")).toHaveText("failed");
+    await page.getByRole("tab", { name: "Catalog" }).click();
+    expect(new URL(page.url()).searchParams.get("run")).toBeNull();
+    expect(new URL(page.url()).searchParams.get("keep")).toBe("1");
+  });
+
+  test("B5W-05: an invalid or unknown run id shows an explicit unavailable state", async ({ page }) => {
+    await mockShell(page);
+    await installEnginesMock(page);
+    await page.goto("/ui/admin/redteam?run=not-a-run");
+    const unavailable = page.getByTestId("engine-run-unavailable");
+    await expect(unavailable).toContainText("the link does not name a valid run", { timeout: 30_000 });
+    await page.goto("/ui/admin/redteam?run=99999999-1111-4000-8000-0000000000ff");
+    await expect(unavailable).toContainText("it does not exist or you cannot see it");
+    await expectAxeClean(page, "engine run unavailable");
+    await unavailable.getByRole("button", { name: "Close" }).click();
+    await expect(unavailable).toHaveCount(0);
+    expect(new URL(page.url()).searchParams.get("run")).toBeNull();
   });
 });

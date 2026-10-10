@@ -1004,8 +1004,8 @@ for(const recordStatus of [200,403]) for(const startStep of [0,2]) {
  });
 }
 
-for(const heldRequest of ["patch","artifact"])for(const refused of [false,true]){
- test(`R24-05: owner change during ${heldRequest} (refused=${refused}) stops subsequent writes and success navigation`,async({page})=>{
+for(const heldRequest of ["patch","artifact"])for(const refused of [false,true])for(const returnsToOwner of [false,true]){
+ test(`R24-05: owner change during ${heldRequest} (refused=${refused}, returns=${returnsToOwner}) stops subsequent writes and success navigation`,async({page})=>{
   const state=await mockGateway(page,{status:"needs_info",resubmission:true,reviews:[]});
   await page.goto(`/ui/admin/governance/intake?resubmit=${UC}`);
   await page.getByLabel("What will the system do?").fill("Original owner edit");
@@ -1018,8 +1018,9 @@ for(const heldRequest of ["patch","artifact"])for(const refused of [false,true])
   state.persona=SAM;expect(await refreshSessionInPlace(page)).toBe("sam");
   const notice=page.getByRole("alert").filter({hasText:"You're now signed in as someone else"});
   await expect(notice).toContainText("sent before the account changed");await expect(notice).not.toContainText("nothing was sent");
+  if(returnsToOwner){state.persona=RILEY;expect(await refreshSessionInPlace(page)).toBe("riley");await expect(page.getByRole("alert").filter({hasText:"The account changed while"})).toBeVisible();}
   release();await expect(page.getByRole("button",{name:"Discard and leave",exact:true})).toBeEnabled();
-  await expect(notice).toContainText("sent before the account changed");await expect(notice).not.toContainText("nothing was sent");
+  const finalNotice=page.getByRole("alert").filter({hasText:"sent before the account changed"});await expect(finalNotice).toBeVisible();await expect(finalNotice).not.toContainText("nothing was sent");if(returnsToOwner)await expect(finalNotice).not.toContainText("someone else");
   await expect(page).toHaveURL(/resubmit=/);if(heldRequest==="patch")expect(state.artifacts).toEqual([]);
   expect(state.draftWrites.filter(write=>write.method==="DELETE")).toEqual([]);
   await expect(page.getByText("Resubmitted for review",{exact:true})).toHaveCount(0);
