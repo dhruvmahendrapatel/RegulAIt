@@ -65,6 +65,7 @@ describe("ADR-0186 strict defaults and relaxations", () => {
       decisionReceiptsMode: "on",
       auditAnchorTimestampMode: "required",
       vendoredDetectionPacks: ["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"],
+      outboundCredentialAudience: "enforce",
       monitorMcpBaselineDays: 14,
       monitorJailbreakThreshold: 3,
       monitorJailbreakWindowHours: 24,
@@ -89,6 +90,7 @@ describe("ADR-0186 strict defaults and relaxations", () => {
       ["decisionReceiptsMode", "off", true],
       ["auditAnchorTimestampMode", "off", true],
       ["vendoredDetectionPacks", ["pipelock-secrets"], true],
+      ["outboundCredentialAudience", "off", true],
       ["monitorMcpBaselineDays", 30, true],
       ["monitorMcpBaselineDays", 7, false],
       ["monitorJailbreakThreshold", 4, true],
@@ -112,6 +114,9 @@ describe("ADR-0186 strict defaults and relaxations", () => {
     expect(ok({ stepUpActions: ["approval_decide", "approval_decide"] })).toBe(false);
     expect(ok({ stepUpActions: ["sudo"] })).toBe(false);
     expect(ok({ vendoredDetectionPacks: ["other-pack"] })).toBe(false);
+    expect(ok({ outboundCredentialAudience: "enforce" })).toBe(true);
+    expect(ok({ outboundCredentialAudience: "off" })).toBe(true);
+    expect(ok({ outboundCredentialAudience: "warn" })).toBe(false);
     expect(ok({ monitorMcpBaselineDays: 91 })).toBe(false);
     expect(ok({ monitorJailbreakWindowHours: 0 })).toBe(false);
     // stored in vocabulary order

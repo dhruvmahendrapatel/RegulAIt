@@ -39,7 +39,11 @@ and admission consumers honor the current pack selection. Results expose
 rule IDs/counts/spans, not matched secrets or descriptions. Scrubbing makes at most two linear passes. If newly introduced marker boundaries reveal another credential in an unredacted fragment, the second pass redacts that whole fragment (field marker), preventing an unbounded chain of boundary changes. Only markers whose labels are known detector rule IDs or the field label stay opaque; caller-supplied unknown labels are scanned. the pathological fragment may lose non-secret surrounding prose.
 
 `credentialAudienceViolations` provides host/TLS matching, including wildcard
-apex/subdomains and suffix-spoof refusal. **The guarded outbound integration is
-not installed by this slice:** `outboundAudienceEnforced: false` reports that
-fact. A URL/header/body consumer and its integration test remain an owner-file
-prerequisite. Manifest exclusions and normalisation limits remain visible.
+apex/subdomains and suffix-spoof refusal. Its consumer is the gateway's
+`outbound-audience.ts` (ADR-0186 decision 30), called at the MCP tool, MCP
+protocol and connector dispatch points on the caller's own content; the org
+setting `outboundCredentialAudience` (strict `enforce`) governs it and
+`GET /v1/detection-content` reports `outboundAudienceEnforced` from that setting
+and the secrets pack. A rule with no audience hosts is refused for every
+destination; the SSN shape is personal data, not a credential, and is left to
+the piiMode cascade there. Manifest exclusions and normalisation limits remain visible.

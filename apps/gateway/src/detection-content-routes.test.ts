@@ -24,15 +24,17 @@ describe.skipIf(!base)("X23 manifest on real app and database",()=>{
   const key=await app.inject({method:"POST",url:`/v1/users/${user.json().id}/keys`,headers:boot,payload:{name:"X23 fixture"}});expect(key.statusCode).toBe(201);member={authorization:`Bearer ${key.json().token}`};
  },120000);
  afterAll(async()=>{await app?.close();await restore?.();await db?.$client.end();if(control){await dropScratchDatabase(control,name);await control.$client.end();}});
- it("reports pinned manifests and real strict settings with uncovered outbound seam",async()=>{
+ it("reports pinned manifests and real strict settings with the outbound audience enforced (decision 30)",async()=>{
   const result=await app.inject({method:"GET",url:"/v1/detection-content",headers:boot});expect(result.statusCode).toBe(200);
-  const body=result.json();expect(body.outboundAudienceEnforced).toBe(false);expect(body.packs).toHaveLength(4);
+  const body=result.json();expect(body.outboundAudienceEnforced).toBe(true);expect(body.outboundCredentialAudience).toBe("enforce");expect(body.packs).toHaveLength(4);
   for(const pack of body.packs){expect(pack.enabled).toBe(true);expect(pack.commit).toMatch(/^[a-f0-9]{40}$/);expect(pack.sha256).toMatch(/^[a-f0-9]{64}$/);expect(pack.rules).toBe(VENDORED_PACK_MANIFESTS.find(p=>p.id===pack.id)!.rules);}
   expect(body.packs.find((p:{id:string})=>p.id==="nemo-yara-injection").notImported).toHaveLength(5);
  });
  it("reads changed selection while audit redaction remains unconditional",async()=>{
   await db.update(orgSettings).set({vendoredDetectionPacks:[]}).where(eq(orgSettings.id,ORG_SETTINGS_ID));
-  try{const body=(await app.inject({method:"GET",url:"/v1/detection-content",headers:boot})).json();expect(body.packs.every((p:{enabled:boolean})=>!p.enabled)).toBe(true);expect(body.packs.find((p:{id:string})=>p.id==="pipelock-secrets").auditRedactionAlways).toBe(true);}
+  try{const body=(await app.inject({method:"GET",url:"/v1/detection-content",headers:boot})).json();expect(body.packs.every((p:{enabled:boolean})=>!p.enabled)).toBe(true);expect(body.packs.find((p:{id:string})=>p.id==="pipelock-secrets").auditRedactionAlways).toBe(true);
+   // with the secrets pack off nothing can match, so enforcement is not claimed
+   expect(body.outboundAudienceEnforced).toBe(false);}
   finally{await db.update(orgSettings).set({vendoredDetectionPacks:["pipelock-secrets","pipelock-normalise","nemo-yara-injection","agt-mcp-heuristics"]}).where(eq(orgSettings.id,ORG_SETTINGS_ID));}
  });
  it("requires administrator authentication",async()=>{
