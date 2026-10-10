@@ -148,6 +148,32 @@ The dedicated scratch database was dropped after validation; the shared base dat
 
 No additional authentication/secret-storage/replay/default-deny bypass reproduced in this slice. AuthContext.via adds a type member, with no workload authentication issuer yet; no human auth widening was introduced here. Allocation/settlement admission and live provenance remain S3/S4, SPIFFE trust bundles S9. The owner's announced missing builder_turn/root subject-credential FKs and child max_depth are deferred boundaries, not rediscovered findings. No token endpoint, live allocation, real external caller, or whole gateway/shared CI claim is made.
 
+## X30 Engines returned-fix recheck — 2026-10-10 UTC
+
+Independently reviewed PR #248 at `d68baf83481879e61dacce9ab45f038829e72d7f` (source changes `9e1bda97` / `35eb6559`, integrated through `f5680d85` / `bcb374eb`). **Recommend resolving B5W-07 and the three #230 P2 review items within their stated scope.** No additional defect reproduced. Claude retains final adjudication and VERIFIED ownership.
+
+- **B5W-07:** the risk dialog names the build returned in the actual refusal, not the loaded inventory. Acceptance sends `expectedVersion` + `expectedDigest`; its `settings_relax` fact includes that same build. The gateway checks both before consuming step-up and under the engine row lock, and its acceptance audit uses the locked row. A rollover reopens acknowledgement for the replacement build, unticked. An unnamed refusal cannot produce an accepted write.
+- **Revocation reason:** the shared 500-character bound is mirrored and pinned by tests; oversized input disables submission. Server refusal keeps the dialog and typed reason available for correction.
+- **Runner report freshness:** additive `selfTestReportedAt` feeds age and future-skew checks. Stale, missing, malformed and excessively future-dated reports have no healthy badge; the page clock rechecks reports that expire while it remains open.
+- **Modelscan copy:** enabling the artifact-only engine explains that it has no model credentials and calls no model. Model-access engine copy still explains run-scoped model keys.
+
+Actual validation at the reviewed head (activation helper sourced first):
+
+| Command | Result |
+|---|---|
+| `pnpm --filter '@regulait/gateway...' build` | PASS, gateway and dependency closure |
+| `pnpm --filter @regulait/web test` | 468/468 PASS |
+| `pnpm --filter @regulait/web build` | PASS, includes `tsc -p tsconfig.json --noEmit` |
+| `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_review_engines_oct10_parallel pnpm --filter @regulait/gateway test zz-b5-engines.test.ts` | 42/42 PASS, fresh disposable PostgreSQL DB dropped after clean exit |
+| `pnpm --filter @regulait/shared test engines/engines.test.ts` | 20/20 PASS, including shared/web constant pins |
+| `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/b5-engines-page.mock.spec.ts e2e/x30-engines-independent.mock.spec.ts --trace on --output=/workspace/.regulait-onboarding/g12-followup/engines-final-browser` | 22/22 PASS (19 owner + 3 independent), 1.7 minutes |
+
+The gateway suite executes the owner’s real two-replica manifest rollover case with the real database and app: stale acceptance before/during the dialog or step-up refuses, an old grant cannot accept a new build, no stale acceptance is audited, and fresh acceptance audits the new build. The browser suite includes all 19 owner cases (with light/dark axe) and three additional independent negatives in `x30-engines-independent.mock.spec.ts`: loaded A → refusal B → rollover C during step-up preserves the exact B request/fact and refuses it; an unnamed build refusal cannot accept; and an excessively future-dated passing report never reads healthy.
+
+**Evidence limits:** browser routes and their step-up verification are mocked. They establish UI orchestration, not gateway locking or a live engine process. Gateway rollover evidence comes from the real PostgreSQL/app suite, not those mocks. No full monorepo, actual deployed rolling upgrade, live cloud provider, deployed passkey ceremony or screen-reader session is claimed. Production source remains unchanged; this delivery adds only independent web tests and the review ledger. Passing traces retained under `/workspace/.regulait-onboarding/engines-final-browser/**/trace.zip`; logs `/tmp/engines-parallel-{build,web-test,web-build,db,shared,browser}.log`. The Playwright `--output` directory was moved outside the checkout after the run solely to keep binary evidence out of git.
+
+---
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.

@@ -91,8 +91,11 @@ jobs:
     # Not a performance target — a blast-radius cap. A hung job bills its full
     # timeout, so this is the most CI minutes any single run can waste. A normal
     # run is ~13 min (see the arithmetic above); 20 left ~7 min of headroom and
-    # a slow runner day turned green PRs red for timing (CI-03).
-    timeout-minutes: 30
+    # a slow runner day turned green PRs red for timing (CI-03). By 2026-10-10
+    # the gateway suite had grown to 20-30 min (batches 4-6) and three PRs were
+    # cancelled at 30 while still making progress (not hung); 45 is a stopgap
+    # until the gateway tests are sharded across jobs.
+    timeout-minutes: 45
 
     services:
       postgres:
