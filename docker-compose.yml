@@ -570,6 +570,74 @@ services:
       REGULAIT_MODELSCAN_RESULTS_DIR: /out
     restart: unless-stopped
 
+  # --- garak engine: runner + worker (profile: engines) — ADR-0187 B5-G -------
+  #
+  # ONE image (engines/garak/Dockerfile), TWO containers (decision 140), so the
+  # process that runs garak never holds the runner credential:
+  #
+  #   engine-garak         the runner: the hardened template, on `engines`, its
+  #                        own state volume (the runner token), the job volume
+  #                        read-write, the result volume READ-ONLY. It never
+  #                        runs garak.
+  #   engine-garak-worker  the worker: runs one garak process per probe. It must
+  #                        reach the gateway's model routes, so it is on
+  #                        `engines` (internal: reaches only the gateway) — but
+  #                        it has NO runner token, NO enrolment token and NO
+  #                        state volume: what it holds, for one run at a time, is
+  #                        that run's own virtual key (in the job). Read-only
+  #                        root, non-root, cap_drop ALL, no-new-privileges; the
+  #                        job volume READ-ONLY; its writable places are /work
+  #                        (garak's per-probe directories) and /out (results).
+  #
+  # Both exchange volumes are tmpfs-backed. Digest pinning as for the other
+  # engines: one variable, REGULAIT_ENGINE_GARAK_DIGEST=sha256:<digest>, names
+  # the image of BOTH containers and the digest the runner reports; the
+  # all-zero default names no image.
+  engine-garak:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-garak-state:/state
+      - engine-garak-jobs:/jobs
+      - engine-garak-results:/results:ro
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_GARAK_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_GARAK_JOBS_DIR: /jobs
+      REGULAIT_GARAK_RESULTS_DIR: /results
+
+  engine-garak-worker:
+    profiles: ["engines"]
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["node", "/app/dist/worker-main.js"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
+    networks: [engines]
+    read_only: true
+    tmpfs:
+      - /work:size=1g,mode=0700,uid=10001,gid=10001
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    mem_limit: 3g
+    cpus: 2
+    pids_limit: 256
+    volumes:
+      - engine-garak-jobs:/jobs:ro
+      - engine-garak-results:/out
+    environment:
+      REGULAIT_GARAK_JOBS_DIR: /jobs
+      REGULAIT_GARAK_RESULTS_DIR: /out
+      REGULAIT_WORK_DIR: /work
+    restart: unless-stopped
+
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
   # OFF by default. Keycloak brokers Microsoft Entra ID, Google and GitHub and
@@ -783,5 +851,20 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=64m,uid=10001,gid=10001,mode=0750"
+  # ADR-0187 B5-G: the garak runner's own state (its runner token only), and the
+  # two tmpfs-backed exchange volumes between the runner and the worker
+  engine-garak-state:
+  engine-garak-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-garak-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=256m,uid=10001,gid=10001,mode=0750"
   caddy_data:
   caddy_config:
