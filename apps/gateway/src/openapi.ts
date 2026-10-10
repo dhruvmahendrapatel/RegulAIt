@@ -49,6 +49,8 @@ import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
   assignRoleSchema,
+  BOM_B4_ROUTE_CONTRACT,
+  bomErrorEnvelopeSchema,
   createApiKeySchema,
   createProjectSchema,
   createRoleSchema,
@@ -155,7 +157,37 @@ export interface RouteDoc {
   body?: ZodTypeAny;
   /** a named response shape, when one is worth stating */
   responseNote?: string;
+  /** the query-string schema (a zod object), rendered as `in: query` parameters */
+  query?: ZodTypeAny;
+  /** the 2XX JSON body schema, when the route's contract freezes one */
+  response?: ZodTypeAny;
+  /** a 2XX that is bytes, not JSON (ADR-0189 bundles): its content type and the headers it carries */
+  responseBinary?: { contentType: string; headers: ZodTypeAny };
+  /** refusal statuses and their `error` codes; each body is `errorBody` */
+  errors?: Readonly<Record<number, readonly string[]>>;
+  errorBody?: ZodTypeAny;
 }
+
+/**
+ * ADR-0189 slice B4: the FROZEN contract of the five §9 routes B1 registered as
+ * 501 stubs (`@regulait/shared` `contract-b4.ts`). Internal stability, so they
+ * render only with `?include=all`; the routes still answer 501 `not_built`
+ * until B4 implements exactly these shapes.
+ */
+const BOM_B4_DOCS: Record<string, RouteDoc> = Object.fromEntries(
+  Object.entries(BOM_B4_ROUTE_CONTRACT).map(([key, c]) => {
+    const doc: RouteDoc = {
+      summary: `${c.summary} Not built yet: answers 501 \`not_built\` until ADR-0189 slice B4.`,
+      errors: c.errors,
+      errorBody: bomErrorEnvelopeSchema,
+    };
+    if ("query" in c) doc.query = c.query;
+    if ("body" in c) doc.body = c.body;
+    if (c.response.kind === "json") doc.response = c.response.schema;
+    else doc.responseBinary = { contentType: "application/gzip", headers: c.response.headers };
+    return [key, doc];
+  }),
+);
 
 /**
  * Bodies are bound to the ACTUAL shared schema the handler calls `.parse()`
@@ -291,6 +323,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/conversations": { summary: "The caller's conversations." },
   "GET /v1/conversations/:conversationId": { summary: "One conversation." },
   "DELETE /v1/conversations/:conversationId": { summary: "Delete a conversation." },
+  ...BOM_B4_DOCS,
 };
 
 // ===========================================================================
@@ -399,7 +432,14 @@ export function buildOpenApiDocument(
       required: true,
       schema: { type: "string" },
     }));
-    if (params.length > 0) operation.parameters = params;
+    const queryShape = doc?.query ? (jsonSchemaFor(doc.query) as { properties?: Record<string, unknown>; required?: string[] }) : null;
+    const queryParams = Object.entries(queryShape?.properties ?? {}).map(([name, schema]) => ({
+      name,
+      in: "query",
+      required: (queryShape?.required ?? []).includes(name),
+      schema,
+    }));
+    if (params.length + queryParams.length > 0) operation.parameters = [...params, ...queryParams];
 
     if (doc?.body) {
       operation.requestBody = {
@@ -413,8 +453,26 @@ export function buildOpenApiDocument(
       operation["x-regulait-schema"] = "unspecified";
     }
 
+    const success: Record<string, unknown> = { description: doc?.responseNote ?? "Success." };
+    if (doc?.response) success.content = { "application/json": { schema: jsonSchemaFor(doc.response) } };
+    if (doc?.responseBinary) {
+      success.content = { [doc.responseBinary.contentType]: { schema: { type: "string", format: "binary" } } };
+      const headers = jsonSchemaFor(doc.responseBinary.headers) as { properties?: Record<string, unknown> };
+      success.headers = Object.fromEntries(Object.entries(headers.properties ?? {}).map(([name, schema]) => [name, { schema }]));
+    }
+    const refusals: Record<string, unknown> = {};
+    if (doc?.errors && doc.errorBody) {
+      const body = jsonSchemaFor(doc.errorBody);
+      for (const [status, codes] of Object.entries(doc.errors)) {
+        refusals[status] = {
+          description: codes.length ? `Refused: ${codes.map((c) => `\`${c}\``).join(", ")}.` : "Refused.",
+          ...(codes.length ? { content: { "application/json": { schema: body } } } : {}),
+          "x-regulait-error-codes": codes,
+        };
+      }
+    }
     operation.responses = {
-      "2XX": { description: doc?.responseNote ?? "Success." },
+      "2XX": success,
       "400": { description: "Request body failed schema validation." },
       ...(auth === "public"
         ? {}
@@ -440,6 +498,7 @@ export function buildOpenApiDocument(
             }
           : {}),
       "429": { description: "Rate limited. Retry after the `retry-after` header." },
+      ...refusals,
     };
 
     const p = openApiPath(entry.url);
