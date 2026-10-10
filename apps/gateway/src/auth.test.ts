@@ -1639,7 +1639,7 @@ describe("ADR-0030 — login by username", () => {
   });
 
   it("a username write against an unknown user is a 404, not a silent no-op", async () => {
-    const r = await setUsername("00000000-0000-0000-0000-0000000000ff", "ghost");
+    const r = await setUsername("00000000-0000-4000-8000-0000000000ff", "ghost");
     expect(r.statusCode).toBe(404);
     expect(r.json().error).toBe("unknown_user");
   });

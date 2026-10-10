@@ -157,7 +157,7 @@ describe("capture → approve → alignment, end to end on the one column", () =
 
   it("an unknown agent id in the capture is refused (invalid_reference), not stored dangling", async () => {
     const res = await patch(useCaseId, {
-      intendedAgentIds: ["00000000-0000-0000-0000-0000000000ab"],
+      intendedAgentIds: ["00000000-0000-4000-8000-0000000000ab"],
     });
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ error: "invalid_reference", field: "intendedAgentIds" });

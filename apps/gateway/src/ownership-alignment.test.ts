@@ -253,12 +253,12 @@ describe("ownership — an audited governance record, never a default", () => {
   it("both write endpoints are admin-only via the default gate; unknown agent is a 404", async () => {
     expect((await setOwner(agentAligned, ownerId, memberAuth)).statusCode).toBe(403);
     expect((await setLifecycle(agentAligned, { status: "deprecated", reason: "x" }, memberAuth)).statusCode).toBe(403);
-    expect((await setOwner("00000000-0000-0000-0000-0000000000ab", ownerId)).statusCode).toBe(404);
-    expect((await setLifecycle("00000000-0000-0000-0000-0000000000ab", { status: "deprecated", reason: "x" })).statusCode).toBe(404);
+    expect((await setOwner("00000000-0000-4000-8000-0000000000ab", ownerId)).statusCode).toBe(404);
+    expect((await setLifecycle("00000000-0000-4000-8000-0000000000ab", { status: "deprecated", reason: "x" })).statusCode).toBe(404);
   });
 
   it("owner must be a real, active user — an unknown id is refused, a deactivated one would mint an orphan", async () => {
-    const unknown = await setOwner(agentAligned, "00000000-0000-0000-0000-0000000000cd");
+    const unknown = await setOwner(agentAligned, "00000000-0000-4000-8000-0000000000cd");
     expect(unknown.statusCode).toBe(400);
     expect(unknown.json().error).toBe("invalid_reference");
 

@@ -224,7 +224,7 @@ describe("registration and ownership", () => {
         category: "tool_misuse",
         likelihood: "low",
         impact: "low",
-        useCaseId: "00000000-0000-0000-0000-0000000000aa",
+        useCaseId: "00000000-0000-4000-8000-0000000000aa",
       },
     });
     expect(res.statusCode).toBe(400);

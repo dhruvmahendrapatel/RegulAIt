@@ -533,7 +533,7 @@ describe("O13: interception scope rules — precedence chain, exposure != entitl
 
   it("a rule must target something that exists (422 unknown_scope_target)", async () => {
     await mkRule(
-      { scopeKind: "role", scopeId: "00000000-0000-0000-0000-00000000dead", anthropicCompatEnabled: true },
+      { scopeKind: "role", scopeId: "00000000-0000-4000-8000-00000000dead", anthropicCompatEnabled: true },
       422,
     );
   });

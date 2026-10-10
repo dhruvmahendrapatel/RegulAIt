@@ -2311,7 +2311,7 @@ export const updateOrgSettingsSchema = z
      * override below the global floor is accepted but inert: composition is
      * max(floor, override), so retention can never shorten. */
     modeAuditRetention: z
-      .record(z.enum(["hosted", "byoc", "air_gapped"]), z.number().int().positive())
+      .partialRecord(z.enum(["hosted", "byoc", "air_gapped"]), z.number().int().positive())
       .optional(),
     /** Batch B7c (ADR-0073 amendment, migration 0102): retention window for
      * `config_canary_observations` — shadow-canary evidence only, acted on by

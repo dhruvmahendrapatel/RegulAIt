@@ -288,7 +288,7 @@ describe("the plan-only gate on a direct agent invoke", () => {
   it("an unknown instance refuses, and someone else's instance refuses — never ignored", async () => {
     const unknown = await invoke({
       mode: "plan",
-      instanceId: "00000000-0000-0000-0000-0000000000ff",
+      instanceId: "00000000-0000-4000-8000-0000000000ff",
     });
     expect(unknown.statusCode).toBe(400);
     expect(unknown.json().error).toBe("invalid_reference");
@@ -375,7 +375,7 @@ describe("the plan-only gate on the run-plan path", () => {
       url: "/v1/runs",
       payload: {
         graph: graph("po-run-unknown", "plan"),
-        workflowInstanceId: "00000000-0000-0000-0000-0000000000ff",
+        workflowInstanceId: "00000000-0000-4000-8000-0000000000ff",
       },
     });
     expect(res.statusCode).toBe(400);

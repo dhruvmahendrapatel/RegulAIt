@@ -286,7 +286,7 @@ describe("rule authoring — reasons required, selectors concrete, surfaces stat
   });
 
   it("refuses by name: unknown object, identical sides, misplaced tool name / mode, missing reason", async () => {
-    const ghost = "00000000-0000-0000-0000-00000000dead";
+    const ghost = "00000000-0000-4000-8000-00000000dead";
     const bad = await createRule({
       name: "sod-bad-ref",
       reason: "x",

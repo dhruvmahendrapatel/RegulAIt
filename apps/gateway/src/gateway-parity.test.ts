@@ -496,7 +496,7 @@ describe("virtual keys: issuance and storage", () => {
       method: "POST",
       url: "/v1/virtual-keys",
       headers: adaAuth,
-      payload: { name: "gp-pin", upstreamCredentialId: "00000000-0000-0000-0000-000000000001" },
+      payload: { name: "gp-pin", upstreamCredentialId: "00000000-0000-4000-8000-000000000001" },
     });
     expect(r.statusCode).toBe(403);
     expect(r.json().error).toBe("admin_only_field");
@@ -728,7 +728,7 @@ describe("virtual keys: the pinned upstream credential", () => {
       headers: rootAuth,
       payload: {
         name: "gp-ghost-cred",
-        upstreamCredentialId: "00000000-0000-0000-0000-0000000000aa",
+        upstreamCredentialId: "00000000-0000-4000-8000-0000000000aa",
       },
     });
     expect(r.statusCode).toBe(404);
@@ -913,7 +913,7 @@ describe("fallback chains: configuration", () => {
       "duplicate_fallback",
     );
     expect(
-      (await setFallbacks(primaryAgentId, ["00000000-0000-0000-0000-0000000000ff"], 422)).json().error,
+      (await setFallbacks(primaryAgentId, ["00000000-0000-4000-8000-0000000000ff"], 422)).json().error,
     ).toBe("unknown_fallback_agent");
   });
 

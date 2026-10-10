@@ -257,7 +257,7 @@ describe("scoping", () => {
   it("both inventory endpoints are admin-only via the default gate; unknown agent is a 404", async () => {
     expect((await listInventory(holderAuth)).statusCode).toBe(403);
     expect((await detailOf(agentA, holderAuth)).statusCode).toBe(403);
-    expect((await detailOf("00000000-0000-0000-0000-0000000000ab")).statusCode).toBe(404);
+    expect((await detailOf("00000000-0000-4000-8000-0000000000ab")).statusCode).toBe(404);
   });
 });
 

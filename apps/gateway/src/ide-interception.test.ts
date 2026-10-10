@@ -834,7 +834,7 @@ describe("an unresolvable model is DEFAULT-DENY, never a pass-through", () => {
   it("a bogus x-regulait-agent-id is 403, not a 404-shaped hint", async () => {
     const r = await app.inject({
       method: "POST",
-      headers: { ...devAuth, [AGENT_HEADER]: "00000000-0000-0000-0000-0000000000ff" },
+      headers: { ...devAuth, [AGENT_HEADER]: "00000000-0000-4000-8000-0000000000ff" },
       url: "/v1/messages",
       payload: anthropicBody("ide-premium"),
     });
@@ -1040,7 +1040,7 @@ describe("turning a surface off takes it away again", () => {
     const r = await app.inject({
       method: "POST",
       headers: devAuth,
-      url: "/mcp/00000000-0000-0000-0000-000000000001",
+      url: "/mcp/00000000-0000-4000-8000-000000000001",
       payload: { jsonrpc: "2.0", id: 1, method: "tools/list" },
     });
     expect(r.statusCode).toBe(404);
