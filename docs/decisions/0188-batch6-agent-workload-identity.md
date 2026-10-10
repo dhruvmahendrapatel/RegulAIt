@@ -1,7 +1,8 @@
 # ADR-0188: Batch 6 item 1 — per-agent and workload identity, and constrained delegation
 
 - **Status:** Proposed (design only; nine OWNER DECISION items below, each with a recommended answer). Amended
-  2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table.
+  2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table; amended again
+  after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23.
 - **Date:** 2026-10-10
 - **Deciders:** owner (pending); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
@@ -83,7 +84,8 @@ Run-scoped virtual keys (ADR-0187 decision 2) are the closest existing thing to 
 model allow-list, budget, expiry at the deadline, revoked at completion; but they are still bearer and still keyed to a
 human only.
 
-**Numbers.** Latest migration on `main` is `0175_model_artifact_scans`; the build takes the next free number at the
+**Numbers.** Latest migration on `main` is `0176_model_artifact_quotas_retention` (re-checked after merging main for
+the X31 follow-up); the build takes the next free number at the
 time (0176–0178 are reserved for the Batch 5 follow-up, garak and B5-P2, so 0179 or later), with the journal `when` rule of CONTRIBUTING_PARALLEL_SESSIONS §4.
 
 ### Standards and open source surveyed (ADR-0176)
@@ -343,7 +345,9 @@ Codex reviewed this ADR at `691e717` (codexInputs.md, "X31 — ADR-0188 identity
 the exact library versions. It kept the core (sponsor plus actor intersection, constrained grants, no trust-score
 authority, mandatory sender binding, in-process grants without signatures) and raised nine findings, I7R-01 to I7R-09.
 Decisions 12 to 21 resolve them; where they change decisions 3 to 11, the earlier text points here and **the later
-decision wins**. The disposition table follows decision 21.
+decision wins**. Codex's recheck of that revision (`165a5be`, codexInputs.md "X31 revised ADR recheck") found two
+gaps left in decisions 15 and 16 (I7R-10, I7R-11); decisions 22 and 23 close them and amend 15 and 16 in turn. The
+disposition table follows decision 23.
 
 #### 12. Credential provenance: revoking a key refuses what it minted (I7R-01)
 
@@ -393,7 +397,7 @@ unbound bearer unless `requireDPoP: true` is passed, and throws "unsupported JWT
 upsert. Two replicas can both see "absent" and both succeed; Codex's probe got `[true, true]` for one client
 assertion `jti`. Client assertions and token-endpoint DPoP proofs both go through it. Decision:
 - One table `replay_claims (namespace, key, expires_at, claimed_at, PRIMARY KEY (namespace, key))`. Namespaces:
-  `client_assertion`, `as_dpop`, `rs_dpop`, `human_delegation_proof`. A claim is
+  `client_assertion`, `as_dpop`, `rs_dpop`, `human_delegation_proof`, and `delegation_authz` (decision 23). A claim is
   `INSERT … ON CONFLICT DO NOTHING RETURNING 1`: one row back means accepted, none means replay. Never an update, never
   an overwrite. Rows are kept until `expires_at` = the end of the acceptance window plus clock skew, then swept.
 - Inside `oidc-provider`, the `ReplayDetection` model is served by our adapter so that its `find` is not trusted for
@@ -406,6 +410,10 @@ assertion `jti`. Client assertions and token-endpoint DPoP proofs both go throug
   that loses must fail even if the winner's request later errors.
 
 #### 15. The token-exchange wire contract (I7R-04)
+
+*Amended by decision 23 (I7R-11):* in the child exchange, `actor_token` is a one-use **delegation authorization**
+signed by A that binds the intended child, its key and the whole delegation body, not a plain DPoP proof; and a
+certificate-bound (mTLS) parent cannot hand off across processes in v1.
 
 Two facts are kept apart: **who may spend the parent's authority** (proved by the parent's binding) and **who holds
 the new token** (proved by the child's key). The output is always bound to the **child's** key.
@@ -462,6 +470,10 @@ mismatched subject or proof; revoked chain), `invalid_target` (resource), `inval
 Decision 4's "computed, not requested" is withdrawn. **A request for any scope, budget, depth or lifetime beyond what
 the parent allows is refused, not narrowed** (`delegation-scope`, `delegation-budget`, `delegation-depth`), consistent
 with OWNER DECISION 9. A request that fits is granted exactly as asked.
+
+*Amended by decision 22 (I7R-10):* the per-ancestor reservation below double-reserves nested children. Decision 22's
+edge model replaces the bullets "`delegation_grants`", "`delegation_reservations`", "Remaining", "Creating a child",
+"Spend" and "Release"; the unknown-cost and first-crossing bullets stand.
 
 Budget accounting, in integer **micro-dollars** (`bigint`), never floating point:
 - `delegation_grants`: `budget_micros` (cap), `settled_micros` (measured spend charged to this grant **and its
@@ -585,6 +597,97 @@ permit" would deny everything if read literally. Restated:
 - Bundles are uploaded locally (air-gapped) or fetched through the egress guard; a bundle never auto-refreshes from an
   unlisted host.
 
+#### 22. Budget allocations live on parent→child edges (I7R-10; replaces decision 16's reservation bullets)
+
+Decision 16 reserved a child's cap at **every** ancestor, so a grandchild was charged against the root a second time
+(root 100 → B 100 left the root with 0 remaining, and C 1 under B was refused although B had 100 unspent). Each dollar
+of allocation now sits on exactly one edge.
+
+**Schema** (integer micro-dollars; examples below in dollars):
+- `delegation_grants`: `cap_micros` (this grant's allocation; for a root, the amount the sponsor or run budget gives
+  it), `settled_micros` (measured spend by this grant and its whole subtree), `reserved_micros` (allocation currently
+  held by its **direct** children and not yet spent: Σ over its open outgoing edges of `amount − drawn`).
+- `delegation_allocations` (one row per parent→child edge): `id`, `parent_grant_id`, `child_grant_id` UNIQUE,
+  `amount_micros` (= the child's `cap_micros`), `drawn_micros`, `released_micros`, `status` (`open | closed`),
+  `idempotency_key`, UNIQUE (`parent_grant_id`, `idempotency_key`), `created_at`, `closed_at`.
+- `delegation_charges` (`usage_event_id` UNIQUE, `leaf_grant_id`, `amount_micros`, `at`): the record that one usage
+  row has been settled along its path, so a retried settlement applies once.
+
+**Rules.**
+- **Remaining(g)** = `cap − settled − reserved`, for one grant only. A grant's capacity is already inside its parent's
+  edge, so no check above the parent is needed or made.
+- **Admit a child C under P** (one transaction): lock P (`FOR UPDATE`), run the decision 17 live-chain check, refuse
+  if `C.cap > Remaining(P)`, insert the edge (`amount = C.cap`, `drawn = 0`) and C, and add `C.cap` to
+  `P.reserved`. **No ancestor of P changes.** A repeated request with the same idempotency key returns the existing
+  child and edge.
+- **Settle a charge of x** for a usage row at leaf L (in the usage row's transaction; lock the path root first): insert
+  the `delegation_charges` row (conflict = already settled, stop); `L.settled += x`; then for every edge P→Q on the
+  path, with `d = min(x, amount − drawn)` (the part still reserved on that edge): `edge.drawn += x`,
+  `P.reserved −= d`, `P.settled += x`. Reserved turns into settled once per edge, and every ancestor counts each dollar
+  once. If `x > d` (the documented first crossing of decision 16), the excess `x − d` lands on P as settled with no
+  reservation behind it, so P's own remaining falls and P may itself be at its cap; that is the only overrun, and the
+  next call anywhere under P is refused.
+- **Release** (child ends: completed, revoked, expired, failed or cancelled): close its open descendants first
+  (leaves first); then on its incoming edge `released = max(0, amount − drawn)`, `P.reserved −= released`, status
+  `closed`. Unused capacity returns to the **parent only**, where the parent can re-allocate it while it is alive; it
+  reaches the root only when every grant between them closes. Closing is idempotent (a closed edge is not released
+  twice). A sweep closes edges of expired grants.
+- **Root siblings** compete only at the root: admitting each locks the root, so concurrent requests serialise.
+
+**Worked examples** (all amounts in dollars; S = settled, R = reserved, rem = remaining):
+
+*Scenario 1 (the I7R-10 counterexample).*
+
+| Step | Root (cap 100) | B | C | Result |
+|---|---|---|---|---|
+| 1. Admit B cap 100 | S 0, R 100, rem 0 | cap 100, rem 100 | — | ok |
+| 2. Admit C cap 1 under B | unchanged: R 100, rem 0 | R 1, rem 99 | cap 1, rem 1 | **ok** (decision 16 refused this) |
+
+*Scenario 2 (nesting, a root sibling, spend, release).*
+
+| Step | Root (cap 100) | B | C | D | Result |
+|---|---|---|---|---|---|
+| 1. Admit B cap 60 | R 60, rem 40 | cap 60, rem 60 | — | — | ok |
+| 2. Admit C cap 40 under B | unchanged: R 60, rem 40 | R 40, rem 20 | cap 40, rem 40 | — | ok; the root's reservation for B stays 60 |
+| 3. Admit D cap 40 under root | R 100, rem 0 | | | cap 40 | ok: the root's remaining 40 |
+| 4. C spends 10 | S 10, R 90, rem 0 | S 10, R 30, rem 20 | S 10, rem 30 | | edges root→B and B→C each drawn 10 |
+| 5. Release C (B still active) | unchanged: S 10, R 90 | S 10, R 0, rem 50 | closed, released 30 | | the 30 returns to B, not to the root |
+| 6. Close B | S 10, R 40 (D only), rem 50 | closed, released 50 | | | root gets back B's unspent 60 − 10 |
+
+*Scenario 3 (concurrency).* Under a fresh root with cap 100, two requests for children of 60 each arrive at the same
+time: the root lock serialises them, one is admitted (R 60), the other is refused `delegation-budget`.
+
+#### 23. A parent authorises one specific child and body (I7R-11; amends decision 15)
+
+A plain DPoP proof by A binds the method, the endpoint and the parent token (`htm`, `htu`, `ath`), but not who the
+child is, its key, or what is delegated. Someone holding a different valid child credential and a captured, unused
+proof by A could race a changed request to be the first claim. So in the child exchange, `actor_token` is a
+**delegation authorization**: a JWT with `typ` `regulait-delegation-authz+jwt`, signed by **A's bound key** (the key
+whose thumbprint is the parent token's `cnf.jkt`; the public key is in the header `jwk` and its thumbprint must equal
+`cnf.jkt`), with claims:
+- the DPoP-style fields: `htm` = `POST`, `htu` = the token endpoint URL, `ath` = hash of the parent token, `iat`
+  (within 60 s), the current gateway `nonce`, `jti`;
+- `iss` = A's identifier, `aud` = our issuer, `parent_grant_id` (must equal the parent token's verified grant);
+- `child` = B's registered identity id and `child_cnf` = B's output-binding thumbprint (`jkt`);
+- `delegation` = the canonical (RFC 8785) form of exactly what is requested: `authorization_details`, `resource`,
+  `project_id`, `env`, `cap_micros`, `max_depth` (the child's allowed further depth) and `expires_at` (or lifetime);
+- `idempotency_key` (decision 22).
+`actor_token_type` = `urn:regulait:params:oauth:token-type:delegation-authz`.
+
+The token endpoint checks, **in this order, before claiming any `jti` and before any allocation**: the parent token
+(decision 13, with A's binding proved by this object's signature and the DPoP-style fields); the authenticated client
+is the `child`; the request's DPoP header is signed by the key whose thumbprint is `child_cnf`; every field of
+`delegation` equals the request body's canonical form; `parent_grant_id` matches. Only when all match does it claim
+the object's `jti` (namespace `delegation_authz`, decision 14) and then admit the child (decision 22). A mismatch
+consumes nothing, so a substituted request cannot burn A's authorization either. The issued token's `cnf` is
+`child_cnf`. An admitted child's scope, budget and lifetime are exactly what A signed; the live intersection
+(decisions 3 and 17) still applies on every use.
+
+**mTLS parents in v1:** a parent token bound with `cnf.x5t#S256` cannot authorise a cross-process child; the exchange
+is refused with `invalid_grant` and `error_code` `mtls_parent_handoff_unsupported`. Signing the authorization with a
+certificate-bound key distinct from the child's client certificate is left to a later ADR. In-process hand-offs
+(decision 6) are unaffected.
+
 #### X31 review dispositions
 
 | Finding | Severity | Disposition | Where |
@@ -592,14 +695,16 @@ permit" would deny everything if read literally. Restated:
 | I7R-01 key revocation not linked to grants | HIGH | Accepted. Credential and binding provenance stored per grant and per token; revocation table per credential kind; rotation ≠ revocation | Decision 12; decisions 4, 5 amended; tests |
 | I7R-02 provider replay check races | HIGH | Accepted. Atomic `INSERT … ON CONFLICT DO NOTHING` claims in namespaces, wired into the provider's refusal path with a version-pinned contract test, fallback to our own claim | Decision 14; tests (two real replicas, concurrent) |
 | I7R-03 `oauth4webapi` covers part of the verifier | MEDIUM | Accepted. Our verifier adds 60 s window, nonce, `jti` claim, `requireDPoP: true`, exactly-one-`cnf`, and a separate mTLS branch | Decision 13 |
-| I7R-04 token-exchange wire unspecified | MEDIUM | Accepted. Exact requests, token types, child-key binding, parent proof as `actor_token`, one-use bound human delegation proof, `act` rebuilt from the stored path, errors | Decision 15; decision 7 amended |
-| I7R-05 reservation accounting | MEDIUM | Accepted. Refuse over-scope/over-budget (one contract); micro-dollar reservations with lock order, draw-down, idempotency, release, unknown-cost refusal, first-crossing stated | Decision 16; decision 4 amended |
+| I7R-04 token-exchange wire unspecified | MEDIUM | Accepted. Exact requests, token types, child-key binding, parent proof as `actor_token`, one-use bound human delegation proof, `act` rebuilt from the stored path, errors | Decision 15; decision 7 amended; the child hand-off completed by decision 23 (I7R-11) |
+| I7R-05 reservation accounting | MEDIUM | Accepted. Refuse over-scope/over-budget (one contract); micro-dollar reservations with lock order, draw-down, idempotency, release, unknown-cost refusal, first-crossing stated | Decision 16; decision 4 amended; the allocation model replaced by decision 22 (I7R-10) |
 | I7R-06 ancestors not fully checked | MEDIUM | Accepted. Every ancestor's identity, credentials, own live grants and halt, plus sponsor's current rights; stored path/root/depth validated; fresh read at point of use | Decision 17 |
 | I7R-07 Cedar second evaluation | MEDIUM | Accepted. Grants authorise, Cedar only narrows via the wrapper; legacy policies for the sponsor, v4 Agent policies per actor; S2 owns gateway ABAC wiring | Decision 18; decision 3 amended; slices |
 | I7R-08 audit v2 cutover | MEDIUM | Accepted. Boundary set under the append lock in a trusted table, version in canonical data, downgrade refused, drained rollout with a boot check | Decision 19; decision 9 amended |
 | I7R-09 `jose` is not a path validator | MEDIUM | Accepted. `pkijs` (already pinned) for chains plus our SPIFFE profile; authenticated, stripped proxy header | Decision 21; S0 amended |
 | Library notes (air-gap, replicas, mounting, koa-compose notice) | note | Accepted | Decision 20; decision 11 amended |
 | Slice-order notes | note | Accepted | Slice table |
+| I7R-10 nested children double-reserved (recheck of `165a5be`) | MEDIUM | Accepted. Allocations on parent→child edges; admitting a child touches only its parent; per-edge drawn/released and per-usage settlement idempotency; release returns to the parent only; worked examples | Decision 22; decision 16 amended; tests |
+| I7R-11 parent proof does not bind the child or body (recheck of `165a5be`) | MEDIUM | Accepted. One-use delegation authorization signed by A's bound key, binding parent grant, child identity, child key thumbprint, canonical body, issuer and endpoint; checked before any claim or allocation; mTLS-parent hand-off refused in v1 | Decision 23; decision 15 amended; tests |
 
 ## Rollout: slices (one PR each)
 
@@ -612,9 +717,9 @@ and the audit cutover (19) are settled in this ADR before S1, so S1 freezes them
 | Slice | Content | Depends on | Parallel? |
 |---|---|---|---|
 | **S0 spike** (research, no product code) | `oidc-provider` 9.12.2 under Fastify behind our real hooks (auth, route classes, body limit, timeout, rate limit, audit), Postgres adapter, two replicas; the decision 14 replay claim inside the provider, proven with concurrent requests; RFC 8693 + DPoP per decision 15; the decision 13 verifier around `oauth4webapi` (DPoP) and the mTLS branch; `pkijs` X.509-SVID and mTLS path validation offline with the decision 21 profile and the forwarded-header rules; JWT-SVID signatures with `jose` from an uploaded bundle; exact-pinned licence closure with notices (decision 20). Output: a research note and go/no-go for decision 7 | none | **Yes**, with S1; must close before S5 |
-| **S1 foundation** | Migration (`workload_identities`, `workload_credentials`, `delegation_grants` with provenance and micro-dollar columns, `delegation_reservations`, `issued_tokens`, `replay_claims`, `identity_signing_keys`, `audit_chain_versions`, audit/trace/usage columns, the v2 serialisation code path; the v2 cutover itself is not run here), `schema.ts`, shared zod and constants, step-up kind `identity_manage`, settings with strict defaults and audited relaxation, every new route as a 501 stub, `AuthContext.via` gains `workload` | none | serial (owns hot files) |
+| **S1 foundation** | Migration (`workload_identities`, `workload_credentials`, `delegation_grants` with provenance and micro-dollar columns, `delegation_allocations` and `delegation_charges` (decision 22), `issued_tokens`, `replay_claims`, `identity_signing_keys`, `audit_chain_versions`, audit/trace/usage columns, the v2 serialisation code path; the v2 cutover itself is not run here), `schema.ts`, shared zod and constants, step-up kind `identity_manage`, settings with strict defaults and audited relaxation, every new route as a 501 stub, `AuthContext.via` gains `workload` | none | serial (owns hot files) |
 | **S2 kernel and Cedar wiring** | `ActorChain` required on the three kernel inputs; intersection semantics and new rule ids; Cedar v4 (`Agent` entity, `actorChain`, `delegationDepth`) and the per-principal evaluation of decision 18 in the gateway ABAC wiring; property tests | S1 (types only) | **Yes**, with S6 |
-| **S3 issuer and grants** | `delegation.ts` (refuse-over-scope creation, reservations with lock order and idempotency, draw-down, release sweep, cascade revoke, the decision 17 live-chain query), signing-key management and rotation, JWKS route, token mint and the decision 13 verifier | S1, and S2's `ActorChain`/scope types | after S2's types land; then **yes**, with the rest of S2 and S6 |
+| **S3 issuer and grants** | `delegation.ts` (refuse-over-scope creation, decision 22 edge allocations with idempotency, per-edge settlement, release sweep, the decision 23 authorization check, cascade revoke, the decision 17 live-chain query), signing-key management and rotation, JWKS route, token mint and the decision 13 verifier | S1, and S2's `ActorChain`/scope types | after S2's types land; then **yes**, with the rest of S2 and S6 |
 | **S4 in-process wiring** | Creates the internal identities and grants **before** any agent path requires them (one first-load step, then the paths switch on); grants through `executeGovernedDispatch` / `ToolCall` / `ConnectorCall`; orchestration lead→worker child grants (ceiling folded in), builder turns, schedules, engine runs; audit, trace, usage and receipt stamping; then the audit v2 cutover (decision 19) after all replicas run v2 code | S2, S3 | serial (orchestration, builder, mcp-proxy) |
 | **S5 token endpoint and external callers** | `/oauth/token` token exchange per decision 15, client auth (`private_key_jwt`, mTLS, SPIFFE), DPoP and nonce, revocation and introspection; delegated tokens accepted on `/mcp/:serverId` and the compat routes; RFC 9728 `authorization_servers` | S3, S0 closed | **Yes**, with S4, only with the split stated here: S5 owns `auth.ts` and `oauth/`, S2 owns the ABAC wiring, S4 owns the governed call paths; none edits another's files |
 | **S6 admin UI** | Agent identities page (create, bind key or SPIFFE ID, suspend, revoke, stewards), grants editor for agent principals, "proposed grants from observed usage", delegation chain in traces, audit and the agent card | S1 stubs | **Yes** (web only); its acceptance and merge come after S4/S5's real routes |
@@ -638,6 +743,12 @@ counter that must stay at zero for every refusal.
   one granted. A descendant's spend is counted once at each ancestor (reserved or settled, never both). A retried
   request with the same idempotency key (lost reply) reserves once. Cancelling or expiring a child returns only its
   unspent amount. An unpriced call under a capped grant is refused. Over-scope requests are refused, never narrowed.
+- (X31 recheck, decision 22) Every row of the three worked-example scenarios, as an integration test with balances
+  asserted after each step: root 100 → B 100 → C 1 is admitted; B 60 → C 40 leaves the root's reservation for B at
+  60 and a root sibling can take the other 40; C spending 10 gives root S 10 / R 50 (without D), B S 10 / R 30, C S 10;
+  releasing C returns 30 to B only; closing B returns 50 to the root; the same usage row settled twice changes nothing;
+  a first-crossing overrun at a leaf lands as settled at each ancestor once and the next call under that ancestor is
+  refused.
 - (X31, decision 17) Suspend, halt or revoke the credential of the **middle** actor without touching its grant row, or
   remove a tool from the middle actor's own grants or from the sponsor's role → the leaf's next call is refused; a
   sibling under the root keeps exactly its own narrowed scope. A forged or substituted `act`, path or depth in a
@@ -670,6 +781,12 @@ counter that must stay at zero for every refusal.
 - (X31, decision 15) Parent A → child B succeeds only with B's client authentication **and** A's proof, and the result
   carries `cnf` = B's key and an `act` rebuilt from the stored path; a stolen parent token without A's proof, a wrong
   child assertion, a swapped project, env or resource, and a reused human delegation proof → refused each.
+- (X31 recheck, decision 23) The intended child with A's authorization succeeds. With A's genuine, unused
+  authorization: a different authenticated child, a DPoP key other than `child_cnf`, a changed `authorization_details`,
+  `resource`, `project_id`, `env`, cap, depth or lifetime → refused each, **and** the authorization is still unclaimed
+  afterwards (the intended child then succeeds). A first-use race between the intended request and a substituted one
+  on two replicas admits only the intended one. A parent bound by `x5t#S256` is refused
+  `mtls_parent_handoff_unsupported`.
 - (X31, decision 21) An unknown CA, an expired or not-yet-valid certificate, a wrong SAN or trust domain, a leaf with CA
   set or without `digitalSignature`, a broken path, and a forwarded-certificate header from an untrusted or
   unauthenticated peer → refused each; a genuine SVID validates offline with no network access.
