@@ -46,6 +46,15 @@
  *    supplier-declared model-card claims, and only when they are already a
  *    valid SPDX DateTime and an https origin that B3's endpoint rule leaves
  *    unchanged (`isSpdxDownloadLocation`).
+ *  - B9 (OWNER DECISION 13, R51): the CURRENT supplier-declared values in
+ *    `n.spdxFields` (from `ai_bom_spdx_declarations`) fill the properties no
+ *    other table records. A model's declared `releaseTime` and
+ *    `downloadLocation` come before its card's `data_claims` value; a declared
+ *    `packageVersion` is used only when the card has no pinned version. A
+ *    dataset gains `builtTime`, `originatedBy` (an Organization), `releaseTime`,
+ *    `downloadLocation` and `datasetType`; with no declared type it keeps the
+ *    standard's `noAssertion`. Each value passes the same literal checks as
+ *    before; one still missing keeps the rendering not_producible.
  *  - IRIs: `https://regulait.invalid/spdx/ai-bom/<snapshot id>/v<version>#…`
  *    with each fragment `<kind>-<sha256(bom-ref)[0:32]>`, so no name, engine id
  *    or provider name ever reaches an IRI except as a digest.
@@ -204,6 +213,7 @@ export function renderAiBomSpdx(n: AiBomRecordSet, meta: AiBomSnapshotMeta, cdx:
   const agentsById = new Map(n.agents.map((a) => [a.id, a]));
   const trainingDs = new Map(n.trainingDatasets.map((d) => [`${d.id}:${d.version}`, d]));
   const enginesById = new Map(n.engines.map((e) => [e.id, e]));
+  const declaredFields = new Map((n.spdxFields ?? []).map((f) => [`${f.subjectKind}:${f.subjectId}`, f]));
 
   // ------------------------------------------------------------- the subject root (R31: its own record, never synthetic)
   const root = doc.metadata.component;
@@ -234,16 +244,19 @@ export function renderAiBomSpdx(n: AiBomRecordSet, meta: AiBomSnapshotMeta, cdx:
         if (!agentModel && !card) throw new Error(`ai-bom spdx: model card ${ref} not in the record set`);
         const supplierName = (c.supplier as { name: string } | undefined)?.name;
         if (!supplierName) throw new Error(`ai-bom spdx: model ${ref} has no supplier`);
-        const releaseTime = claimText(card, "releaseTime");
-        const downloadLocation = claimText(card, "downloadLocation");
+        const decl = card ? declaredFields.get(`model_card:${card.id}`) : undefined;
+        // R51: a declared value first, then the card's supplier-declared claim (B5's source)
+        const releaseTime = decl?.releaseTime ?? claimText(card, "releaseTime");
+        const downloadLocation = decl?.downloadLocation ?? claimText(card, "downloadLocation");
+        const packageVersion = card?.pinnedModelVersion ?? decl?.packageVersion ?? null;
         const training = card && trainingDataDeclared(card) ? `supplier-declared: ${String(card.dataClaims.trainingData)}` : "unknown";
         const arch = claimText(card, "architecture");
         el({
           type: "ai_AIPackage", spdxId, name,
           software_primaryPurpose: "model",
           suppliedBy: supplier(supplierName),
-          // #280 round 12: the card's pinned version only; an agent has no version column. Never a placeholder (R3).
-          ...(card?.pinnedModelVersion ? { software_packageVersion: card.pinnedModelVersion } : {}),
+          // #280 round 12: the card's pinned version, else (R51) a declared one; an agent has no version column. Never a placeholder (R3).
+          ...(packageVersion ? { software_packageVersion: packageVersion } : {}),
           // R3: supplier-declared only, and only when already a valid SPDX literal; otherwise omitted (not_producible)
           ...(isSpdxDateTime(releaseTime) ? { releaseTime } : {}),
           ...(isSpdxDownloadLocation(downloadLocation) ? { software_downloadLocation: downloadLocation } : {}),
@@ -263,12 +276,20 @@ export function renderAiBomSpdx(n: AiBomRecordSet, meta: AiBomSnapshotMeta, cdx:
         const training = ref.startsWith("dataset:training:");
         const d = training ? trainingDs.get(ref.slice("dataset:training:".length)) : undefined;
         if (training && !d) throw new Error(`ai-bom spdx: training dataset ${ref} not in the record set`);
+        // `dataset:<training|eval>:<row id>:<version>`: the row id is the 36 characters after the kind prefix
+        const rowId = ref.slice(training ? "dataset:training:".length : "dataset:eval:".length).slice(0, 36);
+        const dd = declaredFields.get(`${training ? "training_dataset" : "eval_dataset"}:${rowId}`);
         el({
           type: "dataset_DatasetPackage", spdxId, name, software_packageVersion: c.version as string,
           software_primaryPurpose: "data",
-          // the standard's own no-assertion value; builtTime, originatedBy, releaseTime and
-          // downloadLocation have none and are not recorded: omitted, so the rendering is not_producible
-          dataset_datasetType: ["noAssertion"],
+          // R51: declared values only, each re-checked; builtTime, originatedBy, releaseTime and
+          // downloadLocation have no no-assertion form, so a missing one is omitted and the rendering is not_producible
+          ...(isSpdxDateTime(dd?.builtTime) ? { builtTime: dd!.builtTime } : {}),
+          ...(dd?.originatedBy ? { originatedBy: [supplier(dd.originatedBy)] } : {}),
+          ...(isSpdxDateTime(dd?.releaseTime) ? { releaseTime: dd!.releaseTime } : {}),
+          ...(isSpdxDownloadLocation(dd?.downloadLocation) ? { software_downloadLocation: dd!.downloadLocation } : {}),
+          // the standard's own no-assertion value when no type is declared (R3)
+          dataset_datasetType: dd?.datasetType.length ? [...dd.datasetType] : ["noAssertion"],
           // R24: training classification only from the linked project; evaluation datasets have none
           ...(d?.projectDataSensitivity ? { dataset_confidentialityLevel: SPDX_CONFIDENTIALITY[d.projectDataSensitivity]! } : {}),
           // R11: flagged/blocked are known sensitive; clean (and an unscanned eval set) is no assertion

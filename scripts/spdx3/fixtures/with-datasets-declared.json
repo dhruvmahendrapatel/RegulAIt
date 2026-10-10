@@ -1,0 +1,344 @@
+{
+ "comment": "ADR-0189 B9 (R51): SYNTHETIC records, the with-datasets set plus supplier-declared SPDX properties (spdxFields) for every dataset, so the snapshot's SPDX 3.0.1 is rendered (producible) and CI validates the real product output with SHACL.",
+ "meta": {
+  "id": "00000000-0000-4000-8000-000000000384",
+  "subjectKind": "use_case",
+  "subjectId": "00000000-0000-4000-8000-000000000001",
+  "version": 1,
+  "supersedes": null,
+  "trigger": "on_demand",
+  "createdAt": "2026-10-10T12:00:00.123Z"
+ },
+ "records": {
+  "subject": {
+   "kind": "use_case",
+   "id": "00000000-0000-4000-8000-000000000001"
+  },
+  "install": {
+   "installId": "spdx-ci-install"
+  },
+  "useCases": [
+   {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "name": "Claims triage",
+    "ownerUserId": "00000000-0000-4000-8000-00000000001f",
+    "ownerDisplayName": null,
+    "dataSensitivity": "confidential",
+    "complianceTags": [
+     "soc2"
+    ],
+    "euAiActTier": "high",
+    "status": "approved",
+    "intendedAgentIds": [
+     "00000000-0000-4000-8000-000000000002"
+    ]
+   }
+  ],
+  "agents": [
+   {
+    "id": "00000000-0000-4000-8000-000000000002",
+    "name": "triage-agent",
+    "provider": "provider-a",
+    "model": "model-x",
+    "expectedServedModel": null,
+    "customProviderId": null,
+    "lifecycleStatus": "active",
+    "ownerUserId": "00000000-0000-4000-8000-00000000001f",
+    "ownerDisplayName": null,
+    "workloadIdentity": "spiffe://regulait.local/regulait/agent/00000000-0000-4000-8000-000000000002",
+    "observedLastSeen": "2026-10-10T12:00:00.000Z",
+    "observedCount": 7
+   }
+  ],
+  "customProviders": [],
+  "modelCards": [
+   {
+    "id": "00000000-0000-4000-8000-000000000004",
+    "agentId": "00000000-0000-4000-8000-000000000002",
+    "customProviderId": null,
+    "intendedUse": "Claims triage summaries",
+    "limitations": "Not for final decisions",
+    "biasFairness": [],
+    "dataClaims": {
+     "trainingData": "public web corpus (supplier statement)",
+     "license": "Apache-2.0",
+     "task": "text-generation",
+     "architecture": "transformer",
+     "releaseTime": "2026-06-01T00:00:00Z",
+     "downloadLocation": "https://models.provider-a.example"
+    },
+    "standardRefs": [
+     "ISO-42001-A.6"
+    ],
+    "pinnedModelVersion": "2026-06-01"
+   },
+   {
+    "id": "00000000-0000-4000-8000-000000000005",
+    "agentId": "00000000-0000-4000-8000-000000000002",
+    "customProviderId": null,
+    "intendedUse": "Fraud hints",
+    "limitations": null,
+    "biasFairness": [],
+    "dataClaims": {
+     "license": "proprietary",
+     "releaseTime": "2026-05-01T00:00:00Z",
+     "downloadLocation": "https://models.provider-a.example"
+    },
+    "standardRefs": [],
+    "pinnedModelVersion": "2026-05-01"
+   }
+  ],
+  "modelCardApprovals": [],
+  "modelCardEvidence": [
+   {
+    "id": "00000000-0000-4000-8000-000000000009",
+    "cardId": "00000000-0000-4000-8000-000000000004",
+    "kind": "external",
+    "evalRunId": null,
+    "externalRef": "https://audits.example/report",
+    "artifactScanId": null,
+    "attachedAt": "2026-10-10T12:00:00.000Z"
+   },
+   {
+    "id": "00000000-0000-4000-8000-00000000000a",
+    "cardId": "00000000-0000-4000-8000-000000000005",
+    "kind": "engine_scan",
+    "evalRunId": null,
+    "externalRef": null,
+    "artifactScanId": "00000000-0000-4000-8000-000000000013",
+    "attachedAt": "2026-10-10T12:00:00.000Z"
+   },
+   {
+    "id": "00000000-0000-4000-8000-000000000008",
+    "cardId": "00000000-0000-4000-8000-000000000004",
+    "kind": "eval_run",
+    "evalRunId": "00000000-0000-4000-8000-00000000000b",
+    "externalRef": null,
+    "artifactScanId": null,
+    "attachedAt": "2026-10-10T12:00:00.000Z"
+   }
+  ],
+  "evalRuns": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000b",
+    "datasetId": "00000000-0000-4000-8000-00000000000c",
+    "datasetVersion": 2
+   }
+  ],
+  "evalDatasets": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000c",
+    "version": 2,
+    "name": "triage-golden",
+    "casesDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+   }
+  ],
+  "trainingDatasets": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000d",
+    "version": 1,
+    "name": "claims-ft",
+    "checksum": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:120",
+    "rowCount": 120,
+    "piiVerdict": "flagged",
+    "projectId": "00000000-0000-4000-8000-000000000020",
+    "projectDataSensitivity": "regulated"
+   },
+   {
+    "id": "00000000-0000-4000-8000-000000000022",
+    "version": 3,
+    "name": "claims-unclassified",
+    "checksum": "",
+    "rowCount": 0,
+    "piiVerdict": "clean",
+    "projectId": null,
+    "projectDataSensitivity": null
+   }
+  ],
+  "trainingJobs": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000e",
+    "datasetId": "00000000-0000-4000-8000-00000000000d",
+    "datasetVersion": 1,
+    "method": "lora",
+    "baseAgentId": "00000000-0000-4000-8000-000000000002",
+    "status": "succeeded"
+   }
+  ],
+  "trainingArtifacts": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000f",
+    "jobId": "00000000-0000-4000-8000-00000000000e",
+    "name": "claims-lora",
+    "method": "lora",
+    "kind": "inline",
+    "agentId": "00000000-0000-4000-8000-000000000002",
+    "modelCardId": "00000000-0000-4000-8000-000000000004",
+    "payloadDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "createdAt": "2026-10-10T12:00:00.000Z"
+   }
+  ],
+  "modelArtifacts": [
+   {
+    "id": "00000000-0000-4000-8000-000000000011",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sizeBytes": 1024,
+    "format": "safetensors"
+   }
+  ],
+  "artifactScans": [
+   {
+    "id": "00000000-0000-4000-8000-000000000013",
+    "artifactId": "00000000-0000-4000-8000-000000000011",
+    "engineRunId": "00000000-0000-4000-8000-000000000015",
+    "artifactSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "verdict": "no_known_unsafe",
+    "scannerVersion": "0.8.5",
+    "createdAt": "2026-10-10T12:00:00.000Z"
+   }
+  ],
+  "engineRuns": [
+   {
+    "id": "00000000-0000-4000-8000-000000000015",
+    "engineId": "modelscan",
+    "engineVersion": "0.8.5"
+   }
+  ],
+  "engines": [
+   {
+    "id": "modelscan",
+    "version": "0.8.5",
+    "imageDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "licence": "Apache-2.0"
+   }
+  ],
+  "promptTags": [
+   {
+    "promptId": "00000000-0000-4000-8000-000000000016",
+    "promptName": "triage system",
+    "tag": "production",
+    "commitId": "00000000-0000-4000-8000-000000000017",
+    "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "agentId": "00000000-0000-4000-8000-000000000002"
+   }
+  ],
+  "configVersions": [
+   {
+    "id": "00000000-0000-4000-8000-000000000018",
+    "artifactType": "agent_system_prompt",
+    "artifactId": "00000000-0000-4000-8000-000000000002",
+    "version": 4,
+    "status": "active",
+    "canaryPct": null,
+    "bodyDigest": "2222222222222222222222222222222222222222222222222222222222222222"
+   }
+  ],
+  "mcpServers": [
+   {
+    "id": "00000000-0000-4000-8000-00000000001a",
+    "name": "files",
+    "transport": "streamable_http",
+    "url": "https://mcp.example",
+    "releaseDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "admissionState": "clean",
+    "admissionManifestDigest": null,
+    "identityPropagation": "none",
+    "ownerUserId": null,
+    "ownerDisplayName": null
+   }
+  ],
+  "mcpTools": [
+   {
+    "id": "00000000-0000-4000-8000-00000000001b",
+    "serverId": "00000000-0000-4000-8000-00000000001a",
+    "name": "read_file",
+    "kind": "read"
+   }
+  ],
+  "connectors": [
+   {
+    "id": "00000000-0000-4000-8000-00000000001c",
+    "name": "crm",
+    "kind": "salesforce",
+    "url": null,
+    "ownerUserId": "00000000-0000-4000-8000-00000000001f",
+    "ownerDisplayName": null,
+    "credentialSet": true
+   }
+  ],
+  "grants": [
+   {
+    "holderKind": "agent",
+    "holderId": "00000000-0000-4000-8000-000000000002",
+    "targetKind": "mcp_tool",
+    "targetId": "00000000-0000-4000-8000-00000000001b",
+    "source": "identity_tool_grants"
+   }
+  ],
+  "builderAgents": [
+   {
+    "id": "00000000-0000-4000-8000-00000000001d",
+    "name": "builder",
+    "modelAgentId": "00000000-0000-4000-8000-000000000002",
+    "ownerUserId": "00000000-0000-4000-8000-00000000001f",
+    "ownerDisplayName": null,
+    "workloadIdentity": null
+   }
+  ],
+  "builderSkills": [
+   {
+    "agentId": "00000000-0000-4000-8000-00000000001d",
+    "skillId": "00000000-0000-4000-8000-00000000001e",
+    "snapshotName": "lint-skill",
+    "snapshotDigest": "5555555555555555555555555555555555555555555555555555555555555555",
+    "snapshotVersion": 2,
+    "snapshotAdmissionState": "admitted"
+   }
+  ],
+  "memoryStores": [
+   {
+    "kind": "builder_agent_memory",
+    "builderAgentId": "00000000-0000-4000-8000-00000000001d"
+   }
+  ],
+  "spdxFields": [
+   {
+    "subjectKind": "training_dataset",
+    "subjectId": "00000000-0000-4000-8000-00000000000d",
+    "releaseTime": "2026-04-01T09:30:00Z",
+    "downloadLocation": "https://datasets.supplier-b.example",
+    "packageVersion": null,
+    "builtTime": "2026-03-15T08:00:00Z",
+    "originatedBy": "Synthetic Data Supplier B",
+    "datasetType": [
+     "text"
+    ]
+   },
+   {
+    "subjectKind": "training_dataset",
+    "subjectId": "00000000-0000-4000-8000-000000000022",
+    "releaseTime": "2026-04-01T09:30:00Z",
+    "downloadLocation": "https://datasets.supplier-b.example",
+    "packageVersion": null,
+    "builtTime": "2026-03-15T08:00:00Z",
+    "originatedBy": "Synthetic Data Supplier B",
+    "datasetType": [
+     "structured",
+     "text"
+    ]
+   },
+   {
+    "subjectKind": "eval_dataset",
+    "subjectId": "00000000-0000-4000-8000-00000000000c",
+    "releaseTime": "2026-05-20T00:00:00Z",
+    "downloadLocation": "https://evals.supplier-c.example:8443",
+    "packageVersion": null,
+    "builtTime": "2026-05-19T23:59:59Z",
+    "originatedBy": "Synthetic Eval Lab C",
+    "datasetType": [
+     "text"
+    ]
+   }
+  ]
+ }
+}
