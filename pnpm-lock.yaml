@@ -493,6 +493,9 @@ importers:
       '@arizeai/openinference-semantic-conventions':
         specifier: 2.14.0
         version: 2.14.0
+      '@cyclonedx/cyclonedx-library':
+        specifier: 10.3.0
+        version: 10.3.0(ajv-formats@3.0.1(ajv@8.20.0))(ajv@8.20.0)
       '@humanwhocodes/momoa':
         specifier: 3.3.13
         version: 3.3.13
@@ -502,6 +505,12 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: 1.43.0
         version: 1.43.0
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.20.0)
       canonicalize:
         specifier: 5.1.0
         version: 5.1.0
@@ -859,6 +868,33 @@ packages:
 
   '@cedar-policy/cedar-wasm@4.12.0':
     resolution: {integrity: sha512-tCSj92hh4fnmas4ojO4tjx8wAAW3mKVgQ7M388NsSpXp64FVeYY6xwhKtJRaaYGK0qLiN2jnq8/SNIU2r5fdPw==}
+
+  '@cyclonedx/cyclonedx-library@10.3.0':
+    resolution: {integrity: sha512-RIT28sp1U0PCHaaeF3yNRwk6Jig/XJ8UsYAVOMYaHQ+0VVOvsjcp0PTWQFLUqJFF8XMud+Kdq6G+wtDAh+QJFA==}
+    engines: {node: '>=20.18.0'}
+    peerDependencies:
+      ajv: ^8.12.0
+      ajv-formats: ^3.0.1
+      ajv-formats-draft2019: ^1.6.1
+      libxmljs2: ^0.35||^0.37
+      packageurl-js: '*'
+      spdx-expression-parse: '*'
+      xmlbuilder2: ^3.0.2||^4.0.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
+      ajv-formats:
+        optional: true
+      ajv-formats-draft2019:
+        optional: true
+      libxmljs2:
+        optional: true
+      packageurl-js:
+        optional: true
+      spdx-expression-parse:
+        optional: true
+      xmlbuilder2:
+        optional: true
 
   '@dagrejs/dagre@3.1.1':
     resolution: {integrity: sha512-zroZB1dFOFiGgv4Xcrn1DckB1o4aOikPqD2NDQPV0WM//CXGcS6xiD0rNkqHmw6FEg4tabt4nxPLwgCWT+Vb2A==}
@@ -4206,6 +4242,11 @@ snapshots:
       '@babel/helper-validator-identifier': 7.29.7
 
   '@cedar-policy/cedar-wasm@4.12.0': {}
+
+  '@cyclonedx/cyclonedx-library@10.3.0(ajv-formats@3.0.1(ajv@8.20.0))(ajv@8.20.0)':
+    optionalDependencies:
+      ajv: 8.20.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
 
   '@dagrejs/dagre@3.1.1':
     dependencies:
