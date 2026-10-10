@@ -351,7 +351,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       userId: actorUserId ?? NIL_UUID,
       objectType,
       objectId,
-      detail: { subsystem: "chatops", ...detail, receiptClass:"decision" },
+      detail: { subsystem: "chatops", ...detail, receiptClass: "excluded" },
       effect,
       ruleId,
       ruleChain: [],

@@ -201,4 +201,26 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(2);
     expect((await get(`/v1/receipts/${good.id}`)).json().receipts).toHaveLength(1);
   });
+  it("B4I-01: a retired deployment key cannot sign again but its historical evidence verifies", async () => {
+    const before = await bundle();
+    await db.update(receiptSigningKeys).set({ retiredAt: new Date() }).where(eq(receiptSigningKeys.keyId, "fixture-1"));
+    useKey("fixture-1");
+    await decision();
+    expect((await get("/v1/receipts/status")).statusCode).toBe(503);
+    await expect(runDecisionReceiptSignSweep(db)).rejects.toThrow("conflicts");
+    expect(await db.select().from(decisionReceipts)).toHaveLength(before.receipts.length);
+    const historical = await bundle();
+    expect(historical.keys.find(key => key.keyId === "fixture-1")!.retiredAt).not.toBeNull();
+    const checked = await app.inject({ method: "POST", url: "/v1/receipts/verify", headers: admin, payload: historical });
+    expect(checked.json().results.every((row: { status: string }) => row.status === "valid")).toBe(true);
+    expect(checked.json().cannotProve.join(" ")).toContain("signed before key retirement");
+    const cli = offline(historical, true);
+    expect(cli.status).toBe(0);
+    // ADR-0186 decision 30 item 2: the offline CLI surfaces the same limit as the API
+    expect(cli.output.cannotProve.join(" ")).toContain("signed before key retirement");
+    expect(cli.output.cannotProve.join(" ")).toContain("not a revocation attestation");
+    expect(checked.json().cannotProve.join(" ")).toContain("not a revocation attestation");
+    useKey("fixture-2", secondKey);
+    expect((await runDecisionReceiptSignSweep(db)).signed).toBe(1);
+  });
 });

@@ -91,8 +91,11 @@ jobs:
     # Not a performance target — a blast-radius cap. A hung job bills its full
     # timeout, so this is the most CI minutes any single run can waste. A normal
     # run is ~13 min (see the arithmetic above); 20 left ~7 min of headroom and
-    # a slow runner day turned green PRs red for timing (CI-03).
-    timeout-minutes: 30
+    # a slow runner day turned green PRs red for timing (CI-03). By 2026-10-10
+    # the gateway suite had grown to 20-30 min (batches 4-6) and three PRs were
+    # cancelled at 30 while still making progress (not hung); 45 is a stopgap
+    # until the gateway tests are sharded across jobs.
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -190,7 +193,12 @@ jobs:
       # behind a green build.
       - run: pnpm -r build
 
-      - run: pnpm -r test
+      # ADR-0186 decision 30 item 3 (B4I-03): @regulait/shared holds the wall-clock budget tests (its `timing`
+      # Vitest project, serialized after its parallel `unit` project). It runs on its own first, so the
+      # gateway suite on the other cores cannot stretch those budgets; every other package then runs in
+      # parallel as before. `!regulait` keeps the root's own recursive `test` script out of the filter.
+      - run: pnpm --filter @regulait/shared test
+      - run: pnpm -r --filter '!@regulait/shared' --filter '!regulait' test
         env:
           # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
           REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
