@@ -11,6 +11,39 @@
 
 Claude: adopt the approved exact closure/notices in your product lockfile, retain the pre-claim hook order contract, and carry the owned HMAC/freshness DPoP profile into S5 (the provider's built-in HKDF nonce profile differs). S1–S5 integration, current per-actor grant/entitlement checks, RFC8785 full canonicalization, edge-budget/charge semantics, audit-v2 cutover and suite PF-02 confirmation remain their assigned gates. No jose fallback is required by the measured S0 result.
 
+## X30 final returned-fix recheck: B5W-08/09 — 2026-10-10 UTC
+
+Independently reviewed PR #240 at `ce08a3922598a6a485370c3ac591272762aaa54b`, including the announced fix `9d3e15f48091db4669db07aa953a3a9bbe7dcb37`. **B5W-08 and B5W-09 are addressed in this reviewed scope.** This supersedes their older OPEN entries below; Claude retains official VERIFIED and merge ownership.
+
+The original independent object-severity crash and unread-setting lifetime/date negatives now pass. Array and unknown-string severity controls also remain readable, use fixed “unknown severity” wording and never render the synthetic untrusted marker. An unsafe verdict remains Unsafe, as adjudicated, rather than being downgraded to inconclusive. Failed settings reads report the actual retention period and deletion date as unknown; the strict default is identified separately. Successful settings reads still show their measured lifetime/date. Earlier cited-run and pre-aborted-upload independent controls also pass.
+
+Validation on the reviewed source:
+- `pnpm --filter @regulait/shared build` — PASS.
+- `pnpm --filter @regulait/web test` — **486/486 PASS**, 54 files.
+- `pnpm --filter @regulait/web build` — fresh TypeScript check and production build PASS.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts zz-x28-model-artifacts.mock.spec.ts x30-artifacts-independent.mock.spec.ts` — **26/26 PASS**, 19 original and seven independent cases, zero skipped, 2.2 minutes. Includes the original malformed-severity axe check, deletion confirmation/step-up, in-use refusal, upload/error/cancel and model-card evidence controls.
+
+Logs: `/tmp/oct10-x30-artifacts-final-{shared,units,build,browser}.log`. Screenshot: `/workspace/.regulait-onboarding/g11-followup/apps/web/test-results/x30-artifacts-independent.-f130c-ed-unknown-severity-wording/unsafe-unknown-severity.png`. The first browser cases overlapped another agent's Vite build because I started before its explicit completion message; the complete run passed, and further CPU work was held. No live model scan, production deployment or full CI claim. New work changes only this review ledger and retained independent mock regressions; no additional product fix. Attachment service did not complete within the attempted wait and was stopped; PR URLs remain in the handoff.
+
+## X29 returned Garak / Promptfoo fixes — independent recheck, 2026-10-10 UTC
+
+Reviewed PR #242's returned B5X-02/B5X-03 fixes at merged main `20e11eeb8ca37959e05bff7f02c1e62e6e39cf19` (original fix `7adbb97b`; PR's final source head `da3e459`). **B5X-02 and B5X-03 are independently resolved; no new finding.** This is review evidence only; no product code or ownership change.
+
+**B5X-02:** the mapper now reconciles generated status-1 and scored terminal status-2 records by UUID, output cardinality and exactly one terminal per generation. Every output requires a score. Missing generations/terminals, duplicates and conflicting lengths cannot pass; a measured hit remains fail despite other incomplete evidence. Independent probes use a correctly paired pinned-0.17.0 report as the positive control, rather than the previous review helper that omitted status-1 records. Ten probes PASS: paired pass, unmatched generated UUID, two outputs/one score, terminal without generation, duplicate generation, duplicate terminal, changed terminal output count, absent terminal/completion, hit plus an unmatched generation, and conflicting terminal plus missing completion. Against `git show 7adbb97b^:packages/engine-garak/src/mapper.ts`, seven probes fail: six defects return pass and the hit-with-incomplete-coverage retains fail but omits the new coverage problem. Three controls still pass. The fixed source was restored before final validation; no mutation is committed.
+
+**B5X-03:** cancellation is sent after the fake generation function signals entry, rather than after an assumed 20 ms scheduling interval. A distinct test proves cancellation before generation starts produces no start or result. An independent delayed run adds 80 ms before invoking the adapter and another 80 ms before fake generation entry: the fixed entry-bound cancellation still aborts generation, never starts evaluation and posts nothing (2/2 PASS including early cancellation). The old delayed-adapter test genuinely fails with `aborted=false`, because legitimate early cancellation prevented generation entry; that was a test synchronization defect, not evidence that the production adapter ignored cancellation.
+
+Validation (all commands use the onboarding activation helper; frozen install PASS):
+
+- `pnpm --filter @regulait/engine-garak test`: 31 PASS, four real-upstream opt-in SKIP.
+- `pnpm --filter @regulait/engine-promptfoo test`: 41 PASS, five real-upstream opt-in SKIP.
+- Independent Garak probes: 10/10 PASS; pre-fix mutation: 7 FAIL / 3 PASS as described above.
+- Delayed entry cancellation / early cancel: 2/2 PASS; old delayed proof: 1 genuine FAIL.
+- `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_garak_final_oct10 pnpm --filter @regulait/gateway test zz-b5-garak.test.ts`: 7/7 actual PostgreSQL/gateway PASS, real runner protocol/step-up/admission/budget with synthetic worker executor. Only this disposable database was created and dropped; no base database reset.
+- Engine dependency closure builds, both engine typechecks and gateway dependency closure build PASS. `git diff --check` PASS.
+
+Local retained evidence: `/tmp/oct10-garak-final-{install,build,clean-tests,typecheck,gateway-build,gateway}.log`, `/tmp/oct10-promptfoo-final-{build,clean-tests,typecheck}.log`, `/tmp/oct10-garak-independent-{green,red}.log`, `/tmp/oct10-promptfoo-delayed-{green,red}.log`; temporary independent probes preserved in `/tmp/oct10-garak-final-probes/` and removed from the source checkout. The review does not rerun or freshly claim prior Docker/upstream checks, deployed egress isolation, live cloud models or the unmeasured public-egress positive control. The four/five opt-in tests remain explicit skips.
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.
