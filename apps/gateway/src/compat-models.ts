@@ -84,6 +84,21 @@ export interface EntitledModel {
  * cannot be dispatched, so advertising it in a discovery endpoint would hand a
  * client a model id that is guaranteed to fail.
  */
+/**
+ * ADR-0188 S4: the delegation grant a `/v1/models` listing is narrowed by. A workload caller lists its chain's
+ * intersection; so does an ENGINE run's key, under the run's live grant (review L1) — the same grant its
+ * dispatches are decided with. No live grant = the nil id, which lists nothing. A person's own key: none.
+ */
+export async function modelListingGrantId(
+  db: Db,
+  authCtx: { via?: string; delegationGrantId?: string | undefined },
+  vk: VirtualKeyContext | null,
+): Promise<string | undefined> {
+  if (authCtx.via === "workload") return authCtx.delegationGrantId ?? NO_DELEGATION_GRANT;
+  if (vk?.purpose === "engine") return (vk.engineRunId ? await liveEngineRunGrant(db, vk.engineRunId) : null) ?? NO_DELEGATION_GRANT;
+  return undefined;
+}
+
 export async function listEntitledModels(
   db: Db,
   userId: string,
@@ -194,13 +209,7 @@ export function registerModelsDiscovery(app: FastifyInstance, db: Db) {
       db,
       userId,
       vk,
-      // ADR-0188 S4: a workload caller lists its chain's intersection; so does an ENGINE run's key, under the
-      // run's live grant (review L1) — the same grant its dispatches are decided with (no live grant = nothing)
-      req.authCtx.via === "workload"
-        ? (req.authCtx.delegationGrantId ?? NO_DELEGATION_GRANT)
-        : vk?.purpose === "engine"
-          ? ((vk.engineRunId ? await liveEngineRunGrant(db, vk.engineRunId) : null) ?? NO_DELEGATION_GRANT)
-          : undefined,
+      await modelListingGrantId(db, req.authCtx, vk),
     );
 
     // One audit row per listing. A discovery call is a read of the caller's own

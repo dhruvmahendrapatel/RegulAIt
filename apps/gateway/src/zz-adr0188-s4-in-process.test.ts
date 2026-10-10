@@ -106,7 +106,7 @@ let approverId: string;
 let restoreGates: () => Promise<void> = async () => {};
 let restoreAdmission: (() => Promise<void>) | undefined;
 
-const inject = (method: "GET" | "POST" | "PUT", url: string, headers: Record<string, string>, payload?: unknown) =>
+const inject = (method: "GET" | "POST" | "PUT" | "PATCH", url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
 
 async function mkUser(label: string): Promise<{ id: string; auth: { authorization: string } }> {
@@ -187,6 +187,15 @@ describe("S4: an agent with no grants of its own is refused under the strict def
     expect(list.statusCode, list.body).toBe(200);
     const read = await inject("GET", `/v1/workload-identities/${ident!.id}/grants`, AUTH);
     expect(read.json()).toMatchObject({ identityId: ident!.id, agents: [], tools: [], revision: 0 });
+    // S4 amendment 1 (N1): an unowned agent's only steward is the system principal, which holds nothing — the
+    // grant is refused until the admin names a steward who holds it (Ivy)
+    const unowned = await inject("PUT", `/v1/workload-identities/${ident!.id}/grants`, AUTH, {
+      revision: 0, tools: [], servers: [], connectors: [], roleIds: [], agents: [{ agentId: worker, allowedModes: ["execute"] }],
+    });
+    expect(unowned.statusCode, unowned.body).toBe(422);
+    expect(unowned.json().error).toBe("grant_exceeds_stewards");
+    const named = await inject("PATCH", `/v1/workload-identities/${ident!.id}`, AUTH, { sponsorUserIds: [ivy.id] });
+    expect(named.statusCode, named.body).toBe(200);
     const put = await inject("PUT", `/v1/workload-identities/${ident!.id}/grants`, AUTH, {
       revision: 0, tools: [], servers: [], connectors: [], roleIds: [], agents: [{ agentId: worker, allowedModes: ["execute"] }],
     });
