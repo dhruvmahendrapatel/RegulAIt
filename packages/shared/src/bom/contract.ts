@@ -144,7 +144,29 @@ export const bomTimeSchema = z
 export const bomIdentifierSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:/@+#=-]+$/);
 /** a safe JS integer (amendment 5: integers never exceed 2^53) */
 export const bomIntSchema = z.number().int().safe();
-export const bomSpiffeSchema = z.string().max(2048).regex(/^spiffe:\/\/[a-z0-9.-]+(\/[A-Za-z0-9._~:@!$&'()*+,;=-]+)+$/);
+/**
+ * LINEAR shape checks for the delimited formats (CodeQL js/polynomial-redos): a
+ * regex with a repeated group over caller input is replaced by a split on the
+ * delimiter and one flat, anchored character-class test per part, after a
+ * length cap. No nested or overlapping quantifier is applied to caller input.
+ */
+const SPIFFE_HOST = /^[a-z0-9.-]+$/;
+const SPIFFE_SEGMENT = /^[A-Za-z0-9._~:@!$&'()*+,;=-]+$/;
+export function isBomSpiffeId(value: string): boolean {
+  if (value.length > 2048 || !value.startsWith("spiffe://")) return false;
+  const rest = value.slice("spiffe://".length);
+  const slash = rest.indexOf("/");
+  if (slash < 1 || !SPIFFE_HOST.test(rest.slice(0, slash))) return false;
+  return rest.slice(slash + 1).split("/").every((segment) => SPIFFE_SEGMENT.test(segment));
+}
+const OID_ARC = /^[0-9]+$/;
+/** a dotted OID: `0`, `1` or `2`, then one or more numeric arcs */
+export function isBomDottedOid(value: string): boolean {
+  if (value.length > 256) return false;
+  const [first, ...arcs] = value.split(".");
+  return (first === "0" || first === "1" || first === "2") && arcs.length >= 1 && arcs.every((arc) => OID_ARC.test(arc));
+}
+export const bomSpiffeSchema = z.string().max(2048).refine(isBomSpiffeId, "a spiffe://trust-domain/path identifier");
 
 // ---------------------------------------------------------------------------
 // canonical bytes, digests, serial numbers
@@ -233,15 +255,19 @@ export function parseTrainingDatasetChecksum(checksum: string, storedRowCount?: 
  * and a dotted domain immediately after it. Checked in LINEAR time (CodeQL
  * js/polynomial-redos on the earlier unanchored regex): each `@` is visited
  * once, and the domain is matched with a sticky regex whose runs are separated
- * by literal dots, so it cannot backtrack across positions.
+ * by literal dots, so it cannot backtrack across positions. The domain is now a
+ * hand scan by code unit (no regex): CodeQL flagged the sticky domain regex too.
  */
 const EMAIL_LOCAL_CHAR = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]$/;
-const EMAIL_DOMAIN_AT = /[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/y;
+/** a domain-label character `[A-Za-z0-9-]`, by code unit (no regex) */
+const isLabelChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 45;
 export function hasEmailShape(text: string): boolean {
   for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
     if (at === 0 || !EMAIL_LOCAL_CHAR.test(text[at - 1]!)) continue;
-    EMAIL_DOMAIN_AT.lastIndex = at + 1;
-    if (EMAIL_DOMAIN_AT.test(text)) return true;
+    // a dotted domain follows iff: one or more label characters, a dot, and one more label character
+    let i = at + 1;
+    while (i < text.length && isLabelChar(text.charCodeAt(i))) i += 1;
+    if (i > at + 1 && text.charCodeAt(i) === 46 && i + 1 < text.length && isLabelChar(text.charCodeAt(i + 1))) return true;
   }
   return false;
 }
@@ -269,11 +295,24 @@ export function findEmailShapes(value: unknown, at = "$"): string[] {
 // R47: an exported endpoint is scheme, host, port and path only
 // ---------------------------------------------------------------------------
 
-/** no userinfo, no query, no fragment; the path is plain URL characters */
-export const bomEndpointSchema = z
-  .string()
-  .max(2048)
-  .regex(/^(https?|wss?):\/\/[A-Za-z0-9.-]+(:[0-9]{1,5})?(\/[A-Za-z0-9._~!$&'()*+,;=:%-]*)*$/, "scheme://host[:port]/path only");
+const ENDPOINT_SCHEME = /^(?:https|http|wss|ws):\/\//;
+const ENDPOINT_HOST = /^[A-Za-z0-9.-]+$/;
+const ENDPOINT_PORT = /^[0-9]{1,5}$/;
+const ENDPOINT_SEGMENT = /^[A-Za-z0-9._~!$&'()*+,;=:%-]*$/;
+/** no userinfo, no query, no fragment; the path is plain URL characters (a linear split, no nested quantifier) */
+export function isBomExportEndpoint(value: string): boolean {
+  if (value.length > 2048) return false;
+  const scheme = ENDPOINT_SCHEME.exec(value);
+  if (!scheme) return false;
+  const rest = value.slice(scheme[0].length);
+  const slash = rest.indexOf("/");
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  const colon = authority.indexOf(":");
+  const host = colon === -1 ? authority : authority.slice(0, colon);
+  if (!ENDPOINT_HOST.test(host) || (colon !== -1 && !ENDPOINT_PORT.test(authority.slice(colon + 1)))) return false;
+  return slash === -1 || rest.slice(slash + 1).split("/").every((segment) => ENDPOINT_SEGMENT.test(segment));
+}
+export const bomEndpointSchema = z.string().max(2048).refine(isBomExportEndpoint, "scheme://host[:port]/path only");
 
 // ---------------------------------------------------------------------------
 // R5 / R18 / R26: the fixed canonical column projection of every bound row
@@ -565,7 +604,7 @@ export const decisionBomAnchorSchema = z
         token: z.string().max(65536).regex(/^[A-Za-z0-9+/=]+$/),
         genTime: bomTimeSchema,
         messageImprint: bomDigestSchema,
-        policyOid: z.string().regex(/^[0-2](\.[0-9]+)+$/).nullable(),
+        policyOid: z.string().max(256).refine(isBomDottedOid, "a dotted OID").nullable(),
         nonce: z.string().regex(/^[0-9a-f]{1,64}$/).nullable(),
         requestSentAt: bomTimeSchema.nullable(),
         /** #280: a token granted before `tsa_request_sent_at` existed; the verifier says `request_facts_not_recorded` */
