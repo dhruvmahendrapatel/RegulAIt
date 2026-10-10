@@ -300,7 +300,9 @@ const forwardedCerts = new WeakMap<object, PresentedCertificate | null>();
 function decodeForwarded(value: string): Buffer | null {
   if (value.length === 0 || value.length > MAX_CERT_BYTES * 2) return null;
   try {
-    const text = value.startsWith("-----BEGIN") ? value : value.startsWith("%2D") || value.startsWith("%2d") ? decodeURIComponent(value) : null;
+    // URL-encoded PEM (nginx `$ssl_client_escaped_cert`): "-" is unreserved, so it may or may not be escaped
+    const decoded = value.includes("%") ? decodeURIComponent(value) : value;
+    const text = decoded.startsWith("-----BEGIN") ? decoded : null;
     if (text !== null) return Buffer.from(new X509Certificate(text).raw);
     const der = Buffer.from(value, value.includes("-") || value.includes("_") ? "base64url" : "base64");
     return Buffer.from(new X509Certificate(der).raw);

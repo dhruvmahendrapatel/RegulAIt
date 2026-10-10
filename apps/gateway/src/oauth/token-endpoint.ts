@@ -148,6 +148,10 @@ interface RequestState {
   outcome?: { grantId: string; parentGrantId: string | null; jti: string; actorIdentityId: string };
   code?: string;
   aborted: boolean;
+  /** the client the request named (for the audit row) */
+  clientId: string | null;
+  /** the audit row is written before the response leaves (Koa middleware); the route writes it otherwise */
+  audited?: boolean;
 }
 
 const als = new AsyncLocalStorage<RequestState>();
@@ -492,6 +496,8 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
     clientAuthMethods: ["private_key_jwt", "tls_client_auth"],
     enabledJWA: { clientAuthSigningAlgValues: [...WORKLOAD_PROOF_ALGS], dPoPSigningAlgValues: [...WORKLOAD_PROOF_ALGS] },
     clockTolerance: 5,
+    // the provider validates every client's metadata against its own keystore; it signs no ID token here
+    clientDefaults: { id_token_signed_response_alg: "EdDSA", grant_types: [TOKEN_EXCHANGE_GRANT_TYPE], response_types: [] },
     features: {
       devInteractions: { enabled: false },
       dPoP: { enabled: true, requireNonce: () => false },
@@ -555,12 +561,17 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
   provider.proxy = true;
   provider.registerGrantType(TOKEN_EXCHANGE_GRANT_TYPE, (ctx) => exchange(provider, ctx), EXCHANGE_PARAMS);
   // expose our public RegulAIt error_code (decision 15) on the refusals that carry one
+  // and write the audit row BEFORE the response leaves (decision 20: the provider runs outside Fastify's hooks)
   provider.use(async (ctx, next) => {
     await next();
     const s = als.getStore();
     const body = ctx.body as Record<string, unknown> | undefined;
     if (s?.code && body && typeof body === "object" && typeof body.error === "string" && (DELEGATION_ERROR_CODES as readonly string[]).includes(s.code)) {
       ctx.body = { ...body, error_code: s.code };
+    }
+    if (s && !s.audited) {
+      s.audited = true;
+      await auditTokenRequest(db, s, s.aborted ? 499 : ctx.status, s.clientId);
     }
   });
   byIssuer.set(issuer, provider);
@@ -628,7 +639,7 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
   const form = new URLSearchParams(req.body.toString("utf8"));
   const clientId = clientIdOf(form);
   const now = await databaseNow(db);
-  const s: RequestState = { db, issuer, secrets, now, phase: "client_assertion", aborted: false };
+  const s: RequestState = { db, issuer, secrets, now, phase: "client_assertion", aborted: false, clientId };
 
   // decision 21: a client certificate is matched to a registered credential BEFORE the provider sees the request,
   // and only when the client sent no assertion (one mechanism per request)
@@ -683,6 +694,9 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
     );
   } finally {
     clearTimeout(timer);
-    await auditTokenRequest(db, s, s.aborted ? 499 : reply.raw.statusCode, clientId).catch(() => {});
+    if (!s.audited) {
+      s.audited = true;
+      await auditTokenRequest(db, s, s.aborted ? 499 : reply.raw.statusCode, clientId).catch(() => {});
+    }
   }
 }
