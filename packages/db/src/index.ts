@@ -13,7 +13,14 @@ export { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte
 export type { SQL } from "drizzle-orm";
 export type { PgColumn } from "drizzle-orm/pg-core";
 
-export { AUDIT_CHAIN_LOCK_KEY, appendChainedAuditRows, withAuditChain } from "./audit-chain.js";
+export {
+  AUDIT_CHAIN_LOCK_KEY,
+  AuditChainSchemaBehindError,
+  appendChainedAuditRows,
+  loadAuditChainBoundary,
+  readAuditV2Boundary,
+  withAuditChain,
+} from "./audit-chain.js";
 
 // ADR-0102 — the operator-prose credential scrub for reason/note columns
 // OUTSIDE `audit_log`. Exported so the covered/not-covered inventory can be

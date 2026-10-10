@@ -52,6 +52,9 @@ export const STEP_UP_ACTION_KINDS = [
   "break_glass",
   "passkey_manage",
   "owner_change",
+  // ADR-0188 (migration 0180): creating, binding a key to, suspending or revoking a workload identity,
+  // and every other identity administration write
+  "identity_manage",
 ] as const;
 export type StepUpActionKind = (typeof STEP_UP_ACTION_KINDS)[number];
 

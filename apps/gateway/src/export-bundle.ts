@@ -78,6 +78,7 @@ import {
   AUDIT_GENESIS_ROW_HASH,
   AUDIT_PAYLOAD_VERSION,
   canonicalAuditPayload,
+  canonicalAuditPayloadV2,
   canonicalJson,
 } from "@regulait/shared";
 
@@ -365,7 +366,8 @@ export async function readChainSegment(db: Db, subjectId: string | null): Promis
     contentHash: r.contentHash as string,
     prevHash: r.prevHash as string,
     rowHash: r.rowHash as string,
-    payload: canonicalAuditPayload(r),
+    // ADR-0188 decision 19: a v2 row's payload is the v2 serialisation (its version is inside the hash)
+    payload: r.chainVersion === 2 ? canonicalAuditPayloadV2(r) : canonicalAuditPayload(r),
     subject: subjectId !== null && r.objectId === subjectId,
   }));
 
