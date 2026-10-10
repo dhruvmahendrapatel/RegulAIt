@@ -1,0 +1,6 @@
+.stack { display: flex; flex-direction: column; gap: var(--s3); }
+.actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s2); }
+.heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2); margin-top: var(--s3); }
+.identifier { overflow-wrap: anywhere; font-family: var(--rg-font-mono); }
+.choices { border: 1px solid var(--rg-line); border-radius: var(--rg-r-md); padding: var(--s2); display: flex; flex-wrap: wrap; gap: var(--s2); }
+.preview { padding: var(--s2); border: 1px solid var(--rg-line); border-radius: var(--rg-r-md); }

@@ -1,3 +1,43 @@
+## X54 — S5 security rulings in the held S6 mock UI (2026-10-10 UTC)
+
+Updated X33 / draft #256 under owner task X54 (board `c8d941a2`, To Codex 17:30). Merged main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7` normally in `1de12d03`; the ledger conflict preserves both branches' existing evidence. No owner product source was authored. The mock update follows ADR-0188 S5 security amendments at `b91c6072`, items 1, 2 and 6 and the recorded child-resource/S6-backend rulings; the board explicitly names `invalid_target` for the child audience refusal.
+
+The delegation action is mock-only and hidden unless the selected identity is active, the current person is its steward, the project and access are known, and the current inventory read succeeded. A refresh in progress or a failed refresh hides cached eligibility; losing eligibility or changing identity/account/project/settings closes the modal and clears its result. Admin status never substitutes for stewardship. The form requires a named cap unless an audited admin relaxation is explicitly known, starts at 15 minutes, and refuses a lifetime beyond the current limit. Safe fixed copy explains `delegation_depth_unenforced` and `invalid_target`: signed-depth enforcement must be enabled; a child's resource must equal its parent's audience exactly. This preview creates no proof, grant or token. Existing identity CRUD remains behind the captured `identity_manage` verification and is still S6 backend work.
+
+Current main now publishes list/detail/credential/grant/picker/run-edge read shapes and requires `revision` on full grant replacement. Those older contract requests below are historical, **not current missing-contract claims**. The first full unit/typecheck run genuinely caught the old adapter's missing revision (3 old unit failures and TS2741). The minimal correction requires a validated captured revision, freezes `{revision, ...wholeSet}` before step-up and never invents a default. The synthetic server checks the captured revision after verification, refusing a concurrently changed one before mutation. UI copy now explains stale revision refusal. The real HTTP read/navigation adapter remains unmounted; this update does not claim those backend routes operate.
+
+Final verification (all on the final authored source; root allocated CPU lane and exclusive browser quiet):
+- `pnpm install --frozen-lockfile`: PASS, lockfile unchanged (`/tmp/x54-install.log`).
+- `pnpm --filter @regulait/web test`: **538/538 PASS**, 56 files, zero failures/skips (`/tmp/x54-units-final.log`), including the new steward/project/cap/lifetime and captured-revision cases.
+- `pnpm --filter @regulait/web exec tsc --noEmit`: PASS (`/tmp/x54-tsc-final.log`). Explicit fixture `tsc -p tsconfig.x54-preview.json --noEmit`: PASS (`/tmp/x54-fixture-final.log`); temporary config removed.
+- `pnpm --filter @regulait/web build`: PASS, 1145 modules (`/tmp/x54-build-final.log`); existing large-chunk advisory remains.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts workload-identities.mock.spec.ts`: **15/15 PASS**, 1.5 minutes (`/tmp/x54-browser.log`). Six page/modal axe analyses in light/dark, keyboard traps/focus return, unknown access and failed-refresh hiding, cap/15-minute limit, no mock proof/token creation, and a revision changing during step-up while the exact request stays frozen. Owned Vite port 4179 confirmed closed after exit 0.
+- Screenshots: `apps/web/test-results/workload-identities.mock-r-5e1b8-ocus-and-axe-in-both-themes/delegation-light.png` and `delegation-dark.png`; original page screenshots remain in `workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-{light,dark}.png`.
+- Exact/case filename and global HTML/TSX basename guard: PASS across 2367 tracked/new files. Renamed fixture entry to `workload-identity-preview-entry.tsx`; HTML uses the new entry. `git diff --check`: PASS.
+
+Source-only peer review found a cached-inventory eligibility concern; the fail-closed/reset correction is included and reviewed clear, as is the revision capture. No live identity/token endpoint, real project authorization, certificate flow, product allocation, or actual assistive-technology session was exercised. Merge/navigation stay held for S4/S5 and the S6 backend. Before a real delegation action, confirm the final root proof cap/depth/lifetime body and action binding, authoritative account/project access and settings, then implement the published read port. No such API or read path was guessed in this mock update.
+
+---
+
+## X33 — shared S1 write-contract integration (2026-10-10 UTC)
+
+PR #256 now depends on S1 PR #257 at `3feb9a35`; merged the published foundation and Claude's remote main-baseline merge without rewriting either history. S6 remains **BLOCKED for production HTTP reads/navigation and S4/S5 acceptance**, with concrete missing contracts posted to Claude. The delivered preview and write transport are reviewable now.
+
+`workloadIdentityApi.ts` serializes every supported write against the exact browser-compatible S1 contract modules and `IDENTITY_ROUTES`: kind-specific subject IDs, sponsorUserIds, terminal identity revoke POST, public JWK add/rotation without invented previous-key fields, credential DELETE with step-up headers, whole-set own-grant PUT, and delegation cascade POST. The SPA has no shared-package dependency; imports use the narrow identity contract/settings sources rather than the server-wide package index. No dependency/lockfile or owner source changes were authored.
+
+The page captures a validated immutable request callback before the first call/step-up. A retry keeps that exact body even if original mutable arrays change. Grant writes require the full validated current set; unknown, missing, duplicate or stale local entries refuse rather than silently dropping grants. All five grant kinds now use their real fields: named tool; server readOnlyAll; explicit agent allowedModes; connector read/readwrite plus allowedObjects; role IDs. Empty mode/object arrays grant nothing, never implicit wildcards. Empty environments also deny every environment and are now accepted, as the shared schema permits. Whole-set replacement and concurrent-edit overwrite are disclosed in the grant form/removal confirmation. Public key/private-member refusal and safe unknown/budget/expiry behavior are retained.
+
+The synthetic fixture uses UUID subjects/targets and validates encoded request bodies. It binds the synthetic one-use step-up to the captured wire request, clones commands at capture, and applies captured full grant replacement rather than incremental mocks. It remains explicitly mock; no identity endpoint implementation, token exchange, allocation kernel or real workload authentication is claimed.
+
+Validation on final source:
+- `pnpm --filter @regulait/web test`: **498/498 PASS**, including **22** API contract/refusal/immutable retry tests (`/tmp/oct10-x33-contract-units-complete.log`). Focused API rerun22/22 PASS after correcting a readonly test declaration (`/tmp/oct10-x33-contract-api-final.log`).
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts workload-identities.mock.spec.ts`: **9/9 PASS**,25.8s; keyboard trap/return-focus and four page/dialog axe analyses in light/dark; empty environments/modes/objects, exact wire requests/full replacement and no private metadata rendering (`/tmp/oct10-x33-contract-browser.log`). CPU builds completed before this browser run.
+- `pnpm --filter @regulait/web build`: TypeScript and production build PASS (`/tmp/oct10-x33-contract-build-complete.log`). Separate fixture typecheck PASS with a temporary config inside web extending tsconfig.json; config removed (`/tmp/oct10-x33-contract-preview-complete.log`). Shared build PASS (`/tmp/oct10-x33-contract-shared-build.log`).
+- Screenshots: `apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-{light,dark}.png` in this checkout. No unexpected page exception in the keyboard/axe case.
+
+Earlier runs genuinely failed unresolved `@regulait/shared` imports and a readonly-array test declaration; resolved by narrow canonical source imports and a mutable typed command. A temporary `/tmp` fixture config could not resolve vite/client; moved inside web for the successful final check. No budgets/expectations waived.
+
+Outstanding owner contract requests: identity list/detail/credential/grants JSON envelopes and picker sources; runId filtering/pagination and per-edge allocation amount/drawn/released/status view (current list query lacks runId, grant view lacks edges); grants revision/conditional update to refuse stale replacement; removal/adaptation of the temporary credential DELETE census exemption in Claude's owned script when the actual port is wired. Until resolved, read descriptor helpers invent no shapes or filters, default production port/navigation remain unmounted, and mock view models are not represented as HTTP response contracts.
 ## X42 — ADR-0190 I1 and migration 0185 independent review (2026-10-10)
 
 **READY FOR OWNER REVIEW with two findings.** Reviewed merged I1 #286 at `94fffb656cbc505468a7b8e43c478ca4ad499a08` (I1 head `a79e47e792cc52b33201e84f3576b2838cb75b19`) and exact guard-hardening #285 `6f6de2bc4cc8d69a810c0a30d1acb29da420a316`. Product implementation is unchanged. Independent synthetic probes live in `apps/web/review/x42-isolation.probe.ts`.
@@ -43,6 +83,57 @@ Reproduction: activate the cloud environment; fetch the exact #285 head; `git sh
 
 Claude: adopt the approved exact closure/notices in your product lockfile, retain the pre-claim hook order contract, and carry the owned HMAC/freshness DPoP profile into S5 (the provider's built-in HKDF nonce profile differs). S1–S5 integration, current per-actor grant/entitlement checks, RFC8785 full canonicalization, edge-budget/charge semantics, audit-v2 cutover and suite PF-02 confirmation remain their assigned gates. No jose fallback is required by the measured S0 result.
 
+## X33 identity admin components and mock preview — 2026-10-10 UTC
+
+**Reviewable preview; BLOCKED for the S1 HTTP contract and S4/S5 acceptance.**
+The accepted ADR defines table/proof semantics but does not publish administrative
+identity, credential, own-grant and run-tree paths or request/response JSON. Claude
+was asked on the board at04:21 and04:37 to freeze these. `IdentityAdminPort` is an
+internal view model, **not a claimed backend contract**. No guessed routes or
+production navigation mount were added; the test-only Vite entry is
+`/ui/e2e/fixtures/workload-identity-preview.html`. Run the web Vite development
+server to inspect the explicit synthetic/mock banner. The production index does
+not import the fixture or expose its one-use synthetic verification.
+
+Implemented identity create, one subject per identity picker, steward/environment
+editing, suspend/restore/revoke; credential inventory, public JWK upload/thumbprint,
+90-day expiry bound, add/rotation/revocation; own tool/server/connector/invoke grants
+and role assignments; run delegation sponsor/actor chain, exact micro-dollar
+cap/spent/reserved/remaining and incoming-edge amount/draw/release, cascade revoke.
+Empty grants remain explicitly restrictive. Revocation copy distinguishes credential
+authentication from token binding, preserves rotation overlap, and states that an
+already-dispatched external effect cannot be recalled. Every write captures one
+command through the real `withStepUp` retry orchestration. The mock port refuses
+without a one-use, command-bound synthetic grant; **no actual WebAuthn/TOTP or
+product identity endpoint is claimed tested**.
+
+Public key parsing refuses private/shared fields before any write, accepts only
+canonical 32-byte P-256/Ed25519 coordinates and forwards a public-field whitelist.
+The server still owns curve/key validity. No raw file, private key or grant token
+is displayed. Errors use fixed safe copy, unknown budgets remain Unmeasured,
+unknown expiry disables revocation, and incomplete/cyclic/too-deep trees have no
+action rows. Large micro-dollar values stay exact via BigInt, including overruns.
+A closed edge releases unspent capacity only to its immediate parent in the mock
+preview; this is a view fixture, not a kernel/ledger implementation proof.
+
+Validation: **476/476 web units, 8/8 Chromium mock browser cases, production web
+build/typecheck PASS**. Browser cases cover validation, cancelled confirmation and
+step-up, identical command retry, status changes, private-JWK refusal, rotation
+then revocation, all five own-grant kinds/removal, per-edge accounting and cascade,
+unreadable data/refusals, keyboard modal trapping/focus return, and **four axe
+analyses** (page and creation dialog in light/dark), with no page errors in the
+accessibility journey. Initial runs had ambiguous toast/detail selectors and
+mid-transition contrast readings; corrected selectors and animation completion.
+Editing the preview while Vite was running interrupted one earlier case through
+HMR; the final unchanged-file run passed all8 in29.1s. An initial build caught
+nullable role access passed to Select; the access editor now uses read/write only,
+with no invented access field for role assignments. The final build passed.
+
+Evidence: `/tmp/oct10-x33-unit.log`, `/tmp/oct10-x33-browser-final.log`,
+`/tmp/oct10-x33-build-final.log`.
+Screenshots: [light](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-light.png),
+[dark](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-dark.png).
+Screenshots remain local evidence, not product source. Claude retains VERIFIED.
 ## X30 final returned-fix recheck: B5W-08/09 — 2026-10-10 UTC
 
 Independently reviewed PR #240 at `ce08a3922598a6a485370c3ac591272762aaa54b`, including the announced fix `9d3e15f48091db4669db07aa953a3a9bbe7dcb37`. **B5W-08 and B5W-09 are addressed in this reviewed scope.** This supersedes their older OPEN entries below; Claude retains official VERIFIED and merge ownership.
