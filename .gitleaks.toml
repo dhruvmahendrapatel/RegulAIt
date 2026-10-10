@@ -155,6 +155,13 @@ regexTarget = "secret"
 regexes = ['''^GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ$''']
 
 [[allowlists]]
+description = "HISTORY ONLY: synthetic AWS-key-shaped passkey label the B4 step-up test used from d28ab09 until 2bc9a12 replaced it with AWS's published AKIAIOSFODNN7EXAMPLE. The literal is no longer in the tree, but the secret scan reads the full history, so this exact value stays allowed in this one file."
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-b4a-step-up\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^AKIAZ7XQK3NWQOPXR4LT$''']
+
+[[allowlists]]
 description = "Placeholder ciphertext literal in the B4 approver-eligibility test (marks a user as TOTP-enrolled; never decrypted)"
 condition = "AND"
 paths = ['''^apps/gateway/src/zz-b4s-approver-eligibility\.test\.ts$''']
