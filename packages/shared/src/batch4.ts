@@ -112,6 +112,17 @@ export type ReceiptVerifyStatus = (typeof RECEIPT_VERIFY_STATUSES)[number];
 
 /** R: the receipt payload's version tag (and the export bundle's `verifier`) */
 export const RECEIPT_PAYLOAD_VERSION = "regulait.receipt.v1";
+/**
+ * ADR-0189 R34 / R42 / R48 (shared with ADR-0188 decision 9, open question 1):
+ * receipt payload v2 adds the actor chain and `factsHash`. B1 VERIFIES v2 but
+ * still EMITS v1: nothing emits v2 because a binary was deployed. From the
+ * recorded boundary (`receipt_payload_versions.from_audit_seq`) on, every
+ * receipt is v2 and a v1 receipt there is invalid; below it, always v1.
+ */
+export const RECEIPT_PAYLOAD_VERSION_V2 = "regulait.receipt.v2";
+export const RECEIPT_PAYLOAD_VERSIONS = [RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2] as const;
+/** R43: can this build emit v2 receipts with facts? A build that cannot refuses to start once a boundary exists. */
+export const RECEIPT_EMITTER_SUPPORTS_V2 = false;
 /** R: `prev` of the first receipt */
 export const RECEIPT_GENESIS_PREV = "0".repeat(64);
 
@@ -136,6 +147,11 @@ export const VENDORED_DETECTION_PACKS = [
   "agt-mcp-heuristics",
 ] as const;
 export type VendoredDetectionPack = (typeof VENDORED_DETECTION_PACKS)[number];
+
+/** V (decision 32): whether caller-supplied content carrying a `pipelock-secrets` credential may leave for a host
+ * outside that credential's audience (`org_settings.outbound_credential_audience`). `enforce` refuses it. */
+export const OUTBOUND_CREDENTIAL_AUDIENCE_MODES = ["enforce", "off"] as const;
+export type OutboundCredentialAudienceMode = (typeof OUTBOUND_CREDENTIAL_AUDIENCE_MODES)[number];
 
 /** M: the four monitor rules (rule ids in `MONITOR_RULES`) */
 export const DETECTION_MONITOR_RULE_IDS = [
@@ -263,8 +279,29 @@ export interface DecisionReceiptPayload {
   keyId: string;
 }
 
+/**
+ * ADR-0189 R34: the v2 payload. Everything v1 carries, plus ADR-0188 decision
+ * 9's actor fields and the decision's facts binding. `factsHash` is null only
+ * when `decision_facts_capture` was off for that decision, and then
+ * `factsStatus` says so inside the signed bytes.
+ */
+export interface DecisionReceiptPayloadV2 extends Omit<DecisionReceiptPayload, "v"> {
+  v: typeof RECEIPT_PAYLOAD_VERSION_V2;
+  actor: {
+    /** the acting workload identity (ADR-0188), null when a person acted directly */
+    identityId: string | null;
+    delegationGrantId: string | null;
+    /** ordered identity ids, root first; null when there is no chain */
+    chain: string[] | null;
+  };
+  factsStatus: "captured" | "capture_off";
+  /** `decision_facts.facts_hash`; null exactly when `factsStatus` is `capture_off` */
+  factsHash: string | null;
+}
+export type AnyDecisionReceiptPayload = DecisionReceiptPayload | DecisionReceiptPayloadV2;
+
 /** the bytes a receipt signature covers */
-export function receiptCanonicalBytes(payload: DecisionReceiptPayload): string {
+export function receiptCanonicalBytes(payload: AnyDecisionReceiptPayload): string {
   return canonicalJson(payload);
 }
 
@@ -292,6 +329,7 @@ export const BATCH4_STRICT_DEFAULTS = Object.freeze({
   decisionReceiptsMode: "on" as DecisionReceiptsMode,
   auditAnchorTimestampMode: "required" as AuditAnchorTimestampMode,
   vendoredDetectionPacks: [...VENDORED_DETECTION_PACKS] as VendoredDetectionPack[],
+  outboundCredentialAudience: "enforce" as OutboundCredentialAudienceMode,
   monitorMcpBaselineDays: 14 as number,
   monitorJailbreakThreshold: 3 as number,
   monitorJailbreakWindowHours: 24 as number,
@@ -312,6 +350,7 @@ export const BATCH4_SETTING_COLUMNS: Readonly<Record<Batch4SettingKey, string>> 
   decisionReceiptsMode: "decision_receipts_mode",
   auditAnchorTimestampMode: "audit_anchor_timestamp_mode",
   vendoredDetectionPacks: "vendored_detection_packs",
+  outboundCredentialAudience: "outbound_credential_audience",
   monitorMcpBaselineDays: "monitor_mcp_baseline_days",
   monitorJailbreakThreshold: "monitor_jailbreak_threshold",
   monitorJailbreakWindowHours: "monitor_jailbreak_window_hours",
@@ -371,6 +410,14 @@ export const BATCH4_SETTING_COPY: Readonly<Record<Batch4SettingKey, { label: str
       "rules, and MCP manifest heuristics.",
     relaxed: "Each pack turned off stops detecting what it covers.",
   },
+  outboundCredentialAudience: {
+    label: "Credentials sent to the wrong service",
+    strict:
+      "Enforce: a tool or connector call whose own arguments carry a known credential (for example a GitHub or " +
+      "cloud API token) is refused unless it goes to that credential's own service. Credentials the gateway adds " +
+      "itself are not affected.",
+    relaxed: "Off: a call may carry such a credential to any destination the egress rules allow.",
+  },
   monitorMcpBaselineDays: {
     label: "MCP server baseline (days)",
     strict: "14 days: an agent calling a server it did not call in the last 14 days raises an alert.",
@@ -395,7 +442,7 @@ const missingAny = (value: readonly string[], strict: readonly string[]) => stri
 /**
  * Is `value` a RELAXATION of the strict default for `key`? A weaker signature
  * mode, step-up off, a longer step-up lifetime, any step-up action or pack
- * removed, a smaller sensitive quorum, receipts or timestamps off, a longer MCP
+ * removed, a smaller sensitive quorum, receipts, timestamps or outbound credential audience off, a longer MCP
  * baseline, a higher jailbreak threshold and a shorter jailbreak window are
  * relaxations; the opposite moves are stricter.
  */
@@ -420,6 +467,8 @@ export function batch4SettingRelaxed<K extends Batch4SettingKey>(key: K, value: 
       return value !== "on";
     case "auditAnchorTimestampMode":
       return value !== "required";
+    case "outboundCredentialAudience":
+      return value !== "enforce";
     default:
       return !sameJson(value, BATCH4_STRICT_DEFAULTS[key]);
   }
@@ -461,6 +510,8 @@ export const batch4OrgSettingsFields = {
   auditAnchorTimestampMode: z.enum(AUDIT_ANCHOR_TIMESTAMP_MODES).optional(),
   /** strict: all four; removing one relaxes it */
   vendoredDetectionPacks: uniqueSubset(VENDORED_DETECTION_PACKS).optional(),
+  /** strict "enforce"; off relaxes it */
+  outboundCredentialAudience: z.enum(OUTBOUND_CREDENTIAL_AUDIENCE_MODES).optional(),
   /** strict 14; longer, up to 90, relaxes it */
   monitorMcpBaselineDays: boundedInt(BATCH4_SETTING_LIMITS.monitorMcpBaselineDays).optional(),
   /** strict 3; higher, up to 100, relaxes it */

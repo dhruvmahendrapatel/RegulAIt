@@ -530,7 +530,7 @@ describe("F14 — atomicity", () => {
     const args = { text: `f14-epoch-${RUN}` };
     const signed = await queueAndApprove(EPOCH, args);
     const evaluated = await governedEvaluate(db, callerId, serverId,
-      { serverId, name: EPOCH, kind: "write" }, args);
+      { serverId, name: EPOCH, kind: "write" }, args, undefined, undefined, undefined, undefined, undefined, undefined, { actor: null });
     expect(evaluated.decision.effect).toBe("allow");
     expect(evaluated.approvedApprovalId).toBe(signed);
     await activateRuleVersion(ruleIdFor.get(EPOCH)!, { writeOnly: false });

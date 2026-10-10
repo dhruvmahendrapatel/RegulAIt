@@ -456,6 +456,10 @@ import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 // ADR-0188 (batch 6 item 1) S1 — every identity route, a 501 stub until its slice lands
 import { registerIdentityRoutes } from "./identity-routes.js";
+// ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
+import { registerBomRoutes } from "./bom-routes.js";
+// ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
+import { registerIsolationRoutes } from "./isolation-routes.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
@@ -2957,6 +2961,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             mfaCompleted: body.principal.mfaCompleted ?? null,
           }
         : undefined,
+      undefined,
+      undefined,
+      undefined,
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     // What the decision was actually computed ON. A proxy that believes it is
@@ -3053,6 +3061,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // caller, so the principal's session attributes are honestly unknown
       // here. /v1/abac/simulate is where a hypothetical session can be named.
       undefined,
+      undefined,
+      undefined,
+      undefined,
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
@@ -3070,7 +3082,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-      detail: { ...(advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" })), receiptClass: "decision" },
+      detail: { ...(advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" })), receiptClass: "excluded" },
     });
 
     return decision;
@@ -3917,7 +3929,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ...(updated.objectType === "connector_call"
             ? { objectType: "connector" as const, objectId: updated.connectorId }
             : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
-          detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "decision" },
+          detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "excluded" },
           effect: "deny",
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],
@@ -5233,6 +5245,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDetectionContentRoutes(app, db);
   // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
   registerIdentityRoutes(app, db);
+  // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
+  registerBomRoutes(app, db);
+  registerIsolationRoutes(app, db);
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (runner token only: registerEngineRunnerScopeHook).

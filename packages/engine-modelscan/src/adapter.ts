@@ -129,6 +129,8 @@ export function modelscanAdapter(opts: ModelscanAdapterOptions): EngineAdapter {
         timedOut: outcome.timedOut,
         report: outcome.reportTooLarge ? "too_large" : outcome.report,
         reportSha256: outcome.reportSha256,
+        npy: outcome.npy,
+        npz: outcome.npz,
       });
     } finally {
       await opts.executor.release(lease.runId);

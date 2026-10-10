@@ -27,6 +27,10 @@ import { approvalRuleQuorumFields, batch4OrgSettingsFields } from "./batch4.js";
 import { batch5OrgSettingsFields } from "./engines/settings.js";
 // ADR-0188 (batch 6 item 1): the identity settings ride the same PUT
 import { identityOrgSettingsFields } from "./identity/settings.js";
+// ADR-0189 (batch 6 item 2): the Decision BOM / AI BOM settings ride the same PUT
+import { bomOrgSettingsFields } from "./bom/settings.js";
+// ADR-0190 (batch 6 item 3): the isolation settings ride the same PUT
+import { isolationOrgSettingsFields } from "./isolation/settings.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -2415,6 +2419,11 @@ export const updateOrgSettingsSchema = z
     // ADR-0188 (batch 6 item 1): agent entitlement mode, delegated token lifetime, delegation depth,
     // workload client authentication methods, the DPoP nonce and the workload key lifetime
     ...identityOrgSettingsFields,
+    // ADR-0189 (batch 6 item 2): fact capture, Decision BOM finality, export roles, person identifiers,
+    // snapshot triggers, snapshots without a key, CycloneDX versions and the export rate limit
+    ...bomOrgSettingsFields,
+    // ADR-0190 (batch 6 item 3): isolation enforcement, the class floors and the executor attestation lifetime
+    ...isolationOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -2857,7 +2866,12 @@ export {
   AUDIT_LEGACY_DISCLOSURE,
   AUDIT_PAYLOAD_VERSION,
   AUDIT_PAYLOAD_VERSION_V2,
+  AUDIT_CHAIN_BOUNDARY_VERSIONS,
   auditChainVersionAt,
+  auditRowVersionProblem,
+  resolveAuditChainBoundary,
+  type AuditChainBoundary,
+  type AuditChainBoundaryRecord,
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
@@ -4604,6 +4618,9 @@ export * from "./detection-content/index.js";
 // ADR-0187 (batch 5): the sidecar engine contract
 export * from "./engines/index.js";
 export * from "./identity/index.js";
+export * from "./bom/index.js";
+// ADR-0190 (batch 6 item 3): isolation and execution profiles
+export * from "./isolation/index.js";
 export {
   injectionText,
   vendoredCompileProblems,
@@ -4619,3 +4636,6 @@ export { vendoredMcpFindings } from "./detection-content/mcp.js";
 
 // ADR-0186 R: public offline receipt-verification seam.
 export * from "./receipts/verify.js";
+
+// ADR-0187 decisions 185–192: the built-in CyberSecEval eval datasets (pure: pins, mapping, digests).
+export * from "./eval-datasets/cyberseceval.js";

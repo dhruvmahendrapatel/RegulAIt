@@ -103,10 +103,12 @@ import { breakerAdmits, recordUpstreamFailure, recordUpstreamSuccess } from "./u
 import {
   connectUpstream,
   consumeApprovalOrRetire,
+  credentialAudienceDecision,
   preflightUpstream,
   queueGovernedApproval,
   type GovernedToolCallOutcome,
 } from "./mcp-proxy.js";
+import { refuseOutboundCredentialAudience } from "./outbound-audience.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -332,7 +334,27 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       undefined,
       undefined,
       approvalTargetForServer(serverId, serverRow),
+      { actor: null }, // ADR-0188 S4 replaces
     );
+  // ADR-0186 V, decision 32 — the decided params (EXACTLY what is sent) against
+  // the registered upstream URL, after the entitlement decision and before its
+  // row (see the tool path in mcp-proxy.ts: a refused payload leaves no
+  // arguments digest); stdio has no host and is out of scope
+  if (decision.effect !== "deny" && serverRow.transport !== "stdio") {
+    const audience = await refuseOutboundCredentialAudience(db, {
+      userId,
+      surface: "mcp_protocol",
+      content: [decided],
+      destinations: [serverRow.url],
+      projectId,
+      subject: { serverId, toolName: grant },
+      detail: { method, approvalScope, contextDigest, target: auditTarget(serverRow) },
+    });
+    if (audience) {
+      recordDecision({ surface: "mcp_protocol", effect: "deny" });
+      return { kind: "denied", decision: credentialAudienceDecision(audience.reason) };
+    }
+  }
   await db.insert(auditLog).values({
     userId,
     serverId,
@@ -669,6 +691,7 @@ async function loggingRelayAllowed(
     undefined,
     undefined,
     approvalTargetForServer(a.serverId, a.serverRow),
+    { actor: null }, // ADR-0188 S4 replaces
   );
   await db.insert(auditLog).values({
     userId: a.userId,

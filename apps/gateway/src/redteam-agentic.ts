@@ -247,6 +247,7 @@ export async function adjudicateInducedCall(
     ]);
     const decision = evaluateConnector({
       userId: input.userId,
+      actor: null, // ADR-0188 S4 replaces
       /**
        * ADR-0124 — EVALUATION ONLY, and this one matters.
        *
@@ -324,7 +325,7 @@ export async function adjudicateInducedCall(
     undefined,
     undefined,
     // ADR-0182 A14: an evaluation dispatch is exempt from the literacy gate
-    { origin: "evaluation" },
+    { origin: "evaluation", actor: null }, // ADR-0188 S4 replaces
   );
   const held = decision.effect !== "allow";
   return {
@@ -594,7 +595,7 @@ export async function auditAdjudication(
       platformEffect: a.platformEffect,
       targetRegistered: a.targetRegistered,
       executed: false,
-      receiptClass: "decision",
+      receiptClass: "excluded",
     },
     effect,
     ruleId:

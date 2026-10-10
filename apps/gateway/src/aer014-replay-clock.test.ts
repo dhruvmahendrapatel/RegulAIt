@@ -187,7 +187,7 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
     const kind = { serverId, name: TOOL, kind: "read" as const };
     const old = await governedEvaluate(db, userId, serverId, kind, undefined, null, null, undefined, {
       versionId: candidateVersionId,
-    });
+    }, undefined, undefined, { actor: null });
     expect(old.candidateDecision?.effect).toBe("allow");
 
     // and the replay clock, asked the same question at B's instant, denies it
@@ -203,7 +203,7 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
       {
         versionId: candidateVersionId,
         replay: { asOf: at.B, lookbackHorizon: null, countAllowed: replayCounterFor(db, ids.B) },
-      },
+      }, undefined, undefined, { actor: null },
     );
     expect(replayed.candidateDecision?.effect).toBe("deny");
     expect(replayed.candidateDecision?.ruleId).toBe(limitId);
@@ -222,7 +222,7 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
       {
         versionId: candidateVersionId,
         replay: { asOf: at.A, lookbackHorizon: null, countAllowed: replayCounterFor(db, ids.A) },
-      },
+      }, undefined, undefined, { actor: null },
     );
     expect(atA.candidateDecision?.effect).toBe("allow");
   });
@@ -265,7 +265,7 @@ describe("AER-014: a replayed rate limit counts the calls strictly before the re
         {
           versionId: candidateVersionId,
           replay: { asOf: at.B, lookbackHorizon: cutoff, countAllowed: replayCounterFor(db, ids.B) },
-        },
+        }, undefined, undefined, { actor: null },
       );
       expect(direct.candidateDecision).toBeUndefined();
       expect(direct.replayIndeterminate).toMatch(/pruned/);

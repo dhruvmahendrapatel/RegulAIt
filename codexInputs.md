@@ -17,6 +17,37 @@ Validation on final source:
 Earlier runs genuinely failed unresolved `@regulait/shared` imports and a readonly-array test declaration; resolved by narrow canonical source imports and a mutable typed command. A temporary `/tmp` fixture config could not resolve vite/client; moved inside web for the successful final check. No budgets/expectations waived.
 
 Outstanding owner contract requests: identity list/detail/credential/grants JSON envelopes and picker sources; runId filtering/pagination and per-edge allocation amount/drawn/released/status view (current list query lacks runId, grant view lacks edges); grants revision/conditional update to refuse stale replacement; removal/adaptation of the temporary credential DELETE census exemption in Claude's owned script when the actual port is wired. Until resolved, read descriptor helpers invent no shapes or filters, default production port/navigation remain unmounted, and mock view models are not represented as HTTP response contracts.
+## X42 — ADR-0190 I1 and migration 0185 independent review (2026-10-10)
+
+**READY FOR OWNER REVIEW with two findings.** Reviewed merged I1 #286 at `94fffb656cbc505468a7b8e43c478ca4ad499a08` (I1 head `a79e47e792cc52b33201e84f3576b2838cb75b19`) and exact guard-hardening #285 `6f6de2bc4cc8d69a810c0a30d1acb29da420a316`. Product implementation is unchanged. Independent synthetic probes live in `apps/web/review/x42-isolation.probe.ts`.
+
+### DBG-01 — HIGH merge blocker: exact migration 0185 cannot run after merged 0182/0183
+
+Both merged migrations create `public.regulait_refuse_truncate()` with `CREATE OR REPLACE`. Exact #285 migration 0185 uses `CREATE FUNCTION` for that same signature. After a fresh migration through main's 0183, executing the exact 0185 SQL inside a rollback-only transaction fails with PostgreSQL **42723 (duplicate_function)**. The preceding 15 ALTER FUNCTION statements roll back, so the existing old-function search-path and old-table TRUNCATE gaps remain. This is a migration integration blocker, not evidence that the intended guard fails after successful installation.
+
+The attempted dependency merge was aborted: its journal conflicts with main's 0182/0183. No journal/owner-file resolution is included here, and no complete merged migration-0185 success is claimed. Please reconcile the journal preserving all existing entries and the frozen 0185 `when=1785120000000`, and make the function definition compatible with the already-created signature. Retain the 0185 refusal behavior/error text so its own acceptance assertions agree. Recheck the composed migration before merging.
+
+### I1R-01 — LOW: profile body CHECK accepts missing/null required identity fields
+
+`packages/db/migrations/0183_isolation_execution_profiles.sql`'s `execution_profiles_body_check` claims the body is a v1 profile and restates `schema`, `name`, and `minClass`. On real Postgres, both `{}` and `{"schema":null,"name":null,"minClass":null}` insert successfully with a correctly computed body digest and otherwise valid, non-null row columns. Missing/JSON-null `->>` values turn the CHECK expression into SQL NULL, which passes. Both rows were created only in a transaction that was rolled back.
+
+Please require those comparisons to evaluate TRUE, e.g. `COALESCE((whole existing body predicate), false)` or explicit required-field checks, and add absent/null negatives. This is an invariant gap for trusted SQL writers; all profile routes still return 501 and shared zod rejects incomplete bodies. No exposed HTTP exploit, full database-level equivalent of zod, or need to duplicate every profile constraint in SQL is claimed.
+
+### Independent evidence and scope
+
+- **28/28 real-Postgres focused tests PASS, zero skipped:** all 16 existing I1 foundation cases plus 12 independent review cases. The review assertions deliberately reproduce DBG-01/I1R-01; their green result does not mean those findings are fixed.
+- Independent nonpublic hostile-schema negative control deletes a synthetic append-only incident event before search-path pinning. Applying the exact intended ALTER/trigger statements inside one rolled-back transaction, explicitly excluding the colliding CREATE FUNCTION, refuses that deletion and preserves the event. Every discovered public SQL/plpgsql function then has the pinned path; every discovered append-only table has a TRUNCATE guard. All guarded tables (more than 25) refuse `TRUNCATE ... CASCADE`, with a savepoint rollback after every attempt. This is partial statement-level evidence, **not a successful migration 0185**.
+- Future-migration controls create an unpinned public SQL function and a new append-only row-guarded table lacking a TRUNCATE guard. The same catalog predicates used by the owner's invariants detect both omissions. Both controls roll back. The current I1 functions/tables introduce no new omission.
+- A hostile temporary `execution_profiles` table and caller search path cannot bypass I1's one-step version guard. All four I1 tables refuse TRUNCATE under the hostile search path.
+- Independent shared checks cover amendments A–D: fixed OCI seccomp/sidecar flags, directfs as an explicit relaxation, workload-vs-host pids headroom, executor-side vs in-sandbox probe definitions; order-independent profile digests and changed security flags; backend class claims; and relaxation against both defaults and stricter stored settings. Existing I1 tests additionally prove placement outcome shapes/no fallback and audited org-setting relaxations through the real app.
+- **51/51 existing shared isolation cases PASS, zero skipped.** Gateway dependency-closure build and web typecheck/production build PASS. The existing Vite large-chunk advisory remains.
+- Scratch database `regulait_review_x42_oct10b` was created and dropped without FORCE; base database untouched. Temporary gateway test copy removed. Logs: `/tmp/x42-{install,gateway-build,web-build,pg-tests,shared-tests}.log`.
+
+Reproduction: activate the cloud environment; fetch the exact #285 head; `git show 6f6de2bc4cc8d69a810c0a30d1acb29da420a316:packages/db/migrations/0185_guard_search_path_and_truncate.sql > /tmp/x42-0185.sql`; create only the named scratch database; copy the owned probe to `apps/gateway/src/x42-isolation-independent.test.ts`; from the repository root run `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_review_x42_oct10b pnpm --filter @regulait/gateway test x42-isolation-independent.test.ts zz-adr0190-i1-foundation.test.ts`; remove the temporary test and drop only that scratch database. Run shared with `pnpm --filter @regulait/shared test isolation/isolation.test.ts`.
+
+**Limits:** no runsc/Kata/OpenShell execution, real escape probe, deployed executor, placement admission, complete guard-hardening migration, browser sweep, full gateway/shared/monorepo suite, or production designation. Actual runtime attestation and required-class placement are later I2–I4 slices. Amendment D evidence here checks the contract's probe definitions, not an operating sandbox's EROFS/host quotas.
+
+---
 
 ## X32 — ADR-0188 S0 identity-library spike (2026-10-10 04:17 UTC)
 
@@ -82,6 +113,168 @@ Evidence: `/tmp/oct10-x33-unit.log`, `/tmp/oct10-x33-browser-final.log`,
 Screenshots: [light](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-light.png),
 [dark](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-dark.png).
 Screenshots remain local evidence, not product source. Claude retains VERIFIED.
+## X30 final returned-fix recheck: B5W-08/09 — 2026-10-10 UTC
+
+Independently reviewed PR #240 at `ce08a3922598a6a485370c3ac591272762aaa54b`, including the announced fix `9d3e15f48091db4669db07aa953a3a9bbe7dcb37`. **B5W-08 and B5W-09 are addressed in this reviewed scope.** This supersedes their older OPEN entries below; Claude retains official VERIFIED and merge ownership.
+
+The original independent object-severity crash and unread-setting lifetime/date negatives now pass. Array and unknown-string severity controls also remain readable, use fixed “unknown severity” wording and never render the synthetic untrusted marker. An unsafe verdict remains Unsafe, as adjudicated, rather than being downgraded to inconclusive. Failed settings reads report the actual retention period and deletion date as unknown; the strict default is identified separately. Successful settings reads still show their measured lifetime/date. Earlier cited-run and pre-aborted-upload independent controls also pass.
+
+Validation on the reviewed source:
+- `pnpm --filter @regulait/shared build` — PASS.
+- `pnpm --filter @regulait/web test` — **486/486 PASS**, 54 files.
+- `pnpm --filter @regulait/web build` — fresh TypeScript check and production build PASS.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts zz-x28-model-artifacts.mock.spec.ts x30-artifacts-independent.mock.spec.ts` — **26/26 PASS**, 19 original and seven independent cases, zero skipped, 2.2 minutes. Includes the original malformed-severity axe check, deletion confirmation/step-up, in-use refusal, upload/error/cancel and model-card evidence controls.
+
+Logs: `/tmp/oct10-x30-artifacts-final-{shared,units,build,browser}.log`. Screenshot: `/workspace/.regulait-onboarding/g11-followup/apps/web/test-results/x30-artifacts-independent.-f130c-ed-unknown-severity-wording/unsafe-unknown-severity.png`. The first browser cases overlapped another agent's Vite build because I started before its explicit completion message; the complete run passed, and further CPU work was held. No live model scan, production deployment or full CI claim. New work changes only this review ledger and retained independent mock regressions; no additional product fix. Attachment service did not complete within the attempted wait and was stopped; PR URLs remain in the handoff.
+
+## X29 returned Garak / Promptfoo fixes — independent recheck, 2026-10-10 UTC
+
+Reviewed PR #242's returned B5X-02/B5X-03 fixes at merged main `20e11eeb8ca37959e05bff7f02c1e62e6e39cf19` (original fix `7adbb97b`; PR's final source head `da3e459`). **B5X-02 and B5X-03 are independently resolved; no new finding.** This is review evidence only; no product code or ownership change.
+
+**B5X-02:** the mapper now reconciles generated status-1 and scored terminal status-2 records by UUID, output cardinality and exactly one terminal per generation. Every output requires a score. Missing generations/terminals, duplicates and conflicting lengths cannot pass; a measured hit remains fail despite other incomplete evidence. Independent probes use a correctly paired pinned-0.17.0 report as the positive control, rather than the previous review helper that omitted status-1 records. Ten probes PASS: paired pass, unmatched generated UUID, two outputs/one score, terminal without generation, duplicate generation, duplicate terminal, changed terminal output count, absent terminal/completion, hit plus an unmatched generation, and conflicting terminal plus missing completion. Against `git show 7adbb97b^:packages/engine-garak/src/mapper.ts`, seven probes fail: six defects return pass and the hit-with-incomplete-coverage retains fail but omits the new coverage problem. Three controls still pass. The fixed source was restored before final validation; no mutation is committed.
+
+**B5X-03:** cancellation is sent after the fake generation function signals entry, rather than after an assumed 20 ms scheduling interval. A distinct test proves cancellation before generation starts produces no start or result. An independent delayed run adds 80 ms before invoking the adapter and another 80 ms before fake generation entry: the fixed entry-bound cancellation still aborts generation, never starts evaluation and posts nothing (2/2 PASS including early cancellation). The old delayed-adapter test genuinely fails with `aborted=false`, because legitimate early cancellation prevented generation entry; that was a test synchronization defect, not evidence that the production adapter ignored cancellation.
+
+Validation (all commands use the onboarding activation helper; frozen install PASS):
+
+- `pnpm --filter @regulait/engine-garak test`: 31 PASS, four real-upstream opt-in SKIP.
+- `pnpm --filter @regulait/engine-promptfoo test`: 41 PASS, five real-upstream opt-in SKIP.
+- Independent Garak probes: 10/10 PASS; pre-fix mutation: 7 FAIL / 3 PASS as described above.
+- Delayed entry cancellation / early cancel: 2/2 PASS; old delayed proof: 1 genuine FAIL.
+- `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_garak_final_oct10 pnpm --filter @regulait/gateway test zz-b5-garak.test.ts`: 7/7 actual PostgreSQL/gateway PASS, real runner protocol/step-up/admission/budget with synthetic worker executor. Only this disposable database was created and dropped; no base database reset.
+- Engine dependency closure builds, both engine typechecks and gateway dependency closure build PASS. `git diff --check` PASS.
+
+Local retained evidence: `/tmp/oct10-garak-final-{install,build,clean-tests,typecheck,gateway-build,gateway}.log`, `/tmp/oct10-promptfoo-final-{build,clean-tests,typecheck}.log`, `/tmp/oct10-garak-independent-{green,red}.log`, `/tmp/oct10-promptfoo-delayed-{green,red}.log`; temporary independent probes preserved in `/tmp/oct10-garak-final-probes/` and removed from the source checkout. The review does not rerun or freshly claim prior Docker/upstream checks, deployed egress isolation, live cloud models or the unmeasured public-egress positive control. The four/five opt-in tests remain explicit skips.
+
+## X36 real Batch 5 browser sweep — 2026-10-10 UTC
+
+**READY-FOR-REVIEW for states reachable on the shipped unbuilt-engine install.**
+Reviewed main `20e11eeb` with a real PostgreSQL scratch database
+`regulait_review_x36_oct10`, gateway on127.0.0.1:3147, built SPA and filesystem
+artifact store `/tmp/oct10-x36-model-artifacts`. No HTTP mocks and no external
+model calls. Frozen install, gateway dependency closure and production web build
+PASS. `demo:prepare` created its fixtures and reached demo:check; that check first
+reported18 PASS/1 FAIL because this scratch environment had no deployment export
+signing key. After the documented demo-only key generation in
+`/tmp/oct10-x36-export-keys`, the same database's final `demo:check` passed19/19.
+This is not a claim that the initial command exited successfully.
+
+**3/3 Chromium journeys PASS in the final combined run (1.8 minutes).**
+All three engines are off with no image digest and the page says Off — not built.
+Actual enable returns409 `engine_self_test_required`; actual self-test states that
+no live runner exists. Confirmation and keyboard focus trapping/return are checked.
+Red-teaming and Evaluations show no enabled engine and no runs, with no verdict
+badge; a real404 selected run is unavailable, never passed. Actual synthetic-file
+upload returns201 `format:unrecognised`; it stays Not scanned / Not admissible,
+modelscan's start button is disabled, a direct start request is409 `engine_disabled`
+and the recorded scans remain empty. Raw synthetic file bytes never enter the DOM.
+The execution kill switch confirms an audited reason; restoring normal mode opens
+the real identity step-up dialog and the gateway stays halted until an actual TOTP
+verification authorizes the retried change. The final mode is normal.
+
+**14 axe analyses PASS** (seven surfaces in light/dark) and keyboard actions cover
+enabling/refusal, self-test, opening artifact detail/upload and halt/resume. Choosing
+the local file uses Playwright's native file input fixture. No page exception or
+unexpected console error after sign-in. Chromium's deliberately generated
+403/404/409/501 resource refusals are separately asserted; the unauthenticated
+sign-in401 precedes the reviewed pages and is outside the page error collection.
+
+Limits: an unbuilt/off install cannot admit a runner, a successful enabled run,
+runner revocation or an approval-waiting engine run. Thus no actual runner-revoke,
+not_run/unknown **completed run**, approval or kill-during-live-run claim is made.
+Unrecognised format and a never-scanned artifact are distinct from a measured
+unknown scan. The existing mock/unit tests pin those remaining rendering branches;
+a real runner acceptance sweep remains a gate when its image is enabled. PR#240's
+artifact delete/retention changes were not merged at this main SHA, so those belong
+to the separately assigned returned-fix review. No new production defect found in
+the reachable states; Claude retains VERIFIED and merge authority.
+
+Initial harness corrections: collect console errors after the real login's expected
+401; use the gateway's actual unrecognised vocabulary; avoid toggling closed an
+artifact that upload already selected. Final unchanged-file combined run passed
+all3; these are not waived product failures. Read-only inspection and own disposable
+fixture mutations only. Commands are captured by the dedicated
+`playwright.x36-real.config.ts`; it requires an already-running prepared gateway
+and `E2E_DEMO_PREPARE_LOG`, and is not silently collected into the normal reset suite.
+
+Evidence logs: `/tmp/oct10-x36-{install,gateway-build,web-build,demo-prepare,demo-check-final,browser-final}.log`.
+Screenshots (local evidence only):
+
+[artifact-unknown-not-scanned-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-dark.png)
+
+[artifact-unknown-not-scanned-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-light.png)
+
+[execution-halted-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-dark.png)
+
+[execution-halted-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-light.png)
+
+[execution-restored-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-dark.png)
+
+[execution-restored-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-light.png)
+
+[engines-off-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-dark.png)
+
+[engines-off-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-light.png)
+
+[engines-refused-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-dark.png)
+
+[engines-refused-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-light.png)
+
+[evals-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-dark.png)
+
+[evals-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-light.png)
+
+[redteam-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-dark.png)
+
+[redteam-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-light.png)
+
+## X35 — ADR-0188 S1 independent review (2026-10-10 UTC)
+
+Reviewed PR #257, `b6-identity-s1` **3feb9a35**, against the frozen ADR decisions24–28 and the 04:55 coordination announcement. Review output only; no product implementation changed. Existing checkout symlinks were preserved under `/tmp/x35-preserved-symlinks` before switching branches.
+
+**I7S-01 — MEDIUM — v1 audit rows can acquire actor attribution without failing verification.** `packages/shared/src/audit-chain.ts:504` selects the v1 hash for rows before the v2 boundary but never refuses their non-null actor fields. The writer correctly refuses those fields before cutover, yet a raw SQL UPDATE of all three actor columns on an existing valid v1 row passes the migration's together-or-null constraint and `verifyAuditChain` still returns `status:ok, firstBreak:null`. No content/row hashes were rewritten; the unchanged anchored hash therefore does not commit to the injected attribution. Actual scratch-PostgreSQL probe starts with a valid writer row, updates actor_identity_id/delegation_grant_id/actor_chain together, and genuinely fails its expected-broken assertion. Acceptance: verifier rejects actor fields on every v1 row, including bounded scans, and exposes a definite break; preserve byte-for-byte v1 hash compatibility. Existing v2 actor tampering remains detected (independent positive control passes).
+
+**I7S-02 — LOW — verifier ignores unsupported future audit boundaries.** `apps/gateway/src/audit-chain.ts:951` selects only version2; unlike `readAuditV2Boundary`, it cannot see and refuse an unsupported latest boundary. A transaction simulating a future migration (temporarily lifting the version=2 CHECK and inserting version3/from_seq2) produces `status:ok, firstBreak:null` and fails the expected-broken assertion. Current S1 SQL itself refuses version3: this is a forward-version fail-closed gap, not a current route allowing unknown-version insertion. Acceptance: load and validate boundary versions consistently in writer and verifier; unsupported boundaries fail closed with explicit disclosure. Keep ordinary v1 verification green when no boundary exists.
+
+**I7S-03 — LOW — delegation depth setting copy is one actor short.** `packages/shared/src/identity/settings.ts` describes strict depth3 as an agent plus its delegate plus its delegate (three actors). ADR decision26 explicitly caps stored grant depth: a root is0 and depth3 permits four actors/hops. Acceptance: explain root plus three descendant delegations (four actors), or label the setting as descendant grant depth; keep the existing schema bounds and semantics.
+
+Validation on the exact reviewed source:
+- Frozen install and `pnpm --filter '@regulait/gateway...' build` PASS (`/tmp/oct10-x35-{install,build}.log`).
+- Actual PostgreSQL: `DATABASE_URL=<regulait_review_x35_oct10_parallel> pnpm --filter @regulait/gateway exec vitest run src/zz-adr0188-s1-foundation.test.ts` **23/23 PASS** (`/tmp/oct10-x35-foundation.log`). Covers migration/journal, strict defaults and audited step-up relaxations, credential/status/grant/replay constraints, all route stubs and auth classes, and writer version behavior.
+- `pnpm --filter @regulait/shared exec vitest run src/identity/identity.test.ts src/audit-chain.test.ts` **62/62 PASS** (`/tmp/oct10-x35-shared.log`).
+- Actual PostgreSQL gateway `src/audit-chain.test.ts`: **60 PASS, 9 explicitly skipped** (`/tmp/oct10-x35-audit.log`); skipped external/optional cases are not live verification.
+- Web `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS (`/tmp/oct10-x35-web-{tsc,build}.log`).
+- Independent negatives: **two expected-broken assertions genuinely fail**, and v2 actor-tamper positive control **1/1 PASS** (`/tmp/oct10-x35-independent.log`). Reproduction preserved in `apps/web/review/x35-s1-independent.probe.ts`; copy temporarily to `apps/gateway/src/zz-x35-independent-review.test.ts`, run with the scratch DATABASE_URL as above, then remove the temporary copy. It is deliberately outside normal test collection. Each probe uses a rolled-back transaction; unknown-version DDL is rolled back too.
+
+The dedicated scratch database was dropped after validation; the shared base database was untouched.
+
+No additional authentication/secret-storage/replay/default-deny bypass reproduced in this slice. AuthContext.via adds a type member, with no workload authentication issuer yet; no human auth widening was introduced here. Allocation/settlement admission and live provenance remain S3/S4, SPIFFE trust bundles S9. The owner's announced missing builder_turn/root subject-credential FKs and child max_depth are deferred boundaries, not rediscovered findings. No token endpoint, live allocation, real external caller, or whole gateway/shared CI claim is made.
+
+## X30 Engines returned-fix recheck — 2026-10-10 UTC
+
+Independently reviewed PR #248 at `d68baf83481879e61dacce9ab45f038829e72d7f` (source changes `9e1bda97` / `35eb6559`, integrated through `f5680d85` / `bcb374eb`). **Recommend resolving B5W-07 and the three #230 P2 review items within their stated scope.** No additional defect reproduced. Claude retains final adjudication and VERIFIED ownership.
+
+- **B5W-07:** the risk dialog names the build returned in the actual refusal, not the loaded inventory. Acceptance sends `expectedVersion` + `expectedDigest`; its `settings_relax` fact includes that same build. The gateway checks both before consuming step-up and under the engine row lock, and its acceptance audit uses the locked row. A rollover reopens acknowledgement for the replacement build, unticked. An unnamed refusal cannot produce an accepted write.
+- **Revocation reason:** the shared 500-character bound is mirrored and pinned by tests; oversized input disables submission. Server refusal keeps the dialog and typed reason available for correction.
+- **Runner report freshness:** additive `selfTestReportedAt` feeds age and future-skew checks. Stale, missing, malformed and excessively future-dated reports have no healthy badge; the page clock rechecks reports that expire while it remains open.
+- **Modelscan copy:** enabling the artifact-only engine explains that it has no model credentials and calls no model. Model-access engine copy still explains run-scoped model keys.
+
+Actual validation at the reviewed head (activation helper sourced first):
+
+| Command | Result |
+|---|---|
+| `pnpm --filter '@regulait/gateway...' build` | PASS, gateway and dependency closure |
+| `pnpm --filter @regulait/web test` | 468/468 PASS |
+| `pnpm --filter @regulait/web build` | PASS, includes `tsc -p tsconfig.json --noEmit` |
+| `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_review_engines_oct10_parallel pnpm --filter @regulait/gateway test zz-b5-engines.test.ts` | 42/42 PASS, fresh disposable PostgreSQL DB dropped after clean exit |
+| `pnpm --filter @regulait/shared test engines/engines.test.ts` | 20/20 PASS, including shared/web constant pins |
+| `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts e2e/b5-engines-page.mock.spec.ts e2e/x30-engines-independent.mock.spec.ts --trace on --output=/workspace/.regulait-onboarding/g12-followup/engines-final-browser` | 22/22 PASS (19 owner + 3 independent), 1.7 minutes |
+
+The gateway suite executes the owner’s real two-replica manifest rollover case with the real database and app: stale acceptance before/during the dialog or step-up refuses, an old grant cannot accept a new build, no stale acceptance is audited, and fresh acceptance audits the new build. The browser suite includes all 19 owner cases (with light/dark axe) and three additional independent negatives in `x30-engines-independent.mock.spec.ts`: loaded A → refusal B → rollover C during step-up preserves the exact B request/fact and refuses it; an unnamed build refusal cannot accept; and an excessively future-dated passing report never reads healthy.
+
+**Evidence limits:** browser routes and their step-up verification are mocked. They establish UI orchestration, not gateway locking or a live engine process. Gateway rollover evidence comes from the real PostgreSQL/app suite, not those mocks. No full monorepo, actual deployed rolling upgrade, live cloud provider, deployed passkey ceremony or screen-reader session is claimed. Production source remains unchanged; this delivery adds only independent web tests and the review ledger. Passing traces retained under `/workspace/.regulait-onboarding/engines-final-browser/**/trace.zip`; logs `/tmp/engines-parallel-{build,web-test,web-build,db,shared,browser}.log`. The Playwright `--output` directory was moved outside the checkout after the run solely to keep binary evidence out of git.
+
+---
 
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
@@ -1097,3 +1290,90 @@ X22 publication cleanup: removed a local generated-output symlink accidentally i
 ### X23 second cross-review corrections — 2026-10-09 CDT
 R23-10: caller-defined marker labels no longer make real credentials opaque. Only known rule-label combinations and field markers are protected; existing generated markers remain idempotent. Genuine old-scrubber red captured in /tmp/oct10-x23-marker-red.log. R23-02/05: remove the eight-open-gate fallback, tighten JWT/Discord/Stripe gates and emit reviewed bounded prefix context for candidate suffix scans; unbounded prefixes retain full scans. Original text still supplies exact spans. Added above-eight-gates 400k near-miss budget and Unicode UTF-16 offset regressions without weakening budgets. R23-11 portable screenshot paths were retained and verified.
 Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.
+
+### B4I-01 receipt retirement follow-up — 2026-10-10 UTC
+
+Retirement is a signing-service lifecycle event, not proof that a historical
+signature is invalid or that the private key was compromised. The gateway
+already refuses a retired deployment key in both sweep and status; public
+keys must remain available to verify historical evidence after rotation.
+`decision.at` is the decision timestamp, potentially preceding the signing
+sweep/key's first use by a backlog, so comparing it with firstUsedAt/retiredAt
+would invent signing-time evidence and reject legitimate receipts.
+
+Added explicit online/offline `cannotProve` wording that verification does not
+establish signing before retirement or absence of compromise, plus an owned
+receipt README describing operator trust-file removal and the absent separate
+revocation policy. New pure and actual database/API/CLI tests preserve historical
+verification while refusing new signing with a retired key, then allow a
+replacement key to sign the pending decision. Claude should adjudicate B4I-01
+on this contract; no new trusted-time or revocation guarantee is claimed.
+
+Validation: `pnpm --filter @regulait/shared test receipts/verify.test.ts` 8/8;
+`DATABASE_URL=<local base> pnpm --filter @regulait/gateway test decision-receipts.test.ts receipt-writer-classification.test.ts`
+11/11 on the suite's newly migrated disposable database, dropped by teardown.
+Gateway dependency build and gateway `tsc --noEmit`, web `tsc --noEmit` and web
+build PASS. Logs `/tmp/oct10-b4i-receipt-{units,db,build,tsc,web-tsc,web-build}.log`.
+
+### B4I-02/03 dense scrub performance follow-up — 2026-10-10 UTC
+
+B4I-02: repeated short fragments and credentials no longer require one full
+fragment scan/hash per occurrence. Per-invocation caches are capped at 256
+entries/256-character strings; unseen or uncached text is always scanned, and
+nothing is retained between audit writes. The second pass uses the first
+pass's surviving fragments, preserving existing markers while avoiding a parse
+of each newly generated marker. Empty prefixless RE2 sets are no longer scanned.
+A source/flags-pinned proof restricts the native fixed-width Google key scan to
+its final possible 39 characters only when the entire input is ASCII word/dash;
+the original regex/text still enforce both boundaries. Changed patterns fall
+back to the complete scan.
+
+Genuine old dense-Slack regression: isolated best-of-three 243.7ms, exceeding
+the unchanged 400k/100ms budget. Old compiled Google prefix/dash case145.4ms.
+Both new 400k/100ms tests pass, alongside cache saturation/distinct-fingerprint,
+EOF/boundary and changed-rule fallback tests (5/5). Output equivalence against
+the pre-optimization implementation passes20,000 seeded inputs and411 additional
+Google/boundary cases. Full shared test run with one worker:2049/2049 PASS,
+including the integration branch's50 forged-marker tests temporarily copied
+for verification and removed afterward. Existing20,000 fixed-point corpus,
+near-miss and all original100ms assertions remain unchanged. Fresh shared build,
+web typecheck and web build PASS. The final new test initially used a readonly
+property assignment; compilation caught it before publication, and descriptor
+replacement/restoration now compiles and passes.
+
+B4I-03 remains an owner-config handoff, not falsely closed: default parallel
+execution passed1994 tests but timed out the unchanged5-second candidate oracle;
+the same suite serially passed1995, then1996 as tests were added. A simultaneous
+build also moved a passing dense case over100ms. A broader75-case400k wall-time
+scan had further overruns under load; it is not claimed universally green.
+Please serialize shared files (fileParallelism:false/maxWorkers:1) or isolate
+timing tests in a dedicated serialized project in the owned shared test
+configuration. No timeout or budget was increased. This does not establish
+that the earlier inaccessible CI log had this same cause.
+
+Logs `/tmp/oct10-b4i-{dense-isolated-red,final-focused,shared-complete,delivery-build,final-equivalence,google-equivalence,scrub-web-tsc,scrub-web-build}.log`.
+Claude retains outbound-audience integration and B4I-01 retirement adjudication.
+
+B4I integration validation: reviewed exact `b4-codex-int` head
+`e3e47eaf839ac2fc3243bc90d7784ba6de8affdd` with only the product/test patches
+from X21 f69db5ef and X23 30a730c1 applied in an existing Codex review checkout.
+This was a temporary composition, not a claim that Claude merged those heads.
+Frozen install; **2068/2068 serialized shared tests**, **11/11 actual disposable
+PostgreSQL/API/CLI and writer-classification tests**, full gateway dependency
+build PASS. Logs `/tmp/oct10-b4i-integration-{install,shared,build,db}.log`.
+The temporary source patches were removed after verification.
+
+Concrete B4I-03 proposal for Claude's owned files: add shared Vitest config
+`defineConfig({test:{fileParallelism:false}})` and change the CI unit step to
+run `pnpm --filter @regulait/shared test` before
+`pnpm -r --filter '!@regulait/shared' --filter '!regulait' test`. This prevents both sibling-file
+and sibling-package competition for the shared wall-time budgets while
+retaining other packages' usual parallelism and every existing limit. The
+verified maxWorkers=1 command gives the proposed shared-file execution order;
+the entire rewritten CI job remains unrun. Draft patch saved as
+`/tmp/oct10-b4i-shared-test-config.patch`; I have not edited these owner files
+or claimed B4I-03 closed without their integration/CI verification.
+
+The proposed CI filter was dry-checked:18 remaining workspace projects, with
+both shared and the recursive root script explicitly excluded. The first
+negative-only filter included the root; the reviewed proposal now excludes it.

@@ -287,7 +287,7 @@ describe("ADR-0040 — attribute policies over the real bags", () => {
   });
 
   it("forbids by role + environment together", () => {
-    const src = `forbid (principal, action == RegulAIt::Action::"McpToolCall", resource)
+    const src = `forbid (principal is RegulAIt::User, action == RegulAIt::Action::"McpToolCall", resource)
       when { principal.roles.contains("contractor") && context.environments.contains("production") };`;
     expect(abacEngine.validate(src, V).ok).toBe(true);
     const base = request();
@@ -300,7 +300,7 @@ describe("ADR-0040 — attribute policies over the real bags", () => {
   });
 
   it("forbids unless MFA was completed — an authentication-strength policy", () => {
-    const src = `forbid (principal, action == RegulAIt::Action::"McpToolCall", resource)
+    const src = `forbid (principal is RegulAIt::User, action == RegulAIt::Action::"McpToolCall", resource)
       unless { principal.mfaCompleted };`;
     expect(abacEngine.validate(src, V).ok).toBe(true);
     const base = request();

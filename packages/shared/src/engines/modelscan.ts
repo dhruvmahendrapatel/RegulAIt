@@ -95,7 +95,12 @@ export const ARTIFACT_FORMAT_PLANS: Readonly<Record<ArtifactFormat, ArtifactForm
   },
   pytorch_zip: { scanAs: ".pt", executable: true, ceiling: "no_known_unsafe", describe: "a zip-layout PyTorch checkpoint (data.pkl inside): loading it runs code" },
   numpy: { scanAs: ".npy", executable: true, ceiling: "no_known_unsafe", describe: "a NumPy .npy array (object arrays are pickles)" },
-  numpy_npz: { scanAs: ".zip", executable: true, ceiling: "no_known_unsafe", describe: "a NumPy .npz archive of .npy members" },
+  numpy_npz: {
+    scanAs: ".zip",
+    executable: true,
+    ceiling: "no_known_unsafe",
+    describe: "a NumPy .npz archive of .npy members (object members are pickles); each member's header is checked and only object members' payloads are scanned",
+  },
   keras_h5: { scanAs: ".h5", executable: true, ceiling: "no_known_unsafe", describe: "an HDF5 (Keras H5) model: Lambda layers carry code" },
   keras_v3: { scanAs: null, executable: true, ceiling: "not_run", describe: "a Keras v3 archive: its scanner needs TensorFlow, which this image does not ship" },
   zip: { scanAs: ".zip", executable: true, ceiling: "unknown", describe: "a zip archive of unrecognised layout: members are scanned by name only" },
@@ -427,6 +432,107 @@ export const MODELSCAN_EXIT = { clean: 0, issues: 1, errors: 2, nothingScanned: 
 /** the largest report the runner reads (a report lists issues and errors, not data) */
 export const MODELSCAN_MAX_REPORT_BYTES = 4 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// The .npy header check (ADR-0187 decisions 180–184; closes open question 15(b))
+// ---------------------------------------------------------------------------
+
+/**
+ * Every answer the scanner's header check (engines/modelscan/npy-header.py) can give for a refused
+ * `.npy`, plus `npy_check_failed` (the check itself did not answer). Each one reads `unknown`.
+ */
+export const NPY_PROBLEMS = [
+  "npy_truncated",
+  "npy_magic_invalid",
+  "npy_version_unsupported",
+  "npy_header_length",
+  "npy_header_encoding",
+  "npy_header_not_literal",
+  "npy_header_keys",
+  "npy_header_value",
+  "npy_dtype_unsupported",
+  "npy_trailing_bytes",
+  "npy_payload_too_large",
+  "npy_check_failed",
+] as const;
+export type NpyProblem = (typeof NPY_PROBLEMS)[number];
+
+/** the header check's one answer: a numeric array (no pickle), an object array (its payload is a pickle), or refused */
+export const npyCheckSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("numeric") }).strict(),
+  z.object({ kind: z.literal("object"), payloadBytes: z.number().int().min(1) }).strict(),
+  z.object({ kind: z.literal("invalid"), problem: z.enum(NPY_PROBLEMS) }).strict(),
+]);
+export type NpyCheck = z.infer<typeof npyCheckSchema>;
+
+/** an object array's payload is handed to modelscan's PICKLE scanner under this name */
+export const NPY_OBJECT_PAYLOAD_NAME = "artifact.pkl";
+
+/**
+ * The largest object-array payload the scanner copies out for modelscan (larger: `npy_payload_too_large`,
+ * unknown). The copy lands on the result volume, a 64 MiB tmpfs that also holds the report (at most 4 MiB).
+ */
+export const NPY_OBJECT_PAYLOAD_MAX_BYTES = 48 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// The .npz archive check (ADR-0187 decisions 219–224; closes open question 15(c))
+// ---------------------------------------------------------------------------
+
+/**
+ * Archive-level refusals of the scanner's `.npz` check (engines/modelscan/npy-header.py `--npz`), plus
+ * `npz_check_failed` (the check itself did not answer). Each one reads `unknown`; nothing is extracted
+ * and modelscan is not started.
+ */
+export const NPZ_PROBLEMS = [
+  "npz_malformed",
+  "npz_layout",
+  "npz_header_mismatch",
+  "npz_empty",
+  "npz_too_many_members",
+  "npz_too_large",
+  "npz_member_encrypted",
+  "npz_member_path",
+  "npz_member_not_npy",
+  "npz_member_duplicate",
+  "npz_compression_unsupported",
+  "npz_check_failed",
+] as const;
+export type NpzProblem = (typeof NPZ_PROBLEMS)[number];
+
+/** member-level refusals beyond the `.npy` ones: the member is unknown, the other members are still checked */
+export const NPZ_MEMBER_PROBLEMS = ["npz_member_nested", "npz_member_corrupt"] as const;
+
+/** the most members a `.npz` may have (more: `npz_too_many_members`) */
+export const NPZ_MAX_MEMBERS = 1024;
+/** the most uncompressed bytes all members together may declare (more: `npz_too_large`; the zip-bomb bound) */
+export const NPZ_MAX_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024;
+
+/** one member's answer: a `.npy` answer, or a member-level `.npz` refusal */
+export const npzMemberCheckSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("numeric") }).strict(),
+  z.object({ kind: z.literal("object"), payloadBytes: z.number().int().min(1) }).strict(),
+  z.object({ kind: z.literal("invalid"), problem: z.enum([...NPY_PROBLEMS, ...NPZ_MEMBER_PROBLEMS]) }).strict(),
+]);
+export type NpzMemberCheck = z.infer<typeof npzMemberCheckSchema>;
+
+/**
+ * The archive check's one answer: every member's answer in central-directory order, or an archive-level
+ * refusal. All object payloads together stay within `NPY_OBJECT_PAYLOAD_MAX_BYTES` (one result volume).
+ */
+export const npzCheckSchema = z
+  .discriminatedUnion("kind", [
+    z.object({ kind: z.literal("npz"), members: z.array(npzMemberCheckSchema).min(1).max(NPZ_MAX_MEMBERS) }).strict(),
+    z.object({ kind: z.literal("invalid"), problem: z.enum(NPZ_PROBLEMS) }).strict(),
+  ])
+  .refine((c) => c.kind !== "npz" || c.members.reduce((n, m) => n + (m.kind === "object" ? m.payloadBytes : 0), 0) <= NPY_OBJECT_PAYLOAD_MAX_BYTES, {
+    message: "the object payloads exceed the result volume's bound",
+  });
+export type NpzCheck = z.infer<typeof npzCheckSchema>;
+
+/** the file an object member's payload is handed to modelscan's PICKLE scanner as (1-based position, never its name) */
+export function npzMemberPayloadName(index: number): string {
+  return `member-${String(index + 1).padStart(4, "0")}.pkl`;
+}
+
 /**
  * PR #212 review [4234946100]: does the report's summary disagree with its own lists? `total_issues`
  * and the per-severity counts against `issues[]`; `total_scanned` against `scanned_files`;
@@ -531,10 +637,14 @@ export function mapModelscanReport(input: {
   report: Uint8Array | null | "too_large";
   /** sha256 of the report bytes, recorded as the raw report (nothing attached) */
   reportSha256?: string | null;
+  /** the scanner's `.npy` header check (decisions 180–184); read only for the `numpy` format */
+  npy?: NpyCheck | null;
+  /** the scanner's `.npz` archive check (decisions 219–224); read only for the `numpy_npz` format */
+  npz?: NpzCheck | null;
 }): ModelscanEnvelopeBody {
   const plan = ARTIFACT_FORMAT_PLANS[input.format];
   const fmt = formatItem(input.format, input.formatDetail);
-  const name = modelscanArtifactName(input.format);
+  let name = modelscanArtifactName(input.format);
   const rawReport = input.reportSha256 ? { sha256: input.reportSha256, bytes: 0 } : null;
   const unknownScan = (why: string) => item(MODELSCAN_SCAN_ITEM_KEY, "modelscan", "scan", "medium", 0, 0, "unknown", why);
   if (!plan.scanAs || !name) {
@@ -549,19 +659,97 @@ export function mapModelscanReport(input: {
     rawReport,
   });
   if (input.timedOut) return failed("engine_timeout", "modelscan did not finish within the run's time limit");
-  if (input.report === null) return failed("report_missing", "modelscan wrote no report");
-  if (input.report === "too_large" || input.report.length > MODELSCAN_MAX_REPORT_BYTES) return failed("report_too_large", "modelscan's report is larger than the runner reads");
+  if (input.format === "numpy") {
+    // decisions 180–184: modelscan 0.8.8's NumPy scanner cannot read a header under numpy 2.x, so the
+    // scanner checks the header itself and modelscan sees only an object array's pickle payload
+    const npy = npyCheckSchema.safeParse(input.npy);
+    if (!npy.success) return failed("npy_check_missing", "the .npy header was not checked");
+    if (npy.data.kind === "invalid") {
+      const problem = npy.data.problem;
+      return {
+        status: "completed",
+        errorCode: null,
+        items: [
+          fmt.item,
+          unknownScan("the .npy header was refused: the array cannot be read safely, so its content is unknown"),
+          item("modelscan/error/1", MODELSCAN_ERROR_SYSTEM, problem, "medium", 0, 0, "unknown", `the .npy header was refused (${problem}); the artifact is unknown`),
+        ],
+        notRun: [],
+        rawReport: null,
+      };
+    }
+    if (npy.data.kind === "numeric") {
+      // a numeric array is raw bytes: no pickle, so modelscan has nothing to scan and was not started
+      if (input.report !== null || input.exitCode !== null) return failed("report_inconsistent", "modelscan ran on a numeric .npy, which has nothing for it to scan");
+      return {
+        status: "completed",
+        errorCode: null,
+        items: [
+          fmt.item,
+          item(MODELSCAN_SCAN_ITEM_KEY, "regulait-npy-header", "numeric", "low", 1, 0, "pass", "the .npy header verified a plain numeric dtype and the payload is exactly its size: no pickle to scan"),
+        ],
+        notRun: [],
+        rawReport: null,
+      };
+    }
+    // an object array: modelscan's pickle scanner was handed exactly the payload, as artifact.pkl
+    name = NPY_OBJECT_PAYLOAD_NAME;
+  }
+  // decisions 219–224: a .npz is checked member by member in the scanner; modelscan sees only the
+  // object members' pickle payloads, one file each, in one directory (names relative to it)
+  let expected: string[] = [name];
+  let npzRefused: EngineResultItem[] = [];
+  if (input.format === "numpy_npz") {
+    const npz = npzCheckSchema.safeParse(input.npz);
+    if (!npz.success) return failed("npz_check_missing", "the .npz archive was not checked");
+    if (npz.data.kind === "invalid") {
+      const problem = npz.data.problem;
+      return {
+        status: "completed",
+        errorCode: null,
+        items: [
+          fmt.item,
+          unknownScan("the .npz archive was refused: its members cannot be read safely, so its content is unknown"),
+          item("modelscan/error/1", MODELSCAN_ERROR_SYSTEM, problem, "medium", 0, 0, "unknown", `the .npz archive was refused (${problem}); the artifact is unknown`),
+        ],
+        notRun: [],
+        rawReport: null,
+      };
+    }
+    const members = npz.data.members;
+    npzRefused = members.flatMap((m, i) =>
+      m.kind === "invalid"
+        ? [item(`npz/member/${i + 1}`, MODELSCAN_ERROR_SYSTEM, m.problem, "medium", 0, 0, "unknown", `.npz member ${i + 1} was refused (${m.problem}); that member is unknown`)]
+        : [],
+    );
+    expected = members.flatMap((m, i) => (m.kind === "object" ? [npzMemberPayloadName(i)] : []));
+    if (expected.length === 0) {
+      // no object member: no pickle anywhere, so modelscan has nothing to scan and was not started
+      if (input.report !== null || input.exitCode !== null) return failed("report_inconsistent", "modelscan ran on a .npz with no object member, which has nothing for it to scan", npzRefused);
+      const scan =
+        npzRefused.length > 0
+          ? unknownScan(`${npzRefused.length} member(s) of the .npz were refused; they are unknown`)
+          : item(MODELSCAN_SCAN_ITEM_KEY, "regulait-npy-header", "numeric", "low", 1, 0, "pass", "every .npz member's header verified a plain numeric dtype and its payload is exactly its size: no pickle to scan");
+      return { status: "completed", errorCode: null, items: [fmt.item, scan, ...npzRefused], notRun: [], rawReport: null };
+    }
+  }
+  const ownerOf = (source: string) => expected.find((n) => source === n || source.startsWith(`${n}:`)) ?? null;
+  if (input.report === null) return failed("report_missing", "modelscan wrote no report", npzRefused);
+  if (input.report === "too_large" || input.report.length > MODELSCAN_MAX_REPORT_BYTES) return failed("report_too_large", "modelscan's report is larger than the runner reads", npzRefused);
   let report: ModelscanReport;
   try {
     const parsed = modelscanReportSchema.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(input.report)));
-    if (!parsed.success) return failed("report_invalid", "modelscan's report does not have the 0.8.8 shape");
+    if (!parsed.success) return failed("report_invalid", "modelscan's report does not have the 0.8.8 shape", npzRefused);
     report = parsed.data;
   } catch {
-    return failed("report_invalid", "modelscan's report is not valid JSON");
+    return failed("report_invalid", "modelscan's report is not valid JSON", npzRefused);
   }
   // findings first: an issue is a finding whatever else happened
   const issueItems = report.issues.slice(0, 1000).map((iss, i) => {
-    const member = iss.source.startsWith(`${name}:`) ? safeIdent(iss.source.slice(name.length + 1)) : null;
+    const owner = ownerOf(iss.source);
+    const inner = owner && iss.source !== owner ? safeIdent(iss.source.slice(owner.length + 1)) : null;
+    // for a .npz, the payload file names the member by its position (never the member's own name)
+    const member = input.format === "numpy_npz" && owner ? (inner ? `${owner}:${inner}` : owner) : inner;
     return item(
       `modelscan/issue/${i + 1}`,
       MODELSCAN_ISSUE_SYSTEM,
@@ -576,13 +764,16 @@ export function mapModelscanReport(input: {
   // PR #212 review [4234946100]: the summary must agree with the lists it summarises; a report that
   // contradicts itself decides nothing (its findings are still kept)
   const summaryProblem = modelscanSummaryProblem(report);
-  if (summaryProblem) return failed("report_inconsistent", `modelscan's report contradicts itself: ${summaryProblem}`, issueItems);
+  const kept = [...issueItems, ...npzRefused];
+  if (summaryProblem) return failed("report_inconsistent", `modelscan's report contradicts itself: ${summaryProblem}`, kept);
   if (input.exitCode === null || input.exitCode === MODELSCAN_EXIT.usage || input.exitCode < 0 || input.exitCode > MODELSCAN_EXIT.usage) {
-    return failed("engine_error", `modelscan exited ${input.exitCode ?? "without a code"}`, issueItems);
+    return failed("engine_error", `modelscan exited ${input.exitCode ?? "without a code"}`, kept);
   }
   const scanned = report.summary.scanned.scanned_files ?? [];
-  const foreign = [...scanned, ...report.issues.map((i) => i.source)].some((s) => s !== name && !s.startsWith(`${name}:`));
-  if (foreign) return failed("report_inconsistent", "modelscan's report names a file other than the one it was given", issueItems);
+  const foreign = [...scanned, ...report.issues.map((i) => i.source)].some((s) => ownerOf(s) === null);
+  if (foreign) return failed("report_inconsistent", "modelscan's report names a file other than the one it was given", kept);
+  // a .npz: every object member's payload must have been scanned (or carry a finding)
+  const unscanned = expected.filter((n) => !scanned.some((s) => ownerOf(s) === n) && !report.issues.some((i) => ownerOf(i.source) === n));
   const expectedExit =
     scanned.length === 0 && report.issues.length === 0
       ? MODELSCAN_EXIT.nothingScanned
@@ -593,7 +784,7 @@ export function mapModelscanReport(input: {
           : MODELSCAN_EXIT.clean;
   // exit 3 also covers "errors and nothing scanned" (a file whose only result was a parse error)
   const consistent = input.exitCode === expectedExit || (input.exitCode === MODELSCAN_EXIT.nothingScanned && scanned.length === 0);
-  if (!consistent) return failed("report_inconsistent", `modelscan exited ${input.exitCode} but its report implies ${expectedExit}`, issueItems);
+  if (!consistent) return failed("report_inconsistent", `modelscan exited ${input.exitCode} but its report implies ${expectedExit}`, kept);
   const errorItems = report.errors.slice(0, 1000).map((e, i) =>
     item(`modelscan/error/${i + 1}`, MODELSCAN_ERROR_SYSTEM, safeIdent(e.category, 64), "medium", 0, 0, "unknown", `modelscan could not read part of the artifact (${safeIdent(e.category, 64)}); that part is unknown`),
   );
@@ -608,6 +799,10 @@ export function mapModelscanReport(input: {
     items.push(unknownScan(`modelscan reported ${report.errors.length} error(s); the parts it could not read are unknown`));
   } else if (report.issues.length > 0) {
     items.push(item(MODELSCAN_SCAN_ITEM_KEY, "modelscan", "scan", "high", 1, 1, "fail", `modelscan found ${report.issues.length} unsafe operator(s)`));
+  } else if (unscanned.length > 0) {
+    items.push(unknownScan(`${unscanned.length} object member payload(s) of the .npz were not scanned; they are unknown`));
+  } else if (npzRefused.length > 0) {
+    items.push(unknownScan(`${npzRefused.length} member(s) of the .npz were refused; they are unknown`));
   } else {
     items.push(
       item(
@@ -622,7 +817,7 @@ export function mapModelscanReport(input: {
       ),
     );
   }
-  return { status: "completed", errorCode: null, items: [...items, ...issueItems, ...errorItems], notRun, rawReport };
+  return { status: "completed", errorCode: null, items: [...items, ...issueItems, ...errorItems, ...npzRefused], notRun, rawReport };
 }
 
 /** the not-run keys modelscan declares before any run (planning-time exclusions, ADR-0187 decision 61) */

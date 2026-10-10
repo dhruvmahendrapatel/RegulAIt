@@ -36,6 +36,7 @@ import {
   and,
   asc,
   auditLog,
+  builderAgents,
   deployTargets,
   desc,
   eq,
@@ -50,6 +51,7 @@ import {
   teams,
   users,
   workflowInstances,
+  workloadIdentities,
   type AbacPolicyTestCase,
   type Db,
 } from "@regulait/db";
@@ -61,12 +63,15 @@ import {
   abacEngine,
   abacSchemaText,
   evaluateAbac,
+  hasAgentPrincipal,
   isValidTimezone,
+  type AbacAgentAttrs,
+  type AbacDelegationContext,
   type AbacPolicy,
   type AbacRequest,
   type AbacResourceAttrs,
 } from "@regulait/policy-kernel/abac";
-import type { AbacDecision } from "@regulait/policy-kernel";
+import type { AbacDecision, ActorAbacVerdict, ActorLinkFacts, GovernedActor } from "@regulait/policy-kernel";
 import { projectClassifications } from "./projects.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { aiTrainingCurrentFor } from "./ai-literacy.js";
@@ -158,6 +163,19 @@ export interface AbacToolContext {
   /** the instant to evaluate at; defaults to now. Tests and the simulation
    * surface pin it — the ENFORCEMENT path never accepts one from a client. */
   at?: Date;
+  /**
+   * ADR-0188 S2 — schema v4's `context.actorChain` / `context.delegationDepth` for this call. Built from the
+   * kernel's `GovernedActor` (which S3/S4 build from the stored grant path), never from a request. Absent = a
+   * person acting directly: an empty chain and depth 0.
+   */
+  delegation?: AbacDelegationContext | null;
+}
+
+/** ADR-0188 S2 — the v4 delegation context of a governed call (decision 26: depth = hop count; null = 0) */
+export function abacDelegationContextOf(actor: GovernedActor | null): AbacDelegationContext {
+  return actor
+    ? { actorChain: actor.chain.actors.map((a) => a.identityId), delegationDepth: actor.chain.depth }
+    : { actorChain: [], delegationDepth: 0 };
 }
 
 /**
@@ -285,8 +303,89 @@ export async function assembleAbacRequest(db: Db, ctx: AbacToolContext): Promise
       // here is safe and keeps ONE place that decides.
       clientIp: ctx.principal?.clientIp ?? null,
     },
+    // ADR-0188 S2: only a v4 group reads it (the engine drops it for v1–v3)
+    ...(ctx.delegation ? { delegation: ctx.delegation } : {}),
     ...(ctx.at ? { at: ctx.at } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0188 S2 — per-principal evaluation (decision 18)
+// ---------------------------------------------------------------------------
+
+/** the verdict that refuses one actor's call when its Cedar evaluation cannot be completed (fail closed) */
+function actorEngineError(reason: string): ActorAbacVerdict {
+  return { effect: "forbid", policyId: "abac-engine-error", policyName: null, reason: `ABAC evaluation failed: ${reason}` };
+}
+
+/**
+ * ADR-0188 S2 — the request ONE actor is evaluated with: the call's resource and context bags exactly as the
+ * sponsor's (the same `assembleAbacRequest` output, so a preview and enforcement can never differ), with the
+ * principal replaced by the `Agent`. The agent's attributes come only from its own `workload_identities` row
+ * (and, for a builder agent, its declared ADR-0180 A8 autonomy class); nothing of the sponsor is copied onto it.
+ * Returns null when the identity row does not exist, which the caller turns into a refusal.
+ */
+export async function assembleActorAbacRequest(
+  db: Db,
+  identityId: string,
+  base: AbacRequest,
+): Promise<AbacRequest | null> {
+  const [row] = await db
+    .select({
+      id: workloadIdentities.id,
+      kind: workloadIdentities.kind,
+      identifier: workloadIdentities.identifier,
+      environments: workloadIdentities.environments,
+      stewards: workloadIdentities.sponsorUserIds,
+      autonomyClass: builderAgents.declaredAutonomyClass,
+    })
+    .from(workloadIdentities)
+    .leftJoin(builderAgents, eq(builderAgents.id, workloadIdentities.builderAgentId))
+    .where(eq(workloadIdentities.id, identityId));
+  if (!row) return null;
+  const agent: AbacAgentAttrs = {
+    id: row.id,
+    kind: row.kind,
+    identifier: row.identifier,
+    environments: [...new Set(row.environments)],
+    stewards: [...new Set(row.stewards)],
+    autonomyClass: row.autonomyClass ?? null,
+  };
+  return { ...base, agent };
+}
+
+/**
+ * ADR-0188 S2 — every actor of the chain evaluated as `Agent` against the active v4 policies (decision 18), the
+ * verdict attached to its link for the kernel's `abac-forbid` term.
+ *
+ * LAZY: with no active v4 policy the actor is returned unchanged, without a query — agent evaluation is neutral
+ * and the grants decide. FAIL CLOSED PER CALL: an identity that cannot be found, or an evaluation that throws,
+ * gives that link `forbid` / `abac-engine-error`, which refuses this call and nothing else; the engine already
+ * returns the same verdict for a Cedar failure (a malformed v4 group).
+ */
+export async function evaluateAbacForChain(
+  db: Db,
+  actor: GovernedActor,
+  /** the sponsor's request for this call (resource and context bags are reused as-is) */
+  base: AbacRequest,
+  policies: readonly AbacPolicy[],
+): Promise<GovernedActor> {
+  const v4 = policies.filter((p) => hasAgentPrincipal(p.schemaVersion));
+  if (v4.length === 0) return actor;
+  const links: ActorLinkFacts[] = [];
+  for (const link of actor.links) {
+    let verdict: ActorAbacVerdict;
+    try {
+      const request = await assembleActorAbacRequest(db, link.identityId, base);
+      verdict = request
+        ? abacEngine.evaluate(v4, request)
+        : actorEngineError(`agent identity ${link.identityId} was not found`);
+    } catch (err) {
+      verdict = actorEngineError(err instanceof Error ? err.message : String(err));
+    }
+    links.push({ ...link, abacDecision: verdict.effect === "permit" ? null : verdict });
+  }
+  return { ...actor, links };
 }
 
 /**

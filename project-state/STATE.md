@@ -1,10 +1,10 @@
 ---
-phase: adr0187-batch-5-engines-and-adr0188-identity
+phase: batch-6-identity-bom-isolation-slices
 last_updated: 2026-10-10
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-03-session-02.md
+last_session: sessions/2026-10-10-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,17 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-10 (afternoon) - Batch 6 slices in parallel: S3 in CI, B1 merged, I1 next; CI sharded.** Full record:
+[sessions/2026-10-10-session-01.md](sessions/2026-10-10-session-01.md).
+- Merged: B1 BOM foundation (#283, migration 0182), spike B0 (#265), ADR-0189 (#253), outbound credential audience
+  (#273, 0181), gateway CI sharding (#284), and the Batch 4/5 tail (#264, #270, #272).
+- Merge order from here: #279 S3, then #286 I1 (0183), then S4 (0184), then #285 guard hardening (0185); #287 B3
+  after its security review. S5 (token endpoint) takes 0186 if it needs a migration.
+- Building: S4 in-process wiring, S5 token endpoint, B5 SPDX renderer. Next unblocked: I2 after S3+S4; B2 after S4;
+  B4 after B2+B3; B7/B8 after B4/B5.
+- Owner decision 12 (ADR-0189): snapshots fail closed without a signing key. Codex queue: X41, X43, X42, X38, X37, X34,
+  X39, X40, X33.
 
 **2026-10-10 - Parallel wave: Batch 5 engines and their UI merged; ADR-0188 (identity) accepted; garak open questions decided.**
 - Merged: #217 (ADR-0188), #227/#228 (modelscan follow-up, garak), #230 (Engines page), #231 (B5-P2 promptfoo split),

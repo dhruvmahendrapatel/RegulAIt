@@ -17,8 +17,8 @@ describe("ADR-0182 P0: the literacy slot", () => {
 
   it("changes no decision: absent and the explicit default evaluate identically", () => {
     const base = { userId: "u1", serverId: "s1", tool: readTool, toolGrants: [grant], serverGrants: [] };
-    const a = evaluate({ ...base, execution: { mode: "normal" } });
-    const b = evaluate({ ...base, execution: { mode: "normal", literacy: LITERACY_NOT_REQUIRED } });
+    const a = evaluate({ actor: null, ...base, execution: { mode: "normal" } });
+    const b = evaluate({ actor: null, ...base, execution: { mode: "normal", literacy: LITERACY_NOT_REQUIRED } });
     expect(b).toEqual(a);
     expect(a.effect).toBe("allow");
   });

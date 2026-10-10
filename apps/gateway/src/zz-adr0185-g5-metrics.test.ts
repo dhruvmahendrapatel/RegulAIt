@@ -16,7 +16,7 @@ import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { createDb, eq, mcpServers, mcpTools, runMigrations, toolGrants, users, type Db } from "@regulait/db";
+import { createDb, eq, mcpServers, mcpTools, runMigrations, sql, toolGrants, users, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { startGateway } from "./boot.js";
 import {
@@ -33,11 +33,24 @@ import {
 import { recordUpstreamFailure, recordUpstreamSuccess, breakerAdmits, type BreakerConfig } from "./upstream-breaker.js";
 import { withUpstreamRetry } from "./upstream-retry.js";
 import { Scheduler, syncSchedulerJobs, toRegistry, type SchedulerJobDefinition } from "./scheduler.js";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const BOOT = "adr0185-g5-metrics-boot";
+// Its OWN scratch database: the boot below runs the real data-key check
+// (verifyDataKeyOnBoot), which refuses a database holding ciphertexts under
+// another key and no recorded fingerprint. On the shared suite database that
+// passed or failed depending on which files ran before this one; with the
+// gateway suite sharded by `vitest --shard`, that order is no longer the
+// unsharded one (measured 2026-10-10: shard 4/4 refused the boot).
+const SCRATCH_DB = `regulait_g5_metrics_${process.pid}_${Date.now()}`;
+const scratchUrl = (() => {
+  const u = new URL(DATABASE_URL);
+  u.pathname = "/" + SCRATCH_DB;
+  return u.toString();
+})();
 const TOKEN = "m".repeat(20) + "synthetic-token-0185"; // 40 chars, synthetic
 const DATA_KEY = "a".repeat(64);
 
@@ -99,16 +112,23 @@ function bootEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return { PATH: process.env.PATH, VITEST: "1", REGULAIT_SCHEDULER: "off", ...extra } as NodeJS.ProcessEnv;
 }
 
+let admin: Db;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 beforeAll(async () => {
-  db = createDb(DATABASE_URL);
+  admin = createDb(DATABASE_URL);
+  await admin.execute(sql.raw(`CREATE DATABASE ${SCRATCH_DB}`));
+  db = createDb(scratchUrl);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
-});
+}, 60_000);
 afterAll(async () => {
-  await app.close();
-  await db.$client.end();
+  await closeAll([
+    async () => app?.close(),
+    async () => db?.$client.end(),
+    async () => dropScratchDatabase(admin, SCRATCH_DB),
+    async () => admin.$client.end(),
+  ]);
 });
 
 describe("configuration — a metrics setting without a usable token refuses", () => {

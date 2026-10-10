@@ -450,7 +450,7 @@ export function registerPlaygroundRoutes(app: FastifyInstance, db: Db, opts: { d
       userId: caller.userId,
       objectType: "agent",
       objectId: prep.agent.id,
-      detail: { purpose: "playground", phase: "evaluate", source, ...summary, receiptClass: "decision" },
+      detail: { purpose: "playground", phase: "evaluate", source, ...summary, receiptClass: "excluded" },
       effect: stoppedBy ? "deny" : "allow",
       ruleId: PLAYGROUND_RULE_IDS.evaluated,
       ruleChain: [],

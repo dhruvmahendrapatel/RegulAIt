@@ -183,3 +183,14 @@ issues and four low issues; all are fixed, each with a test that fails without i
   - Not covered: Teredo (`2001::/32`).
 - **Constant-time compare:** one helper on `crypto.timingSafeEqual` (both sides hashed first) replaces five hand-written
   copies. An inventory test keeps it that way.
+
+## Amendment — CI-only tooling and specification data files (owner, 2026-10-10)
+
+Taken with ADR-0189 spike B0.
+
+- **CI-only tooling.** Tools that run only in CI and never ship in an image, package or bundle may also carry the
+  permissive licences PSF-2.0 and W3C-20150513, each named in the tool's own lock or THIRD_PARTY record. Shipped code
+  keeps the strict list. The first use is the SPDX 3 validator closure (`typing_extensions`, `owlrl`).
+- **Specification data files.** Data files published by a standards body (schemas, models, JSON-LD contexts) may be
+  vendored under Community-Spec-1.0 or CC-BY-3.0/4.0, with attribution in THIRD_PARTY.md and a pinned sha256. They are
+  data, not code. The first use is the SPDX 3.0.1 schema, model and context.

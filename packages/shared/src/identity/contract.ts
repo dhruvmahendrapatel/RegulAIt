@@ -549,8 +549,24 @@ export const putAgentGrantsSchema = actorEntitlementsSchema
       .array(z.string().uuid())
       .max(100)
       .refine((a) => new Set(a).size === a.length, { message: "duplicate entries" }),
+    /**
+     * Stale-write protection (X33): the `revision` of the grant set the caller
+     * read (`AgentGrantsView.revision`, `workload_identities.grants_revision`).
+     * The PUT replaces the WHOLE set, so it is refused with 409
+     * `grants_revision_conflict` unless this equals the stored revision; a
+     * successful write stores `revision + 1`. An `If-Match: "<revision>"`
+     * header, when also sent, must agree with it.
+     */
+    revision: z.number().int().min(0),
   })
   .strict();
+/** the refusal a stale `PUT .../grants` gets (409) */
+export const GRANTS_REVISION_CONFLICT = "grants_revision_conflict" as const;
+export interface GrantsRevisionConflictBody {
+  error: typeof GRANTS_REVISION_CONFLICT;
+  /** the revision now stored: re-read the set, re-apply the change, send this */
+  currentRevision: number;
+}
 export type PutAgentGrants = z.infer<typeof putAgentGrantsSchema>;
 
 /**
@@ -575,16 +591,35 @@ export type CreateDelegationProof = z.infer<typeof createDelegationProofSchema>;
 /** `POST /v1/delegation-grants/:grantId/revoke` — admin; cascades to every descendant (decision 4) */
 export const revokeDelegationGrantSchema = z.object({}).strict();
 
-/** list filters of `GET /v1/delegation-grants` */
+/**
+ * list filters of `GET /v1/delegation-grants`. `runId` (X33) reads one run's
+ * delegation TREE: its grants plus the parent→child edges between them.
+ * Keyset-paginated: `cursor` is the opaque `nextCursor` of the previous page.
+ */
 export const listDelegationGrantsQuerySchema = z
   .object({
     actorIdentityId: z.string().uuid().optional(),
     sponsorUserId: z.string().uuid().optional(),
     rootGrantId: z.string().uuid().optional(),
+    runId: z.string().uuid().optional(),
     status: z.enum(["live", "revoked", "expired"]).optional(),
     limit: z.coerce.number().int().min(1).max(200).optional(),
+    cursor: z.string().min(1).max(512).optional(),
   })
   .strict();
+export type ListDelegationGrantsQuery = z.infer<typeof listDelegationGrantsQuerySchema>;
+
+/** list filters of `GET /v1/workload-identities` (keyset-paginated like every list) */
+export const listWorkloadIdentitiesQuerySchema = z
+  .object({
+    kind: z.enum(WORKLOAD_IDENTITY_KINDS).optional(),
+    status: z.enum(WORKLOAD_IDENTITY_STATUSES).optional(),
+    sponsorUserId: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    cursor: z.string().min(1).max(512).optional(),
+  })
+  .strict();
+export type ListWorkloadIdentitiesQuery = z.infer<typeof listWorkloadIdentitiesQuerySchema>;
 
 // ---------------------------------------------------------------------------
 // Response shapes (what the routes will answer once built)
@@ -600,6 +635,8 @@ export interface WorkloadIdentityView {
   sponsorUserIds: string[];
   environments: string[];
   status: WorkloadIdentityStatus;
+  /** the revision of its own grant set (`PutAgentGrants.revision`) */
+  grantsRevision: number;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -650,6 +687,93 @@ export interface DelegationGrantView {
   createdAt: string;
 }
 
+// --- Read shapes, frozen for the S6 UI (X33) --------------------------------
+// Every list is keyset-paginated: `nextCursor` is null on the last page and is
+// passed back verbatim as `cursor`.
+
+/** `GET /v1/workload-identities` */
+export interface WorkloadIdentityListView {
+  items: WorkloadIdentityView[];
+  nextCursor: string | null;
+}
+
+/** `GET /v1/workload-identities/:identityId`: the identity plus the counts its page summarises */
+export interface WorkloadIdentityDetailView extends WorkloadIdentityView {
+  /** credentials not revoked and not past `notAfter` */
+  activeCredentialCount: number;
+  /** delegation grants naming this identity as actor that are neither revoked nor expired */
+  liveDelegationGrantCount: number;
+}
+
+/** `GET /v1/workload-identities/:identityId/credentials` (public halves only) */
+export interface WorkloadCredentialListView {
+  items: WorkloadCredentialView[];
+}
+
+/** `GET /v1/workload-identities/:identityId/grants`: the whole set a `PUT` replaces, and its revision */
+export interface AgentGrantsView extends ActorEntitlements {
+  identityId: string;
+  roleIds: string[];
+  /** send back as `PutAgentGrants.revision` */
+  revision: number;
+}
+
+/** one parent→child budget edge of a delegation tree (decision 22, `delegation_allocations`) */
+export interface DelegationAllocationView {
+  id: string;
+  parentGrantId: string;
+  childGrantId: string;
+  amountMicros: number;
+  drawnMicros: number;
+  releasedMicros: number;
+  status: DelegationAllocationStatus;
+  createdAt: string;
+  closedAt: string | null;
+}
+
+/** `GET /v1/delegation-grants` (with `runId`: one run's tree) */
+export interface DelegationGrantListView {
+  items: DelegationGrantView[];
+  /** the parent→child edges between grants on this page, with their allocations */
+  edges: DelegationAllocationView[];
+  nextCursor: string | null;
+}
+
+/** `GET /v1/delegation-grants/:grantId`: the grant, the edge into it, and the edges out of it */
+export interface DelegationGrantDetailView extends DelegationGrantView {
+  allocation: DelegationAllocationView | null;
+  childAllocations: DelegationAllocationView[];
+}
+
+/** one choice offered by a picker */
+export interface IdentityPickerOption {
+  id: string;
+  label: string;
+}
+
+/**
+ * `GET /v1/identity/picker-sources`: what the identity forms may offer. Only
+ * objects that exist and that an admin may name; a picker never offers a free
+ * text id.
+ */
+export interface IdentityPickerSourcesView {
+  /** people who may steward an identity */
+  sponsors: Array<IdentityPickerOption & { email: string }>;
+  /** subjects that have no identity yet, by kind */
+  subjects: {
+    agent: IdentityPickerOption[];
+    builder_agent: IdentityPickerOption[];
+    engine_runner: IdentityPickerOption[];
+  };
+  /** environment names an identity may be limited to */
+  environments: string[];
+  /** grant targets for the own-grants editor */
+  servers: Array<IdentityPickerOption & { tools: string[] }>;
+  agents: IdentityPickerOption[];
+  connectors: IdentityPickerOption[];
+  roles: IdentityPickerOption[];
+}
+
 export interface IdentitySigningKeyView {
   kid: string;
   algorithm: typeof IDENTITY_SIGNING_ALGORITHM;
@@ -659,6 +783,31 @@ export interface IdentitySigningKeyView {
   retiredAt: string | null;
   revokedAt: string | null;
 }
+
+/** `GET /v1/identity/signing-keys` (S3): every issuer key ever recorded, newest first; public halves only */
+export interface IdentitySigningKeyListView {
+  items: IdentitySigningKeyView[];
+}
+
+/** an issuer key id: the RFC 7638 thumbprint of its public JWK (migration 0180 CHECK allows this alphabet) */
+export const IDENTITY_SIGNING_KID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * `POST /v1/identity/signing-keys/rotate` (S3; admin, `identity_manage`
+ * step-up, audited). The new key's PRIVATE half is a deploy-time secret
+ * (`REGULAIT_IDENTITY_SIGNING_KEY`), never sent here: the operator deploys it
+ * first, then this activates it and retires the current signer (overlap keeps
+ * the retired key's public half in the JWKS until every token it signed has
+ * expired). `kid` names the configured key to activate; it may be omitted only
+ * when exactly one configured key has never been recorded.
+ */
+export const rotateIdentitySigningKeySchema = z
+  .object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN).optional() })
+  .strict();
+export type RotateIdentitySigningKey = z.infer<typeof rotateIdentitySigningKeySchema>;
+
+/** `POST /v1/identity/signing-keys/:kid/revoke` (S3): compromise; every token it signed is refused; never undone */
+export const revokeIdentitySigningKeySchema = z.object({}).strict();
 
 // ---------------------------------------------------------------------------
 // The routes (S1 registers every one as a 501 stub)
@@ -700,6 +849,7 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "GET", path: "/v1/workload-identities/:identityId/grants", cls: "admin", slice: "S6" },
   { method: "PUT", path: "/v1/workload-identities/:identityId/grants", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId/grant-proposals", cls: "admin", slice: "S6" },
+  { method: "GET", path: "/v1/identity/picker-sources", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/delegation-grants", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/delegation-grants/:grantId", cls: "admin", slice: "S6" },
   { method: "POST", path: "/v1/delegation-grants/:grantId/revoke", cls: "admin", slice: "S6" },

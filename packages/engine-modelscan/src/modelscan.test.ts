@@ -18,7 +18,7 @@ import {
   type ArtifactFormat,
 } from "@regulait/shared";
 import type { ScanExecutor, ScanJob } from "./exchange.js";
-import type { ModelscanOutcome } from "./scan.js";
+import type { ScanOutcome } from "./scan.js";
 import {
   cleanPickle,
   legacyTorchFile,
@@ -65,11 +65,11 @@ function replay(answer: (job: ScanJob) => { exitCode: number | null; report?: un
         const { tmpdir } = await import("node:os");
         return mkdtemp(`${tmpdir()}/b5m-stage-`);
       },
-      async scan(job: ScanJob): Promise<ModelscanOutcome> {
+      async scan(job: ScanJob): Promise<ScanOutcome> {
         jobs.push(job);
         const a = answer(job);
         const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-        return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false };
+        return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false, npy: null, npz: null };
       },
       async release() {},
       async reconcile() {

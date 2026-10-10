@@ -87,7 +87,7 @@ export function enginesList(): Json {
         switches: { PROMPTFOO_DISABLE_TELEMETRY: "1", PROMPTFOO_DISABLE_UPDATE: "1" },
         selfTest: { passed: true, failures: [], runnerId: RUNNER_PF, imageDigest: DIGEST_PF, version: "0.123.1", egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false }, at: iso(30) },
         selfTestPassedAt: iso(30),
-        runners: [{ id: RUNNER_PF, name: "promptfoo-runner-1", reportedDigest: DIGEST_PF, reportedVersion: "0.123.1", selfTestPassed: true, selfTestFailures: [], registeredAt: iso(40), lastSeenAt: iso(1) }],
+        runners: [{ id: RUNNER_PF, name: "promptfoo-runner-1", reportedDigest: DIGEST_PF, reportedVersion: "0.123.1", selfTestPassed: true, selfTestFailures: [], selfTestReportedAt: iso(30), registeredAt: iso(40), lastSeenAt: iso(1) }],
         lastRun: { id: RUNS.completedFail.id, status: "completed", createdAt: iso(20) },
       }),
       engine({ id: "modelscan", kind: "model_scan", displayName: "modelscan", version: "0.8.8", licence: "Apache-2.0", imageDigest: null, signature: "not_built", needsModelAccess: false, reCheckBy: "2027-02-18", switches: { REGULAIT_MODELSCAN_SCANNER_ISOLATED: "1" }, airGappedReducedSet: [{ key: "format", reason: "unsupported_format" }, { key: "modelscan/scan", reason: "unsupported_format" }] }),
@@ -100,7 +100,7 @@ export function enginesList(): Json {
         signature: "unverified",
         switches: { HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_TELEMETRY: "1" },
         selfTest: { passed: false, failures: ["egress_dns_resolved"], runnerId: RUNNER_GK, imageDigest: DIGEST_GK, version: "0.17.0", egress: { host: "example.com", dnsResolved: true, connected: false, address: "93.184.215.14", addressConnected: false }, at: iso(10) },
-        runners: [{ id: RUNNER_GK, name: "garak-runner-1", reportedDigest: DIGEST_GK, reportedVersion: "0.17.0", selfTestPassed: false, selfTestFailures: ["egress_dns_resolved"], registeredAt: iso(12), lastSeenAt: iso(11) }],
+        runners: [{ id: RUNNER_GK, name: "garak-runner-1", reportedDigest: DIGEST_GK, reportedVersion: "0.17.0", selfTestPassed: false, selfTestFailures: ["egress_dns_resolved"], selfTestReportedAt: iso(10), registeredAt: iso(12), lastSeenAt: iso(11) }],
       }),
     ],
   };
@@ -327,7 +327,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       return json(route, 200, { runs: state.runs.filter((r) => (!engineId || r.engineId === engineId) && (!status || r.status === status)) });
     }
     if (p === "/v1/engine-runs" && method === "POST") {
-      const sensitive = (body.config?.sets ?? []).some((s: string) => s !== "basic");
+      // as the manifests class them: promptfoo's `basic` and modelscan's `scan` are standard, anything else waits for approval
+      const sensitive = (body.config?.sets ?? []).some((s: string) => s !== "basic" && !(body.engineId === "modelscan" && s === "scan"));
       if (sensitive && !body.approverUserId) return json(route, 422, { error: "engine_approver_required", detail: "this run uses an agentic, offensive or unclassified set, so it waits for approval" });
       const r = run(`99999999-7777-4000-8000-${String(state.runs.length).padStart(12, "0")}`, {
         engineId: body.engineId,
@@ -335,6 +336,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
         config: body.config,
         projectId: body.projectId ?? null,
         targetAgentId: body.target?.agentId ?? null,
+        targetKind: body.target?.artifactId ? "artifact" : "agent",
+        targetArtifactId: body.target?.artifactId ?? null,
         judgeAgentId: body.target?.judgeAgentId ?? null,
         createdAt: new Date().toISOString(),
       });
@@ -372,6 +375,16 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       return json(route, 201, { artifact: a });
     }
     const artifactMatch = /^\/v1\/model-artifacts\/([0-9a-f-]+)$/.exec(p);
+    // ADR-0187 decision 127: the uploader or an admin deletes, with a `settings_relax` step-up
+    if (artifactMatch && method === "DELETE") {
+      const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
+      if (!a) return json(route, 404, { error: "unknown_artifact" });
+      if (!headers["x-regulait-step-up"]) {
+        return json(route, 403, { error: "step_up_required", actionKind: "settings_relax", methods: ["passkey", "totp"], action: { kind: "settings_relax", facts: { modelArtifactId: a.id, values: { deleted: true } } } });
+      }
+      state.artifacts = state.artifacts.filter((x) => x.id !== a.id);
+      return json(route, 200, { deleted: { id: a.id, sha256: a.sha256, scansDeleted: (ARTIFACT_SCANS[a.id] ?? []).length, object: "deleted" } });
+    }
     if (artifactMatch && method === "GET") {
       const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
       if (!a) return json(route, 404, { error: "unknown_artifact" });
