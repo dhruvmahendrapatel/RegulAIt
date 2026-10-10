@@ -37,28 +37,28 @@ test("empty, unavailable and unreadable inventories never invent permissions or 
   await expect(page.getByText("No workload identities", { exact: true })).toHaveCount(0);
 });
 
-test("identity creation requires stewards and environment and retries the identical command after step-up", async ({ page }) => {
+test("identity creation requires a steward, permits explicit empty environments and retries the identical request after step-up", async ({ page }) => {
   await open(page, "empty");
   await page.getByRole("button", { name: "Add identity", exact: true }).click();
   const form = page.getByRole("dialog", { name: "Add identity", exact: true });
   await form.getByRole("button", { name: "Add identity", exact: true }).click();
   await expect(form.getByRole("alert")).toHaveText("Choose the subject this identity belongs to.");
-  await form.getByLabel("Subject", { exact: true }).selectOption("agent-b");
+  await form.getByLabel("Subject", { exact: true }).selectOption("00000000-0000-4000-8000-000000000005");
   await form.getByRole("button", { name: "Add identity", exact: true }).click();
   await expect(form.getByRole("alert")).toHaveText("Choose at least one steward.");
   await form.getByLabel("Synthetic steward", { exact: true }).check();
-  await form.getByRole("button", { name: "Add identity", exact: true }).click();
-  await expect(form.getByRole("alert")).toHaveText("Choose at least one environment.");
   expect(await calls(page)).toHaveLength(0);
-  await form.getByLabel("demo", { exact: true }).check();
+  await expect(form).toContainText("Empty environments allow no environment.");
   await form.getByRole("button", { name: "Add identity", exact: true }).click();
   await verify(page);
   const sent = await calls(page);
   expect(sent).toHaveLength(2);
   expect(sent[0]!.command).toEqual(sent[1]!.command);
+  expect(sent[0]!.request).toEqual(sent[1]!.request);
   expect(sent[0]!.headers).toEqual({});
   expect(sent[1]!.headers["x-regulait-step-up"]).toMatch(/^synthetic-step-up-/);
-  expect(sent[1]!.command).toEqual({ operation: "create_identity", kind: "agent", subjectId: "agent-b", stewardIds: ["synthetic-steward"], environments: ["demo"] });
+  expect(sent[1]!.request).toEqual({ method: "POST", path: "/v1/workload-identities", body: { kind: "agent", agentId: "00000000-0000-4000-8000-000000000005", sponsorUserIds: ["00000000-0000-4000-8000-000000000001"], environments: [] } });
+  expect(sent[1]!.command).toEqual({ operation: "create_identity", kind: "agent", subjectId: "00000000-0000-4000-8000-000000000005", stewardIds: ["00000000-0000-4000-8000-000000000001"], environments: [] });
 });
 
 test("cancelled destructive confirmation and step-up leave identity active; suspend, restore and revoke each verify", async ({ page }) => {
@@ -119,7 +119,7 @@ test("all own grant kinds start empty, narrow authority and require verified wri
   await open(page); await manage(page);
   await expect(page.getByText("No own grants", { exact: true })).toBeVisible();
   await expect(page.getByText(/Its stewards' permissions are not copied/)).toBeVisible();
-  for (const [kind, target] of [["tool", "tools-a"], ["server", "server-a"], ["connector", "connector-a"], ["agent_invoke", "agent-b"], ["role", "role-a"]]) {
+  for (const [kind, target] of [["tool", "00000000-0000-4000-8000-000000000006"], ["server", "00000000-0000-4000-8000-000000000007"], ["connector", "00000000-0000-4000-8000-000000000008"], ["agent_invoke", "00000000-0000-4000-8000-000000000005"], ["role", "00000000-0000-4000-8000-000000000009"]]) {
     await page.getByRole("button", { name: "Add own grant", exact: true }).click();
     const form = page.getByRole("dialog", { name: "Add own grant", exact: true });
     await form.getByLabel("Grant kind", { exact: true }).selectOption(kind);
@@ -129,10 +129,20 @@ test("all own grant kinds start empty, narrow authority and require verified wri
       await expect(form.getByRole("alert")).toContainText("specific tool");
       await form.getByLabel("Tool", { exact: true }).selectOption("read-record");
     }
-    if (kind === "role") await expect(form.getByLabel("Access", { exact: true })).toHaveCount(0);
+    await expect(form.getByLabel("Access", { exact: true })).toHaveCount(0);
+    if (kind === "server") await expect(form.getByLabel("Only read-only tools")).toBeChecked();
+    if (kind === "agent_invoke") await form.getByLabel("Allowed modes", { exact: true }).fill("chat, plan");
+    if (kind === "connector") await form.getByLabel("Allowed objects", { exact: true }).fill("synthetic-record");
     await form.getByRole("button", { name: "Add own grant", exact: true }).click(); await verify(page);
   }
   expect((await calls(page)).filter(c => c.headers["x-regulait-step-up"])).toHaveLength(5);
+  const verified = (await calls(page)).filter(c => c.headers["x-regulait-step-up"]);
+  expect(verified[4]!.request).toMatchObject({ method: "PUT", path: "/v1/workload-identities/00000000-0000-4000-8000-000000000003/grants", body: {
+    tools: [{ serverId: "00000000-0000-4000-8000-000000000006", toolName: "read-record" }],
+    servers: [{ serverId: "00000000-0000-4000-8000-000000000007", readOnlyAll: true }],
+    agents: [{ agentId: "00000000-0000-4000-8000-000000000005", allowedModes: ["chat", "plan"] }],
+    connectors: [{ connectorId: "00000000-0000-4000-8000-000000000008", mode: "read", allowedObjects: ["synthetic-record"] }],
+    roleIds: ["00000000-0000-4000-8000-000000000009"] } });
   await page.getByRole("button", { name: "Remove grant for Synthetic reader role" }).click();
   await page.getByRole("dialog", { name: "Remove own grant?" }).getByRole("button", { name: "Remove grant", exact: true }).click(); await verify(page);
   await expect(page.getByRole("button", { name: "Remove grant for Synthetic reader role" })).toHaveCount(0);
@@ -142,7 +152,7 @@ test("delegation shows per-edge accounting and cascade confirmation; unreadable 
   await open(page); await tree(page);
   const child = page.getByRole("row").filter({ hasText: "Child synthetic actor" }).last();
   await expect(child).toContainText("Allocated $60.00"); await expect(child).toContainText("Drawn $10.00; released $0.00");
-  await child.getByRole("button", { name: "Revoke grant grant-child and descendants" }).click();
+  await child.getByRole("button", { name: "Revoke grant 00000000-0000-4000-8000-000000000012 and descendants" }).click();
   const confirm = page.getByRole("dialog", { name: "Revoke grant and descendants?" });
   await expect(confirm).toContainText("return to the immediate parent, once only");
   await confirm.getByRole("button", { name: "Revoke grant and descendants", exact: true }).click(); await verify(page);
@@ -150,7 +160,7 @@ test("delegation shows per-edge accounting and cascade confirmation; unreadable 
   await open(page, "unknown-budget"); await tree(page);
   await expect(page.getByRole("row").filter({ hasText: "Child synthetic actor" }).last()).toContainText("Cap Unmeasured");
   await open(page, "unknown-expiry"); await tree(page);
-  await expect(page.getByRole("button", { name: "Revoke grant grant-child and descendants" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Revoke grant 00000000-0000-4000-8000-000000000012 and descendants" })).toBeDisabled();
   await expect(page.getByText("Validity unmeasured", { exact: true })).toBeVisible();
   await open(page, "cycle"); await tree(page);
   await expect(page.getByText(/delegation chain has a cycle/)).toBeVisible();
@@ -170,7 +180,7 @@ test("read and write failures use safe copy; editing stewards and environment pr
   await page.getByRole("button", { name: "Confirm mock step-up" }).click();
   await expect(page.getByText("Change not recorded", { exact: true })).toBeVisible();
   const sent = await calls(page); expect(sent[0]!.command).toEqual(sent[1]!.command);
-  expect(sent[1]!.command).toMatchObject({ stewardIds: ["synthetic-steward", "co-steward"], environments: ["demo", "byoc"] });
+  expect(sent[1]!.command).toMatchObject({ stewardIds: ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"], environments: ["demo", "byoc"] });
   await expect(page.locator("body")).not.toContainText("SYNTHETIC_UNTRUSTED");
 });
 
@@ -192,4 +202,25 @@ test("keyboard-only forms trap and restore focus; identity, detail, tree and mod
     await escapeToTrigger(page, dialog, trigger);
   }
   expect(errors).toEqual([]);
+});
+
+
+test("empty explicit modes and objects grant no implicit authority", async ({ page }) => {
+  await open(page); await manage(page);
+  for (const [kind, target] of [["agent_invoke", "00000000-0000-4000-8000-000000000005"], ["connector", "00000000-0000-4000-8000-000000000008"]]) {
+    await page.getByRole("button", { name: "Add own grant", exact: true }).click();
+    const form = page.getByRole("dialog", { name: "Add own grant", exact: true });
+    await form.getByLabel("Grant kind", { exact: true }).selectOption(kind);
+    await form.getByLabel("Grant target", { exact: true }).selectOption(target);
+    if (kind === "agent_invoke") await expect(form.getByLabel("Allowed modes", { exact: true })).toHaveValue("");
+    else await expect(form.getByLabel("Allowed objects", { exact: true })).toHaveValue("");
+    await form.getByRole("button", { name: "Add own grant", exact: true }).click(); await verify(page);
+  }
+  const last = (await calls(page)).at(-1)!;
+  expect(last.request).toMatchObject({ method: "PUT", body: {
+    agents: [{ agentId: "00000000-0000-4000-8000-000000000005", allowedModes: [] }],
+    connectors: [{ connectorId: "00000000-0000-4000-8000-000000000008", mode: "read", allowedObjects: [] }],
+  } });
+  await expect(page.getByText("No modes allowed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Read; no objects allowed", { exact: true })).toBeVisible();
 });

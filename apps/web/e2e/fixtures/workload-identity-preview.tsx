@@ -8,52 +8,58 @@ import { subscribeStepUpPrompt, type StepUpPrompt } from "../../src/stepup/stepU
 import { Button, Modal } from "../../src/ui/kit";
 import { ToastProvider } from "../../src/ui/toast";
 import WorkloadIdentitiesPage from "../../src/views/admin/identity/WorkloadIdentitiesPage";
+import type { PutAgentGrants } from "../../../../packages/shared/src/identity/contract";
+import { encodeIdentityWrite } from "../../src/views/admin/identity/workloadIdentityApi";
 import type { DelegationNode, IdentityAdminPort, IdentityDetail, IdentityInventory, IdentityWrite } from "../../src/views/admin/identity/workloadIdentityModel";
 import "../../src/theme/fonts.css";
 import "../../src/theme/tokens.css";
 import "../../src/theme/global.css";
 
 const mode = new URL(location.href).searchParams.get("mode");
-const steward = { id: "synthetic-steward", name: "Synthetic steward" };
+const steward = { id: "00000000-0000-4000-8000-000000000001", name: "Synthetic steward" };
 const inventory: IdentityInventory = {
-  identities: mode === "empty" ? [] : [{ id: "identity-a", kind: "agent", identifier: "spiffe://demo.example/regulait/agent/identity-a",
-    subjectId: "agent-a", stewards: [steward], environments: ["demo"], status: "active", createdAt: new Date().toISOString() }],
-  people: [steward, { id: "co-steward", name: "Synthetic co-steward" }],
-  subjects: [{ id: "agent-a", name: "Synthetic agent", kind: "agent" }, { id: "agent-b", name: "Second synthetic agent", kind: "agent" }],
+  identities: mode === "empty" ? [] : [{ id: "00000000-0000-4000-8000-000000000003", kind: "agent", identifier: "spiffe://demo.example/regulait/agent/identity-a",
+    subjectId: "00000000-0000-4000-8000-000000000004", stewards: [steward], environments: ["demo"], status: "active", createdAt: new Date().toISOString() }],
+  people: [steward, { id: "00000000-0000-4000-8000-000000000002", name: "Synthetic co-steward" }],
+  subjects: [{ id: "00000000-0000-4000-8000-000000000004", name: "Synthetic agent", kind: "agent" }, { id: "00000000-0000-4000-8000-000000000005", name: "Second synthetic agent", kind: "agent" }],
   environments: ["demo", "byoc"], grantTargets: [
-    { id: "tools-a", name: "Synthetic tool server", kind: "tool", tools: ["read-record", "write-record"] },
-    { id: "server-a", name: "Synthetic server", kind: "server" }, { id: "connector-a", name: "Synthetic connector", kind: "connector" },
-    { id: "agent-b", name: "Second synthetic agent", kind: "agent_invoke" }, { id: "role-a", name: "Synthetic reader role", kind: "role" },
+    { id: "00000000-0000-4000-8000-000000000006", name: "Synthetic tool server", kind: "tool", tools: ["read-record", "write-record"] },
+    { id: "00000000-0000-4000-8000-000000000007", name: "Synthetic server", kind: "server" }, { id: "00000000-0000-4000-8000-000000000008", name: "Synthetic connector", kind: "connector" },
+    { id: "00000000-0000-4000-8000-000000000005", name: "Second synthetic agent", kind: "agent_invoke" }, { id: "00000000-0000-4000-8000-000000000009", name: "Synthetic reader role", kind: "role" },
   ],
 };
-const details = new Map<string, IdentityDetail>([["identity-a", { grants: [], credentials: [{ id: "credential-a", identityId: "identity-a", kind: "public_key",
+const details = new Map<string, IdentityDetail>([["00000000-0000-4000-8000-000000000003", { grants: [], credentials: [{ id: "00000000-0000-4000-8000-000000000010", identityId: "00000000-0000-4000-8000-000000000003", kind: "public_key",
   fingerprint: "synthetic-public-thumbprint", notBefore: new Date(Date.now() - 60000).toISOString(),
   notAfter: new Date(Date.now() + 86400000).toISOString(), revokedAt: null }] }]]);
 const tree: DelegationNode[] = [
-  { id: "grant-root", parentId: null, identityId: "identity-a", identifier: "Root synthetic actor", sponsor: steward, actorChain: ["Root synthetic actor"],
+  { id: "00000000-0000-4000-8000-000000000011", parentId: null, identityId: "00000000-0000-4000-8000-000000000003", identifier: "Root synthetic actor", sponsor: steward, actorChain: ["Root synthetic actor"],
     status: "active", capMicros: "100000000", settledMicros: "10000000", reservedMicros: "50000000", expiresAt: new Date(Date.now() + 300000).toISOString(), allocation: null },
-  { id: "grant-child", parentId: "grant-root", identityId: "child-identity", identifier: "Child synthetic actor", sponsor: steward,
+  { id: "00000000-0000-4000-8000-000000000012", parentId: "00000000-0000-4000-8000-000000000011", identityId: "00000000-0000-4000-8000-000000000013", identifier: "Child synthetic actor", sponsor: steward,
     actorChain: ["Root synthetic actor", "Child synthetic actor"], status: "active", capMicros: "60000000", settledMicros: "10000000", reservedMicros: "0", expiresAt: new Date(Date.now() + 300000).toISOString(),
     allocation: { amountMicros: "60000000", drawnMicros: "10000000", releasedMicros: "0", status: "open" } },
 ];
 if (mode === "unknown-budget") tree[1]!.capMicros = null;
 if (mode === "unknown-expiry") tree[1]!.expiresAt = "unreadable";
-if (mode === "cycle") { tree[0]!.parentId = "grant-child"; }
-const calls: Array<{ command: IdentityWrite; headers: Record<string, string> }> = [];
+if (mode === "cycle") { tree[0]!.parentId = "00000000-0000-4000-8000-000000000012"; }
+const calls: Array<{ command: IdentityWrite; request: ReturnType<typeof encodeIdentityWrite>; headers: Record<string, string> }> = [];
 const grants = new Map<string, string>();
 let sequence = 0;
 const port: IdentityAdminPort = {
   async inventory() { if (mode === "read-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return structuredClone(inventory); },
   async detail(id) { if (mode === "detail-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return structuredClone(details.get(id) ?? { grants: [], credentials: [] }); },
   async delegationTree(runId) { if (mode === "tree-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return { runId, nodes: structuredClone(tree) }; },
-  async write(command, headers) {
-    calls.push({ command: structuredClone(command), headers: { ...headers } });
-    const key = JSON.stringify(command), token = headers["x-regulait-step-up"];
-    if (!token || grants.get(token) !== key) throw new ApiError(403, { error: "step_up_required", actionKind: "identity_manage", methods: ["mock"], action: { kind: "identity_manage", body: command } });
+  prepareWrite(command) {
+    command = structuredClone(command);
+    const snapshot = "identityId" in command ? details.get(command.identityId)?.grants : undefined;
+    const request = encodeIdentityWrite(command, snapshot);
+    return async headers => {
+    calls.push({ command: structuredClone(command), request: structuredClone(request), headers: { ...headers } });
+    const key = JSON.stringify(request), token = headers["x-regulait-step-up"];
+    if (!token || grants.get(token) !== key) throw new ApiError(403, { error: "step_up_required", actionKind: "identity_manage", methods: ["mock"], action: { kind: "identity_manage", body: request } });
     grants.delete(token);
     if (mode === "write-error") throw new ApiError(409, { error: "synthetic_refusal", detail: "SYNTHETIC_UNTRUSTED_SERVER_DETAIL" });
     if (command.operation === "create_identity") {
-      const id = `identity-${++sequence}`;
+      const id = `00000000-0000-4000-9000-${String(++sequence).padStart(12, "0")}`;
       inventory.identities.push({ id, kind: command.kind, identifier: `spiffe://demo.example/regulait/${command.kind}/${id}`,
         subjectId: command.subjectId, stewards: inventory.people.filter(p => command.stewardIds.includes(p.id)), environments: command.environments,
         status: "active", createdAt: new Date().toISOString() }); details.set(id, { grants: [], credentials: [] });
@@ -78,12 +84,25 @@ const port: IdentityAdminPort = {
     } else {
       const detail = details.get(command.identityId)!;
       if (command.operation === "revoke_credential") detail.credentials.find(c => c.id === command.credentialId)!.revokedAt = new Date().toISOString();
-      else if (command.operation === "add_credential" || command.operation === "rotate_credential") detail.credentials.push({ id: `credential-${++sequence}`, identityId: command.identityId,
+      else if (command.operation === "add_credential" || command.operation === "rotate_credential") detail.credentials.push({ id: `00000000-0000-4000-a000-${String(++sequence).padStart(12, "0")}`, identityId: command.identityId,
         kind: "public_key", fingerprint: "synthetic-new-public-thumbprint", notBefore: new Date().toISOString(), notAfter: command.notAfter, revokedAt: null });
-      else if (command.operation === "add_grant") detail.grants.push({ id: `own-grant-${++sequence}`, kind: command.kind, targetId: command.targetId,
-        targetName: inventory.grantTargets.find(t => t.id === command.targetId)!.name, toolName: command.toolName, access: command.access });
-      else if (command.operation === "remove_grant") detail.grants = detail.grants.filter(g => g.id !== command.grantId);
+      else if (command.operation === "add_grant" || command.operation === "remove_grant") {
+        const body = request.body as PutAgentGrants, previous = detail.grants;
+        const row = (kind: IdentityDetail["grants"][number]["kind"], targetId: string, toolName: string | null, fields = {}) => ({
+          id: previous.find(g => g.kind === kind && g.targetId === targetId && g.toolName === toolName)?.id ?? `own-grant-${++sequence}`,
+          kind, targetId, targetName: inventory.grantTargets.find(t => t.id === targetId && t.kind === kind)?.name ?? "Synthetic target", toolName, access: null, ...fields,
+        });
+        // The synthetic server applies the captured full replacement, including a denial via empty arrays.
+        detail.grants = [
+          ...body.tools.map(g => row("tool", g.serverId, g.toolName)),
+          ...body.servers.map(g => row("server", g.serverId, null, { readOnlyAll: g.readOnlyAll })),
+          ...body.agents.map(g => row("agent_invoke", g.agentId, null, { allowedModes: [...g.allowedModes] })),
+          ...body.connectors.map(g => row("connector", g.connectorId, null, { mode: g.mode, allowedObjects: [...g.allowedObjects] })),
+          ...body.roleIds.map(roleId => row("role", roleId, null)),
+        ];
+      }
     }
+    };
   },
 };
 declare global { interface Window { identityPreview: { calls: typeof calls; inventory: IdentityInventory; tree: DelegationNode[] } } }

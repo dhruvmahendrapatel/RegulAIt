@@ -1,6 +1,7 @@
-/** View model only. The S1 HTTP contract supplies its adapter; no API paths are guessed here. */
-export type WorkloadKind = "agent" | "builder_agent" | "engine_runner" | "worker_runtime" | "pdp";
-export type WorkloadStatus = "active" | "suspended" | "revoked";
+/** Display models are separate from the shared S1 wire contract. */
+import { WORKLOAD_IDENTITY_MAX_STEWARDS, WORKLOAD_IDENTITY_MAX_ENVIRONMENTS, ENVIRONMENT_NAME_PATTERN, type WorkloadIdentityKind, type WorkloadIdentityStatus } from "../../../../../../packages/shared/src/identity/contract";
+export type WorkloadKind = WorkloadIdentityKind;
+export type WorkloadStatus = WorkloadIdentityStatus;
 export interface IdentityPerson { id: string; name: string }
 export interface WorkloadIdentity {
   id: string; kind: WorkloadKind; identifier: string; subjectId: string | null;
@@ -13,6 +14,7 @@ export interface WorkloadCredential {
 export interface OwnGrant {
   id: string; kind: "tool" | "server" | "connector" | "agent_invoke" | "role";
   targetId: string; targetName: string; toolName: string | null; access: "read" | "write" | "invoke" | null;
+  readOnlyAll?: boolean; allowedModes?: string[]; mode?: "read" | "readwrite"; allowedObjects?: string[];
 }
 export interface DelegationNode {
   id: string; parentId: string | null; identityId: string; identifier: string;
@@ -34,14 +36,15 @@ export type IdentityWrite =
   | { operation: "identity_status"; identityId: string; status: WorkloadStatus }
   | { operation: "add_credential" | "rotate_credential"; identityId: string; previousCredentialId?: string; publicKey: PublicKey; notAfter: string }
   | { operation: "revoke_credential"; identityId: string; credentialId: string }
-  | { operation: "add_grant"; identityId: string; kind: OwnGrant["kind"]; targetId: string; toolName: string | null; access: OwnGrant["access"] }
+  | { operation: "add_grant"; identityId: string; kind: OwnGrant["kind"]; targetId: string; toolName: string | null; access: OwnGrant["access"]; readOnlyAll?: boolean; allowedModes?: string[]; mode?: "read" | "readwrite"; allowedObjects?: string[] }
   | { operation: "remove_grant"; identityId: string; grantId: string }
   | { operation: "revoke_delegation"; grantId: string };
 export interface IdentityAdminPort {
   inventory(): Promise<IdentityInventory>;
   detail(identityId: string): Promise<IdentityDetail>;
   delegationTree(runId: string): Promise<{ runId: string; nodes: DelegationNode[] }>;
-  write(command: IdentityWrite, headers: Record<string, string>): Promise<void>;
+  /** Capture a complete, immutable wire request before the first call or step-up. */
+  prepareWrite(command: IdentityWrite): (headers: Record<string, string>) => Promise<void>;
 }
 
 export const workloadKindLabels: Record<WorkloadKind, string> = {
@@ -90,7 +93,8 @@ export function validateIdentity(kind: WorkloadKind, subjectId: string | null, s
   if (["agent", "builder_agent", "engine_runner"].includes(kind) && !subjectId) return "Choose the subject this identity belongs to.";
   if (["worker_runtime", "pdp"].includes(kind) && subjectId !== null) return "An external worker or policy client has no internal subject.";
   if (!stewardIds.length) return "Choose at least one steward.";
-  if (!environments.length) return "Choose at least one environment.";
+  if (stewardIds.length > WORKLOAD_IDENTITY_MAX_STEWARDS || new Set(stewardIds).size !== stewardIds.length) return "Choose up to 10 distinct stewards.";
+  if (environments.length > WORKLOAD_IDENTITY_MAX_ENVIRONMENTS || new Set(environments).size !== environments.length || environments.some(env => !ENVIRONMENT_NAME_PATTERN.test(env))) return "Choose up to 20 distinct valid environments.";
   return null;
 }
 export function orderedDelegations(nodes: DelegationNode[]): { nodes: Array<DelegationNode & { level: number }>; problem: string | null } {
@@ -107,4 +111,14 @@ export function orderedDelegations(nodes: DelegationNode[]): { nodes: Array<Dele
   for (const root of nodes.filter(n => n.parentId === null)) visit(root, 0);
   if (visited.size !== nodes.length) return { nodes: [], problem: "The delegation chain has a cycle or exceeds the display depth. Refresh before acting." };
   return { nodes: result, problem: null };
+}
+
+export function ownGrantSummary(grant: OwnGrant): string {
+  switch (grant.kind) {
+    case "tool": return "This named tool";
+    case "server": return grant.readOnlyAll === undefined ? "Permission unmeasured" : grant.readOnlyAll ? "All read-only tools" : "All tools";
+    case "agent_invoke": return grant.allowedModes === undefined ? "Modes unmeasured" : grant.allowedModes.length ? `Modes: ${grant.allowedModes.join(", ")}` : "No modes allowed";
+    case "connector": return grant.mode === undefined || grant.allowedObjects === undefined ? "Permission unmeasured" : `${grant.mode === "read" ? "Read" : "Read and write"}; ${grant.allowedObjects.length ? `objects: ${grant.allowedObjects.join(", ")}` : "no objects allowed"}`;
+    case "role": return "Defined by role";
+  }
 }

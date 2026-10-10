@@ -1,3 +1,4 @@
+import { IDENTITY_STRICT_DEFAULTS, IDENTITY_SETTING_LIMITS } from "../../../../../../packages/shared/src/identity/settings";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../../../shell/AppShell";
@@ -6,7 +7,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input
 import { useToast } from "../../../ui/toast";
 import {
   credentialStatus, formatMicros, orderedDelegations, publicKeyFingerprint, readPublicKey, remainingMicros,
-  validateIdentity, workloadKindLabels, type IdentityAdminPort, type IdentityInventory, type IdentityWrite,
+  validateIdentity, workloadKindLabels, ownGrantSummary, type IdentityAdminPort, type IdentityInventory, type IdentityWrite,
   type OwnGrant, type PublicKey, type WorkloadCredential, type WorkloadIdentity, type WorkloadKind,
 } from "./workloadIdentityModel";
 import s from "./workloadIdentities.module.css";
@@ -18,7 +19,7 @@ type Form = { kind: "identity"; identity?: WorkloadIdentity } |
 type Confirmation = { title: string; body: string; label: string; command: IdentityWrite };
 const dateLabel = (value: string) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Unmeasured";
 
-/** S6 view components. An HTTP adapter and navigation mount await Claude's frozen S1 contract. */
+/** S6 view components. Shared S1 schemas define writes; read envelopes await the S6 server contract. */
 export default function WorkloadIdentitiesPage({ port, preview = false }: { port?: IdentityAdminPort; preview?: boolean }) {
   const qc = useQueryClient(), { toast } = useToast();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -43,7 +44,8 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
     setBusy(true); setFailure(null);
     try {
       // The captured command is identical on retry; the server binds identity_manage to it.
-      await withStepUp(headers => port.write(command, headers));
+      const capturedWrite = port.prepareWrite(command);
+      await withStepUp(capturedWrite);
       await qc.invalidateQueries({ queryKey: queryRoot });
       toast("Workload identity change recorded.", "success");
     } catch {
@@ -54,8 +56,8 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
   const confirm = (next: Confirmation) => { setFailure(null); setConfirmation(next); };
   return <>
     <PageHeader title="Workload identities" crumbs={["Identity & access"]}
-      sub="The agent's own grants narrow what its human sponsor may do."
-      info="Register public credentials for callers outside the gateway, manage each workload's own grants, and inspect its delegated authority. Empty own grants refuse agent calls. Revocation refuses the next use; an external effect already dispatched cannot be recalled."
+      sub="Manage workload grants and inspect delegated authority."
+      info="Register public credentials for callers outside the gateway, manage each workload's own grants, and inspect its delegated authority. With least privilege enabled, empty own grants refuse agent calls. Revocation refuses the next use; an external effect already dispatched cannot be recalled."
       actions={port && <Button disabled={busy || !inventory.data} onClick={() => setForm({ kind: "identity" })}>Add identity</Button>} />
     {preview && <p role="note" className={s.preview}>Mock identity preview — synthetic records and step-up only. This preview does not change deployment permissions.</p>}
     {!port ? <Card><EmptyState title="Workload identity management is not available" body="The deployment has not enabled this administrative surface." /></Card> : <div className={s.stack}>
@@ -99,14 +101,14 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
               </div> },
             ]} />
           <div className={s.heading}><h2>Own grants</h2><Button disabled={busy || identity.status !== "active"} onClick={() => setForm({ kind: "grant", identity })}>Add own grant</Button></div>
-          <p>Effective authority is the intersection of the sponsor, every actor, delegation scope and lead ceiling. A role or grant here never widens the sponsor's rights.</p>
+          <p>With least privilege enabled, effective authority is the intersection of the sponsor, every actor, delegation scope and lead ceiling. A role or grant here never widens the sponsor's rights.</p>
           <Table rows={detail.data.grants} rowKey={g => g.id} empty={<EmptyState title="No own grants" body="With own-grants mode enabled, this identity cannot invoke agents, tools or connectors. Its stewards' permissions are not copied to it." />}
             columns={[
               { key: "kind", header: "Kind", render: g => g.kind },
               { key: "target", header: "Target", render: g => g.targetName },
               { key: "tool", header: "Tool", render: g => g.toolName ?? "Not applicable" },
-              { key: "access", header: "Access", render: g => g.access ?? "Defined by role" },
-              { key: "remove", header: "Remove", render: g => <Button size="sm" variant="danger" disabled={busy} aria-label={`Remove grant for ${g.targetName}`} onClick={() => confirm({ title: "Remove own grant?", label: "Remove grant", body: "The next use is checked against the identity's remaining grants. Delegated tokens do not preserve a permission removed here.", command: { operation: "remove_grant", identityId: identity.id, grantId: g.id } })}>Remove</Button> },
+              { key: "access", header: "Access", render: g => ownGrantSummary(g) },
+              { key: "remove", header: "Remove", render: g => <Button size="sm" variant="danger" disabled={busy} aria-label={`Remove grant for ${g.targetName}`} onClick={() => confirm({ title: "Remove own grant?", label: "Remove grant", body: "The next use is checked against the identity's remaining grants. Delegated tokens do not preserve a permission removed here. This change replaces all direct grants and roles; a concurrent change can be overwritten. Refresh before editing.", command: { operation: "remove_grant", identityId: identity.id, grantId: g.id } })}>Remove</Button> },
             ]} />
         </>}
       </Card>}
@@ -147,9 +149,11 @@ function IdentityForm({ form, inventory, onClose, onSave }: { form: Form; invent
   const [environments, setEnvironments] = useState(initial?.environments ?? []);
   const [key, setKey] = useState<PublicKey | null>(null), [fingerprint, setFingerprint] = useState<string | null>(null);
   const [keyBusy, setKeyBusy] = useState(false), [error, setError] = useState<string | null>(null);
-  const [expiry, setExpiry] = useState(new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10));
+  const [expiry, setExpiry] = useState(new Date(Date.now() + IDENTITY_STRICT_DEFAULTS.workloadKeyMaxAgeDays * 86400000).toISOString().slice(0, 10));
   const [grantKind, setGrantKind] = useState<OwnGrant["kind"]>("tool"), [targetId, setTargetId] = useState(""), [toolName, setToolName] = useState("");
-  const [access, setAccess] = useState<"read" | "write">("read");
+  const [readOnlyAll, setReadOnlyAll] = useState(true);
+  const [connectorMode, setConnectorMode] = useState<"read" | "readwrite">("read");
+  const [allowedModes, setAllowedModes] = useState(""), [allowedObjects, setAllowedObjects] = useState("");
   const reads = useRef(0);
   const internal = ["agent", "builder_agent", "engine_runner"].includes(kind);
   const targets = inventory.grantTargets.filter(t => t.kind === grantKind);
@@ -176,12 +180,19 @@ function IdentityForm({ form, inventory, onClose, onSave }: { form: Form; invent
     } else if (form.kind === "credential") {
       const until = Date.parse(`${expiry}T00:00:00.000Z`), duration = until - Date.now();
       if (!key || keyBusy) { setError("Choose and validate a public JWK first."); return; }
-      if (!Number.isFinite(until) || duration <= 0 || duration > 90 * 86400000) { setError("Choose a future expiry no more than 90 days away."); return; }
+      if (!Number.isFinite(until) || duration <= 0 || duration > IDENTITY_SETTING_LIMITS.workloadKeyMaxAgeDays.max * 86400000) { setError("Choose a future expiry no more than 90 days away."); return; }
       onSave({ operation: form.previous ? "rotate_credential" : "add_credential", identityId: form.identity.id,
         ...(form.previous ? { previousCredentialId: form.previous.id } : {}), publicKey: key, notAfter: new Date(until).toISOString() });
     } else {
       if (!target || (grantKind === "tool" && !target.tools?.includes(toolName))) { setError("Choose a permitted target and, for a tool grant, a specific tool."); return; }
-      onSave({ operation: "add_grant", identityId: form.identity.id, kind: grantKind, targetId, toolName: grantKind === "tool" ? toolName : null, access: grantKind === "agent_invoke" ? "invoke" : grantKind === "role" ? null : access });
+      const names = (value: string) => value.split(",").map(name => name.trim()).filter(Boolean);
+      const modes = names(allowedModes), objects = names(allowedObjects);
+      if (modes.length > 20 || modes.some(mode => mode.length > 64) || new Set(modes).size !== modes.length || objects.length > 500 || objects.some(object => object.length > 200) || new Set(objects).size !== objects.length) {
+        setError("Use distinct mode names up to 64 characters and object names up to 200 characters. Choose at most 20 modes or 500 objects."); return;
+      }
+      onSave({ operation: "add_grant", identityId: form.identity.id, kind: grantKind, targetId, toolName: grantKind === "tool" ? toolName : null, access: null,
+        ...(grantKind === "server" ? { readOnlyAll } : {}), ...(grantKind === "agent_invoke" ? { allowedModes: modes } : {}),
+        ...(grantKind === "connector" ? { mode: connectorMode, allowedObjects: objects } : {}) });
     }
   }
   return <Modal open title={title} onClose={onClose} actions={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" disabled={keyBusy} onClick={submit}>{title}</Button></>}>
@@ -192,7 +203,7 @@ function IdentityForm({ form, inventory, onClose, onSave }: { form: Form; invent
           {internal && <Field label="Subject"><Select value={subjectId} onChange={event => setSubjectId(event.target.value)}><option value="">Choose a subject</option>{inventory.subjects.filter(subject => subject.kind === kind && !inventory.identities.some(identity => identity.subjectId === subject.id)).map(subject => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</Select></Field>}</>}
         <Choices label="Stewards" options={inventory.people} selected={stewards} onChange={setStewards} />
         <Choices label="Allowed environments" options={inventory.environments.map(id => ({ id, name: id }))} selected={environments} onChange={setEnvironments} />
-        <p>At least one steward and environment is required. Own grants start empty; stewards' permissions are never copied onto the identity.</p>
+        <p>At least one steward is required. Empty environments allow no environment. Own grants start empty; stewards' permissions are never copied onto the identity.</p>
       </> : form.kind === "credential" ? <>
         {form.previous && <p>Rotation adds a new public credential. The previous credential remains valid until its recorded expiry. Revoke it separately to refuse its tokens and grants.</p>}
         <Field label="Public JWK file" help="Choose only the public part of an ES256 or Ed25519 key. File contents are not displayed."><Input type="file" accept="application/json,.json" onChange={event => void chooseFile(event.target.files?.[0])} /></Field>
@@ -204,8 +215,13 @@ function IdentityForm({ form, inventory, onClose, onSave }: { form: Form; invent
         <Field label="Grant kind"><Select value={grantKind} onChange={event => { setGrantKind(event.target.value as OwnGrant["kind"]); setTargetId(""); setToolName(""); }}>{["tool", "server", "connector", "agent_invoke", "role"].map(value => <option key={value} value={value}>{value}</option>)}</Select></Field>
         <Field label="Grant target"><Select value={targetId} onChange={event => { setTargetId(event.target.value); setToolName(""); }}><option value="">Choose a target</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</Select></Field>
         {grantKind === "tool" && <Field label="Tool"><Select value={toolName} onChange={event => setToolName(event.target.value)}><option value="">Choose a tool</option>{target?.tools?.map(tool => <option key={tool} value={tool}>{tool}</option>)}</Select></Field>}
-        {grantKind !== "agent_invoke" && grantKind !== "role" && <Field label="Access"><Select value={access} onChange={event => setAccess(event.target.value as "read" | "write")}><option value="read">Read</option><option value="write">Write</option></Select></Field>}
-        <p>This grant narrows delegated authority and cannot exceed the sponsor's rights.</p>
+        {grantKind === "server" && <label><input type="checkbox" checked={readOnlyAll} onChange={event => setReadOnlyAll(event.target.checked)} /> Only read-only tools</label>}
+        {grantKind === "agent_invoke" && <Field label="Allowed modes" help="Exact mode names, separated by commas. Empty allows no mode; one mode never implies another."><Input value={allowedModes} onChange={event => setAllowedModes(event.target.value)} /></Field>}
+        {grantKind === "connector" && <>
+          <Field label="Connector access"><Select value={connectorMode} onChange={event => setConnectorMode(event.target.value as "read" | "readwrite")}><option value="read">Read</option><option value="readwrite">Read and write</option></Select></Field>
+          <Field label="Allowed objects" help="Exact object names, separated by commas. Empty allows no object; no wildcard is inferred."><Input value={allowedObjects} onChange={event => setAllowedObjects(event.target.value)} /></Field>
+        </>}
+        <p>This grant narrows delegated authority and cannot exceed the sponsor's rights. Every change replaces all direct grants and roles. A concurrent change can be overwritten; refresh before editing.</p>
       </>}
     </div>
   </Modal>;
