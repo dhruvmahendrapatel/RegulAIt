@@ -1,0 +1,9 @@
+{
+  "sha256": {
+    "native": "cdf0c876b79295abb30d0051278e66b22705c2c6a8bd410ef20d3b21aba9d3cc",
+    "cyclonedx-1.7": "c9a367e37ceeb6d78969cfe9489b5b66af0ecb372452e65a30589339f9091ee5",
+    "cyclonedx-1.6": "1d451d5a82a7d87ee861227b1a84b56efe7b0ff0e529f1f033aa25db1cdd023e",
+    "spdx-3.0.1": "e3dede3acd21077e92cd7dee3393de9d8b4ea7f237cdab1c217023062e7dbf91"
+  },
+  "signatureEd25519SyntheticKey": "n9ZXFfLcsSpY5GYt/cD6Bfx9YIAL5a4gDsKXIZ6ArhWy7/8LEAT+5+SK8dmm+HqDjewnMSNA8T+G6iRXS6kcBA=="
+}
