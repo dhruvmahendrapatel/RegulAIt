@@ -313,15 +313,17 @@ beforeAll(async () => {
   }
   projectId = rows<{ id: string }>(await db.execute(sql`insert into projects (name) values (${`s5-proj-${RUN}`}) returning id`))[0]!.id;
   const ic = await inject("GET", "/v1/interception/settings", AUTH);
-  const before = ic.json();
+  const before = ic.json().settings as { mcpInterceptionEnabled: boolean; anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean };
+  expect(typeof before.mcpInterceptionEnabled).toBe("boolean");
   const put = await inject("PUT", "/v1/interception/settings", AUTH, { mcpInterceptionEnabled: true, anthropicCompatEnabled: true, openaiCompatEnabled: true });
   expect(put.statusCode, put.body).toBe(200);
   restores.push(async () => {
-    await inject("PUT", "/v1/interception/settings", AUTH, {
+    const back = await inject("PUT", "/v1/interception/settings", AUTH, {
       mcpInterceptionEnabled: before.mcpInterceptionEnabled,
       anthropicCompatEnabled: before.anthropicCompatEnabled,
       openaiCompatEnabled: before.openaiCompatEnabled,
     });
+    expect(back.statusCode, back.body).toBe(200);
   });
   for (let i = 0; i < 6; i++) agents.push(await newAgent(`a${i}`));
 }, 120_000);
