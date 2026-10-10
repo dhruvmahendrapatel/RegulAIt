@@ -4,7 +4,7 @@
  * renders SPDX instead of `not_producible`. Never invented: a property nobody
  * declared stays missing, and R3's fallback applies.
  *
- *   GET  /v1/ai-bom/spdx-fields/:subjectKind/:subjectId                       current values, provenance, history
+ *   GET  /v1/ai-bom/spdx-fields/:subjectKind/:subjectId                       display name, current values, provenance, history
  *   PUT  /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property             declare (or correct) one value
  *   POST /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property/withdraw    clear one value
  *
@@ -22,11 +22,15 @@
  *    CHECKs. A refusal names the property and the rule, never the value;
  *  - the source (`supplier_declared` or `admin_entered`) is REQUIRED: there is
  *    no default, so a value never claims a provenance nobody stated;
- *  - `declared_at` is the database clock (a trigger), never the process clock.
+ *  - `declared_at` is the database clock (a trigger), never the process clock;
+ *  - NO STEP-UP (R51): a declaration is evidence authoring and relaxes no setting. It is governed like model-card
+ *    authoring and edits, evidence attachment and dataset writes, which need none; step-up in `step-up.ts` guards
+ *    relaxations (`settings_relax`), approvals, evidence holds, break-glass, passkeys, owner changes and identity
+ *    administration. A withdrawal only makes a rendering `not_producible`, the stricter outcome.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { aiBomSpdxDeclarations, and, auditLog, desc, eq, evalDatasets, inArray, modelCards, sql, trainingDatasets, type Db } from "@regulait/db";
+import { agents, aiBomSpdxDeclarations, and, auditLog, customModelProviders, desc, eq, evalDatasets, inArray, modelCards, sql, trainingDatasets, type Db } from "@regulait/db";
 import {
   AI_BOM_SPDX_SOURCES,
   AI_BOM_SPDX_SUBJECT_KINDS,
@@ -37,6 +41,7 @@ import {
   type AiBomSpdxSubjectKind,
   type SpdxFieldsRecord,
 } from "@regulait/shared";
+import { PRESENTATION_SCRUB } from "./conversation-presentation.js";
 
 type Tx = Db;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -110,10 +115,33 @@ export async function loadSpdxFieldsRecords(tx: Tx, kind: AiBomSpdxSubjectKind, 
   return out;
 }
 
-async function parentExists(tx: Tx, kind: AiBomSpdxSubjectKind, id: string): Promise<boolean> {
-  const table = kind === "model_card" ? modelCards : kind === "training_dataset" ? trainingDatasets : evalDatasets;
-  const [row] = await tx.select({ id: table.id }).from(table).where(eq(table.id, id));
-  return !!row;
+/** the cap on a presented display name (the AI BOM name cap); a longer one is shortened for display only */
+const DISPLAY_NAME_MAX_CHARS = 512;
+
+/**
+ * The subject's display name for a confirmation screen, or null when the row does not exist: a model card is
+ * "<agent or custom provider name> · <intended use>", a dataset "<name> v<version>". Scrubbed with the same
+ * presentation scrub the model-card views use (`PRESENTATION_SCRUB`, ADR-0115), then length-capped.
+ */
+export async function spdxSubjectDisplayName(tx: Tx, kind: AiBomSpdxSubjectKind, id: string): Promise<string | null> {
+  let name: string | null = null;
+  if (kind === "model_card") {
+    const [r] = await tx
+      .select({ intendedUse: modelCards.intendedUse, agentName: agents.name, providerName: customModelProviders.name })
+      .from(modelCards)
+      .leftJoin(agents, eq(agents.id, modelCards.agentId))
+      .leftJoin(customModelProviders, eq(customModelProviders.id, modelCards.customProviderId))
+      .where(eq(modelCards.id, id));
+    if (!r) return null;
+    name = `${r.agentName ?? r.providerName ?? "unknown model"} · ${r.intendedUse}`;
+  } else {
+    const table = kind === "training_dataset" ? trainingDatasets : evalDatasets;
+    const [r] = await tx.select({ name: table.name, version: table.version }).from(table).where(eq(table.id, id));
+    if (!r) return null;
+    name = `${r.name} v${r.version}`;
+  }
+  const scrubbed = PRESENTATION_SCRUB(name);
+  return scrubbed.length > DISPLAY_NAME_MAX_CHARS ? `${scrubbed.slice(0, DISPLAY_NAME_MAX_CHARS - 1)}…` : scrubbed;
 }
 
 const declareBody = z.object({ value: z.unknown(), source: z.enum(AI_BOM_SPDX_SOURCES) }).strict();
@@ -155,7 +183,8 @@ export function registerAiBomSpdxFieldRoutes(app: FastifyInstance, db: Db): void
     if (notAdmin(req, reply)) return reply;
     const s = subjectOf(req);
     if (!s) return reply.status(400).send({ error: "invalid_spdx_subject" });
-    if (!(await parentExists(db, s.kind, s.id))) return reply.status(404).send({ error: "spdx_subject_not_found" });
+    const displayName = await spdxSubjectDisplayName(db, s.kind, s.id);
+    if (displayName === null) return reply.status(404).send({ error: "spdx_subject_not_found" });
     const current = (await currentSpdxDeclarations(db, s.kind, [s.id])).get(s.id) ?? new Map<AiBomSpdxProperty, Row>();
     const history = await db
       .select()
@@ -165,7 +194,7 @@ export function registerAiBomSpdxFieldRoutes(app: FastifyInstance, db: Db): void
       .limit(HISTORY_LIMIT);
     const declarable = AI_BOM_SPDX_SUBJECT_PROPERTIES[s.kind];
     return {
-      subject: s,
+      subject: { ...s, displayName },
       declarable,
       current: declarable.filter((p) => current.has(p)).map((p) => view(current.get(p)!)),
       // R51: what this record still lacks; the SPDX rendering stays not_producible while a mandatory one is missing

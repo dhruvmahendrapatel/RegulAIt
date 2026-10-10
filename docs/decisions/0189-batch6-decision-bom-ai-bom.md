@@ -990,9 +990,19 @@ R51. **The mandatory SPDX properties are collected, never invented (slice B9).**
       parent and property. UPDATE, DELETE (except the parent's cascade) and TRUNCATE are refused in the database.
     - **Who may write.** Admins only: the routes sit behind the global admin gate and are not in `NON_ADMIN_ROUTES`
       (default-deny). Every write, including a withdrawal, writes an audit row in the same transaction. Reads are
-      admin-only too.
-    - **Validation, strict.** A time is a real instant in whole seconds and is rendered as an `xsd:dateTime` in UTC
-      (`YYYY-MM-DDThh:mm:ssZ`). A download location follows R47 and #280 (4237493036), the rule B3 and B5 already apply
+      admin-only too. The read returns the subject's display name for a confirmation screen (a model card as
+      "<agent or provider> · <intended use>", a dataset as "<name> v<version>"), passed through the same
+      presentation scrub as the model-card views (ADR-0115).
+    - **No step-up (checked 2026-10-10).** Comparable evidence-affecting admin writes need none: model card authoring
+      and edits, evidence attachment, and training and evaluation dataset writes. In `step-up.ts`, step-up guards
+      relaxing a strict setting (`settings_relax`, which includes the BOM settings), approvals, evidence holds,
+      break-glass, passkeys, owner changes, identity administration and model-artifact deletion. Declaring a value
+      relaxes no setting. Withdrawing one only makes a rendering `not_producible`, the stricter outcome, and the
+      table keeps the history. So the SPDX routes require no step-up, like the writes they sit beside. If model card
+      edits ever gain a step-up, these routes take the same kind.
+    - **Validation, strict.** A time is accepted **only** as `YYYY-MM-DDThh:mm:ssZ`: a real instant, whole seconds,
+      UTC with `Z`. That is exactly what is stored and rendered as the `xsd:dateTime`. A minutes-only time, any
+      offset (even `+00:00`) and fractional seconds are refused, never normalised (owner, 2026-10-10). A download location follows R47 and #280 (4237493036), the rule B3 and B5 already apply
       to every exported endpoint: an `https` origin (`https://host[:port]`) only. A value with a path, query, fragment
       or userinfo, a non-https scheme, or a non-ASCII host is **refused** at write, never cut down to its origin,
       because cutting would record a value nobody declared. Plain `http` is refused too: B5 never exports it, so a
