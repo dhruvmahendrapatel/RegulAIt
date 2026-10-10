@@ -36,6 +36,8 @@ import {
 import { AI_BOM_RECORD_LISTS, AI_BOM_RECORD_TABLES, aiBomRecordKey, cmpCodeUnits, normaliseAiBomRecords, sortedBy, type AiBomRecordSet } from "./ai-bom-records.js";
 import { renderAiBomCycloneDx, type AiBomGap, type AiBomSnapshotMeta, type CycloneDxRenderResult, type CycloneDxSpecVersion } from "./ai-bom-cyclonedx.js";
 import { cycloneDxValidatorId, validateCycloneDx } from "./ai-bom-cyclonedx-schema.js";
+import { renderAiBomSpdx, spdxMandatoryMissing } from "./ai-bom-spdx.js";
+import { spdxValidatorId, validateSpdx } from "./ai-bom-spdx-schema.js";
 
 export class AiBomBuildError extends Error {
   constructor(message: string, readonly paths: string[] = []) {
@@ -171,6 +173,7 @@ export function buildAiBom(records: AiBomRecordSet, meta: AiBomSnapshotMeta, opt
 
   let gaps: AiBomGap[] = [];
   let compositions: CycloneDxRenderResult["compositions"] = [];
+  let cdx17: CycloneDxRenderResult | null = null;
   const renderings: AiBomRendering[] = [];
   for (const v of versions.sort(cmpCodeUnits).reverse()) {
     const r = renderAiBomCycloneDx(n, meta, v);
@@ -189,6 +192,27 @@ export function buildAiBom(records: AiBomRecordSet, meta: AiBomSnapshotMeta, opt
     if (v === "1.7") {
       gaps = r.gaps;
       compositions = r.compositions;
+      cdx17 = r;
+    }
+  }
+
+  // ------------------------------------------------------------- SPDX 3.0.1 (slice B5; R2: every v1 renderer at freeze)
+  // R3 + 4237371312: a mandatory literal property with no recorded value means NO SPDX rendering for this snapshot;
+  // the signed body records `not_producible` with the missing property names. Never a placeholder.
+  const notProducible: Partial<Record<BomRenderingFormat, { status: "not_producible"; missing: string[] }>> = {};
+  {
+    const spdx = renderAiBomSpdx(n, meta, cdx17!).doc;
+    const missing = spdxMandatoryMissing(spdx);
+    if (missing.length) notProducible["spdx-3.0.1"] = { status: "not_producible", missing };
+    else {
+      const problems = findNonCanonicalShapes(spdx);
+      if (problems.length) throw new AiBomBuildError("SPDX 3.0.1 invariants", problems);
+      const emails = findEmailShapesBroad(spdx);
+      if (emails.length) throw new AiBomBuildError("email-shaped value in spdx-3.0.1", emails);
+      const checked = validateSpdx(spdx);
+      if (!checked.valid) throw new AiBomBuildError("SPDX 3.0.1 schema validation failed", checked.errors.map((e) => `${e.path} ${e.message}`));
+      const bytes = bomCanonicalBytes(spdx);
+      renderings.push({ format: "spdx-3.0.1", bytes, sha256: bomSha256(bytes), byteLength: Buffer.byteLength(bytes, "utf8"), validator: spdxValidatorId() });
     }
   }
 
@@ -207,7 +231,10 @@ export function buildAiBom(records: AiBomRecordSet, meta: AiBomSnapshotMeta, opt
     records: recordsOut,
     unrecorded: gaps,
     compositions,
-    renderings: Object.fromEntries(renderings.map((r) => [r.format, { status: "rendered", sha256: r.sha256, bytes: r.byteLength, validator: r.validator }])),
+    renderings: {
+      ...Object.fromEntries(renderings.map((r) => [r.format, { status: "rendered", sha256: r.sha256, bytes: r.byteLength, validator: r.validator }])),
+      ...notProducible,
+    },
   };
   const shapes = findNonCanonicalShapes(candidate);
   if (shapes.length) throw new AiBomBuildError("native body is not canonical-safe", shapes);
