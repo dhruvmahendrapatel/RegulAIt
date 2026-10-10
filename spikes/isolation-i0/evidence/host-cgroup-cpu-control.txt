@@ -1,0 +1,5 @@
+cfs_bandwidth_files: 1
+quota_read_back: 50000/100000
+limited: {"mode": "cpu", "workers": 4, "seconds": 3, "iterations": 9073547}
+throttled: nr_throttled 10 throttled_time 139827439 
+unlimited: {"mode": "cpu", "workers": 4, "seconds": 3, "iterations": 8660520}

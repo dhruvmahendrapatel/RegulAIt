@@ -1,0 +1,3 @@
+{"mode": "pids", "requested": 200, "spawned": 20, "first_error": "12:Cannot allocate memory"}
+{"mode": "pids", "requested": 200, "spawned": 20, "first_error": "12:Cannot allocate memory", "outcome": "completed"}
+exit=0 wall_s=6.58
