@@ -28,7 +28,7 @@
  *    Every string is email-scanned by the builder.
  */
 import { createHash } from "node:crypto";
-import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
+import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, isBomExportEndpoint, isBomSpiffeId, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
 
 // ---------------------------------------------------------------------------
 // persisted vocabularies (each mirrors a `packages/db` enum; any other value is refused)
@@ -470,7 +470,10 @@ export function sanitiseAiBomEndpoint(url: string, what: string): string {
   if (u.username || u.password) fail(`${what}: endpoint carries userinfo; snapshot refused (R47)`);
   if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) fail(`${what}: endpoint scheme ${u.protocol} is not exportable`);
   if (!/^[A-Za-z0-9.-]+$/.test(u.hostname)) fail(`${what}: endpoint host is not exportable as plain ASCII`);
-  return `${u.protocol}//${u.host}`;
+  const origin = `${u.protocol}//${u.host}`;
+  // belt and braces: the B1 export shape (R47), checked by its linear splitter
+  if (!isBomExportEndpoint(origin)) fail(`${what}: endpoint is not exportable`);
+  return origin;
 }
 
 /**
@@ -512,10 +515,8 @@ function dataClaims(v: unknown, at: string): Record<string, string | number | bo
 
 const spiffeOrNull = (what: string, v: unknown): string | null => {
   if (v === null) return null;
-  // linear check (no nested quantifier, CodeQL js/polynomial-redos): length first, then split on "/"
-  if (typeof v !== "string" || v.length > 2048 || !v.startsWith("spiffe://")) return fail(`${what}: not a workload identity URI`);
-  const [domain, ...segments] = v.slice("spiffe://".length).split("/");
-  if (!/^[a-z0-9._-]{1,255}$/.test(domain!) || !segments.length || segments.some((x) => !/^[A-Za-z0-9._-]+$/.test(x))) fail(`${what}: not a workload identity URI`);
+  // B1's linear, length-capped split check (CodeQL js/polynomial-redos), one definition for every SPIFFE id
+  if (typeof v !== "string" || !isBomSpiffeId(v)) return fail(`${what}: not a workload identity URI`);
   return v;
 };
 
