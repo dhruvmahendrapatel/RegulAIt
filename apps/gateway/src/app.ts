@@ -2957,6 +2957,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             mfaCompleted: body.principal.mfaCompleted ?? null,
           }
         : undefined,
+      undefined,
+      undefined,
+      undefined,
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     // What the decision was actually computed ON. A proxy that believes it is
@@ -3053,6 +3057,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // caller, so the principal's session attributes are honestly unknown
       // here. /v1/abac/simulate is where a hypothetical session can be named.
       undefined,
+      undefined,
+      undefined,
+      undefined,
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"

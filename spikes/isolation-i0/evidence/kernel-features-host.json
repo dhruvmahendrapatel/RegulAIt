@@ -1,0 +1,22 @@
+{
+ "seccomp_filter_flags0_control": {
+  "result": 0,
+  "errno": 0,
+  "error": ""
+ },
+ "seccomp_filter_new_listener": {
+  "result": 4,
+  "errno": 0,
+  "error": ""
+ },
+ "kernel": "6.18.44-fc-v114",
+ "landlock": {
+  "abi": 7
+ },
+ "seccomp_ret_kill_process": {
+  "available": true
+ },
+ "seccomp_ret_user_notif": {
+  "available": true
+ }
+}

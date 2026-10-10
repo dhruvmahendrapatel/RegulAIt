@@ -1,0 +1,7 @@
+W1010 05:20:38.276686       1 log.go:371] WARNING: BUG on pkg/sentry/platform/systrap/subprocess.go:240
+
+handlePtraceSyscallRequest failed: error initializing thread: resource temporarily unavailable
+--
+panic: Unknown syscall 56 error: createSysmsgThread: failed to get clone
+
+goroutine 11 gp=0xfe82325b680 m=9 mp=0xfe8231e2808 [running]:

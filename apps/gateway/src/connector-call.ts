@@ -418,6 +418,7 @@ export async function executeGovernedConnectorCall(
         : null;
     const decision = evaluateConnector({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — the kill switch on the connector path. A connector has no
       // per-subject halt of its own; the dial governs it.
       execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId, ...connectorLiteracy },

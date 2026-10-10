@@ -616,6 +616,7 @@ async function lookupEntityCandidate(
       if (!actor.isAdmin) {
         const decision = evaluateConnector({
           userId: actor.userId,
+          actor: null, // ADR-0188 S4 replaces
           // ADR-0124 — listing which connectors the actor may use. Visibility.
           execution: EVALUATION_ONLY_EXECUTION,
           connectorId: c.id,
@@ -1507,6 +1508,7 @@ export async function agentDecision(
   }
   const decision = evaluateAgent({
     userId,
+    actor: null, // ADR-0188 S4 replaces
     // ADR-0124 — the copilot's narrator really dispatches, and its own comment
     // says it "is not exempt from anything". A halt is no exception.
     execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...(await literacySlot(db, userId)) },

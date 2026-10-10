@@ -1,0 +1,43 @@
+{
+ "cpu_count": 2,
+ "dmesg": [
+  "[    0.000000] Starting gVisor..."
+ ],
+ "dns": "failed:gaierror:-3",
+ "egress_host_listener": "refused:OSError:101",
+ "egress_public_literal": "refused:OSError:101",
+ "etc_write": "denied:30:Read-only file system",
+ "home_listing": {
+  "entries": 0
+ },
+ "host_process": {
+  "cmdline_has_token": false,
+  "kill0": "ESRCH",
+  "pids_visible": 1
+ },
+ "interfaces": [
+  "lo"
+ ],
+ "kernel": "Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016",
+ "meminfo": {
+  "MemFree": "247688 kB",
+  "MemTotal": "262144 kB"
+ },
+ "rlimit_nofile": [
+  1024,
+  1024
+ ],
+ "root_mount": "ro,trans=fd,rfdno=4,wfdno=4,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=fscache,disable_fifo_open,overlayfs_stale_read,directfs",
+ "rootfs_write": "denied:30:Read-only file system",
+ "status": {
+  "CapBnd": "0000000000000000",
+  "CapEff": "0000000000000000",
+  "CapPrm": "0000000000000000",
+  "Gid": "0\t0\t0\t0",
+  "NoNewPrivs": "1",
+  "Seccomp": "2",
+  "Uid": "0\t0\t0\t0"
+ },
+ "uname_release": "4.19.0-gvisor",
+ "work_write": "writable"
+}

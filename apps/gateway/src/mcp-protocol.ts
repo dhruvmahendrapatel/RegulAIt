@@ -334,6 +334,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       undefined,
       undefined,
       approvalTargetForServer(serverId, serverRow),
+      { actor: null }, // ADR-0188 S4 replaces
     );
   // ADR-0186 V, decision 32 — the decided params (EXACTLY what is sent) against
   // the registered upstream URL, after the entitlement decision and before its
@@ -690,6 +691,7 @@ async function loggingRelayAllowed(
     undefined,
     undefined,
     approvalTargetForServer(a.serverId, a.serverRow),
+    { actor: null }, // ADR-0188 S4 replaces
   );
   await db.insert(auditLog).values({
     userId: a.userId,
