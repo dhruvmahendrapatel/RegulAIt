@@ -173,9 +173,17 @@ const FINDING_SENTENCE: Record<string, (f: ArtifactScanFinding) => string> = {
     `${formatName(safeFindingId(f.id))} is an executable format: loading it can run code, so it can never be clean. A scan that finds nothing does not make it safe to load.`,
   scan_error: (f) => `The scanner reported an error (${safeFindingId(f.id)}), so the result is inconclusive.`,
 };
-function severityWord(s: unknown): string {
-  return typeof s === "string" && /^(critical|high|medium|low|info)$/.test(s) ? s : "unrated";
+/** the severities a scan finding carries (the gateway's closed vocabulary) */
+export const FINDING_SEVERITIES = ["critical", "high", "medium", "low"] as const;
+/** B5W-08: a finding's severity, or null when it is absent, not a string, or not in the vocabulary */
+export function findingSeverity(s: unknown): (typeof FINDING_SEVERITIES)[number] | null {
+  return typeof s === "string" && (FINDING_SEVERITIES as readonly string[]).includes(s) ? (s as (typeof FINDING_SEVERITIES)[number]) : null;
 }
+/** the words for a severity: the value when it is one of ours, else a fixed "unknown severity" (never the raw value) */
+export function severityLabel(s: unknown): string {
+  return findingSeverity(s) ?? "unknown severity";
+}
+const severityWord = severityLabel;
 export function findingKindLabel(kind: string): string {
   return kind === "unsafe_operator" ? "Unsafe operator" : kind === "executable_format" ? "Executable format" : kind === "scan_error" ? "Scan error" : "Other finding";
 }
@@ -223,6 +231,18 @@ export function scanStatus(scan: ArtifactScan | null | undefined, artifact?: Pic
   const verdict: ArtifactScanVerdict = known ? (scan.verdict as ArtifactScanVerdict) : "unknown";
   const findings = scan.findings;
   const reasons = findings.map(findingSentence);
+  // B5W-08: a finding whose severity is unknown or malformed makes the record inconclusive (an unsafe
+  // verdict stays unsafe: it is already the strongest "not clean"); the finding still lists, as "unknown severity"
+  if (findings.some((f) => findingSeverity(f.severity) === null) && verdict !== "unsafe") {
+    return {
+      label: SCAN_CHIP.unknown,
+      tone: "warn",
+      clean: false,
+      admissible: false,
+      verdict: "unknown",
+      reasons: ["A finding has an unknown or malformed severity, so the scan is treated as inconclusive.", ...reasons],
+    };
+  }
 
   if (verdict === "clean") {
     const problems: string[] = [];
@@ -336,10 +356,17 @@ const day = (t: number) => new Date(t).toLocaleDateString("en-US", { month: "sho
  * the sweep may delete it.
  */
 export function retentionText(createdAt: string, retentionDays: number, known: boolean): string {
+  // B5W-09: without the setting there is no lifetime to promise; the server applies its live setting
+  if (!known) {
+    return (
+      "The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here. " +
+      `The server applies its own setting (the strict default is ${DEFAULT_RETENTION_DAYS} days), and never deletes an artifact while a scan of it is cited as model-card evidence or a run on it is unfinished.`
+    );
+  }
   const from = Date.parse(createdAt) + retentionDays * DAY_MS;
   const when = Number.isFinite(from) ? ` It may be deleted from ${day(from)}` : " It may be deleted once that age is reached";
   return (
-    `Kept for ${retentionDays} days${known ? "" : " (the strict default; the organisation's setting could not be read)"}.` +
+    `Kept for ${retentionDays} days.` +
     `${when}, unless a scan of it is cited as model-card evidence or a run on it is unfinished. The setting is read when the sweep runs, so a change applies to artifacts already stored.`
   );
 }

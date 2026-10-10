@@ -32,6 +32,8 @@ import {
   DEFAULT_MAX_MEGABYTES,
   DEFAULT_RETENTION_DAYS,
   findingKindLabel,
+  findingSeverity,
+  severityLabel,
   formatBytes,
   formatName,
   isLiveRun,
@@ -458,13 +460,21 @@ function ArtifactDetail(props: {
         </div>
 
         {findings.length > 0 && (
-          <Table<{ i: number; kind: string; id: string; severity: string }>
+          <Table<{ i: number; kind: string; id: string; severity: unknown }>
             rows={findings.map((f, i) => ({ i, kind: f.kind, id: f.id, severity: f.severity }))}
             rowKey={(f) => String(f.i)}
             columns={[
               { key: "kind", header: "Finding", render: (f) => findingKindLabel(f.kind) },
               { key: "id", header: "Identifier", render: (f) => <code>{safeFindingId(f.id)}</code> },
-              { key: "sev", header: "Severity", render: (f) => <SeverityBadge severity={f.severity} /> },
+              {
+                key: "sev",
+                header: "Severity",
+                // B5W-08: only a known severity reaches the badge; anything else is fixed words, never the raw value
+                render: (f) => {
+                  const sev = findingSeverity(f.severity);
+                  return sev ? <SeverityBadge severity={sev} /> : <Badge tone="warn">{severityLabel(f.severity)}</Badge>;
+                },
+              },
             ]}
           />
         )}

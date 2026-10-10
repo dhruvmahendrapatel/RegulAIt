@@ -9,6 +9,8 @@ import { ApiError } from "../../../api/client";
 import {
   SCAN_CHIP,
   findingSentence,
+  findingSeverity,
+  severityLabel,
   chooseScan,
   latestScan,
   scanFindings,
@@ -193,7 +195,13 @@ describe("the upload", () => {
 
   it("retention states the setting and the first date the sweep may delete it", () => {
     expect(retentionText("2026-10-01T12:00:00.000Z", 30, true)).toMatch(/^Kept for 30 days\. It may be deleted from Oct 31, 2026, unless a scan of it is cited/);
-    expect(retentionText("2026-10-01T12:00:00.000Z", 30, false)).toMatch(/the strict default; the organisation's setting could not be read/);
+    // B5W-09: an unread setting promises no lifetime and no date
+    const unread = retentionText("2026-10-01T12:00:00.000Z", 30, false);
+    expect(unread).toMatch(/^The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here\./);
+    expect(unread).toMatch(/the strict default is 30 days/);
+    expect(unread).not.toMatch(/Kept for/);
+    expect(unread).not.toMatch(/Oct 31, 2026|deleted from/);
+    expect(unread).toMatch(/never deletes an artifact while a scan of it is cited as model-card evidence or a run on it is unfinished/);
   });
 
   it("posts raw bytes as octet-stream with the CSRF header, reports progress, and turns a refusal into an ApiError", async () => {
@@ -273,6 +281,30 @@ describe("X30 review: B5W-06 a malformed scan record is inconclusive, never clea
   }
   it("a record with no verdict is inconclusive too", () => {
     expect(scanStatus(scan({ verdict: undefined as never }), SAFETENSORS).clean).toBe(false);
+  });
+});
+
+describe("X30 review: B5W-08 a finding's severity is validated, never rendered raw", () => {
+  const bad: unknown[] = [{ untrusted: "synthetic" }, ["high"], undefined, null, 3, "HIGH", "severe", "info"];
+  for (const severity of bad) {
+    it(`severity = ${JSON.stringify(severity) ?? "undefined"} reads as "unknown severity" and the scan is inconclusive`, () => {
+      expect(findingSeverity(severity)).toBeNull();
+      expect(severityLabel(severity)).toBe("unknown severity");
+      const st = scanStatus(scan({ verdict: "clean", findings: [{ kind: "scan_error", id: "synthetic_error", severity } as never] }), SAFETENSORS);
+      expect(st).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+      expect(st.reasons[0]).toBe("A finding has an unknown or malformed severity, so the scan is treated as inconclusive.");
+      expect(st.reasons.join(" ")).not.toContain("synthetic\"");
+      // the finding still lists (the record is not dropped)
+      expect(scanFindings(scan({ findings: [{ kind: "scan_error", id: "synthetic_error", severity } as never] }))).toHaveLength(1);
+    });
+  }
+  it("an unsafe verdict stays unsafe, with the severity in fixed words", () => {
+    const st = scanStatus(scan({ verdict: "unsafe", format: "pickle", admissible: false, findings: [{ kind: "unsafe_operator", id: "os.system", severity: { x: 1 } } as never] }), PICKLE);
+    expect(st).toMatchObject({ clean: false, label: SCAN_CHIP.unsafe });
+    expect(st.reasons[0]).toBe("An unsafe operator was found: os.system (unknown severity).");
+  });
+  it("valid severities stay readable", () => {
+    for (const s of ["critical", "high", "medium", "low"]) expect(severityLabel(s)).toBe(s);
   });
 });
 

@@ -276,6 +276,37 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     await expect(page.locator('[data-testid="scan-status"][data-clean="true"]')).toHaveCount(0);
   });
 
+  test("X30 B5W-08: a malformed finding severity reads as \"unknown severity\", the scan is inconclusive, and the page stays readable", async ({ page }) => {
+    await setup(page);
+    const base = ARTIFACT_SCANS[ARTIFACTS.truncated.id]![0];
+    const bad = { ...base, findings: [{ kind: "scan_error", id: "synthetic_error", severity: { untrusted: "synthetic" } }, { kind: "executable_format", id: "pickle", severity: ["high"] }] };
+    await page.route(`**/v1/model-artifacts/${ARTIFACTS.truncated.id}`, (route) =>
+      route.request().method() === "GET" ? json(route, { artifact: ARTIFACTS.truncated, scans: [bad] }) : route.fallback(),
+    );
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.truncated.id}`);
+    await expect(page.getByText("Artifact: broken.pkl")).toBeVisible();
+    const shown = page.getByTestId("latest-scan");
+    await expect(shown.getByTestId("scan-status")).toHaveAttribute("data-clean", "false");
+    await expect(shown.getByTestId("scan-status")).toContainText(ARTIFACT_CHIP.unknown);
+    await expect(shown.getByRole("list", { name: "Why it is not clean" })).toContainText("A finding has an unknown or malformed severity");
+    await expect(page.getByRole("cell", { name: "unknown severity" })).toHaveCount(2);
+    await expect(page.getByRole("cell", { name: "synthetic_error" })).toBeVisible();
+    await expect(page.getByText("Objects are not valid as a React child")).toHaveCount(0);
+    await expect(page.getByText(/untrusted/)).toHaveCount(0);
+    await expectAxeClean(page, "malformed finding severity");
+  });
+
+  test("X30 B5W-09: an unread retention setting promises no lifetime or date", async ({ page }) => {
+    await setup(page);
+    await page.route("**/v1/org/settings", (route) => json(route, { error: "unavailable" }, 503));
+    await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.gguf.id}`);
+    const ret = page.getByTestId("artifact-retention");
+    await expect(ret).toContainText("The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here.");
+    await expect(ret).toContainText("the strict default is 30 days");
+    await expect(ret).not.toContainText("Kept for");
+    await expect(ret).not.toContainText(/deleted from \w{3} \d{1,2}, \d{4}/);
+  });
+
   test("delete refused while in use: the fixed sentence, and the artifact stays", async ({ page }) => {
     await setup(page);
     await page.route(`**/v1/model-artifacts/${ARTIFACTS.safetensors.id}`, (route) =>
