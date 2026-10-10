@@ -1735,8 +1735,9 @@ sibling) rebuilds the three blocks with `buildAiBom` and compares them byte for 
 
 #### B4.10 Contract changes this needs (a separate PR, reviewed with B6)
 
-Not made here; `contract-b4.ts` on `main` is unchanged until that PR lands. Nothing else in the frozen contract
-changes: the manifest, descriptor, body and route shapes stay as they are.
+Made in the contract PR from branch `b4-contract-outcomes` (2026-10-10), which also requires an AI BOM bundle above
+version 1 to report `supersedes` `unverifiable` `earlier_snapshot_not_in_bundle`, mirroring the `chain_signed` anchor
+rule. Nothing else in the frozen contract changes: the manifest, descriptor, body and route shapes stay as they are.
 
 1. `BOM_VERIFY_OUTCOMES` becomes `["valid", "unverifiable", "invalid"]` (`valid_with_unverifiable` is removed; B6 has
    not shipped, so no consumer reads it).

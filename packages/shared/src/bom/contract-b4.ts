@@ -48,6 +48,7 @@ import {
   decisionBomBodySchema,
   findEmailShapes,
   hasEmailShape,
+  type DecisionBomFinalityState,
 } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -512,6 +513,8 @@ export const BOM_VERIFY_INVALID_REASONS = [
   "subject_mismatch",
   "facts_hash_mismatch",
   "v1_receipt_after_boundary",
+  /** B4.9 G10: a v2 receipt below the trust root's boundary, or with no boundary recorded (B4.10) */
+  "v2_receipt_before_boundary",
   "addendum_chain_break",
   "section_mismatch",
   "chain_break",
@@ -567,7 +570,7 @@ export const bomVerifyCheckResultSchema = z
   });
 export type BomVerifyCheckResult = z.infer<typeof bomVerifyCheckResultSchema>;
 
-/** §6's fixed list plus R4, R39, R44, R46 and the #280 finite-lock entry */
+/** §6's fixed list plus R4, R39, R44, R46, the #280 finite-lock entry and B4.8's two by-design limits (B4.10) */
 export const BOM_CANNOT_PROVE = [
   "nothing_omitted_after_anchor",
   "facts_true",
@@ -577,6 +580,10 @@ export const BOM_CANNOT_PROVE = [
   "commitment_after_retain_until",
   "facts_recorded_at_decision_time",
   "finite_lock_under_unbounded_retention",
+  /** B4.8: a `chain_signed` Decision BOM has no anchor */
+  "external_commitment",
+  /** B4.8: an AI BOM bundle above version 1 never carries the snapshot it supersedes (B4.1) */
+  "superseded_snapshot",
 ] as const;
 export type BomCannotProve = (typeof BOM_CANNOT_PROVE)[number];
 /** always present for every Decision BOM verify (§6, R4, R39) */
@@ -601,9 +608,59 @@ export const BOM_CANNOT_PROVE_COPY: Readonly<Record<BomCannotProve, string>> = {
   commitment_after_retain_until: "That the external commitment exists after its retain-until date.",
   facts_recorded_at_decision_time: "That these facts are the ones recorded at decision time: the receipt does not commit to them.",
   finite_lock_under_unbounded_retention: "That the anchor stays locked for the whole retention: the lock is finite while the retention has no end.",
+  external_commitment: "That the chain row was committed outside this deployment: this BOM is chain_signed and has no anchor.",
+  superseded_snapshot: "What the snapshot this one supersedes held: only its id is named, and it is not in the bundle.",
 };
 
-export const BOM_VERIFY_OUTCOMES = ["valid", "valid_with_unverifiable", "invalid"] as const;
+/**
+ * ADR-0189 B4.8 (B4.10): `invalid` if any check or section is invalid; else `unverifiable` if any check is unverifiable
+ * other than by design (`isUnverifiableByDesign`); else `valid`.
+ */
+export const BOM_VERIFY_OUTCOMES = ["valid", "unverifiable", "invalid"] as const;
+export type BomVerifyOutcome = (typeof BOM_VERIFY_OUTCOMES)[number];
+export const BOM_VERIFY_SOURCES = ["bundle", "decision_bom", "ai_bom_snapshot"] as const;
+export type BomVerifySource = (typeof BOM_VERIFY_SOURCES)[number];
+
+/** what B4.8's table needs to know about the verified subject; the Decision BOM fields are null for an AI BOM */
+export interface BomByDesignContext {
+  subject: "decision-bom" | "ai-bom";
+  source: BomVerifySource;
+  receiptPayloadVersion: "v1" | "v2" | null;
+  recordedFinality: DecisionBomFinalityState | null;
+  /** the Decision BOM or AI BOM snapshot version */
+  version: number;
+}
+
+/**
+ * ADR-0189 B4.8's table, exactly: an `unverifiable` result that a correct BOM always gives, because the bundle never
+ * carries what the check would check. It is reported, its limit is listed in `cannotProve`, and it does not lower the
+ * outcome. Every other `unverifiable` result does. Pure; `reason` is the check result's reason.
+ */
+export function isUnverifiableByDesign(check: BomVerifyCheck, reason: BomVerifyUnverifiableReason | BomVerifyInvalidReason | null, ctx: BomByDesignContext): boolean {
+  if ((BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(check)) return reason === "not_a_bundle" && ctx.source !== "bundle";
+  if (ctx.subject === "decision-bom") {
+    if (check === "decision_content_binding") return reason === "preimage_not_exported";
+    if (check === "receipt_facts_binding") return reason === "receipt_v1_no_factsHash" && ctx.receiptPayloadVersion === "v1";
+    if ((BOM_ANCHOR_CHECKS as readonly string[]).includes(check)) return reason === "anchor_absent" && ctx.recordedFinality === "chain_signed";
+    return false;
+  }
+  return check === "supersedes" && reason === "earlier_snapshot_not_in_bundle" && ctx.source === "bundle" && ctx.version > 1;
+}
+
+/**
+ * ADR-0189 B4.8: the exact `cannotProve` list of a verified subject: its fixed list plus each conditional entry whose
+ * condition holds, in BOM_CANNOT_PROVE order, each once.
+ */
+export function bomCannotProveFor(ctx: BomByDesignContext & { reportedFinality: BomReportedFinality | null }): BomCannotProve[] {
+  const want = new Set<BomCannotProve>(ctx.subject === "decision-bom" ? DECISION_BOM_CANNOT_PROVE_FIXED : AI_BOM_CANNOT_PROVE_FIXED);
+  if (ctx.subject === "decision-bom") {
+    if (ctx.receiptPayloadVersion === "v1") want.add("facts_recorded_at_decision_time");
+    if (ctx.reportedFinality === "anchored_lapsed") want.add("commitment_after_retain_until");
+    if (ctx.recordedFinality === "anchored_finite_lock") want.add("finite_lock_under_unbounded_retention");
+    if (ctx.recordedFinality === "chain_signed") want.add("external_commitment");
+  } else if (ctx.source === "bundle" && ctx.version > 1) want.add("superseded_snapshot");
+  return BOM_CANNOT_PROVE.filter((c) => want.has(c));
+}
 
 /** a Decision BOM section as verified: the recomputed result and the recorded completeness (a gap is a limit, not a failure) */
 export const bomVerifySectionSchema = z
@@ -646,7 +703,7 @@ export const bomVerifyResponseSchema = z
   .object({
     /** §9: the online verifier trusts the server's recorded keys, and says so */
     trust: z.literal("deployment_registry"),
-    source: z.enum(["bundle", "decision_bom", "ai_bom_snapshot"]),
+    source: z.enum(BOM_VERIFY_SOURCES),
     /** null only when the bundle could not be read far enough to tell (then `invalid`) */
     bodyVersion: z.enum(BOM_BODY_VERSIONS).nullable(),
     identity: bomVerifyIdentitySchema.nullable(),
@@ -664,10 +721,23 @@ export const bomVerifyResponseSchema = z
   .strict()
   .superRefine((r, ctx) => {
     const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-    // the outcome aggregates the checks AND the sections (B4C-02): any invalid -> invalid; else any unverifiable -> valid_with_unverifiable
-    const statuses = new Set([...r.checks.map((c) => c.status), ...r.sections.map((s) => s.status)]);
-    const want = statuses.has("invalid") ? "invalid" : statuses.has("unverifiable") ? "valid_with_unverifiable" : "valid";
-    if (r.outcome !== want) issue(`outcome is ${want} for these checks and sections`);
+    // B4.8: a section is never unverifiable in v1; it is the sections_projection result, valid or invalid
+    if (r.sections.some((s) => s.status === "unverifiable")) issue("a section is valid or invalid in v1, never unverifiable (B4.8)");
+    // B4.8 (B4C-02 kept): any invalid check or section -> invalid; else any unverifiable check NOT by design -> unverifiable; else valid
+    const subject = r.identity;
+    const design: BomByDesignContext | null =
+      subject === null
+        ? null
+        : subject.subject === "decision-bom"
+          ? { subject: subject.subject, source: r.source, receiptPayloadVersion: subject.receiptPayloadVersion, recordedFinality: subject.recordedFinality, version: subject.version }
+          : { subject: subject.subject, source: r.source, receiptPayloadVersion: null, recordedFinality: null, version: subject.version };
+    const anyInvalid = r.checks.some((c) => c.status === "invalid") || r.sections.some((s) => s.status === "invalid");
+    const lowering = r.checks.some((c) => c.status === "unverifiable" && (design === null || !isUnverifiableByDesign(c.check, c.reason, design)));
+    const want: BomVerifyOutcome = anyInvalid ? "invalid" : lowering ? "unverifiable" : "valid";
+    if (r.outcome !== want) issue(`outcome is ${want} for these checks and sections (B4.8)`);
+    // B4.8: cannotProve is exactly the subject's fixed list plus the conditional entries that hold, in BOM_CANNOT_PROVE order
+    const wantCannotProve = subject === null || design === null ? [] : bomCannotProveFor({ ...design, reportedFinality: subject.subject === "decision-bom" ? subject.reportedFinality : null });
+    if (r.cannotProve.join() !== wantCannotProve.join()) issue(`cannotProve is exactly [${wantCannotProve.join(", ")}] (B4.8)`);
     // a check reported more than once names a distinct `ref` each time (B4C-01)
     const seen = new Map<string, Array<string | null>>();
     for (const c of r.checks) seen.set(c.check, [...(seen.get(c.check) ?? []), c.ref]);
@@ -687,8 +757,6 @@ export const bomVerifyResponseSchema = z
       if (r.checks.some((c) => (foreign as readonly string[]).includes(c.check))) issue("checks belong to the subject (R19)");
       if (decision && r.sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join()) issue("every Decision BOM section, in order");
       if (!decision && r.sections.length) issue("an AI BOM has no Decision BOM sections");
-      const fixed = decision ? DECISION_BOM_CANNOT_PROVE_FIXED : AI_BOM_CANNOT_PROVE_FIXED;
-      if (fixed.some((c) => !r.cannotProve.includes(c))) issue("the fixed cannotProve list is always present");
 
       // B4C-01: the minimum check set for this source and subject; an inapplicable conditional check is left out (B4.4)
       const required: readonly BomVerifyCheck[] = [
@@ -705,6 +773,11 @@ export const bomVerifyResponseSchema = z
       if (r.source === "bundle" && r.checks.some((c) => c.reason === "not_a_bundle")) issue("not_a_bundle is never reported for a bundle");
       if (r.checks.some((c) => c.reason === "not_a_bundle" && !(BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(c.check))) issue("not_a_bundle applies to the bundle_* checks only");
       if (r.identity.subject === "ai-bom" && r.identity.version === 1 && of("supersedes").length) issue("version 1 supersedes nothing: the supersedes check is left out");
+      // B4.8: a bundle never carries the superseded snapshot (B4.1), so above version 1 its supersedes check is
+      // unverifiable earlier_snapshot_not_in_bundle, as a chain_signed BOM's anchor checks are anchor_absent
+      if (r.identity.subject === "ai-bom" && r.identity.version > 1 && r.source === "bundle" && !all("supersedes", "unverifiable", "earlier_snapshot_not_in_bundle")) {
+        issue("supersedes: unverifiable earlier_snapshot_not_in_bundle for a bundle above version 1");
+      }
       if (r.identity.subject === "decision-bom") {
         const id = r.identity;
         // R39: the decision row's preimage is never exported, so its content binding is never claimed
@@ -713,6 +786,10 @@ export const bomVerifyResponseSchema = z
         const v1Binding = of("receipt_facts_binding").every((c) => (c.status === "unverifiable" && c.reason === "receipt_v1_no_factsHash") || (c.status === "invalid" && c.reason === "v1_receipt_after_boundary"));
         if (id.receiptPayloadVersion === "v1" && !v1Binding) issue("a v1 receipt's facts binding is unverifiable receipt_v1_no_factsHash, or invalid after the boundary (R46)");
         if (id.receiptPayloadVersion === "v2" && r.checks.some((c) => c.reason === "receipt_v1_no_factsHash" || c.reason === "v1_receipt_after_boundary")) issue("a v2 receipt takes no v1 reason");
+        // B4.9 G10 (B4.10): v2_receipt_before_boundary is the facts binding of a v2 receipt only
+        if (r.checks.some((c) => c.reason === "v2_receipt_before_boundary" && (id.receiptPayloadVersion !== "v2" || c.check !== "receipt_facts_binding"))) {
+          issue("v2_receipt_before_boundary is reported only on receipt_facts_binding of a v2 receipt");
+        }
         // a chain_signed BOM has no anchor: its anchor checks are unverifiable anchor_absent (B4.4)
         if (id.recordedFinality === "chain_signed") {
           for (const c of BOM_ANCHOR_CHECKS) if (!all(c, "unverifiable", "anchor_absent")) issue(`${c}: unverifiable anchor_absent for chain_signed`);
@@ -723,16 +800,10 @@ export const bomVerifyResponseSchema = z
         const projectionInvalid = projection.some((c) => c.status === "invalid");
         if (sectionInvalid !== projectionInvalid) issue("a section is invalid exactly when sections_projection is invalid (section_mismatch)");
         if (projection.some((c) => c.status === "unverifiable")) issue("sections_projection is a pure recomputation: never unverifiable");
-        if (r.sections.some((s) => s.status === "unverifiable") && !r.checks.some((c) => c.status === "unverifiable")) {
-          issue("a section is unverifiable only through an unverifiable check it depends on");
-        }
         const lapsed = id.reportedFinality === "anchored_lapsed";
         if (!(id.reportedFinality === id.recordedFinality || (lapsed && (id.recordedFinality === "anchored" || id.recordedFinality === "anchored_finite_lock")))) {
           issue("reportedFinality is the recorded state, or anchored_lapsed for an anchored state");
         }
-        if (lapsed && !r.cannotProve.includes("commitment_after_retain_until")) issue("a lapsed lock adds commitment_after_retain_until (R44)");
-        if (id.recordedFinality === "anchored_finite_lock" && !r.cannotProve.includes("finite_lock_under_unbounded_retention")) issue("a finite lock adds its cannotProve entry");
-        if (id.receiptPayloadVersion === "v1" && !r.cannotProve.includes("facts_recorded_at_decision_time")) issue("a v1 receipt adds facts_recorded_at_decision_time (R46)");
       }
     }
     if ((r.source === "bundle") !== (r.manifest !== null) && r.outcome !== "invalid") issue("a manifest exactly for a readable bundle");
