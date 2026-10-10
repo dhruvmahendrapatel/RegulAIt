@@ -76,7 +76,8 @@ maintained pure-JS engine); NeMo YARA rules are converted to data.
 - `org_settings`, all strict: `approval_signature_mode` passkey; `step_up_mode` required; `step_up_max_age_seconds` 120
   (30–900); `step_up_actions` = approval_decide, settings_relax, evidence_hold_override, break_glass, passkey_manage,
   owner_change (removing one is a relaxation); `tool_approval_sensitive_quorum` 2; `decision_receipts_mode` on;
-  `audit_anchor_timestamp_mode` required; `vendored_detection_packs` all four; `monitor_mcp_baseline_days` 14;
+  `audit_anchor_timestamp_mode` required; `vendored_detection_packs` all four; `outbound_credential_audience`
+  enforce (decision 32, migration 0181); `monitor_mcp_baseline_days` 14;
   `monitor_jailbreak_threshold` 3; `monitor_jailbreak_window_hours` 24. Every relaxation is audited through
   `org-settings-updated` with `detail.transitions` and needs a `settings_relax` step-up.
 
@@ -651,6 +652,58 @@ unless stated.
     every few characters without matching costs a few microseconds per hit. That is still far below the previous
     worst case (every gated rule scanning the whole value), but it is not a universal 100 ms bound.
 
+32. **Outbound credential audience (V; owner decision 2026-10-10, branch `b4-outbound-audience`; migration 0181;
+    `zz-b4o-outbound-audience.test.ts`, 14 tests, shown red by disabling the check).** An implementation decision
+    recording the owner's choice for the `pipelock-secrets` audience hosts that X23 left unconsumed.
+    - **Refuse.** A `pipelock-secrets` match in the caller's content, bound for a host outside that rule's audience, is
+      refused before anything is sent: `403 credential_audience_violation` on the connector route (with `violations`,
+      rule ids and counts); on the MCP surfaces, where a JSON-RPC answer has no HTTP status, a governed deny whose
+      error message names `credential_audience_violation` and whose error data is
+      `{ error: "credential_audience_violation", status: 403 }`. One audit row, rule `credential-audience-violation`,
+      `detail.violations` = rule ids and counts, `detail.destinationHosts` = host only. The credential, a fragment
+      and a hash of it are never written: the check runs after the entitlement decision and **before** the decision
+      row, so a refused call leaves no ADR-0104 arguments digest (an unentitled caller is still denied as such, with
+      its usual row). The trace span stores no input for it, and the connector span drops `object`.
+    - **What is scanned.** The caller's content only, decoded to strings recursively (every string value and object
+      key; a string with `%` escapes also percent-decoded), joined once and scanned once per destination with the
+      pack matcher (RE2, linear). MCP tool calls: the arguments as sent (the PII-redacted arguments when redact is in
+      force). MCP protocol calls (`prompts/get`, `resources/read`, `completion/complete`, ...): the decided params,
+      exactly what is sent. Connector calls: `object` and `payload`. Neither path forwards a caller-set upstream
+      header or URL, so these are every caller-controlled URL, query, header and body surface.
+    - **Gateway-injected credentials are exempt structurally.** The connector credential the gateway decrypts and the
+      registered MCP upstream URL (and any credential in it) are never inputs to the scan, which is built from the
+      invocation alone before the adapter or transport exists. Nothing is exempted by matching on a value.
+    - **Destinations.** MCP: the registered upstream URL. Connector: the typed `baseUrl` (credential's, else the
+      connector's); for a credential-derived kind (`teams`, `outlook`, `snowflake`) every host the credential names
+      plus the compiled hosts, a match being permitted only if every one is in its audience; else the compiled vendor
+      default. No network destination (the mock, or a kind that cannot be built without a `baseUrl`) is not scanned;
+      a destination that cannot be named grants no exemption. Audience = the pack's host list over https only.
+    - **Order.** MCP tool and protocol: after the entitlement decision, before the decision row, the compliance
+      read-only gate, the budget gate, approval queueing, admission/egress, the breaker and the connect. Connector:
+      after the entitlement decision, before its row, the budget gate, the hold, the egress guard and the adapter. No
+      approver is asked to sign off a call that may not go out.
+    - **stdio MCP is out of scope:** it has no host to have an audience.
+    - **Setting** `outboundCredentialAudience: "enforce" | "off"` (`org_settings.outbound_credential_audience`), strict
+      `enforce` (ADR-0180). It is a batch-4 key, so `off` is a relaxation: a `settings_relax` step-up and
+      `org-settings-updated` with `detail.relaxed`. `GET /v1/detection-content` reports `outboundAudienceEnforced` =
+      setting `enforce` AND the `pipelock-secrets` pack enabled (the pack off matches nothing), plus the raw setting.
+    - **Personal data is not a credential.** The pack's `social_security_number` rule is excluded
+      (`NON_CREDENTIAL_RULES` in `outbound-audience.ts`): personal data in a call is governed by the §8.4 piiMode
+      cascade, which a project may set below block, and refusing it here would silently override that choice. The
+      audit scrub and the DLP guardrail still see it. (Found by the full gateway suite: three suites whose fixtures
+      carry a synthetic SSN were refused before the PII and egress checks they test.)
+    - **What the pack refuses (consequence, pending owner confirmation).** Rules with no audience hosts are refused for
+      every destination: the GitHub and GitLab tokens and JWTs (their upstream exemptions are path or carrier based
+      and are not representable, so none is granted), private keys, cloud keys, database connection strings and
+      `environment_variable_secret`. So under `enforce` a caller cannot pass, for example, their own GitHub token as a
+      tool argument to a GitHub MCP server.
+    - **Cost (B4I-02).** One linear pass of the pack matcher per destination, the same order as the input DLP
+      guardrail's scan of the same arguments; gate-dense content costs about 0.25 s per 400k characters on the
+      development machine (the existing matcher's cost, measured), bounded by the 1 MiB body limit on the proxy and
+      connector routes.
+    - **Web.** The detection-content panel already renders `outboundAudienceEnforced`. The org settings page does not
+      list the batch-4 toggles; showing this one there is a follow-up.
+
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode** (corrected 2026-10-10, B4X-01; decision 29, finding 51). The recheck
   rebuilds the signed payload from the call actually run. For a tool-scoped approval (ADR-0104 `approvalScope: "tool"`)
@@ -686,8 +739,9 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
   need position semantics that `any`/`N of them` conditions cannot express. Importing them would need a hand-written
   evaluator, which ADR-0176 bars. The pack stays empty; revisit only through a new ADR.
-- **V, credential audience.** Outbound enforcement of `pipelock-secrets` audience hosts is not wired yet (no
-  `credential_audience_violation` in the code); Claude owns it.
+- **V, credential audience** — wired in decision 32. Residuals: stdio MCP is out of scope (no host); rules with no
+  audience hosts refuse every destination, including GitHub tokens and JWTs (pending owner confirmation that this
+  breadth is intended); the SSN shape is excluded as personal data; the matcher's gate-dense cost (B4I-02) is linear but not capped below the body limit.
 - **S (R22-07):** no network certificate-revocation checking (OCSP/CRL) on the TSA chain: no CRL, OCSP or AIA fetch,
   which suits air-gapped installs. A revoked TSA certificate still verifies while its chain ends at a certificate in the configured trust bundle.
 - **M:** `mcp_server_baseline_drift` sees only calls attributed to a builder agent.

@@ -36,6 +36,8 @@ export interface EngineRunner {
   reportedVersion: string;
   selfTestPassed: boolean | null;
   selfTestFailures: string[] | null;
+  /** the report's own time, which the lease judges freshness by; absent from an older gateway */
+  selfTestReportedAt?: string | null;
   registeredAt: string;
   lastSeenAt: string | null;
 }
@@ -89,6 +91,9 @@ export interface EnginePatch {
   maxConcurrent?: number;
   /** ADR-0187 decision 79: sent only after the person accepts the gateway's credential-isolation refusal */
   acceptCredentialIsolationRisk?: true;
+  /** B5W-07: the build accepted, exactly as the gateway's refusal named it (required with the acceptance) */
+  expectedVersion?: string;
+  expectedDigest?: string;
 }
 
 /** POST /v1/engines/:engineId/enrollment-tokens → 201 (the token is shown once) */

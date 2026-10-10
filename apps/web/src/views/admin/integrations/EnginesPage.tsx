@@ -41,7 +41,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { KV, QueryGate, ReasonModal } from "../adminKit";
+import { KV, QueryGate } from "../adminKit";
 import { EngineStatusBadge } from "./EngineStatusBadge";
 import {
   ENGINE_DIAL_LIMITS,
@@ -51,13 +51,19 @@ import {
   egressReadings,
   engineHealth,
   failureText,
+  buildOfRefusal,
+  isBuildChangedRefusal,
   isCredentialIsolationRefusal,
   lastRunText,
   pagesUsing,
+  RUNNER_REVOKE_REASON_MAX,
   raisedDials,
+  revokeReasonProblem,
   runnerOnCurrentBuild,
+  runnerSelfTestReading,
   shortDigest,
   startFreshnessClock,
+  type EngineBuild,
   type EngineDial,
 } from "./engineModel";
 import type {
@@ -88,7 +94,7 @@ const useDetectionContent = () =>
 
 type ModalState =
   | { kind: "enable"; engine: Engine }
-  | { kind: "accept-risk"; engine: Engine; detail: string }
+  | { kind: "accept-risk"; engine: Engine; detail: string; build: EngineBuild | null; notice: string | null }
   | { kind: "disable"; engine: Engine }
   | { kind: "self-test"; engine: Engine }
   | { kind: "enrol"; engine: Engine; minted?: EnrollmentTokenMinted }
@@ -152,18 +158,43 @@ export default function EnginesPage() {
   }, [engines.data]);
   const now = Date.now();
 
-  const enable = async (engine: Engine, acceptRisk: boolean) => {
+  /**
+   * `accepted` is the build the person ticked the acknowledgement for — always the
+   * one a gateway refusal named, never the one this page loaded (B5W-07).
+   */
+  const enable = async (engine: Engine, accepted: EngineBuild | null, isolationDetail?: string) => {
     close();
     const res = await act.run(
       engine.id,
-      () => patchEngine(engine.id, acceptRisk ? { enabled: true, acceptCredentialIsolationRisk: true } : { enabled: true }),
+      () =>
+        patchEngine(
+          engine.id,
+          accepted
+            ? { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: accepted.version, expectedDigest: accepted.imageDigest }
+            : { enabled: true },
+        ),
       () => `${engine.displayName} enabled`,
     );
     if (res.ok) return;
     // decision 79: the gateway's refusal opens the explicit acceptance, never a silent resend
-    if (!acceptRisk && isCredentialIsolationRefusal(res.err)) {
+    if (!accepted && isCredentialIsolationRefusal(res.err)) {
       const detail = typeof res.err.payload.detail === "string" ? res.err.payload.detail : res.err.message;
-      setModal({ kind: "accept-risk", engine, detail });
+      setModal({ kind: "accept-risk", engine, detail, build: buildOfRefusal(res.err), notice: null });
+      return;
+    }
+    // B5W-07: the build rolled over (before the step-up or during it): nothing was enabled;
+    // the acceptance comes back, unticked, for the build that is current now
+    if (accepted && isBuildChangedRefusal(res.err)) {
+      const build = buildOfRefusal(res.err);
+      setModal({
+        kind: "accept-risk",
+        engine,
+        detail: isolationDetail ?? "",
+        build,
+        notice:
+          `The build changed since you reviewed it: it is now ${build ? `${build.version} (${shortDigest(build.imageDigest)})` : "a build the gateway did not name"}. ` +
+          "Nothing was enabled. Review the current build and accept again only if you still want it.",
+      });
       return;
     }
     act.fail(engine.id, res.err);
@@ -212,10 +243,19 @@ export default function EnginesPage() {
         confirmLabel="Enable"
         body={modal?.kind === "enable" ? <EnableBody engine={modal.engine} /> : null}
         onCancel={close}
-        onConfirm={() => modal?.kind === "enable" && void enable(modal.engine, false)}
+        onConfirm={() => modal?.kind === "enable" && void enable(modal.engine, null)}
       />
       {modal?.kind === "accept-risk" && (
-        <AcceptRiskModal engine={modal.engine} detail={modal.detail} onCancel={close} onAccept={() => void enable(modal.engine, true)} />
+        <AcceptRiskModal
+          // a new build is a new acknowledgement: remount, so the tick never carries over
+          key={modal.build ? `${modal.build.version}@${modal.build.imageDigest}` : "unnamed"}
+          engine={modal.engine}
+          detail={modal.detail}
+          build={modal.build}
+          notice={modal.notice}
+          onCancel={close}
+          onAccept={(build) => void enable(modal.engine, build, modal.detail)}
+        />
       )}
       <ConfirmModal
         open={modal?.kind === "disable"}
@@ -318,37 +358,27 @@ export default function EnginesPage() {
           }}
         />
       )}
-      <ReasonModal
-        open={modal?.kind === "revoke"}
-        danger
-        title={modal?.kind === "revoke" ? `Revoke runner ${modal.runner.name}?` : ""}
-        confirmLabel="Revoke runner"
-        placeholder="reason (required, audited)"
-        body={
-          <div className={v.stack}>
-            <p>
-              Its runner token authenticates nothing from now on. Runs it holds end as cancelled and their run-scoped keys are
-              revoked at once. To serve this engine again, enrol a runner with a new enrolment token.
-            </p>
-            <p className={v.faint}>
-              Recorded in the audit log as <code>engine-runner-revoked</code>, with your reason.
-            </p>
-          </div>
-        }
-        onCancel={close}
-        onConfirm={(reason) => {
-          if (modal?.kind !== "revoke") return;
-          const { engine, runner } = modal;
-          close();
-          void act
-            .run(
+      {modal?.kind === "revoke" && (
+        <RevokeRunnerModal
+          runner={modal.runner}
+          busy={act.busy}
+          onCancel={close}
+          // PR #230 review: a refusal keeps the dialog open with the typed reason, and is shown in it
+          onRevoke={async (reason) => {
+            const { engine, runner } = modal;
+            const res = await act.run(
               engine.id,
               () => api.del<RunnerRevoked>(`/v1/engine-runners/${runner.id}`, { reason }),
               (out) => `Runner ${runner.name} revoked; ${plural(out.endedRuns, "run")} ended`,
-            )
-            .then((res) => !res.ok && act.fail(engine.id, res.err));
-        }}
-      />
+            );
+            if (res.ok) {
+              close();
+              return null;
+            }
+            return res.err instanceof Error ? res.err.message : String(res.err);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -471,7 +501,7 @@ function EngineCard(props: {
           </Section>
 
           <Section title={`Runners (${e.runners.length})`}>
-            <RunnersTable engine={e} busy={props.busy} onRevoke={(runner) => props.onModal({ kind: "revoke", engine: e, runner })} />
+            <RunnersTable engine={e} now={props.now} busy={props.busy} onRevoke={(runner) => props.onModal({ kind: "revoke", engine: e, runner })} />
           </Section>
 
           {unverified.length > 0 && (
@@ -558,7 +588,7 @@ function EgressBlock(props: { egress: EngineSelfTest["egress"]; at: string | nul
   );
 }
 
-function RunnersTable(props: { engine: Engine; busy: boolean; onRevoke: (r: EngineRunner) => void }) {
+function RunnersTable(props: { engine: Engine; now: number; busy: boolean; onRevoke: (r: EngineRunner) => void }) {
   const e = props.engine;
   if (e.runners.length === 0) {
     return (
@@ -587,16 +617,17 @@ function RunnersTable(props: { engine: Engine; busy: boolean; onRevoke: (r: Engi
         {
           key: "selftest",
           header: "Its self-test",
-          render: (r) =>
-            r.selfTestPassed === true ? (
-              <Badge tone="ok">passed</Badge>
-            ) : r.selfTestPassed === false ? (
+          // PR #230 review: the recorded verdict counts only while the report is fresh (the lease's own rule)
+          render: (r) => {
+            const reading = runnerSelfTestReading(r, props.now);
+            return (
               <span>
-                <Badge tone="danger">failed</Badge> <span className={v.dim}>{(r.selfTestFailures ?? []).map(failureText).join("; ")}</span>
+                <Badge tone={reading.tone}>{reading.label}</Badge>
+                {r.selfTestReportedAt && <span className={v.faint}> reported {ago(r.selfTestReportedAt)}</span>}
+                {r.selfTestPassed === false && <span className={v.dim}> {(r.selfTestFailures ?? []).map(failureText).join("; ")}</span>}
               </span>
-            ) : (
-              <Badge>no report</Badge>
-            ),
+            );
+          },
         },
         { key: "seen", header: "Last seen", render: (r) => (r.lastSeenAt ? <span title={fmtAt(r.lastSeenAt)}>{ago(r.lastSeenAt)}</span> : "never") },
         { key: "registered", header: "Registered", render: (r) => <span title={fmtAt(r.registeredAt)}>{ago(r.registeredAt)}</span> },
@@ -618,14 +649,90 @@ function RunnersTable(props: { engine: Engine; busy: boolean; onRevoke: (r: Engi
 // dialogs
 // ---------------------------------------------------------------------------
 
+/**
+ * PR #230 review: the revocation reason is bounded as the gateway bounds it
+ * (revokeRunnerSchema: trimmed, 1–RUNNER_REVOKE_REASON_MAX characters), with a
+ * counter; a refusal keeps this dialog open with the typed reason and shows why.
+ */
+function RevokeRunnerModal(props: { runner: EngineRunner; busy: boolean; onCancel: () => void; onRevoke: (reason: string) => Promise<string | null> }) {
+  const [reason, setReason] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const length = reason.trim().length;
+  const tooLong = length > RUNNER_REVOKE_REASON_MAX;
+  const counterId = `revoke-reason-count-${props.runner.id}`;
+  const go = async () => {
+    const problem = revokeReasonProblem(reason);
+    if (problem) {
+      setErr(problem);
+      return;
+    }
+    setErr(null);
+    setErr(await props.onRevoke(reason.trim()));
+  };
+  return (
+    <Modal
+      open
+      title={`Revoke runner ${props.runner.name}?`}
+      onClose={props.onCancel}
+      actions={
+        <>
+          <Button onClick={props.onCancel}>Cancel</Button>
+          <Button variant="danger" disabled={tooLong || props.busy} onClick={() => void go()}>
+            Revoke runner
+          </Button>
+        </>
+      }
+    >
+      <div className={v.stack}>
+        <p>
+          Its runner token authenticates nothing from now on. Runs it holds end as cancelled and their run-scoped keys are
+          revoked at once. To serve this engine again, enrol a runner with a new enrolment token.
+        </p>
+        <p className={v.faint}>
+          Recorded in the audit log as <code>engine-runner-revoked</code>, with your reason.
+        </p>
+        <Input
+          placeholder="reason (required, audited)"
+          aria-label="Reason"
+          aria-describedby={counterId}
+          aria-invalid={tooLong}
+          value={reason}
+          onChange={(ev) => setReason(ev.target.value)}
+          onKeyDown={(ev) => {
+            if (ev.key === "Enter" && !tooLong && !props.busy) void go();
+          }}
+        />
+        <span id={counterId} className={tooLong ? v.errLine : v.faint}>
+          {length} / {RUNNER_REVOKE_REASON_MAX} characters{tooLong ? " — too long; the gateway refuses more" : ""}
+        </span>
+        {err && (
+          <div className={v.errLine} role="alert">
+            {err}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function EnableBody(props: { engine: Engine }) {
   const e = props.engine;
   return (
     <div className={v.stack}>
-      <p>
-        Runners of {e.displayName} {e.version} may then lease its queued runs. Each run gets a run-scoped key, pinned to its
-        project, that stops at the run&apos;s budget (ceiling {fmtUsd(e.maxBudgetUsd)}) and its timeout ({e.timeoutSeconds} s).
-      </p>
+      {/* PR #230 review: only an engine whose manifest needs model access gets a run-scoped key */}
+      {e.needsModelAccess ? (
+        <p>
+          Runners of {e.displayName} {e.version} may then lease its queued runs. Each run gets a run-scoped key, pinned to its
+          project, that stops at the run&apos;s budget (ceiling {fmtUsd(e.maxBudgetUsd)}) and its timeout ({e.timeoutSeconds}{" "}
+          s).
+        </p>
+      ) : (
+        <p>
+          Runners of {e.displayName} {e.version} may then lease its queued runs. Each run scans an uploaded model artifact,
+          streamed to the runner through the gateway; it gets no model credentials and calls no model. A run stops at its
+          timeout ({e.timeoutSeconds} s).
+        </p>
+      )}
       <p>
         The gateway refuses unless a self-test of this build passed in the last 24 hours. You will be asked to confirm
         it&apos;s you. If this build cannot keep the runner token away from the engine process, the gateway says so and you
@@ -638,8 +745,17 @@ function EnableBody(props: { engine: Engine }) {
   );
 }
 
-function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () => void; onAccept: () => void }) {
+function AcceptRiskModal(props: {
+  engine: Engine;
+  detail: string;
+  /** B5W-07: the build the gateway's refusal named; the acknowledgement and the request name exactly this one */
+  build: EngineBuild | null;
+  notice: string | null;
+  onCancel: () => void;
+  onAccept: (build: EngineBuild) => void;
+}) {
   const e = props.engine;
+  const build = props.build;
   const [ack, setAck] = useState(false);
   const id = `accept-risk-${e.id}`;
   return (
@@ -650,13 +766,18 @@ function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () =
       actions={
         <>
           <Button onClick={props.onCancel}>Keep it off</Button>
-          <Button variant="danger" disabled={!ack} onClick={props.onAccept}>
+          <Button variant="danger" disabled={!ack || build === null} onClick={() => build && props.onAccept(build)}>
             Accept risk and enable
           </Button>
         </>
       }
     >
       <div className={v.stack}>
+        {props.notice && (
+          <div className={v.errLine} role="alert" data-testid="build-changed-notice">
+            {props.notice}
+          </div>
+        )}
         <p>The gateway refused to enable this engine:</p>
         <blockquote className={v.dim} data-testid="credential-isolation-reason" style={{ margin: 0, paddingLeft: "var(--s2)", borderLeft: "3px solid var(--border)" }}>
           {props.detail}
@@ -666,13 +787,20 @@ function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () =
           and this build, and you will be asked to confirm it&apos;s you. A build that keeps the token out of the engine
           process removes the need for this acceptance.
         </p>
-        <div style={{ display: "flex", gap: "var(--s2)", alignItems: "flex-start" }}>
-          <input id={id} type="checkbox" checked={ack} onChange={(ev) => setAck(ev.target.checked)} />
-          <label htmlFor={id}>
-            I accept that a compromised {e.displayName} engine could read its runner token for build {e.version} (
-            {shortDigest(e.imageDigest)}), lease this engine&apos;s runs and post their results.
-          </label>
-        </div>
+        {build ? (
+          <div style={{ display: "flex", gap: "var(--s2)", alignItems: "flex-start" }}>
+            <input id={id} type="checkbox" checked={ack} onChange={(ev) => setAck(ev.target.checked)} />
+            <label htmlFor={id}>
+              I accept that a compromised {e.displayName} engine could read its runner token for build {build.version} (
+              {shortDigest(build.imageDigest)}), lease this engine&apos;s runs and post their results.
+            </label>
+          </div>
+        ) : (
+          <p className={v.errLine}>
+            The gateway did not name the build this refusal is about, so its risk cannot be accepted here. Reload the page and
+            try again.
+          </p>
+        )}
       </div>
     </Modal>
   );
