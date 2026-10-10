@@ -3,3 +3,4 @@
  */
 export * from "./contract.js";
 export * from "./settings.js";
+export * from "./delegation-authz.js";
