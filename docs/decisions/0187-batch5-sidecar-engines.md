@@ -1591,6 +1591,24 @@ and not edited). Tests: `apps/gateway/src/zz-b5-modelscan-storage.test.ts` (12, 
      signature fits in the file. **The bound is the file size**, not a fixed 1 MiB: it covers every offset the
      library would accept, and costs at most 24 eight-byte reads at the 8 GiB upload ceiling. Red: a header at
      4096 read `unrecognised` with the old bound.
+132. **A safetensors header that repeats a key is never verified** (Codex review B5X-01, MEDIUM). The verifier read
+     the header with `JSON.parse`, which silently keeps the last of two equal keys, so a duplicate tensor name whose
+     first entry had an invalid dtype (`PICKLE`), or a tensor with `dtype` given twice (`U8` then `I8`), read as
+     verified `safetensors` (ceiling `clean`). **Measured against the reference parser** (safetensors 0.7.0, in a
+     scratch venv): it refuses the invalid-dtype duplicate, a repeated `dtype`, `shape` or `data_offsets`, and a
+     repeated `__metadata__`; it ACCEPTS a tensor name repeated with two valid entries and a key repeated inside
+     `__metadata__` (the last wins), and it accepts names that are escaped but distinct (`"w"` and `"wx"`,
+     `"a\"b"` and `"a\\b"`). **Chosen, stricter than the reference:** any key repeated in one object, at any level
+     (tensor names, a tensor's fields, `__metadata__` and its keys), makes the file `safetensors_invalid` (never
+     better than `unknown`). Keys are compared after unescaping, so `"w"` and `"w"` are one key (the
+     reference refuses that file too); escaped-but-distinct names stay accepted. **Open-source check (ADR-0176):**
+     `@humanwhocodes/momoa` 3.3.13 (Apache-2.0, released 2026-09-02, no dependencies, no install script, pure
+     JavaScript, so it works air-gapped) parses JSON to a syntax tree that keeps every member;
+     `jsonHasDuplicateKey` walks that tree without recursion. It is a new exact-pinned dependency of
+     `@regulait/shared`, with its row in `packages/shared/THIRD_PARTY.md`. `JSON.parse` still produces the values
+     the existing checks read, and the evidence string is a fixed sentence (no artifact text). Red: with the
+     duplicate refusal disabled, six of the seven duplicate shapes read as verified `safetensors` (the escaped
+     duplicate already failed the tiling rule).
 
 ## Consequences
 
