@@ -1020,6 +1020,22 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/identity/signing-keys": "internal",
   "POST /v1/identity/signing-keys/rotate": "internal",
   "POST /v1/identity/signing-keys/:kid/revoke": "internal",
+  // --- ADR-0190 (batch 6 item 3) I1: 501 stubs until their slices land
+  "GET /v1/execution-profiles": "internal",
+  "POST /v1/execution-profiles": "internal",
+  "GET /v1/execution-profiles/:name": "internal",
+  "POST /v1/execution-profiles/:name/versions": "internal",
+  "POST /v1/execution-profiles/:name/retire": "internal",
+  "GET /v1/executors": "internal",
+  "POST /v1/executors": "internal",
+  "GET /v1/executors/:executorId": "internal",
+  "GET /v1/executors/:executorId/attestations": "internal",
+  "POST /v1/executors/:executorId/quarantine": "internal",
+  "POST /v1/executors/:executorId/reenable": "internal",
+  "POST /v1/executors/:executorId/revoke": "internal",
+  "PUT /v1/executors/:executorId/declared-class": "internal",
+  "GET /v1/execution-placements": "internal",
+  "GET /v1/execution-placements/:placementId": "internal",
 };
 
 /**
@@ -1920,4 +1936,20 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/identity/signing-keys": "identity",
   "POST /v1/identity/signing-keys/rotate": "identity",
   "POST /v1/identity/signing-keys/:kid/revoke": "identity",
+  // --- ADR-0190 (batch 6 item 3) I1: 501 stubs until their slices land
+  "GET /v1/execution-profiles": "isolation",
+  "POST /v1/execution-profiles": "isolation",
+  "GET /v1/execution-profiles/:name": "isolation",
+  "POST /v1/execution-profiles/:name/versions": "isolation",
+  "POST /v1/execution-profiles/:name/retire": "isolation",
+  "GET /v1/executors": "isolation",
+  "POST /v1/executors": "isolation",
+  "GET /v1/executors/:executorId": "isolation",
+  "GET /v1/executors/:executorId/attestations": "isolation",
+  "POST /v1/executors/:executorId/quarantine": "isolation",
+  "POST /v1/executors/:executorId/reenable": "isolation",
+  "POST /v1/executors/:executorId/revoke": "isolation",
+  "PUT /v1/executors/:executorId/declared-class": "isolation",
+  "GET /v1/execution-placements": "isolation",
+  "GET /v1/execution-placements/:placementId": "isolation",
 };
