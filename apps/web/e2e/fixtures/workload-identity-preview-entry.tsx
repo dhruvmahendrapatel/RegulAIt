@@ -28,7 +28,7 @@ const inventory: IdentityInventory = {
     { id: "00000000-0000-4000-8000-000000000005", name: "Second synthetic agent", kind: "agent_invoke" }, { id: "00000000-0000-4000-8000-000000000009", name: "Synthetic reader role", kind: "role" },
   ],
 };
-const details = new Map<string, IdentityDetail>([["00000000-0000-4000-8000-000000000003", { grants: [], credentials: [{ id: "00000000-0000-4000-8000-000000000010", identityId: "00000000-0000-4000-8000-000000000003", kind: "public_key",
+const details = new Map<string, IdentityDetail>([["00000000-0000-4000-8000-000000000003", { grantsRevision: 0, grants: [], credentials: [{ id: "00000000-0000-4000-8000-000000000010", identityId: "00000000-0000-4000-8000-000000000003", kind: "public_key",
   fingerprint: "synthetic-public-thumbprint", notBefore: new Date(Date.now() - 60000).toISOString(),
   notAfter: new Date(Date.now() + 86400000).toISOString(), revokedAt: null }] }]]);
 const tree: DelegationNode[] = [
@@ -45,13 +45,13 @@ const calls: Array<{ command: IdentityWrite; request: ReturnType<typeof encodeId
 const grants = new Map<string, string>();
 let sequence = 0;
 const port: IdentityAdminPort = {
-  async inventory() { if (mode === "read-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return structuredClone(inventory); },
-  async detail(id) { if (mode === "detail-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return structuredClone(details.get(id) ?? { grants: [], credentials: [] }); },
+  async inventory() { if (mode === "read-error" || (mode === "refresh-read-error" && calls.some(call => call.command.operation === "edit_identity" && !!call.headers["x-regulait-step-up"]))) throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return structuredClone(inventory); },
+  async detail(id) { if (mode === "detail-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return structuredClone(details.get(id) ?? { grantsRevision: 0, grants: [], credentials: [] }); },
   async delegationTree(runId) { if (mode === "tree-error") throw new Error("SYNTHETIC_UNTRUSTED_SERVER_DETAIL"); return { runId, nodes: structuredClone(tree) }; },
   prepareWrite(command) {
     command = structuredClone(command);
     const snapshot = "identityId" in command ? details.get(command.identityId)?.grants : undefined;
-    const request = encodeIdentityWrite(command, snapshot);
+    const request = encodeIdentityWrite(command, snapshot, "identityId" in command ? details.get(command.identityId)?.grantsRevision : undefined);
     return async headers => {
     calls.push({ command: structuredClone(command), request: structuredClone(request), headers: { ...headers } });
     const key = JSON.stringify(request), token = headers["x-regulait-step-up"];
@@ -62,7 +62,7 @@ const port: IdentityAdminPort = {
       const id = `00000000-0000-4000-9000-${String(++sequence).padStart(12, "0")}`;
       inventory.identities.push({ id, kind: command.kind, identifier: `spiffe://demo.example/regulait/${command.kind}/${id}`,
         subjectId: command.subjectId, stewards: inventory.people.filter(p => command.stewardIds.includes(p.id)), environments: command.environments,
-        status: "active", createdAt: new Date().toISOString() }); details.set(id, { grants: [], credentials: [] });
+        status: "active", createdAt: new Date().toISOString() }); details.set(id, { grantsRevision: 0, grants: [], credentials: [] });
     } else if (command.operation === "edit_identity" || command.operation === "identity_status") {
       const i = inventory.identities.find(i => i.id === command.identityId)!;
       if (command.operation === "identity_status") i.status = command.status;
@@ -88,6 +88,8 @@ const port: IdentityAdminPort = {
         kind: "public_key", fingerprint: "synthetic-new-public-thumbprint", notBefore: new Date().toISOString(), notAfter: command.notAfter, revokedAt: null });
       else if (command.operation === "add_grant" || command.operation === "remove_grant") {
         const body = request.body as PutAgentGrants, previous = detail.grants;
+        if (body.revision !== detail.grantsRevision) throw new ApiError(409, { error: "grants_revision_conflict" });
+        detail.grantsRevision++;
         const row = (kind: IdentityDetail["grants"][number]["kind"], targetId: string, toolName: string | null, fields = {}) => ({
           id: previous.find(g => g.kind === kind && g.targetId === targetId && g.toolName === toolName)?.id ?? `own-grant-${++sequence}`,
           kind, targetId, targetName: inventory.grantTargets.find(t => t.id === targetId && t.kind === kind)?.name ?? "Synthetic target", toolName, access: null, ...fields,
@@ -112,12 +114,20 @@ function MockStepUp() {
   useEffect(() => subscribeStepUpPrompt(setPrompt), []);
   return <Modal open={!!prompt} title="Mock identity management verification" onClose={() => prompt?.finish(null)}
     actions={<><Button onClick={() => prompt?.finish(null)}>Cancel verification</Button><Button variant="primary" onClick={() => {
-      if (!prompt) return; const token = `synthetic-step-up-${++sequence}`;
+      if (!prompt) return;
+      if (mode === "stale-grant-revision" && (prompt.action.body as { method?: string }).method === "PUT") details.get("00000000-0000-4000-8000-000000000003")!.grantsRevision++;
+      const token = `synthetic-step-up-${++sequence}`;
       grants.set(token, JSON.stringify(prompt.action.body)); prompt.finish(token);
     }}>Confirm mock step-up</Button></>}><p>Mock verification only. The requested change is bound to this one-use synthetic grant.</p></Modal>;
 }
 const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 createRoot(document.getElementById("root")!).render(<MemoryRouter><QueryClientProvider client={qc}><ToastProvider>
-  <main style={{ maxWidth: 1600, margin: "auto", padding: "var(--s3)" }}><WorkloadIdentitiesPage port={mode === "unavailable" ? undefined : port} preview /></main>
+  <main style={{ maxWidth: 1600, margin: "auto", padding: "var(--s3)" }}><WorkloadIdentitiesPage port={mode === "unavailable" ? undefined : port} preview delegationPreview={mode === "access-unknown" ? undefined : {
+    viewerId: mode === "not-steward" ? inventory.people[1]!.id : steward.id,
+    projectId: "synthetic-project",
+    projectAccess: mode === "no-project-access" ? false : mode === "project-access-unknown" ? null : true,
+    uncappedRootAllowed: mode === "cap-relaxed" ? true : mode === "cap-setting-unknown" ? null : false,
+    maxLifetimeSeconds: 900,
+  }} /></main>
   <MockStepUp />
 </ToastProvider></QueryClientProvider></MemoryRouter>);

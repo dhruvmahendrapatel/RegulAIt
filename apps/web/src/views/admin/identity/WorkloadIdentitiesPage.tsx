@@ -7,7 +7,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input
 import { useToast } from "../../../ui/toast";
 import {
   credentialStatus, formatMicros, orderedDelegations, publicKeyFingerprint, readPublicKey, remainingMicros,
-  validateIdentity, workloadKindLabels, ownGrantSummary, type IdentityAdminPort, type IdentityInventory, type IdentityWrite,
+  validateIdentity, workloadKindLabels, ownGrantSummary, canPreviewDelegation, validateRootDelegationPreview, delegationRefusalMessages, type DelegationPreviewContext, type IdentityAdminPort, type IdentityInventory, type IdentityWrite,
   type OwnGrant, type PublicKey, type WorkloadCredential, type WorkloadIdentity, type WorkloadKind,
 } from "./workloadIdentityModel";
 import s from "./workloadIdentities.module.css";
@@ -20,8 +20,10 @@ type Confirmation = { title: string; body: string; label: string; command: Ident
 const dateLabel = (value: string) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Unmeasured";
 
 /** S6 view components. Shared S1 schemas define writes; read envelopes await the S6 server contract. */
-export default function WorkloadIdentitiesPage({ port, preview = false }: { port?: IdentityAdminPort; preview?: boolean }) {
+export default function WorkloadIdentitiesPage({ port, preview = false, delegationPreview }: { port?: IdentityAdminPort; preview?: boolean; delegationPreview?: DelegationPreviewContext }) {
   const qc = useQueryClient(), { toast } = useToast();
+  const [delegationOpen, setDelegationOpen] = useState(false);
+  const [delegationResult, setDelegationResult] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
@@ -53,6 +55,9 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
       setFailure("The change was refused or could not be recorded. Refresh before retrying; an identity management step-up is required for every write.");
     } finally { setBusy(false); }
   }
+  const delegationAllowed = preview && inventory.isSuccess && !inventory.isFetching && !!identity && canPreviewDelegation(identity, delegationPreview);
+  useEffect(() => { setDelegationOpen(false); setDelegationResult(null); }, [selectedId, delegationPreview?.viewerId, delegationPreview?.projectId, delegationPreview?.uncappedRootAllowed, delegationPreview?.maxLifetimeSeconds]);
+  useEffect(() => { if (!delegationAllowed) { setDelegationOpen(false); setDelegationResult(null); } }, [delegationAllowed]);
   const confirm = (next: Confirmation) => { setFailure(null); setConfirmation(next); };
   return <>
     <PageHeader title="Workload identities" crumbs={["Identity & access"]}
@@ -78,6 +83,7 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
       {identity && <Card title="Selected identity">
         <h2 className={s.identifier}>{identity.identifier}</h2>
         <div className={s.actions}>
+          {delegationAllowed && <Button disabled={busy} onClick={() => { setDelegationResult(null); setDelegationOpen(true); }}>Preview root delegation</Button>}
           <Button disabled={busy || identity.status === "revoked"} onClick={() => setForm({ kind: "identity", identity })}>Edit stewards and environments</Button>
           <Button disabled={busy || identity.status === "revoked"} onClick={() => confirm({
             title: identity.status === "active" ? "Suspend identity?" : "Restore identity?", label: identity.status === "active" ? "Suspend identity" : "Restore identity",
@@ -108,10 +114,18 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
               { key: "target", header: "Target", render: g => g.targetName },
               { key: "tool", header: "Tool", render: g => g.toolName ?? "Not applicable" },
               { key: "access", header: "Access", render: g => ownGrantSummary(g) },
-              { key: "remove", header: "Remove", render: g => <Button size="sm" variant="danger" disabled={busy} aria-label={`Remove grant for ${g.targetName}`} onClick={() => confirm({ title: "Remove own grant?", label: "Remove grant", body: "The next use is checked against the identity's remaining grants. Delegated tokens do not preserve a permission removed here. This change replaces all direct grants and roles; a concurrent change can be overwritten. Refresh before editing.", command: { operation: "remove_grant", identityId: identity.id, grantId: g.id } })}>Remove</Button> },
+              { key: "remove", header: "Remove", render: g => <Button size="sm" variant="danger" disabled={busy} aria-label={`Remove grant for ${g.targetName}`} onClick={() => confirm({ title: "Remove own grant?", label: "Remove grant", body: "The next use is checked against the identity's remaining grants. Delegated tokens do not preserve a permission removed here. This change replaces all direct grants and roles at the loaded revision; a stale revision is refused. Refresh before editing.", command: { operation: "remove_grant", identityId: identity.id, grantId: g.id } })}>Remove</Button> },
             ]} />
         </>}
       </Card>}
+      {preview && <Card title="Delegation safeguards">
+        <p>Only an agent's stewards with access to the selected project may delegate it. Unknown access hides the action. Admin status alone does not replace stewardship.</p>
+        <p>A root-grant cap is required unless an admin has enabled an audited relaxation. The strict default lifetime and maximum are 15 minutes. Limits are checked again at exchange, even if settings changed after proof creation.</p>
+        <p><code>delegation_depth_unenforced</code>: {delegationRefusalMessages.delegation_depth_unenforced}</p>
+        <p><code>invalid_target</code>: {delegationRefusalMessages.invalid_target}</p>
+        <p>Identity creation, edits, suspension and revocation require <code>identity_manage</code> step-up verification. The real identity-management backend and delegation proof flow remain unavailable in this mock preview.</p>
+      </Card>}
+      {preview && delegationResult && <p role="status">{delegationResult}</p>}
       <Card title="Run delegation tree">
         <form className={s.actions} onSubmit={event => { event.preventDefault(); setRunId(runInput.trim() || null); }}>
           <Field label="Run ID"><Input value={runInput} onChange={event => setRunInput(event.target.value)} /></Field>
@@ -130,6 +144,9 @@ export default function WorkloadIdentitiesPage({ port, preview = false }: { port
           ]} />}
       </Card>
     </div>}
+    {delegationOpen && delegationAllowed && delegationPreview && <RootDelegationPreview context={delegationPreview} onClose={() => setDelegationOpen(false)} onReview={(cap, seconds) => {
+      setDelegationOpen(false); setDelegationResult(`Mock root delegation reviewed: ${cap.trim() ? `cap ${formatMicros(cap.trim())}` : "uncapped under an audited admin relaxation"}; lifetime ${seconds / 60} minutes. No proof, grant or token was created.`);
+    }} />}
     {form && inventory.data && <IdentityForm form={form} inventory={inventory.data} onClose={() => setForm(null)} onSave={command => { setForm(null); void write(command); }} />}
     <ConfirmModal open={!!confirmation} title={confirmation?.title ?? "Confirm identity change"} body={confirmation?.body} danger confirmLabel={confirmation?.label}
       onCancel={() => setConfirmation(null)} onConfirm={() => { const command = confirmation?.command; setConfirmation(null); if (command) void write(command); }} />
@@ -221,8 +238,29 @@ function IdentityForm({ form, inventory, onClose, onSave }: { form: Form; invent
           <Field label="Connector access"><Select value={connectorMode} onChange={event => setConnectorMode(event.target.value as "read" | "readwrite")}><option value="read">Read</option><option value="readwrite">Read and write</option></Select></Field>
           <Field label="Allowed objects" help="Exact object names, separated by commas. Empty allows no object; no wildcard is inferred."><Input value={allowedObjects} onChange={event => setAllowedObjects(event.target.value)} /></Field>
         </>}
-        <p>This grant narrows delegated authority and cannot exceed the sponsor's rights. Every change replaces all direct grants and roles. A concurrent change can be overwritten; refresh before editing.</p>
+        <p>This grant narrows delegated authority and cannot exceed the sponsor's rights. Every change replaces all direct grants and roles at the loaded revision. A stale revision is refused; refresh before editing.</p>
       </>}
+    </div>
+  </Modal>;
+}
+
+/** Mock review only: deliberately bypasses neither identity writes nor step-up. */
+function RootDelegationPreview({ context, onClose, onReview }: { context: DelegationPreviewContext; onClose: () => void; onReview: (cap: string, seconds: number) => void }) {
+  const [cap, setCap] = useState("");
+  const [minutes, setMinutes] = useState("15");
+  const [error, setError] = useState<string | null>(null);
+  function review() {
+    const seconds = Number(minutes) * 60;
+    const problem = validateRootDelegationPreview(cap, seconds, context);
+    setError(problem);
+    if (!problem) onReview(cap, seconds);
+  }
+  return <Modal open title="Preview root delegation" onClose={onClose} actions={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={review}>Review mock delegation</Button></>}>
+    <div className={s.stack}>
+      {error && <p role="alert">{error}</p>}
+      <Field label="Root cap (micro-dollars)" help={context.uncappedRootAllowed === true ? "An admin has relaxed the cap requirement; leaving this empty previews an uncapped root." : "Required. No cap is supplied by default."}><Input inputMode="numeric" value={cap} onChange={event => setCap(event.target.value)} /></Field>
+      <Field label="Lifetime (minutes)" help={`Default 15 minutes; current maximum ${context.maxLifetimeSeconds / 60} minutes.`}><Input type="number" min="1" value={minutes} onChange={event => setMinutes(event.target.value)} /></Field>
+      <p>Mock review only. Delegating a sensitive write also requires step-up. No delegation proof, private key, access token or live grant is created here.</p>
     </div>
   </Modal>;
 }

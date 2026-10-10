@@ -224,3 +224,85 @@ test("empty explicit modes and objects grant no implicit authority", async ({ pa
   await expect(page.getByText("No modes allowed", { exact: true })).toBeVisible();
   await expect(page.getByText("Read; no objects allowed", { exact: true })).toBeVisible();
 });
+
+test("root delegation action is hidden unless both stewardship and project access are known", async ({ page }) => {
+  for (const mode of ["not-steward", "no-project-access", "project-access-unknown", "access-unknown"]) {
+    await open(page, mode); await manage(page);
+    await expect(page.getByRole("button", { name: "Preview root delegation", exact: true })).toHaveCount(0);
+    expect(await calls(page)).toHaveLength(0);
+  }
+  await open(page); await manage(page);
+  await expect(page.getByRole("button", { name: "Preview root delegation", exact: true })).toBeVisible();
+});
+
+test("strict root preview requires a cap, defaults to fifteen minutes and creates no proof or token", async ({ page }) => {
+  await open(page); await manage(page);
+  await page.getByRole("button", { name: "Preview root delegation", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "Preview root delegation", exact: true });
+  await expect(form.getByLabel("Lifetime (minutes)", { exact: true })).toHaveValue("15");
+  await expect(form.getByLabel("Root cap (micro-dollars)", { exact: true })).toHaveValue("");
+  await form.getByRole("button", { name: "Review mock delegation" }).click();
+  await expect(form.getByRole("alert")).toContainText("Name a root-grant cap");
+  await form.getByLabel("Root cap (micro-dollars)", { exact: true }).fill("1000000");
+  await form.getByLabel("Lifetime (minutes)", { exact: true }).fill("16");
+  await form.getByRole("button", { name: "Review mock delegation" }).click();
+  await expect(form.getByRole("alert")).toContainText("strict limit is 15 minutes");
+  await form.getByLabel("Lifetime (minutes)", { exact: true }).fill("15");
+  await form.getByRole("button", { name: "Review mock delegation" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Mock root delegation reviewed" })).toContainText("cap $1.00; lifetime 15 minutes. No proof, grant or token was created.");
+  expect(await calls(page)).toHaveLength(0);
+  await expect(page.locator("body")).toContainText("delegation_depth_unenforced");
+  await expect(page.locator("body")).toContainText("The child's resource must exactly equal its parent's audience");
+});
+
+test("only an explicit cap relaxation permits an uncapped mock root", async ({ page }) => {
+  await open(page, "cap-setting-unknown"); await manage(page);
+  await page.getByRole("button", { name: "Preview root delegation", exact: true }).click();
+  await page.getByRole("button", { name: "Review mock delegation" }).click();
+  await expect(page.getByRole("alert")).toContainText("Name a root-grant cap");
+  await open(page, "cap-relaxed"); await manage(page);
+  await page.getByRole("button", { name: "Preview root delegation", exact: true }).click();
+  await page.getByRole("button", { name: "Review mock delegation" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Mock root delegation reviewed" })).toContainText("uncapped under an audited admin relaxation");
+  expect(await calls(page)).toHaveLength(0);
+});
+
+test("root delegation preview supports keyboard focus and axe in both themes", async ({ page }, info) => {
+  await open(page); await manage(page);
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(t => { document.documentElement.dataset.theme = t; }, theme);
+    const trigger = page.getByRole("button", { name: "Preview root delegation", exact: true });
+    await activate(page, trigger);
+    const dialog = page.getByRole("dialog", { name: "Preview root delegation", exact: true });
+    await expectDialogTrap(page, dialog);
+    expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+    await page.screenshot({ path: info.outputPath(`delegation-${theme}.png`), fullPage: true });
+    await escapeToTrigger(page, dialog, trigger);
+  }
+});
+
+test("a failed inventory refresh hides cached delegation eligibility", async ({ page }) => {
+  await open(page, "refresh-read-error"); await manage(page);
+  await expect(page.getByRole("button", { name: "Preview root delegation", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit stewards and environments" }).click();
+  await page.getByRole("dialog", { name: "Edit identity", exact: true }).getByRole("button", { name: "Edit identity", exact: true }).click();
+  await verify(page);
+  await expect(page.getByText("Workload identities could not be read. No empty or active state is inferred.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Preview root delegation", exact: true })).toHaveCount(0);
+});
+
+test("a grant revision changed during step-up refuses the frozen replacement", async ({ page }) => {
+  await open(page, "stale-grant-revision"); await manage(page);
+  await page.getByRole("button", { name: "Add own grant", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "Add own grant", exact: true });
+  await form.getByLabel("Grant target", { exact: true }).selectOption("00000000-0000-4000-8000-000000000006");
+  await form.getByLabel("Tool", { exact: true }).selectOption("read-record");
+  await form.getByRole("button", { name: "Add own grant", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm mock step-up" }).click();
+  await expect(page.getByText("Change not recorded", { exact: true })).toBeVisible();
+  await expect(page.getByText("No own grants", { exact: true })).toBeVisible();
+  const sent = await calls(page);
+  expect(sent).toHaveLength(2);
+  expect(sent[0]!.request).toEqual(sent[1]!.request);
+  expect(sent[1]!.request.body).toMatchObject({ revision: 0 });
+});

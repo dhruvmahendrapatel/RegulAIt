@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { credentialStatus, formatMicros, orderedDelegations, readPublicKey, remainingMicros, type DelegationNode, type WorkloadCredential } from "./workloadIdentityModel";
+import { credentialStatus, formatMicros, orderedDelegations, readPublicKey, remainingMicros, type DelegationNode, type WorkloadCredential, type WorkloadIdentity, canPreviewDelegation, validateRootDelegationPreview } from "./workloadIdentityModel";
 
 describe("identity view refusal and budget boundaries", () => {
   it("keeps each edge separate and preserves exact amounts above JS integer precision", () => {
@@ -36,5 +36,30 @@ describe("identity view refusal and budget boundaries", () => {
     expect(credentialStatus(c)).toBe("Validity unmeasured");
     expect(credentialStatus({ ...c, revokedAt: "recorded" })).toBe("Revoked");
     expect(credentialStatus({ ...c, notBefore: "2026-10-01T00:00:00Z", notAfter: "2026-10-02T00:00:00Z" }, Date.parse("2026-10-02T00:00:00Z"))).toBe("Expired");
+  });
+});
+
+
+describe("S5 mock delegation safeguards", () => {
+  const identity = { status: "active", stewards: [{ id: "steward", name: "Synthetic steward" }] } as WorkloadIdentity;
+  const context = { viewerId: "steward", projectId: "synthetic-project", projectAccess: true, uncappedRootAllowed: false, maxLifetimeSeconds: 900 };
+  it("requires stewardship and known project access independently", () => {
+    expect(canPreviewDelegation(identity, context)).toBe(true);
+    for (const denied of [undefined, { ...context, viewerId: "admin-other" }, { ...context, viewerId: null }, { ...context, projectId: null }, { ...context, projectAccess: false }, { ...context, projectAccess: null }]) {
+      expect(canPreviewDelegation(identity, denied)).toBe(false);
+    }
+    expect(canPreviewDelegation({ ...identity, status: "suspended" }, context)).toBe(false);
+  });
+  it("requires an explicit cap unless the admin relaxation is known true", () => {
+    expect(validateRootDelegationPreview("", 900, context)).toContain("cap");
+    expect(validateRootDelegationPreview("", 900, { ...context, uncappedRootAllowed: null })).toContain("cap");
+    expect(validateRootDelegationPreview("", 900, { ...context, uncappedRootAllowed: true })).toBeNull();
+    expect(validateRootDelegationPreview("1000000", 900, context)).toBeNull();
+    expect(validateRootDelegationPreview("1e6", 900, context)).toContain("whole number");
+  });
+  it("accepts exactly fifteen minutes and refuses over-limit or unreadable lifetimes", () => {
+    expect(validateRootDelegationPreview("1000000", 900, context)).toBeNull();
+    for (const seconds of [901, 0, -1, NaN, Infinity]) expect(validateRootDelegationPreview("1000000", seconds, context)).toContain("15 minutes");
+    expect(validateRootDelegationPreview("1000000", 900, { ...context, maxLifetimeSeconds: NaN })).toContain("15 minutes");
   });
 });

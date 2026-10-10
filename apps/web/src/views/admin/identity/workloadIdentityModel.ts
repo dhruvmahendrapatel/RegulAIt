@@ -28,7 +28,7 @@ export interface IdentityInventory {
   grantTargets: Array<{ id: string; name: string; kind: OwnGrant["kind"]; tools?: string[] }>;
   environments: string[];
 }
-export interface IdentityDetail { credentials: WorkloadCredential[]; grants: OwnGrant[] }
+export interface IdentityDetail { grantsRevision: number; credentials: WorkloadCredential[]; grants: OwnGrant[] }
 export interface PublicKey { kty: "EC" | "OKP"; crv: "P-256" | "Ed25519"; x: string; y?: string }
 export type IdentityWrite =
   | { operation: "create_identity"; kind: WorkloadKind; subjectId: string | null; stewardIds: string[]; environments: string[] }
@@ -122,3 +122,29 @@ export function ownGrantSummary(grant: OwnGrant): string {
     case "role": return "Defined by role";
   }
 }
+
+/** Mock display facts only; not an HTTP response or delegation-proof wire body. */
+export interface DelegationPreviewContext {
+  viewerId: string | null;
+  projectId: string | null;
+  projectAccess: boolean | null;
+  uncappedRootAllowed: boolean | null;
+  maxLifetimeSeconds: number;
+}
+export function canPreviewDelegation(identity: WorkloadIdentity, context?: DelegationPreviewContext): boolean {
+  return identity.status === "active" && !!context?.viewerId && !!context.projectId && context.projectAccess === true &&
+    identity.stewards.some(steward => steward.id === context?.viewerId);
+}
+export function validateRootDelegationPreview(capMicros: string, lifetimeSeconds: number, context: DelegationPreviewContext): string | null {
+  if (!capMicros.trim() && context.uncappedRootAllowed !== true) return "Name a root-grant cap. Uncapped roots require an audited admin relaxation.";
+  if (capMicros.trim() && !/^\d{1,64}$/.test(capMicros.trim())) return "Enter a cap as a whole number of micro-dollars.";
+  if (!Number.isSafeInteger(context.maxLifetimeSeconds) || context.maxLifetimeSeconds < 1 ||
+    !Number.isSafeInteger(lifetimeSeconds) || lifetimeSeconds < 1 || lifetimeSeconds > context.maxLifetimeSeconds) {
+    return "Choose a positive lifetime within the current root-grant limit. The strict limit is 15 minutes.";
+  }
+  return null;
+}
+export const delegationRefusalMessages = {
+  delegation_depth_unenforced: "External child delegation is unavailable until the parent's signed depth limit is enforced. Retry only after the deployment enables that enforcement.",
+  invalid_target: "The child's resource must exactly equal its parent's audience. Choose that same resource; a different audience cannot narrow this delegation.",
+} as const;

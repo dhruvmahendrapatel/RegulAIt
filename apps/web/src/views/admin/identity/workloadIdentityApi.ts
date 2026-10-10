@@ -35,11 +35,12 @@ function route(method: Method | "GET", template: string, params: object = {}): s
 }
 /** A full validated snapshot is required: PUT replaces all direct grants and roles.
  * It must be captured with the action, never re-read inside a step-up retry.
- * S1 has no revision/precondition contract; callers must disclose concurrent-edit risk.
+ * Capture the published grant-set revision too; stale replacements are refused.
  */
-function grantSet(grants: readonly (OwnGrant & GrantFields)[]): PutAgentGrants {
+function grantSet(grants: readonly (OwnGrant & GrantFields)[], revision: number | undefined): PutAgentGrants {
+  if (!Number.isSafeInteger(revision) || revision! < 0) throw new Error("Refresh the complete grant set and its revision before editing.");
   if (new Set(grants.map(g => g.id)).size !== grants.length) throw new Error("Refresh the complete grants before editing.");
-  const body: PutAgentGrants = { tools: [], servers: [], agents: [], connectors: [], roleIds: [] };
+  const body: PutAgentGrants = { revision: revision!, tools: [], servers: [], agents: [], connectors: [], roleIds: [] };
   for (const g of grants) {
     switch (g.kind) {
       case "tool": body.tools.push({ serverId: g.targetId, toolName: g.toolName! }); break;
@@ -59,7 +60,7 @@ function freeze<T>(value: T): T {
   }
   return value;
 }
-export function encodeIdentityWrite(command: IdentityWrite, currentGrantSet?: readonly OwnGrant[]): IdentityWriteRequest {
+export function encodeIdentityWrite(command: IdentityWrite, currentGrantSet?: readonly OwnGrant[], currentGrantRevision?: number): IdentityWriteRequest {
   let request: IdentityWriteRequest;
   switch (command.operation) {
     case "create_identity": {
@@ -84,7 +85,7 @@ export function encodeIdentityWrite(command: IdentityWrite, currentGrantSet?: re
       if (currentGrantSet === undefined) throw new Error("Load the complete grants before editing.");
       // Validate the existing snapshot even when removing a malformed entry: never
       // silently drop unknown grants and replace the server's full set with a partial list.
-      grantSet(currentGrantSet);
+      grantSet(currentGrantSet, currentGrantRevision);
       let next: readonly (OwnGrant & GrantFields)[];
       if (command.operation === "remove_grant") {
         if (!currentGrantSet.some(g => g.id === command.grantId)) throw new Error("The grant changed. Refresh before editing.");
@@ -94,7 +95,7 @@ export function encodeIdentityWrite(command: IdentityWrite, currentGrantSet?: re
         next = [...currentGrantSet, { id: "new-grant", kind: command.kind, targetId: command.targetId, targetName: "", toolName: command.toolName,
           readOnlyAll: fields.readOnlyAll, allowedModes: fields.allowedModes, mode: fields.mode, allowedObjects: fields.allowedObjects } as OwnGrant & GrantFields];
       }
-      request = { method: "PUT", path: route("PUT", "/v1/workload-identities/:identityId/grants", command), body: grantSet(next) }; break;
+      request = { method: "PUT", path: route("PUT", "/v1/workload-identities/:identityId/grants", command), body: grantSet(next, currentGrantRevision) }; break;
     }
     case "revoke_delegation": request = { method: "POST", path: route("POST", "/v1/delegation-grants/:grantId/revoke", command), body: {} }; break;
   }
