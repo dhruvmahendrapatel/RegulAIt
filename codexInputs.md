@@ -1,3 +1,18 @@
+## X47 — dependency-advisory documentation review (#308, 2026-10-10)
+
+Target: `7c3333338a0836a080a0c06b886f9b0fd6059135` (`deps-advisories-1010`), baseline main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7`. Review only; no dependency or security-gate changes. No new confirmed defect in the added advisory triage.
+
+Independent evidence:
+- Queried all five [GitHub advisory records](https://api.github.com/advisories/GHSA-27vj-qcqg-25rc), including [datasets](https://api.github.com/advisories/GHSA-379c-qx7v-6h59), [NLTK](https://api.github.com/advisories/GHSA-8mgp-746c-j5xp), [braces](https://api.github.com/advisories/GHSA-vfj7-8cjw-p6xm), and [node-forge](https://api.github.com/advisories/GHSA-86w9-cpqp-85rv). fsspec first patch is 2026.6.0; datasets first patch is 5.0.1; the other three have no first patched version recorded. Datasets severity is GitHub `medium` (the PR uses npm's equivalent `moderate`). Saved response facts: `/tmp/x47-308-advisories.json`.
+- Independently queried primary PyPI metadata for garak0.17.0, datasets3.6.0/5.0.1 and nltk3.10.3. Garak latest remains0.17.0 with `datasets>=3.0.0,<4.0` and `nltk>=3.10.3`; datasets3.6.0 caps fsspec at2025.3.0; datasets5.0.1 raises the cap to2026.6.0; NLTK latest remains3.10.3. Datasets latest is5.1.0, consistent with the documented first fixed5.0.1. `/tmp/x47-308-upstream-pins.json`.
+- Actual previously built local garak image `regulait-review/engine-garak:oct10` (`6f1d74cc3c1a`) under `--network none`, executing `/opt/garak/venv/bin/python`, confirms the four pinned distribution versions and relevant garak/datasets constraints. `/tmp/x47-308-image-metadata.json`. This is a dependency-closure observation, not a scan, signature admission, or proof that the newer pre-seeded image was built.
+- Promptfoo lock entries for braces3.0.3/node-forge1.4.0 are both optional; Dockerfile uses `npm ci --omit=optional`. Actual previously built promptfoo image `regulait-review/engine-promptfoo:oct10` (`1fcfab70273f`) refuses `require.resolve` for both with `MODULE_NOT_FOUND` under `--network none`. Existing runner/worker image and pruned closure evidence remains in prior X29-G review; no rebuilt-image claim.
+- Read exact gate implementation: `scripts/security-gate.mjs` admits only fixable HIGH/CRITICAL to its finding list (requires `FixedVersion`); no gate or suppression change in #308. fsspec allowance names CVE-2026-104851, expires2026-12-09, and records the upstream pin and cache restrictions. No vulnerability was dismissed, no affected package upgraded, no claim that the unresolved findings are fixed.
+
+Limits: route/config/cache reachability is source-inspected, not newly exploited; no new Trivy report or licence scan. The PR's earlier tests/audit are owner receipts, not independent reruns. First local garak inspection used the system Python and failed `PackageNotFoundError`; corrected to the image's configured venv before making version claims. Both owned containers completed and were removed.
+
+Validation: final web typecheck/build pending the shared two-lane handoff; this review changes only this ledger after composing the documentation dependency.
+
 ## X42 — ADR-0190 I1 and migration 0185 independent review (2026-10-10)
 
 **READY FOR OWNER REVIEW with two findings.** Reviewed merged I1 #286 at `94fffb656cbc505468a7b8e43c478ca4ad499a08` (I1 head `a79e47e792cc52b33201e84f3576b2838cb75b19`) and exact guard-hardening #285 `6f6de2bc4cc8d69a810c0a30d1acb29da420a316`. Product implementation is unchanged. Independent synthetic probes live in `apps/web/review/x42-isolation.probe.ts`.
