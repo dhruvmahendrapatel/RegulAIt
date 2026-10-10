@@ -16,6 +16,8 @@
  * refused. The invariant checks are also shown to fire on the pre-0185
  * database, so they are not vacuous.
  *
+ * Also I1R-01: the execution_profiles body CHECK (0183) passed on NULL; 0185 makes it NULL-safe.
+ *
  * Runs on its OWN scratch database (prefix `dbg185_`), dropped in afterAll.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -169,7 +171,40 @@ async function tryTruncate(table: string): Promise<string | null> {
   }
 }
 
-const pre = {} as { shadowError: string | null; shadowRowKept: boolean; truncateError: string | null; unpinned: string[]; missingTruncate: string[] };
+/**
+ * I1R-01: insert one execution profile (version 1 of a fresh name, digest computed from the body) in a transaction
+ * that is always rolled back. Returns the error message, or null when the row was accepted.
+ */
+async function tryProfile(body: string, name = "dbg185-probe", minClass = "microvm"): Promise<string | null> {
+  const client = await db.$client.connect();
+  try {
+    await client.query("BEGIN");
+    try {
+      await client.query(
+        `INSERT INTO execution_profiles (name, version, body, digest, min_class)
+         VALUES ($1, 1, $2, encode(sha256(convert_to($2, 'UTF8')), 'hex'), $3)`,
+        [name, body, minClass],
+      );
+      return null;
+    } catch (e) {
+      return (e as Error).message;
+    } finally {
+      await client.query("ROLLBACK");
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/** a shipped profile's body, renamed: the positive control for the NULL-safe body CHECK */
+async function shippedBodyRenamed(name: string): Promise<string> {
+  const res = await db.execute<{ body: string }>(
+    sql`SELECT jsonb_set(body::jsonb, '{name}', to_jsonb(${name}::text))::text AS body FROM execution_profiles WHERE shipped ORDER BY name LIMIT 1`,
+  );
+  return res.rows[0]!.body;
+}
+
+const pre = {} as { shadowError: string | null; shadowRowKept: boolean; truncateError: string | null; unpinned: string[]; missingTruncate: string[]; emptyProfileError: string | null };
 
 beforeAll(async () => {
   admin = createDb(DATABASE_URL);
@@ -195,6 +230,7 @@ beforeAll(async () => {
   pre.unpinned = await unpinnedFunctions();
   const guarded = new Set(await truncateGuardedTables());
   pre.missingTruncate = (await expectedTruncateGuarded()).filter((t) => !guarded.has(t));
+  pre.emptyProfileError = await tryProfile("{}");
 
   // then the real folder, to the head
   await runMigrations(db, migrationsFolder);
@@ -215,6 +251,9 @@ describe("0185 negative controls: the attacks work on the database before 0185",
   it("TRUNCATE of an append-only table succeeds", () => {
     expect(pre.truncateError).toBeNull();
   });
+  it("I1R-01: an execution profile with a body of {} is accepted", () => {
+    expect(pre.emptyProfileError).toBeNull();
+  });
   it("the invariant checks fire on the unhardened schema (not vacuous)", () => {
     expect(pre.unpinned).toContain("regulait_refuse_mutation()");
     expect(pre.missingTruncate).toEqual(expect.arrayContaining(["ai_incident_events", "decision_receipts", "audit_log"]));
@@ -233,8 +272,36 @@ describe("0185: the attacks are refused after migrating to the head", () => {
     const tables = await truncateGuardedTables();
     expect(tables.length).toBeGreaterThan(0);
     for (const t of tables) {
-      expect(await tryTruncate(t), t).toMatch(/append-only: TRUNCATE refused/);
+      expect(await tryTruncate(t), t).toMatch(/TRUNCATE refused \(append-only\)/);
     }
+  });
+});
+
+describe("0185 I1R-01: the execution_profiles body CHECK is NULL-safe", () => {
+  const BODY_CHECK = /execution_profiles_body_check/;
+  it("refuses {}", async () => {
+    expect(await tryProfile("{}")).toMatch(BODY_CHECK);
+  });
+  it("refuses a JSON-null schema", async () => {
+    expect(await tryProfile(JSON.stringify({ schema: null, name: "dbg185-probe", minClass: "microvm" }))).toMatch(BODY_CHECK);
+  });
+  it("refuses a body with no name", async () => {
+    expect(await tryProfile(JSON.stringify({ schema: "regulait.execution-profile.v1", minClass: "microvm" }))).toMatch(BODY_CHECK);
+  });
+  it("refuses a body with no minClass", async () => {
+    expect(await tryProfile(JSON.stringify({ schema: "regulait.execution-profile.v1", name: "dbg185-probe" }))).toMatch(BODY_CHECK);
+  });
+  it("positive control: a shipped profile body (renamed) is accepted, and every seeded row still passes", async () => {
+    const shipped = await db.execute<{ name: string; min_class: string }>(
+      sql`SELECT name, min_class FROM execution_profiles WHERE shipped ORDER BY name LIMIT 1`,
+    );
+    const { min_class: minClass } = shipped.rows[0]!;
+    expect(await tryProfile(await shippedBodyRenamed("dbg185-ok"), "dbg185-ok", minClass)).toBeNull();
+    const bad = await db.execute(sql`SELECT 1 FROM execution_profiles WHERE NOT COALESCE(
+      ("body"::jsonb ->> 'schema') = 'regulait.execution-profile.v1' AND ("body"::jsonb ->> 'name') = "name"
+      AND ("body"::jsonb ->> 'minClass') = "min_class", false)`);
+    expect(bad.rows).toEqual([]);
+    expect((await db.execute(sql`SELECT 1 FROM execution_profiles WHERE shipped`)).rows.length).toBeGreaterThan(0);
   });
 });
 
