@@ -459,6 +459,8 @@ import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 import { registerIdentityRoutes } from "./identity-routes.js";
 // ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
 import { registerBomRoutes } from "./bom-routes.js";
+// ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
+import { registerIsolationRoutes } from "./isolation-routes.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
@@ -5250,6 +5252,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
   registerBomRoutes(app, db);
+  registerIsolationRoutes(app, db);
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (runner token only: registerEngineRunnerScopeHook).
