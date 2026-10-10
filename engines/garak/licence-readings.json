@@ -1,0 +1,226 @@
+[
+  {
+    "subject": "accelerate",
+    "version": "1.15.0",
+    "file": "licenses/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA says only \"Apache\""
+  },
+  {
+    "subject": "avidtools",
+    "version": "0.1.2",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA names no licence"
+  },
+  {
+    "subject": "click-default-group",
+    "version": "1.2.4",
+    "file": "LICENSE",
+    "sha256": "ec684181160e02c9e25c09dbfb32cc8278bb6bb3e84d7d9570a059ca55e4c118",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text (the non-endorsement clause present); its classifier says Public Domain, the shipped file is taken"
+  },
+  {
+    "subject": "colorama",
+    "version": "0.4.6",
+    "file": "licenses/LICENSE.txt",
+    "sha256": "cac35c02686e5d04a5a7140bfb3b36e73aed496656e891102e428886d7930318",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA has only the ambiguous BSD classifier"
+  },
+  {
+    "subject": "defusedxml",
+    "version": "0.7.1",
+    "file": "LICENSE",
+    "sha256": "b80ce9da8c42a1f91079627fbbe2bf27210ae108a0ffe5f077d5b08e076c24c8",
+    "licence": "PSF-2.0",
+    "read": "the Python Software Foundation License version 2; METADATA says \"PSFL\""
+  },
+  {
+    "subject": "ecoji",
+    "version": "0.1.1",
+    "file": "licenses/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA says only \"Apache\""
+  },
+  {
+    "subject": "fastuuid",
+    "version": "0.14.0",
+    "file": "licenses/LICENSE",
+    "sha256": "00736c852386ac15a12283c00677b46ef4b303be53ab0a1d05f48a9291355fa4",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA has only the ambiguous BSD classifier"
+  },
+  {
+    "subject": "fsspec",
+    "version": "2025.3.0",
+    "file": "licenses/LICENSE",
+    "sha256": "2dc35496ce53a7307915c008a844aad53e772b49b34cdd00445067691407ec94",
+    "licence": "BSD-3-Clause",
+    "read": "the BSD 3-Clause License text; METADATA says \"BSD 3-Clause License\""
+  },
+  {
+    "subject": "jinja2",
+    "version": "3.1.6",
+    "file": "licenses/LICENSE.txt",
+    "sha256": "3b49dcee4105eb37bac10faf1be260408fe85d252b8e9df2e0979fc1e094437b",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA has only the ambiguous BSD classifier"
+  },
+  {
+    "subject": "jsonpatch",
+    "version": "1.34",
+    "file": "licenses/LICENSE",
+    "sha256": "4393eb6733fa1e367f41769b382f4f1be7bf0daeb1e243ed92b3f5d8bafd236f",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA says \"Modified BSD License\""
+  },
+  {
+    "subject": "jsonpointer",
+    "version": "3.2.0",
+    "file": "licenses/LICENSE.txt",
+    "sha256": "d8b24f15d472885f788a2d6e985850f264627b86012a17bb242c83f310d907e5",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA says \"Modified BSD License\""
+  },
+  {
+    "subject": "mistralai",
+    "version": "1.5.2",
+    "file": "LICENSE",
+    "sha256": "ad4b50ffd183d0ec8b3e56fedae59575f13cee1cee74c466b16fad4bed032bed",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA names no licence"
+  },
+  {
+    "subject": "mpmath",
+    "version": "1.3.0",
+    "file": "LICENSE",
+    "sha256": "c26cae81da4508e5e249985777a33821f183223ebb74d7f8cfbf90fe7eef2fb7",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA says \"BSD\""
+  },
+  {
+    "subject": "multidict",
+    "version": "6.9.1",
+    "file": "licenses/LICENSE",
+    "sha256": "2e4be5fc6c4c72a466fcb665d726e049a6891981fe536c4f04b6366749461d23",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA says \"Apache License 2.0\""
+  },
+  {
+    "subject": "orjson",
+    "version": "3.13.0",
+    "file": "licenses/LICENSE-MPL-2.0",
+    "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+    "licence": "MPL-2.0 AND MIT",
+    "read": "METADATA says MPL-2.0 AND (Apache-2.0 OR MIT), which the parser does not split; the MIT option of the disjunction is taken (LICENSE-MIT ships beside it)"
+  },
+  {
+    "subject": "pandas",
+    "version": "3.0.6",
+    "file": "LICENSE",
+    "sha256": "5c1052e921e62d36ccda50a61585e9c0444b80c62f39b57c4f3f0d5fb62f5071",
+    "licence": "BSD-3-Clause AND Apache-2.0 AND MIT AND BSD-2-Clause",
+    "read": "pandas' own BSD 3-Clause text followed by the bundled notices: Apache-2.0, MIT (several, including musl), and two-clause BSD; METADATA says \"BSD 3-Clause License\""
+  },
+  {
+    "subject": "protobuf",
+    "version": "7.36.2",
+    "file": "LICENSE",
+    "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA says \"3-Clause BSD License\""
+  },
+  {
+    "subject": "pyasn1_modules",
+    "version": "0.4.2",
+    "file": "licenses/LICENSE.txt",
+    "sha256": "2aad5fc00f705c4a1addb83eed10a6a75d286a3779f0cf8519d87e62bc4735fd",
+    "licence": "BSD-2-Clause",
+    "read": "a two-clause BSD text (no non-endorsement clause); METADATA says \"BSD\""
+  },
+  {
+    "subject": "pyperclip",
+    "version": "1.11.0",
+    "file": "licenses/LICENSE.txt",
+    "sha256": "a72b0acc9389e4c17ced890ef1b03455e04978d39e25636099b93efb76b74ead",
+    "licence": "BSD-3-Clause",
+    "read": "a three-clause BSD text; METADATA says \"BSD\""
+  },
+  {
+    "subject": "replicate",
+    "version": "1.0.7",
+    "file": "licenses/LICENSE",
+    "sha256": "0c525cce5051ba765a9bc9b368c69334dfb82bd2b24c8b1769d539fe28c5a66b",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA says \"Apache License\""
+  },
+  {
+    "subject": "sniffio",
+    "version": "1.3.1",
+    "file": "LICENSE",
+    "sha256": "652c878488d1456361e08c3f8607fd7ba59892a14103d15cce4ff93c85b5cc8b",
+    "licence": "MIT OR Apache-2.0",
+    "read": "\"either of the licenses found in LICENSE.APACHE2 or LICENSE.MIT\"; METADATA's License field has spaces and two classifiers"
+  },
+  {
+    "subject": "sqlite-fts4",
+    "version": "1.0.3",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA says \"Apache License, Version 2.0\""
+  },
+  {
+    "subject": "sympy",
+    "version": "1.14.0",
+    "file": "licenses/LICENSE",
+    "sha256": "07a5e9819f727b4986ad2829c7a29a6320d42575f720eb24d71b7fef573a0286",
+    "licence": "BSD-3-Clause",
+    "read": "three-clause BSD texts for sympy and the code it bundles; METADATA says \"BSD\""
+  },
+  {
+    "subject": "tiktoken",
+    "version": "0.14.0",
+    "file": "licenses/LICENSE",
+    "sha256": "418cb499b436128d653d79941333a5437b7be2ea9213dcc2f04d15d5d2c51d86",
+    "licence": "MIT",
+    "read": "the MIT License text; METADATA says \"MIT License\""
+  },
+  {
+    "subject": "tqdm",
+    "version": "4.70.1",
+    "file": "licenses/LICENCE",
+    "sha256": "fcff87c3a47ce8028a8512aa182d4fcf0ad1c90544ee75cf9b343684cac194de",
+    "licence": "MPL-2.0 AND MIT",
+    "read": "the LICENCE file: MPL-2.0 for most files, MIT for the files it names; METADATA's License field has spaces"
+  },
+  {
+    "subject": "transformers",
+    "version": "5.19.0",
+    "file": "licenses/LICENSE",
+    "sha256": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049",
+    "licence": "Apache-2.0",
+    "read": "the Apache License 2.0 text; METADATA says \"Apache 2.0 License\""
+  },
+  {
+    "subject": "uritemplate",
+    "version": "4.2.0",
+    "file": "licenses/LICENSE",
+    "sha256": "3cfc9f01cdeec92900f228cf5677ffa57e7ed304c4263532bcad9cbd9969e46c",
+    "licence": "BSD-3-Clause OR Apache-2.0",
+    "read": "\"either of the licenses found in LICENSE.APACHE or LICENSE.BSD\"; METADATA's expression has spaces in a name"
+  },
+  {
+    "subject": "zalgolib",
+    "version": "0.2.2",
+    "file": "LICENSE",
+    "sha256": "b2c3cf7796ea7139b3e86bd6ab91da899cb0d4b1545abc27b08d3fa4cf96710a",
+    "licence": "MIT",
+    "read": "the MIT License text; METADATA says \"MIT License\""
+  }
+]

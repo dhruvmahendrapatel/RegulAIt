@@ -177,6 +177,9 @@ importers:
         specifier: 3.25.2
         version: 3.25.2(zod@3.25.76)
     devDependencies:
+      '@regulait/engine-garak':
+        specifier: workspace:*
+        version: link:../../packages/engine-garak
       '@regulait/engine-modelscan':
         specifier: workspace:*
         version: link:../../packages/engine-modelscan
@@ -297,6 +300,25 @@ importers:
       drizzle-kit:
         specifier: ^0.31.4
         version: 0.31.11
+
+  packages/engine-garak:
+    dependencies:
+      '@regulait/engine-runner':
+        specifier: workspace:*
+        version: link:../engine-runner
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.15))
 
   packages/engine-modelscan:
     dependencies:

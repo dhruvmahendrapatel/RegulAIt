@@ -1,0 +1,8 @@
+# ADR-0187 B5-G — the two closure packages with no Python 3 wheel on PyPI, pinned by their sdist's sha256.
+# Built in the image's closure stage with:
+#   pip install --require-hashes --no-deps --no-build-isolation --no-binary :all: -r requirements-sdist.txt
+# after requirements.txt (which pins the setuptools that builds them).
+ecoji==0.1.1 \
+    --hash=sha256:9665b2545d73ea0b4e0c9897cc6575df8ae7dc3946a82ac9d62db2f147139a9c
+langdetect==1.0.9 \
+    --hash=sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0

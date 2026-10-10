@@ -193,4 +193,43 @@ describe("ADR-0187: the engines network and the runner template", () => {
       expect(vols.slice(at, at + 200), v).toMatch(/type: tmpfs\n\s+device: tmpfs\n/);
     }
   });
+
+  it("B5-G: the garak runner merges the template; the worker reaches only the engines network and holds no runner credential and no state", () => {
+    const REF = "${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const line = (svc: string, k: string) => svc.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
+    const runner = block("engine-garak");
+    expect(runner).toMatch(/\n {4}<<: \*engine-runner\n/);
+    for (const key of ["ports", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode", "tmpfs"]) {
+      expect(runner, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&")}:`));
+    }
+    expect(line(runner, "image")).toBe(REF);
+    expect(line(runner, "REGULAIT_ENGINE_IMAGE_REF")).toBe(REF);
+    const rvols = runner.slice(runner.indexOf("    volumes:\n") + 13, runner.indexOf("    environment:"));
+    expect(rvols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-garak-state:/state", "- engine-garak-jobs:/jobs", "- engine-garak-results:/results:ro"]);
+
+    const worker = block("engine-garak-worker");
+    expect(line(worker, "image")).toBe(REF);
+    expect(worker).toMatch(/\n {4}command: \["node", "\/app\/dist\/worker-main\.js"\]\n/);
+    // the worker must reach the gateway's model routes: the internal engines network, and nothing else
+    expect(worker).toMatch(/\n {4}networks: \[engines\]\n/);
+    for (const key of ["network_mode", "ports", "privileged", "cap_add", "<<", "extra_hosts", "dns"]) {
+      expect(worker, key).not.toMatch(new RegExp(`\\n {4}${key.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&")}:`));
+    }
+    expect(worker).toMatch(/\n {4}read_only: true\n/);
+    expect(worker).toMatch(/\n {4}cap_drop: \[ALL\]\n/);
+    expect(worker).toMatch(/\n {4}security_opt: \["no-new-privileges:true"\]\n/);
+    expect(worker).toMatch(/\n {4}user: "10001:10001"\n/);
+    expect(worker).toMatch(/\n {4}pull_policy: \$\{REGULAIT_ENGINE_PULL_POLICY:-never\}\n/);
+    expect(worker).toMatch(/\n {4}profiles: \["engines"\]\n/);
+    // credential isolation (decision 140): no runner token, no enrolment token, no state volume
+    const wvols = worker.slice(worker.indexOf("    volumes:\n") + 13, worker.indexOf("    environment:"));
+    expect(wvols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-garak-jobs:/jobs:ro", "- engine-garak-results:/out"]);
+    expect(worker).not.toMatch(/ENROLLMENT_TOKEN|\/state|engine-garak-state|IMAGE_DIGEST/);
+    const vols = block("volumes", "");
+    for (const v of ["engine-garak-jobs", "engine-garak-results"]) {
+      const at = vols.indexOf(`\n  ${v}:\n`);
+      expect(at, v).toBeGreaterThan(-1);
+      expect(vols.slice(at, at + 200), v).toMatch(/type: tmpfs\n\s+device: tmpfs\n/);
+    }
+  });
 });
