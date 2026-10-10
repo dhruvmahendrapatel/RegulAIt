@@ -15,11 +15,16 @@
  *     file is missing or has changed, is not used (the distribution is then judged by its metadata, and a
  *     reading that matched nothing fails the build as stale), so a reading can never outlive what it read;
  *   - ADDITION 2: the native libraries pillow's wheel bundles (`pillow.libs`), each by the licence pillow's
- *     own LICENSE file gives it.
+ *     own LICENSE file gives it;
+ *   - ADDITION 3, CONDITIONS (ADR-0187 decision 194): an allow entry may carry `"condition": "unmodified"`,
+ *     and an MPL-2.0 entry MUST (the owner admitted MPL-2.0 only while its files are unmodified, open
+ *     question 21). Such a row is admitted only when every file the distribution's RECORD lists with a hash
+ *     is present and matches that hash (the hashes pip wrote from the hash-pinned wheel); a missing or
+ *     changed file DENIES the row, so a patched MPL file can never ship under the admission.
  *
  * Each licence term is ALLOWED when it is on the ADR-0176 list (MIT, Apache-2.0, BSD-2-Clause,
  * BSD-3-Clause, ISC, Unlicense, CC0-1.0, 0BSD); otherwise it is admitted only when
- * `licence-allow.json` names that subject and that licence, and EVERY entry of that file says either
+ * `licence-allow.json` names that subject and that licence (and its condition, if any, holds), and EVERY entry of that file says either
  * exactly "pending owner decision" or a recorded owner acceptance, "accepted by owner <YYYY-MM-DD>
  * (ADR-NNNN decision N)" (ADR-0187 decision 106, owner 2026-10-09): nothing outside the list is
  * admitted silently, and the allow file cannot carry a decision in any other form. Anything else is
@@ -39,6 +44,42 @@ export const ACCEPTED_TEXT = /^accepted by owner \d{4}-\d{2}-\d{2} \(ADR-\d{4} d
 /** the only two forms an allow-file decision may take */
 export function decisionValid(d) {
   return d === PENDING_TEXT || (typeof d === "string" && ACCEPTED_TEXT.test(d));
+}
+/** the only condition an allow entry may carry, and the licences that must carry it */
+export const CONDITIONS = new Set(["unmodified"]);
+export const REQUIRED_CONDITION = { "MPL-2.0": "unmodified" };
+
+/**
+ * what is wrong with a distribution's installed files against its RECORD (null when every hashed file is
+ * present and matches). RECORD rows are `path,sha256=<urlsafe base64, no padding>,size`; a row with no
+ * hash (RECORD itself, files pip could not hash) is not checked.
+ */
+export function recordProblem(sitePackages, distInfo) {
+  if (typeof distInfo !== "string" || !distInfo) return "no dist-info to check";
+  const record = path.join(sitePackages, distInfo, "RECORD");
+  if (!existsSync(record)) return `${distInfo} has no RECORD`;
+  let checked = 0;
+  for (const line of readFileSync(record, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    // the path may itself be quoted CSV; the hash and size are the last two fields
+    const parts = line.split(",");
+    const size = parts.pop();
+    const hash = parts.pop();
+    const rel = parts.join(",").replace(/^"(.*)"$/, "$1");
+    if (!hash) continue;
+    const m = /^sha256=([A-Za-z0-9_-]+)$/.exec(hash);
+    if (!m) return `${rel}: RECORD hash is not sha256`;
+    // RECORD paths are relative to site-packages; console scripts live in the venv's bin (`../../../bin`)
+    const file = path.resolve(sitePackages, rel);
+    const within = path.relative(path.resolve(sitePackages, "../../.."), file);
+    if (!within || within.startsWith("..") || path.isAbsolute(within)) return `${rel}: RECORD path escapes the environment`;
+    if (!existsSync(file)) return `${rel} is missing`;
+    const got = createHash("sha256").update(readFileSync(file)).digest("base64url");
+    if (got !== m[1]) return `${rel} is modified (its hash is not the wheel's)`;
+    if (size && Number(size) !== statSync(file).size) return `${rel} is modified (its size is not the wheel's)`;
+    checked++;
+  }
+  return checked > 0 ? null : `${distInfo} RECORD lists no hashed file`;
 }
 
 /** what each bundled native library is (by the name before its first hyphen), verified from the wheels' licence files */
@@ -145,8 +186,8 @@ export function inventory(sitePackages, runtime = [], readings = []) {
       if (reading) usedReadings.add(reading);
       const lic = reading ? reading.licence : metaLic;
       const terms = licenceTerms(lic);
-      if (!terms) rows.push({ subject: name, version, licence: lic ?? "(none)", term: null });
-      else for (const t of terms) rows.push({ subject: name, version, licence: lic, term: t });
+      if (!terms) rows.push({ subject: name, version, licence: lic ?? "(none)", term: null, distInfo: d });
+      else for (const t of terms) rows.push({ subject: name, version, licence: lic, term: t, distInfo: d });
     } else if (d.endsWith(".libs") && statSync(full).isDirectory()) {
       for (const lib of readdirSync(full).sort()) {
         if (!/\.so(\.|$)/.test(lib)) continue;
@@ -173,12 +214,18 @@ export function allowProblems(allow) {
     if (typeof e.subject !== "string" || typeof e.licence !== "string") out.push(`entry ${i} needs subject and licence`);
     if (!decisionValid(e.decision)) out.push(`entry ${i} (${e.subject}) must say decision "${PENDING_TEXT}" or "accepted by owner <date> (ADR-NNNN decision N)"`);
     if (typeof e.why !== "string" || !e.why.trim()) out.push(`entry ${i} (${e.subject}) must say why it is needed`);
+    if (e.condition !== undefined && !CONDITIONS.has(e.condition)) out.push(`entry ${i} (${e.subject}) has an unknown condition "${e.condition}"`);
+    const need = Object.prototype.hasOwnProperty.call(REQUIRED_CONDITION, e.licence) ? REQUIRED_CONDITION[e.licence] : null;
+    if (need && e.condition !== need) out.push(`entry ${i} (${e.subject}) ${e.licence} is admitted only with condition "${need}"`);
   });
   return out;
 }
 
-/** judge the inventory against the allow-list and the allow file */
-export function judge(rows, allow) {
+/**
+ * judge the inventory against the allow-list and the allow file. `conditionProblem(row, entry)` checks an
+ * entry's condition (the CLI passes the RECORD check); with none given, a conditional entry admits nothing.
+ */
+export function judge(rows, allow, conditionProblem = () => "the condition was not checked") {
   const used = new Set();
   const allowed = [];
   const pending = [];
@@ -191,7 +238,9 @@ export function judge(rows, allow) {
     const i = Array.isArray(allow) ? allow.findIndex((e) => e.subject === r.subject && e.licence === r.term && decisionValid(e.decision)) : -1;
     if (r.term !== null && i >= 0) {
       used.add(i);
-      pending.push(r);
+      const why = allow[i].condition !== undefined ? conditionProblem(r, allow[i]) : null;
+      if (why) denied.push({ ...r, why: `condition "${allow[i].condition}" not met: ${why}` });
+      else pending.push(r);
     } else denied.push(r);
   }
   const stale = Array.isArray(allow) ? allow.filter((_, i) => !used.has(i)) : [];
@@ -214,12 +263,12 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const readings = readingsFile ? JSON.parse(readFileSync(readingsFile, "utf8")) : [];
   const problems = [...allowProblems(allow), ...readingProblems(readings)];
   const rows = inventory(site, runtime, readings);
-  const res = judge(rows, allow);
+  const res = judge(rows, allow, (r, e) => (e.condition === "unmodified" ? recordProblem(site, r.distInfo) : `unknown condition ${e.condition}`));
   for (const r of rows.staleReadings) problems.push(`reading ${r.subject} ${r.version} (${r.file}) matches nothing installed`);
   console.log(`licence gate: ${res.allowed.length} allowed, ${res.pending.length} admitted by the allow file, ${res.denied.length} denied`);
   const decisionOf = (r) => allow.find((e) => e.subject === r.subject && e.licence === r.term)?.decision ?? "?";
   for (const r of res.pending) console.log(`  admitted ${r.subject} ${r.version} ${r.term}: ${decisionOf(r)}`);
-  for (const r of res.denied) console.log(`  DENIED   ${r.subject} ${r.version} ${r.licence}`);
+  for (const r of res.denied) console.log(`  DENIED   ${r.subject} ${r.version} ${r.licence}${r.why ? ` (${r.why})` : ""}`);
   for (const e of res.stale) console.log(`  STALE    allow entry ${e.subject} ${e.licence} matches nothing installed`);
   for (const p of problems) console.log(`  INVALID  ${p}`);
   process.exit(res.denied.length || res.stale.length || problems.length ? 1 : 0);

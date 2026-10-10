@@ -1,0 +1,41 @@
+{
+ "cpu_count": 4,
+ "dmesg": [
+  "[    0.000000] Starting gVisor..."
+ ],
+ "dns": "failed:gaierror:-3",
+ "egress_host_listener": "refused:OSError:101",
+ "egress_public_literal": "refused:OSError:101",
+ "etc_write": "writable",
+ "home_listing": "<error 13:Permission denied>",
+ "host_process": {
+  "cmdline_has_token": true,
+  "kill0": "exists",
+  "pids_visible": 1
+ },
+ "interfaces": [
+  "lo"
+ ],
+ "kernel": "Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016",
+ "meminfo": {
+  "MemFree": "16464940 kB",
+  "MemTotal": "16479424 kB"
+ },
+ "rlimit_nofile": [
+  20000,
+  20000
+ ],
+ "root_mount": "rw",
+ "rootfs_write": "writable",
+ "status": {
+  "CapBnd": "000001ffffffdfff",
+  "CapEff": "000001ffffffdfff",
+  "CapPrm": "000001ffffffdfff",
+  "Gid": "0\t0\t0\t0",
+  "NoNewPrivs": "0",
+  "Seccomp": "0",
+  "Uid": "0\t0\t0\t0"
+ },
+ "uname_release": "4.19.0-gvisor",
+ "work_write": "denied:2:No such file or directory"
+}

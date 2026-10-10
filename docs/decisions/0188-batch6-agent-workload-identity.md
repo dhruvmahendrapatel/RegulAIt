@@ -3,7 +3,8 @@
 - **Status:** Accepted 2026-10-10. The owner accepted all nine OWNER DECISION items with their recommended answers
   ("accept all on ADR-0188"). Design only until the build slices land. Amended
   2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table; amended again
-  after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23.
+  after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23. Amended again during S1 (main-session rulings from
+  the S2 planning pass): decisions 24 to 28 (agent grant storage, actor order, depth, strict scope, rule ids).
 - **Date:** 2026-10-10
 - **Deciders:** owner (accepted all nine recommendations, 2026-10-10); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
@@ -689,6 +690,58 @@ is refused with `invalid_grant` and `error_code` `mtls_parent_handoff_unsupporte
 certificate-bound key distinct from the child's client certificate is left to a later ADR. In-process hand-offs
 (decision 6) are unaffected.
 
+### Amendments from the S1 foundation and the S2 planning pass (2026-10-10)
+
+The main session's S2 planning pass read the S1 contract while it was being written and ruled on five gaps before
+S1 froze the schema. Decisions 24 to 28 record those rulings; where they change earlier text, **the later decision
+wins**. They change no owner decision.
+
+#### 24. Agent principals' own grants: parallel tables keyed by identity (decision 3)
+
+Decision 3 gives an agent "grants of its own, in the same shape as users'", and the slice table did not name their
+storage. Migration 0180 adds five parallel tables, the twins of a user's: `identity_tool_grants`,
+`identity_server_grants`, `identity_agent_grants`, `identity_connector_grants` and `identity_role_assignments`, each
+with `identity_id` → `workload_identities` (`ON DELETE RESTRICT`; identities are never deleted) and the same object
+FKs and uniques as the user tables (the governed object's deletion removes the grant, as for users). Parallel tables
+were chosen over a principal-kind column on the existing grant tables because those tables' `user_id NOT NULL`, their
+indexes and every existing reader (kernel loaders, certification campaigns, the ADR-0074 rule-write guard,
+inventory) assume a person; widening them would put every existing query one missed `WHERE` away from treating an
+agent as a user. Default-deny: no row, no right; every identity starts with none (OWNER DECISION 1, no
+grandfathering). The contract types are `actorEntitlementsSchema` / `putAgentGrantsSchema` in
+`packages/shared/src/identity/contract.ts`; S2 fills one `ActorEntitlements` per actor from these tables, with role
+grants expanded.
+
+#### 25. One canonical actor order: root first, leaf last
+
+`ActorChain.actors`, `delegation_grants.path` (+ the leaf grant) and `audit_log.actor_chain` all run root first, leaf
+(the caller) last. This supersedes the leaf-first wording of decision 1. The RFC 8693 nested `act` claim is only a wire
+encoding derived from that order at mint and verify time (S3/S5): the outermost `act` is the last element
+(`actClaimFromChain`).
+
+#### 26. Depth is the hop count
+
+`ActorChain.depth = actors.length`: a human acting directly is 0 (and is `actor: null`, never an empty chain), a first
+agent 1, its sub-agent 2. Cedar's `context.delegationDepth` is the same number. The stored `delegation_grants.depth`
+counts ancestor grants (`cardinality(path)`, 0 for a root grant), so for the leaf grant of a chain
+`ActorChain.depth = delegation_grants.depth + 1` (`actorChainDepthForGrantDepth`). `delegation_max_depth` caps the
+stored grant depth (0 to 8), so a chain has at most 9 hops.
+
+#### 27. Scope semantics are strict: absence is denial
+
+Nothing implies anything else. `write` does not include `read`; one mode never implies another; a scope entry with no
+`modes` allows no mode; an `mcp_tool` entry with no `toolNames` covers no tool. For an agent's own grants (decision 24)
+`allowed_modes` and `allowed_objects` are `NOT NULL` lists: a user's `NULL` there means "every mode / every object",
+and an agent never gets that implicitly.
+
+#### 28. Rule ids
+
+A refusal because an actor's own grants (decision 24) do not cover the call is `actor-allow-list`. The existing
+`agent-allow-list` keeps its current meaning (the per-user agent allow-list). A stored chain that is inconsistent, or
+an actor in it that is not live (decision 17), is refused `actor-chain-invalid`. Both are in `DELEGATION_RULE_IDS`.
+
+Also ruled, for S2's planning (nothing in S1): new ABAC policies default to Cedar schema v4; and S2 may make the
+one-token `actor: null` edits in S4-owned files and in `app.ts`.
+
 #### X31 review dispositions
 
 | Finding | Severity | Disposition | Where |
@@ -706,6 +759,158 @@ certificate-bound key distinct from the child's client certificate is left to a 
 | Slice-order notes | note | Accepted | Slice table |
 | I7R-10 nested children double-reserved (recheck of `165a5be`) | MEDIUM | Accepted. Allocations on parent→child edges; admitting a child touches only its parent; per-edge drawn/released and per-usage settlement idempotency; release returns to the parent only; worked examples | Decision 22; decision 16 amended; tests |
 | I7R-11 parent proof does not bind the child or body (recheck of `165a5be`) | MEDIUM | Accepted. One-use delegation authorization signed by A's bound key, binding parent grant, child identity, child key thumbprint, canonical body, issuer and endpoint; checked before any claim or allocation; mTLS-parent hand-off refused in v1 | Decision 23; decision 15 amended; tests |
+
+### Amendments from the S2 build: kernel and Cedar wiring (2026-10-10)
+
+Slice S2 recorded the implementation decisions below while building. They follow the S2 plan's rulings (decisions
+25 to 28 and the two rulings after them) and change no owner decision. Where they make an earlier decision more
+precise, **the later decision wins**.
+
+#### 29. The kernel's actor types, and what S3 hands the kernel
+
+`packages/policy-kernel/src/actor.ts` holds dependency-free twins of the S1 contract (`ActorChainLink`,
+`ActorChain`, `DelegationScopeItem`/`DelegationScope`, `ActorEntitlements`) plus the kernel-only input:
+- `ActorLinkFacts`, one per actor in chain order: `identityId`, `grantId`, `live` (decision 17's result for that
+  link: grant unrevoked, unexpired and path-consistent; identity active and not halted; credentials live), an
+  optional `liveFailure` code, `scope`, `budget` (`{remainingMicros}` = cap − settled − reserved, or `null` for no
+  cap), `entitlements` (the actor's own grants, read now) and `abacDecision` (filled by the gateway, decision 36).
+- `GovernedActor`: `chain`, `entitlementMode`, `maxDepth` (the org's `delegation_max_depth`), `costKnown` and
+  `links`. S3/S4 build it from the stored grant path at the point of use; the kernel never looks anything up.
+- The helpers are `scopeCovers`, `scopeSubset` and `checkActorChain`. The gateway test
+  `actor-contract-types.test.ts` fails the build if an S1 `z.infer` type stops being assignable to its twin.
+
+#### 30. Term order and combination
+
+The tool, agent and connector paths all decide an agent call in this order: (1) the ADR-0124 execution gate, run
+with exactly the arguments the human path uses, so a gated agent call gets the human's decision; (2)
+`actor-chain-invalid`; (3) `delegation-depth`; (4) `delegation-scope`, every link, root first; (5)
+`delegation-budget`; (6) the sponsor's own evaluation, unchanged; (7) `actor-allow-list`, each actor's own grants,
+root first; (8) each actor's own Cedar verdict, traced as `abac-forbid`. Terms 2 to 5 run before the sponsor, so a
+forged or spent chain never reaches the grant lookup. Terms 7 and 8 run after it, so when the person is not
+entitled the reason shown is the person's.
+
+The **first deny** in that order decides. Otherwise the **first require_approval** decides, and the sponsor's comes
+first. Otherwise the result is allow, with the sponsor's grant as `ruleId`. One consent satisfies an actor's
+approval hold, as one consent already satisfies whichever hold is checked first. Model dispatch cannot queue
+(ADR-0124), so an actor's approval hold refuses there. The connector path queues only a queueable write, as for a
+person. Every term traces under its rule id; the `grantId` of a trace entry is the delegation grant
+(chain, depth, scope, budget terms), the identity (`actor-allow-list`) or the policy (`abac-forbid`) that decided.
+
+#### 31. `actor: null` is today, byte for byte
+
+`evaluate`, `evaluateAgent` and `evaluateConnector` branch on `actor === null` before anything else, and the null
+branch is the unchanged pre-S2 function. The existing kernel suite (169 tests) and the gateway suites were re-run
+with only `actor: null` added and pass unchanged; P3 (decision 40) adds that `sponsor_only` with a clean chain
+reproduces the sponsor's effect, rule id and reason exactly. `visibleTools` stays the user's own entitlement
+(`actor: null`); an agent's narrowing applies at execution.
+
+#### 32. Scope: the call each path asks about, and subset per atom
+
+A tool call asks `{mcp_tool, serverId, toolName, kind = tool.kind}`, a connector call
+`{connector, connectorId, kind = operation}`, and a model dispatch `{agent, agentId, mode, kind}`, where `kind` is
+`read` for a plan-safe mode and `write` for every other mode. That is ADR-0124's one definition of a write
+(`isPlanSafeMode`), so a delegation of `plan` is a `read` entry. `scopeSubset(child, parent)` holds when every
+atomic call the child covers (one per tool name or mode, per kind) is covered by some parent entry, so a parent may
+split a server's tools across entries. `checkActorChain` refuses a link whose scope is wider than its parent's
+(`actor-chain-invalid`); the every-link scope check of term 4 is therefore defence in depth, and its refusal names
+the first link (root first) that does not cover the call.
+
+#### 33. The budget term
+
+The leaf link must have `remainingMicros > 0`. An ancestor at exactly 0 is normal, because its allocation sits on
+its children's edges (decision 22). An ancestor below 0 (a first crossing somewhere under it) refuses everything
+under it. When `costKnown` is false and any link carries a cap, the call is refused (decision 16). A non-finite
+balance is refused. All four refusals are `delegation-budget`.
+
+#### 34. The depth term and the chain check
+
+The depth term refuses when `chain.depth − 1 > maxDepth` (the leaf grant's stored depth against the setting, decision
+26). `checkActorChain` refuses, as `actor-chain-invalid`, any of: a hop count outside 1..9 or different from
+`actors.length`; a repeated identity or grant; fact rows missing, extra or out of order; a leaf fact whose grant is
+not the chain's; a sponsor other than the evaluated user; an unknown entitlement mode or a `maxDepth` outside 0..8;
+a link not live; a child scope wider than its parent's.
+
+#### 35. An agent's own grants, per path
+
+On the tool path an agent is covered by an `identity_tool_grants` row for the tool, or by a read-only-all server
+grant for a read **tool**; as for a person, never for a protocol method (ADR-0185 G3). On the agent path it is
+covered by a grant whose `allowedModes` lists the mode. On the connector path it is covered by a grant for the
+connector, `readwrite` for a write, whose `allowedObjects` lists the named object. A connector call that names no
+object is therefore never covered for an agent (decision 27: an agent's object list is never "every object").
+`sponsor_only` skips only term 7; the delegation terms and the actors' Cedar still apply.
+
+`apps/gateway/src/actor-entitlements.ts` (`loadActorEntitlements`) reads an identity's own grants and the grants of
+its roles. It does not cache: S3's live-chain query calls it at the point of use. A role grant whose
+`allowed_modes` or `allowed_objects` is NULL ("every") gives an agent **nothing**. Connector and agent grants are
+returned as separate candidates, never merged, so a read grant on one object and a readwrite grant on another
+cannot combine into readwrite on both.
+
+#### 36. Cedar schema v4
+
+v4 is v3 plus:
+- an `Agent` entity with `kind`, `identifier`, `environments`, `stewards` and an optional `autonomyClass` (a
+  builder agent's declared ADR-0180 A8 class; absent for other kinds, so a policy must guard it with `has`);
+- `McpToolCall` principals `User` or `Agent`;
+- the required context attributes `actorChain` (a Set of the chain's **identity ids**, the same values as the
+  `Agent` entity ids and `audit_log.actor_chain`; a Set, so a policy asks membership, not position) and
+  `delegationDepth` (the hop count, 0 for a person acting directly).
+
+No human attribute exists on `Agent`, and none is copied onto it. The sponsor is evaluated as `User` against every
+version as before; a v4 group also sees the chain in its context. Each actor is evaluated as `Agent` against v4
+policies only (`abacEngine.evaluate` filters the set when the request names an agent).
+`assembleActorAbacRequest` reuses the sponsor's resource and context bags and reads the agent's attributes only
+from its `workload_identities` row. A route that authenticated a workload credential
+(`via === "workload"`) reports origin `unknown` and no second factor in the principal bag.
+
+#### 37. Fail closed per call, and lazily
+
+`evaluateAbacForChain` runs only when the call has an actor **and** at least one active v4 policy; otherwise it
+returns the chain untouched and runs no query. For each actor, an identity that cannot be found, an exception, a
+request-validation failure or a policy evaluation error in a v4 group gives that link `forbid` with
+`abac-engine-error`, which refuses this call and no other. The engine now also refuses on a Cedar evaluation error
+inside a v4 group, which Cedar otherwise reports only in diagnostics and skips (a skipped forbid would read as "no
+match"). v1 to v3 groups keep their existing behaviour exactly; that behaviour (an erroring legacy policy is
+skipped) is recorded as an open question for the ABAC owner, not changed here.
+
+#### 38. New policies default to v4, with help text
+
+`ABAC_CURRENT_SCHEMA_VERSION` is `v4`. The backend routes default to it; the web app sends no schema version, so it
+needs no change. Under v4 an unscoped `principal` may be an `Agent`, so strict validation refuses a policy that
+reads a person-only attribute without `principal is RegulAIt::User`, and an agent-only attribute without
+`principal is RegulAIt::Agent`. Such errors carry `ABAC_V4_PRINCIPAL_HELP`, which the editor's existing help line
+shows. Stored v1 to v3 policies are untouched. The two kernel tests and the one gateway test written against "the
+current version" for person attributes now name `is RegulAIt::User` or `v3`.
+
+#### 39. Required `actor` everywhere, and the S4 hand-off
+
+`governedEvaluate`'s `opts` is now required, with `actor: GovernedActor | null`. Its earlier optional positional
+parameters become explicit `T | undefined` parameters, because a required parameter cannot follow optional ones.
+Every production call site the compiler flagged passes `actor: null` and carries `// ADR-0188 S4 replaces`, for S4
+to replace with the built chain. There are 21: `agents-connectors.ts` (3), `app.ts` (2), `compat-core.ts`,
+`compat-models.ts`, `connector-call.ts`, `copilot.ts` (2), `decompose.ts`, `evals.ts`, `mcp-protocol.ts` (2),
+`mcp-proxy.ts`, `orchestration.ts` (2), `policy-simulation.ts`, `redteam-agentic.ts` (2) and `regulait-llm.ts`. No
+governed-path logic changed. Tests pass `actor: null`.
+
+#### 40. Property tests, and the ADR-0176 admission of `fast-check`
+
+`fast-check` 4.10.2 (MIT, released 2026-09-19, one runtime dependency `pure-rand` 8.4.2, MIT; no npm advisory for
+either) is an exact-pinned devDependency of `@regulait/policy-kernel`, listed in the package's new
+`THIRD_PARTY.md`; it is test-only. `src/actor-properties.test.ts` runs P1 to P7 under fixed seeds, 1,500 runs
+each, over a deliberately small universe so that generated rights overlap the call:
+- P1: soundness on all three paths. An allowed call lies inside every link's own rights.
+- P2: narrowing on all three paths. An actor never widens the sponsor's decision.
+- P3: `sponsor_only` with a clean chain equals the sponsor alone.
+- P4: the scope algebra. Subset is reflexive and transitive, covering is preserved upward, and the semantics are
+  strict.
+- P5: anti-monotone in rights. Removing a grant or scope entry never turns a deny into an allow.
+- P6: a forged or inconsistent chain is refused `actor-chain-invalid`.
+- P7: past the depth limit is `delegation-depth`; a spent leaf is `delegation-budget`.
+
+Each property asserts a floor on how often it reached its interesting case. Two negative controls must find
+counterexamples: P1 against a decider that consults only the leaf's own grants, and P4 against write-implies-read
+covering. Eight deliberate kernel mutations were each shown to turn unit tests and properties red: leaf-only
+grants, a union of grants, a spent leaf allowed, depth off by one, liveness ignored, write implies read, actor Cedar
+ignored and unknown cost ignored.
 
 ## Rollout: slices (one PR each)
 

@@ -241,7 +241,7 @@ beforeAll(async () => {
   await relaxStrictAdmissionForTest(db);
   await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required', approval_delegation_enabled = true,
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.listen({ port: 0, host: "127.0.0.1" });

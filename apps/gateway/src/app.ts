@@ -454,6 +454,8 @@ import {
 import { registerDecisionReceiptRoutes } from "./decision-receipts.js";
 import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
+// ADR-0188 (batch 6 item 1) S1 — every identity route, a 501 stub until its slice lands
+import { registerIdentityRoutes } from "./identity-routes.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
@@ -2955,6 +2957,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             mfaCompleted: body.principal.mfaCompleted ?? null,
           }
         : undefined,
+      undefined,
+      undefined,
+      undefined,
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     // What the decision was actually computed ON. A proxy that believes it is
@@ -3051,6 +3057,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // caller, so the principal's session attributes are honestly unknown
       // here. /v1/abac/simulate is where a hypothetical session can be named.
       undefined,
+      undefined,
+      undefined,
+      undefined,
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
@@ -5229,6 +5239,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
+  // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
+  registerIdentityRoutes(app, db);
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (runner token only: registerEngineRunnerScopeHook).

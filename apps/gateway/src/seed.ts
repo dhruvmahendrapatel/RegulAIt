@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { auditLog, mcpServers } from "@regulait/db"; // ADR-0181 (SC): seedStrictAdmission
 import { buildApp } from "./app.js";
+import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
 import { demoKeyExpiresAt, revokeScriptKeys, SEED_PERSONA_KEY_TTL_DAYS, seedStrictIdentity } from "./demo-identity.js";
@@ -109,6 +110,11 @@ await runMigrations(
   db,
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),
 );
+// ADR-0187 decisions 185–192: the built-in eval datasets, as the gateway's boot seeds them (idempotent; no run)
+{
+  const seeded = await seedBuiltinEvalDatasets(db);
+  console.log(`built-in eval datasets: ${seeded.datasets.map((d) => `${d.name} ${d.outcome}`).join("; ")}`);
+}
 const app = buildApp(db, {
   bootstrapToken: BOOT,
   dataKey: DATA_KEY,

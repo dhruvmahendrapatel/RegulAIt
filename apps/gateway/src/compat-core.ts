@@ -698,6 +698,7 @@ export async function prepareCompatCall(
     withModelPolicy(
       evaluateAgent({
         userId,
+        actor: null, // ADR-0188 S4 replaces
         // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
         // Developers' traffic is exactly what a halt is usually thrown for.
         execution: { ...postureOf(compatExecutionMode, agentHaltOf(a)), ...compatLiteracy },
