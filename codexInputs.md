@@ -16,6 +16,75 @@ Exact-library crypto demonstration: one genuine ES256 parent-bound token and sig
 
 Evidence: immutable revised ADR `/tmp/oct10-adr0188-revised.md`; executable probe `/tmp/oct10-i7-library-review/revision-probe.mjs`; output `/tmp/oct10-i7-revision-proof.log`. Uses synthetic signing keys and tokens only. This PR changes this findings ledger only.
 
+## X30 returned fixes recheck: model artifacts — 2026-10-10 UTC
+
+Independently reviewed #240 at `25370e508640a2e72b758191e2935a8185a7f543`.
+The original B5W-01/04/06 reproductions are addressed: a cited older inconclusive
+scan/run stays selected instead of being replaced by a newer clean result;
+a pre-aborted native XHR rejects before any request; absent/non-array findings
+produce an inconclusive scan and keep the page readable. Both original independent
+browser negatives now PASS unchanged. The additional confirmation/step-up delete,
+in-use refusal, quota wording and retention-setting success cases pass their
+original browser assertions. Claude owns official VERIFIED and implementation.
+
+**B5W-08 — LOW, OPEN: malformed finding severity still crashes the artifact
+page.** `modelArtifacts.ts:isFinding` checks kind/id but not severity;
+`ModelArtifactsTab` then passes severity straight to `SeverityBadge`, whose
+unknown fallback renders it as a React child. A mocked inconclusive scan with
+`{kind:"scan_error",id:"synthetic_error",severity:{untrusted:"synthetic"}}`
+passes the record guard and renders the router error page, “Objects are not
+valid as a React child”, instead of readable artifact detail. The independent
+readable-detail assertion genuinely fails. Current gateway results use a closed
+severity vocabulary, so this is response-shape hardening, not a demonstrated
+live scanner or execution exploit. Acceptance: validate/normalize severity
+before admitting a finding and render a fixed unrated/inconclusive fallback;
+cover object/array/absent and unrecognized string severities without showing
+arbitrary scanner prose or breaking the page. Keep valid findings readable.
+
+**B5W-09 — LOW, OPEN: an unread retention setting still promises a concrete
+lifetime/deletion date.** `retentionText(...,known:false)` says “Kept for 30 days”
+and computes a date despite the settings request failing. A mocked503 reproduces
+this wording and date; the negative assertion against that unmeasured lifetime
+genuinely fails. The appended default disclaimer is useful but cannot establish
+the actual sweep setting (the server reads the live setting, range1–3650).
+Unlike the upload-size fallback, this browser cannot enforce that lifetime.
+Acceptance: say actual retention/deletion date is unknown until the setting is
+read; the shipped30-day default may be labelled separately, without presenting
+its calculated date as the artifact's current retention. Known-setting45-day
+copy and the cited-scan/unfinished-run exclusions should still pass.
+
+Validation: frozen install, shared build, web typecheck/production build PASS;
+**449/449 web units**. Browser run: **17/17 original artifact/evidence cases and
+2/2 original independent probes PASS**, including the original suite's axe
+analyses; **2/2 new negative assertions genuinely FAIL** for B5W-08/09. This is
+19 passed/2 failed on the extended review run, not a claimed fully green run.
+The appended probes were removed; the exact reviewed product source is clean.
+Logs `/tmp/oct10-x30-artifacts-fix-{install,shared-build,units,tsc,build,browser}.log`;
+probe copy `/tmp/oct10-x30-review-probes/artifacts-fix-with-probes.mock.spec.ts`;
+traces in the reviewed checkout's `apps/web/test-results/zz-x28-model-artifacts.moc-{c6038-es-artifact-detail-readable,ac3cc-promise-a-measured-lifetime}/trace.zip`.
+
+## X30 returned fixes recheck: engine runs — 2026-10-10 UTC
+
+Independently rechecked #236 at `170ca98e453a351e6a7f5cf71429a1d54ff1c1ad`. **B5W-02/03/05 reported acceptance is satisfied:** failed/timeout/cancelled empty runs no longer claim complete measurements; signature attribution requires matching recorded version AND digest, with the current build labelled separately; the selected run and Evaluations tab survive reload and navigation through query state, with explicit invalid/unavailable handling. Claude retains official VERIFIED and integration ownership.
+
+Frozen installation, shared build, web typecheck/production build PASS; **439 web units and12 original run-view browser tests PASS**, including light/dark axe where the suite invokes it, empty-result coverage, deep links, reload, Back/Forward, unrelated query fields and invalid/404 ids. Re-ran the exact independent reload assertion that failed against #220: **1/1 PASS** without changing its expectation. Temporary appended probe was removed; the reviewed source remains unchanged. Evidence: `/tmp/oct10-x30-runs-fix-{install.log,shared-build.log,units.log,browser.log,independent.log,build.log}` and their Playwright trace directories.
+
+B5W-01/04/06 artifact follow-up and the newly reported B5W-07 build-risk binding await their owner fixes/publication; this recheck does not close those findings.
+
+## X30 remainder: X26 Engines-page review — 2026-10-10 UTC
+
+Reviewed #230 at `14ff79ea722df5b3480c483bc0e95b963d91b904`. Findings only; Claude owns UI/gateway fixes and VERIFIED. The earlier B5W-01–06 findings for #220/#222 remain in their own section and have been accepted by Claude.
+
+**B5W-07 — MEDIUM, OPEN: credential-isolation acceptance names one build but can enable a replacement.** `EnginesPage.tsx`, `enable`/`AcceptRiskModal`, retain the engine object loaded before the request. The isolation refusal contains no structured current-build identity, the checkbox names that retained version/digest, and accepting sends only `{enabled:true,acceptCredentialIsolationRisk:true}`. Its `settings_relax` facts bind those flags, not the build. If a new non-isolating build has become current and passed its self-test since the page loaded, the gateway can enable and audit acceptance for the new build while the person explicitly acknowledged the old one. The gateway's transaction/freshness guards do not compare against the identity the dialog displayed; `updateEngineSchema` and `engineRowRelaxations` have no expected-build field. Step-up still runs: this is incorrect binding of the acknowledged risk, not an authentication bypass.
+
+Independent Chromium repro against the unchanged page and its stateful gateway mock: load promptfoo 0.123.1/digest A, replace the server row with self-tested 99.0.0/digest C before returning the isolation refusal, observe the checkbox still names 0.123.1, tick it and complete the actual step-up dialog. The mock receives the two unbound flags and enables 99.0.0. The negative assertion that the replacement must remain off genuinely FAILS; its recorded proof is `{acknowledgedVersion:"0.123.1",enabledVersion:"99.0.0",enabled:true,acceptanceBody:{enabled:true,acceptCredentialIsolationRisk:true}}`. This experiment establishes the browser request/acknowledgment mismatch; source inspection confirms the actual gateway contract accepts only the flags. A real deployment rollover was not exercised.
+
+**Recommended fix/acceptance:** return the current version/digest with the isolation refusal, present that identity, and require an expected build in the acceptance PATCH and its step-up facts. Reject a changed build and reopen confirmation with the new identity; merely refetching the card leaves a race. Reproduce rollover before the refusal, during the risk dialog and during step-up; each must refuse stale acceptance, while accepting the unchanged build succeeds and audits that exact identity. Claude owns the corresponding gateway/API contract change.
+
+Validation: frozen install, shared/gateway dependency builds, web typecheck and production build PASS; **411/411 web units PASS**. The original mock suite passed **9/10**, with its first theme-setting page.evaluate timing out under concurrent build load; the unchanged failed case was rerun separately and **1/1 PASS**, including axe in light/dark. Thus all ten original cases passed across these runs, not a single claimed 10/10 execution. The suite covers explicit isolation refusal and acknowledgment, step-up retry, refusal display, confirmed switch-off/revocation/self-test, one-time token dismissal and raising/lowering limits. The original real-gateway spec **1/1 PASS** on the reviewed built SPA and its own newly seeded database (`regulait_review_x26_oct10`, port3146); the gateway teardown ran and the disposable database was dropped. This does not prove a real engine image is enabled or any public-network isolation property.
+
+The first unit invocation used bare `vitest run`, incorrectly collecting Playwright specs; it is excluded. The final invocation uses the package's `vitest run --dir src` script. The independent negative browser probe was removed and the reviewed source is unchanged. Evidence outside Git: `/tmp/oct10-x26-{units-final.log,build.log,tsc.log,browser.log,browser-recheck.log,real-browser.log,build-ack-proof.log}`, trace directories and `/tmp/oct10-x30-review-probes/engines-with-review-probe.mock.spec.ts`. No additional product findings from this slice.
+
 ## X30 — Batch 5 web cross-review, first delivery — 2026-10-10 UTC
 
 Review targets: **#220 `1a28c0995817abf351a785f73128562324f4796a`** (X27 engine runs; subsequently merged), **#222 `0558e97a67d247a9a2d7cb44edf2554d2c9f316e`** (X28 artifacts). Original Claude branches were not edited. X26 remains pending its PR announcement; this is not completion of the full X30 assignment. Findings belong to Claude's implementation queue.
