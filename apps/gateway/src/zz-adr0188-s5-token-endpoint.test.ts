@@ -322,6 +322,8 @@ beforeAll(async () => {
     expect((await inject("POST", "/v1/grants/tools", AUTH, { userId: sponsorId, serverId, toolName: name })).statusCode).toBe(201);
   }
   projectId = rows<{ id: string }>(await db.execute(sql`insert into projects (name) values (${`s5-proj-${RUN}`}) returning id`))[0]!.id;
+  // S5 review: a delegation needs EXPLICIT project membership
+  await db.execute(sql`insert into project_members (project_id, user_id, role) values (${projectId}, ${sponsorId}, 'contributor')`);
   const ic = await inject("GET", "/v1/interception/settings", AUTH);
   const before = ic.json().settings as { mcpInterceptionEnabled: boolean; anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean };
   expect(typeof before.mcpInterceptionEnabled).toBe("boolean");
@@ -495,6 +497,30 @@ describe("S5 — DPoP at the token endpoint", () => {
     const proof = await makeProof(a, { cnf: await jkt(bind) });
     const [r1, r2] = await Promise.all([token(await rootForm(a, proof), await dpop(bind), {}, app), token(await rootForm(a, proof), await dpop(bind), {}, app2)]);
     expect([r1.statusCode, r2.statusCode].sort()).toEqual([200, 400]);
+  });
+
+  it("X45 I7S5-04: with the process clock 30 s ahead, the replay claims still last the whole signed window", async () => {
+    const a = agents[2]!;
+    const bind = wkey();
+    const assertionJti = randomUUID();
+    const dpopJti = randomUUID();
+    const iat = nowS();
+    const form = await rootForm(a, await makeProof(a, { cnf: await jkt(bind) }), { assertionOpts: { jti: assertionJti, iat, exp: iat + 120 } });
+    const proofJwt = await dpop(bind, { jti: dpopJti, iat });
+    vi.useFakeTimers({ now: Date.now() + 30_000, toFake: ["Date"] });
+    let r;
+    try {
+      r = await token(form, proofJwt);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(r.statusCode, r.body).toBe(200);
+    const claim = async (ns: string, key: string) =>
+      (await db.select().from(replayClaims).where(and(eq(replayClaims.namespace, ns as never), eq(replayClaims.key, key))))[0]!;
+    const ca = await claim("client_assertion", providerKey(a.clientId, assertionJti));
+    expect(ca.expiresAt.getTime()).toBeGreaterThanOrEqual((iat + 120 + 5) * 1000);
+    const dp = await claim("as_dpop", providerKey(a.clientId, dpopJti));
+    expect(dp.expiresAt.getTime()).toBeGreaterThanOrEqual((iat + 60 + 5) * 1000);
   });
 
   it("the process clock ±500 ms changes nothing: every window is judged on the database clock", async () => {
@@ -765,6 +791,16 @@ describe("S5 — mTLS and SPIFFE (decision 21)", () => {
 describe("S5 review item 2 — only a steward with project access may start a delegation", () => {
   const lastProofRefusal = async () =>
     (await db.select().from(auditLog).where(eq(auditLog.ruleId, "delegation-proof-refused")).orderBy(desc(auditLog.seq)).limit(1))[0]!;
+
+  it("a project with NO members is not open for delegation (unlike ADR-0011 attribution); an explicit member is allowed", async () => {
+    const open = rows<{ id: string }>(await db.execute(sql`insert into projects (name) values (${`s5-memberless-${RUN}`}) returning id`))[0]!.id;
+    const a = agents[0]!;
+    const refused = await proofRequest(a, { project: open });
+    expect([refused.statusCode, refused.json().error]).toEqual([403, "delegation_project_access"]);
+    expect((await lastProofRefusal()).detail).toMatchObject({ code: "delegation_project_access", projectId: open });
+    await db.execute(sql`insert into project_members (project_id, user_id, role) values (${open}, ${sponsorId}, 'viewer')`);
+    expect((await proofRequest(a, { project: open })).statusCode).toBe(201);
+  });
 
   it("a person who is not a steward of the agent is refused, audited", async () => {
     const other = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `s5-other-${RUN}@example.com`, displayName: `s5 other ${RUN}` } });

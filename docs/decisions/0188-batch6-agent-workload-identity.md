@@ -969,9 +969,10 @@ session's rulings below are binding on S5 and the slices after it. Items 1 to 6 
    with `max_depth: 0`, the root exchange, A authorises child B → refused `delegation_depth`).
 2. **Only a steward with access to the project may start a delegation (MEDIUM).** `POST /v1/delegations/proofs`
    checked no relation between the person, the agent and the project. Now the caller must be listed in the workload
-   identity's `sponsor_user_ids` (a steward) and must have access to `projectId` through the gateway's existing
-   project check (`assertProjectAttribution`, ADR-0011: an admin, or a member of a project that has members).
-   Otherwise 403 `delegation_not_steward` or `delegation_project_access`, each audited as a deny.
+   identity's `sponsor_user_ids` (a steward) and must be an **explicit member** of `projectId` (a `project_members`
+   row). *Master ruling after the fix round:* a delegation-specific check, not ADR-0011's attribution rule: a project
+   with no members is NOT open for delegation, and being an admin is not membership (ADR-0180). ADR-0011's general
+   rule is unchanged. Otherwise 403 `delegation_not_steward` or `delegation_project_access`, each audited as a deny.
 3. **Every issuer on an X.509 path must be a CA (MEDIUM).** `pkijs` 3.4.1 `CertificateChainValidationEngine` checks
    signatures and validity but not `basicConstraints.cA`, the `keyCertSign` key usage or `pathLenConstraint` on
    issuers, so a leaf certificate could sign another leaf. After the engine accepts a path, our validator walks
@@ -992,12 +993,24 @@ session's rulings below are binding on S5 and the slices after it. Items 1 to 6 
    - `delegationUncappedRootAllowed` (strict `false`): a root grant with no cap is refused
      (`delegation_cap_required`) unless an admin turns this on.
    - `delegationRootDefaultCapMicros` (strict `0` = none, so the person must name a cap): the cap applied when a
-     person names none. Setting one, or raising it, is a relaxation.
+     person names none. Setting one, or raising it, is a relaxation that needs the `settings_relax` step-up (master ruling, confirmed).
    - `delegationRootMaxLifetimeSeconds` (strict 900): the longest root grant. The default lifetime is 15 minutes (not
      1 hour); a longer request is refused (`delegation_lifetime`) unless an admin raises the limit (up to 24 h).
    The proof route and the root exchange both enforce them, so a setting tightened between the two still applies.
 7. **Introspection reads `aud` as one string,** as the token endpoint does: a client assertion's `aud` must be exactly
    the token endpoint URL (not an array containing it), and a token whose `aud` is not a single string is inactive.
+
+8. **The delegation step-up binds the whole authority (Codex X45 I7S5-02, MEDIUM).** The `identity_manage` step-up
+   for a write delegation on a classified project bound only the agent, project and resource, so a grant approved for
+   a narrow delegation could sign a wider one. Its facts are now the whole intended authority, computed after the cap
+   and lifetime are resolved: `op`, `agentIdentityId`, `projectId`, `resource`, `env`, `authorizationDetails`, the
+   resolved `capMicros`, `maxDepth`, the resolved `lifetimeSeconds` and `agentKeyThumbprint` (or null). The 403
+   returns exactly these as `action.body`, and the client posts that object verbatim to `/v1/auth/step-up/options`
+   (no web client calls the proof route yet; S6's must echo it). A grant for other facts is refused and not spent.
+9. **Replay claims outlive their signed window on any process clock (Codex X45 I7S5-04, LOW).** The adapter added the
+   provider's process-relative `expiresIn` to the database clock, so under process skew a claim could expire before
+   the signed window ended. A `client_assertion` claim now lasts at least until the verified `exp` plus the 5 s
+   allowance; an `as_dpop` claim at least until the proof's `iat` plus its 60 s acceptance age plus 5 s.
 
 Recorded with these:
 

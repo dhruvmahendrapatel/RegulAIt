@@ -158,6 +158,10 @@ interface RequestState {
   preflight?: Preflight;
   /** the credential a verified client assertion was signed with */
   assertionCredentialId?: string;
+  /** X45 I7S5-04: the verified client assertion's `exp` and the request DPoP proof's `iat` (seconds), so a replay
+   *  claim never expires before the window its own signed times allow, whatever the process clock says */
+  assertionExp?: number;
+  dpopIat?: number;
   /** decision 21: the certificate this request presented, matched to a credential (or why not) */
   mtls?: { clientId: string; match: CertificateMatch } | null;
   /** what to audit */
@@ -216,7 +220,20 @@ function adapterFor(db: Db) {
       const s = state();
       // R11 rule 1, enforced: a client-assertion claim with no completed preflight means the provider's hook order changed
       if (s.phase === "client_assertion" && !s.preflight) throw refuse(new InvalidClientAuth("provider pre-claim hook order changed"), "hook_order");
-      const ok = await claimReplay(db, s.phase, id, new Date(s.now.getTime() + Math.max(1, expiresIn) * 1000));
+      // the provider's `expiresIn` is relative to the PROCESS clock (signed exp − process now) and is added here to the
+      // DATABASE clock; under skew that ends the claim before the signed window does (X45 I7S5-04). So the claim lives
+      // at least until the window the signed times give: the assertion's exp (+ skew allowance), or the DPoP proof's
+      // iat + its acceptance age (+ the allowance for a proof from the future)
+      const floorMs =
+        s.phase === "client_assertion"
+          ? s.assertionExp !== undefined
+            ? (s.assertionExp + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000
+            : 0
+          : s.dpopIat !== undefined
+            ? (s.dpopIat + DPOP_PROOF_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000
+            : 0;
+      const expiresAt = new Date(Math.max(s.now.getTime() + Math.max(1, expiresIn) * 1000, floorMs));
+      const ok = await claimReplay(db, s.phase, id, expiresAt);
       if (!ok) {
         throw s.phase === "as_dpop" ? refuse(new InvalidDpopProof("DPoP proof replayed"), "dpop_replayed") : refuse(new InvalidClientAuth("client assertion replayed"), "assertion_replayed");
       }
@@ -249,7 +266,7 @@ const param = (ctx: KoaContextLike, k: string): string | undefined => {
 };
 
 /** our DPoP profile for the token endpoint request (decisions 13, 20) */
-async function requestDpop(ctx: KoaContextLike, s: RequestState): Promise<{ thumbprint: string; jti: string } | null> {
+async function requestDpop(ctx: KoaContextLike, s: RequestState): Promise<{ thumbprint: string; jti: string; iat: number } | null> {
   const proof = ctx.get("DPoP");
   if (!proof) return null;
   let payload: JWTPayload;
@@ -281,7 +298,7 @@ async function requestDpop(ctx: KoaContextLike, s: RequestState): Promise<{ thum
     throw refuse(new InvalidDpopProof("DPoP proof is for another request"), "dpop_htm_htu");
   }
   if (typeof payload.jti !== "string" || payload.jti.length === 0 || payload.jti.length > 256) throw refuse(new InvalidDpopProof("DPoP proof jti"), "dpop_jti");
-  return { thumbprint: await calculateJwkThumbprint(jwk, "sha256"), jti: payload.jti };
+  return { thumbprint: await calculateJwkThumbprint(jwk, "sha256"), jti: payload.jti, iat: payload.iat };
 }
 
 function mapDelegationRefusal(e: DelegationRefusedError): OIDCProviderError {
@@ -328,7 +345,10 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
   // the OUTPUT binding: the DPoP key when a proof is sent, else (mTLS clients only) the certificate
   const dpop = await requestDpop(ctx, s);
   let binding: Binding;
-  if (dpop) binding = { kind: "dpop", thumbprint: dpop.thumbprint, dpopJti: dpop.jti };
+  if (dpop) {
+    binding = { kind: "dpop", thumbprint: dpop.thumbprint, dpopJti: dpop.jti };
+    s.dpopIat = dpop.iat;
+  }
   else if (s.mtls && s.mtls.clientId === clientId && s.mtls.match.ok) binding = { kind: "mtls", thumbprint: s.mtls.match.thumbprint };
   else throw refuse(new InvalidDpopProof("a DPoP proof is required"), "dpop_required");
 
@@ -624,6 +644,7 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
       ) {
         throw refuse(new InvalidClientAuth("client assertion claims"), "assertion_claims");
       }
+      s.assertionExp = payload.exp;
       // decision 12: WHICH registered key signed it (the provider verified one of the client's live keys)
       const client = await findWorkloadClient(s.db, ctx.oidc.client.clientId, s.now);
       const assertion = typeof ctx.oidc.params.client_assertion === "string" ? ctx.oidc.params.client_assertion : "";
