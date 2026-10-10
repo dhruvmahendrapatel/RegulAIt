@@ -270,6 +270,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // deployment and to where, under the same egress guard as the endpoints
       // above, with the delivery log as the evidence.
       { label: "Webhooks", to: "/admin/webhooks" },
+      // ADR-0187 — the sidecar engines (red-teaming, model scanning): whether
+      // each may run at all, its runners and its self-test. Runs start on the
+      // Red-teaming, Evaluations and Admission review pages.
+      { label: "Engines", to: "/admin/engines" },
     ],
   },
   {
