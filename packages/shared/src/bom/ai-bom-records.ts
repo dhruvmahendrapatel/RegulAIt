@@ -28,6 +28,7 @@
  *    Every string is email-scanned by the builder.
  */
 import { createHash } from "node:crypto";
+import { scrubAuditText } from "../audit-scrub.js";
 import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, isBomExportEndpoint, isBomSpiffeId, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ export const AI_BOM_DATA_CLAIM_MAX_CHARS = 512;
 /** the cap on any free-text value that may appear (names, intended use, limitations) */
 export const AI_BOM_TEXT_MAX_CHARS = 4096;
 export const AI_BOM_NAME_MAX_CHARS = 512;
+/** the most records one list may carry (an install snapshot is bounded, never unbounded memory) */
+export const AI_BOM_MAX_RECORDS_PER_LIST = 20_000;
 
 export class AiBomRecordError extends Error {
   constructor(message: string) {
@@ -412,7 +415,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ISO_MS = (v: string) => Number.isFinite(Date.parse(v)) && new Date(v).toISOString() === v;
 
 function oneOf<T extends string>(what: string, v: unknown, allowed: readonly T[]): T {
-  if (typeof v !== "string" || !(allowed as readonly string[]).includes(v)) fail(`${what}: ${JSON.stringify(v)} is not one of ${allowed.join(" | ")}`);
+  // never echo the record value (PR #287): name the field and the rule only
+  if (typeof v !== "string" || !(allowed as readonly string[]).includes(v)) fail(`${what}: not one of ${allowed.join(" | ")}`);
   return v as T;
 }
 function text(what: string, v: unknown, max: number, opts: { nullable?: boolean } = {}): string | null {
@@ -431,7 +435,7 @@ function uuid(what: string, v: unknown, nullable = false): string | null {
 function int(what: string, v: unknown, nullable = false): number | null {
   if (v === null || v === undefined) return nullable ? null : fail(`${what}: required`);
   if (typeof v === "bigint") return fail(`${what}: load it as a checked safe integer`);
-  if (typeof v !== "number" || !Number.isSafeInteger(v)) fail(`${what}: not a safe integer (amendment 5): ${String(v)}`);
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) fail(`${what}: not a safe integer (amendment 5)`);
   return v as number;
 }
 function time(what: string, v: unknown, nullable = false): string | null {
@@ -476,15 +480,61 @@ export function sanitiseAiBomEndpoint(url: string, what: string): string {
   return origin;
 }
 
+/** a scheme prefix (`https:`, `id:`, `mailto:`): bounded, anchored, linear */
+const SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]{0,31}:/;
+/** an identifier of known shape: no `:`, `/`, `=`, `+`, `@`, `#` (PR #287 decision) */
+const REF_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const isRefId = (v: string) => UUID.test(v) || REF_ID.test(v);
+/** does the text carry a URL (a scheme prefix, or `://` anywhere)? */
+const carriesUrl = (v: string) => SCHEME_PREFIX.test(v) || v.includes("://");
+
 /**
- * #280 (4237488597): a free-form reference rendered SAFELY. A URL becomes its
- * sanitised origin (`url:` prefix), an identifier stays as is (`id:`), and any
- * other text becomes its SHA-256 only (`sha256:`). Raw text never passes.
+ * #280 (4237488597) and the PR #287 decision (ADR-0180): a free-form
+ * reference is NEVER emitted raw. An already-safe output passes (idempotent);
+ * an `id:` input is re-validated; any scheme-prefixed value is a URL reduced to
+ * its origin (`sanitiseAiBomEndpoint`) or refused; an identifier of known shape
+ * is `id:`; everything else is `sha256:` of its bytes.
  */
 export function safeReference(v: string, what: string): string {
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return `url:${sanitiseAiBomEndpoint(v, what)}`;
-  if (bomIdentifierSchema.safeParse(v).success && !v.includes("@")) return `id:${v}`;
+  if (v.startsWith("sha256:") && HEX64.test(v.slice(7))) return v;
+  if (v.startsWith("id:")) return isRefId(v.slice(3)) ? v : `sha256:${sha256(v)}`;
+  if (v.startsWith("url:")) return `url:${sanitiseAiBomEndpoint(v.slice(4), what)}`;
+  if (carriesUrl(v)) return `url:${sanitiseAiBomEndpoint(v, what)}`;
+  if (isRefId(v)) return `id:${v}`;
   return `sha256:${sha256(v)}`;
+}
+
+/**
+ * Free text that may appear (names, intended use, limitations, claims, bias
+ * dimension and method): refused when it holds credential-shaped material,
+ * detected by the audit scrubber's own rules (`scrubAuditText`, ADR-0099; no
+ * new pattern). The refusal names the field, never the value.
+ */
+function guardText(what: string, v: string): string {
+  if (scrubAuditText(v) !== v) fail(`${what}: holds credential-shaped material (refused, never redacted)`);
+  return v;
+}
+const free = (what: string, v: unknown, max: number) => guardText(what, req(what, v, max));
+const freeOpt = (what: string, v: unknown, max: number) => {
+  const t = opt(what, v, max);
+  return t === null ? null : guardText(what, t);
+};
+/**
+ * A value that may be a URL or text (claims, standard refs, bias method): a
+ * URL keeps its origin only (R47); a URL buried in prose is refused; other
+ * text passes the credential guard.
+ */
+function urlOrText(what: string, v: string): string {
+  if (SCHEME_PREFIX.test(v)) return sanitiseAiBomEndpoint(v, what);
+  if (v.includes("://")) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
+  return guardText(what, v);
+}
+/** a timestamp (date or date-time), checked linearly then parsed */
+const STAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9:.]{1,18}(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?$/;
+function stamp(what: string, v: unknown, nullable: boolean): string | null {
+  if (v === null || v === undefined) return nullable ? null : fail(`${what}: required`);
+  if (typeof v !== "string" || v.length > 40 || !STAMP.test(v) || !Number.isFinite(Date.parse(v))) return fail(`${what}: not a timestamp`);
+  return v;
 }
 
 function onlyFields<K extends AiBomRecordList>(list: K, r: unknown, at: string): Record<string, unknown> {
@@ -501,10 +551,14 @@ function dataClaims(v: unknown, at: string): Record<string, string | number | bo
   if (!v || typeof v !== "object" || Array.isArray(v)) return fail(`${at}: data_claims must be an object`);
   const out: Record<string, string | number | boolean> = {};
   for (const k of sortedStrings(Object.keys(v))) {
-    if (!(AI_BOM_DATA_CLAIM_KEYS as readonly string[]).includes(k)) fail(`${at}.${k}: unknown data_claims key refused`);
-    const x = (v as Record<string, unknown>)[k];
+    if (!(AI_BOM_DATA_CLAIM_KEYS as readonly string[]).includes(k)) fail(`${at}: an unknown data_claims key is refused (allowed: ${AI_BOM_DATA_CLAIM_KEYS.join(", ")})`);
+    let x = (v as Record<string, unknown>)[k];
     if (typeof x === "string") {
       if (x.length > AI_BOM_DATA_CLAIM_MAX_CHARS) fail(`${at}.${k}: longer than ${AI_BOM_DATA_CLAIM_MAX_CHARS} characters`);
+      // PR #287: a URL claim keeps its origin only (R47), a time claim must be a time, other text is guarded
+      if (k === "releaseTime") x = stamp(`${at}.${k}`, x, false);
+      else if (k === "downloadLocation") x = carriesUrl(x as string) ? sanitiseAiBomEndpoint(x as string, `${at}.${k}`) : fail(`${at}.${k}: not a URL`);
+      else x = urlOrText(`${at}.${k}`, x as string);
     } else if (!(typeof x === "boolean" || (typeof x === "number" && Number.isSafeInteger(x)))) {
       fail(`${at}.${k}: only a string, safe integer or boolean is allowed (no nested object or array)`);
     }
@@ -540,6 +594,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
   const each = <K extends AiBomRecordList>(list: K, map: (r: Record<string, unknown>, at: string) => AiBomRecordSet[K][number]): AiBomRecordSet[K] => {
     const raw = (input as unknown as Record<string, unknown>)[list];
     if (!Array.isArray(raw)) return fail(`${list}: expected a list`);
+    if (raw.length > AI_BOM_MAX_RECORDS_PER_LIST) fail(`${list}: more than the cap of ${AI_BOM_MAX_RECORDS_PER_LIST} records (refused)`);
     const out = raw.map((r, i) => map(onlyFields(list, r, `${list}[${i}]`), `${list}[${i}]`));
     const sorted = sortedBy(out, (r) => aiBomRecordKey(list, r as unknown as Record<string, unknown>));
     for (let i = 1; i < sorted.length; i++) {
@@ -554,7 +609,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     install,
     useCases: each("useCases", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
       ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       dataSensitivity: oneOf(`${at}.dataSensitivity`, r.dataSensitivity, AI_BOM_DATA_SENSITIVITIES),
@@ -565,7 +620,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     })),
     agents: each("agents", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       provider: req(`${at}.provider`, r.provider, AI_BOM_NAME_MAX_CHARS),
       model: opt(`${at}.model`, r.model, AI_BOM_NAME_MAX_CHARS),
       expectedServedModel: opt(`${at}.expectedServedModel`, r.expectedServedModel, AI_BOM_NAME_MAX_CHARS),
@@ -579,7 +634,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     })),
     customProviders: each("customProviders", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       wireProtocol: ident(`${at}.wireProtocol`, r.wireProtocol),
       baseUrl: r.baseUrl === null ? null : sanitiseAiBomEndpoint(req(`${at}.baseUrl`, r.baseUrl, 2048), `custom provider ${String(r.id)}`),
       keySet: bool(`${at}.keySet`, r.keySet),
@@ -588,25 +643,25 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       const agentId = uuid(`${at}.agentId`, r.agentId, true);
       const customProviderId = uuid(`${at}.customProviderId`, r.customProviderId, true);
       if ((agentId === null) === (customProviderId === null)) fail(`${at}: exactly one of agentId and customProviderId (model_cards_subject_check)`);
-      const intendedUse = req(`${at}.intendedUse`, r.intendedUse, AI_BOM_TEXT_MAX_CHARS);
+      const intendedUse = free(`${at}.intendedUse`, r.intendedUse, AI_BOM_TEXT_MAX_CHARS);
       if (!intendedUse.trim()) fail(`${at}.intendedUse: empty`);
       if (!Array.isArray(r.biasFairness)) fail(`${at}.biasFairness: not a list`);
       const bias = (r.biasFairness as unknown[]).map((b, i) => {
         const w = `${at}.biasFairness[${i}]`;
         if (!b || typeof b !== "object" || Array.isArray(b)) return fail(`${w}: expected an object`);
         const extra = Object.keys(b).filter((k) => !(BIAS_FIELDS as readonly string[]).includes(k));
-        if (extra.length) fail(`${w}: unknown key(s) refused: ${extra.join(", ")}`);
+        if (extra.length) fail(`${w}: an unknown bias_fairness key is refused (allowed: ${BIAS_FIELDS.join(", ")})`);
         const o = b as Record<string, unknown>;
         const resultRef = opt(`${w}.resultRef`, o.resultRef, AI_BOM_TEXT_MAX_CHARS);
         return {
-          dimension: req(`${w}.dimension`, o.dimension, AI_BOM_NAME_MAX_CHARS),
-          method: req(`${w}.method`, o.method, AI_BOM_NAME_MAX_CHARS),
+          dimension: free(`${w}.dimension`, o.dimension, AI_BOM_NAME_MAX_CHARS),
+          method: urlOrText(`${w}.method`, req(`${w}.method`, o.method, AI_BOM_NAME_MAX_CHARS)),
           status: oneOf(`${w}.status`, o.status, AI_BOM_BIAS_STATUSES),
           resultRef: resultRef === null || resultRef === "" ? null : safeReference(resultRef, `${w}.resultRef`),
-          assessedAt: opt(`${w}.assessedAt`, o.assessedAt, 64),
+          assessedAt: stamp(`${w}.assessedAt`, o.assessedAt === "" ? null : o.assessedAt, true),
         } satisfies BiasFairnessRecord;
       });
-      const limitations = opt(`${at}.limitations`, r.limitations, AI_BOM_TEXT_MAX_CHARS);
+      const limitations = freeOpt(`${at}.limitations`, r.limitations, AI_BOM_TEXT_MAX_CHARS);
       const pinned = opt(`${at}.pinnedModelVersion`, r.pinnedModelVersion, AI_BOM_NAME_MAX_CHARS);
       return {
         id: uuid(`${at}.id`, r.id) as string,
@@ -617,7 +672,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         // a TOTAL order on every rendered field (R12 section 13)
         biasFairness: sortedBy(bias, (b) => bomCanonicalBytes(b)),
         dataClaims: dataClaims(r.dataClaims, `${at}.dataClaims`),
-        standardRefs: strings(`${at}.standardRefs`, r.standardRefs, AI_BOM_NAME_MAX_CHARS),
+        standardRefs: strings(`${at}.standardRefs`, r.standardRefs, AI_BOM_NAME_MAX_CHARS).map((x, i) => urlOrText(`${at}.standardRefs[${i}]`, x)).sort(cmpCodeUnits),
         pinnedModelVersion: pinned !== null && pinned.trim() ? pinned : null,
       };
     }),
@@ -643,7 +698,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         kind,
         evalRunId,
         // already-safe values (a prior normalise) pass through unchanged
-        externalRef: external === null ? null : /^(url|id|sha256):/.test(external) && normalisedRef(external) ? external : safeReference(external, `${at}.externalRef`),
+        externalRef: external === null ? null : safeReference(external, `${at}.externalRef`),
         artifactScanId,
         attachedAt: time(`${at}.attachedAt`, r.attachedAt) as string,
       };
@@ -656,7 +711,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     evalDatasets: each("evalDatasets", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
       version: int(`${at}.version`, r.version) as number,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       casesDigest: digest(`${at}.casesDigest`, r.casesDigest) as string,
     })),
     trainingDatasets: each("trainingDatasets", (r, at) => {
@@ -670,7 +725,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       return {
         id: uuid(`${at}.id`, r.id) as string,
         version: int(`${at}.version`, r.version) as number,
-        name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+        name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
         checksum,
         rowCount,
         piiVerdict: oneOf(`${at}.piiVerdict`, r.piiVerdict, AI_BOM_PII_VERDICTS),
@@ -693,7 +748,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       return {
         id: uuid(`${at}.id`, r.id) as string,
         jobId: uuid(`${at}.jobId`, r.jobId) as string,
-        name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+        name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
         method: ident(`${at}.method`, r.method),
         kind,
         agentId: uuid(`${at}.agentId`, r.agentId, true),
@@ -734,7 +789,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     }),
     promptTags: each("promptTags", (r, at) => ({
       promptId: uuid(`${at}.promptId`, r.promptId) as string,
-      promptName: req(`${at}.promptName`, r.promptName, AI_BOM_NAME_MAX_CHARS),
+      promptName: free(`${at}.promptName`, r.promptName, AI_BOM_NAME_MAX_CHARS),
       tag: ident(`${at}.tag`, r.tag),
       commitId: uuid(`${at}.commitId`, r.commitId) as string,
       hash: digest(`${at}.hash`, r.hash) as string,
@@ -754,7 +809,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       const url = req(`${at}.url`, r.url, 2048);
       return {
         id: uuid(`${at}.id`, r.id) as string,
-        name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+        name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
         transport,
         // a stdio server's url is the `stdio:<name>` sentinel, not an endpoint (R12 section 12)
         url: transport === "stdio" ? null : sanitiseAiBomEndpoint(url, `mcp server ${String(r.id)}`),
@@ -769,12 +824,12 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     mcpTools: each("mcpTools", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
       serverId: uuid(`${at}.serverId`, r.serverId) as string,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       kind: oneOf(`${at}.kind`, r.kind, ["read", "write"] as const),
     })),
     connectors: each("connectors", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       kind: ident(`${at}.kind`, r.kind),
       // a governance-only connector has no base_url: no endpoint at all
       url: r.url === null ? null : sanitiseAiBomEndpoint(req(`${at}.url`, r.url, 2048), `connector ${String(r.id)}`),
@@ -791,7 +846,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     })),
     builderAgents: each("builderAgents", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
-      name: req(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
+      name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       modelAgentId: uuid(`${at}.modelAgentId`, r.modelAgentId, true),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
       ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
@@ -803,7 +858,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       return {
         agentId: uuid(`${at}.agentId`, r.agentId) as string,
         skillId: uuid(`${at}.skillId`, r.skillId) as string,
-        snapshotName: text(`${at}.snapshotName`, r.snapshotName, AI_BOM_NAME_MAX_CHARS) as string,
+        snapshotName: guardText(`${at}.snapshotName`, text(`${at}.snapshotName`, r.snapshotName, AI_BOM_NAME_MAX_CHARS) as string),
         snapshotDigest: d,
         snapshotVersion: int(`${at}.snapshotVersion`, r.snapshotVersion) as number,
         snapshotAdmissionState: oneOf(`${at}.snapshotAdmissionState`, r.snapshotAdmissionState, AI_BOM_SKILL_ADMISSION_STATES),
@@ -815,18 +870,4 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     })),
   };
   return n;
-}
-
-/** is `v` already one of `safeReference`'s outputs (so a second normalise is a no-op)? */
-function normalisedRef(v: string): boolean {
-  if (v.startsWith("sha256:")) return HEX64.test(v.slice(7));
-  if (v.startsWith("id:")) return bomIdentifierSchema.safeParse(v.slice(3)).success && !v.includes("@");
-  if (v.startsWith("url:")) {
-    try {
-      return sanitiseAiBomEndpoint(v.slice(4), "ref") === v.slice(4);
-    } catch {
-      return false;
-    }
-  }
-  return false;
 }

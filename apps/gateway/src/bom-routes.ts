@@ -37,7 +37,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const BOOT_USER = "00000000-0000-0000-0000-000000000000";
 
 /** the B3 routes' own refusals (B1's `BOM_ERROR_CODES` holds the shared ones) */
-export const AI_BOM_ROUTE_ERRORS = ["invalid_ai_bom_subject", "ai_bom_subject_not_found", "ai_bom_no_snapshot", "ai_bom_build_refused", "rate_limited"] as const;
+export const AI_BOM_ROUTE_ERRORS = ["invalid_ai_bom_subject", "ai_bom_subject_not_found", "ai_bom_no_snapshot", "ai_bom_build_refused", "ai_bom_too_large", "bom_snapshot_busy", "rate_limited"] as const;
 
 function subjectOf(req: FastifyRequest): AiBomSubject | null {
   const p = req.params as { subjectKind?: string; subjectId?: string };
@@ -76,7 +76,8 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   const refuse = (reply: FastifyReply, e: unknown) => {
     if (e instanceof AiBomError) return reply.status(e.status).send({ error: e.code, detail: e.message });
     if (e instanceof AiBomBuildError || e instanceof AiBomRecordError || e instanceof TrainingChecksumError) {
-      // fail closed and say why (an email shape, userinfo in an endpoint, an unsafe value): never redacted
+      // fail closed and say which field and rule (an email shape, userinfo, an unsafe value); the
+      // messages name fields and rules only and never echo a record value (PR #287)
       return reply.status(422).send({ error: "ai_bom_build_refused", detail: e.message });
     }
     throw e;

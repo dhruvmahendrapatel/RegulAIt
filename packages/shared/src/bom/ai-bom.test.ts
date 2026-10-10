@@ -10,6 +10,7 @@ import { Models } from "@cyclonedx/cyclonedx-library";
 import {
   AI_BOM_INSTALL_SUBJECT_ID,
   AI_BOM_SCAN_VERDICTS,
+  AI_BOM_MAX_RECORDS_PER_LIST,
   aiBomInventoryIndex,
   aiBomSerialNumber,
   buildAiBom,
@@ -492,5 +493,74 @@ describe("drift (R8): a change list of refs, versions and hashes only", () => {
     const changes = diffAiBomInventory(base, live).map((c) => `${c.change} ${c.ref}`);
     expect(changes).toEqual(expect.arrayContaining([`changed_hash artifact:${ART}`, `changed_version model:${CARD1}`, `removed service:connector:${CONN}`, `added prompt:${u(50)}:tag:production`]));
     expect(diffAiBomInventory(base, base)).toEqual([]);
+  });
+});
+
+describe("security review round (PR #287): free-form references and claims never leave raw", () => {
+  const leaks = (f: AiBomRecordSet, canary: string) => {
+    const b = buildAiBom(f, meta(), opts);
+    return [b.bodyBytes, ...b.renderings.map((r) => r.bytes)].some((x) => x.includes(canary));
+  };
+  const withRef = (ref: string) => {
+    const f = fixture();
+    f.modelCardEvidence[1] = { ...f.modelCardEvidence[1]!, externalRef: ref };
+    f.modelCards[0]!.biasFairness = [{ ...f.modelCards[0]!.biasFairness[0]!, resultRef: ref }];
+    return f;
+  };
+  it("HIGH: a reference is an identifier of known shape, a sanitised URL origin, or a SHA-256 — never raw", () => {
+    const outcomes: string[] = [];
+    for (const [ref, canary] of [
+      ["api_key=sk-live-CANARY123", "CANARY123"],
+      ["https:/files.internal.corp/bot99:SECRETTOK/api", "SECRETTOK"],
+      ["id:SECRETTOK=abc", "SECRETTOK"],
+      ["token=SECRETTOK", "SECRETTOK"],
+    ] as const) {
+      let leaked: boolean | "refused";
+      try { leaked = leaks(withRef(ref), canary); } catch { leaked = "refused"; }
+      outcomes.push(`${ref} -> ${leaked === true ? "LEAKED" : leaked}`);
+    }
+    expect(outcomes.filter((o) => o.endsWith("LEAKED"))).toEqual([]);
+    expect(safeReference("AUDIT-12", "t")).toBe("id:AUDIT-12");
+    expect(safeReference("id:AUDIT-12", "t")).toBe("id:AUDIT-12");
+    expect(safeReference("id:SECRETTOK=abc", "t")).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(safeReference("https:/files.internal.corp/bot99:SECRETTOK/api", "t")).toBe("url:https://files.internal.corp");
+  });
+  it("MEDIUM: URL-shaped claims, standard refs and bias methods keep the origin only; secret-shaped free text is refused", () => {
+    const urlCases: Array<[(f: AiBomRecordSet) => void, string]> = [
+      [(f) => { f.modelCards[0]!.dataClaims = { downloadLocation: "https://bucket.s3.test/w.bin?X-Amz-Signature=CANARYSIG" }; }, "CANARYSIG"],
+      [(f) => { f.modelCards[0]!.standardRefs = ["https://std.test/doc?token=CANARYSTD"]; }, "CANARYSTD"],
+      [(f) => { f.modelCards[0]!.biasFairness = [{ dimension: "age", method: "https://eval.test/run?key=CANARYBIAS", status: "assessed", resultRef: null, assessedAt: null }]; }, "CANARYBIAS"],
+      [(f) => { f.modelCards[0]!.dataClaims = { trainingData: "corpus key sk-live-CANARYTRAIN0123456789abcdef" }; }, "CANARYTRAIN"],
+    ];
+    const outcomes: string[] = [];
+    for (const [mutate, canary] of urlCases) {
+      const f = fixture();
+      mutate(f);
+      let leaked: boolean | "refused";
+      try { leaked = leaks(f, canary); } catch { leaked = "refused"; }
+      outcomes.push(`${canary} -> ${leaked === true ? "LEAKED" : leaked}`);
+    }
+    expect(outcomes.filter((o) => o.endsWith("LEAKED"))).toEqual([]);
+  });
+  it("assessedAt and releaseTime must be timestamps", () => {
+    const f = fixture();
+    f.modelCards[0]!.biasFairness = [{ ...f.modelCards[0]!.biasFairness[0]!, assessedAt: "token=SECRET" }];
+    refused(() => normaliseAiBomRecords(f), /assessedAt/);
+    const g = fixture();
+    g.modelCards[0]!.dataClaims = { releaseTime: "next tuesday" };
+    refused(() => normaliseAiBomRecords(g), /releaseTime/);
+  });
+  it("LOW: a refusal names the field and rule, never the record value", () => {
+    const f = fixture();
+    f.artifactScans[0]!.verdict = "SECRETVERDICT";
+    let msg = "";
+    try { normaliseAiBomRecords(f); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toMatch(/verdict/);
+    expect(msg).not.toContain("SECRETVERDICT");
+  });
+  it("LOW: a record list over the cap is refused", () => {
+    const f = fixture();
+    f.mcpTools = Array.from({ length: AI_BOM_MAX_RECORDS_PER_LIST + 1 }, (_, i) => ({ id: u(100000 + i), serverId: MCP, name: `t${i}`, kind: "read" }));
+    refused(() => normaliseAiBomRecords(f), /cap/);
   });
 });
