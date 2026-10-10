@@ -1,0 +1,19 @@
+{
+  "name": "regulait-identity-s0-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 spike.test.mjs",
+    "licences": "node licences.mjs"
+  },
+  "dependencies": {
+    "oidc-provider": "9.12.2",
+    "oauth4webapi": "3.8.8",
+    "jose": "6.2.12",
+    "pkijs": "3.4.1",
+    "asn1js": "3.0.10",
+    "pg": "8.23.1",
+    "fastify": "5.12.5"
+  }
+}
