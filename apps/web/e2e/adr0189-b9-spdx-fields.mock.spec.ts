@@ -32,6 +32,8 @@ const DECLARABLE = {
   eval_dataset: ["builtTime", "originatedBy", "releaseTime", "downloadLocation", "datasetType"],
 } as const;
 type Kind = keyof typeof DECLARABLE;
+/** the gateway's display names for the three mocked records */
+const DISPLAY: Record<Kind, string> = { model_card: "Clause triage · Contract clause triage", eval_dataset: "golden v2", training_dataset: "support-corpus v1" };
 
 interface Row {
   seq: number;
@@ -68,7 +70,7 @@ async function installSpdxMock(page: Page, seed: Partial<Record<string, Row[]>> 
       for (const r of [...rows].sort((a, b) => a.seq - b.seq)) latest.set(r.property, r);
       const current = DECLARABLE[kind].filter((p) => latest.get(p) && !latest.get(p)!.withdrawn).map((p) => latest.get(p)!);
       return json(route, {
-        subject: { kind, id },
+        subject: { kind, id, displayName: DISPLAY[kind] },
         declarable: DECLARABLE[kind],
         current,
         undeclared: DECLARABLE[kind].filter((p) => !current.some((c) => c.property === p)),
@@ -195,7 +197,8 @@ test.describe("ADR-0189 B9: SPDX fields on a model card", () => {
     await expect(dialog.getByTestId("spdx-confirm-value")).toHaveText("2026-01-31T09:30:00Z");
     await expect(confirm).toContainText("Release time");
     await expect(confirm).toContainText("Supplier declared");
-    await expect(confirm).toContainText(CARD);
+    await expect(confirm.getByTestId("spdx-subject-name")).toHaveText("Clause triage · Contract clause triage");
+    await expect(confirm).toContainText(`model card ${CARD}`);
     await expect(dialog).toContainText("value and its audit record in one transaction");
     await expectAxeClean(page, "model card SPDX confirmation");
     expect(spdx.writes()).toEqual([]);
@@ -316,6 +319,7 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
 
     await panel(page).getByRole("button", { name: "Withdraw built time" }).click();
     const dialog = page.getByRole("dialog", { name: "Withdraw built time" });
+    await expect(dialog.getByTestId("spdx-withdraw-subject")).toContainText(`golden v2 (evaluation dataset version ${EVAL_DS})`);
     await expect(dialog).toContainText("2026-01-02T03:04:05Z");
     await expect(dialog).toContainText("declared by Blake Admin at 2026-10-01T12:00:05Z");
     await expect(dialog).toContainText("becomes not_producible until a built time is declared again");
@@ -348,6 +352,7 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
     await dialog.getByRole("checkbox", { name: "categorical" }).check();
     await dialog.getByRole("button", { name: "Review" }).click();
     await expect(dialog.getByTestId("spdx-confirm-value")).toHaveText("categorical, text");
+    await expect(dialog.getByTestId("spdx-subject-name")).toHaveText("support-corpus v1");
     await dialog.getByRole("button", { name: "Record value" }).click();
     await expect(dialog).toHaveCount(0);
     expect(spdx.writes()).toEqual([{ method: "PUT", path: `/v1/ai-bom/spdx-fields/training_dataset/${TRAIN_DS}/datasetType`, body: { value: ["categorical", "text"], source: "admin_entered" } }]);

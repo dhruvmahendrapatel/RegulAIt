@@ -16,6 +16,7 @@ import {
   checkSpdxValue,
   isMandatory,
   parseSpdxFieldsResponse,
+  subjectDisplayName,
   refusalSentence,
   spdxFieldPath,
   undeclaredSummary,
@@ -30,7 +31,8 @@ describe("time: UTC, whole seconds", () => {
   it.each([
     "2026-01-31T09:30:00.500Z", // fractional seconds
     "2026-01-31T09:30Z", // no seconds
-    "2026-01-31T09:30:00+01:00", // not UTC: the UI asks for the stored form only
+    "2026-01-31T09:30:00+01:00", // an offset: refused by the gateway too (8ea41e3)
+    "2026-01-31T09:30:00+00:00", // even a zero offset
     "2026-01-31 09:30:00Z",
     "2026-02-30T00:00:00Z", // not a real instant
     "2025-02-29T00:00:00Z",
@@ -145,8 +147,12 @@ describe("refusals never carry the value", () => {
 
 describe("the GET answer is checked before it is rendered", () => {
   const good = { subject: { kind: "model_card", id: "x" }, declarable: ["releaseTime"], current: [], undeclared: ["releaseTime"], history: [], historyLimit: 200 };
-  it("passes a well-formed answer through", () => {
+  it("passes a well-formed answer through, with or without a display name", () => {
     expect(parseSpdxFieldsResponse(good)).toEqual(good);
+    const named = { ...good, subject: { ...good.subject, displayName: "golden v2" } };
+    expect(subjectDisplayName(parseSpdxFieldsResponse(named))).toBe("golden v2");
+    expect(subjectDisplayName(parseSpdxFieldsResponse({ ...good, subject: { ...good.subject, displayName: null } }))).toBeNull();
+    expect(subjectDisplayName(good as never)).toBeNull();
   });
   it.each([
     ["an empty object", {}],
@@ -154,6 +160,8 @@ describe("the GET answer is checked before it is rendered", () => {
     ["an unknown property", { ...good, undeclared: ["licence"] }],
     ["a malformed history row", { ...good, history: [{ seq: 1 }] }],
     ["a missing limit", { ...good, historyLimit: undefined }],
+    ["no subject", { ...good, subject: undefined }],
+    ["a display name that is not text", { ...good, subject: { ...good.subject, displayName: 7 } }],
   ])("refuses %s with a load error, not a render crash", (_name, raw) => {
     expect(() => parseSpdxFieldsResponse(raw)).toThrow("not in the expected shape");
   });

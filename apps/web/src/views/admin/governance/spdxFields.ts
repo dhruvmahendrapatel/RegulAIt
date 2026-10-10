@@ -67,8 +67,8 @@ export const SUBJECT_LABEL: Readonly<Record<SpdxSubjectKind, string>> = {
 
 /** the format hint shown under each input, the same rule the gateway applies */
 export const PROPERTY_HINT: Readonly<Record<SpdxProperty, string>> = {
-  releaseTime: "UTC, whole seconds: YYYY-MM-DDThh:mm:ssZ (for example 2026-01-31T09:30:00Z).",
-  builtTime: "UTC, whole seconds: YYYY-MM-DDThh:mm:ssZ (for example 2026-01-31T09:30:00Z).",
+  releaseTime: "UTC, whole seconds: YYYY-MM-DDThh:mm:ssZ (for example 2026-01-31T09:30:00Z). No offset and no fractional seconds.",
+  builtTime: "UTC, whole seconds: YYYY-MM-DDThh:mm:ssZ (for example 2026-01-31T09:30:00Z). No offset and no fractional seconds.",
   downloadLocation:
     "An https origin only: https://host or https://host:port. A path, query, fragment, user name or password, plain http, an upper-case or non-ASCII host, or the default port written out (:443) is refused, never cut down.",
   packageVersion: `Printable ASCII with no spaces, 1 to ${SPDX_TEXT_MAX_CHARS} characters. No URL, no @, no credential-shaped text.`,
@@ -98,7 +98,8 @@ export interface SpdxDeclarationView {
 }
 
 export interface SpdxFieldsResponse {
-  subject: { kind: SpdxSubjectKind; id: string };
+  /** displayName: the gateway's presentation-scrubbed name of the record ("<model> · <intended use>", "<dataset> v<n>") */
+  subject: { kind: SpdxSubjectKind; id: string; displayName?: string | null };
   declarable: SpdxProperty[];
   current: SpdxDeclarationView[];
   undeclared: SpdxProperty[];
@@ -130,9 +131,14 @@ const isDeclaration = (x: unknown): x is SpdxDeclarationView => {
  */
 export function parseSpdxFieldsResponse(raw: unknown): SpdxFieldsResponse {
   const r = raw as Partial<SpdxFieldsResponse> | null;
+  const subject = r?.subject as Partial<SpdxFieldsResponse["subject"]> | undefined;
   const ok =
     !!r &&
     typeof r === "object" &&
+    !!subject &&
+    typeof subject === "object" &&
+    typeof subject.id === "string" &&
+    (subject.displayName === undefined || subject.displayName === null || typeof subject.displayName === "string") &&
     Array.isArray(r.declarable) && r.declarable.every(isProperty) &&
     Array.isArray(r.undeclared) && r.undeclared.every(isProperty) &&
     Array.isArray(r.current) && r.current.every(isDeclaration) &&
@@ -141,6 +147,12 @@ export function parseSpdxFieldsResponse(raw: unknown): SpdxFieldsResponse {
   if (!ok) throw new Error("The gateway's SPDX fields answer was not in the expected shape, so nothing is shown. Retry, or check the gateway version.");
   return r as SpdxFieldsResponse;
 }
+
+/** the record's name for a confirmation, or null when the gateway gave none (the id is shown instead) */
+export const subjectDisplayName = (data: Pick<SpdxFieldsResponse, "subject">): string | null => {
+  const n = data.subject.displayName;
+  return typeof n === "string" && n.trim() ? n : null;
+};
 
 /** what the banner says is still missing, split by whether it blocks the SPDX rendering */
 export function undeclaredSummary(kind: SpdxSubjectKind, undeclared: readonly SpdxProperty[], pinnedModelVersion?: string | null) {
@@ -174,7 +186,7 @@ const VERSION = /^[!-~]+$/;
 
 /** the fixed sentence for each gateway rule; the property is named by the caller */
 export const RULE_SENTENCE: Readonly<Record<string, string>> = {
-  spdx_time_invalid: "is not a real UTC date-time in whole seconds (YYYY-MM-DDThh:mm:ssZ).",
+  spdx_time_invalid: "is not in the form YYYY-MM-DDThh:mm:ssZ: a real instant in UTC with Z and whole seconds. A minutes-only time, an offset (even +00:00) or fractional seconds is refused, never converted.",
   download_location_invalid: "is not an absolute URL of at most 2,048 characters.",
   download_location_credentials: "carries a user name or password. Only an https origin is recorded.",
   download_location_not_https: "is not https. Only an https origin is recorded; plain http is refused.",

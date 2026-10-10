@@ -40,6 +40,7 @@ import {
   checkSpdxValue,
   isMandatory,
   parseSpdxFieldsResponse,
+  subjectDisplayName,
   refusalSentence,
   spdxFieldPath,
   spdxFieldsPath,
@@ -218,6 +219,19 @@ export function SpdxFieldsView(props: SpdxFieldsViewProps) {
   );
 }
 
+/** the record named for a person; its id stays as secondary text, the only form when the gateway gives no name */
+function SubjectName(props: { kind: SpdxSubjectKind; id: string; name: string | null }) {
+  return props.name ? (
+    <>
+      <strong data-testid="spdx-subject-name">{props.name}</strong> <span className={v.faint}>({SUBJECT_LABEL[props.kind]} <code>{props.id}</code>)</span>
+    </>
+  ) : (
+    <>
+      This {SUBJECT_LABEL[props.kind]} (<code>{props.id}</code>)
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // the refusal live region (always mounted while its dialog is open)
 // ---------------------------------------------------------------------------
@@ -251,6 +265,7 @@ function RefusalRegion(props: { id: string; refusal: Refusal | null }) {
 function SetDialog(props: {
   kind: SpdxSubjectKind;
   subjectId: string;
+  subjectName: string | null;
   property: SpdxProperty;
   current: SpdxDeclarationView | undefined;
   onClose: () => void;
@@ -272,7 +287,6 @@ function SetDialog(props: {
   const summaryRef = useRef<HTMLDListElement>(null);
   const { toast } = useToast();
   const label = PROPERTY_LABEL[property];
-  const subject = SUBJECT_LABEL[kind];
 
   useEffect(() => {
     if (step === "confirm") summaryRef.current?.focus();
@@ -415,7 +429,7 @@ function SetDialog(props: {
             <dl className={s.summary} ref={summaryRef} tabIndex={-1} data-testid="spdx-confirm" aria-label="What will be recorded">
               <dt>Record</dt>
               <dd>
-                This {subject} (<code>{props.subjectId}</code>)
+                <SubjectName kind={kind} id={props.subjectId} name={props.subjectName} />
               </dd>
               <dt>Field</dt>
               <dd>{label}</dd>
@@ -450,6 +464,7 @@ function SetDialog(props: {
 function WithdrawDialog(props: {
   kind: SpdxSubjectKind;
   subjectId: string;
+  subjectName: string | null;
   property: SpdxProperty;
   current: SpdxDeclarationView;
   names: Map<string, string>;
@@ -494,6 +509,9 @@ function WithdrawDialog(props: {
       }
     >
       <div className={v.stack} data-testid="spdx-withdraw-dialog">
+        <p data-testid="spdx-withdraw-subject">
+          Record: <SubjectName kind={kind} id={props.subjectId} name={props.subjectName} />
+        </p>
         <p>
           The current {lower(property)} <code>{valueText(current)}</code> ({SOURCE_LABEL[current.source]}, declared by{" "}
           {actorLabel(current.declaredByUserId, props.names)} at {utcSeconds(current.declaredAt)}) stops being current. A withdrawal
@@ -574,6 +592,7 @@ function AdminSpdxFieldsPanel(props: PanelProps) {
           key={setting}
           kind={props.kind}
           subjectId={props.subjectId}
+          subjectName={fields.data ? subjectDisplayName(fields.data) : null}
           property={setting}
           current={current(setting)}
           onClose={() => setSetting(null)}
@@ -585,6 +604,7 @@ function AdminSpdxFieldsPanel(props: PanelProps) {
           key={withdrawing}
           kind={props.kind}
           subjectId={props.subjectId}
+          subjectName={fields.data ? subjectDisplayName(fields.data) : null}
           property={withdrawing}
           current={current(withdrawing)!}
           names={names}
