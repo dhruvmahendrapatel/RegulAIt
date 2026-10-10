@@ -273,7 +273,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X28 — Batch 5 A: model artifacts in Admission review + engine-scan evidence chip on model cards.** Branch `codex/x28`.
   Status: REASSIGNED to Claude by the owner (10-10), branch `b5-ui-artifacts` — Codex: do not start
 - **X29 — Cross-review of Claude's Batch 5 server slices F/E/P/M/G** (findings `B5X-NN`; deepest on runner-token scope, virtual-key ceiling and project pinning, kill switch, not-clean semantics, egress-test validity, hostile artifact parsing).
-  Status: READY-FOR-REVIEW (b96a2bd5) — available F/E/P/M reviewed on fde6625b; B5X-01 MEDIUM false verified/clean duplicate safetensors fields, independent reference-parser repro;117 gateway+100 runner+28 promptfoo+40 modelscan PASS,9 explicitly skipped; G review awaits publication
+  Status: READY-FOR-REVIEW (b96a2bd5, draft #224) — available F/E/P/M reviewed on fde6625b; B5X-01 MEDIUM false verified/clean duplicate safetensors fields, independent reference-parser repro;117 gateway+100 runner+28 promptfoo+40 modelscan PASS,9 explicitly skipped; G review awaits publication
 
 ### Gemini — demo content and research
 
@@ -320,7 +320,7 @@ facts before anything reaches code.
   California SB 53 + CCPA ADMT rules; Illinois HB 3773; Utah AI Policy Act; UK; Canada; China; South Korea AI
   Basic Act; Japan; Brazil; ISO/IEC 42001 certification. Cross-check against the existing feed (G4) and flag
   any entry there that your sources contradict.
-  Status: READY-FOR-REVIEW (819ea125, draft #219) — R166-21/22/23/24 fixed; original checked sources/statuses retained, blocked rechecks separate, single-SHA reconciliation and citation spacing; no fresh primary-law claim
+  Status: READY-FOR-REVIEW (819ea125, merged #219) — R166-21/22/23/24 fixed; original checked sources/statuses retained, blocked rechecks separate, single-SHA reconciliation and citation spacing; no fresh primary-law claim
 - **G15 — Skill starters** `docs/research/R6-skill-starters.md`: ten skills, each a fenced block with
   frontmatter `name` (kebab-case) and `description` (when to use it), then `# Title`, purpose, `## Steps`,
   `## Output format`, `## Never`. Topics: EU AI Act tier mapping; vendor AI due-diligence questionnaire;
