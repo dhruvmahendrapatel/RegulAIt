@@ -1274,6 +1274,12 @@ export const startEvalRunSchema = z.object({
   judgePanel: judgePanelSchema.optional(),
   /** ADR-0173 batch 2c — judge each judge-backed case this many times (1–5) */
   repetitions: z.number().int().min(1).max(JUDGE_PANEL_LIMITS.maxRepetitions).default(1),
+  /**
+   * ADR-0187 decision 190 — who approves a run of an OFFENSIVE built-in dataset
+   * (the interpreter set). Absent = the org's `infraApproverUserId`; never the
+   * caller. Ignored for every other dataset.
+   */
+  approverUserId: z.string().uuid().optional(),
 });
 
 export const setEvalBaselineSchema = z.object({

@@ -298,6 +298,90 @@ export function auditChainVersionAt(seq: number, v2FromSeq: number | null | unde
   return v2FromSeq != null && seq >= v2FromSeq ? 2 : 1;
 }
 
+/** One row of `audit_chain_versions`, as stored. */
+export interface AuditChainBoundaryRecord {
+  version: number;
+  fromSeq: number;
+}
+
+/**
+ * What the recorded boundaries mean to this build (ADR-0188 decision 19; X35
+ * I7S-02). The ONE interpretation the writer, the verifier and the receipt
+ * sweep share: `v2FromSeq` when every recorded boundary is one this build can
+ * write and verify, or the first boundary it cannot. An unknown version fails
+ * closed everywhere: the writer refuses to append, the verifier reports a
+ * break, the receipt sweep signs nothing.
+ */
+export type AuditChainBoundary =
+  | { supported: true; v2FromSeq: number | null }
+  | { supported: false; version: number; fromSeq: number; detail: string };
+
+/** The boundary versions this build knows (v1 has no boundary row: it is everything before the first one). */
+export const AUDIT_CHAIN_BOUNDARY_VERSIONS: ReadonlyArray<number> = [2];
+
+export function resolveAuditChainBoundary(records: ReadonlyArray<AuditChainBoundaryRecord>): AuditChainBoundary {
+  const sorted = records
+    .map((r) => ({ version: Number(r.version), fromSeq: Number(r.fromSeq) }))
+    .sort((a, b) => a.fromSeq - b.fromSeq);
+  const unknown = sorted.find((r) => !AUDIT_CHAIN_BOUNDARY_VERSIONS.includes(r.version));
+  if (unknown) {
+    return {
+      supported: false,
+      version: unknown.version,
+      fromSeq: unknown.fromSeq,
+      detail: `the chain records serialisation version ${unknown.version} from seq ${unknown.fromSeq}, which this build can neither write nor verify`,
+    };
+  }
+  return { supported: true, v2FromSeq: sorted.find((r) => r.version === 2)?.fromSeq ?? null };
+}
+
+/**
+ * The per-row version checks every reader of the chain applies before it trusts
+ * a row's hash (verifier and receipt sweep alike):
+ *  - `version_mismatch`: the row's stored version is not the one the boundary
+ *    requires at its `seq`;
+ *  - `actor_on_v1` (X35 I7S-01): a v1 row carries actor attribution. A v1 hash
+ *    does not cover the actor columns and the writer never sets them below the
+ *    boundary, so any value there was written around the chain (a raw UPDATE),
+ *    and the row's hash cannot vouch for it. v1 hashes are unchanged by this check.
+ */
+export function auditRowVersionProblem(
+  row: Pick<ChainedAuditRow, "seq" | "chainVersion" | "actorIdentityId" | "delegationGrantId" | "actorChain">,
+  v2FromSeq: number | null,
+): Omit<ChainBreak, "seq"> | null {
+  const version = auditChainVersionAt(row.seq, v2FromSeq);
+  const stored = row.chainVersion ?? null;
+  if (version === 2 ? stored !== 2 : stored !== null) {
+    return {
+      kind: "version_mismatch",
+      expected: version === 2 ? "2" : "null",
+      actual: stored === null ? "null" : String(stored),
+      detail:
+        version === 2
+          ? "this row is at or past the recorded v2 boundary but does not carry chain version 2"
+          : "this row is before any recorded v2 boundary but claims a chain version",
+    };
+  }
+  if (version === 1) {
+    const fields: Array<[string, unknown]> = [
+      ["actor_identity_id", row.actorIdentityId],
+      ["delegation_grant_id", row.delegationGrantId],
+      ["actor_chain", row.actorChain],
+    ];
+    const set = fields.filter(([, v]) => v !== null && v !== undefined).map(([k]) => k);
+    if (set.length > 0) {
+      return {
+        kind: "actor_on_v1",
+        expected: "no actor fields on a v1 row",
+        actual: set.join(","),
+        detail:
+          "this v1 row carries actor attribution its hash does not cover; the writer never sets it before the v2 boundary, so it was written around the chain",
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * `row_hash = SHA-256(prev_hash || content_hash)` — the LINKED value.
  *
@@ -417,7 +501,14 @@ export type ChainBreakKind =
   /** ADR-0188 decision 19: the row's stored serialisation version is not the
    * one the recorded boundary requires at its `seq` (a v2 row claiming v1 or no
    * version, or a v1 row claiming v2). */
-  | "version_mismatch";
+  | "version_mismatch"
+  /** X35 I7S-01: a v1 row (before the recorded v2 boundary) carries an actor
+   * field its v1 hash does not cover, so the attribution was added around the chain. */
+  | "actor_on_v1"
+  /** X35 I7S-02: `audit_chain_versions` records a serialisation version this
+   * build does not know; rows from that boundary on cannot be verified, so the
+   * chain is reported broken there rather than passed. */
+  | "unsupported_chain_version";
 
 export interface ChainBreak {
   seq: number;
@@ -500,25 +591,13 @@ export function verifyChainBatch(
     // 3. CONTENT. An in-place UPDATE of reason/detail/effect lands here, at
     //    exactly the seq that was edited.
     // 3a. VERSION (ADR-0188 decision 19): the boundary decides, and the row's
-    //     own stored version must agree with it — v2 rows carry 2, v1 rows none.
-    const version = auditChainVersionAt(row.seq, v2FromSeq);
-    const stored = row.chainVersion ?? null;
-    if (version === 2 ? stored !== 2 : stored !== null) {
-      return {
-        break: {
-          seq: row.seq,
-          kind: "version_mismatch",
-          expected: version === 2 ? "2" : "null",
-          actual: stored === null ? "null" : String(stored),
-          detail:
-            version === 2
-              ? "this row is at or past the recorded v2 boundary but does not carry chain version 2"
-              : "this row is before any recorded v2 boundary but claims a chain version",
-        },
-        expectedSeq,
-        prevRowHash,
-      };
+    //     own stored version must agree with it — v2 rows carry 2, v1 rows none,
+    //     and a v1 row carries no actor fields (X35 I7S-01).
+    const problem = auditRowVersionProblem(row, v2FromSeq);
+    if (problem) {
+      return { break: { seq: row.seq, ...problem }, expectedSeq, prevRowHash };
     }
+    const version = auditChainVersionAt(row.seq, v2FromSeq);
     const recomputedContent = auditContentHashFor(row, version);
     if (recomputedContent !== row.contentHash) {
       return {

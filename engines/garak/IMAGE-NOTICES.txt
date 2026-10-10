@@ -1,0 +1,142 @@
+RegulAIt garak engine image — third-party data notices
+=======================================================
+
+Shipped in the image at /opt/garak/NOTICES.txt (ADR-0187 decision 197). The software licences of the
+Python closure are in engines/garak/THIRD_PARTY.md and in each distribution's own dist-info. This file
+carries the attribution, permission and use-restriction notices for the DATA the image ships or that the
+engine is admitted to use, as the owner required on 2026-10-10 (ADR-0187 open questions 20 and 22).
+
+
+1. Data bundled in garak 0.17.0 (PyPI wheel, Apache-2.0), shipped unmodified
+---------------------------------------------------------------------------
+
+1a. garak/data/badchars/intentional.txt — Unicode Security Mechanisms (UTS #39) data, version 17.0.0,
+    "© 2025 Unicode®, Inc." Used by the badchars.BadCharacters probe. Licence: Unicode License v3
+    (SPDX Unicode-3.0). Its copyright and permission notice follows, as that licence requires:
+
+    UNICODE LICENSE V3
+
+    COPYRIGHT AND PERMISSION NOTICE
+
+    Copyright © 1991-2026 Unicode, Inc.
+
+    NOTICE TO USER: Carefully read the following legal agreement. BY
+    DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+    SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+    TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+    DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of data files and any associated documentation (the "Data Files") or
+    software and any associated documentation (the "Software") to deal in the
+    Data Files or Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, and/or sell
+    copies of the Data Files or Software, and to permit persons to whom the
+    Data Files or Software are furnished to do so, provided that either (a)
+    this copyright and permission notice appear with all copies of the Data
+    Files or Software, or (b) this copyright and permission notice appear in
+    associated Documentation.
+
+    THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+    KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+    THIRD PARTY RIGHTS.
+
+    IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+    BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+    OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+    WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+    FILES OR SOFTWARE.
+
+    Except as contained in this notice, the name of a copyright holder shall
+    not be used in advertising or otherwise to promote the sale, use or other
+    dealings in these Data Files or Software without prior written
+    authorization of the copyright holder.
+
+1b. garak/data/ldnoobw-en.txt — "List of Dirty, Naughty, Obscene, and Otherwise Bad Words" (English),
+    by the LDNOOBW project contributors (github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words),
+    licensed under the Creative Commons Attribution 4.0 International licence (CC-BY-4.0,
+    https://creativecommons.org/licenses/by/4.0/). Shipped as garak ships it; no changes were made.
+    It is read only by garak's unsafe_content.LDNOOBW detector, which no probe this build plans uses.
+
+1c. Inline payloads in garak's own Apache-2.0 code that garak reproduces from named third-party posts
+    (the doctor, grandma, goodside and glitch probe modules). Their sources are those cited in each
+    module's documentation in the garak wheel; they are shipped unmodified as part of garak's code.
+
+1d. The two unverified word lists garak bundles (garak/data/profanity_en.csv and
+    garak/data/ofcom-potentially-offensive.txt) are NOT shipped: the build deletes them (owner,
+    2026-10-10, open question 26).
+
+
+2. Hugging Face Hub assets pre-seeded in the image (/opt/garak/hf), at pinned commits
+------------------------------------------------------------------------------------
+
+Each was downloaded at the commit below, its licence read from its card at that commit, and every file
+pinned by sha256 (engines/garak/hf-preseed.json). They are shipped unmodified.
+
+  garak-llm/refutation_detector_distilbert        906ac60cba379abc1ad1ed328acebeb17357adac  Apache-2.0
+  garak-llm/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli
+                                                  75044664e962c6237d48ec4d72fa189fb8723fdc  MIT
+      (the card names its upstream: huggingface.co/ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli)
+  garak-llm/pypi-20241031 (dataset)               d0cb6954a12ebe3e383e9946ab2685efa23130fa  Apache-2.0
+  garak-llm/npm-20241031 (dataset)                98e02cd0a2d568a8b36300431aefba21550a9d34  Apache-2.0
+  garak-llm/rubygems-20241031 (dataset)           51ab0238f9c16b5c31ecfdf935da9fd5abf74647  Apache-2.0
+  garak-llm/dart-20250811 (dataset)               f50076de413a4f660d65b398096fae750b35d53b  Apache-2.0
+  garak-llm/perl-20250811 (dataset)               2b41fd08111f283b03d00544121ba438c769db22  Apache-2.0
+  garak-llm/raku-20250811 (dataset)               e2b0b34ad3cb30e6c62076f4cfeb605c94f3a809  Apache-2.0
+  garak-llm/drh-System-Prompt-processed (dataset) 26bb2b284b0380268bc74fe51b1c5eeaccb02242  Apache-2.0
+      (garak credits its source as danielrosehill/System-Prompt-Library-030825)
+
+The Apache License 2.0 text is at https://www.apache.org/licenses/LICENSE-2.0 and in garak's own
+dist-info (garak-0.17.0.dist-info/licenses/LICENSE). The MIT licence: Permission is hereby granted, free
+of charge, to any person obtaining a copy of this software and associated documentation files, to deal
+in the Software without restriction, subject to the condition that the copyright notice and this
+permission notice be included in all copies or substantial portions of the Software; THE SOFTWARE IS
+PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+
+3. Admitted by the owner (2026-10-10) but NOT shipped in this image
+-------------------------------------------------------------------
+
+3a. garak-llm/roberta_toxicity_classifier @ fb7e9d615fc8c59d2e70466a831ed70d6f6f895a — the toxicity
+    classifier garak's unsafe_content.ToxicCommentModel detector loads (a backup of
+    s-nlp/roberta_toxicity_classifier). Licence: CreativeML Open RAIL++-M. It is not pre-seeded in this
+    image, so the probes that need it are not run. Its use restrictions bind ANY use of the model with
+    this engine, and are reproduced here as the owner required (Attachment A of the CreativeML Open
+    RAIL++-M License dated July 26, 2023):
+
+    Use Restrictions
+    You agree not to use the Model or Derivatives of the Model:
+    - In any way that violates any applicable national, federal, state, local or international law or
+      regulation;
+    - For the purpose of exploiting, harming or attempting to exploit or harm minors in any way;
+    - To generate or disseminate verifiably false information and/or content with the purpose of harming
+      others;
+    - To generate or disseminate personal identifiable information that can be used to harm an individual;
+    - To defame, disparage or otherwise harass others;
+    - For fully automated decision making that adversely impacts an individual's legal rights or otherwise
+      creates or modifies a binding, enforceable obligation;
+    - For any use intended to or which has the effect of discriminating against or harming individuals or
+      groups based on online or offline social behavior or known or predicted personal or personality
+      characteristics;
+    - To exploit any of the vulnerabilities of a specific group of persons based on their age, social,
+      physical or mental characteristics, in order to materially distort the behavior of a person
+      pertaining to that group in a manner that causes or is likely to cause that person or another
+      person physical or psychological harm;
+    - For any use intended to or which has the effect of discriminating against individuals or groups
+      based on legally protected characteristics or categories;
+    - To provide medical advice and medical results interpretation;
+    - To generate or disseminate information for the purpose to be used for administration of justice,
+      law enforcement, immigration or asylum processes, such as predicting an individual will commit
+      fraud/crime commitment (e.g. by text profiling, drawing causal relationships between assertions
+      made in documents, indiscriminate and arbitrarily-targeted use).
+
+    The licence also requires that these restrictions be passed on to anyone the model or a derivative
+    is distributed to, and that every user of the model comply with them (its paragraph 5).
+
+3b. garak-llm/tm-system_prompt (dataset) @ 005c0854 — the second system-prompt source garak's
+    sysprompt_extraction probe names (garak credits teilomillet/system_prompt). Licence: CC-BY-4.0
+    (https://creativecommons.org/licenses/by/4.0/). Not pre-seeded; this build configures the probe with
+    the pre-seeded Apache-2.0 dataset only. If it is ever shipped, credit "teilomillet/system_prompt,
+    CC-BY-4.0" with an indication of any changes.

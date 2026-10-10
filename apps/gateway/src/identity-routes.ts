@@ -18,7 +18,8 @@
  *   POST /v1/delegations/proofs             a one-use delegation proof (S5)
  * Admin (every write also needs an `identity_manage` step-up and is audited):
  *   /v1/workload-identities[...]            identities, credentials, own grants (S6 UI)
- *   /v1/delegation-grants[...]              list, inspect, cascade-revoke (S6 UI)
+ *   /v1/delegation-grants[...]              list (a run's tree with ?runId=), inspect, cascade-revoke (S6 UI)
+ *   /v1/identity/picker-sources             the options the identity forms offer (S6 UI)
  *   /v1/identity/signing-keys[...]          issuer key list, rotate, revoke (S3)
  *
  * The routes are written out literally (not looped over IDENTITY_ROUTES) so the
@@ -49,6 +50,8 @@ export function registerIdentityRoutes(app: FastifyInstance, _db: Db): void {
   app.get("/v1/workload-identities/:identityId/grants", notBuilt);
   app.put("/v1/workload-identities/:identityId/grants", notBuilt);
   app.get("/v1/workload-identities/:identityId/grant-proposals", notBuilt);
+  // admin: what the identity forms may offer (sponsors, subjects, environments, grant targets)
+  app.get("/v1/identity/picker-sources", notBuilt);
   // admin: delegation grants
   app.get("/v1/delegation-grants", notBuilt);
   app.get("/v1/delegation-grants/:grantId", notBuilt);

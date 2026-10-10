@@ -2857,7 +2857,12 @@ export {
   AUDIT_LEGACY_DISCLOSURE,
   AUDIT_PAYLOAD_VERSION,
   AUDIT_PAYLOAD_VERSION_V2,
+  AUDIT_CHAIN_BOUNDARY_VERSIONS,
   auditChainVersionAt,
+  auditRowVersionProblem,
+  resolveAuditChainBoundary,
+  type AuditChainBoundary,
+  type AuditChainBoundaryRecord,
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
@@ -4619,3 +4624,6 @@ export { vendoredMcpFindings } from "./detection-content/mcp.js";
 
 // ADR-0186 R: public offline receipt-verification seam.
 export * from "./receipts/verify.js";
+
+// ADR-0187 decisions 185–192: the built-in CyberSecEval eval datasets (pure: pins, mapping, digests).
+export * from "./eval-datasets/cyberseceval.js";
