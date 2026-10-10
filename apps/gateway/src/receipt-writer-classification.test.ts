@@ -23,10 +23,21 @@ it("every gateway audit writer capable of receipt object types explicitly classi
  for(const file of files){const source=program.getSourceFile(file)!;function visit(node:ts.Node){
   if(ts.isCallExpression(node)&&node.expression.getText(source).replace(/\s+/g,"").endsWith("insert(auditLog).values")){
    for(const arg of node.arguments){if(!ts.isObjectLiteralExpression(arg))continue;
-    const property=checker.getPropertyOfType(checker.getTypeAtLocation(arg),"objectType");
-    const type=property&&checker.getTypeOfSymbolAtLocation(property,arg);
+    // Type only the `objectType` initializer, not the whole literal: typing the literal makes the
+    // checker resolve it against drizzle's `values()` overloads, ~90% of this test's cost (measured
+    // 18.5 s vs 1.5 s over 489 writers, identical eligibility at every site). A literal with a spread
+    // can take objectType from the spread, so it keeps the whole-literal form.
+    const explicit=arg.properties.find(p=>p.name?.getText(source)==="objectType");
+    let present:boolean,type:ts.Type|undefined;
+    if(arg.properties.some(ts.isSpreadAssignment)){
+     const property=checker.getPropertyOfType(checker.getTypeAtLocation(arg),"objectType");
+     present=!!property;type=property&&checker.getTypeOfSymbolAtLocation(property,arg);
+    }else{
+     present=!!explicit;
+     type=explicit&&checker.getTypeAtLocation(ts.isPropertyAssignment(explicit)?explicit.initializer:explicit.name!);
+    }
     const members=type?.isUnion()?type.types:type?[type]:[];
-    const eligible=!property||members.some(t=>t.isStringLiteral()&&["agent","mcp_tool","connector","approval"].includes(t.value));
+    const eligible=!present||members.some(t=>t.isStringLiteral()&&["agent","mcp_tool","connector","approval"].includes(t.value));
     if(!eligible)continue;
     const detail=arg.properties.find(p=>p.name?.getText(source)==="detail");
     const text=detail?.getText(source)??"";

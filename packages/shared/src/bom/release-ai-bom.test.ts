@@ -28,6 +28,9 @@ import {
   AiDevStackError,
   AI_BOM_INSTALL_SUBJECT_ID,
   buildAiBom,
+  renderAiBomCycloneDx,
+  renderAiBomSpdx,
+  spdxInexpressible,
   buildReleaseSbomIdentity,
   checkReleaseSbomBytes,
   cycloneDxBomLink,
@@ -196,7 +199,16 @@ describe("B7 install-scope rendering", () => {
     expect(doc.formulation?.[0]?.components.map((c) => c.name)).toEqual(ids);
     expect(doc.components ?? []).toEqual([]);
     for (const id of ids) expect(b.gaps).toContainEqual({ ref: `dev-tool:${id}`, field: "version", reason: "dev_stack_version_not_recorded" });
+    // B5 x B7 (R3): SPDX cannot express formulation or BOM-Links, so it is recorded as not producible, never half-rendered
     expect(b.renderings.map((r) => r.format)).toEqual(["cyclonedx-1.7"]);
+    expect(b.body.renderings["spdx-3.0.1"]).toEqual({ status: "not_producible", missing: ["formulation", "bomLinkExternalReferences"] });
+    expect(built({ sboms: null }).build.body.renderings["spdx-3.0.1"]).toEqual({ status: "not_producible", missing: ["formulation"] });
+  });
+  it("the SPDX renderer refuses release content rather than dropping it (R3, B5's never-silently-dropped rule)", () => {
+    const b = built().build;
+    const cdx = renderAiBomCycloneDx(b.records, { ...installMeta, id: b.body.snapshot.id }, "1.7");
+    expect(() => renderAiBomSpdx(b.records, { ...installMeta, id: b.body.snapshot.id }, cdx)).toThrow(/CycloneDX-only content/);
+    expect(spdxInexpressible({ ...b.records, devStackTools: [], releaseSboms: [] })).toEqual([]);
   });
   it("CANARY: no SBOM content, runner path or secret leaks into the native body or any rendering", () => {
     for (const f of built().files.filter((x) => x.name.startsWith("ai-bom."))) {

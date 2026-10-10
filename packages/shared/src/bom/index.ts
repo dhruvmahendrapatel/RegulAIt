@@ -14,3 +14,6 @@ export * from "./release-switch.js";
 export * from "./ai-dev-stack.js";
 export * from "./release-sbom-identity.js";
 export * from "./release-ai-bom.js";
+// slice B5: the SPDX 3.0.1 renderer and its offline validator
+export * from "./ai-bom-spdx.js";
+export * from "./ai-bom-spdx-schema.js";

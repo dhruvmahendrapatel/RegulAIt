@@ -147,7 +147,8 @@ of AI tools in our development stack (`security/ai-dev-stack.json`), reads the R
 writes the release SBOM identity file (`regulait.release-sbom-identity.v1`: serial number, version, SHA-256 and kind of
 the two SBOMs, the signed image digest and the commit, derived from the SBOM bytes themselves) and the install-scope AI
 BOM, which cites both SBOMs by CycloneDX BOM-Link (`urn:cdx:<serial>/<version>` plus the SHA-256) and lists the
-dev-stack tools as `formulation`. `sign` (`id-token: write` only, job-gated on the switch) runs nothing but the pinned
+dev-stack tools as `formulation`. SPDX 3.0.1 can express neither, so the signed body records SPDX as
+`not_producible` (`formulation`, `bomLinkExternalReferences`; ADR-0189 R3) rather than a file that silently omits them. `sign` (`id-token: write` only, job-gated on the switch) runs nothing but the pinned
 cosign: it signs every file keylessly and verifies it against this workflow's identity, the GitHub OIDC issuer and the
 workflow commit (`--certificate-github-workflow-sha`), then keeps them as the `release-ai-bom` artifact (90 days).
 
