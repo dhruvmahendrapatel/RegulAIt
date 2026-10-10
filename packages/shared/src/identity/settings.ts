@@ -25,7 +25,14 @@ export const IDENTITY_SETTING_LIMITS = {
   delegationMaxDepth: { min: 0, max: 8 },
   /** the longest a registered workload key or certificate is accepted, in days (OWNER DECISION 7: at most 90) */
   workloadKeyMaxAgeDays: { min: 1, max: 90 },
+  /** S5 review item 6 (migration 0188): the cap a root grant gets when the person names none, in micro-dollars (0 = none) */
+  delegationRootDefaultCapMicros: { min: 0, max: 1_000_000_000_000 },
+  /** S5 review item 6 (migration 0188): the longest a root delegation grant lives, in seconds */
+  delegationRootMaxLifetimeSeconds: { min: 60, max: 86_400 },
 } as const;
+
+/** a root grant's lifetime when the person names none: 15 minutes (S5 review item 6), never above the org maximum */
+export const DEFAULT_ROOT_GRANT_LIFETIME_SECONDS = 900;
 
 /** THE STRICT DEFAULTS. The column defaults of migration 0180 are these values. */
 export const IDENTITY_STRICT_DEFAULTS = Object.freeze({
@@ -35,6 +42,10 @@ export const IDENTITY_STRICT_DEFAULTS = Object.freeze({
   workloadClientAuthMethods: [...WORKLOAD_CLIENT_AUTH_METHODS] as WorkloadClientAuthMethod[],
   dpopNonceRequired: true as boolean,
   workloadKeyMaxAgeDays: 90 as number,
+  // S5 security review item 6 (migration 0188): a root grant is capped and short-lived unless an admin relaxes it
+  delegationUncappedRootAllowed: false as boolean,
+  delegationRootDefaultCapMicros: 0 as number,
+  delegationRootMaxLifetimeSeconds: 900 as number,
 });
 export type IdentitySettings = {
   -readonly [K in keyof typeof IDENTITY_STRICT_DEFAULTS]: (typeof IDENTITY_STRICT_DEFAULTS)[K];
@@ -50,6 +61,9 @@ export const IDENTITY_SETTING_COLUMNS: Readonly<Record<IdentitySettingKey, strin
   workloadClientAuthMethods: "workload_client_auth_methods",
   dpopNonceRequired: "dpop_nonce_required",
   workloadKeyMaxAgeDays: "workload_key_max_age_days",
+  delegationUncappedRootAllowed: "delegation_uncapped_root_allowed",
+  delegationRootDefaultCapMicros: "delegation_root_default_cap_micros",
+  delegationRootMaxLifetimeSeconds: "delegation_root_max_lifetime_seconds",
 };
 
 /** What the strict default does, and what an admin gives up by relaxing it. */
@@ -94,11 +108,27 @@ export const IDENTITY_SETTING_COPY: Readonly<Record<IdentitySettingKey, { label:
     strict: "90 days: a registered workload key or certificate is refused 90 days after it was added.",
     relaxed: "A limit you shortened, set longer again (never past 90 days), keeps keys valid for longer.",
   },
+  delegationUncappedRootAllowed: {
+    label: "Allow delegations with no spending cap",
+    strict: "Off: every delegation a person gives an agent has a spending cap; one with no cap is refused.",
+    relaxed: "On: a person may delegate to an agent with no cap of its own; only their own budgets still apply.",
+  },
+  delegationRootDefaultCapMicros: {
+    label: "Default delegation spending cap (micro-dollars)",
+    strict: "None: a person must name a cap each time they delegate to an agent.",
+    relaxed: "A default cap is applied when a person names none, so a delegation can carry spending nobody chose for it.",
+  },
+  delegationRootMaxLifetimeSeconds: {
+    label: "Longest delegation lifetime (seconds)",
+    strict: "900 seconds: a delegation a person gives an agent ends after at most 15 minutes, its default too.",
+    relaxed: "A longer limit (up to 24 hours) lets an agent keep acting for a person for longer after they delegated.",
+  },
 };
 
 /**
  * Is `value` a RELAXATION of the strict default for `key`? Sponsor-only mode,
- * a longer token lifetime, a deeper chain and the nonce off are. The auth
+ * a longer token lifetime, a deeper chain, the nonce off, uncapped roots, a
+ * default root cap and a longer root lifetime are. The auth
  * method list and the key age cannot be looser than their defaults (the
  * default is already the widest list and the longest age); only a change
  * against a stricter STORED value is (see `identitySettingLooser`).
@@ -109,6 +139,8 @@ export function identitySettingRelaxed<K extends IdentitySettingKey>(key: K, val
       return value !== IDENTITY_STRICT_DEFAULTS.agentEntitlementMode;
     case "dpopNonceRequired":
       return value !== true;
+    case "delegationUncappedRootAllowed":
+      return value === true;
     case "workloadClientAuthMethods":
     case "workloadKeyMaxAgeDays":
       return false;
@@ -124,6 +156,8 @@ export function identitySettingLooser(key: IdentitySettingKey, value: unknown, s
       return stored === "own_grants" && value === "sponsor_only";
     case "dpopNonceRequired":
       return stored === true && value === false;
+    case "delegationUncappedRootAllowed":
+      return stored === false && value === true;
     case "workloadClientAuthMethods": {
       // a PERMISSION list: any method not stored now is looser
       const before = new Set(Array.isArray(stored) ? stored.map(String) : []);
@@ -156,4 +190,10 @@ export const identityOrgSettingsFields = {
   dpopNonceRequired: z.boolean().optional(),
   /** strict 90 (the ceiling); shorter tightens it */
   workloadKeyMaxAgeDays: boundedInt(IDENTITY_SETTING_LIMITS.workloadKeyMaxAgeDays).optional(),
+  /** strict false; true relaxes it (a root grant with no cap) */
+  delegationUncappedRootAllowed: z.boolean().optional(),
+  /** strict 0 (none: the person names a cap); any default, or a larger one, relaxes it */
+  delegationRootDefaultCapMicros: boundedInt(IDENTITY_SETTING_LIMITS.delegationRootDefaultCapMicros).optional(),
+  /** strict 900; longer, up to 86400, relaxes it */
+  delegationRootMaxLifetimeSeconds: boundedInt(IDENTITY_SETTING_LIMITS.delegationRootMaxLifetimeSeconds).optional(),
 } as const;

@@ -27,6 +27,7 @@ import { WEB_UI_ROUTES } from "./web-serving.js";
 import {
   ENGINE_ENROLLMENT_ROUTES,
   ENGINE_RUNNER_ROUTES,
+  EXECUTOR_CHANNEL_ROUTES,
   IDENTITY_JWKS_PATH,
   OAUTH_INTROSPECTION_PATH,
   OAUTH_REVOCATION_PATH,
@@ -137,6 +138,11 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // /admin above — the browser hits it before it has any credential; every
   // API call the page makes still authenticates normally.
   ...WEB_UI_ROUTES,
+  // ADR-0190 I3 — the executor channel: no RegulAIt credential, authenticated
+  // IN-ROUTE on a one-use proof under the executor's registered ADR-0188 key
+  // (executor-channel-auth.ts), like the token endpoint above. A request
+  // without a valid proof is a 401 before any handler runs.
+  ...EXECUTOR_CHANNEL_ROUTES.map((r) => r.split(" ")[1]!),
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -758,6 +764,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // admits only a session or an MFA-qualified API key, never the bootstrap
   // token or a virtual key). Every other identity route stays ADMIN-ONLY.
   "POST /v1/delegations/proofs",
+  // ADR-0190 I3 — the executor channel (auth-exempt above too; in-route proof)
+  ...EXECUTOR_CHANNEL_ROUTES,
 ]);
 
 /**

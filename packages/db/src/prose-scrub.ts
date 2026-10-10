@@ -303,11 +303,17 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  *   only by migration SQL (no application writer, so nothing an operator
  *   typed), and held only until `runMigrations` drains it into
  *   `audit_log.reason` through the chained insert, which ADR-0099 scrubs.
+ * - `execution_offers.decline_reason` — ADR-0190 I3 (migration 0187): a DB
+ *   CHECK limits it to the five decline codes (`attestation_stale`,
+ *   `class_below_required`, `capacity`, `quarantined`, `profile_unknown`),
+ *   and the channel route accepts only that enum. A credential cannot appear
+ *   in a five-member enum.
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
   "delegation_grants.revoked_reason",
   "engine_run_items.not_run_reason",
+  "execution_offers.decline_reason",
   "mcp_registry_entries.conflict_reason",
   "migration_audit_outbox.reason",
   "risk_acceptances.compensating_controls",
