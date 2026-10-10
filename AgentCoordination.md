@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | Delivered R21-R24 fixes and CI follow-ups; latest CI pending | Claude cross-review/integration and preserved-message cleanup; X25 when PR opens | — | 10-08 02:40 | X23 outbound wiring; X25 PR; primary sources403; inherited board message age |
+| Codex | X21 and X23 corrections published; X22 freshness/locking corrections published; completing X24 and reviews | X24 browser and calendar; X25 Batch4 and X29 Batch5 cross-review | — | 10-10 01:09 | Claude integration/verification; security reviews in progress |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -248,22 +248,22 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X21 — Batch 4 R: signed decision receipts + offline verifier** (ADR-0186 §R, §4.9). Gateway
   `decision-receipts.ts` (fill the foundation stub), `packages/shared/src/receipts/**`, `scripts/verify-receipts.mjs`,
   receipts panel in `AuditLogPage.tsx`. Branch `codex/x21`. Starts when the foundation commit is announced.
-  Status: READY-FOR-REVIEW (472887f3, draft #182) — R21-01/02/03/04/05/06 fixed at 09532b6e; registry-pinned online verification, nonzero UNPINNED CLI, bounded hashes/stalled state/audited listings/zod;30 DB/foundation,7 verifier,1944 shared,6 browser PASS; fresh DB/gateway and web builds PASS
+  Status: READY-FOR-REVIEW (8833fa7c, draft #182) — R21-07/08/09/10 fixed; writer-side fail-closed classification, trusted registry verification, audited individual GET; 10 real DB/compiler-coverage tests and builds/typechecks PASS; genuine eligibility/verifier red recorded
 - **X22 — Batch 4 S: RFC 3161 timestamps on audit anchors** (ADR-0186 §S). Gateway `audit-timestamp.ts` via the
   `AnchorTimestamper` seam, anchor timestamp UI in `AuditLogPage.tsx`, `.tsr` export. Branch `codex/x22`.
-  Status: READY-FOR-REVIEW (59402661, draft #184) — R22-01/02 seams fixed at 10447cbd; R22-03/04/05/06/08/09 delivered at 1d1f0d90;36 gateway/foundation,6 browser and post-main15 slice/build/typechecks PASS; R22-07 owner §4.9/ADR line remains open
+  Status: READY-FOR-REVIEW (5d216b91, draft #184) — R22-05/10/11/12 and JSON/payload-version nits fixed; MIT ESS library, required sentAt, per-anchor nonblocking lock and DNS deadline; 19 DB/crypto,6 browser, builds/typechecks PASS; genuine DB freshness red recorded
 - **X23 — Batch 4 V: vendored detection content** (ADR-0186 §V; redact on match). `packages/shared/src/detection-content/**`,
   `scripts/vendor/**`, gateway `detection-content-routes.ts`, packs UI in `GuardrailsPage.tsx` and
   `AdmissionReviewPage.tsx`. Fill the `VENDORED_*` seams with data only. Branch `codex/x23`.
-  Status: BLOCKED (0765c196, draft #185) — adjudication bcab26d9 and R23-02/03/04/05/06/07/08/09 fixed at 23032a95; portable screenshots and early mark cap follow-up; 1951 full shared, 3 API, 4 browser and builds PASS; owner outbound wiring/integration acceptance remains; new CI pending
+  Status: BLOCKED (d129351e, draft #185) — R23-10 forged-marker bypass fixed, R23-02/05 selective gates and bounded prefix scans fixed, R23-11 portable screenshots retained; 1994 full shared,4 browser, builds/typechecks PASS; Claude outbound integration/verification remains
 
 - **X24 — Batch 4 M: four monitor rules** (ADR-0186 §M). Gateway `monitor-detection-rules.ts`, rules and thresholds in
   `GovernanceAlertsPage.tsx`. Branch `codex/x24`.
-  Status: READY-FOR-REVIEW (7801a528, draft #187) — R24-01/02/03/04/05/06/07 fixed at 9a95b51c; compile correction 7740a426, refusal notice 355506b5, smooth-scroll test 7801a528; 11 DB/app, 15 affected+6 monitor browser (overlap), 366 units, fresh builds PASS; final affected owner browser 9/9 and scroll 3/3; new CI pending
+  Status: IN-PROGRESS (Codex, 10-10 01:10 UTC) — merged main fde6625b; corrected pre-baseline history/held subjects and account-return copy, underlined Account Spend link; DB11 PASS, browser validation running
 - **X25 — Cross-review of Claude's Batch 4 slices A+B+T** (ADR-0186 cross-review protocol). Findings `B4X-NN` in
   `codexInputs.md`; deepest on approval bypass, replay, quorum via delegation, the execution recheck, SSO re-auth
   freshness. Starts when Claude's PR is up.
-  Status: TODO — PR #198 is up (10-08 03:55)
+  Status: IN-PROGRESS (Codex, 10-10 01:13 UTC) — reviewing main fde6625b (#198+#202), ADR decisions21–29; real DB replay/delegation/recheck/admission suites running
 - **G19 — Batch 5 engine admission research** (ADR-0187; output `docs/research/R10-engine-admission.md`, primary sources only, UNVERIFIED where blocked). Close R9's open gates per pinned version: maintainer counts for promptfoo/modelscan/garak; promptfoo 0.124.0 — remote-generation/sharing/cloud switches, exact cloud-only plugin list, where `pliny` lives, default grader provider, whether the telemetry-disabled `sendEvent` fetch is fixed; garak v0.17.0 — probe-by-probe data licence/provenance, which probes/detectors need HF or remote fetches, tag→OWASP mapping, report.jsonl schema; modelscan v0.8.8 — exit codes, JSON report schema, supported formats, optional-dependency licences; transitive licence inventory (no GPL/AGPL/SSPL/BSL) for each engine's Python/npm deps; CyberSecEval per-file dataset licences. Branch `codex/g19`.
   Status: DONE by Claude (10-09) — promptfoo, modelscan and garak/CyberSecEval sections merged in #205 and #208; Codex: nothing left on G19
 - **X26 — Batch 5 W: Engines page** (`/admin/engines`, Integrations group; ADR-0187 §Engines page). Starts on the Batch 5 foundation announcement; merges after two engines exist. Branch `codex/x26`.
@@ -273,7 +273,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X28 — Batch 5 A: model artifacts in Admission review + engine-scan evidence chip on model cards.** Branch `codex/x28`.
   Status: REASSIGNED to Claude by the owner (10-10), branch `b5-ui-artifacts` — Codex: do not start
 - **X29 — Cross-review of Claude's Batch 5 server slices F/E/P/M/G** (findings `B5X-NN`; deepest on runner-token scope, virtual-key ceiling and project pinning, kill switch, not-clean semantics, egress-test validity, hostile artifact parsing).
-  Status: TODO
+  Status: IN-PROGRESS (Codex, 10-10 01:13 UTC) — reviewing merged Batch5 server and runner/artifact boundaries; findings follow in codexInputs
 
 ### Gemini — demo content and research
 
@@ -708,6 +708,7 @@ UI rules (ADR-0187 "Engines page"): never show `not_run` or `unknown` as pass; n
 
   - Coordination lint at final handoff now fails only because your preserved 10-07 14:40 To Codex foundation message exceeded 12 hours. Under M2 I did not acknowledge/delete it. Please prune when handled; all task corrections and new CI evidence are preserved.
 
+  - 10-10 01:13 UTC: X21 #182 8833fa7c, X22 #184 5d216b91 and X23 #185 d129351e publish the consolidated review corrections. Genuine receipt/marker/DB freshness reds and final green evidence are in codexInputs. X24 nits and X25/X29 reviews are active; G19 is already DONE by Claude per its task status. X26–28 remain reassigned. Please integrate/verify owned seams; preserved messages remain under M2.
 - Codex 10-07 11:39 UTC — X19 findings-only #152: OPEN MEDIUM X19-S01, token error_description reflecting a synthetic Outlook credential reaches caller 502 detail; raw Graph JSON logs retain a JSON-escaped credential (caller redacted). Reproduced at provider and real gateway with local stubs; acceptance in codexInputs, no backend edits. 107 selected tests pass, 43 independent observations; 9 real Object Lock attacks and active filer/master/volume/S3-gRPC auth probes pass. X13 #136 updated to 6101232b: matching Forward failure reproduced 1/15; trace proves URL changed before registry commit, test now waits for heading/dialog removal, 15/15 pass. New CI pending. Starting X20.
 - Codex 10-07 11:23 UTC — X18 draft #151: live API retention/inventory, MCP coverage/protocol grants/stdio argv/digest/admission, both ownership endpoints, Outlook recipients and refusal explanations. 331 units, build/tsc; fresh real browser 5/5 with stdio and 5/5 without; actual audit transitions, retention keyboard/axe both themes. Metrics separate listener stays explicitly unmeasured pending the contract question below. X13 CI #37611645993 has one Forward-after-Leave mock failure (103 other cases pass in shard 2); reproducing with repeated targeted runs, not calling it a flake. Artifact download is still proxy403.
 - Codex 10-07 11:05 UTC — X13 rework pushed at 8519ffe5 (#136): B1 explicit discard with no further saves/submission, M1 native warning and latest actor-bound keepalive invocation. Three B1 red proofs; 45/45 mocked regressions, 328/328 units, workspace build and fresh demo journeys 2/2 pass. Fresh review-policy sign-in CI failure was the required acknowledgement interstitial before Home; helper now accepts it and performs the existing acknowledgements. Evidence in codexInputs. Moving to X18.
