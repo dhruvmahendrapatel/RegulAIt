@@ -50,7 +50,8 @@ export interface EngineManifestEntry {
    * PR #205 review round 9 [79]: does this build keep the runner credential out of the engine
    * process's reach (a distinct OS identity, or a separate container)? false = the engine process
    * runs as the runner's user and could read the credential; enabling then needs an explicit,
-   * stepped-up, audited acceptance (ADR-0187 decision 79). No build has it yet (B5-P2 splits it).
+   * stepped-up, audited acceptance (ADR-0187 decision 79). promptfoo's runner/worker split has it
+   * (B5-P2, decisions 170 on); modelscan's scanner split waits for its verified image (decision 104).
    */
   credentialIsolation: boolean;
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
@@ -80,30 +81,38 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
     version: PROMPTFOO_ENGINE_VERSION,
     // round 13 [95]: bump with every build change (version or digest)
-    generation: 1,
+    generation: 2, // B5-P2: 0.123.1 → 0.124.1 (decision 176)
     // B5-P: the image (engines/promptfoo/Dockerfile) has not been built anywhere that could
     // report a real digest, so this stays null and the engine cannot be enabled (secure default)
     imageDigest: null,
     licence: "MIT",
     maintainerCount: null,
-    usageDataEnv: PROMPTFOO_USAGE_DATA_ENV,
+    // the documented switches, plus (B5-P2) the WORKER container's own self-test: the runner reports
+    // REGULAIT_PROMPTFOO_WORKER_ISOLATED true only when the worker's report is fresh, names the
+    // pinned version, reached nothing off the gateway and found no runner credential in reach
+    // (packages/engine-promptfoo/src/worker-selftest.ts; ADR-0187 decisions 170 on)
+    usageDataEnv: { ...PROMPTFOO_USAGE_DATA_ENV, REGULAIT_PROMPTFOO_WORKER_ISOLATED: "1" },
     needsModelAccess: true,
     // PR #205 review round 6 [73]: promptfoo grades with a judge behind the gateway (without one it
     // would fall back to a vendor default, which the config refuses)
     requiresJudge: true,
-    credentialIsolation: false,
+    // B5-P2 (ADR-0187 decisions 170 on): promptfoo runs in its own container (the worker) with no
+    // state volume, no runner or enrolment token and its own PID namespace; it holds only the run's
+    // virtual key. The runner token stays in the runner container, which never runs promptfoo. The
+    // worker proves it at run time (the switch above), so decision 79's gate no longer applies.
+    credentialIsolation: true,
     // every set that runs here, by class; a set not listed is offensive (fail closed)
     sets: promptfooManifestSets(),
     // remote generation is off on every install, not only air-gapped ones: this never runs
     airGappedReducedSet: promptfooReducedSet(),
-    lastVerified: "2026-10-08",
+    lastVerified: "2026-10-10",
     reCheckBy: "2027-01-08",
     unverified: [
       "image digest and signature (the image is not built yet)",
       "maintainer count",
       "transitive licences: 11 npm packages carry permissive licences outside the ADR-0176 list (Artistic-2.0, BlueOak-1.0.0, Python-2.0) and await an owner decision; the base image OS layer is not yet scanned",
-      "runtime behaviour inside the built image (egress test, air-gapped run)",
-      "the disabled-telemetry path still attempts a request in 0.123.1: the image patches it, and network denial stays the control",
+      "runtime behaviour inside the built image (egress test, air-gapped run, and the runner/worker two-container layout of B5-P2 with the worker's own self-test)",
+      "the disabled-telemetry path still attempts a request in 0.124.1 (as in 0.123.1): the image patches it, and network denial stays the control",
     ],
   },
   modelscan: {
