@@ -303,7 +303,10 @@ describe("a judged run, end to end (decisions 188 and 191)", () => {
     expect(seen).toHaveLength(judged.length);
     expect(seen.every((r) => r.includes("Judge question:"))).toBe(true);
     // the case's instructions rode the prompt as context; a held case never reached the model
-    expect(globalThis.__cseCalls).toHaveLength(judged.length);
+    expect(
+      globalThis.__cseCalls.length,
+      JSON.stringify(globalThis.__cseCalls.filter((c) => !c.input.startsWith("CONTEXT:")).map((c) => c.input.slice(0, 80)).slice(0, 5)),
+    ).toBe(judged.length);
     expect(globalThis.__cseCalls.every((c) => c.input.startsWith("CONTEXT:"))).toBe(true);
     const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.objectType, "eval_run"), eq(auditLog.objectId, outcome.run.id)));
     expect(audit!.detail).toMatchObject({ builtinDataset: INJECTION.key, sensitivity: "standard" });

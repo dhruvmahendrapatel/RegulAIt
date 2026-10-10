@@ -94,7 +94,7 @@ import {
   startEvalRunSchema,
   validateScorerConfig,
   promptFromBody,
-  BUILTIN_CONTENT_HOLD_CODES,
+  builtinCaseHeldByPlatform,
   BUILTIN_EVAL_DATASET_PREFIX,
   builtinEvalDatasetByName,
   isReservedEvalDatasetName,
@@ -1196,12 +1196,7 @@ export async function runEvalSuite(
     });
     const latencyMs = Date.now() - started;
 
-    if (
-      !outcome.ok &&
-      builtin.builtin &&
-      builtin.spec.contentBlock === "held" &&
-      (BUILTIN_CONTENT_HOLD_CODES as readonly string[]).includes(outcome.error)
-    ) {
+    if (!outcome.ok && builtin.builtin && builtinCaseHeldByPlatform(builtin.spec, outcome.error)) {
       // ADR-0187 decision 191 — on an ATTACK set a content-layer block means
       // the attack never reached the model: red-team polarity (ADR-0072), the
       // case passes and the row says the PLATFORM held, never that the agent
