@@ -1,0 +1,70 @@
+/* ADR-0189 B9 — the SPDX fields panel on a model card and a dataset version */
+
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.bannerBlocking {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn-soft-text);
+}
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s1);
+}
+
+.typeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--s1);
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--s1) var(--s3);
+  margin: 0;
+}
+
+.summary dt {
+  font-weight: 600;
+}
+
+.summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.refusal {
+  padding: var(--s2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-soft-text);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  justify-content: flex-end;
+}
