@@ -22,6 +22,20 @@ it.each(cases)("B4I-02: $name dense synthetic credentials retain the 400k/100ms 
   expect(best, `400k dense scrub took ${best.toFixed(1)} ms`).toBeLessThan(100);
 });
 
+it("B4I-02 (decision 31): a 400k gate-dense value with no credential retains the 100ms scrub budget", () => {
+  // every former gate literal, each followed by a character that ends the shape: 17 rules used to pass their
+  // gates and each ran one RE2 scan of the remainder (275-360 ms)
+  const input = "sk gl m n secret mysql: redis postgres mongodb xox sig= key- tok_ dapi hf_ r8_ ".repeat(5300);
+  let best = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const start = performance.now();
+    expect(scrubAuditText(input)).toBe(input);
+    best = Math.min(best, performance.now() - start);
+  }
+  expect(input.length).toBe(418_700);
+  expect(best, `400k gate-dense scrub took ${best.toFixed(1)} ms`).toBeLessThan(100);
+});
+
 it("native suffix scanning preserves EOF keys and original left/right boundaries", () => {
   const token = `AIza${"A".repeat(35)}`;
   for (const prefix of ["", "prefix-", "-".repeat(400_000)]) {

@@ -22,12 +22,20 @@ NeMo injection protection. Claude accepted the zero-rule result as a documented
 ADR residual in the 2026-10-07 22:15 coordination review; the five exclusions
 remain visible.
 
-Runtime matching uses RE2 only. A combined RE2 set selects candidates before
-individual matchers locate spans in the original text. Conservative mandatory-fragment gates bypass absent patterns on all text, folding the RE2 ASCII-equivalent Unicode long-s and Kelvin sign before candidate selection. Full-pattern proof inputs are pinned in prefix-proofs.json. Candidate selection retains the gates when more than eight rules are active; reviewed bounded prefix offsets permit scanning the suffix while preserving the preceding boundary. Unbounded prefix offsets retain the full candidate scan. Folding preserves UTF-16 offsets, including dotted capital I; exact matches still use the original text. For patterns proved to
-consume ASCII spaces only via flexible `\s` quantifiers, the candidate scan
-collapses space runs; unproved patterns still scan original text. Candidate
-failures retain every rule. Provider left boundaries are checked separately so
-a credential's preceding delimiter is not redacted.
+Runtime matching uses RE2 only. For the shipped rules, the converter derives a
+scan plan for each rule from RE2's own compiled program (ADR-0186 decision 31):
+a prefilter of up to 24 code-point classes that every match begins with, and the
+rule's maximum match length when the program has no loop. A native scan for the
+prefilter (a fixed sequence of classes: nothing to backtrack) finds every position where a match can
+start; a rule with no such position needs no RE2 work. A bounded rule is matched
+by RE2 in a window at each position (one unit of left context, maximum length
+plus one unit after it), which reproduces the full-text match; an unbounded rule
+gets one RE2 scan from its first position. The derivation is pinned to the
+re2js version whose program layout it reads, and a differential test holds the
+result to a full RE2 scan of every rule. A custom rule list still uses one
+combined RE2 set to select candidates; candidate failures retain every rule.
+Provider left boundaries are checked separately so a credential's preceding
+delimiter is not redacted.
 
 Normalisation follows invisible removal, NFKC, confusable folding, NFD/mark
 removal, NFC and whitespace folding. It also removes discarded Mn marks before

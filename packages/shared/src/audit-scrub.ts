@@ -247,7 +247,8 @@ export function scrubAuditText(text:string):string{
  // opening '[' because '[' is excluded from every marker content field.
  for(let i=0;i<pieces.length;i+=2){
    const surviving=pieces[i]!;let cursor=0;
-   for(const match of knownMarkers(surviving)){
+   // MARKER_PATTERN needs this literal; most dense pieces are short separators without it (decision 31).
+   for(const match of surviving.includes(AUDIT_SCRUB_MARKER_PREFIX)?knownMarkers(surviving):[]){
      out.push(scrubFragment(surviving.slice(cursor,match.index)),match[0]);
      cursor=match.index!+match[0].length;
    }
@@ -317,7 +318,8 @@ function scrubAuditTextPass(text: string, pieces?: string[]): string {
       j += 1;
     }
     const removed = text.slice(start, end);
-    const cacheKey = removed.length <= 256 ? JSON.stringify(rules) : undefined;
+    // A single rule id is its own key (ids never start with '['); several are JSON (decision 31).
+    const cacheKey = removed.length > 256 ? undefined : rules.length === 1 ? rules[0]! : JSON.stringify(rules);
     let replacement = cacheKey === undefined ? undefined : markers.get(cacheKey)?.get(removed);
     if (replacement === undefined) {
       replacement = marker(rules, removed);
