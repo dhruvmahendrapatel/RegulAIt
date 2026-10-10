@@ -22,10 +22,10 @@ describe("release-ai-bom.mjs (ADR-0189 B7)", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/tool\(s\), reviewed/);
   });
-  it("identity and build are inert: exit 0, write nothing, even with missing inputs", () => {
+  it("build is inert: exit 0, writes nothing, even with missing inputs", () => {
     const out = mkdtempSync(path.join(tmpdir(), "b7-release-"));
     for (const cmd of [
-      ["identity", "--commit", "a".repeat(40), "--image-digest", `sha256:${"c".repeat(64)}`, "--workspace", "/nonexistent", "--image", "/nonexistent", "--out", path.join(out, "id.json")],
+      ["build", "--commit", "a".repeat(40), "--image-digest", `sha256:${"c".repeat(64)}`, "--workspace", "/nonexistent", "--image", "/nonexistent", "--out-dir", path.join(out, "bom")],
       ["build", "--commit", "a".repeat(40), "--out-dir", path.join(out, "bom")],
     ]) {
       const r = run(...cmd);
@@ -37,5 +37,6 @@ describe("release-ai-bom.mjs (ADR-0189 B7)", () => {
   });
   it("refuses an unknown command", () => {
     expect(run("publish").status).toBe(2);
+    expect(run("identity").status).toBe(2);
   });
 });

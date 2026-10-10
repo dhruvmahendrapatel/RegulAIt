@@ -8,3 +8,9 @@
 /.github/CODEOWNERS                  @dhruvmahendrapatel
 /scripts/security-*                  @dhruvmahendrapatel
 /Dockerfile                          @dhruvmahendrapatel
+# ADR-0189 B7 (security review F5): the release AI BOM's switch, builder and CLI
+# decide what is signed and published; the workflow is covered by /.github/workflows/ above.
+/scripts/release-ai-bom.mjs                       @dhruvmahendrapatel
+/packages/shared/src/bom/release-switch.ts        @dhruvmahendrapatel
+/packages/shared/src/bom/release-ai-bom.ts        @dhruvmahendrapatel
+/.github/workflows/release-ai-bom.yml             @dhruvmahendrapatel

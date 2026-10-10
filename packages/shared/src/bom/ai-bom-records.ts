@@ -30,7 +30,7 @@
 import { createHash } from "node:crypto";
 import { scrubAuditText } from "../audit-scrub.js";
 import { aiDevStackToolSchema, bomSafeIssue, type AiDevStackTool } from "./ai-dev-stack.js";
-import { RELEASE_SBOM_KINDS, RELEASE_SBOM_VERIFICATION_METHODS, releaseCommitSchema, releaseImageDigestSchema, releaseSbomSerialSchema, type ReleaseSbomRecord } from "./release-sbom-identity.js";
+import { RELEASE_SBOM_IDENTITY_BASES, RELEASE_SBOM_KINDS, releaseCommitSchema, releaseImageDigestSchema, releaseSbomSerialSchema, type ReleaseSbomRecord } from "./release-sbom-identity.js";
 import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, isBomExportEndpoint, isBomSpiffeId, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -335,7 +335,8 @@ export interface AiBomRecordSet {
   memoryStores: MemoryStoreRecord[];
   /**
    * B7 (R9): the release's ADR-0184 SBOMs, ONLY from a signature-verified
-   * identity file (`verifiedReleaseSbomRecords`). Install subject only;
+   * identity file (`verifiedReleaseSbomRecords`) or, in our release build, from
+   * the SBOM bytes themselves (`releaseBuildSbomRecords`). Install subject only;
    * omitted or empty means no BOM-Link and an `incomplete` subject.
    */
   releaseSboms?: ReleaseSbomRecord[];
@@ -394,7 +395,7 @@ const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof RecordOf<K>> } = {
   builderAgents: ["id", "name", "modelAgentId", "ownerUserId", "ownerDisplayName", "workloadIdentity"],
   builderSkills: ["agentId", "skillId", "snapshotName", "snapshotDigest", "snapshotVersion", "snapshotAdmissionState"],
   memoryStores: ["kind", "builderAgentId"],
-  releaseSboms: ["kind", "serialNumber", "version", "sha256", "imageDigest", "releaseCommit", "signatureVerified", "verifiedBy"],
+  releaseSboms: ["kind", "serialNumber", "version", "sha256", "imageDigest", "releaseCommit", "identityBasis"],
   devStackTools: ["id", "category", "description", "deployment", "networkEgress", "repositoryAccess", "dataShared", "outputControl", "governedBy", "introducedOn"],
 };
 const BIAS_FIELDS = ["dimension", "method", "status", "resultRef", "assessedAt"] as const;
@@ -492,7 +493,7 @@ export function sanitiseAiBomEndpoint(url: string, what: string): string {
     return fail(`${what}: endpoint is not an absolute URL`);
   }
   if (u.username || u.password) fail(`${what}: endpoint carries userinfo; snapshot refused (R47)`);
-  if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) fail(`${what}: endpoint scheme ${u.protocol} is not exportable`);
+  if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) fail(`${what}: endpoint scheme is not exportable`); // never the scheme text: it is part of the value
   if (!/^[A-Za-z0-9.-]+$/.test(u.hostname)) fail(`${what}: endpoint host is not exportable as plain ASCII`);
   const origin = `${u.protocol}//${u.host}`;
   // belt and braces: the B1 export shape (R47), checked by its linear splitter
@@ -505,8 +506,24 @@ const SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]{0,31}:/;
 /** an identifier of known shape: no `:`, `/`, `=`, `+`, `@`, `#` (PR #287 decision) */
 const REF_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const isRefId = (v: string) => UUID.test(v) || REF_ID.test(v);
-/** does the text carry a URL (a scheme prefix, or `://` anywhere)? */
-const carriesUrl = (v: string) => SCHEME_PREFIX.test(v) || v.includes("://");
+const WEB_SCHEMES: readonly string[] = ["http:", "https:", "ws:", "wss:"];
+/**
+ * B7 fix round F4: a scheme-prefixed value IS a URL only when `//` follows the
+ * scheme, or the scheme is http, https, ws or wss. `Prod: claims triage` and
+ * `llama3:8b` are text (still credential-guarded), not refused URLs.
+ */
+function isUrlValue(v: string): boolean {
+  const m = SCHEME_PREFIX.exec(v);
+  if (!m) return false;
+  return v.startsWith("//", m[0].length) || WEB_SCHEMES.includes(m[0].toLowerCase());
+}
+/**
+ * B7 fix round F3: a protocol-relative URL (`//host/path?q=`) or a scheme-less
+ * one with a query (`host/path?sig=`). Plain string checks, no regex (linear).
+ */
+const hiddenUrl = (v: string) => v.startsWith("//") || (v.includes("/") && v.includes("?"));
+/** does the text carry a URL (a URL value, or `://` anywhere)? */
+const carriesUrl = (v: string) => isUrlValue(v) || v.includes("://");
 
 /**
  * #280 (4237488597) and the PR #287 decision (ADR-0180): a free-form
@@ -551,7 +568,7 @@ const freeOpt = (what: string, v: unknown, max: number) => {
  * because `name:tag` model ids look like a scheme and must stay exact.
  */
 function guardName(what: string, v: string): string {
-  if (v.includes("://")) fail(`${what}: a URL is refused in a name or identifier`);
+  if (carriesUrl(v) || hiddenUrl(v)) fail(`${what}: a URL is refused in a name or identifier`);
   return guardText(what, v);
 }
 const name = (what: string, v: unknown, max: number) => guardName(what, req(what, v, max));
@@ -565,8 +582,8 @@ const nameOpt = (what: string, v: unknown, max: number) => {
  * text passes the credential guard.
  */
 function urlOrText(what: string, v: string): string {
-  if (SCHEME_PREFIX.test(v)) return sanitiseAiBomEndpoint(v, what);
-  if (v.includes("://")) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
+  if (isUrlValue(v)) return sanitiseAiBomEndpoint(v, what);
+  if (v.includes("://") || hiddenUrl(v)) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
   return guardText(what, v);
 }
 /** a timestamp (date or date-time), checked linearly then parsed */
@@ -678,7 +695,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       id: uuid(`${at}.id`, r.id) as string,
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       wireProtocol: ident(`${at}.wireProtocol`, r.wireProtocol),
-      baseUrl: r.baseUrl === null ? null : sanitiseAiBomEndpoint(req(`${at}.baseUrl`, r.baseUrl, 2048), `custom provider ${String(r.id)}`),
+      baseUrl: r.baseUrl === null ? null : sanitiseAiBomEndpoint(req(`${at}.baseUrl`, r.baseUrl, 2048), `${at}.baseUrl`),
       keySet: bool(`${at}.keySet`, r.keySet),
     })),
     modelCards: each("modelCards", (r, at) => {
@@ -854,7 +871,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
         transport,
         // a stdio server's url is the `stdio:<name>` sentinel, not an endpoint (R12 section 12)
-        url: transport === "stdio" ? null : sanitiseAiBomEndpoint(url, `mcp server ${String(r.id)}`),
+        url: transport === "stdio" ? null : sanitiseAiBomEndpoint(url, `${at}.url`),
         releaseDigest: r.releaseDigest === null ? null : digest(`${at}.releaseDigest`, String(r.releaseDigest).replace(/^sha256:/, "")),
         admissionState: ident(`${at}.admissionState`, r.admissionState),
         admissionManifestDigest: r.admissionManifestDigest === null ? null : digest(`${at}.admissionManifestDigest`, String(r.admissionManifestDigest).replace(/^sha256:/, "")),
@@ -874,7 +891,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       kind: ident(`${at}.kind`, r.kind),
       // a governance-only connector has no base_url: no endpoint at all
-      url: r.url === null ? null : sanitiseAiBomEndpoint(req(`${at}.url`, r.url, 2048), `connector ${String(r.id)}`),
+      url: r.url === null ? null : sanitiseAiBomEndpoint(req(`${at}.url`, r.url, 2048), `${at}.url`),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
       ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       credentialSet: bool(`${at}.credentialSet`, r.credentialSet),
@@ -912,7 +929,6 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     })),
     releaseSboms: each("releaseSboms", (r, at) => {
       const kind = oneOf(`${at}.kind`, r.kind, RELEASE_SBOM_KINDS);
-      if (r.signatureVerified !== true) fail(`${at}.signatureVerified: only a signature-verified release SBOM identity is BOM-linked (R9)`);
       if (!releaseSbomSerialSchema.safeParse(r.serialNumber).success) fail(`${at}.serialNumber: not a urn:uuid serial`);
       if (kind === "image" ? !releaseImageDigestSchema.safeParse(r.imageDigest).success : r.imageDigest !== null) fail(`${at}.imageDigest: set for the image SBOM only, as sha256:<hex>`);
       if (!releaseCommitSchema.safeParse(r.releaseCommit).success) fail(`${at}.releaseCommit: not a commit id`);
@@ -925,8 +941,8 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         sha256: digest(`${at}.sha256`, r.sha256) as string,
         imageDigest: (r.imageDigest ?? null) as string | null,
         releaseCommit: r.releaseCommit as string,
-        signatureVerified: true as const,
-        verifiedBy: oneOf(`${at}.verifiedBy`, r.verifiedBy, RELEASE_SBOM_VERIFICATION_METHODS),
+        // R9: a verified signature (install time) or derived from the SBOM bytes (release build); nothing else
+        identityBasis: oneOf(`${at}.identityBasis`, r.identityBasis, RELEASE_SBOM_IDENTITY_BASES),
       };
     }),
     devStackTools: each("devStackTools", (r, at) => {

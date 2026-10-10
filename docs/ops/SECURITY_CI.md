@@ -133,23 +133,32 @@ different failure, such as a network error, fails the job as inconclusive.
   signed image is `publish-image.yml`'s job (ADR-0184 lists the change it needs);
 - release-key signing of update bundles, which stays the owner's offline ceremony (`infra/release-keys/`, PENDING S3).
 
-### 6a. Our own AI BOM per release (`release-ai-bom` job; ADR-0189 slice B7, amendments R9 and R28)
+### 6a. Our own AI BOM per release (`release-ai-bom.yml`; ADR-0189 slice B7, amendments R9 and R28)
 
-**Inert today.** On a push to `main` the job builds the shared package, validates the reviewed inventory of AI tools in
-our development stack (`security/ai-dev-stack.json`, schema `aiDevStackInventorySchema`), and reads the R17 switch
-`AI_BOM_SNAPSHOTS_RELEASED` (`packages/shared/src/bom/release-switch.ts`, the same constant the gateway's snapshot routes
-read). While it is `false` the job writes one summary line and nothing else: no download, no snapshot, no signature, no
-artifact. Every producing step is gated on `steps.switch.outputs.released == 'true'`, and a shared test fails if one is not.
+**Its own workflow, so its own signing identity.** A keyless certificate names the workflow file, so
+`.github/workflows/release-ai-bom.yml@refs/heads/main` can never produce a signature that verifies as the image signer
+(`security.yml@refs/heads/main`). It runs on `workflow_run` after a successful `Security` run for a push to `main`, and
+reads that run's `sbom-and-image-scan` and `signed-image-digest` artifacts by run id (`actions: read`). The workflow
+file and the checkout are `main`'s own code; no event value is expanded inside `run:`.
 
-**Once the switch flips** (in whichever of B4 and B5 merges second), the job writes the release SBOM identity file
-(`regulait.release-sbom-identity.v1`: serial number, version, SHA-256 and kind of the workspace and image SBOMs above,
-the signed image digest and the commit), signs it keylessly with this workflow's identity and verifies it, then builds
-the install-scope AI BOM (`scripts/release-ai-bom.mjs build`), which cites both SBOMs by CycloneDX BOM-Link
-(`urn:cdx:<serial>/<version>` plus the file's SHA-256) and lists the dev-stack tools as `formulation`. The AI BOM files
-are signed and verified the same way and kept as the `release-ai-bom` artifact (90 days).
+**Two jobs.** `build` (no `id-token`) installs dependencies, builds the shared package, validates the reviewed inventory
+of AI tools in our development stack (`security/ai-dev-stack.json`), reads the R17 switch `AI_BOM_SNAPSHOTS_RELEASED`
+(`packages/shared/src/bom/release-switch.ts`, the constant the gateway's snapshot routes read) and, when it is on,
+writes the release SBOM identity file (`regulait.release-sbom-identity.v1`: serial number, version, SHA-256 and kind of
+the two SBOMs, the signed image digest and the commit, derived from the SBOM bytes themselves) and the install-scope AI
+BOM, which cites both SBOMs by CycloneDX BOM-Link (`urn:cdx:<serial>/<version>` plus the SHA-256) and lists the
+dev-stack tools as `formulation`. `sign` (`id-token: write` only, job-gated on the switch) runs nothing but the pinned
+cosign: it signs every file keylessly and verifies it against this workflow's identity, the GitHub OIDC issuer and the
+workflow commit (`--certificate-github-workflow-sha`), then keeps them as the `release-ai-bom` artifact (90 days).
 
-**Does not prove:** that an install verifies the identity file; the install-time trust root is ADR-0189 owner item 2.
-No release key is involved (`infra/release-keys/` is untouched).
+**Inert today.** While the switch is `false`, `build` writes one summary line after validating the inventory; it
+downloads, builds and uploads nothing, and `sign` does not run. A shared test fails if a producing step is ungated,
+if `build` gains `id-token` or `sign` gains anything but cosign. The switch, the builder, the CLI and the workflow are
+in this workflow's WATCHED list and in `CODEOWNERS`.
+
+**Does not prove:** that an install verifies the identity file; the install-time trust root is ADR-0189 owner item 2,
+which must also pin this workflow's identity and its commit or trigger. No release key is involved
+(`infra/release-keys/` is untouched). The cosign pin is repeated in this workflow's `env`; bump it with security.yml's.
 
 ### 7. Engine images (`engines`, `engine-image` and `engine-sign` jobs; ADR-0187 decision 120)
 

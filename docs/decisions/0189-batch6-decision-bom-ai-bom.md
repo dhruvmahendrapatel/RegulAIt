@@ -961,6 +961,11 @@ R50. **An on-demand snapshot is one writable transaction.** R22's `READ ONLY` lo
 2. **Trust root for the release's SBOM identity file in air-gapped installs** (R9): verify the release's existing
    keyless signature offline against a trusted-root file shipped with the release, or an owner-held release key.
    Recommended: the existing signature with the shipped trusted root, so no new key needs custody.
+   B7 security review (F7, 2026-10-10): whichever trust root is chosen, the install-time `cosign verify-blob` must pin
+   the signing workflow's identity (`.github/workflows/release-ai-bom.yml@refs/heads/main`, a different identity from
+   the image signer) and the OIDC issuer, and must also pin `--certificate-github-workflow-sha` to the release commit or
+   `--certificate-github-workflow-trigger` to `workflow_run`, so a signature from another run of the same workflow
+   file is not accepted.
 
 Owner item 3 (automatic snapshots without a signing key) was decided on 2026-10-10: OWNER DECISION 12 under "Owner decisions".
 

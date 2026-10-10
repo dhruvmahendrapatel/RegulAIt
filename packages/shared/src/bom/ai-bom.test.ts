@@ -574,6 +574,12 @@ describe("security review round (PR #287): free-form references and claims never
 describe("X41: no string field carries a credential or a URL path/query into any output", () => {
   const SECRET = ["sk", `XFIELDCANARY${"q".repeat(20)}`].join("-");
   const URL_CANARY = ["https:", "", "internal.example", "XFIELDPATH", `doc?signature=XFIELDQUERY`].join("/");
+  // B7 fix round: F2 a colon-bearing key-shaped value (a "scheme" an error could echo),
+  // F3 a protocol-relative URL and a scheme-less path with a query
+  const COLON_CANARY = `XFIELDCANARY-sk-${"q".repeat(20)}:x`;
+  const PROTO_RELATIVE = "//internal.example/XFIELDPATH?q=XFIELDQUERY";
+  const SCHEMELESS = "internal.example/XFIELDPATH?sig=XFIELDQUERY";
+  const CANARIES = [SECRET, URL_CANARY, COLON_CANARY, PROTO_RELATIVE, SCHEMELESS];
   const BA_ID = u(40);
   const SK = u(41);
   const rich = (): AiBomRecordSet =>
@@ -603,17 +609,18 @@ describe("X41: no string field carries a credential or a URL path/query into any
       const recs = (base as unknown as Record<string, unknown[] | undefined>)[list] ?? [];
       if (!recs.length) continue;
       for (const p of stringPaths(recs[0], [list, 0])) {
-        for (const canary of [SECRET, URL_CANARY]) {
+        for (const canary of CANARIES) {
           const f = rich();
           setAt(f, p, canary);
-          const label = `${p.join(".")} <- ${canary === SECRET ? "credential" : "url"}`;
+          const label = `${p.join(".")} <- canary ${CANARIES.indexOf(canary)}`;
           cases.push(label);
           let out = "";
           try {
             out = all(buildAiBom(f, meta(), opts));
           } catch (e) {
             const msg = `${(e as Error).message} ${((e as AiBomBuildError).paths ?? []).join(" ")}`;
-            expect(msg, `${label}: a refusal never echoes the value`).not.toMatch(/XFIELD/);
+            // no part of any canary: its marker, its host, its colon tail
+            expect(msg, `${label}: a refusal never echoes the value`).not.toMatch(/XFIELD|internal\.example|qqqq/);
             continue;
           }
           expect(out.includes("XFIELD"), `${label} reached a signed output`).toBe(false);
@@ -623,6 +630,38 @@ describe("X41: no string field carries a credential or a URL path/query into any
     // the record types with string fields were all exercised (a new list must join this test)
     // (B7's install-only lists are exercised in release-ai-bom.test.ts on an install subject)
     expect(new Set(cases.map((c) => c.split(".")[0]))).toEqual(new Set(AI_BOM_RECORD_LISTS.filter((l) => l !== "releaseSboms" && l !== "devStackTools")));
-    expect(cases.length).toBeGreaterThan(150);
+    expect(cases.length).toBeGreaterThan(400);
+  });
+  it("F2: an endpoint with a colon-bearing scheme is refused without echoing it", () => {
+    const f = fixture();
+    f.connectors[0]!.url = `${COLON_CANARY}//host`;
+    refused(() => buildAiBom(f, meta(), opts), /scheme is not exportable|not an absolute URL/);
+    try { buildAiBom(f, meta(), opts); } catch (e) { expect((e as Error).message).not.toMatch(/XFIELD|qqqq/); }
+  });
+  it("F3: protocol-relative and scheme-less URLs are refused in free text and in names", () => {
+    for (const v of [PROTO_RELATIVE, SCHEMELESS]) {
+      const a = fixture();
+      a.agents[0]!.name = v;
+      refused(() => buildAiBom(a, meta(), opts), /URL inside free text/);
+      const b = fixture();
+      b.agents[0]!.model = v;
+      refused(() => buildAiBom(b, meta(), opts), /URL is refused in a name/);
+    }
+  });
+  it("F4: a colon in an ordinary name or model id is text, not a refused URL", () => {
+    const f = fixture();
+    f.useCases[0]!.name = "Prod: claims triage";
+    f.agents[0]!.name = "Prod: triage agent";
+    f.agents[0]!.model = "llama3:8b";
+    f.modelCards[0]!.intendedUse = "Note: summaries only";
+    const out = all(buildAiBom(f, meta(), opts));
+    for (const v of ["Prod: claims triage", "Prod: triage agent", "llama3:8b", "Note: summaries only"]) expect(out).toContain(v);
+    // still a URL when it is one: a web scheme, or `//` after any scheme
+    const g = fixture();
+    g.agents[0]!.name = "https://internal.example/x?y=z";
+    expect(all(buildAiBom(g, meta(), opts))).not.toContain("/x?y=z");
+    const h = fixture();
+    h.agents[0]!.name = "ftp://internal.example/x";
+    refused(() => buildAiBom(h, meta(), opts), /scheme is not exportable/);
   });
 });

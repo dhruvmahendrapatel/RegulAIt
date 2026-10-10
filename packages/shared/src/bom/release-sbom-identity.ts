@@ -31,8 +31,11 @@ export const RELEASE_SBOM_IDENTITY_VERSION = "regulait.release-sbom-identity.v1"
 export const RELEASE_SBOM_KINDS = ["workspace", "image"] as const;
 export type ReleaseSbomKind = (typeof RELEASE_SBOM_KINDS)[number];
 /** how a release SBOM identity's signature was verified before use (owner item 2 picks the install-time trust root) */
-export const RELEASE_SBOM_VERIFICATION_METHODS = ["sigstore_keyless_ci", "release_trust_root"] as const;
+export const RELEASE_SBOM_VERIFICATION_METHODS = ["sigstore_keyless_signature", "release_trust_root_signature"] as const;
 export type ReleaseSbomVerificationMethod = (typeof RELEASE_SBOM_VERIFICATION_METHODS)[number];
+/** why an identity is trusted: a verified signature (install time), or derived from the SBOM bytes (our release build) */
+export const RELEASE_SBOM_IDENTITY_BASES = [...RELEASE_SBOM_VERIFICATION_METHODS, "derived_in_release_build"] as const;
+export type ReleaseSbomIdentityBasis = (typeof RELEASE_SBOM_IDENTITY_BASES)[number];
 /** a release SBOM file larger than this is refused before it is parsed */
 export const RELEASE_SBOM_MAX_BYTES = 256 * 1024 * 1024;
 
@@ -136,7 +139,7 @@ export function cycloneDxBomLink(serialNumber: string, version: number, bomRef?:
   return `urn:cdx:${serialNumber.slice(9)}/${version}${bomRef === undefined ? "" : `#${encodeURIComponent(bomRef)}`}`;
 }
 
-/** one release SBOM as an AI BOM record (install subject only); only a VERIFIED identity yields these */
+/** one release SBOM as an AI BOM record (install subject only) */
 export interface ReleaseSbomRecord {
   kind: ReleaseSbomKind;
   serialNumber: string;
@@ -145,15 +148,27 @@ export interface ReleaseSbomRecord {
   /** the scanned image's digest (image kind only) */
   imageDigest: string | null;
   releaseCommit: string;
-  signatureVerified: true;
-  verifiedBy: ReleaseSbomVerificationMethod;
+  /** why the identity is trusted (R9): its signature verified, or derived from the SBOM bytes in the release build itself */
+  identityBasis: ReleaseSbomIdentityBasis;
 }
 
+const recordsOf = (f: ReleaseSbomIdentity, identityBasis: ReleaseSbomIdentityBasis): ReleaseSbomRecord[] =>
+  f.sboms.map((s) => ({
+    kind: s.kind,
+    serialNumber: s.serialNumber,
+    version: s.version,
+    sha256: s.sha256,
+    imageDigest: s.kind === "image" ? f.imageDigest : null,
+    releaseCommit: f.commit,
+    identityBasis,
+  }));
+
 /**
- * R9: the ONLY way to turn an identity file into AI BOM records. The caller
- * passes the outcome of the signature check (cosign verify-blob against the
- * release's trust root); anything but `{ signatureVerified: true }` is refused,
- * so an unverified file can never be BOM-linked.
+ * R9, INSTALL TIME: the way an installed gateway turns a shipped identity file
+ * into AI BOM records. The caller passes the outcome of the signature check
+ * (cosign verify-blob against the release's trust root, owner item 2);
+ * anything but `{ signatureVerified: true }` is refused, so an unverified file
+ * can never be BOM-linked.
  */
 export function verifiedReleaseSbomRecords(
   identity: unknown,
@@ -161,15 +176,18 @@ export function verifiedReleaseSbomRecords(
 ): ReleaseSbomRecord[] {
   if (verification?.signatureVerified !== true) fail("the identity file's signature was not verified (R9); no BOM-Link is emitted");
   if (!(RELEASE_SBOM_VERIFICATION_METHODS as readonly string[]).includes(verification.method)) fail("unknown verification method");
-  const f = parseReleaseSbomIdentity(identity);
-  return f.sboms.map((s) => ({
-    kind: s.kind,
-    serialNumber: s.serialNumber,
-    version: s.version,
-    sha256: s.sha256,
-    imageDigest: s.kind === "image" ? f.imageDigest : null,
-    releaseCommit: f.commit,
-    signatureVerified: true as const,
-    verifiedBy: verification.method,
-  }));
+  return recordsOf(parseReleaseSbomIdentity(identity), verification.method);
+}
+
+/**
+ * RELEASE BUILD: our own release's AI BOM is built in the same pipeline that
+ * holds the SBOM files, so the identity is DERIVED here from their exact bytes
+ * (no signature is needed to trust a hash this code just computed). The
+ * identity file and the AI BOM are then signed together by the release
+ * workflow's separate, cosign-only signing job.
+ */
+export function releaseBuildSbomRecords(input: { commit: string; imageDigest: string; workspace: Uint8Array; image: Uint8Array }): { identity: ReleaseSbomIdentity; records: ReleaseSbomRecord[] } {
+  const identity = buildReleaseSbomIdentity(input);
+  checkReleaseSbomBytes(identity, { workspace: input.workspace, image: input.image });
+  return { identity, records: recordsOf(identity, "derived_in_release_build") };
 }

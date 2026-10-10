@@ -227,7 +227,7 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
       root.externalReferences = sboms.map((x) => ({
         type: "bom",
         url: cycloneDxBomLink(x.serialNumber, x.version),
-        comment: `ADR-0184 ${x.kind} SBOM of this release (identity signature verified: ${x.verifiedBy})`,
+        comment: `ADR-0184 ${x.kind} SBOM of this release (identity basis: ${x.identityBasis})`,
         hashes: [{ alg: "SHA-256", content: x.sha256 }],
       }));
       const r = root as { properties?: Obj[] };

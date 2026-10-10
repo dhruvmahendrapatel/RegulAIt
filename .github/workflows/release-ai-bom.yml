@@ -1,0 +1,175 @@
+name: Release AI BOM
+
+# ADR-0189 slice B7 (amendments R9, R28): our own install-scope AI BOM per
+# release, BOM-linked (CycloneDX BOM-Link) to the workspace and image SBOMs that
+# ADR-0184's `security.yml` wrote for the same commit. What it proves and what it
+# does not: docs/ops/SECURITY_CI.md §6a.
+#
+# WHY A SEPARATE WORKFLOW (B7 security review F1): a keyless cosign certificate
+# names the WORKFLOW FILE. This file signs as
+# `.github/workflows/release-ai-bom.yml@refs/heads/main`, so nothing here can
+# produce a signature that verifies as the image signer
+# (`security.yml@refs/heads/main`), and the image verify step pins that identity.
+#
+# WHY TWO JOBS: `build` installs dependencies and runs our code, so it gets NO
+# `id-token`. `sign` holds `id-token: write` and runs only the pinned cosign
+# binary over the files `build` produced: no checkout, no pnpm, no node.
+#
+# HOW IT GETS ITS INPUTS: `workflow_run` on a successful `Security` run for a
+# push to main. That run's artifacts `sbom-and-image-scan` and
+# `signed-image-digest` (written by its `sign` job after the image signature
+# verified) are downloaded by run id. The workflow file and the checkout are
+# main's own code (`workflow_run` always runs the default branch's file; the
+# checkout is the triggering run's head commit, which is a push to main). No
+# event value is ever expanded inside `run:`; each one goes through `env:`.
+#
+# INERT until the R17 switch (`AI_BOM_SNAPSHOTS_RELEASED`,
+# packages/shared/src/bom/release-switch.ts) flips (R28): `build` validates the
+# inventory, reads the switch and writes one summary line; every producing step
+# is gated on it, and `sign` does not run at all.
+
+on:
+  workflow_run:
+    workflows: [Security]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-ai-bom-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+env:
+  # the same pinned cosign as security.yml (bump both together)
+  COSIGN_VERSION: '3.1.3'
+  COSIGN_SHA256: '4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71'
+
+jobs:
+  build:
+    name: Build the release AI BOM (no signing identity)
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      released: ${{ steps.switch.outputs.released }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Build the shared BOM package
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm --filter @regulait/shared build
+
+      - name: Validate the AI dev-stack inventory
+        run: node scripts/release-ai-bom.mjs check-inventory
+
+      - name: Read the R17 switch
+        id: switch
+        run: node scripts/release-ai-bom.mjs switch >> "$GITHUB_OUTPUT"
+
+      - name: Inert until the R17 switch flips (R28)
+        if: steps.switch.outputs.released != 'true'
+        run: echo "Release AI BOM is inert (ADR-0189 R28); nothing built, signed or published." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download this commit's SBOMs
+        if: steps.switch.outputs.released == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-and-image-scan
+          path: ${{ runner.temp }}/sbom
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the signed image digest
+        if: steps.switch.outputs.released == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-image-digest
+          path: ${{ runner.temp }}/signed-image
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Build the SBOM identity and the AI BOM (unsigned)
+        if: steps.switch.outputs.released == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-ai-bom"
+          # the digest is validated by the builder (sha256:<64 hex>); it is never evaluated
+          digest="$(head -c 80 "$RUNNER_TEMP/signed-image/digest.txt" | tr -d '\n')"
+          committed_at="$(date -u -d "@$(git log -1 --format=%ct)" +%Y-%m-%dT%H:%M:%S.000Z)"
+          node scripts/release-ai-bom.mjs build --commit "$HEAD_SHA" --committed-at "$committed_at" \
+            --image-digest "$digest" \
+            --workspace "$RUNNER_TEMP/sbom/sbom-workspace.cdx.json" --image "$RUNNER_TEMP/sbom/sbom-image.cdx.json" \
+            --out-dir "$out"
+
+      - name: Hand the unsigned files to the signing job
+        if: steps.switch.outputs.released == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-ai-bom-unsigned
+          path: ${{ runner.temp }}/release-ai-bom
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: Sign and verify the release AI BOM (cosign only)
+    needs: [build]
+    if: needs.build.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - name: Install cosign (pinned version and SHA-256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-ai-bom-unsigned
+          path: ${{ runner.temp }}/release-ai-bom
+
+      - name: Sign (keyless, this workflow's identity) and verify every file
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-ai-bom.yml@refs/heads/main"
+          for f in "$RUNNER_TEMP"/release-ai-bom/*.json; do
+            "$RUNNER_TEMP/bin/cosign" sign-blob --yes --bundle "$f.sigstore.json" "$f"
+            "$RUNNER_TEMP/bin/cosign" verify-blob --bundle "$f.sigstore.json" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-sha "$GITHUB_SHA" \
+              "$f"
+          done
+
+      - name: Keep the release AI BOM, the SBOM identity and their signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-ai-bom
+          path: ${{ runner.temp }}/release-ai-bom
+          if-no-files-found: error
+          retention-days: 90
