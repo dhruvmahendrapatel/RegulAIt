@@ -26,7 +26,7 @@ roadmap: ../docs/product/ROADMAP.md
 - Merged: B1 BOM foundation (#283, migration 0182), spike B0 (#265), ADR-0189 (#253), outbound credential audience
   (#273, 0181), gateway CI sharding (#284), and the Batch 4/5 tail (#264, #270, #272).
 - Merge order from here: #279 S3, then #286 I1 (0183), then S4 (0184), then #285 guard hardening (0185); #287 B3
-  after its security review. S5 (token endpoint) takes 0186 if it needs a migration.
+  after its security review. S5 (token endpoint, #302) needs no migration; 0186 is B9 SPDX fields and 0187 is ADR-0190 I3.
 - Building: S4 in-process wiring, S5 token endpoint, B5 SPDX renderer. Next unblocked: I2 after S3+S4; B2 after S4;
   B4 after B2+B3; B7/B8 after B4/B5.
 - Owner decision 13 (ADR-0189, owner item 1, 2026-10-10): collect the mandatory SPDX properties (amendment R51).
