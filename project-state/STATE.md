@@ -21,6 +21,17 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-10 (evening) - current merge state and migration queue (documentation drift fix after audit #325).** This
+paragraph supersedes the queue and number plan in the dated paragraphs below, which are kept as history.
+- Merged on `main`: S3 (#279), I1 (#286, migration 0183), B3 (#287), B5 SPDX renderer (#297), CI docs (#304), the
+  board refresh (#306), the B4 contract (#307) and its bundle and signature specification (#327), B7 our own AI BOM
+  (#314), the finality fix (#315), ADR-0191 (#328), research R14 on content provenance (#329), and #301.
+- Pending, in migration order: **0184** S4 in-process wiring (#326), **0185** guard hardening (#285), **0186** B9
+  SPDX fields (#322; 0186 is B9's, not S5's), **0187** ADR-0190 I3 executor core (#323), **0188** S5 token endpoint
+  (#302). Each is checked again at its own head and in this order before it merges.
+- Builder: Claude only ([ADR-0191](../docs/decisions/0191-claude-sole-builder.md)); Codex is retired and
+  `codexInputs.md` is frozen, appended only as history.
+
 **2026-10-10 (evening) - zod 3.25.76 -> 4.6.5 across the workspace (ADR-0192).** Full record:
 [sessions/2026-10-10-session-02-zod4.md](sessions/2026-10-10-session-02-zod4.md).
 - Direct move to the zod 4 API in one PR, because the gateway composes shared's schemas. `zod/v3` was rejected (a
