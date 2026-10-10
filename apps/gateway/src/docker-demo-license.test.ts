@@ -445,6 +445,9 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
       env: {
         ...process.env,
         DATABASE_URL: scratchUrl,
+        // the seed's TOTP enrolment (ADR-0181 FX2) is refused 409 data_key_required without a
+        // data key: CI's 64-hex fixture key when the invoking shell has none. Not a secret.
+        REGULAIT_DATA_KEY: process.env.REGULAIT_DATA_KEY || "a".repeat(64),
         REGULAIT_BOOTSTRAP_TOKEN: BOOT,
         REGULAIT_EPHEMERAL_LICENSE: "1",
         REGULAIT_LICENSE_KEYRING: keyring,

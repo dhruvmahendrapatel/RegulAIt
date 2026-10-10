@@ -64,7 +64,10 @@ beforeAll(async () => {
     // ADR-0181 FX3: the seed runs only on an explicit demo signal
     const r = spawnSync(process.execPath, [seedScript, "--seed-demo"], {
       encoding: "utf8",
-      env: { ...process.env, DATABASE_URL: scratchUrl },
+      // The seed enrols Ada's TOTP (ADR-0181 FX2), and the gateway refuses a TOTP enrolment
+      // (409 data_key_required) without a data key: supply CI's 64-hex fixture key when the
+      // invoking shell has none, so the result does not depend on the shell. Not a secret.
+      env: { ...process.env, DATABASE_URL: scratchUrl, REGULAIT_DATA_KEY: process.env.REGULAIT_DATA_KEY || "a".repeat(64) },
       timeout: 180_000,
     });
     seedRuns.push({ status: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" });
