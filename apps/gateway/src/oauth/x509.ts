@@ -18,13 +18,20 @@
  *    route sees it (`stripUntrustedClientCertHeader`, an onRequest hook). A
  *    forwarded certificate is then validated here, never trusted as verified.
  *
- * Validation: `pkijs` 3.4.1 `CertificateChainValidationEngine` (signatures,
- * validity of every certificate on the path at `now`, CA flags and
- * `keyCertSign` on issuers) against LOCAL trust anchors only — the mTLS CA set
+ * Validation: `pkijs` 3.4.1 `CertificateChainValidationEngine` builds the path
+ * and checks its signatures and the validity of every certificate on it at
+ * `now`, against LOCAL trust anchors only — the mTLS CA set
  * (`REGULAIT_MTLS_CA_BUNDLE`) or the SPIFFE bundle of the ID's trust domain
  * (`REGULAIT_SPIFFE_TRUST_BUNDLES`). Both default to EMPTY: with no anchors
  * every chain is refused (secure by default, ADR-0180; S9 moves bundles into
  * managed, audited storage). Nothing is fetched: no AIA, no CRL, no OCSP.
+ * The engine does NOT enforce the issuer rules (S5 security review, ADR-0188
+ * amendments item 3), and it takes the LAST certificate of `certs` as the
+ * end entity, so OUR code passes the leaf last, requires the built path to
+ * start at that leaf, and requires every issuer on it (intermediates and the
+ * anchor) to be a CA (`basicConstraints.cA`), to carry `keyCertSign`, and to
+ * have a `pathLenConstraint`, when present, no smaller than the number of
+ * intermediates below it (`issuerRulesFailure`).
  * Then OUR profile: the leaf is not a CA, carries `digitalSignature` and
  * neither `keyCertSign` nor `cRLSign`; for SPIFFE exactly one URI SAN, a
  * `spiffe://` ID in the anchor's trust domain with no userinfo, port, query or
@@ -121,6 +128,7 @@ export type CertificateFailure =
   | "certificate_malformed"
   | "certificate_no_anchor"
   | "certificate_path"
+  | "certificate_issuer"
   | "certificate_time"
   | "certificate_leaf_ca"
   | "certificate_key_usage"
@@ -149,6 +157,32 @@ function uriSansOf(cert: Certificate): string[] {
   if (!ext) return [];
   const names = ext.parsedValue instanceof GeneralNames ? ext.parsedValue : new GeneralNames({ schema: asn1js.fromBER(ext.extnValue.valueBlock.valueHexView).result });
   return names.names.filter((n) => n.type === 6).map((n) => String(n.value));
+}
+
+const sameCertificate = (a: Certificate, b: Certificate) => Buffer.from(a.tbsView).equals(Buffer.from(b.tbsView));
+
+/**
+ * The issuer rules `pkijs` does not enforce (ADR-0188 S5 review item 3), over
+ * the path the engine built: `path[0]` is the end entity, the last entry the
+ * anchor. Every issuer (index ≥ 1) is a CA, carries `keyCertSign`, and its
+ * `pathLenConstraint`, when present, allows the intermediates below it
+ * (index − 1 of them: the leaf is not counted). Null when the path holds.
+ */
+export function issuerRulesFailure(path: readonly Certificate[]): string | null {
+  for (let i = 1; i < path.length; i++) {
+    const cert = path[i]!;
+    const bcExt = cert.extensions?.find((e) => e.extnID === "2.5.29.19");
+    const bc = bcExt?.parsedValue as { cA?: boolean; pathLenConstraint?: unknown } | undefined;
+    if (!bc || bc.cA !== true) return `issuer ${i} is not a CA`;
+    const ku = keyUsageByte(cert);
+    if (ku === null || !(ku & KU_KEY_CERT_SIGN)) return `issuer ${i} lacks keyCertSign`;
+    if ("pathLenConstraint" in bc && bc.pathLenConstraint !== undefined) {
+      // a hex-only (huge or malformed) INTEGER is not a number we can trust: refuse
+      if (typeof bc.pathLenConstraint !== "number" || !Number.isInteger(bc.pathLenConstraint) || bc.pathLenConstraint < 0) return `issuer ${i} has an unreadable pathLenConstraint`;
+      if (i - 1 > bc.pathLenConstraint) return `issuer ${i} allows ${bc.pathLenConstraint} intermediates below it, the path has ${i - 1}`;
+    }
+  }
+  return null;
 }
 
 /** a SPIFFE ID, by the X.509-SVID rules, parsed with `URL` */
@@ -185,14 +219,20 @@ export async function validateClientCertificate(
   } catch {
     return { ok: false, code: "certificate_malformed" };
   }
-  // the path, every certificate's validity at `now`, and issuer CA/keyCertSign rules
+  // the engine: the path, its signatures and every certificate's validity at `now`. It treats the LAST of `certs`
+  // as the end entity, so the leaf goes last (the anchors are already its `trustedCerts`)
+  let path: Certificate[];
   try {
-    const engine = new CertificateChainValidationEngine({ trustedCerts: anchors, certs: [leaf, ...intermediates, ...anchors], checkDate: opts.now });
+    const engine = new CertificateChainValidationEngine({ trustedCerts: anchors, certs: [...intermediates, leaf], checkDate: opts.now });
     const r = await engine.verify();
-    if (!r.result) return { ok: false, code: "certificate_path" };
+    if (!r.result || !r.certificatePath || r.certificatePath.length < 2) return { ok: false, code: "certificate_path" };
+    path = r.certificatePath;
   } catch {
     return { ok: false, code: "certificate_path" };
   }
+  // the path the engine judged must be THIS leaf's, and every issuer on it must be a CA (pkijs does not enforce it)
+  if (!sameCertificate(path[0]!, leaf)) return { ok: false, code: "certificate_path" };
+  if (issuerRulesFailure(path) !== null) return { ok: false, code: "certificate_issuer" };
   if (leaf.notBefore.value.getTime() > opts.now.getTime() || leaf.notAfter.value.getTime() < opts.now.getTime()) return { ok: false, code: "certificate_time" };
   const basic = leaf.extensions?.find((e) => e.extnID === "2.5.29.19")?.parsedValue as { cA?: boolean } | undefined;
   if (basic?.cA) return { ok: false, code: "certificate_leaf_ca" };
@@ -294,7 +334,8 @@ function proxyAdmitted(req: FastifyRequest, cfg: ProxyConfig): boolean {
   return cfg.secret !== null && typeof presented === "string" && constantTimeEqual(presented, cfg.secret);
 }
 
-const forwardedCerts = new WeakMap<object, PresentedCertificate | null>();
+/** per request: was the socket peer an ADMITTED proxy, and what client certificate did it forward (if any) */
+const forwardedCerts = new WeakMap<object, { viaProxy: boolean; presented: PresentedCertificate | null }>();
 
 /** decode a forwarded certificate value: URL-encoded PEM, or base64 / base64url DER. Node parses it. */
 function decodeForwarded(value: string): Buffer | null {
@@ -320,16 +361,18 @@ export function registerClientCertificateHook(app: FastifyInstance, env: NodeJS.
   app.addHook("onRequest", async (req) => {
     const cfg = proxyConfig(env);
     let presented: PresentedCertificate | null = null;
+    // judged before the headers are stripped: the shared secret is one of them
+    const viaProxy = proxyAdmitted(req, cfg);
     if (cfg.header) {
       const raw = req.headers[cfg.header];
-      if (typeof raw === "string" && proxyAdmitted(req, cfg)) {
+      if (typeof raw === "string" && viaProxy) {
         const der = decodeForwarded(raw);
         if (der) presented = { der, intermediates: [], source: "proxy" };
       }
       delete req.headers[cfg.header];
     }
     delete req.headers[CLIENT_CERT_PROXY_SECRET_HEADER];
-    forwardedCerts.set(req.raw, presented);
+    forwardedCerts.set(req.raw, { viaProxy, presented });
   });
 }
 
@@ -337,8 +380,15 @@ export function registerClientCertificateHook(app: FastifyInstance, env: NodeJS.
  * The client certificate this request presents, from the gateway's own TLS
  * termination or an admitted proxy — NOT yet validated (call
  * `validateClientCertificate`). Null when there is none.
+ *
+ * When the socket peer is an ADMITTED proxy (ADR-0188 S5 review item 4), the
+ * client certificate is the one it forwarded, or none: the TLS peer
+ * certificate is then the PROXY's own (proxy-to-gateway mTLS), which
+ * authenticates the proxy and never the client behind it.
  */
 export function presentedClientCertificate(req: FastifyRequest): PresentedCertificate | null {
+  const forwarded = forwardedCerts.get(req.raw);
+  if (forwarded?.viaProxy) return forwarded.presented;
   const sock = socketOf(req);
   if (sock.encrypted && typeof sock.getPeerCertificate === "function") {
     const peer = sock.getPeerCertificate(true);
@@ -354,5 +404,5 @@ export function presentedClientCertificate(req: FastifyRequest): PresentedCertif
       return { der: Buffer.from(peer.raw), intermediates, source: "tls" };
     }
   }
-  return forwardedCerts.get(req.raw) ?? null;
+  return forwarded?.presented ?? null;
 }
