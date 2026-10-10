@@ -34,7 +34,7 @@
  */
 import type { RedTeamAttackClass, RedTeamSeverity } from "../redteam.js";
 import type { EngineNotRunReason } from "./contract.js";
-import { GARAK_UPSTREAM_PROBES, GARAK_UPSTREAM_VERSION } from "./garak-upstream.js";
+import { GARAK_UPSTREAM_PROBES } from "./garak-upstream.js";
 
 /** the release the image is built from (engines/garak/requirements.txt pins the same) */
 export const GARAK_ENGINE_VERSION = "0.17.0";
@@ -222,7 +222,10 @@ export function garakPrimaryDetector(probe: string): string | null {
   return UPSTREAM_BY_PROBE.get(probe)?.detector ?? null;
 }
 
-/** garak's own OWASP tags for a probe (2023 numbering) */
+/**
+ * garak's own OWASP tags for a probe (2023 numbering): upstream provenance only, never used to map a
+ * probe to an OWASP risk. The 2025 mapping is our own table (garak-owasp-2025.ts, decision 213).
+ */
 export function garakOwaspTags2023(probe: string): readonly string[] {
   return UPSTREAM_BY_PROBE.get(probe)?.owasp ?? [];
 }
@@ -260,51 +263,9 @@ export function garakTaxonomyEntries(): Array<{ system: string; id: string; atta
 }
 
 // ---------------------------------------------------------------------------
-// OWASP LLM Top 10: garak's 2023 tags -> the 2025 ids our catalog cites (decision 148)
+// OWASP LLM Top 10 (2025): our own per-probe table, garak-owasp-2025.ts (decisions 213-218). garak's
+// 2023 tags are never read to map anything.
 // ---------------------------------------------------------------------------
-
-export interface GarakOwaspCrosswalkRow {
-  /** garak's tag, 2023 (v1.1) numbering */
-  garak: string;
-  /** the 2023 risk it names */
-  name2023: string;
-  /** the 2025 id (`owasp:llm:NN`, a key of OWASP_LLM_TOP_10_MAPPING), or null */
-  owasp2025: string | null;
-  /** `mapped`: the risk carries over (R10 consequence 6); `owner_decision`: no clean 2025 target, unmapped until decided */
-  status: "mapped" | "owner_decision";
-}
-
-/**
- * THE CROSSWALK, versioned by the garak release whose tags it reads. Only the rows R10 supports are
- * mapped. The two 2023 risks with no clean 2025 target (Insecure Plugin Design; Model Theft) map to
- * nothing until the owner decides (OWNER DECISION, ADR-0187 open question 19). This is reported
- * provenance only: what COUNTS toward A3 is the per-probe attack class above, never an OWASP tag.
- */
-export const GARAK_OWASP_CROSSWALK: { garakVersion: string; rows: readonly GarakOwaspCrosswalkRow[] } = Object.freeze({
-  garakVersion: GARAK_UPSTREAM_VERSION,
-  rows: Object.freeze([
-    { garak: "owasp:llm01", name2023: "Prompt Injection", owasp2025: "owasp:llm:01", status: "mapped" },
-    { garak: "owasp:llm02", name2023: "Insecure Output Handling", owasp2025: "owasp:llm:05", status: "mapped" },
-    { garak: "owasp:llm03", name2023: "Training Data Poisoning", owasp2025: "owasp:llm:04", status: "mapped" },
-    { garak: "owasp:llm04", name2023: "Model Denial of Service", owasp2025: "owasp:llm:10", status: "mapped" },
-    { garak: "owasp:llm05", name2023: "Supply Chain Vulnerabilities", owasp2025: "owasp:llm:03", status: "mapped" },
-    { garak: "owasp:llm06", name2023: "Sensitive Information Disclosure", owasp2025: "owasp:llm:02", status: "mapped" },
-    { garak: "owasp:llm07", name2023: "Insecure Plugin Design", owasp2025: null, status: "owner_decision" },
-    { garak: "owasp:llm08", name2023: "Excessive Agency", owasp2025: "owasp:llm:06", status: "mapped" },
-    { garak: "owasp:llm09", name2023: "Overreliance", owasp2025: "owasp:llm:09", status: "mapped" },
-    { garak: "owasp:llm10", name2023: "Model Theft", owasp2025: null, status: "owner_decision" },
-  ] satisfies GarakOwaspCrosswalkRow[]),
-});
-
-/** the 2025 OWASP ids a probe's garak tags map to (unmapped and owner-decision rows contribute nothing) */
-export function garakOwasp2025(probe: string): string[] {
-  const ids = new Set<string>();
-  for (const tag of garakOwaspTags2023(probe)) {
-    const row = GARAK_OWASP_CROSSWALK.rows.find((r) => r.garak === tag);
-    if (row && row.status === "mapped" && row.owasp2025) ids.add(row.owasp2025);
-  }
-  return [...ids].sort();
-}
 
 // ---------------------------------------------------------------------------
 // Run configuration (decision 149)
