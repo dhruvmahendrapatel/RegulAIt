@@ -4,7 +4,7 @@ last_updated: 2026-10-10
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-10-session-01.md
+last_session: sessions/2026-10-10-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,19 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-10 (helper session) - CI sharding measured on runners; `dhruv/active` repaired; repo review #309.** Full
+record: [sessions/2026-10-10-session-02.md](sessions/2026-10-10-session-02.md).
+- Merged #291: the sharded gateway suite measured on five runs against six single-job runs. Whole-run wall clock
+  26–32 min → 13–16 min; slowest build-and-test job 9m49s under its 20-min cap; cost +14 billed min a push (~19 PR
+  pushes a month at 2,000 min, from ~22). `ci.yml`'s arithmetic comment, README and ADR-0110 §7 carry the numbers.
+  The ADR-0110 unique-constraint pre-flight stays per shard (owner).
+- `dhruv/active` would not fast-forward (9ab8b55, Gemini's G16–G18 note, existed only there); `main` was merged into it
+  with no force-push. #301 carries that note to `main` marked superseded, plus `THIRD_PARTY.md` for the 14 packages
+  that had none and the gitleaks fixture fix (#309 items 1 and 5). Merge #301 **with a merge commit**, then
+  fast-forward `dhruv/active`.
+- Issue #309 remaining: `AgentCoordination.md` inbox older than its 12 h rule and at 768/800 lines; migration numbers
+  0177–0179 undocumented as retired; ADR-0149 and ADR-0190 unmentioned here.
 
 **2026-10-10 (afternoon) - Batch 6 slices in parallel: S3 in CI, B1 merged, I1 next; CI sharded.** Full record:
 [sessions/2026-10-10-session-01.md](sessions/2026-10-10-session-01.md).
