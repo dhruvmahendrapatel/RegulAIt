@@ -289,6 +289,7 @@ async function agentDecider(db: Db, userId: string) {
   return (agent: typeof agents.$inferSelect, mode: string): AgentDecision =>
     evaluateAgent({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — RegulAIt-LLM is a dispatch path like any other.
       execution: { ...postureOf(llmExecutionMode, agentHaltOf(agent)), ...llmLiteracy },
       agent: {

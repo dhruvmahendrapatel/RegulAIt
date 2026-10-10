@@ -857,6 +857,7 @@ async function executeGovernedToolCallInner(
       preparedPii,
       // AER-039: bind the consent to the row this call connects with
       approvalTargetForServer(serverId, serverRow),
+      { actor: null }, // ADR-0188 S4 replaces
     );
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {

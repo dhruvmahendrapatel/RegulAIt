@@ -682,6 +682,7 @@ export async function executeGovernedDispatch(
     const hopLiteracy = await literacySlot(db, args.userId, { origin: args.evaluationSubject === true || args.modelFeature?.feature === "evals" ? "evaluation" : "human" });
     const decision = evaluateAgent({
       userId: args.userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
       // The hop agent's OWN halt matters most here: halting an agent must also
       // stop traffic being routed INTO it by somebody else's fallback chain.
@@ -3897,6 +3898,7 @@ export function registerAgentConnectorRoutes(
     const invokeLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) });
     const kernelDecision = evaluateAgent({
       userId,
+      actor: null, // ADR-0188 S4 replaces
       // ADR-0124 — the kill switch on the native dispatch path.
       execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...invokeLiteracy },
       // the display name rides along so denial prose says "premium-mock
@@ -4151,6 +4153,7 @@ export function registerAgentConnectorRoutes(
           withModelPolicy(
             evaluateAgent({
               userId,
+              actor: null, // ADR-0188 S4 replaces
               execution: { ...postureOf(routingExecutionMode, agentHaltOf(a)), ...invokeLiteracy },
               agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
               mode: body.mode,
