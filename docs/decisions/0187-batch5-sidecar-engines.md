@@ -1502,6 +1502,99 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
      the artifact verdict reads the normalised items, never a summary, and the run's aggregates are recomputed by the
      shared normaliser; the report summary was the only instance.
 
+### Implementation decisions (B5-P2 promptfoo runner/worker split and upgrade, 2026-10-10, branch `b5-p2-promptfoo-split`)
+
+Closes open question 13 for promptfoo (decision 79's gate stays for every other build). No migration. Code:
+`packages/engine-promptfoo/src/{job,exchange,worker-selftest,worker-main,version}.ts` (new), `adapter.ts`, `config.ts`,
+`main.ts`; the manifest entry; compose `engine-promptfoo` and `engine-promptfoo-worker`; `engines/promptfoo` (Dockerfile,
+lockfile, THIRD_PARTY.md). Tests: `packages/engine-promptfoo/src/split.test.ts` (11), `image.test.ts` (+1),
+`promptfoo-real.test.ts` (+1, opt-in), `zz-b5-compose.test.ts` (+1), `zz-b5-promptfoo.test.ts` [79] (rewritten, +1). Each
+guard was shown red by breaking it (recorded with each decision). `packages/engine-runner` is unchanged.
+
+170. **promptfoo runs in its own container; the runner never runs it.** One image, two compose services, the modelscan
+     pattern (decision 104) adapted to an engine that calls models. The **runner** (`engine-promptfoo`, the hardened
+     template, default CMD `dist/main.js`) keeps the runner token on its state volume, leases, heartbeats and posts
+     results; it mounts the job volume read-write and the result volume read-only. The **worker**
+     (`engine-promptfoo-worker`, `dist/worker-main.js`) runs promptfoo: on `engines`, read-only root, uid 10001,
+     `cap_drop: [ALL]`, `no-new-privileges`, the template's limits, its own `/work` tmpfs; **no state volume, no
+     enrolment or runner token, no gateway URL of the runner's, no `pid`/`ipc`/`network_mode`/`volumes_from` sharing**
+     (so its own PID namespace: it cannot read the runner's memory, environment or descriptors through `/proc` or
+     ptrace); the job volume read-only and the result volume (`/out`) its one shared writable place. It does not merge
+     `x-engine-runner`, because the template carries the enrolment token. Both exchange volumes are tmpfs-backed (a job
+     holds the run key, which never reaches a disk). Red: the compose test fails with the state volume added to the
+     worker.
+171. **The worker's credential is the run-scoped virtual key, the narrowest one that works.** promptfoo must call the
+     target, the generator and the grader, so whatever runs it can make model calls; the run key bounds exactly that
+     (the compat model routes only, one project, the run's budget, until its deadline, revoked at cancel, timeout or end;
+     decisions 4 and 5). The runner token can lease runs (each minting a key), post results and refresh the self-test;
+     none of that is in the worker's reach. **Rejected:** (A) a forwarding proxy in the runner, with the worker on
+     `network_mode: none` and no key: the worker could still make every model call the key allows through the proxy
+     (no capability removed), while the credential-holding runner would gain a listening port parsing requests from the
+     hostile process; (B) the worker on its own network with only the gateway: the gateway's routes are one listener,
+     so route-level authorisation (the key's purpose) is the boundary either way, and the runner has no port to reach on
+     `engines`; it would also change the gateway service, which other slices share.
+172. **The exchange** (`exchange.ts`; the job, `job.ts`). The runner writes `jobs/<runId>.staging/job.json` — exactly
+     `{runId, baseUrl, apiKey, config, deadlineAt}`, the run key and nothing else secret; the adapter is never given
+     the runner token — and renames it into place. The worker parses it strictly (an extra field is `job_invalid`),
+     re-builds the child environment for its own `/work/<runId>` from nothing (`promptfooEnvFor`) and re-runs
+     `assertGatewayOnly` before promptfoo starts; a refusal is answered (`done.json`, a fixed-vocabulary code) and maps
+     to `not_run` with every planned pair. It runs generate then eval under the run's deadline, writes
+     `results/<runId>/results.json` and, last and atomically, `done.json` with the results' sha256. A cancel (the
+     `cancel` file, or the job disappearing) kills promptfoo's process group; the runner gives up 15 s after the
+     deadline (never clean). The runner reads the results only if their sha256 is the one `done.json` names (else
+     `failed`, `results_inconsistent`), with the 64 MiB bound of decision 63 unchanged; it reconciles stale jobs at start
+     and before each run, and the worker drops results whose job is gone. Red: skipping the worker's invariant ran
+     promptfoo on an off-gateway job; a `passthrough` job schema ran a job carrying an extra field; dropping the sha256
+     check accepted a swapped results file.
+173. **The worker proves the isolation at run time** (`worker-selftest.ts`). Hourly, on its own timer (a long run never
+     lets it go stale, which would fail the runner's refresh and switch the engine off, decision 93), the worker writes
+     `.worker-selftest.json` to the result volume: the same egress probe as the runner's, run inside the worker, and
+     what of the runner's credential it can reach — environment variables named `REGULAIT_ENGINE_ENROLLMENT_TOKEN` or
+     holding an `rge_`/`rgee_` value, any entry in the runner state directory (the image ships `/state` empty; unreadable
+     counts as reachable), and any process in its `/proc` running the runner's `dist/main.js`. The runner reports it as
+     the manifest's new promptfoo usage-data entry `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, true only when the report is
+     fresh (2 h), names the pinned version, reached nothing and found nothing; a missing, stale or failing report fails
+     the self-test, so the engine cannot be enabled. Red: ignoring the state entries, or never flagging a visible runner
+     process, passed a worker that shared the runner's volume or PID namespace; reporting the switch true regardless
+     passed a self-test with no worker report.
+174. **`credentialIsolation` is true for promptfoo** (the manifest), so decision 79's acceptance no longer applies to it:
+     enabling needs the step-up for enabling alone and writes no `engine-credential-isolation-risk-accepted` audit. The
+     claim rests on the compose layout (decision 170, pinned by the compose test), on the job and adapter carrying no
+     runner credential (pinned by `split.test.ts`, which also checks promptfoo's environment against a runner token and
+     an enrolment token planted beside it), and on the worker's run-time proof (decision 173), which is a required
+     usage-data entry. The gate itself is unchanged and still proven on a build without isolation (`zz-b5-promptfoo`
+     [79], through a second app with that manifest; the test restores the module-wide engine runtime that `buildApp`
+     installs). modelscan and garak keep `false` (open question 18 unchanged). **Not verified here:** the image was not
+     built and neither container was run (this environment's disk could not hold the build; see the report), so the
+     layout's run-time behaviour, the worker's self-test inside a real container and the in-image egress test are first
+     exercised by CI's image build (decision 120) and a deployment; the manifest digest stays null, so the engine still
+     cannot be enabled. Red: with the shipped flag false, the "isolating build enables with the step-up alone" proof
+     fails.
+175. **No change to the runner core.** The split lives in the promptfoo shim. `promptfooAdapter` keeps its options and
+     gains `executor` (default: `LocalPromptfooExecutor`, the in-process path the existing tests and the gateway's
+     stand-in use); the image's runner always passes the exchange (a test reads `main.ts` and refuses the local path
+     there). The exchange is a candidate to move into `packages/engine-runner` once a second model-calling engine
+     (garak) needs it.
+176. **promptfoo 0.123.1 → 0.124.1** (released 2026-10-08, MIT, Node ≥ 22.22.0 as before; manifest generation 2,
+     decision 95). Re-checked on the published package, not assumed: the telemetry patch still finds exactly four
+     copies and the disabled path is the same code (measured with the real engine: unpatched, every run connects to
+     the vendor's event collector, blocked; patched, nothing); the extracted plugin and strategy lists are identical
+     (only the chunk name and hash change; `promptfoo-upstream.ts` regenerated, the drift test passes); the usage-data
+     switches are all still read (`PROMPTFOO_DISABLE_TEMPLATE_ENV_VARS` moved into one helper that still withholds
+     `process.env` from templates); `ResultFailureReason` is unchanged. The vendored OWASP file is byte-identical
+     (sha256 `9c78fc85…`) at tag `0.124.1` = commit `421e7959642c5d4cc1c983259a268de1c6f847b9` (this release publishes
+     no `gitHead`), so only its provenance moved. The real-engine suite (opt-in) passes on the patched 0.124.1, including
+     a new run through the exchange. The mapper fixtures stay the 0.123.1 captures (the real 0.124.1 runs agree).
+177. **npm advisories: what the upgrade does and does not clear.** `npm audit --omit=dev` on 0.123.1 reported 6 high
+     and 2 moderate and offered "promptfoo 0.116.7" — a downgrade (to a release before these dependencies), not a fix,
+     so it was not taken. On 0.124.1 the 2 moderate are gone (smol-toml left the closure; Dependabot PR #209 becomes
+     redundant), and 6 high remain: braces (≤ 3.0.3, its latest release) and node-forge (≤ 1.4.0, its latest release),
+     neither with a patched release, reached only through optional packages (chokidar 3 as nunjucks' optional peer, and
+     jks-js). The image installs with `npm ci --omit=optional`, so none of them ships: `npm audit --omit=optional`
+     reports 0, as it did at 0.123.1. A new `image.test.ts` case fails if any of them stops being optional. promptfoo
+     0.124.1 itself requires `simple-git ^4.0.2`, so that override is dropped; `basic-ftp` 6.2.2 stays (without it 5.3.1
+     resolves). The licence gate's result is unchanged (11 pending, open question 6).
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -1559,7 +1652,10 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
     routes; jobs and results pass through a shared work volume (job in, result out, cancellation, deadlines). The
     container posture stays as it is (non-root, `cap_drop: [ALL]`, `no-new-privileges`, read-only root). When it ships,
     the manifest's `credentialIsolation` becomes true and the enable gate of decision 79 no longer applies. Chosen by
-    the coordinator 2026-10-09, pending the owner's confirmation.
+    the coordinator 2026-10-09, pending the owner's confirmation. *2026-10-10, decisions 170–177:* **built for
+    promptfoo** (runner and worker containers, the worker holding only the run's virtual key and proving at run time
+    that no runner credential is in its reach); its `credentialIsolation` is now true. Still open: the image has not
+    been built or run in two containers (CI's build is the first), modelscan's flag (question 18), and garak.
 14. ~~What a clean model-artifact scan means (B5-M, decision 105)~~ — **decided by the owner 2026-10-09: safe formats
     only**, as built (only a verified safetensors file can be `clean`; an executable format is at best
     `no_known_unsafe`, with an `executable_format` finding; the chip never says "safe"). Rejected: extending the

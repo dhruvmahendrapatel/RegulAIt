@@ -2,7 +2,7 @@
 #
 # Built from the REPOSITORY ROOT (the shim is a workspace package):
 #
-#   docker build -f engines/promptfoo/Dockerfile -t regulait/engine-promptfoo:0.123.1 .
+#   docker build -f engines/promptfoo/Dockerfile -t regulait/engine-promptfoo:0.124.1 .
 #
 # Signing and the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) join the
 # gateway image's pipeline (ADR-0184: publish-image.yml / security.yml) in a follow-up: they need a
@@ -47,7 +47,7 @@ COPY engines/promptfoo/package.json engines/promptfoo/package-lock.json engines/
 # the CycloneDX SBOM of exactly what was installed ships inside the image (npm's own `npm sbom`)
 RUN node licence-gate.mjs package-lock.json \
  && npm ci --omit=optional --ignore-scripts --no-audit --no-fund \
- && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.123.1') { console.error('expected promptfoo 0.123.1, got ' + v); process.exit(1); }" \
+ && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.124.1') { console.error('expected promptfoo 0.124.1, got ' + v); process.exit(1); }" \
  && npm sbom --omit=optional --sbom-format cyclonedx --sbom-type application > sbom.cdx.json \
  && rm -rf /root/.npm licence-gate.mjs
 COPY engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs /tmp/telemetry-patch.mjs
@@ -68,7 +68,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
       org.regulait.engine="promptfoo" \
-      org.regulait.engine-version="0.123.1" \
+      org.regulait.engine-version="0.124.1" \
       org.regulait.patches="telemetry-disabled-sends-nothing"
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack

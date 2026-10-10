@@ -2,10 +2,10 @@
 /**
  * ADR-0187 B5-P — the minimal promptfoo patch the ADR allows ("Defaults taken: Images").
  *
- * WHAT IT FIXES. In promptfoo 0.123.1 (and every build we read), `Telemetry.record()` with
+ * WHAT IT FIXES. In promptfoo 0.123.1 and 0.124.1 (and every build we read), `Telemetry.record()` with
  * PROMPTFOO_DISABLE_TELEMETRY=1 calls `recordTelemetryDisabled()`, which calls `sendEvent()`, which
  * POSTs a "telemetry disabled" event to the vendor's collector with `fetchWithProxy` — so the
- * documented opt-out is not a zero-egress switch (R9, confirmed for 0.123.1 in R10 §promptfoo).
+ * documented opt-out is not a zero-egress switch (R9, confirmed for 0.123.1 in R10 §promptfoo; re-read in 0.124.1, ADR-0187 decision 176).
  *
  * THE PATCH. One statement at the top of every copy of `sendEvent` (the bundle carries the class
  * four times: three ESM chunks and one CJS chunk): `if (this.disabled) return;`. Nothing else

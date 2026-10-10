@@ -56,7 +56,7 @@ import {
 import { buildSelfTest, FileRunnerTokenStore, generateRunnerSecret, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, runnerTokenHash, type RunnerHttp } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
-import { engineRunTestHooks, runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
+import { engineRunTestHooks, engineRuntime, runEngineRunSweep, runEngineScheduleSweep, setEngineRuntime } from "./engine-runs.js";
 import { recordVirtualKeySpend } from "./virtual-keys.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -1281,6 +1281,8 @@ describe("PR #205 review round 9: credential-isolation gate, the judge at lease,
     // is exercised on a build that does not: the same gateway code and database, a manifest whose
     // promptfoo entry says false (the flag is the manifest's, never stored on the engine row)
     expect(ENGINE_MANIFEST.promptfoo.credentialIsolation).toBe(true);
+    // buildApp installs the engine runtime module-wide (setEngineRuntime): put this suite's back after
+    const priorRuntime = engineRuntime();
     const legacy = buildApp(db, {
       bootstrapToken: BOOT,
       dataKey: "f".repeat(64),
@@ -1310,6 +1312,7 @@ describe("PR #205 review round 9: credential-isolation gate, the judge at lease,
       expect((await asAdminOn(legacy, { enabled: false })).statusCode).toBe(200);
     } finally {
       await legacy.close();
+      setEngineRuntime(priorRuntime);
     }
   });
 
