@@ -196,7 +196,7 @@ Sections, each built from stored facts only:
 | `model` | agent id, provider, requested model, served model, `pinned_model_version`, model card id and the approval in force, the AI BOM snapshot reference | `decision_facts`, `usage_events` |
 | `approval` | approval id, quorum, each decider id, step-up method, passkey `signed_digest` and credential id | `approvals`, `approval_decisions`, **bound by row digest in `decision_facts`** (amendment R5) |
 | `outcome` | result status, refusal code, upstream status class, post-action verification result where a workflow stage recorded one | `audit_log` and `trace_spans` rows bound by digest in `decision_facts`; later facts only from signed addenda (amendment R5) |
-| `cost` | usage event ids, tokens, cost in integer **micro-dollars** (never floating point in a signed body) | `usage_events` rows bound by digest in `decision_facts` or a signed addendum (amendment R5) |
+| `cost` | usage event ids, tokens, cost as a lossless decimal string of the stored value (amendment R23; never a float in a signed body) | `usage_events` row projections stored in `decision_facts` or an addendum (amendments R5, R18) |
 | `trace` | trace id and span ids (no previews) | `trace_spans` rows bound by digest in `decision_facts` or a signed addendum (amendment R5) |
 | `proof` | the audit-chain segment from the decision row to the anchor that covers it (`seq`, `contentHash`, `prevHash`, `rowHash` per row, as ADR-0116's `chain.tsv`), the **complete canonical anchor record** (`seq`, `rowHash`, `headAt`, `algorithm`, `payloadVersion`, `capturedAt`) plus destination, status, `external_ref`, `flushed_at` and the recorded tamper-resistance observation, the finality state, and the RFC 3161 token where one exists (amendments R1 and R4) | `audit_log`, `audit_anchors` |
 | `completeness` | for every section: `recorded`, `not_applicable`, or `not_recorded` with a reason (for example, a decision made before ADR-0188's audit v2 boundary has `actors: not_recorded, reason: pre_identity`) | builder |
@@ -216,7 +216,7 @@ Built from a signed native snapshot (`regulait.ai-bom.v1`, the authority) and re
 | Provider API endpoint | `service` with `endpoints`, `trustZone`, and **`data` flows** (direction and classification: what the model receives and returns, by the project's sensitivity). This is PF-09's "per-model data flow" |
 | `model_artifacts` | component (type `machine-learning-model` or `file`) with SHA-256 hash and format |
 | `artifact_scans`, `model_card_evidence` (`engine_scan`, `eval_run`, `external`) | `declarations` (attestations: the claim, the scanner and version, the verdict, evidence references); the engine is a `container` component with its `image_digest` |
-| `training_datasets`, `eval_datasets` | component type `data` with `data[].type = dataset`, hash from `checksum`, classification, `governance` (owner), sensitive-data flag from `pii_verdict` |
+| `training_datasets`, `eval_datasets` | component type `data` with `data[].type = dataset`, hash from `checksum`, classification, `governance` (owner), sensitive-data flag from `pii_verdict`; evaluation datasets map only what is recorded (amendment R24) |
 | Training-data sources of third-party models | from `model_cards.data_claims`, marked **supplier-declared**; when absent, `unknown` (OWNER DECISION 10) |
 | `prompt_commits` (the promoted commit) | component type `data`, `data[].type = configuration`, hash = commit `hash` |
 | `builder_skills` | component type `data` (`configuration`) with `admitted_digest` |
@@ -266,8 +266,8 @@ needs the ADR-0102 scrub (M-055 check done at B1 anyway).
 
 ### 6. Verification, offline
 
-- `packages/shared/src/bom/verify.ts` (pure, no I/O) and `scripts/verify-decision-bom.mjs` verify a Decision BOM
-  bundle with an out-of-band trust root only (`--fingerprint` or `--keyring`, as ADR-0116); the key inside a bundle is
+- `packages/shared/src/bom/verify.ts` (pure, no I/O) and `scripts/verify-bom.mjs` verify a Decision BOM or AI BOM
+  (amendment R19) bundle with an out-of-band trust root only (`--fingerprint` or `--keyring`, as ADR-0116); the key inside a bundle is
   a convenience, never the authority (the lesson of ADR-0186 review finding R21-01, "online verify trusts the bundle's
   keys").
 - Checks: the body signature; the receipt signature and that the receipt's `factsHash` equals the facts in the body;
@@ -304,17 +304,18 @@ Build as for a first load: no grandfathering. Decisions made before B2 ships hav
 
 ### 8. Data model sketch (migration `0181+`; not written here)
 
-- `decision_facts` (`audit_id` PK → `audit_log.id`, `audit_seq`, `facts_version`, `facts` jsonb, `facts_hash`,
+- `decision_facts` (`audit_id` PK, no foreign key to `audit_log` (amendment R16), `audit_seq`, `facts_version`, `facts` jsonb, `facts_hash`,
   `created_at`). Append-only, immutability trigger.
 - `decision_boms` (`id`, `audit_id`, `version`, `supersedes_id`, `body` (exact canonical bytes as text), `body_sha256`,
   `signature`, `key_id`, `basis` jsonb, `created_by`, `created_at`; UNIQUE (`audit_id`, `version`)). Append-only.
-- `ai_bom_snapshots` (`id`, `subject_kind` `use_case | agent | builder_agent | install`, `subject_id`, `version`,
+- `ai_bom_snapshots` (`id`, `subject_kind` `use_case | agent | builder_agent | install`, `subject_id` (NOT NULL; nil UUID for install, R20), `version`,
   `serial_number` uuid, `supersedes_id`, `trigger`, `basis` jsonb, `body`, `body_sha256`, `signature`, `key_id`,
   `created_by`, `created_at`; UNIQUE (`subject_kind`, `subject_id`, `version`)). Append-only.
 - `bom_renderings` (`owner_kind` `decision_bom | ai_bom`, `owner_id`, `format` `cyclonedx-1.7 | cyclonedx-1.6 |
   spdx-3.0.1 | in-toto`, `bytes`, `sha256`, `validator`, `created_at`; PK (`owner_kind`, `owner_id`, `format`)).
 - Settings rows for decision 7; the auditor export grant.
-- Retention follows the audit retention of the compliance profile and respects evidence holds (OWNER DECISION 11).
+- Retention follows the audit retention of the compliance profile and respects evidence holds (OWNER DECISION 11),
+  through the single prune path of amendment R16.
 - Receipt payload v2 field `factsHash` (open question 1).
 
 ### 9. API and UI surface
@@ -367,9 +368,9 @@ against the specification rather than against itself.
 | **B0 spike** (research, no product code) | Claude | Confirm at runtime that `@cyclonedx/cyclonedx-library` 10.3.0's model lacks `modelCard`/`data`/`declarations`; compile its bundled 1.7 and 1.6 schemas and the SPDX 3.0.1 schema with our pinned Ajv offline, with the reject-all `idn-email` format; extend the `canonicalize` byte-identity corpus to BOM shapes; render a sample AI BOM twice and on two Node versions and compare bytes; run `spdx3-validate` pinned in a CI container; read the OWASP AIBOM field guidance. Output: a research note and go/no-go on decision 3's exception | none | **Yes**, now, with ADR-0188 S1–S4 |
 | **B1 foundation** | Claude | Migration `0181+` (decision 8 tables, settings, immutability triggers), `schema.ts`, shared zod for `regulait.decision-bom.v1` and `regulait.ai-bom.v1`, strict settings with audited relaxation, every route as a 501 stub, receipt payload v2 `factsHash` as agreed under open question 1 | B0 go; ADR-0188 S1 merged (shared migration journal) | serial (hot files) |
 | **B2 fact capture** | Claude | `decision_facts` written in the decision transaction on every governed path; `factsHash` in receipts; the `actors` facts read from ADR-0188's columns | B1; **ADR-0188 S4 merged** (same files, and the actor chain must exist) | serial |
-| **B3 AI BOM builder and CycloneDX renderer** | Claude | `packages/shared/src/bom/` pure builder from a loaded record set, CycloneDX 1.7 and 1.6 renderers, validation, compositions; gateway loader, snapshot and drift routes (no draft route; snapshot routes and triggers ship disabled until B5 merges, amendment R2) | B1 | **Yes**, with B2 (no shared files) |
-| **B4 Decision BOM assembler, signer, bundle and verifier** | Claude | Assembly from facts and stored rows, freezing rules, signing with the receipt key, `export-bundle/3`, pure verifier and `scripts/verify-decision-bom.mjs`, `POST /v1/boms/verify` | B2, B3 (BOM-Link) | serial after B2 |
-| **B5 SPDX 3.0.1 renderer** | Claude | `ai_AIPackage`, `dataset_DatasetPackage`, licence relationships; schema validation in the product, `spdx3-validate` in CI | B3 | **Yes**, with B4 |
+| **B3 AI BOM builder and CycloneDX renderer** | Claude | `packages/shared/src/bom/` pure builder from a loaded record set, CycloneDX 1.7 and 1.6 renderers, validation, compositions; gateway loader, snapshot and drift routes (no draft route; snapshot routes and triggers ship disabled until both B4 and B5 merge, amendments R2 and R17) | B1 | **Yes**, with B2 (no shared files) |
+| **B4 Decision BOM assembler, signer, bundle and verifier** | Claude | Assembly from facts and stored rows, freezing rules, signing with the receipt key, `export-bundle/3`, pure verifier and `scripts/verify-bom.mjs` (both subjects, R19), whole-bundle email scan (R21), `POST /v1/boms/verify` | B2, B3 (BOM-Link) | serial after B2 |
+| **B5 SPDX 3.0.1 renderer** | Claude | `ai_AIPackage`, `dataset_DatasetPackage`, licence relationships; schema validation in the product, `spdx3-validate` in CI | B3 (the snapshot-route switch flips in the second of B4 and B5 to merge, R17) | **Yes**, with B4 |
 | **B6 web UI** | Codex | Decision 9's tabs, actions and verify panel; drift view; posture rows | B1 stubs | **Yes** (web only); merges after B4's real routes |
 | **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs through release-published, signed SBOM identity metadata (amendment R9); PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3 | **Yes**, with B4–B6 |
 | **B8 runbooks** | Claude, reviewed by Codex | Air-gapped and BYOC verification runbooks; every command executed before it is written down (M-041) | B4, B5 | **Yes**, with B6, B7 |
@@ -493,7 +494,7 @@ R1. **The proof carries the complete canonical anchor record.** The RFC 3161 imp
 R2. **No AI BOM snapshot is frozen until every v1 renderer has shipped.** Renderings are produced only at freeze and
     their hashes sit inside the signed native body, so a snapshot frozen before B5 could never gain SPDX. B3 ships its
     snapshot route and the automatic triggers **disabled in code** (501 `bom_snapshots_not_released`, not an admin
-    setting); B5 enables them in the same PR that adds the SPDX renderer. B3 and B5 may still merge as separate PRs.
+    setting); they are enabled in whichever of B4 and B5 merges second (R17). B3 and B5 may still merge as separate PRs.
     A renderer added after v1 (for example in-toto) applies only to snapshots taken after it ships; an older snapshot
     answers that format with 404 `format_not_rendered_for_snapshot` and the list it has. Nothing is back-filled; a new
     format for an old subject means a new snapshot version with `supersedes`.
@@ -529,8 +530,9 @@ R4. **`anchored` finality requires an observed tamper-resistant destination.** A
       ones until they have an S3-compatible WORM store) gets no Decision BOM until an admin relaxes the setting. The
       posture page says so.
 
-R5. **Every historical section is bound to the receipt.** `decision_facts` covered only `action`, `policy` and `model`,
-    so approval, outcome, cost, trace and post-action verification were read from live tables (Option A's problem).
+R5. **Every historical section is bound to the receipt** (refined by R15: addenda are captured unsigned and signed
+    later; and by R18: rows are stored as projections, not only digests). `decision_facts` covered only `action`,
+    `policy` and `model`, so approval, outcome, cost, trace and post-action verification were read from live tables (Option A's problem).
     Now:
     - At decision time, in the same transaction, `decision_facts` also carries the immutable digests of the approval,
       approval-decision, usage-event and trace-span rows that exist then, and the outcome fields of the audit row. A row
@@ -597,6 +599,102 @@ R14. **Not reproduced or already covered.** The finding that the ADR still calls
     B5 lacks the offline path was already resolved by amendment 4 (commit `cb52d25`, after the reviewed spike commit);
     the libraries-table row is now updated to match. The finding that the B0 evidence is missing is answered above:
     it is on `b6-bom-b0` (PR #265), not on this branch, by design.
+
+### Third review round (2026-10-10)
+
+A third review of PRs #253 and #265 raised further findings. Each was checked against this ADR and the code on
+`main` (`apps/gateway/src/decision-receipts.ts`, `apps/gateway/src/org-settings.ts` `runAuditPruneOnce`,
+`apps/gateway/src/export-bundle.ts`, `packages/shared/src/audit-scrub.ts`, migrations 0168 and 0170, and the
+`usage_events`, `model_cards` and `eval_datasets` tables in `packages/db/src/schema.ts`). All were real; none needed an
+owner choice. They bind B1 to B8 like R1 to R14.
+
+R15. **Late facts survive a signing-key outage.** With no receipt key the sweep returns `no_key` while governed calls
+    go on (`decision-receipts.ts`, `runDecisionReceiptSignSweep`), so R5's "signed when written" would force an
+    addendum writer to fail after the upstream side effect or drop the fact. Now capture and signing are separate,
+    as they already are for receipts:
+    - An addendum row is written **unsigned**, key-independent, in the transaction that records the late fact
+      (`decision_fact_addenda`: `audit_id`, `n`, `prev_hash`, `facts`, `facts_hash`, `created_at`), hash-chained from
+      the decision's `facts_hash`. Immutability trigger; no signature column.
+    - The receipt sign sweep signs addenda in order once a key is present, into a separate append-only table
+      `decision_fact_addendum_signatures` (`audit_id`, `n`, `facts_hash`, `signature`, `key_id`, `created_at`), under
+      `v = regulait.decision-facts-addendum.v1`. The sweep re-checks the hash chain before it signs, as it re-checks
+      audit rows today, and signs nothing past a break.
+    - A Decision BOM is frozen only when the receipt **and every addendum that exists at assembly** are signed;
+      otherwise the route answers 409 `bom_signing_unavailable` (no key) or `bom_anchor_pending` (not yet signed).
+      An unsigned addendum is never assembled, never dropped, and never frozen as `not_recorded`.
+
+R16. **Retention pruning works through the immutability rules.** OWNER DECISION 11 deletes BOM evidence at the end of
+    audit retention, but the BOM tables are append-only and `decision_facts` was sketched with a foreign key to
+    `audit_log`, which `runAuditPruneOnce` deletes directly. Now:
+    - No BOM table has a foreign key to `audit_log` (the `decision_receipts` rule, migration 0170 §7): facts,
+      addenda, addendum signatures and Decision BOMs outlive a pruned audit row, so the audit prune is never blocked.
+    - Rows are deleted only by one prune function, run after the audit prune in the same scheduler pass. Each BOM
+      table's trigger refuses every UPDATE and admits a DELETE only when all of these hold, checked in the database:
+      the transaction has written a `bom_retention_prunes` row (append-only; cutoff, counts, actor; the audited record
+      of the pass); the row's `created_at` is older than that cutoff; for decision-scoped rows, the audit row is
+      already gone (the 0168 "parent gone" test with `audit_log` as the parent); and no evidence hold covers it. A
+      direct DELETE, or one that fails any test, raises as `regulait_refuse_mutation` does.
+    - AI BOM snapshots: the newest snapshot of each subject, and any snapshot that a retained Decision BOM links to,
+      are never deleted. `bom_renderings` go with their parent by the 0168 own-parent cascade.
+
+R17. **Snapshot routes are enabled only once both B4 and B5 have merged.** R2 let B5 enable the snapshot routes while
+    B4, which builds `export-bundle/3` (R7), might not have merged. The enable switch moves out of B5: it flips in
+    whichever of B4 and B5 merges second, and that PR's tests download every format as a verified `export-bundle/3`.
+    Until then the routes answer 501 `bom_snapshots_not_released`. B4 and B5 still run in parallel.
+
+R18. **Facts carry the row projections, not only their digests.** R5 stored SHA-256 digests and reloaded the source
+    rows at assembly, so an approval, usage event, span, grant, token or identity row pruned or changed before the
+    first BOM request made its section unbuildable, and the actor and delegation rows were not bound at all. Now
+    `decision_facts` and each addendum store the **fixed canonical column projection** of every row they bind (the
+    column list per table defined once in the B1 shared zod; ids, digests, enums, integers and times only, never free
+    text), and the digest is computed over that stored projection. The `actors` section is captured at decision time
+    the same way: the actor chain, the grant's id, `path`, `depth`, scope and cap, `binding_kind`, thumbprint,
+    `auth_credential_id` and the workload identity URIs. The assembler builds every section from the stored
+    projections only and never reads a live table for a historical fact; a later grant change or revocation cannot
+    reach a Decision BOM.
+
+R19. **The offline verifier checks AI BOM bundles too.** §6 verified only Decision BOMs, and the stock
+    `verify-export-bundle.sh` checks only the outer manifest, which the export key alone can forge. `verify.ts` and
+    the script (renamed `scripts/verify-bom.mjs`, one tool for both subjects) gain an AI BOM branch: the native body's
+    Ed25519 signature against the out-of-band trust root; `v` is `regulait.ai-bom.v1` and the bundle subject is
+    `ai-bom`; each rendering file's SHA-256 and byte length equal the values in the signed body; the serial number
+    equals the v8 UUID derived from the snapshot id (amendment 5); and `supersedes` when the earlier snapshot is in
+    the bundle. A rendering whose hash is not in the signed body is `invalid`. Codex's specification-only vectors
+    cover this branch.
+
+R20. **Install snapshots use a fixed, non-null internal subject key.** ADR-0116 allows an install with no
+    `REGULAIT_INSTALL_ID` and no licence, and refuses a generated install id. `ai_bom_snapshots.subject_id` is
+    `NOT NULL`; for `subject_kind = install` a CHECK fixes it to the nil UUID (one database holds one install), so
+    the UNIQUE (`subject_kind`, `subject_id`, `version`) constraint and `supersedes` stay sound and never fork on key
+    rotation. This key is internal only and is never exported as an identity; the exported install identity follows
+    ADR-0116 (operator-set, licence-derived, or absent and said so).
+
+R21. **The email scan covers the whole bundle.** `export-bundle/3` adds files outside the native body and renderings
+    (the manifest, the README, the operator-set `installId`, which is unconstrained), and the audit scrub keeps emails
+    by design (`audit-scrub.ts`). B4 therefore runs R10's scan over every final bundle entry, after the bundle is
+    assembled and before it is signed, and refuses the export naming the file and path. The BOM bundle profile also
+    carries no audit-row payloads, only the `chain.tsv` hash columns; an `installId` that matches the scan refuses
+    the export until the operator changes it.
+
+R22. **An AI BOM is loaded from one consistent snapshot.** B3's loader reads every source table in a single
+    `REPEATABLE READ READ ONLY` transaction, so a model card, prompt promotion or admission changing mid-load cannot
+    produce a mix of states that never existed. The `basis` records, for each loaded row, its table, id and the
+    SHA-256 of its canonical projection (as R18), so the snapshot's inputs can be reproduced and a disputed read
+    diagnosed.
+
+R23. **Cost is stored losslessly.** `usage_events.cost_usd` is a double precision column, so integer micro-dollars
+    would round a sub-micro-dollar cost to zero with no stated rule. The `cost` section carries `costUsd` as a string:
+    the ECMAScript shortest round-trip decimal form of the stored double (what `Number.prototype.toString` and RFC
+    8785 produce), which parses back to the identical double, plus `costSource: usage_events.cost_usd`. No rounding
+    happens anywhere; integer money is not used for this field. A null cost is `not_recorded`.
+
+R24. **Evaluation datasets map only what is recorded.** `eval_datasets` has no checksum, classification, owner or
+    PII verdict (only id, name, version, scorer and creator). B3 therefore renders an evaluation dataset with: a
+    SHA-256 computed by the loader over the canonical projection of that version's `eval_cases` rows (versions are
+    frozen once a run references them, ADR-0067), labelled `regulait:dataset:digestOf = eval_cases`; no
+    classification, governance owner or `sensitiveData`; the property `regulait:dataset:piiVerdict = not_scanned`;
+    SPDX `hasSensitivePersonalInformation: noAssertion` and no confidentiality level; and the dataset listed in an
+    `incomplete` composition. The creator is never presented as the owner. Training datasets keep the §3 mapping.
 
 ### Owner items from the review (not decided here)
 
