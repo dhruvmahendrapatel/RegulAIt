@@ -146,8 +146,14 @@ export async function grantBuilderAgentAsAdmin(
     agents?: Array<{ agentId: string; allowedModes: string[] }>;
     tools?: Array<{ serverId: string; toolName: string }>;
   },
+  /**
+   * An admin request context that is already signed in (a signed-in page's `page.request`), reused and not
+   * disposed. Every sign-in and every step-up spends one of Ada's TOTP codes, the gateway takes each 30 s step
+   * once, so a fresh sign-in per grant waits out a window or two. A spec with an admin page passes its request.
+   */
+  reuse?: APIRequestContext,
 ): Promise<void> {
-  const ctx = await adminContext(baseURL, oneTimePassword);
+  const ctx = reuse ?? (await adminContext(baseURL, oneTimePassword));
   try {
     let identityId: string | null = null;
     let cursor: string | null = null;
@@ -187,6 +193,6 @@ export async function grantBuilderAgentAsAdmin(
     });
     expect(r.status(), `identity grants: ${await r.text()}`).toBe(200);
   } finally {
-    await ctx.dispose();
+    if (!reuse) await ctx.dispose();
   }
 }

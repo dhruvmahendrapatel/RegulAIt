@@ -22,7 +22,8 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { asSteppedUpAdmin, grantBuilderAgentAsAdmin } from "./admin-api";
+import { ADMIN_EMAIL, asSteppedUpAdmin, grantBuilderAgentAsAdmin } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -128,9 +129,15 @@ async function orgSettings(baseURL: string, payload?: Record<string, unknown>) {
     // B4S-06: shortening the cooldown is a settings_relax step-up, which the
     // bootstrap credential no longer gives once an admin can step up — Ada makes
     // it, stepped up with her authenticator
-    const res = await asSteppedUpAdmin(baseURL, state.passwords.admin, "PUT", "/v1/org/settings", payload);
-    expect(res.ok(), `org settings PUT: ${res.status()} ${res.bodyText}`).toBe(true);
-    return JSON.parse(res.bodyText) as { settings: { minReleaseAgeDays: number } };
+    // From her page signed in by beforeAll when it is open: each sign-in and each step-up spends one TOTP
+    // step and the gateway takes a step once, so a second sign-in per write waits out a 30 s window.
+    const res =
+      adminPage && !adminPage.isClosed()
+        ? await steppedUpAs(adminPage.request, ADMIN_EMAIL, "PUT", "/v1/org/settings", payload)
+        : await asSteppedUpAdmin(baseURL, state.passwords.admin, "PUT", "/v1/org/settings", payload);
+    const text = await res.text();
+    expect(res.ok(), `org settings PUT: ${res.status()} ${text}`).toBe(true);
+    return JSON.parse(text) as { settings: { minReleaseAgeDays: number } };
   }
   const res = await fetch(`${baseURL}/v1/org/settings`, {
     headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
@@ -142,6 +149,7 @@ async function orgSettings(baseURL: string, payload?: Record<string, unknown>) {
 test.afterAll(async () => {
   await dana?.page.close();
   if (savedMinReleaseAgeDays !== null) await orgSettings(state.baseUrl, { minReleaseAgeDays: savedMinReleaseAgeDays });
+  await adminPage?.close();
 });
 
 /** owner rule (2026-10-04): every builder agent bills to a project. An admin
@@ -149,12 +157,15 @@ test.afterAll(async () => {
  * the seeded demo budgets) and adds Dana to it. */
 const PROJECT_NAME = `Agent builder e2e ${Date.now().toString(36)}`;
 let projectId = "";
+/** Ada, signed in once for the spec: her protected writes (the cooldown, the agent's grant) step up from here */
+let adminPage: Page | undefined;
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(120_000);
+  const page = await browser.newPage();
+  adminPage = page;
+  await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
   savedMinReleaseAgeDays = (await orgSettings(state.baseUrl)).settings.minReleaseAgeDays;
   await orgSettings(state.baseUrl, { minReleaseAgeDays: 0 });
-  const page = await browser.newPage();
-  await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
   const CSRF = { "x-regulait-csrf": "1" };
   const made = await page.request.post("/v1/projects", { headers: CSRF, data: { name: PROJECT_NAME } });
   expect(made.status(), await made.text()).toBe(201);
@@ -164,7 +175,6 @@ test.beforeAll(async ({ browser }) => {
   const danaId = list.find((u) => u.email === "dana@regulait.local")!.id;
   const added = await page.request.post(`/v1/projects/${projectId}/members`, { headers: CSRF, data: { userId: danaId, role: "contributor" } });
   expect(added.status(), await added.text()).toBeLessThan(300);
-  await page.close();
 });
 
 const panel = (page: Page) => page.getByRole("complementary", { name: "Configure agent" });
@@ -271,12 +281,16 @@ test("a non-admin creates an agent from a template and configures it", async ({ 
 test("chat answers through the governed core with its cost, and the thread is in Agent inbox", async ({ browser }) => {
   const { page, track } = await danaSession(browser);
   // ADR-0188 S4: the agent acts only within grants of its own (the strict default) — Ada grants it the model
-  // Dana chose, as an admin does, through the identity grants route (stepped up)
+  // Dana chose, as an admin does, through the identity grants route (stepped up, from her signed-in page)
   const configured = await readAgent(page);
   expect(configured.modelAgent?.id, "the agent has a model").toBeTruthy();
-  await grantBuilderAgentAsAdmin(state.baseUrl, state.passwords.admin, agentId, {
-    agents: [{ agentId: configured.modelAgent.id as string, allowedModes: ["chat"] }],
-  });
+  await grantBuilderAgentAsAdmin(
+    state.baseUrl,
+    state.passwords.admin,
+    agentId,
+    { agents: [{ agentId: configured.modelAgent.id as string, allowedModes: ["chat"] }] },
+    adminPage?.request,
+  );
   await page.goto(`/ui/builder/agents/${agentId}`);
   await expect(page.getByRole("heading", { level: 1, name: AGENT })).toBeVisible();
 
