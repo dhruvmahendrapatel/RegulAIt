@@ -96,8 +96,10 @@ export const ISOLATION_SETTING_COPY: Readonly<Record<IsolationSettingKey, { labe
       "On: a call whose required isolation no executor can provide is refused before anything reaches the " +
       "upstream. There is never a fallback to weaker isolation.",
     relaxed:
-      "Warn: the call is placed on the best isolation available and the shortfall is recorded as a gate warning. " +
-      "The posture page shows \"Isolation: not enforced\". Third-party code still never runs in the gateway.",
+      "Warn: placement is unchanged. A call is still never placed below its required isolation, in any mode; a " +
+      "call no executor can serve at that class is refused, as under On (ADR-0190 amendment item 14). The setting " +
+      "is recorded on each offer and placement and counts as a relaxed posture. What else warn should do is an " +
+      "open owner decision.",
   },
   isolationFloorPublic: floorCopy("public projects", "A user-space kernel sandbox (L2)."),
   isolationFloorInternal: floorCopy("internal projects", "A user-space kernel sandbox (L2)."),

@@ -528,6 +528,44 @@ describe("mismatch and quarantine (decision 6)", () => {
     const [mm] = await audits("execution-profile-mismatch", (offered as { offerId: string }).offerId);
     expect((mm!.detail as { failures: Array<{ code: string }> }).failures).toContainEqual({ probe: "report", code: "image_digest_mismatch" });
   });
+
+  // ADR-0190 amendment item 14 (vector `warn-shortfall`): a report whose applied class is below the requirement is an
+  // execution_profile_mismatch in EVERY enforcement mode. The class falls between acceptance and the report: a
+  // customer plane mapped to microvm takes a microvm offer, then its mapping is lowered before it reports.
+  it.each(["enforce", "warn"] as const)("under %s, a report whose class fell below the requirement after acceptance is never placed", async (enforcement) => {
+    const lowered: string[] = [];
+    class LoweredOnStart extends FakeSandboxBackend {
+      override async start(...args: Parameters<FakeSandboxBackend["start"]>) {
+        const [offer] = args;
+        const res = await inject("PUT", `/v1/executors/${r.executorId}/declared-class`, adminAuth, { class: "user_space_kernel" });
+        expect(res.statusCode, res.body).toBe(200);
+        lowered.push(offer.id);
+        return super.start(...args);
+      }
+    }
+    const backend = new LoweredOnStart({ backend: "customer" });
+    const r = await rig(`below-${enforcement}`, { backend });
+    expect((await inject("PUT", `/v1/executors/${r.executorId}/declared-class`, adminAuth, { class: "microvm" })).statusCode).toBe(200);
+    await r.run(1);
+    const offered = await offerTo(r, { workloadKind: "byoc_worker", requiredClass: "microvm", enforcement, ttlSeconds: 60 });
+    expect(offered).toMatchObject({ kind: "offered", attestedClass: "customer_declared" });
+    const offerId = (offered as { offerId: string }).offerId;
+    const [result] = await Promise.all([awaitPlacement(db, offerId, { pollMs: 50 }), r.run(2)]);
+    expect(lowered).toEqual([offerId]);
+    expect(result).toMatchObject({ kind: "failed", status: "mismatch" });
+    const o = await offerRow(offerId);
+    expect(o.status).toBe("mismatch");
+    const pl = await placementRow(o.placementId!);
+    expect(pl).toMatchObject({ outcome: "mismatch", refusalCode: "execution_profile_mismatch", enforcement, requiredClass: "microvm" });
+    expect(await audits("execution-placed", offerId)).toHaveLength(0);
+    const [mm] = await audits("execution-profile-mismatch", offerId);
+    expect((mm!.detail as { failures: Array<{ code: string }> }).failures).toContainEqual({ probe: "report", code: "class_below_required" });
+    expect((await executorRow(r.executorId)).status).toBe("quarantined");
+    // the sandbox started for the placement never received input
+    const sb = placementSandboxes(backend).filter((s) => s.offerId === offerId);
+    expect(sb).toHaveLength(1);
+    expect(sb[0]).toMatchObject({ released: false, killed: true });
+  });
 });
 
 // ---------------------------------------------------------------------------

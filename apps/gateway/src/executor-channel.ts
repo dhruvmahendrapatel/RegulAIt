@@ -761,9 +761,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         if (!profile || profile.retiredAt) failures.push({ probe: "report", code: "profile_digest_mismatch" });
         else failures.push(...evaluateExecutorReport(signed.report, { profile: profile.parsed, profileDigest: profile.digest, backend: row.backend, classesDeclared: row.classesDeclared, requiredClass: o.requiredClass }).failures);
         if (signed.report.imageDigest !== o.imageDigest) failures.push({ probe: "report", code: "image_digest_mismatch" });
-        // the class actually applied must also satisfy the requirement through the customer mapping, if that is what it is
+        // the class actually applied must also satisfy the requirement through the customer mapping, if that is what it is.
+        // In EVERY enforcement mode (ADR-0190 amendment item 14): `warn` never places a call below its required class.
         const effective = signed.report.class === "customer_declared" ? row.declaredClass : signed.report.class;
-        if (!effective || (o.enforcement === "enforce" && isolationClassRank(effective) < isolationClassRank(o.requiredClass))) {
+        if (!effective || isolationClassRank(effective) < isolationClassRank(o.requiredClass)) {
           if (!failures.some((f) => f.code === "class_below_required")) failures.push({ probe: "report", code: "class_below_required" });
         }
         const reportSha256 = executorReportDigest(signed.report);
