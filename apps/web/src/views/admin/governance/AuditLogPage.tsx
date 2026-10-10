@@ -16,7 +16,7 @@
  */
 import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
@@ -29,6 +29,8 @@ import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminK
 import k from "../../../ui/kit.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+const DecisionBomPanel = lazy(() => import("./DecisionBomPanel").then((module) => ({ default: module.DecisionBomPanel })));
 
 const effectTone = (effect: string): Tone =>
   effect === "allow" ? "ok" : effect === "deny" ? "danger" : effect === "require_approval" ? "warn" : "neutral";
@@ -57,6 +59,7 @@ export default function AuditLogPage() {
   const act = useAction();
   const [userId, setUserId] = useState("");
   const [deployMode, setDeployMode] = useState("");
+  const [bomAuditId, setBomAuditId] = useState<string | null>(null);
   const [confirmPrune, setConfirmPrune] = useState(false);
 
   const qs = useMemo(() => {
@@ -233,6 +236,7 @@ export default function AuditLogPage() {
                     </span>
                   ),
               },
+              { key: "bom", header: "Decision BOM", render: (entry) => entry.id ? <Button size="sm" variant="ghost" onClick={() => setBomAuditId(String(entry.id))}>Decision BOM</Button> : <span>No audit ID recorded</span> },
               { key: "reason", header: "Reason", render: (e) => <span className={`${v.dim} ${k.clamp2}`} title={e.reason ?? undefined}>{e.reason ?? "—"}</span> },
             ]}
             rows={rows}
@@ -266,6 +270,7 @@ export default function AuditLogPage() {
             </div>
           )}
         </Card>
+        {bomAuditId ? <div className={v.stack}><Button size="sm" onClick={() => setBomAuditId(null)}>Close Decision BOM</Button><Suspense fallback={<p role="status">Loading Decision BOM controls…</p>}><DecisionBomPanel key={bomAuditId} auditId={bomAuditId} /></Suspense></div> : null}
       </div>
 
       <ConfirmModal

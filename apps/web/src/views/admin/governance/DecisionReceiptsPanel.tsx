@@ -1,15 +1,20 @@
-import { useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { Button, Card, Field, Input } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
+import { checkedAuditId } from "./bomModel";
 import v from "../../views.module.css";
+const DecisionBomPanel = lazy(() => import("./DecisionBomPanel").then((module) => ({ default: module.DecisionBomPanel })));
+
 interface ReceiptStatus { state: "signing" | "no_key" | "off" | "stalled"; lastSeq: number; lagRows: number }
 interface Verification { results: Array<{ receiptSeq: number | null; status: "valid" | "invalid" | "unverifiable"; reason: string }>; cannotProve: string[] }
 
 export function DecisionReceiptsPanel() {
   const status = useQuery({ queryKey: ["admin", "decision-receipts-status"], retry: false, queryFn: () => api.get<ReceiptStatus>("/v1/receipts/status") });
   const act = useAction();
+  const [auditId, setAuditId] = useState("");
+  const [bomAuditId, setBomAuditId] = useState("");
   const readVersion = useRef(0);
   const [reading, setReading] = useState(false);
   const [from, setFrom] = useState("1"); const [to, setTo] = useState("");
@@ -23,6 +28,12 @@ export function DecisionReceiptsPanel() {
         <p>Last receipt sequence: {status.data!.lastSeq}. Decision rows awaiting signing: {status.data!.lagRows}.</p>
       </> : status.data ? <p>Receipt signing state is not reported by this gateway.</p> : null}
     </QueryGate>
+    <form className={v.stack} onSubmit={(event) => { event.preventDefault(); const id = auditId.trim(); try { checkedAuditId(id); } catch { act.setError("Enter the decision audit UUID from the receipt or audit log."); return; } act.setError(null); setBomAuditId(id); }}>
+      <Field label="Audit row ID for Decision BOM"><Input required value={auditId} onChange={(event) => setAuditId(event.target.value)} /></Field>
+      <p>Use the audit row ID, which is distinct from the receipt sequence. Access and finality are checked by the gateway.</p>
+      <Button type="submit">Open Decision BOM</Button>
+    </form>
+    {bomAuditId ? <Suspense fallback={<p role="status">Loading Decision BOM controls…</p>}><DecisionBomPanel key={bomAuditId} auditId={bomAuditId} /></Suspense> : null}
     <form className={v.stack} onSubmit={(event) => {
       event.preventDefault();
       const first = Number(from), last = Number(to || status.data?.lastSeq);

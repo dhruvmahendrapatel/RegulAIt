@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -69,6 +69,8 @@ interface AgentCardResponse {
   oversight: { modelCards: number; modelCardApproved: boolean; note: string };
 }
 
+const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((module) => ({ default: module.AiBomPanel })));
+
 const TABS = [
   ...["overview", "frameworks", "risks", "stack", "dependencies", "approvals", "audit"].map((id) => ({ id, label: id[0]!.toUpperCase() + id.slice(1) })),
   // ADR-0173 batch 2b: the use case's path from registration to its decision, as a graph
@@ -77,6 +79,7 @@ const TABS = [
   { id: "decisions", label: "Decision records" },
   { id: "incidents", label: "Incidents" },
   { id: "feedback", label: "Feedback" },
+  { id: "ai-bom", label: "AI BOM" },
 ];
 
 export default function UseCaseOverviewPage() {
@@ -169,6 +172,7 @@ export default function UseCaseOverviewPage() {
                 onRefresh={refresh}
               />
             ) : null}
+            {tab === "ai-bom" ? <Suspense fallback={<p role="status">Loading AI BOM controls…</p>}><AiBomPanel key={id} subject={{ kind: "use_case", id }} /></Suspense> : null}
             {tab === "frameworks" ? <FrameworksTab query={frameworks} /> : null}
             {tab === "risks" ? <RisksTab useCaseId={id} risks={data.risks} acceptance={acceptance} onRefresh={refresh} /> : null}
             {tab === "stack" ? <StackTab useCaseId={id} data={data.stack} /> : null}
