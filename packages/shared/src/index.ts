@@ -25,6 +25,8 @@ import { batch3OrgSettingsFields, MCP_UPSTREAM_TRANSPORTS, mcpStdioSpecSchema } 
 import { approvalRuleQuorumFields, batch4OrgSettingsFields } from "./batch4.js";
 // ADR-0187 (batch 5): the engine settings ride the same PUT
 import { batch5OrgSettingsFields } from "./engines/settings.js";
+// ADR-0188 (batch 6 item 1): the identity settings ride the same PUT
+import { identityOrgSettingsFields } from "./identity/settings.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -2410,6 +2412,9 @@ export const updateOrgSettingsSchema = z
     // ADR-0187 (batch 5): engine run timeout, default budget, approval threshold,
     // raw-report retention and sensitive-set approval
     ...batch5OrgSettingsFields,
+    // ADR-0188 (batch 6 item 1): agent entitlement mode, delegated token lifetime, delegation depth,
+    // workload client authentication methods, the DPoP nonce and the workload key lifetime
+    ...identityOrgSettingsFields,
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -2851,9 +2856,19 @@ export {
   AUDIT_GENESIS_SEQ,
   AUDIT_LEGACY_DISCLOSURE,
   AUDIT_PAYLOAD_VERSION,
+  AUDIT_PAYLOAD_VERSION_V2,
+  AUDIT_CHAIN_BOUNDARY_VERSIONS,
+  auditChainVersionAt,
+  auditRowVersionProblem,
+  resolveAuditChainBoundary,
+  type AuditChainBoundary,
+  type AuditChainBoundaryRecord,
   auditContentHash,
+  auditContentHashFor,
   auditRowHash,
   canonicalAuditPayload,
+  canonicalAuditPayloadV2,
+  type AuditChainVersion,
   canonicalJson,
   sha256Hex,
   verifyChainBatch,
@@ -4593,6 +4608,7 @@ export * from "./approval-signing.js";
 export * from "./detection-content/index.js";
 // ADR-0187 (batch 5): the sidecar engine contract
 export * from "./engines/index.js";
+export * from "./identity/index.js";
 export {
   injectionText,
   vendoredCompileProblems,
@@ -4608,3 +4624,6 @@ export { vendoredMcpFindings } from "./detection-content/mcp.js";
 
 // ADR-0186 R: public offline receipt-verification seam.
 export * from "./receipts/verify.js";
+
+// ADR-0187 decisions 185–192: the built-in CyberSecEval eval datasets (pure: pins, mapping, digests).
+export * from "./eval-datasets/cyberseceval.js";

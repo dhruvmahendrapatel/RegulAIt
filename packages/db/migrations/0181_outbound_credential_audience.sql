@@ -1,4 +1,4 @@
--- ADR-0186 decision 30 (V, credential audience): the org setting that refuses caller-supplied credentials sent to a
+-- ADR-0186 decision 32 (V, credential audience): the org setting that refuses caller-supplied credentials sent to a
 -- host outside their audience. Hand-authored (never drizzle-kit generate).
 --
 -- Strict by default (ADR-0180): `enforce`. `off` is a relaxation (a `settings_relax` step-up, audited through

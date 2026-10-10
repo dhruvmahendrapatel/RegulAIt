@@ -1,5 +1,5 @@
 /**
- * ADR-0186 V, decision 30 — OUTBOUND CREDENTIAL AUDIENCE, on the real app and
+ * ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE, on the real app and
  * a real database, at both dispatch points (the MCP proxy — tool and protocol
  * calls — and the connector call).
  *
@@ -305,7 +305,7 @@ afterAll(async () => {
   }
 });
 
-describe("decision 30: the scan input and the matcher (pure)", () => {
+describe("decision 32: the scan input and the matcher (pure)", () => {
   it("decodes caller content recursively: nested values, object keys and percent-escapes", () => {
     const text = callerSuppliedText({ a: [{ deep: { [GH_TOKEN]: 1 } }], q: `token%3D${encodeURIComponent(GH_TOKEN)}`, n: 5, b: true });
     expect(text).toContain(GH_TOKEN);
@@ -356,7 +356,7 @@ describe("decision 30: the scan input and the matcher (pure)", () => {
   }, 30_000);
 });
 
-describe("decision 30: the setting is strict by default and reported truthfully", () => {
+describe("decision 32: the setting is strict by default and reported truthfully", () => {
   it("a migrated org reads `enforce` (column default and stored row); the detection-content route reports enforcement", async () => {
     const res = await db.execute(sql`select column_default from information_schema.columns
       where table_schema = 'public' and table_name = 'org_settings' and column_name = 'outbound_credential_audience'`);
@@ -372,7 +372,7 @@ describe("decision 30: the setting is strict by default and reported truthfully"
   });
 });
 
-describe("decision 30: MCP proxy dispatch", () => {
+describe("decision 32: MCP proxy dispatch", () => {
   it("a GitHub token in tool arguments to a non-matching host is refused (credential_audience_violation); nothing reaches the upstream; audited with no secret", async () => {
     const since = await mark();
     const client = await mcpClient(serverId);
@@ -463,7 +463,7 @@ describe("decision 30: MCP proxy dispatch", () => {
   });
 });
 
-describe("decision 30: connector-call dispatch", () => {
+describe("decision 32: connector-call dispatch", () => {
   it("a GitHub token in the caller's payload to a non-matching host: 403 credential_audience_violation, the receiver sees nothing, audited with no secret", async () => {
     const since = await mark();
     const hits = collectorHits.length;
@@ -518,7 +518,7 @@ describe("decision 30: connector-call dispatch", () => {
   });
 });
 
-describe("decision 30: relaxing to `off` needs a settings_relax step-up, is audited, and then allows", () => {
+describe("decision 32: relaxing to `off` needs a settings_relax step-up, is audited, and then allows", () => {
   it("off without a step-up is refused; with one it is saved and audited as relaxed; both dispatch paths then let the call through", async () => {
     // a session admin with a passkey (the bootstrap credential is not a person)
     const adminId = await newUser("admin");

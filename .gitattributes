@@ -9,3 +9,5 @@ engines/modelscan/*.toml text eol=lf
 engines/garak/*.py text eol=lf
 engines/garak/requirements*.txt text eol=lf
 engines/garak/excluded-data.txt text eol=lf
+# ADR-0187 decision 186: vendored dataset bytes are pinned by sha256; no end-of-line conversion on any checkout
+packages/shared/src/eval-datasets/vendor/** -text

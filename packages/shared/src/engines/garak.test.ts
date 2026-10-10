@@ -11,11 +11,15 @@ import {
   engineConfigNeedsApproval,
   engineRunConfigSchema,
   engineTaxonomyProblems,
+  GARAK_JUDGE_MODULES,
+  GARAK_PRESEEDED_HF_ASSETS,
+  GARAK_PROBE_SETTINGS,
   GARAK_PROBES,
   GARAK_UPSTREAM_PROBES,
   GARAK_USAGE_DATA_ENV,
   GARAK_WORKER_SELF_TEST_SWITCH,
   garakConfigProblem,
+  garakPreseededPlugins,
   garakPrimaryDetector,
   garakProbeForSet,
   garakSetId,
@@ -26,10 +30,10 @@ const local = GARAK_PROBES.filter((p) => p.disposition === "local");
 const byProbe = new Map(GARAK_PROBES.map((p) => [p.probe, p]));
 
 describe("B5-G garak catalogue", () => {
-  it("names only probes the pinned release has, and classifies every one but the always-pass test probes", () => {
+  it("names only probes the pinned release has, and classifies every one but the always-pass test probes and the detector-less intent probe", () => {
     const upstream = new Set(GARAK_UPSTREAM_PROBES.map((p) => p.probe));
     expect(GARAK_PROBES.filter((p) => !upstream.has(p.probe)).map((p) => p.probe)).toEqual([]);
-    expect(GARAK_UPSTREAM_PROBES.filter((p) => !byProbe.has(p.probe)).map((p) => p.probe)).toEqual(["test.Blank", "test.Test"]);
+    expect(GARAK_UPSTREAM_PROBES.filter((p) => !byProbe.has(p.probe)).map((p) => p.probe)).toEqual(["grandma.GrandmaIntent", "test.Blank", "test.Test"]);
     // control: the admitted set is not empty, and not everything
     expect(local.length).toBeGreaterThan(40);
     expect(local.length).toBeLessThan(GARAK_PROBES.length);
@@ -42,13 +46,13 @@ describe("B5-G garak catalogue", () => {
       "dan.DUDE",
       "dan.Ablation_Dan_11_0",
       "misleading.FalseAssertion",
-      "badchars.BadCharacters",
       "tap.TAPCached",
       "realtoxicityprompts.RTPBlank",
       "latentinjection.LatentJailbreak",
       "lmrc.SlurUsage",
       "packagehallucination.Rust",
-      "doctor.Puppetry",
+      "grandma.Slurs",
+      "lmrc.SexualContent",
     ];
     expect(mustNotRun.length).toBeGreaterThan(20);
     for (const p of mustNotRun) {
@@ -60,7 +64,7 @@ describe("B5-G garak catalogue", () => {
     }
   });
 
-  it("every admitted probe's primary detector runs locally: no Hub model, hosted judge, hosted API or unlicensed word list", () => {
+  it("every admitted probe's primary detector runs locally, or is a judge re-pointed at the gateway judge: no Hub model, hosted judge, hosted API or unlicensed word list", () => {
     const allowedDetectorModules = new Set([
       "ansiescape",
       "apikey",
@@ -69,21 +73,75 @@ describe("B5-G garak catalogue", () => {
       "divergence",
       "encoding",
       "exploitation",
+      "goodside",
       "knownbadsignatures",
       "lmrc",
       "malwaregen",
       "mitigation",
+      "productkey",
       "promptinject",
       "snowball",
+      "sysprompt_extraction",
       "web_injection",
     ]);
+    // these detectors (or the probe's own payload) read a Hub asset: admitted only when it is pre-seeded
+    const needsHub = new Set(["packagehallucination", "misleading"]);
+    const preseeded = garakPreseededPlugins();
     for (const p of local) {
       const d = garakPrimaryDetector(p.probe);
       expect(d, p.probe).not.toBeNull();
-      expect(allowedDetectorModules.has(d!.split(".")[0]!), `${p.probe} -> ${d}`).toBe(true);
+      const mod = d!.split(".")[0]!;
+      // ADR-0187 decisions 203-205: a model-calling detector is admitted only on a judge probe, which runs
+      // only with the run's judge behind the gateway (never garak's hosted default)
+      if (p.requiresJudge) expect(GARAK_JUDGE_MODULES.includes(mod), `${p.probe} -> ${d}`).toBe(true);
+      else if (needsHub.has(mod)) expect(preseeded.has(d!), `${p.probe} -> ${d} is not pre-seeded`).toBe(true);
+      else expect(allowedDetectorModules.has(mod), `${p.probe} -> ${d}`).toBe(true);
     }
+    expect(local.filter((p) => p.requiresJudge).map((p) => p.probe)).toEqual(["agent_breaker.AgentBreaker"]);
+    // the detector module that reads the two deleted word lists at import is never a primary detector
+    expect(local.filter((p) => garakPrimaryDetector(p.probe)!.startsWith("unsafe_content.")).map((p) => p.probe)).toEqual([]);
+    // the system-prompt probe reads a Hub dataset: it is pre-seeded, and the probe is pinned to it alone
+    expect(preseeded.has("sysprompt_extraction.SystemPromptExtraction")).toBe(true);
+    expect(GARAK_PROBE_SETTINGS["sysprompt_extraction.SystemPromptExtraction"]).toEqual({ system_prompt_sources: ["garak-llm/drh-System-Prompt-processed"] });
+    expect(GARAK_PRESEEDED_HF_ASSETS.map((a) => a.id)).toContain("garak-llm/drh-System-Prompt-processed");
     // the HF-backed mitigation detector is never a primary detector of an admitted probe
     expect(local.some((p) => garakPrimaryDetector(p.probe) === "mitigation.ModernBERTRefusal")).toBe(false);
+  });
+
+  it("the owner's admissions of 2026-10-10 (questions 20 and 22): runnable ones run, the rest say exactly why not", () => {
+    // question 20: admitted, and runnable here (string, trigger or regex detectors; data now shipped)
+    const admitted = [
+      ...GARAK_UPSTREAM_PROBES.filter((p) => /^(doctor|goodside|glitch)\./.test(p.probe)).map((p) => p.probe),
+      "grandma.Substances",
+      "grandma.Win10",
+      "grandma.Win11",
+      "badchars.BadCharacters",
+      // question 22: their Hub datasets are pre-seeded
+      "sysprompt_extraction.SystemPromptExtraction",
+      ...GARAK_UPSTREAM_PROBES.filter((p) => p.probe.startsWith("packagehallucination.") && p.probe !== "packagehallucination.Rust").map((p) => p.probe),
+    ];
+    expect(admitted.length).toBe(20);
+    for (const p of admitted) {
+      expect(byProbe.get(p)?.disposition, p).toBe("local");
+      expect(ENGINE_MANIFEST.garak.sets[garakSetId(p)], p).toBeDefined();
+      expect(ENGINE_MANIFEST.garak.airGappedReducedSet.some((e) => e.key === p), p).toBe(false);
+    }
+    expect(byProbe.get("sysprompt_extraction.SystemPromptExtraction")?.attackClass).toBe("system_prompt_extraction");
+    expect(byProbe.get("badchars.BadCharacters")).toMatchObject({ setClass: "offensive", attackClass: "encoding_evasion" });
+    expect(byProbe.get("doctor.Bypass")).toMatchObject({ setClass: "offensive", attackClass: "jailbreak" });
+    // admitted by licence, but their detector needs the OpenRAIL toxicity model (not pre-seeded) in the
+    // module that reads the two deleted word lists: not run, and the reason is the missing asset
+    for (const p of ["atkgen.Tox", "lmrc.Bullying", "latentinjection.LatentJailbreak", "realtoxicityprompts.RTPBlank"]) {
+      expect(byProbe.get(p)?.disposition, p).toBe("missing_preseed");
+      expect(byProbe.get(p)?.note, p).toMatch(/licence admitted/);
+    }
+    // their detector reads a word list that stays deleted (question 26) or was never admitted
+    for (const p of ["lmrc.SlurUsage", "lmrc.SexualContent", "lmrc.Sexualisation", "grandma.Slurs"]) expect(byProbe.get(p)?.disposition, p).toBe("excluded_licence");
+    // every pre-seeded asset is MIT or Apache-2.0 and pinned to a full commit
+    for (const a of GARAK_PRESEEDED_HF_ASSETS) {
+      expect(["mit", "apache-2.0"]).toContain(a.licence);
+      expect(a.revision).toMatch(/^[0-9a-f]{40}$/);
+    }
   });
 
   it("set ids are the probes' names in lower case and fit the shared set grammar", () => {

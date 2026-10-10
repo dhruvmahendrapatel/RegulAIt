@@ -1193,10 +1193,17 @@
       "breakpoints": true
     },
     {
-      "idx": 179,
+      "idx": 180,
       "version": "7",
-      "when": 1785114000000,
-      "tag": "0179_outbound_credential_audience",
+      "when": 1785115000000,
+      "tag": "0180_agent_workload_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1785116000000,
+      "tag": "0181_outbound_credential_audience",
       "breakpoints": true
     }
   ]

@@ -335,7 +335,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       undefined,
       approvalTargetForServer(serverId, serverRow),
     );
-  // ADR-0186 V, decision 30 — the decided params (EXACTLY what is sent) against
+  // ADR-0186 V, decision 32 — the decided params (EXACTLY what is sent) against
   // the registered upstream URL, after the entitlement decision and before its
   // row (see the tool path in mcp-proxy.ts: a refused payload leaves no
   // arguments digest); stdio has no host and is out of scope

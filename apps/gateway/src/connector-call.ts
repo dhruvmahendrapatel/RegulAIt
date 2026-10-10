@@ -119,7 +119,7 @@ import { recordDecision } from "./metrics.js";
 import { CREDENTIAL_AUDIENCE_ERROR, CREDENTIAL_AUDIENCE_RULE_ID, refuseOutboundCredentialAudience } from "./outbound-audience.js";
 
 /**
- * ADR-0186 decision 30 — every host a connector call can reach, as the egress
+ * ADR-0186 decision 32 — every host a connector call can reach, as the egress
  * branches below adjudicate it: the typed `baseUrl`; the credential-named and
  * compiled hosts of a credential-derived kind; the compiled vendor default.
  * `[]` = the call reaches no network host (the mock, or a kind that cannot be
@@ -433,7 +433,7 @@ export async function executeGovernedConnectorCall(
     });
     recordDecision({ surface: "connector", effect: decision.effect });
 
-    // ADR-0186 V, decision 30 — OUTBOUND CREDENTIAL AUDIENCE. The caller's own
+    // ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE. The caller's own
     // `object` and `payload`, as they would be sent, against every host this
     // call can reach. After the entitlement decision and BEFORE its row (a
     // refused payload leaves no arguments digest, only this check's rule ids
@@ -1264,7 +1264,7 @@ export async function executeGovernedConnectorCall(
     // A refusal ABOUT the input does not store the input — storing the very
     // payload a block refused would defeat the block (ADR-0070 rule 3).
     const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused" ||
-      // ADR-0186 decision 30: the refused input carries a credential
+      // ADR-0186 decision 32: the refused input carries a credential
       errCode === CREDENTIAL_AUDIENCE_ERROR;
     const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;
     const withheld =

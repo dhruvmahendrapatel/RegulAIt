@@ -77,7 +77,7 @@ maintained pure-JS engine); NeMo YARA rules are converted to data.
   (30–900); `step_up_actions` = approval_decide, settings_relax, evidence_hold_override, break_glass, passkey_manage,
   owner_change (removing one is a relaxation); `tool_approval_sensitive_quorum` 2; `decision_receipts_mode` on;
   `audit_anchor_timestamp_mode` required; `vendored_detection_packs` all four; `outbound_credential_audience`
-  enforce (decision 30, migration 0179); `monitor_mcp_baseline_days` 14;
+  enforce (decision 32, migration 0181); `monitor_mcp_baseline_days` 14;
   `monitor_jailbreak_threshold` 3; `monitor_jailbreak_window_hours` 24. Every relaxation is audited through
   `org-settings-updated` with `detail.transitions` and needs a `settings_relax` step-up.
 
@@ -575,7 +575,7 @@ unless stated.
 
       Both web writers (the profiles page, the first-run pack) go through `withStepUp` and the census covers them.
 
-30. **Outbound credential audience (V; owner decision 2026-10-10, branch `b4-outbound-audience`; migration 0179;
+32. **Outbound credential audience (V; owner decision 2026-10-10, branch `b4-outbound-audience`; migration 0181;
     `zz-b4o-outbound-audience.test.ts`, 14 tests, shown red by disabling the check).** An implementation decision
     recording the owner's choice for the `pipelock-secrets` audience hosts that X23 left unconsumed.
     - **Refuse.** A `pipelock-secrets` match in the caller's content, bound for a host outside that rule's audience, is
@@ -662,7 +662,7 @@ JSON exporter (`docs/deployment/DATA_BOUNDARY.md`).
 - **V, NeMo: zero eligible rules.** The NeMo rules that fit the pack are code, SQL and XSS output-injection rules, which
   need position semantics that `any`/`N of them` conditions cannot express. Importing them would need a hand-written
   evaluator, which ADR-0176 bars. The pack stays empty; revisit only through a new ADR.
-- **V, credential audience** — wired in decision 30. Residuals: stdio MCP is out of scope (no host); rules with no
+- **V, credential audience** — wired in decision 32. Residuals: stdio MCP is out of scope (no host); rules with no
   audience hosts refuse every destination, including GitHub tokens and JWTs (pending owner confirmation that this
   breadth is intended); the SSN shape is excluded as personal data; the matcher's gate-dense cost (B4I-02) is linear but not capped below the body limit.
 - **S (R22-07):** no network certificate-revocation checking (OCSP/CRL) on the TSA chain: no CRL, OCSP or AIA fetch,

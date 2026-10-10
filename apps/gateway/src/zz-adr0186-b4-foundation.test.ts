@@ -97,7 +97,7 @@ const RELAXED: { [K in Batch4SettingKey]: unknown } = {
 
 const STRICT_SQL = sql`UPDATE org_settings SET approval_signature_mode = 'passkey', step_up_mode = 'required',
   step_up_max_age_seconds = 120,
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb,
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb,
   tool_approval_sensitive_quorum = 2, decision_receipts_mode = 'on', audit_anchor_timestamp_mode = 'required',
   vendored_detection_packs = '["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]'::jsonb,
   outbound_credential_audience = 'enforce',
@@ -767,7 +767,7 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
         expect(admin.statusCode,admin.body).toBe(404);expect(admin.json()).toEqual({error:"anchor_not_found"});continue;
       }
       if (url === "/v1/detection-content") {
-        // X23 built: the real manifest; decision 30: outbound audience enforcement is wired and reported
+        // X23 built: the real manifest; decision 32: outbound audience enforcement is wired and reported
         // from the strict setting (zz-b4o-outbound-audience.test.ts proves both dispatch paths)
         expect(admin.statusCode, admin.body).toBe(200);
         expect(admin.json().packs).toHaveLength(4);

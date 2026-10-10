@@ -1,5 +1,5 @@
 /**
- * ADR-0186 V, decision 30 — OUTBOUND CREDENTIAL AUDIENCE, enforced at dispatch.
+ * ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE, enforced at dispatch.
  *
  * A `pipelock-secrets` rule may name the hosts its credential belongs to (a
  * GitHub token to GitHub, a cloud API key to that cloud). A governed call whose

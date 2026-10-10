@@ -148,6 +148,19 @@ describe("the modelscan image's inputs", () => {
     expect(gate.judge(rows, [{ ...allow[0], decision: "approved" }]).denied.map((r) => r.subject)).toContain("numpy");
   });
 
+  it("ADR-0187 decision 180: the .npy header check is baked read-only where the scanner runs it, on the venv's interpreter", () => {
+    expect(MODELSCAN_IMAGE_PATHS.npyHelper).toBe("/opt/modelscan/npy-header.py");
+    expect(MODELSCAN_IMAGE_PATHS.python).toBe(`${MODELSCAN_IMAGE_PATHS.venvBin}/python`);
+    expect(dockerfile).toContain(`COPY engines/modelscan/npy-header.py ${MODELSCAN_IMAGE_PATHS.npyHelper}`);
+    expect(dockerfile).toMatch(new RegExp(`^RUN chmod 0444 \\S+ ${MODELSCAN_IMAGE_PATHS.npyHelper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `, "m"));
+    // stdlib only: it imports nothing outside the standard library (it runs with -I -S)
+    const helper = readFileSync(path.join(dir, "npy-header.py"), "utf8");
+    const imports = [...helper.matchAll(/^(?:import|from) (\S+)/gm)].map((m) => m[1]);
+    expect(imports.sort()).toEqual(["ast", "json", "os", "re", "sys"]);
+    // no builtin eval, exec or compile (re.compile is a method), no dynamic import
+    expect(helper).not.toMatch(/(?<![\w.])(?:eval|exec|compile)\(|__import__|importlib/);
+  });
+
   it.skipIf(spawnSync("python3", ["--version"]).status !== 0)("the settings patch applies only to exactly the expected code", async () => {
     const patch = path.join(dir, "patches/format-names-from-settings.py");
     const src = readFileSync(patch, "utf8");

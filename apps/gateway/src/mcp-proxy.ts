@@ -632,7 +632,7 @@ export async function executeGovernedToolCall(
       // TOOL I/O. Arguments are what the model asked for; content is what the
       // governed path already decided the caller may see — on a PII/guardrail
       // withhold, that is the marker, not the payload.
-      // ADR-0186 decision 30: arguments refused for carrying a credential are not stored
+      // ADR-0186 decision 32: arguments refused for carrying a credential are not stored
       inputText:
         capture && traceInput.value && !(outcome.kind === "denied" && outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID)
           ? toolPayloadPreview(traceInput.value, max)
@@ -868,7 +868,7 @@ async function executeGovernedToolCallInner(
       return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
     }
 
-    // ADR-0186 V, decision 30 — OUTBOUND CREDENTIAL AUDIENCE. The caller's
+    // ADR-0186 V, decision 32 — OUTBOUND CREDENTIAL AUDIENCE. The caller's
     // arguments, as they would be sent, against the registered upstream URL.
     // After the entitlement decision (an unentitled caller is denied as such)
     // and BEFORE the decision row: a refused call is recorded by this check's
@@ -2336,7 +2336,7 @@ export function mcpErrorForGovernanceOutcome(
       return new McpError(
         ErrorCode.InvalidRequest,
         `Denied by policy: ${outcome.decision.reason}`,
-        // ADR-0186 decision 30: the connector route's 403 code, carried in the
+        // ADR-0186 decision 32: the connector route's 403 code, carried in the
         // error data (a JSON-RPC answer has no HTTP status of its own)
         outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID
           ? { error: CREDENTIAL_AUDIENCE_ERROR, status: 403 }
@@ -2415,7 +2415,7 @@ export function mcpErrorForGovernanceOutcome(
 }
 
 /** AER-039 — the upstream a call was bound to, safe for the audit ledger */
-/** ADR-0186 decision 30: the refusal as a governed deny (every surface already maps `denied`) */
+/** ADR-0186 decision 32: the refusal as a governed deny (every surface already maps `denied`) */
 export function credentialAudienceDecision(reason: string): Decision {
   return { effect: "deny", ruleId: CREDENTIAL_AUDIENCE_RULE_ID, ruleChain: [], reason };
 }

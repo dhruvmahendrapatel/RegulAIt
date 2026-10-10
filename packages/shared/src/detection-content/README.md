@@ -40,7 +40,7 @@ rule IDs/counts/spans, not matched secrets or descriptions. Scrubbing makes at m
 
 `credentialAudienceViolations` provides host/TLS matching, including wildcard
 apex/subdomains and suffix-spoof refusal. Its consumer is the gateway's
-`outbound-audience.ts` (ADR-0186 decision 30), called at the MCP tool, MCP
+`outbound-audience.ts` (ADR-0186 decision 32), called at the MCP tool, MCP
 protocol and connector dispatch points on the caller's own content; the org
 setting `outboundCredentialAudience` (strict `enforce`) governs it and
 `GET /v1/detection-content` reports `outboundAudienceEnforced` from that setting

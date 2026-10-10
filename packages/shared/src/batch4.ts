@@ -52,6 +52,9 @@ export const STEP_UP_ACTION_KINDS = [
   "break_glass",
   "passkey_manage",
   "owner_change",
+  // ADR-0188 (migration 0180): creating, binding a key to, suspending or revoking a workload identity,
+  // and every other identity administration write
+  "identity_manage",
 ] as const;
 export type StepUpActionKind = (typeof STEP_UP_ACTION_KINDS)[number];
 
@@ -134,7 +137,7 @@ export const VENDORED_DETECTION_PACKS = [
 ] as const;
 export type VendoredDetectionPack = (typeof VENDORED_DETECTION_PACKS)[number];
 
-/** V (decision 30): whether caller-supplied content carrying a `pipelock-secrets` credential may leave for a host
+/** V (decision 32): whether caller-supplied content carrying a `pipelock-secrets` credential may leave for a host
  * outside that credential's audience (`org_settings.outbound_credential_audience`). `enforce` refuses it. */
 export const OUTBOUND_CREDENTIAL_AUDIENCE_MODES = ["enforce", "off"] as const;
 export type OutboundCredentialAudienceMode = (typeof OUTBOUND_CREDENTIAL_AUDIENCE_MODES)[number];
