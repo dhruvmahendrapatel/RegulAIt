@@ -8,6 +8,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, auditLog, builderAgentSkills, builderAgents, builderSkills, eq } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+// ADR-0186 A (Class C, PR #198 round 4): this suite drives SoD / skill-admission writes through API keys and is
+// not about step-up; disabling a SoD rule or admitting a held skill now needs one, so step-up is relaxed for its run
+// and the strict policy restored after (M-068). The step-up itself is proved in zz-b4c4-review-fixes.
+let restoreStepUpPosture: (() => Promise<void>) | undefined;
 import { buildSystemPrompt } from "./builder-runtime.js";
 import { runSkillAdmissionRescan, skillDigest } from "./skill-admission.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
@@ -56,6 +61,7 @@ const skillRow = async (id: string) => (await k.db.select().from(builderSkills).
 
 beforeAll(async () => {
   k = await builderKit("bld-adm");
+  restoreStepUpPosture = await relaxStepUpForTest(k.db);
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
@@ -66,6 +72,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUpPosture?.();
   await restoreSb2Gates();
   await restoreStrictAdmission?.();
   await k.close();

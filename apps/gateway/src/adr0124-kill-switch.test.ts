@@ -25,6 +25,11 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -83,6 +88,10 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let userId = "";
 let userAuth: { authorization: string } = { authorization: "" };
+/** ADR-0186 A: the person attending the dial — never the caller, who can never
+ * approve their own call (the old self-review is gone for tool calls) */
+let approverId = "";
+let approverAuth: { authorization: string } = { authorization: "" };
 let agentId = "";
 let serverId = "";
 let connectorId = "";
@@ -115,7 +124,7 @@ const setMode = (mode: string, reason = "adr0124 test — exercising the shipped
       mode,
       reason,
       // require_approval must name who is attending — see ADR-0124
-      ...(mode === "require_approval" ? { approverUserId: userId } : {}),
+      ...(mode === "require_approval" ? { approverUserId: approverId } : {}),
     },
   });
 
@@ -174,6 +183,7 @@ let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
   // drives admins through keys and is not about MFA, so it relaxes the dial
   // explicitly and hands the shared database back strict in afterAll (M-068).
@@ -189,6 +199,9 @@ beforeAll(async () => {
   });
   userId = u.json().id;
   userAuth = { authorization: `Bearer ${(await post(`/v1/users/${userId}/keys`, { name: "k" })).json().token}` };
+  const ap = await post("/v1/users", { email: `adr0124-approver-${RUN}@example.com`, displayName: "ADR124 Approver", isAdmin: true });
+  approverId = ap.json().id;
+  approverAuth = { authorization: `Bearer ${(await post(`/v1/users/${approverId}/keys`, { name: "k" })).json().token}` };
 
   const a = await post("/v1/agents", {
     name: `adr0124-agent-${RUN}`,
@@ -221,6 +234,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   await restoreAdminKeyMfa?.();
   await restoreStrictAdmission?.();
   await setMode("normal", "adr0124 teardown — returning the shared database to normal");
@@ -460,7 +474,7 @@ describe("9: a halt destroys nothing", () => {
       userId,
       serverId,
       toolName: WRITE_TOOL,
-      approverUserId: userId,
+      approverUserId: approverId,
     });
     const queued = await callTool(WRITE_TOOL);
     expect(queued.kind).toBe("approval_required");
@@ -591,14 +605,13 @@ describe("AER-017: manual-approval mode restricts an allowed call and can be sat
 
     // DECIDED AS THE NAMED APPROVER, not as the bootstrap token — the bootstrap
     // identity is forbidden from deciding (`bootstrap_cannot_decide`), which is
-    // its own control and not part of this finding. The dial names `userId` as
-    // the approver, so this is a self-review: permitted, and the ledger records
-    // it as one with the reason. This test is about the hold being satisfiable,
-    // not about separation of duties.
+    // its own control and not part of this finding. ADR-0186 A: the dial names a
+    // separate approver (the caller can never approve their own call). This test
+    // is about the hold being satisfiable, not about separation of duties.
     const decided = await post(
       `/v1/approvals/${approvalId}/decide`,
       { decision: "approved", reason: "aer017 — the sign-off that used to buy nothing" },
-      userAuth,
+      approverAuth,
     );
     expect(decided.statusCode, decided.body).toBe(200);
 
@@ -627,7 +640,7 @@ describe("AER-017: manual-approval mode restricts an allowed call and can be sat
       (await post(
         `/v1/approvals/${approvalId}/decide`,
         { decision: "approved", reason: "aer017 — one consent, many racers" },
-        userAuth,
+        approverAuth,
       )).statusCode,
     ).toBe(200);
 

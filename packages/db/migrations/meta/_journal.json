@@ -1149,6 +1149,41 @@
       "when": 1785105000000,
       "tag": "0170_batch4_approvals_receipts_detection",
       "breakpoints": true
+    },
+    {
+      "idx": 171,
+      "version": "7",
+      "when": 1785106000000,
+      "tag": "0171_approval_role_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1785107000000,
+      "tag": "0172_approval_named_approver_first_passkey",
+      "breakpoints": true
+    },
+    {
+      "idx": 173,
+      "version": "7",
+      "when": 1785108000000,
+      "tag": "0173_batch5_sidecar_engines",
+      "breakpoints": true
+    },
+    {
+      "idx": 174,
+      "version": "7",
+      "when": 1785109000000,
+      "tag": "0174_engine_lease_request_and_manifest_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 175,
+      "version": "7",
+      "when": 1785110000000,
+      "tag": "0175_model_artifact_scans",
+      "breakpoints": true
     }
   ]
 }

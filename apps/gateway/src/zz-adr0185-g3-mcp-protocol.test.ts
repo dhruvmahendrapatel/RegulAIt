@@ -25,6 +25,11 @@ import { buildApp } from "./app.js";
 import { executeGovernedProtocolCall } from "./mcp-protocol.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+// ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
+// through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
+// and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
+let restoreApprovalSigning: (() => Promise<void>) | undefined;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -177,6 +182,7 @@ async function upstreamCalls(up: { seen: string[] }, fn: () => Promise<unknown>)
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreApprovalSigning = await relaxApprovalSigningForTest(db);
   restoreAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   restoreGates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
@@ -202,6 +208,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreApprovalSigning?.();
   try {
     // M-068: global state this file changed goes back
     if (db) await setMethods(priorMethods);

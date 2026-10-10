@@ -730,7 +730,8 @@ export async function writeUseCaseDecisionRecord(
       const [last] = await d
         .select({ id: approvals.id })
         .from(approvals)
-        .where(and(eq(approvals.instanceId, instanceId), isNotNull(approvals.decidedAt)))
+        // the instance's own sign-offs only — an engine run's approval (ADR-0187) is linked to it too
+        .where(and(eq(approvals.instanceId, instanceId), eq(approvals.objectType, "workflow"), isNotNull(approvals.decidedAt)))
         .orderBy(desc(approvals.decidedAt))
         .limit(1);
       approvalId = last?.id ?? null;

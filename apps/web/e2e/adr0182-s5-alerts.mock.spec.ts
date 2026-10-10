@@ -8,6 +8,7 @@
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const AGENT = "55555555-5555-4555-8555-555555555555";
 const KRI = "66666666-6666-4666-8666-666666666666";
@@ -253,4 +254,17 @@ test.describe("ADR-0182 S5: the KRI editor's breach action", () => {
     await expect.poll(() => cap.kriPosts.length).toBe(1);
     expect(cap.kriPosts[0]).toMatchObject({ scope: "agent", scopeId: AGENT, onBreach: "propose_halt" });
   });
+});
+
+// ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: relaxing an alert SLA asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const cap = await mockApi(page);
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/admin/governance/alerts");
+  const card = page.getByTestId("alert-settings");
+  await card.getByLabel("High (hours)").fill("48");
+  await card.getByRole("button", { name: "Save SLA" }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(cap.settingsPuts).toEqual([{ alertSlaHours: { high: 48, medium: 72, low: 168 } }]);
 });

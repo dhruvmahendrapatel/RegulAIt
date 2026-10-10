@@ -369,6 +369,48 @@ export const TRACE_STANDARDS_PINS = {
   openInferenceSemanticConventions: "2.14.0",
 } as const;
 
+/**
+ * ADR-0186 T — THE SCHEMA URL. Every exported `ResourceSpans` and `ScopeSpans`
+ * carries `schemaUrl`, so a receiver (or a Collector's schema processor) knows
+ * which convention version our keys follow instead of guessing from the keys.
+ * It is DERIVED from the pin above — the one place the semconv version is
+ * written — and `otel-conformance.test.ts` proves that pin equals the installed
+ * `@opentelemetry/semantic-conventions` version. The package's own `VERSION`
+ * constant sits outside its `exports` map, so it cannot be imported; reading
+ * the pin is the closest the code can get without a second hardcoded number.
+ * The OTel schema file for 1.43.0 is published at exactly this URL (checked
+ * 2026-10-07: HTTP 200, `schema_url: https://opentelemetry.io/schemas/1.43.0`).
+ */
+export const OTEL_SCHEMA_URL = `https://opentelemetry.io/schemas/${TRACE_STANDARDS_PINS.otelSemanticConventions}`;
+
+/**
+ * ADR-0186 T — THE END OF THE `gen_ai.system` TRANSITION WINDOW.
+ *
+ * ADR-0177 gap 1 replaced the deprecated `gen_ai.system` with
+ * `gen_ai.provider.name` (the pinned 1.43.0 module marks `ATTR_GEN_AI_SYSTEM`
+ * "@deprecated Replaced by `gen_ai.provider.name`") and kept the old key so a
+ * dashboard grouping on it does not change under anyone. That window now has a
+ * written end: the first release on or after this date stops emitting
+ * `gen_ai.system`. `tracing-standards.test.ts` fails once the date has passed,
+ * naming this constant, so the removal cannot be forgotten.
+ *
+ * Before removing it, re-run `otlp-ingest-shape.test.ts`: the documented ingest
+ * of both open tracing UIs keys on `gen_ai.provider.name` (Phoenix reads
+ * `gen_ai.system` only as a fallback when the new key is absent), so the
+ * removal is expected to be invisible there.
+ */
+export const GEN_AI_SYSTEM_DUAL_EMIT_UNTIL = "2027-01-01";
+
+/** null while the transition window is open; the failure text once it has closed */
+export function genAiSystemDualEmitOverdue(now: Date): string | null {
+  if (now.getTime() < Date.parse(`${GEN_AI_SYSTEM_DUAL_EMIT_UNTIL}T00:00:00.000Z`)) return null;
+  return (
+    `GEN_AI_SYSTEM_DUAL_EMIT_UNTIL (${GEN_AI_SYSTEM_DUAL_EMIT_UNTIL}) has passed: stop emitting the deprecated ` +
+    "`gen_ai.system` in otelAttributesForSpan (packages/shared/src/tracing.ts), keep `gen_ai.provider.name`, " +
+    "and update the trace-export docs line — or move the date with a written reason."
+  );
+}
+
 /** The structured input message the convention defines (role + parts). */
 function genAiInputMessages(text: string): string {
   return JSON.stringify([{ role: "user", parts: [{ type: "text", content: text }] }]);
@@ -479,6 +521,7 @@ export function otelAttributesForSpan(
   if (op) a[ATTR_GEN_AI_OPERATION_NAME] = op;
   if (span.provider) {
     // gap 1: the current key, with the deprecated one kept for the transition
+    // window, which ends at GEN_AI_SYSTEM_DUAL_EMIT_UNTIL
     a[ATTR_GEN_AI_PROVIDER_NAME] = otelProviderName(span.provider);
     a[ATTR_GEN_AI_SYSTEM] = span.provider;
   }
@@ -743,8 +786,11 @@ function unixNano(t: string | Date | null | undefined): string {
   return (BigInt(Math.trunc(ms)) * 1_000_000n).toString();
 }
 
-/** keys whose convention type is `double`, encoded as such even when whole */
-const DOUBLE_KEYS = new Set<string>([ATTR_GEN_AI_EVALUATION_SCORE_VALUE]);
+/** keys whose convention type is `double`, encoded as such even when whole.
+ * ADR-0186 T: a cost is a double too — a whole-dollar cost went out as
+ * `intValue` until the ingest-shape fixture test (Phoenix types
+ * `llm.cost.total` as a float) caught it. */
+const DOUBLE_KEYS = new Set<string>([ATTR_GEN_AI_EVALUATION_SCORE_VALUE, OI.LLM_COST_TOTAL, "regulait.cost.usd"]);
 
 function otlpAttrs(a: Record<string, OtelAttrValue>): unknown[] {
   return Object.entries(a).map(([key, v]) => ({
@@ -872,8 +918,12 @@ export function buildOtlpPayload(input: OtlpBuildInput): {
             {
               scope: { name: "regulait.gateway", version: "0070" },
               spans,
+              // ADR-0186 T: the convention version the span keys follow
+              schemaUrl: OTEL_SCHEMA_URL,
             },
           ],
+          // ...and the resource keys (`service.name`, `deployment.environment.name`)
+          schemaUrl: OTEL_SCHEMA_URL,
         },
       ],
     },
@@ -901,6 +951,10 @@ export const OTLP_EXPORT_LIMITS =
   "in the OTel status message because the spec requires receivers to ignore a description on a " +
   "non-Error status. No exporter is configured by default and none is ever contacted " +
   "unless an admin types an endpoint, which is then adjudicated by the egress guard on every export. " +
-  "Keys follow the pinned OpenTelemetry semantic conventions (1.43.0, GenAI keys incubating); the " +
+  `Keys follow the pinned OpenTelemetry semantic conventions (${TRACE_STANDARDS_PINS.otelSemanticConventions}, ` +
+  `GenAI keys incubating), stamped as schemaUrl ${OTEL_SCHEMA_URL} on every resource and scope; ` +
+  `the deprecated \`gen_ai.system\` is still sent beside \`gen_ai.provider.name\` until ` +
+  `${GEN_AI_SYSTEM_DUAL_EMIT_UNTIL}. The body is OTLP/HTTP JSON only: a receiver that accepts only ` +
+  "protobuf on HTTP needs an OpenTelemetry Collector between it and us. The " +
   "`openinference` profile adds the OpenInference keys and `llm.cost.total`. With content capture " +
   "off, neither profile carries a prompt, an output, a tool argument or a tool result.";

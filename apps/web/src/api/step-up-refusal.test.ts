@@ -6,6 +6,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api, codeSentence, onStepUpRequired, STEP_UP_HEADER, type StepUpRequest } from "./client";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { BATCH4_REFUSAL_SENTENCES, REFUSAL_GUIDANCE, refusalGuidance } from "./refusals";
 
 function respond(status: number, body: unknown) {
@@ -93,9 +95,31 @@ describe("batch-4 refusal copy (ADR-0186)", () => {
         "passkey_challenge_used",
         "approval_action_changed",
         "passkey_rp_unconfigured",
+        "caller_cannot_approve",
+        "approval_not_signable",
+        "unknown_role",
+        "approval_quorum_unsatisfiable",
+        "approval_signature_recheck_failed",
         "not_built",
       ]),
     );
+  });
+
+  it("every refusal code in the shared batch-4 contract has a sentence (drift guard)", () => {
+    // the web app does not depend on @regulait/shared, so the contract is read from its source: every
+    // `export const *_REFUSALS = { code: status, … }` block that BATCH4_REFUSAL_CODES spreads
+    const src = readFileSync(fileURLToPath(new URL("../../../../packages/shared/src/batch4.ts", import.meta.url)), "utf8");
+    const blocks = [...src.matchAll(/export const ([A-Z_]+_REFUSALS) = \{([^}]*)\}/g)];
+    const list = /export const BATCH4_REFUSAL_CODES = \[([\s\S]*?)\] as const/.exec(src)?.[1] ?? "";
+    expect(blocks.length).toBeGreaterThanOrEqual(4);
+    const codes: string[] = [];
+    for (const [, name, body] of blocks) {
+      expect(list, `${name} is spread into BATCH4_REFUSAL_CODES`).toContain(`Object.keys(${name})`);
+      codes.push(...[...body!.matchAll(/^\s*([a-z_]+): \d{3},/gm)].map((m) => m[1]!));
+    }
+    expect(codes).toContain("approver_not_eligible");
+    expect(codes).toContain("browser_session_required");
+    expect(codes.filter((code) => !(code in BATCH4_REFUSAL_SENTENCES))).toEqual([]);
   });
 
   it("422 step_up_unavailable carries guidance to the Account page", () => {

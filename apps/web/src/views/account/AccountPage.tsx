@@ -1,19 +1,23 @@
 /**
  * Account — identity, password change and TOTP MFA self-service (ADR-0025),
  * plus per-user BYO model keys (ModelKeysCard). Reached from the topbar user
- * menu; ?section= deep-links (password | mfa | keys | ai-policies). ADR-0182 A14 adds the AI policies section.
+ * menu; ?section= deep-links (password | mfa | passkeys | keys | ai-policies). ADR-0182 A14 adds the AI policies section;
+ * ADR-0186 A adds Passkeys.
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
+import { withStepUp } from "../../stepup/stepUp";
 import type { OwnSession } from "../../api/adminTypes";
 import { ago } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
+import { TotpQrCode } from "../../ui/TotpQrCode";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
+import PasskeysCard from "./PasskeysCard";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
 import s from "../auth/auth.module.css";
@@ -24,6 +28,7 @@ export default function AccountPage() {
   const section = params.get("section");
   const pwRef = useRef<HTMLDivElement>(null);
   const mfaRef = useRef<HTMLDivElement>(null);
+  const passkeysRef = useRef<HTMLDivElement>(null);
   const sessionsRef = useRef<HTMLDivElement>(null);
   const keysRef = useRef<HTMLDivElement>(null);
   const policiesRef = useRef<HTMLDivElement>(null);
@@ -31,6 +36,7 @@ export default function AccountPage() {
   useEffect(() => {
     if (section === "password") pwRef.current?.scrollIntoView({ block: "start" });
     if (section === "mfa") mfaRef.current?.scrollIntoView({ block: "start" });
+    if (section === "passkeys") passkeysRef.current?.scrollIntoView({ block: "start" });
     if (section === "sessions") sessionsRef.current?.scrollIntoView({ block: "start" });
     if (section === "keys") keysRef.current?.scrollIntoView({ block: "start" });
     if (section === "ai-policies") policiesRef.current?.scrollIntoView({ block: "start" });
@@ -82,6 +88,11 @@ export default function AccountPage() {
         <div ref={mfaRef}>
           <MfaCard totpEnabled={Boolean(auth?.totpEnabled)} onChanged={() => void refresh()} />
         </div>
+        {auth?.userId && (
+          <div ref={passkeysRef} data-testid="account-passkeys">
+            <PasskeysCard />
+          </div>
+        )}
         <div ref={sessionsRef}>
           <SessionsCard />
         </div>
@@ -435,8 +446,12 @@ function MfaCard(props: { totpEnabled: boolean; onChanged: () => void }) {
             disabled={busy}
             onClick={() =>
               void run(async () => {
+                // ADR-0186 A: adding an authenticator app is a passkey_manage step-up once a method exists
                 setSecret(
-                  await api.post<{ secret: string; otpauthUri: string }>("/auth/totp/enroll"),
+                  await withStepUp(
+                    async (h) =>
+                      (await api.postWithHeaders<{ secret: string; otpauthUri: string }>("/auth/totp/enroll", {}, h)).body,
+                  ),
                 );
               })
             }
@@ -448,9 +463,7 @@ function MfaCard(props: { totpEnabled: boolean; onChanged: () => void }) {
         <div className={v.stack}>
           <div className={s.secretBox}>
             <strong>Shown exactly once.</strong>
-            <span>Add this secret to your authenticator app:</span>
-            <span className={s.secretValue}>{secret.secret}</span>
-            <CodeBlock maxHeight="80px">{secret.otpauthUri}</CodeBlock>
+            <TotpQrCode secret={secret.secret} otpauthUri={secret.otpauthUri} uriMaxHeight="80px" />
           </div>
           <div className={v.row} style={{ alignItems: "flex-end" }}>
             <Field label="Code from your authenticator">

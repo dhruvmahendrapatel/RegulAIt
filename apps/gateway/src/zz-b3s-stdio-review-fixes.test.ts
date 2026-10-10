@@ -34,6 +34,7 @@ import { executeGovernedToolCall, MCP_STDIO_NO_ENTITLEMENT_RULE_ID } from "./mcp
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -156,10 +157,13 @@ const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-ty
 const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   restore.push(await relaxStrictAdmissionForTest(db));
   restore.push(
     await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false }),
@@ -181,6 +185,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await db.execute(sql`UPDATE org_settings SET mcp_upstream_transports = '["streamable_http"]'::jsonb`);
   for (const r of restore.reverse()) await r();
   await restoreAdminKeyMfa?.();

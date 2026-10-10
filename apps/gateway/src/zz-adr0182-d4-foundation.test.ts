@@ -61,6 +61,7 @@ import { routeAuthClass } from "./route-classes.js";
 import { SCHEDULER_JOB_NAMES, schedulerJobDefinitions } from "./scheduler-jobs.js";
 import { haltAgentInTx } from "./execution-control.js";
 import { encryptSecret } from "./secrets.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -151,12 +152,15 @@ async function expectRefused(p: PromiseLike<unknown>, pattern: RegExp): Promise<
 }
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   // ADR-0181 (FX2): this suite drives admins through API keys and is not about
   // MFA, so it relaxes that dial and hands the database back strict (M-068).
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   for (const [k, isAdmin] of [["admin", true], ["owner", false], ["member", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, {
@@ -172,6 +176,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   // M-068: every D4 setting back to strict, whatever happened above
   await db.execute(sql`UPDATE org_settings SET
     decision_regression_gate = 'enforce', decision_regression_max_age_minutes = 60,

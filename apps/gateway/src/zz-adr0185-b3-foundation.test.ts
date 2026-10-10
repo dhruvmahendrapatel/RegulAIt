@@ -43,6 +43,7 @@ import { BATCH3_STRICT_DEFAULTS } from "@regulait/shared";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { buildApp } from "./app.js";
 import { checkUpstreamDestination, McpEgressBlockedError } from "./mcp-egress.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -117,11 +118,14 @@ async function mkConversation(userId: string): Promise<string> {
 }
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   // this suite drives users through API keys and is not about MFA (M-068: restored below)
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   for (const [k, isAdmin] of [["admin", true], ["member", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, {
@@ -137,6 +141,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await db.execute(STRICT_SQL);
   await restoreAdminKeyMfa?.();
   for (const id of created.incidents) {

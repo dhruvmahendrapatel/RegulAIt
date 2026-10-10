@@ -24,6 +24,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Ta
 import { Stat, optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 const SEV_TONE: Record<string, Tone> = { critical: "danger", high: "danger", medium: "warn", low: "ok" };
 const STATUS_TONE: Record<string, Tone> = {
@@ -208,7 +209,7 @@ export default function InfrastructurePage() {
               disabled={!effectiveApprover || act.busy}
               onClick={() =>
                 void act.run(
-                  () => api.put("/v1/org/settings", { infraApproverUserId: effectiveApprover }),
+                  () => putOrgSettings({ infraApproverUserId: effectiveApprover }),
                   "Default remediation approver saved (org setting, audited)",
                 )
               }

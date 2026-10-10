@@ -105,6 +105,9 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0186: defined and run by decision-receipts.ts (R) and audit-timestamp.ts (S)
   decisionReceiptSignSweep: "decision-receipt-sign-sweep",
   anchorTimestampSweep: "anchor-timestamp-sweep",
+  // ADR-0187: defined and run by engine-runs.ts (block at the end)
+  engineRunSweep: "engine-run-sweep",
+  engineScheduleSweep: "engine-schedule-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -768,6 +771,7 @@ import { alertSlaJobDefinitions } from "./alert-ownership.js";
 import { memoryRetentionJobDefinitions } from "./memory-retention.js";
 import { decisionReceiptJobDefinitions } from "./decision-receipts.js";
 import { anchorTimestampJobDefinitions } from "./audit-timestamp.js";
+import { engineJobDefinitions } from "./engine-runs.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -778,6 +782,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...memoryRetentionJobDefinitions(), // ADR-0185 I3: semantic-cache-purge-sweep, conversation-retention-sweep
     ...decisionReceiptJobDefinitions(), // ADR-0186 R: decision-receipt-sign-sweep
     ...anchorTimestampJobDefinitions(), // ADR-0186 S: anchor-timestamp-sweep
+    ...engineJobDefinitions(), // ADR-0187: engine-run-sweep, engine-schedule-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

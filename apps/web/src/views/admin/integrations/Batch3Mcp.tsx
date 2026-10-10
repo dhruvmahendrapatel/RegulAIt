@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { putOrgSettings } from "../../../stepup/stepUp";
 import type { McpServer, OrgSettingsResponse } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
 import { adminKeys, optionEls, QueryGate, readCurrentOrgSettings, reconfirmNeeded, serverOpts, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight, useUserPicker, userOpts } from "../adminKit";
@@ -75,8 +76,10 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
   // load-time snapshot), not the merged lists: confirming re-reads and re-merges
   const [pending, setPending] = useState<{ methods: string[]; transports: string[]; shown: Extract<CoverageChange, { kind: "save" }>; changedWhileOpen: boolean } | null>(null);
   const unavailable = !Array.isArray(settings.mcpProtocolMethods) || !Array.isArray(settings.mcpUpstreamTransports);
+  // ADR-0186 A (B4S-04): enabling a method or transport is a relaxation the gateway refuses with step_up_required;
+  // the step-up dialog opens inside the held flight, and a cancelled step-up writes nothing and frees the form
   const save = async (body: CoverageBody) => {
-    if (await act.run(() => api.put("/v1/org/settings", body), "MCP coverage saved")) await baseline.settle();
+    if (await act.run(() => putOrgSettings(body), "MCP coverage saved")) await baseline.settle();
   };
   const toggle = (values: string[], value: string, checked: boolean) => checked ? [...values, value] : values.filter((item) => item !== value);
   const submit = async () => {

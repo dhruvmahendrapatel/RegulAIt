@@ -149,6 +149,9 @@ async function loadRunEvidence(db: Db, agentIds: string[], now: Date): Promise<R
         inArray(redteamRuns.agentId, agentIds),
         isNotNull(redteamRuns.finishedAt),
         sql`${redteamRuns.finishedAt} >= ${since.toISOString()}`,
+        // ADR-0187: an engine run counts only when it COMPLETED (belt and braces:
+        // only completed runs are written to this ledger at all)
+        sql`NOT EXISTS (SELECT 1 FROM engine_runs er WHERE er.redteam_run_id = ${redteamRuns.id} AND er.status <> 'completed')`,
       ),
     )
     .orderBy(desc(redteamRuns.finishedAt))
@@ -210,6 +213,7 @@ async function loadRunEvidence(db: Db, agentIds: string[], now: Date): Promise<R
         sql`${evalRuns.finishedAt} >= ${since.toISOString()}`,
         sql`NOT EXISTS (SELECT 1 FROM ${redteamRuns} WHERE ${redteamRuns.evalRunId} = ${evalRuns.id})`,
         sql`NOT EXISTS (SELECT 1 FROM ${redteamTrials} WHERE ${redteamTrials.evalRunId} = ${evalRuns.id})`,
+        sql`NOT EXISTS (SELECT 1 FROM engine_runs er WHERE er.eval_run_id = ${evalRuns.id} AND er.status <> 'completed')`,
       ),
     )
     .orderBy(desc(evalRuns.finishedAt))

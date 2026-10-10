@@ -64,6 +64,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { enrolAdminTotpForTest, relaxIdentityForTest } from "./testing/identity-posture.js";
+import { forgetStepUpMethodsForTest, relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { totpCode, totpStep } from "./auth.js";
 import { idTokenMfa } from "./federated-identity.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
@@ -247,6 +248,7 @@ const roundTrip = async (
   });
 };
 
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -261,12 +263,22 @@ beforeAll(async () => {
   expect([201, 409]).toContain(egress.statusCode);
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   orgSnapshot = settings ?? null;
+  // B4S-06: admins here sign in through SSO (a linked identity is a step-up
+  // method), after which the bootstrap credential no longer passes a step-up for
+  // the settings and passwords this suite writes. It is about sign-in, not
+  // step-up (proved in zz-b4a-step-up / zz-b4s-round2): step-up is off for its
+  // run, restored below (and by the settings snapshot)
+  restoreStepUp = await relaxStepUpForTest(db);
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   try {
     if (orgSnapshot) await db.update(orgSettings).set(orgSnapshot).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     if (createdProviderIds.size > 0) await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdProviderIds]));
+    // B4S-06 (M-068): no admin of this suite keeps a step-up method
+    const mine = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${`%-${tag}@adr0174.example`}`);
+    await forgetStepUpMethodsForTest(db, mine.map((u) => u.id));
   } finally {
     await app.close();
     await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());

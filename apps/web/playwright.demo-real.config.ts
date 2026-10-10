@@ -7,14 +7,19 @@ import { defineConfig } from "@playwright/test";
  * setup, no seeding here (the journey mutates the database: prepare a fresh one
  * for every run). Used by `.github/workflows/demo.yml` and the dry run:
  *
- *   pnpm --filter @regulait/gateway demo:prepare        # on an EMPTY database
+ *   pnpm --filter @regulait/gateway demo:prepare | tee demo-prepare.log   # on an EMPTY database
  *   PORT=3105 pnpm --filter @regulait/gateway start      # same environment
- *   E2E_BASE_URL=http://127.0.0.1:3105 pnpm --filter @regulait/web exec \
- *     playwright test -c playwright.demo-real.config.ts
+ *   E2E_BASE_URL=http://127.0.0.1:3105 E2E_DEMO_PREPARE_LOG=demo-prepare.log \
+ *     pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts
  *
- * The spec mints one-time passwords with the gateway's bootstrap token: export
- * the same REGULAIT_BOOTSTRAP_TOKEN the gateway was started with (it falls back
- * to `e2e-bootstrap-token`, the CI value, when unset).
+ * B4S-06: the personas sign in with the one-time passwords and Ada's
+ * authenticator secret demo:prepare printed once, read from its captured output
+ * (E2E_DEMO_PREPARE_LOG; see e2e/demo-credentials.ts) — the bootstrap token
+ * re-provisions nobody once the seed enrolled Ada. Without that file the specs
+ * fall back to the bootstrap path, which only works on a database where no
+ * admin can step up yet. Export the same REGULAIT_BOOTSTRAP_TOKEN the gateway
+ * was started with (it falls back to `e2e-bootstrap-token`, the CI value) for
+ * the specs' read-only calls.
  */
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 

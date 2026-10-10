@@ -19,6 +19,7 @@ import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Modal, Select, T
 import type { AdminUser } from "../../api/adminTypes";
 import { QueryGate, useAction } from "../admin/adminKit";
 import v from "../views.module.css";
+import { putOrgSettings } from "../../stepup/stepUp";
 
 export type FeedbackKind = "problem" | "appeal";
 export type FeedbackStatus = "received" | "acknowledged" | "in_review" | "upheld" | "overturned" | "no_change" | "rejected";
@@ -449,7 +450,7 @@ export function FeedbackSettings() {
   const save = () =>
     void act
       .run(async () => {
-        await api.put("/v1/org/settings", changed);
+        await putOrgSettings(changed);
         await q.refetch();
       }, "Feedback settings saved. Each change is recorded in the audit trail, and a relaxation is named as one.")
       .then((ok) => ok && setDraft({}));

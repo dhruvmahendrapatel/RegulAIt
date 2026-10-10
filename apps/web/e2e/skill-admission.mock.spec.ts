@@ -7,6 +7,7 @@
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { expectAxeClean, installBuilderMock, SKILL_ADMISSION, type MockState } from "./builder-fixtures";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -189,4 +190,17 @@ test.describe("ADR-0175: Admission review (admin)", () => {
     ]);
     await expectAxeClean(page, "admission review with waiting period");
   });
+});
+
+// ADR-0186 A: the waiting period goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: saving the release waiting period asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const st = await installBuilderMock(page);
+  await installAdmissionMock(page, st);
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/admin/admission");
+  await page.getByRole("button", { name: "Use recommended (7)" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  await expect.poll(() => posted(st, "/v1/org/settings")).toEqual([{ minReleaseAgeDays: 7 }]);
 });

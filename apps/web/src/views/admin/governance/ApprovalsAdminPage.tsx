@@ -5,11 +5,18 @@
  * anyone's place only with a recorded reason (audit-marked override); a
  * self-review requires a reason too. Plus delegation windows (vacation /
  * offboarding coverage).
+ *
+ * ADR-0186: a TOOL-CALL approval (MCP tool, connector write) is different. It
+ * may need several different approvers (the row shows "1 of 2 approvals" and
+ * who has decided), the person whose call it is never decides it, an admin
+ * outside its approver pool cannot override it, and each decision is signed
+ * over the exact call with the approver's passkey (the browser prompts once).
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
+import { withStepUp } from "../../../stepup/stepUp";
 import type { Approval } from "../../../api/types";
 import type { Delegation } from "../../../api/adminTypes";
 import { ago, approvalStageLabel } from "../../../api/format";
@@ -32,6 +39,8 @@ import { McpActionReview } from "../../approvals/McpActionReview";
 import { inspectApprovalAction, isBoundAction } from "../../approvals/approvalReview";
 import { ReviewPanel } from "../../approvals/ReviewPanel";
 import { intakeUseCaseName, isIntakeSignoff } from "../../approvals/reviewDecision";
+import { QuorumProgress } from "../../approvals/QuorumProgress";
+import { decideApproval, isToolCallApproval, signatureModeOf, signedDecisionErrorText } from "../../approvals/signedDecision";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -112,8 +121,22 @@ export default function ApprovalsAdminPage() {
       if (blocked) { setRowErrors((errors) => ({ ...errors, [row.id]: blocked })); return; }
     }
     const reason = (reasons[row.id] ?? "").trim();
-    const override = me !== row.approverUserId && !row.delegatedFrom;
     setRowErrors((e) => ({ ...e, [row.id]: "" }));
+    // ADR-0186: a tool-call approval has no override and no self-review — the
+    // gateway decides eligibility (the approver pool) and the browser signs
+    if (isToolCallApproval(row)) {
+      await act.run(async () => {
+        try {
+          return await decideApproval(row, decision, reason || undefined);
+        } catch (err) {
+          const text = signedDecisionErrorText(err);
+          setRowErrors((e) => ({ ...e, [row.id]: text }));
+          throw new Error(text);
+        }
+      }, "Decision recorded");
+      return;
+    }
+    const override = me !== row.approverUserId && !row.delegatedFrom;
     if (override && !reason) {
       setRowErrors((e) => ({
         ...e,
@@ -213,11 +236,25 @@ export default function ApprovalsAdminPage() {
                   }
                   // an AI use-case sign-off is decided as a task, with its evidence beside it
                   if (isIntakeSignoff(r)) return <ReviewPanel approval={r} onDecided={() => void q.refetch()} />;
-                  const override = me !== r.approverUserId && !r.delegatedFrom;
+                  const toolCall = isToolCallApproval(r);
+                  const override = !toolCall && me !== r.approverUserId && !r.delegatedFrom;
+                  if (toolCall && r.myDecision) {
+                    return (
+                      <span className={v.stack} style={{ alignItems: "flex-end", gap: 4 }}>
+                        <QuorumProgress approval={r} />
+                        <span className={v.faint}>You {r.myDecision} this; waiting for another approver.</span>
+                      </span>
+                    );
+                  }
                   const controls = (blockedReason: string | null) => (
                     <span className={v.rowTight} style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
                       {override && <Badge tone="warn">override</Badge>}
-                      {r.selfReview && <Badge tone="warn">self-review</Badge>}
+                      {!toolCall && r.selfReview && <Badge tone="warn">self-review</Badge>}
+                      {toolCall && signatureModeOf(r) === "passkey" && (
+                        <span className={v.faint} title="Your browser asks for your passkey: the signature covers this exact call">
+                          signs with your passkey
+                        </span>
+                      )}
                       <Input
                         style={{ width: 160, fontSize: "var(--text-xs)" }}
                         placeholder={override ? "reason (override)" : "reason (optional)"}
@@ -240,7 +277,12 @@ export default function ApprovalsAdminPage() {
                     </span>
                   );
                   return isBoundAction(r)
-                    ? <McpActionReview approval={r} controls={controls} />
+                    ? (
+                      <span className={v.stack} style={{ alignItems: "flex-end", gap: 4 }}>
+                        {toolCall && <QuorumProgress approval={r} />}
+                        <McpActionReview approval={r} controls={controls} />
+                      </span>
+                    )
                     : controls(null);
                 },
               },
@@ -454,17 +496,15 @@ function DelegationsCard() {
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
-          void act.run(
-            () =>
-              api.post("/v1/delegations", {
-                fromUserId,
-                toUserId,
-                startsAt: new Date(startsAt).toISOString(),
-                endsAt: new Date(endsAt).toISOString(),
-                ...(reason ? { reason } : {}),
-              }),
-            "Delegation created",
-          );
+          // B4S-02: a delegation lets someone decide for an approver and needs a step-up
+          const body = {
+            fromUserId,
+            toUserId,
+            startsAt: new Date(startsAt).toISOString(),
+            endsAt: new Date(endsAt).toISOString(),
+            ...(reason ? { reason } : {}),
+          };
+          void act.run(() => withStepUp((h) => api.postWithHeaders("/v1/delegations", body, h)), "Delegation created");
         }}
       >
         <Field label="Delegator (from)">
@@ -552,7 +592,7 @@ function DelegationsCard() {
         onConfirm={() => {
           const d = endNow;
           setEndNow(null);
-          if (d) void act.run(() => api.del(`/v1/delegations/${d.id}`), "Delegation ended");
+          if (d) void act.run(() => withStepUp((h) => api.delWithHeaders(`/v1/delegations/${d.id}`, h)), "Delegation ended");
         }}
       />
     </Card>

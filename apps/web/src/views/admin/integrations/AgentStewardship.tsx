@@ -15,6 +15,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { AdminAgent, AdminUser } from "../../../api/adminTypes";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { useAction } from "../adminKit";
@@ -279,7 +280,12 @@ export function StewardshipDrawer(props: { agent: Row; users: AdminUser[]; onClo
             const out = stewardshipPatch(a, draft, undefined, { isAdmin });
             if (out.problem) return setProblem(out.problem);
             if (!out.body) return;
-            void act.run(() => api.patch(`/v1/agents/${a.id}/stewardship`, out.body), "Stewardship saved");
+            // ADR-0186 A: a new steward is an owner change, and lifting a suspension a
+            // relaxation — the gateway asks the admin or steward to confirm it's them
+            void act.run(
+              () => withStepUp((h) => stepUpApi.patch(`/v1/agents/${a.id}/stewardship`, out.body, h)),
+              "Stewardship saved",
+            );
           }}
         >
           <h3 id="stewardship-edit" className={st.sectionTitle}>Steward and lifecycle</h3>

@@ -134,12 +134,6 @@
   padding: var(--s2);
   font-size: var(--text-sm);
 }
-.secretValue {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  word-break: break-all;
-  user-select: all;
-}
 
 /* Whose account is this? Shown on the forced-password-change gate, where an
  * admin-issued one-time password drops the user in with no other context. */
