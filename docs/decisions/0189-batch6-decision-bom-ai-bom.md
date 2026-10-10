@@ -951,6 +951,466 @@ R50. **An on-demand snapshot is one writable transaction.** R22's `READ ONLY` lo
     `REPEATABLE READ` read-write transaction that takes the per-subject lock first and holds it through the snapshot
     and rendering inserts. The automatic snapshot after a trigger (R25) uses the same transaction shape.
 
+### B4 contract frozen (2026-10-10)
+
+The request and response bodies of the five B4 routes of §9 (`GET /v1/decisions/:auditId/bom` and `…/bom/bundle`,
+`GET /v1/ai-bom/snapshots/:snapshotId` and `…/bundle`, `POST /v1/boms/verify`), the `export-bundle/3` manifest and
+download headers, the capability fields and the refusal envelope are frozen in
+`packages/shared/src/bom/contract-b4.ts` (`BOM_B4_ROUTE_CONTRACT`) so that B6 can be built against them. B4 must
+implement exactly these shapes; a change to them is a contract change reviewed with B6. This records the freeze only and
+changes no decision above. Amended 2026-10-10 (B4.7-1, master): `proof.anchor.record.payloadVersion` is the stored string, not an
+integer.
+
+### B4 bundle and signature specification (pre-build, 2026-10-10)
+
+This section fixes the bytes slice B4 produces and the offline verifier checks, precisely enough that an implementer
+who reads only this ADR (Codex's specification-only vectors, see the slice table) can write valid positive test
+vectors. It changes no decision above. Where B1 (`packages/shared/src/bom/contract.ts`, migration 0182), B3
+(`apps/gateway/src/ai-bom.ts`), ADR-0116 (`apps/gateway/src/export-bundle.ts`), ADR-0186 R
+(`apps/gateway/src/decision-receipts.ts`, `packages/shared/src/receipts/verify.ts`) or the frozen B4 contract (#307,
+`packages/shared/src/bom/contract-b4.ts`) already fixes a detail, it is cited by file and line and followed. Every
+other choice is marked **decided here** and is the strict option (ADR-0180). Contradictions found while writing it are
+listed in B4.7; the master decided them on 2026-10-10. The worked example (B4.6) is rebuilt and compared byte for byte with this text by
+`apps/gateway/src/adr0189-b4-spec-example.test.ts`, so the two cannot drift apart.
+
+Conventions. "Canonical" means the RFC 8785 bytes `bomCanonicalBytes` writes (`contract.ts:180-184`, the pinned
+`canonicalize`), which `bom.test.ts:158-162` admits byte-identical to ADR-0060 `canonicalJson` for these shapes. Text
+is UTF-8. "Sorted" means by UTF-16 code unit, never `localeCompare` (amendment 5). A SHA-256 is 64 lower-case hex
+characters unless written `sha256:<hex>`. Short file names: `contract.ts`, `contract-b4.ts`, `finality.ts`,
+`bom.test.ts` and `contract-b4.test.ts` are in `packages/shared/src/bom/`; `verify.ts` is
+`packages/shared/src/receipts/verify.ts`; `batch4.ts` is `packages/shared/src/batch4.ts`; `schema.ts` is
+`packages/db/src/schema.ts`; `verify-export-bundle.sh` is in `scripts/`; every other short `.ts` name is in
+`apps/gateway/src/`.
+
+#### B4.1 The `export-bundle/3` archive
+
+**Container.** A gzip-compressed USTAR archive written by ADR-0116's `buildTarGz` (`export-bundle.ts:453-465`) and
+served as `application/gzip` (`contract-b4.ts:278`). B4 reuses that writer and adds no tar dependency.
+
+**Root directory.** Every entry sits under one directory (`verify-export-bundle.sh:169` reads exactly one). Its name
+extends ADR-0116's `regulait-export-<kind>-<id>` (`export-bundle.ts:685`); **decided here**:
+
+- Decision BOM: `regulait-export-decision-bom-<auditId>-v<version>`;
+- AI BOM, `…/bundle`: `regulait-export-ai-bom-<snapshotId>`;
+- AI BOM, `?format=<f>` (`native` included): `regulait-export-ai-bom-<snapshotId>-<f>`.
+
+UUIDs are lower case. `Content-Disposition` is `attachment; filename="<root>.tar.gz"` (`contract-b4.ts:279`).
+
+**Files** (paths relative to the root). No other file and no directory entry exists; in particular there is no
+`audit/rows/` (R39, `contract-b4.ts:364`).
+
+| Path | Exact bytes | In `manifest.files` | Fixed by |
+|---|---|---|---|
+| `manifest.json` | the canonical manifest (below), no trailing newline | no: it is the signed list | ADR-0116 `export-bundle.ts:681`; RFC 8785 decided here |
+| `manifest.json.sig` | padded standard base64 of the 64-byte Ed25519 signature over `manifest.json`'s bytes (export key), then `\n` | no | `export-bundle.ts:682-689` |
+| `README.txt` | informational text; it must say that the bundled keys are not the trust root and that no audit payload is included | yes | ADR-0116; wording not normative |
+| `audit/chain.tsv` | Decision BOM only: one line per `proof.chain` row, ascending: `<seq>\t<contentHash>\t<prevHash>\t<rowHash>\n` | yes | the 4-column form, `export-bundle.ts:616-619`; equal to `proof.chain`, decided here |
+| `content/decision-bom.json` | the exact `decision_boms.body`, no trailing newline | yes | §5, `contract-b4.ts:213-214` |
+| `content/decision-bom.json.sig` | the body signature file (B4.2) | yes | decided here |
+| `content/decision-bom.<format>.json` | the exact `bom_renderings.bytes` of each rendering of this version (none in v1 unless in-toto is asked for) | yes | R7 |
+| `content/ai-bom.json` | the exact `ai_bom_snapshots.body`: the AI BOM bundle's own snapshot, or, in a Decision BOM bundle, the snapshot `basis.aiBomSnapshotId` names (when not null) | yes | R19; carrying the linked snapshot in a Decision BOM bundle decided here |
+| `content/ai-bom.json.sig` | that body's signature file (B4.2) | yes | decided here |
+| `content/ai-bom.<format>.json` | AI BOM bundles only: the exact `bom_renderings.bytes` of each format carried | yes | R7, R19 |
+| `receipt-keys.json` | canonical `{"keys":[{"fingerprint","jwk","keyId"}]}`, one entry per distinct receipt key id named by the bundle's body, receipt and addendum signatures, sorted by `keyId`; a convenience copy, never the trust root | yes | decided here (the receipt-key counterpart of `signing-key.pub`) |
+| `signing-key.pub` | the export public key as SPKI PEM, as `KeyObject.export({type: "spki", format: "pem"})` writes it; a convenience copy | yes | `export-bundle.ts:629` |
+
+**AI BOM formats** (**decided here**). `?format=native` carries the native body, its `.sig`, `receipt-keys.json`,
+`README.txt` and `signing-key.pub`. `?format=<rendering>` adds `content/ai-bom.<rendering>.json`. `…/bundle` adds every
+format of `AI_BOM_DOWNLOAD_FORMATS` (`contract-b4.ts:65`) whose `renderings.<format>.status` is `rendered`; `in-toto`
+is not a download format and is never added. `descriptor.formats` lists `native` and then the carried renderings, in
+`AI_BOM_DOWNLOAD_FORMATS` order. A superseded snapshot is never carried, so `supersedes` reports `unverifiable`
+`earlier_snapshot_not_in_bundle` for any version above 1.
+
+**The manifest** is exactly `exportBundleV3ManifestSchema` (`contract-b4.ts:327-365`) in canonical bytes (RFC 8785 via
+`bomCanonicalBytes` rather than ADR-0116's `canonicalJson`, **decided here**; the bytes are equal for this shape):
+
+- `installId`, `installIdSource`: ADR-0116's `resolveInstallIdentity` (`export-bundle.ts:242-271`), its sources mapped
+  `environment` → `operator`, `license` → `license`, `none` → `absent`.
+- `exportedAt`: the database clock (`select now()`) in `toISOString()` form; `exportedAtSource: "database"`.
+- `exportedByUserId`: the caller's user id; no name and no email (`contract-b4.ts:321-326`).
+- `subject.id`: the `auditId` for a Decision BOM (as the #307 fixture, `contract-b4.test.ts:160`), the `snapshotId` for
+  an AI BOM. `descriptor` follows `contract-b4.ts:295-319`; its `bodySha256` is the SHA-256 of
+  `content/<subject>.json`.
+- `files`: every file in the table except `manifest.json` and `manifest.json.sig`, as `{path, sha256}`, sorted by path,
+  each once (`contract-b4.ts:362-363`).
+- `audit`: for a Decision BOM `{payloadScope: "none", segmentFromSeq, segmentToSeq, segmentRowCount}`, the first and
+  last `proof.chain` seq and the row count; `null` for an AI BOM.
+- `signingKeyId`, `signingKeyFingerprint`: the export key (`REGULAIT_EXPORT_SIGNING_KEY` and `…_ID`,
+  `export-bundle.ts:152-219`). The fingerprint is `sha256:` and the SHA-256 of the DER SubjectPublicKeyInfo
+  (`export-bundle.ts:139-142`); for Ed25519 that DER is the 12 bytes `302a300506032b6570032100` followed by the 32-byte
+  public key.
+
+**Tar order and headers** (`export-bundle.ts:413-465`). The entries are every file, `manifest.json` and its `.sig`
+included, named `<root>/<path>` and sorted by that full name. Each 512-byte header holds: the name (past 99 bytes, split
+into the ustar `prefix` at the last `/` that fits, `export-bundle.ts:413-426`); mode `0000644\0`; uid and gid
+`0000000\0`; size as 11 octal digits and NUL; mtime `00000000000\0`; the checksum as 6 octal digits, NUL and space,
+computed with the field read as 8 spaces; typeflag `0`; magic `ustar\0`; version `00`; linkname, uname, gname,
+devmajor and devminor all NUL. Each body is NUL-padded to a multiple of 512; two zero blocks end the archive, with no
+padding to a 10 240-byte record. The gzip stream is one member from `zlib` level 9 with MTIME 0 and no file name.
+
+The uncompressed tar is a pure function of the files. The compressed bytes are **not** a reproducibility claim: the
+gzip OS byte and the deflate output depend on the zlib build (the owner's Windows checkout among them). Only
+`x-regulait-bundle-sha256` covers them, as the SHA-256 of the bytes actually served (**decided here**). The other
+headers (`contract-b4.ts:264-289`): `x-regulait-bundle-manifest-sha256` is the SHA-256 of `manifest.json`;
+`x-regulait-bom-body-sha256` is `descriptor.bodySha256`.
+
+**Build order** (R21, **decided here**): write every file, then run the email scan over every entry, then write the
+manifest, then sign it. The scan runs `findEmailShapes` (`contract.ts:276-292`) on the parsed value of every `.json`
+file and `hasEmailShape` (`contract.ts:264-273`) on the whole text of every file, JSON included. Any hit refuses the
+export with 422 `bom_export_refused`, naming the file and the JSON path, never the value (`contract-b4.ts:169`).
+
+**What is signed.** Two keys sign two layers. The export key signs `manifest.json`, which authenticates every listed
+file's bytes (the envelope). The receipt key signs the BOM body, and the body embeds the receipt and each addendum with
+their own receipt-key signatures. A verifier checks both layers; the export key alone can forge the envelope but never
+a body (R19).
+
+#### B4.2 The signatures
+
+**Algorithm and key.** Ed25519 (`sign(null, bytes, key)`: no pre-hash, no options) with the ADR-0186 R receipt key,
+loaded exactly as the receipt sweep loads it: `REGULAIT_RECEIPT_SIGNING_KEY` (PKCS#8 PEM, Ed25519 only) and
+`REGULAIT_RECEIPT_SIGNING_KEY_ID` (`[A-Za-z0-9._:-]{1,128}`), refused when it conflicts with its recorded public key or
+is retired (`decision-receipts.ts:18-33`, `:79`). B3 already signs AI BOM bodies this way (`ai-bom.ts:412-459`); B4
+reuses `loadReceiptSigningKey` (`decision-receipts.ts:194`) and records the public JWK in `receipt_signing_keys` on
+first use, as the sweep does (`decision-receipts.ts:95`).
+
+**Signed bytes.** Domain separation is the `v` field inside each signed object (OWNER DECISION 2).
+
+| Object | Signed bytes | `v` |
+|---|---|---|
+| Decision BOM body | `bomCanonicalBytes(body)`, which is the stored `decision_boms.body` | `regulait.decision-bom.v1` |
+| AI BOM native body | `bomCanonicalBytes(body)`, which is the stored `ai_bom_snapshots.body` (`ai-bom.ts:459`) | `regulait.ai-bom.v1` |
+| receipt (embedded) | `receiptCanonicalBytes(payload)`, ADR-0060 `canonicalJson` (`batch4.ts:304-306`, `decision-receipts.ts:118`) | `regulait.receipt.v1` or `.v2` |
+| facts addendum (embedded) | the addendum's canonical bytes, exactly `facts.addenda[i].payload` (**decided here**: R15 fixes the key and the `v`, not the bytes) | `regulait.decision-facts-addendum.v1` |
+
+The ADR-0116 manifest is a fifth signed object, signed with the export key.
+
+**Encoding.** A body, receipt or addendum signature is the unpadded base64url of the 64 signature bytes, exactly 86
+characters (`contract.ts:647`, `decision-receipts.ts:118`, CHECK `schema.ts:12183`). The manifest signature is padded
+standard base64 and a newline (B4.1).
+
+**Signature file** (**decided here**). `content/decision-bom.json.sig` and `content/ai-bom.json.sig` are detached
+signatures: the canonical bytes, with no trailing newline, of
+`{"alg":"Ed25519","keyId":<key id>,"signature":<86 characters>,"signedSha256":<SHA-256 of the body file>}`. `keyId` is
+the row's `key_id`, `signature` its `signature`, and `signedSha256` its `body_sha256`, which must equal
+`descriptor.bodySha256` (the AI BOM linked from a Decision BOM bundle has no descriptor; its `signedSha256` must equal
+the SHA-256 of `content/ai-bom.json`). A body never carries its own signature.
+
+**Finding the key.** By key id, never from the bundle alone:
+
+- Online (`POST /v1/boms/verify`, `trust: "deployment_registry"`, `contract-b4.ts:580`): a receipt key is the
+  `receipt_signing_keys` row with that `key_id`, its `public_jwk` `{kty: "OKP", crv: "Ed25519", x}`
+  (`schema.ts:11893-11907`), retired keys included (R6), exactly as `/v1/receipts/verify` does
+  (`decision-receipts.ts:178-183`). The export key is the deployment's configured export public key.
+- Offline (`scripts/verify-bom.mjs`): the receipt trust root is an out-of-band keyring in the shape
+  `GET /v1/receipts/keys` returns (`{"keys":[{"keyId","jwk",…}]}`, `decision-receipts.ts:168`), or a list of pinned
+  receipt-key fingerprints, each matched against the `receipt-keys.json` entry of that id. A receipt-key fingerprint is
+  `sha256:` and the SHA-256 of `302a300506032b6570032100` followed by the base64url-decoded `x`. The export trust root
+  is ADR-0116's `--fingerprint` or `--keyring`.
+- A key id the trust root does not hold, or holds twice with different keys, makes that signature `invalid` with
+  reason `unknown_key` (**decided here**; the contract has `unknown_key` only as an invalid reason,
+  `contract-b4.ts:439`).
+- The receipt v2 boundary (`receiptV2FromAuditSeq`) is a trust-root input as well: online from
+  `receipt_payload_versions`, offline from the keyring file's field of that name (as `/v1/receipts/export` writes it,
+  `decision-receipts.ts:176`). It is never read from the bundle.
+
+#### B4.3 The receipt payload the Decision BOM binds to
+
+The body's `receipt` section is the stored receipt (R48, `contract.ts:641-650`): `receiptSeq`, `payloadHash`
+(`decision_receipts.payload_hash`, the SHA-256 of `payload`), `keyId`, `payload` (the `receiptCanonicalBytes` of the
+stored payload, as a string) and `signature`.
+
+- **v1** (`regulait.receipt.v1`; `batch4.ts:258-280`, schema `verify.ts:31-39`): `v`, `receiptSeq`,
+  `audit {id, seq, rowHash, contentHash}`, `decision {at, userId, objectType, objectId, serverId, toolName,
+  toolNameHash?, effect, ruleId, ruleIdHash?}`, `prev` (the previous receipt's payload hash; 64 zeros for receipt 1)
+  and `keyId`. `objectType` is one of `mcp_tool`, `agent`, `connector`, `approval`. A field over 4096 characters is
+  null, with its SHA-256 in the matching `…Hash` field (`decision-receipts.ts:69`).
+- **v2** (`regulait.receipt.v2`; `batch4.ts:288-300`, `verify.ts:42-45`): v1's fields plus
+  `actor {identityId, delegationGrantId, chain}` (identity ids, root first, or null), `factsStatus` (`captured` or
+  `capture_off`) and `factsHash`, which is null exactly when `capture_off`.
+- **`factsHash`** is `decision_facts.facts_hash`: the SHA-256 of the canonical bytes of `decision_facts.facts` (CHECK
+  `schema.ts:12083-12084`; `bomDigestOf`, `contract.ts:187`). Those bytes are exactly `body.facts.payload`.
+- **The v2 boundary** (R34, R42, R43): a receipt for an audit seq at or above `from_audit_seq` is v2, one below it v1
+  (`receiptVersionForAuditSeq`, `verify.ts:56-58`). Nothing emits v2 before the cutover
+  (`RECEIPT_EMITTER_SUPPORTS_V2 = false`, `batch4.ts:125`).
+
+The verifier's receipt checks (`contract-b4.ts:412-414`):
+
+- `receipt_payload_hash`: the SHA-256 of `payload` is `payloadHash`; `payload` re-canonicalises to itself; it parses
+  as v1 or v2 (`isDecisionReceiptPayload`).
+- `receipt_signature`: Ed25519 over `payload`'s bytes with the key `receipt.keyId`. Also `payload.keyId` is
+  `receipt.keyId` and `payload.receiptSeq` is `receipt.receiptSeq` (as `verify.ts:74`), and `payload.audit` is
+  `{id: auditId, seq: decision.auditSeq}` with the `rowHash` and `contentHash` of `proof.chain[0]` (**decided here**).
+  The receipt chain (`prev`) is not checked: a bundle carries one receipt.
+- `receipt_facts_binding`: for v2 `captured`, the SHA-256 of `facts.payload` must be `factsHash` (else `invalid`
+  `facts_hash_mismatch`); for v2 `capture_off`, `facts.payload` must be null; for v1 below the boundary, or with no
+  boundary known, `unverifiable` `receipt_v1_no_factsHash` (R46); for v1 at or above a known boundary, `invalid`
+  `v1_receipt_after_boundary`.
+- v2 only (**decided here**): when `actors` is recorded, `actor.identityId` and `actor.delegationGrantId` equal
+  `actors.actorIdentityId` and `actors.delegationGrantId`. The receipt's `chain` (identity ids) and
+  `actors.actorChain` (SPIFFE URIs) are different spellings and are not compared.
+
+#### B4.4 From facts to sections, and freezing
+
+**Sources.** The receipt payload; `decision_facts.facts` (absent when the decision has none); its addenda in `n` order,
+each signed (R15); `audit_log.rule_chain` of the decision row; the chain rows and the anchor row for `proof`. Every
+section is a pure function of these (R37); nothing is read from a live table for a historical fact (R18). "Bound rows"
+below means `facts.rows`, then each addendum's `rows`, in `n` order.
+
+| Section | Built from | Completeness |
+|---|---|---|
+| `decision` | the receipt payload: `auditSeq` is `audit.seq`; `at`, `objectType` and `effect` are copied; `serverId` is copied when it is a lower-case UUID, else null; `toolName` and `ruleId` are copied when they match `bomIdentifierSchema`, else null; `objectId` is copied when at most 256 characters, else null; `ruleChain` is `audit_log.rule_chain` (at most 64 entries, each matching `bomIdentifierSchema`; otherwise assembly answers 422 `bom_decision_not_eligible`) | `recorded` |
+| `receipt` | B4.3 | `recorded` |
+| `principal` | `sponsorUserId` is the receipt's `decision.userId` (`audit_log.user_id`, the sponsor under ADR-0188 decision 9); when `facts.actors` is present it must hold the same id, else 500 `bom_integrity_failure` | `recorded` |
+| `actors` | `facts.actors`, verbatim | no facts: `pre_facts` or `capture_off`; `facts.actors` null: `not_recorded` `pre_identity` |
+| `action`, `policy`, `model` | `facts.action`, `facts.policy`, `facts.model`, verbatim | no facts: `pre_facts` or `capture_off`; the field null: `not_recorded` `not_captured_by_path` |
+| `approval` | the bound rows whose `table` is `approvals` or `approval_decisions`, verbatim `{table, id, projection, digest}`, stable-sorted by `table` then `id`; every binding is kept (an approval re-bound by an addendum after its status changed appears twice) | no facts: as above; no such row: `not_recorded` `no_bound_row` |
+| `outcome` | `facts.outcome`, verbatim; a post-action verification is not projected here, it travels only in the addenda (B4.7-2) | no facts: as above |
+| `cost` | the bound `usage_events` rows, sorted by `id`: `usageEventIds`; `inputTokens` and `outputTokens` as integer sums of the projections; `costUsd` is, for one row, its projection's `costUsd` string verbatim (R23), for several the exact decimal sum of those strings (no binary floating point; plain notation with no exponent and no trailing fractional zeros), and null when any row's `costUsd` is null; `costSource: "usage_events.cost_usd"` | no facts: as above; no row: `no_bound_row` |
+| `trace` | the bound `trace_spans` rows: `spanIds`, their ids sorted; `traceIds`, their distinct `traceId` values sorted | as `cost` |
+| `proof` | `chain`: the chain rows from the decision row to the covering anchor's `record.seq` inclusive (for `chain_signed`, the decision row alone), each `{seq, contentHash, prevHash, rowHash}`; `anchor`: the R1, R4, R33 and R44 fields exactly as stored (`contract.ts:581-619`; `record.payloadVersion` is the stored string, contract amended 2026-10-10, B4.7-1), null for `chain_signed` | `recorded` with an anchor; `not_recorded` `anchor_absent` for `chain_signed` |
+| `facts` | `payload`: the canonical bytes of `decision_facts.facts`, or null; `addenda[i]`: `{n, prevHash, payload, signature, keyId}` of addendum `n = i + 1` with its `decision_fact_addendum_signatures` row | — |
+| `basis` | `auditSeq`: the last `proof.chain` seq; `anchorId`: `proof.anchor.id` or null; `receiptSeq`; `aiBomSnapshotId`: `facts.model.aiBomSnapshotId` (equal to `decision_facts.ai_bom_snapshot_id`), else null | — |
+
+**Decided here:**
+
+- "No facts" is `capture_off` when the decision's `decision_capture_status.status` is `capture_off` (a v2 receipt then
+  says `factsStatus: capture_off`), and `pre_facts` when the decision has no capture-status row (made before B2). A
+  verifier given a v1 receipt accepts either reason, since it cannot tell them apart.
+- B4 never emits `not_applicable`: the facts do not record inapplicability, and a gap is never inferred.
+  `unsigned_addendum` never appears in a frozen body, because R15 waits instead.
+- A `usage_events` or `trace_spans` id bound more than once fails assembly with 500 `bom_integrity_failure`: such a
+  row is bound once, and a second binding would be counted twice.
+- At assembly every bound row's digest is re-checked (`bomRowDigest`, `contract.ts:397`), and so is the addendum chain
+  from `facts_hash` (R35); a mismatch is 500 `bom_integrity_failure` and nothing is frozen (R5).
+- The verifier's `sections_projection` recomputes `decision` (all but `ruleChain`, which only
+  `decision_content_binding` covers, reported `unverifiable` `preimage_not_exported` under R39), `principal`, the eight
+  fact sections and every completeness entry from the same inputs. Any difference is `invalid` `section_mismatch`.
+- A check that does not apply to a bundle is left out of `checks` (for example `ai_bom_link` when
+  `basis.aiBomSnapshotId` is null, or the addendum checks when there are no addenda); the anchor checks of a
+  `chain_signed` BOM are reported `unverifiable` `anchor_absent`.
+
+**Freezing** (§5, R15, R40, R44 and the round 8–10 entry conditions):
+
+1. Version allocation and assembly lock the decision's `decision_capture_status` row `FOR UPDATE` (for a decision
+   without one, `pg_advisory_xact_lock` keyed by the audit id) and hold the lock through the `decision_boms` insert, so
+   two first requests return the same frozen version.
+2. A BOM freezes only when the receipt is signed and every addendum present at the final recheck has its signature row
+   (R15). Otherwise the route answers 409 `bom_signing_unavailable` (`missingKey: "receipt"`) when no receipt key is
+   configured, and 409 `bom_anchor_pending` with reason `receipt_unsigned` when the key exists but the sweep has not
+   signed yet.
+3. Finality follows B4.5; a pending result is 409 `bom_anchor_pending` with its reason and `Retry-After`.
+4. The body is email-scanned (the refusal names the file `body`), signed, and inserted with the decision's shared
+   `expires_at` (entry condition 4237322627).
+5. **Decided here:** a request assembles a new version only when the body it would build differs from the newest
+   version's in anything but `id`, `version` and `supersedes`. Then it freezes version `n + 1` with `supersedes` set to
+   the newest version's `id`; no version is ever edited.
+
+#### B4.5 Finality as emitted
+
+The `decision_bom_finality` setting is a **floor**, not the state written into the BOM (`finality.ts` as fixed by PR
+#315 on branch `b1-finality-fix`: `strongest` at `finality.ts:88-103`, `decisionBomFinality` at `:105-112`). At
+freeze, B4 computes the strongest state the recorded facts support. The ranks are `anchored` 4,
+`anchored_finite_lock` 3, `anchored_unverified_destination` 2 and `chain_signed` 1:
+
+- no flushed anchor covers the row: `chain_signed` (short of `anchored` by `anchor_not_flushed`);
+- flushed, but the recorded `tamper_resistant` is false: `anchored_unverified_destination`
+  (`destination_not_tamper_resistant`); likewise when timestamps are required and none is granted
+  (`timestamp_pending`), when `retain_until` is null (`lock_not_recorded`), and when `retain_until` is not after the
+  freeze time (`lock_lapsed`);
+- unbounded retention (the evidence retention has no end): under `decision_bom_finite_lock_finality = accept`,
+  `anchored_finite_lock`; under the strict default `refuse`, `anchored_unverified_destination`
+  (`retention_unbounded`);
+- `retain_until` before the end of the evidence retention: `anchored_unverified_destination`
+  (`lock_shorter_than_retention`); otherwise `anchored`.
+
+The BOM freezes when that state's rank is at or above the floor (`anchored` 4, `anchored_unverified_destination` 2,
+`chain_signed` 1); under `accept`, an `anchored_finite_lock` state freezes whatever the floor. Otherwise the route
+answers 409 `bom_anchor_pending` with the short-of reason. So, under `refuse` with unbounded retention, the state is
+`anchored_unverified_destination` (reason `retention_unbounded`) when the floor is at or below that rank, and pending
+with `retention_unbounded` under the `anchored` floor; `anchored_finite_lock` is never emitted under `refuse`. The
+emitted state, never the floor, is written into the body's `finality` and the descriptor's.
+
+The verifier's `finality` check (**decided here**) is structural, because the retention period is not in the body:
+`chain_signed` holds exactly when `proof.anchor` is null; every `anchored*` state needs `anchor.status = flushed`;
+`anchored` and `anchored_finite_lock` also need `tamperResistant: true` and a non-null `retainUntil`. It reports
+`anchored_lapsed` for those two once `retainUntil` is not after the verification time, adding
+`commitment_after_retain_until`; `anchored_finite_lock` always adds `finite_lock_under_unbounded_retention`
+(`contract-b4.ts:503-536`). Whether a lock was shorter than the retention stays the server's recorded judgement.
+
+#### B4.6 The worked example (TEST-ONLY CANARY keys)
+
+A minimal valid Decision BOM bundle: one allowed MCP tool call (`search`), facts captured, a v2 receipt (so the facts
+binding can be checked; the verifier needs a recorded v2 boundary at or below seq 42 in its trust root), one usage
+event and one span bound, no approval, no model, no addenda, and finality `chain_signed`. Such a BOM freezes only under
+the audited relaxation `decision_bom_finality = chain_signed`; it is kept minimal on purpose (an anchored example is
+left to B4's own vectors, now that B4.7 item 1 is decided). It is built by `apps/gateway/src/testing/bom-b4-spec-example.ts`, written to disk by
+`node scripts/bom-b4-spec-example.mjs <dir>` (after `pnpm -r build`), and compared with every block below by
+`apps/gateway/src/adr0189-b4-spec-example.test.ts`.
+
+**Keys (TEST-ONLY: never configure them).** Each is the Ed25519 key whose 32-byte seed is the SHA-256 of the UTF-8
+seed text. No private key material is checked in.
+
+| Key id | Seed text | Signs |
+|---|---|---|
+| `TEST-ONLY-CANARY-receipt-key-1` | `regulait ADR-0189 B4 spec TEST-ONLY CANARY receipt key seed` | the body and the receipt; public JWK in `receipt-keys.json` |
+| `TEST-ONLY-CANARY-export-key-1` | `regulait ADR-0189 B4 spec TEST-ONLY CANARY export key seed` | `manifest.json`; public key in `signing-key.pub` |
+
+**Inputs.** Audit id `a0000000-0000-4000-8000-000000000042` at seq 42 and `2026-10-10T12:00:00.000Z`; BOM id
+`b0000000-0000-4000-8000-000000000001`; sponsor `c0000000-0000-4000-8000-000000000001`; exporter
+`c0000000-0000-4000-8000-000000000002`; MCP server `d0000000-0000-4000-8000-000000000001`; usage event
+`e0000000-0000-4000-8000-000000000001` (12 input and 34 output tokens, cost 0.000123); trace
+`f0000000-0000-4000-8000-000000000001` and span `f0000000-0000-4000-8000-000000000002`; exported at
+`2026-10-10T12:30:00.000Z`. The chain row's `prevHash` and `contentHash` are the SHA-256 of
+`TEST-ONLY CANARY audit row 41` and `TEST-ONLY CANARY audit row 42 content` (the preimage is never exported, R39, so any
+digest serves), its `rowHash` is the SHA-256 of `prevHash` followed by `contentHash` (`packages/shared/src/audit-chain.ts:406-408`), and
+`argumentsDigest` is the SHA-256 of `TEST-ONLY CANARY arguments`.
+
+**The canonical receipt payload** (the string in `receipt.payload`; it signs with the receipt key to the
+`receipt.signature` inside the body):
+
+```text b4-example:receipt-payload
+{"actor":{"chain":null,"delegationGrantId":null,"identityId":null},"audit":{"contentHash":"e5a75b4792799bfb7dfba6c9da30cdde03d3480c68cc11b29a901e462776b203","id":"a0000000-0000-4000-8000-000000000042","rowHash":"5ca72bb27bd111c676eaf7d494433506b6afa0fbaa351ed21783b44019c2773c","seq":42},"decision":{"at":"2026-10-10T12:00:00.000Z","effect":"allow","objectId":null,"objectType":"mcp_tool","ruleId":"rule-allow-search","serverId":"d0000000-0000-4000-8000-000000000001","toolName":"search","userId":"c0000000-0000-4000-8000-000000000001"},"factsHash":"17a8bd8dabeac8a9e6b7215d353b329f295984810a047319f2841c7b0652bee2","factsStatus":"captured","keyId":"TEST-ONLY-CANARY-receipt-key-1","prev":"0000000000000000000000000000000000000000000000000000000000000000","receiptSeq":1,"v":"regulait.receipt.v2"}
+```
+
+**The canonical facts payload** (the string in `facts.payload`; its SHA-256 is the receipt's `factsHash`):
+
+```text b4-example:facts-payload
+{"action":{"argumentsDigest":"a1631c01d215115175610f5e1243a1724371a1da51e5ea480fb9016f1ac894bf","complianceTags":[],"contextDigest":null,"dataSensitivity":"internal","inputs":[],"target":{"agentId":null,"connectorId":null,"kind":"mcp_tool","serverId":"d0000000-0000-4000-8000-000000000001","toolName":"search","toolNameHash":null}},"actors":{"actorChain":[],"actorIdentityId":null,"delegationGrantId":null,"sponsorUserId":"c0000000-0000-4000-8000-000000000001"},"auditId":"a0000000-0000-4000-8000-000000000042","auditSeq":42,"model":null,"outcome":{"effect":"allow","refusalCode":null,"upstreamStatusClass":"2xx"},"policy":{"abacPolicyVersions":[],"configVersions":[],"governancePolicyEpoch":7,"guardrailConfigDigest":null,"killSwitch":"off","modelPolicyRuleIds":[]},"rows":[{"digest":"bd932f5599fd6686fd13af24c6134d9dbaee61270ea09587445e373512d56f99","id":"f0000000-0000-4000-8000-000000000002","projection":{"actorIdentityId":null,"agentId":null,"auditLogId":"a0000000-0000-4000-8000-000000000042","connectorId":null,"contentWithheld":true,"costUsd":"0.000123","delegationGrantId":null,"durationMs":100,"endedAt":"2026-10-10T12:00:00.200Z","id":"f0000000-0000-4000-8000-000000000002","inputTokens":12,"kind":"mcp_tool","mcpServerId":"d0000000-0000-4000-8000-000000000001","model":null,"outputTokens":34,"parentSpanId":null,"provider":null,"seq":1,"startedAt":"2026-10-10T12:00:00.100Z","status":"ok","traceId":"f0000000-0000-4000-8000-000000000001","usageEventId":"e0000000-0000-4000-8000-000000000001"},"table":"trace_spans"},{"digest":"88c1833ffb7291ef9ecc725724c5760cd2eabec5ea92ff3e349d94656bc2aecd","id":"e0000000-0000-4000-8000-000000000001","projection":{"actorIdentityId":null,"agentConfigVersion":null,"agentConfigVersionId":null,"agentId":null,"at":"2026-10-10T12:00:00.250Z","configCanary":false,"configVersion":null,"configVersionId":null,"connectorId":null,"costUsd":"0.000123","delegationGrantId":null,"id":"e0000000-0000-4000-8000-000000000001","inputTokens":12,"model":null,"objectType":"mcp_tool","operation":"tool_call","outputTokens":34,"projectId":null,"provider":null,"refusal":null,"requestedAgentId":null,"servedModel":null,"userId":"c0000000-0000-4000-8000-000000000001"},"table":"usage_events"}],"v":"regulait.decision-facts.v1"}
+```
+
+**The files.** Each block holds the file's exact bytes. A fence ends its last line itself, so a file that ends with a
+newline (`README.txt`, `audit/chain.tsv`, `manifest.json.sig`, `signing-key.pub`) has exactly one, and the JSON files
+have none. `audit/chain.tsv` separates its columns with tab characters.
+
+`README.txt` (570 bytes):
+
+```text b4-example:README.txt
+RegulAIt signed export bundle (regulait.export-bundle/3, subject decision-bom)
+
+TEST-ONLY CANARY EXAMPLE: every key that signed this bundle is a published test key.
+
+Verify with an out-of-band trust root only: the export key fingerprint for
+manifest.json.sig, and the receipt key for content/decision-bom.json.sig,
+the receipt and any addenda. signing-key.pub and receipt-keys.json are
+convenience copies, never the trust root.
+
+This bundle carries no audit row payloads (ADR-0189 R39): audit/chain.tsv
+holds hashes only, so the decision row's content is not disclosed.
+```
+
+`audit/chain.tsv` (198 bytes):
+
+```text b4-example:audit/chain.tsv
+42	e5a75b4792799bfb7dfba6c9da30cdde03d3480c68cc11b29a901e462776b203	3befa193af44c4fb95b4c0d8bde9bc63027c729743142f65b11c4974bab8192b	5ca72bb27bd111c676eaf7d494433506b6afa0fbaa351ed21783b44019c2773c
+```
+
+`content/decision-bom.json` (6005 bytes):
+
+```text b4-example:content/decision-bom.json
+{"action":{"argumentsDigest":"a1631c01d215115175610f5e1243a1724371a1da51e5ea480fb9016f1ac894bf","complianceTags":[],"contextDigest":null,"dataSensitivity":"internal","inputs":[],"target":{"agentId":null,"connectorId":null,"kind":"mcp_tool","serverId":"d0000000-0000-4000-8000-000000000001","toolName":"search","toolNameHash":null}},"actors":{"actorChain":[],"actorIdentityId":null,"delegationGrantId":null,"sponsorUserId":"c0000000-0000-4000-8000-000000000001"},"approval":null,"auditId":"a0000000-0000-4000-8000-000000000042","basis":{"aiBomSnapshotId":null,"anchorId":null,"auditSeq":42,"receiptSeq":1},"completeness":{"action":{"status":"recorded"},"actors":{"status":"recorded"},"approval":{"reason":"no_bound_row","status":"not_recorded"},"cost":{"status":"recorded"},"decision":{"status":"recorded"},"model":{"reason":"not_captured_by_path","status":"not_recorded"},"outcome":{"status":"recorded"},"policy":{"status":"recorded"},"principal":{"status":"recorded"},"proof":{"reason":"anchor_absent","status":"not_recorded"},"receipt":{"status":"recorded"},"trace":{"status":"recorded"}},"cost":{"costSource":"usage_events.cost_usd","costUsd":"0.000123","inputTokens":12,"outputTokens":34,"usageEventIds":["e0000000-0000-4000-8000-000000000001"]},"decision":{"at":"2026-10-10T12:00:00.000Z","auditSeq":42,"effect":"allow","objectId":null,"objectType":"mcp_tool","ruleChain":["rule-allow-search"],"ruleId":"rule-allow-search","serverId":"d0000000-0000-4000-8000-000000000001","toolName":"search"},"facts":{"addenda":[],"payload":"{\"action\":{\"argumentsDigest\":\"a1631c01d215115175610f5e1243a1724371a1da51e5ea480fb9016f1ac894bf\",\"complianceTags\":[],\"contextDigest\":null,\"dataSensitivity\":\"internal\",\"inputs\":[],\"target\":{\"agentId\":null,\"connectorId\":null,\"kind\":\"mcp_tool\",\"serverId\":\"d0000000-0000-4000-8000-000000000001\",\"toolName\":\"search\",\"toolNameHash\":null}},\"actors\":{\"actorChain\":[],\"actorIdentityId\":null,\"delegationGrantId\":null,\"sponsorUserId\":\"c0000000-0000-4000-8000-000000000001\"},\"auditId\":\"a0000000-0000-4000-8000-000000000042\",\"auditSeq\":42,\"model\":null,\"outcome\":{\"effect\":\"allow\",\"refusalCode\":null,\"upstreamStatusClass\":\"2xx\"},\"policy\":{\"abacPolicyVersions\":[],\"configVersions\":[],\"governancePolicyEpoch\":7,\"guardrailConfigDigest\":null,\"killSwitch\":\"off\",\"modelPolicyRuleIds\":[]},\"rows\":[{\"digest\":\"bd932f5599fd6686fd13af24c6134d9dbaee61270ea09587445e373512d56f99\",\"id\":\"f0000000-0000-4000-8000-000000000002\",\"projection\":{\"actorIdentityId\":null,\"agentId\":null,\"auditLogId\":\"a0000000-0000-4000-8000-000000000042\",\"connectorId\":null,\"contentWithheld\":true,\"costUsd\":\"0.000123\",\"delegationGrantId\":null,\"durationMs\":100,\"endedAt\":\"2026-10-10T12:00:00.200Z\",\"id\":\"f0000000-0000-4000-8000-000000000002\",\"inputTokens\":12,\"kind\":\"mcp_tool\",\"mcpServerId\":\"d0000000-0000-4000-8000-000000000001\",\"model\":null,\"outputTokens\":34,\"parentSpanId\":null,\"provider\":null,\"seq\":1,\"startedAt\":\"2026-10-10T12:00:00.100Z\",\"status\":\"ok\",\"traceId\":\"f0000000-0000-4000-8000-000000000001\",\"usageEventId\":\"e0000000-0000-4000-8000-000000000001\"},\"table\":\"trace_spans\"},{\"digest\":\"88c1833ffb7291ef9ecc725724c5760cd2eabec5ea92ff3e349d94656bc2aecd\",\"id\":\"e0000000-0000-4000-8000-000000000001\",\"projection\":{\"actorIdentityId\":null,\"agentConfigVersion\":null,\"agentConfigVersionId\":null,\"agentId\":null,\"at\":\"2026-10-10T12:00:00.250Z\",\"configCanary\":false,\"configVersion\":null,\"configVersionId\":null,\"connectorId\":null,\"costUsd\":\"0.000123\",\"delegationGrantId\":null,\"id\":\"e0000000-0000-4000-8000-000000000001\",\"inputTokens\":12,\"model\":null,\"objectType\":\"mcp_tool\",\"operation\":\"tool_call\",\"outputTokens\":34,\"projectId\":null,\"provider\":null,\"refusal\":null,\"requestedAgentId\":null,\"servedModel\":null,\"userId\":\"c0000000-0000-4000-8000-000000000001\"},\"table\":\"usage_events\"}],\"v\":\"regulait.decision-facts.v1\"}"},"finality":"chain_signed","id":"b0000000-0000-4000-8000-000000000001","model":null,"outcome":{"effect":"allow","refusalCode":null,"upstreamStatusClass":"2xx"},"policy":{"abacPolicyVersions":[],"configVersions":[],"governancePolicyEpoch":7,"guardrailConfigDigest":null,"killSwitch":"off","modelPolicyRuleIds":[]},"principal":{"sponsorUserId":"c0000000-0000-4000-8000-000000000001"},"proof":{"anchor":null,"chain":[{"contentHash":"e5a75b4792799bfb7dfba6c9da30cdde03d3480c68cc11b29a901e462776b203","prevHash":"3befa193af44c4fb95b4c0d8bde9bc63027c729743142f65b11c4974bab8192b","rowHash":"5ca72bb27bd111c676eaf7d494433506b6afa0fbaa351ed21783b44019c2773c","seq":42}]},"receipt":{"keyId":"TEST-ONLY-CANARY-receipt-key-1","payload":"{\"actor\":{\"chain\":null,\"delegationGrantId\":null,\"identityId\":null},\"audit\":{\"contentHash\":\"e5a75b4792799bfb7dfba6c9da30cdde03d3480c68cc11b29a901e462776b203\",\"id\":\"a0000000-0000-4000-8000-000000000042\",\"rowHash\":\"5ca72bb27bd111c676eaf7d494433506b6afa0fbaa351ed21783b44019c2773c\",\"seq\":42},\"decision\":{\"at\":\"2026-10-10T12:00:00.000Z\",\"effect\":\"allow\",\"objectId\":null,\"objectType\":\"mcp_tool\",\"ruleId\":\"rule-allow-search\",\"serverId\":\"d0000000-0000-4000-8000-000000000001\",\"toolName\":\"search\",\"userId\":\"c0000000-0000-4000-8000-000000000001\"},\"factsHash\":\"17a8bd8dabeac8a9e6b7215d353b329f295984810a047319f2841c7b0652bee2\",\"factsStatus\":\"captured\",\"keyId\":\"TEST-ONLY-CANARY-receipt-key-1\",\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"receiptSeq\":1,\"v\":\"regulait.receipt.v2\"}","payloadHash":"30aff5ee501f44df54cf68cf30b555f05d5442627129e7cf788444745d9022a1","receiptSeq":1,"signature":"DVYxQr-WXxTSacy6w-9bwXO8e_snJwPcfeLpF6pCvqfBoxrYKWeoUdMaaH-LvB5SzQz31j_3CKfzK8xOBjJDBg"},"supersedes":null,"trace":{"spanIds":["f0000000-0000-4000-8000-000000000002"],"traceIds":["f0000000-0000-4000-8000-000000000001"]},"v":"regulait.decision-bom.v1","version":1}
+```
+
+`content/decision-bom.json.sig` (241 bytes):
+
+```text b4-example:content/decision-bom.json.sig
+{"alg":"Ed25519","keyId":"TEST-ONLY-CANARY-receipt-key-1","signature":"oIwyHzFCKiPSS5Z1e_NSwtYJVLF9TvvjMeNYOY0RAF7mNuUQkFC4sAv7NCTmvlYZEh12s1ADPX8WKNG_nVTBDA","signedSha256":"276649d4c976bde4993d3c88d8e16d6f7e28d69e53d377cbe78f21539ce7219f"}
+```
+
+`manifest.json` (1472 bytes):
+
+```text b4-example:manifest.json
+{"audit":{"payloadScope":"none","segmentFromSeq":42,"segmentRowCount":1,"segmentToSeq":42},"exportedAt":"2026-10-10T12:30:00.000Z","exportedAtSource":"database","exportedByUserId":"c0000000-0000-4000-8000-000000000002","files":[{"path":"README.txt","sha256":"98a095d29fe1cc9d5b6f24ed1306d80208429b11c712dd87617d250a9fad43a2"},{"path":"audit/chain.tsv","sha256":"3e6aa20e5cfd37e6d7bbdbb296341e1b760563feed54c99320093633e1769350"},{"path":"content/decision-bom.json","sha256":"276649d4c976bde4993d3c88d8e16d6f7e28d69e53d377cbe78f21539ce7219f"},{"path":"content/decision-bom.json.sig","sha256":"54bfccb312b1fdae3c0a18d9dcd3ab8c81c7efbbb04e6c8e404f108f7936e986"},{"path":"receipt-keys.json","sha256":"46e04c4e90c3b52fc7e04c33db66aa7137cc7e870a5601c356b0af33a7860369"},{"path":"signing-key.pub","sha256":"299e95e7e4e7635f5de72dc34c532b9d80c194c9dee29780b1cb31ef13bd260e"}],"installId":null,"installIdSource":"absent","product":"regulait","schema":"regulait.export-bundle/3","signingKeyFingerprint":"sha256:3133075a6bffc999dede86075e66ac42685946d768c1ffbfdacb7c7009096b20","signingKeyId":"TEST-ONLY-CANARY-export-key-1","subject":{"descriptor":{"aiBomSnapshotId":null,"auditId":"a0000000-0000-4000-8000-000000000042","bodySha256":"276649d4c976bde4993d3c88d8e16d6f7e28d69e53d377cbe78f21539ce7219f","bomId":"b0000000-0000-4000-8000-000000000001","finality":"chain_signed","formats":[],"receiptSeq":1,"version":1},"id":"a0000000-0000-4000-8000-000000000042","kind":"decision-bom"}}
+```
+
+`manifest.json.sig` (89 bytes):
+
+```text b4-example:manifest.json.sig
+gWJN+hk68R0nBFSzIdeU0c4ez4Q99G0+nIk49r8UHPVRzH7REyObwEco+okjH/6KW29Ny2uhjmqLNlT70rSZCA==
+```
+
+`receipt-keys.json` (227 bytes):
+
+```text b4-example:receipt-keys.json
+{"keys":[{"fingerprint":"sha256:505e806bf46aedd490d099490e7e8d69bd2dec822045e37703cfb4749c746deb","jwk":{"crv":"Ed25519","kty":"OKP","x":"2XdRU9LAxJprz1nYeh91Zo3d_FLZNQZZar-CQBNFuLk"},"keyId":"TEST-ONLY-CANARY-receipt-key-1"}]}
+```
+
+`signing-key.pub` (113 bytes):
+
+```text b4-example:signing-key.pub
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA7Js05bL98Bz37ZfEk/4JZiLIA9LPdsG2/5gDPj2HcTE=
+-----END PUBLIC KEY-----
+```
+
+**Digests** (`sha256sum -c` format, run inside the root directory):
+
+```text b4-example:SHA256SUMS
+98a095d29fe1cc9d5b6f24ed1306d80208429b11c712dd87617d250a9fad43a2  README.txt
+3e6aa20e5cfd37e6d7bbdbb296341e1b760563feed54c99320093633e1769350  audit/chain.tsv
+276649d4c976bde4993d3c88d8e16d6f7e28d69e53d377cbe78f21539ce7219f  content/decision-bom.json
+54bfccb312b1fdae3c0a18d9dcd3ab8c81c7efbbb04e6c8e404f108f7936e986  content/decision-bom.json.sig
+a93fffa719a1e52ad03e797f1d5122724892c474d01a5acb28c9853b742e383a  manifest.json
+d7cb4f3e0b1a462d95cff4040db371c919998d351302d8aef1efe57c9765661b  manifest.json.sig
+46e04c4e90c3b52fc7e04c33db66aa7137cc7e870a5601c356b0af33a7860369  receipt-keys.json
+299e95e7e4e7635f5de72dc34c532b9d80c194c9dee29780b1cb31ef13bd260e  signing-key.pub
+```
+
+**The archive.** The eight entries, in order: `regulait-export-decision-bom-a0000000-0000-4000-8000-000000000042-v1/README.txt`, `…/audit/chain.tsv`, `…/content/decision-bom.json`, `…/content/decision-bom.json.sig`, `…/manifest.json`, `…/manifest.json.sig`, `…/receipt-keys.json`, `…/signing-key.pub`. Every name fits the 100-byte name field, so no `prefix`
+is used. The uncompressed tar:
+
+```text b4-example:tar.sha256
+08869812cfd0c9b973fbcd0e72034eeadd165bbaa2a52f50f9a515fe5d790201  regulait-export-decision-bom-a0000000-0000-4000-8000-000000000042-v1.tar (uncompressed, 16384 bytes)
+```
+
+The served `.tar.gz` starts `1f 8b 08 00 00 00 00 00` (magic, deflate, no flags, MTIME 0); its remaining bytes are not
+pinned (B4.1).
+
+**What a verifier reports** for this bundle, given both trust roots and a v2 boundary at or below 42:
+`bundle_manifest_signature`, `bundle_manifest_files`, `bundle_subject`, `bundle_email_scan`, `body_version`,
+`body_schema`, `body_signature`, `receipt_signature`, `receipt_payload_hash`, `receipt_facts_binding`,
+`sections_projection`, `chain_links` and `finality` are `valid`; `decision_content_binding` is `unverifiable`
+`preimage_not_exported`; `anchor_record`, `anchor_imprint` and `tsa_token` are `unverifiable` `anchor_absent`;
+`ai_bom_link`, `facts_addenda_chain` and `facts_addenda_signatures` do not apply and are left out. The outcome is
+`valid_with_unverifiable`, the recorded and reported finality are `chain_signed`, `receiptPayloadVersion` is `v2`,
+and `cannotProve` is the five fixed Decision BOM entries (`contract-b4.ts:515-521`). Every section is `valid`; the
+completeness is as in the body (`model` `not_recorded` `not_captured_by_path`, `approval` `not_recorded`
+`no_bound_row`, `proof` `not_recorded` `anchor_absent`, the rest `recorded`).
+
+#### B4.7 Questions found while specifying: decided (master, 2026-10-10)
+
+Each item was open when this specification was first written (`195ccae`); the master decided all seven on
+2026-10-10. They bind B4 like the rest of this section.
+
+1. **The anchor record's `payloadVersion` is the stored string. Contract amended 2026-10-10 (B4.7-1).** R1 and the
+   code that builds the RFC 3161 imprint store a string (`AnchorRecord.payloadVersion: string`,
+   `apps/gateway/src/audit-chain.ts:89-96`; `anchorRecordFromRow` writes the stored timestamp's version or
+   `"regulait.audit.v1"`, `audit-timestamp.ts:64-66`), and the frozen body typed it as an integer. The stored and
+   signed value wins: `proof.anchor.record.payloadVersion` is now `bomIdentifierSchema` (`contract.ts:590-592`),
+   holding exactly the string the anchor stores and imprints, so the verifier rebuilds the imprint from the body's
+   six fields unchanged. The B1 and #307 fixtures (`bom.test.ts`, `contract-b4.test.ts`) now use
+   `"regulait.audit.v1"`, and `bom.test.ts` refuses an integer. This is a contract change, to be reviewed with B6. The
+   worked example stays `chain_signed`; an anchored example is left to B4's own vectors.
+2. **Post-action verification travels in the addenda only (v1).** §2 lists it under `outcome`, but `body.outcome` is
+   `decisionOutcomeFactsSchema` (`contract.ts:526-532`), which has no such field. In `regulait.decision-bom.v1` a
+   post-action verification is carried only as `postActionVerification` inside the signed addendum payloads
+   (`facts.addenda[].payload`, `contract.ts:561`); `body.outcome` does not project it, and the verifier checks it only
+   as part of the addendum chain and signatures.
+3. **Cost over several usage events is the exact decimal sum.** Confirmed: with one bound usage event `costUsd` is that
+   row's R23 string verbatim; with several it is the exact decimal sum of their R23 strings (no binary floating point;
+   plain notation with no exponent and no trailing fractional zeros), as B4.4 states; null when any is null.
+4. **No export-key registry in v1.** After an export-key rotation, online verification cannot check an older bundle's
+   manifest and reports `invalid` `unknown_key` (B4.2). That is a v1 limitation: older bundles are verified offline
+   against the pinned export-key fingerprints the operator published (ADR-0116 `--fingerprint` or `--keyring`). An
+   export-key registry like `receipt_signing_keys` is an **open follow-up**, not built in B4.
+5. **B4 build requirement: extend `scripts/verify-export-bundle.sh` to `/3`.** The script accepts only `/1` and `/2`
+   (`verify-export-bundle.sh:199-201`) and expects ADR-0116's chain fields (head, genesis). B4 extends it to accept
+   `regulait.export-bundle/3`: `payloadScope: "none"`, no `audit/rows/`, no manifest head, the B4.1 file table, so
+   §6's "the stock script still checks the file manifest" holds.
+6. **B4 builds on PR #315.** On `b6-bom-b4-contract`, `finality.ts` still emits `anchored_finite_lock` under `refuse`
+   when the floor is relaxed; B4.5 specifies #315's behaviour, and B4 is built on #315.
+7. **Addendum signing bytes.** B4.2's decision stands: an addendum signature covers exactly the addendum's canonical
+   payload bytes (`facts.addenda[i].payload`). The future sweep that signs addenda must sign exactly those bytes.
+
 ### Owner items from the review (not decided here)
 
 1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
