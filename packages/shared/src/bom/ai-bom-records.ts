@@ -29,6 +29,7 @@
  */
 import { createHash } from "node:crypto";
 import { scrubAuditText } from "../audit-scrub.js";
+import { AI_BOM_SPDX_SUBJECT_KINDS, AI_BOM_SPDX_SUBJECT_PROPERTIES, AiBomSpdxFieldError, normaliseSpdxDeclaration, type AiBomSpdxSubjectKind } from "./ai-bom-spdx-fields.js";
 import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, isBomExportEndpoint, isBomSpiffeId, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -56,7 +57,15 @@ export const AI_BOM_CONFIG_STATUSES = ["active", "canary"] as const;
 export const AI_BOM_MEMORY_STORE_KINDS = ["semantic_cache", "conversations", "builder_agent_memory", "project_context"] as const;
 
 /** round 9: the only `data_claims` keys that may reach a BOM (spike B0 `DATA_CLAIM_KEYS`) */
-export const AI_BOM_DATA_CLAIM_KEYS = ["trainingData", "task", "architecture", "license", "retention", "releaseTime", "downloadLocation"] as const;
+export const AI_BOM_DATA_CLAIM_KEYS = ["trainingData", "task", "architecture", "license", "retention"] as const;
+/**
+ * ADR-0189 R51 (owner, 2026-10-10): `releaseTime` and `downloadLocation` are no
+ * longer `data_claims` keys. The governed declarations (`spdxFields`, table
+ * `ai_bom_spdx_declarations`) are their ONLY source, so a value can never come
+ * from two places. The loader drops these two keys from a card's claims; a
+ * record set that still carries one is refused (no grandfathering, ADR-0180).
+ */
+export const AI_BOM_RETIRED_DATA_CLAIM_KEYS = ["releaseTime", "downloadLocation"] as const;
 export const AI_BOM_DATA_CLAIM_MAX_CHARS = 512;
 /** the cap on any free-text value that may appear (names, intended use, limitations) */
 export const AI_BOM_TEXT_MAX_CHARS = 4096;
@@ -304,6 +313,24 @@ export interface InstallRecord {
   installId: Nullable<string>;
 }
 
+/**
+ * ADR-0189 B9 (R51): the CURRENT supplier-declared SPDX properties of one model
+ * card or dataset row, from `ai_bom_spdx_declarations` (newest row per
+ * property; a withdrawn property is null). Values only: who declared them and
+ * when stays in the table and the audit trail.
+ */
+export interface SpdxFieldsRecord {
+  subjectKind: AiBomSpdxSubjectKind;
+  subjectId: string;
+  releaseTime: Nullable<string>;
+  downloadLocation: Nullable<string>;
+  packageVersion: Nullable<string>;
+  builtTime: Nullable<string>;
+  originatedBy: Nullable<string>;
+  /** empty = not declared */
+  datasetType: string[];
+}
+
 export interface AiBomRecordSet {
   subject: { kind: AiBomSubjectKind; id: string };
   install: InstallRecord | null;
@@ -331,6 +358,8 @@ export interface AiBomRecordSet {
   builderAgents: BuilderAgentRecord[];
   builderSkills: BuilderSkillRecord[];
   memoryStores: MemoryStoreRecord[];
+  /** B9 (R51); optional on input (absent = none declared), always present after `normaliseAiBomRecords` */
+  spdxFields?: SpdxFieldsRecord[];
 }
 
 /** the list-valued keys of a record set, in a fixed order */
@@ -338,7 +367,7 @@ export const AI_BOM_RECORD_LISTS = [
   "useCases", "agents", "customProviders", "modelCards", "modelCardApprovals", "modelCardEvidence", "evalRuns",
   "evalDatasets", "trainingDatasets", "trainingJobs", "trainingArtifacts", "modelArtifacts", "artifactScans",
   "engineRuns", "engines", "promptTags", "configVersions", "mcpServers", "mcpTools", "connectors", "grants",
-  "builderAgents", "builderSkills", "memoryStores",
+  "builderAgents", "builderSkills", "memoryStores", "spdxFields",
 ] as const satisfies ReadonlyArray<keyof AiBomRecordSet>;
 export type AiBomRecordList = (typeof AI_BOM_RECORD_LISTS)[number];
 
@@ -351,10 +380,12 @@ export const AI_BOM_RECORD_TABLES: Readonly<Record<AiBomRecordList, string>> = {
   engineRuns: "engine_runs", engines: "engines", promptTags: "prompt_tags", configVersions: "config_versions",
   mcpServers: "mcp_servers", mcpTools: "mcp_tools", connectors: "connectors", grants: "grants",
   builderAgents: "builder_agents", builderSkills: "builder_agent_skills", memoryStores: "memory_stores",
+  spdxFields: "ai_bom_spdx_declarations",
 };
 
 /** THE ALLOWLISTS: exactly the fields each record may carry */
-const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof AiBomRecordSet[K][number]> } = {
+type RecordOf<K extends AiBomRecordList> = NonNullable<AiBomRecordSet[K]>[number];
+const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof RecordOf<K>> } = {
   useCases: ["id", "name", "ownerUserId", "ownerDisplayName", "dataSensitivity", "complianceTags", "euAiActTier", "status", "intendedAgentIds"],
   agents: ["id", "name", "provider", "model", "expectedServedModel", "customProviderId", "lifecycleStatus", "ownerUserId", "ownerDisplayName", "workloadIdentity", "observedLastSeen", "observedCount"],
   customProviders: ["id", "name", "wireProtocol", "baseUrl", "keySet"],
@@ -379,6 +410,7 @@ const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof AiBomRecordSet[K][nu
   builderAgents: ["id", "name", "modelAgentId", "ownerUserId", "ownerDisplayName", "workloadIdentity"],
   builderSkills: ["agentId", "skillId", "snapshotName", "snapshotDigest", "snapshotVersion", "snapshotAdmissionState"],
   memoryStores: ["kind", "builderAgentId"],
+  spdxFields: ["subjectKind", "subjectId", "releaseTime", "downloadLocation", "packageVersion", "builtTime", "originatedBy", "datasetType"],
 };
 const BIAS_FIELDS = ["dimension", "method", "status", "resultRef", "assessedAt"] as const;
 
@@ -393,6 +425,8 @@ export function aiBomRecordKey(list: AiBomRecordList, r: Record<string, unknown>
       return `${r.agentId}:${r.skillId}`;
     case "memoryStores":
       return `${r.kind}:${r.builderAgentId ?? "org"}`;
+    case "spdxFields":
+      return `${r.subjectKind}:${r.subjectId}`;
     case "evalDatasets":
     case "trainingDatasets":
       return `${r.id}:${r.version}`;
@@ -551,14 +585,13 @@ function dataClaims(v: unknown, at: string): Record<string, string | number | bo
   if (!v || typeof v !== "object" || Array.isArray(v)) return fail(`${at}: data_claims must be an object`);
   const out: Record<string, string | number | boolean> = {};
   for (const k of sortedStrings(Object.keys(v))) {
+    if ((AI_BOM_RETIRED_DATA_CLAIM_KEYS as readonly string[]).includes(k)) fail(`${at}: data_claims.${k} is retired as an SPDX source; declare it through the SPDX fields (ADR-0189 R51)`);
     if (!(AI_BOM_DATA_CLAIM_KEYS as readonly string[]).includes(k)) fail(`${at}: an unknown data_claims key is refused (allowed: ${AI_BOM_DATA_CLAIM_KEYS.join(", ")})`);
     let x = (v as Record<string, unknown>)[k];
     if (typeof x === "string") {
       if (x.length > AI_BOM_DATA_CLAIM_MAX_CHARS) fail(`${at}.${k}: longer than ${AI_BOM_DATA_CLAIM_MAX_CHARS} characters`);
-      // PR #287: a URL claim keeps its origin only (R47), a time claim must be a time, other text is guarded
-      if (k === "releaseTime") x = stamp(`${at}.${k}`, x, false);
-      else if (k === "downloadLocation") x = carriesUrl(x as string) ? sanitiseAiBomEndpoint(x as string, `${at}.${k}`) : fail(`${at}.${k}: not a URL`);
-      else x = urlOrText(`${at}.${k}`, x as string);
+      // PR #287: a URL claim keeps its origin only (R47); other text is guarded
+      x = urlOrText(`${at}.${k}`, x as string);
     } else if (!(typeof x === "boolean" || (typeof x === "number" && Number.isSafeInteger(x)))) {
       fail(`${at}.${k}: only a string, safe integer or boolean is allowed (no nested object or array)`);
     }
@@ -591,8 +624,9 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
   const install = input.install === null ? null : { installId: input.install?.installId === null ? null : ident("install.installId", input.install?.installId) };
   if (subjectKind === "install" && install === null) fail("an install subject needs its install record");
 
-  const each = <K extends AiBomRecordList>(list: K, map: (r: Record<string, unknown>, at: string) => AiBomRecordSet[K][number]): AiBomRecordSet[K] => {
-    const raw = (input as unknown as Record<string, unknown>)[list];
+  const each = <K extends AiBomRecordList>(list: K, map: (r: Record<string, unknown>, at: string) => RecordOf<K>): NonNullable<AiBomRecordSet[K]> => {
+    // B9: `spdxFields` is optional on input (a record set loaded before B9 declares none)
+    const raw = list === "spdxFields" ? ((input as unknown as Record<string, unknown>)[list] ?? []) : (input as unknown as Record<string, unknown>)[list];
     if (!Array.isArray(raw)) return fail(`${list}: expected a list`);
     if (raw.length > AI_BOM_MAX_RECORDS_PER_LIST) fail(`${list}: more than the cap of ${AI_BOM_MAX_RECORDS_PER_LIST} records (refused)`);
     const out = raw.map((r, i) => map(onlyFields(list, r, `${list}[${i}]`), `${list}[${i}]`));
@@ -601,7 +635,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       const a = aiBomRecordKey(list, sorted[i - 1] as unknown as Record<string, unknown>);
       if (a === aiBomRecordKey(list, sorted[i] as unknown as Record<string, unknown>)) fail(`${list}: record ${a} loaded twice`);
     }
-    return sorted as AiBomRecordSet[K];
+    return sorted as NonNullable<AiBomRecordSet[K]>;
   };
 
   const n: AiBomRecordSet = {
@@ -868,6 +902,33 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       kind: oneOf(`${at}.kind`, r.kind, AI_BOM_MEMORY_STORE_KINDS),
       builderAgentId: uuid(`${at}.builderAgentId`, r.builderAgentId, true),
     })),
+    // B9 (R51): every loaded value is re-checked by the write route's own rules (defence in depth)
+    spdxFields: each("spdxFields", (r, at) => {
+      const kind = oneOf(`${at}.subjectKind`, r.subjectKind, AI_BOM_SPDX_SUBJECT_KINDS);
+      const allowed = AI_BOM_SPDX_SUBJECT_PROPERTIES[kind] as readonly string[];
+      const value = (p: "releaseTime" | "downloadLocation" | "packageVersion" | "builtTime" | "originatedBy" | "datasetType") => {
+        const v = r[p];
+        const absent = v === null || (p === "datasetType" && Array.isArray(v) && v.length === 0);
+        if (absent) return p === "datasetType" ? [] : null;
+        if (!allowed.includes(p)) return fail(`${at}.${p}: not a property a ${kind} declares`);
+        try {
+          return normaliseSpdxDeclaration(kind, p, v);
+        } catch (e) {
+          if (e instanceof AiBomSpdxFieldError) return fail(`${at}.${p}: ${e.rule}`);
+          throw e;
+        }
+      };
+      return {
+        subjectKind: kind,
+        subjectId: uuid(`${at}.subjectId`, r.subjectId) as string,
+        releaseTime: value("releaseTime") as string | null,
+        downloadLocation: value("downloadLocation") as string | null,
+        packageVersion: value("packageVersion") as string | null,
+        builtTime: value("builtTime") as string | null,
+        originatedBy: value("originatedBy") as string | null,
+        datasetType: value("datasetType") as string[],
+      };
+    }),
   };
   return n;
 }
