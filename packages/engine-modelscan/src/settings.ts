@@ -12,6 +12,9 @@ export const MODELSCAN_IMAGE_PATHS = {
   modelscanBin: "/opt/modelscan/venv/bin/modelscan",
   settingsFile: "/opt/modelscan/modelscan-settings.toml",
   venvBin: "/opt/modelscan/venv/bin",
+  /** ADR-0187 decision 180: the strict `.npy` header check and the interpreter that runs it */
+  python: "/opt/modelscan/venv/bin/python",
+  npyHelper: "/opt/modelscan/npy-header.py",
 } as const;
 
 const PICKLE_EXT = [".pkl", ".pickle", ".joblib", ".dill", ".dat", ".data"];

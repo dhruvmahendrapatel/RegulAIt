@@ -2029,6 +2029,86 @@ RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
      table (exported from `@regulait/shared`), and any future reader that shows a garak probe's OWASP risks must call
      `garakOwasp2025` or `garakOwasp2025Coverage`; reading `GarakUpstreamProbe.owasp` for that is a review finding.
 
+### Implementation decisions (B5-M `.npy` header check, 2026-10-10, branch `b5-modelscan-npy`)
+
+Closes open question 15(b) (decision 108). No migration, no new dependency, no change to the Python lockfile or the
+licence gate. Code: `engines/modelscan/npy-header.py` (new), `packages/shared/src/engines/modelscan.ts` (the check's
+answer and the mapper), `packages/engine-modelscan/src/{scan,exchange,adapter,settings}.ts`, the Dockerfile, the numpy
+row of `engines/modelscan/THIRD_PARTY.md`. Tests: `packages/engine-modelscan/src/npy.test.ts` (19, new),
+`image.test.ts` (+1), `modelscan-real.test.ts` (decision 108's pinned case replaced, +1; opt-in), and the gateway's
+`zz-b5-modelscan.test.ts` follows the outcome type.
+
+180. **Option B: the scanner checks the `.npy` header itself; pinning numpy 1.26 is rejected.** Option A fails ADR-0176:
+     numpy 1.26's last release is 1.26.4, uploaded 2024-02-05 (PyPI, read 2026-10-10), about 32 months ago, against the
+     rule of a release in roughly the last 12 months; the current line is 2.5.3 (2026-09-06). Option B, built: a
+     stdlib-only Python script, `engines/modelscan/npy-header.py`, baked read-only (0444) at `/opt/modelscan/npy-header.py`
+     and run by the **scanner** (decision 104: no network, no credential) on the venv's interpreter with `-I -S`, before
+     modelscan, for every job whose format is `numpy`. It never evaluates anything: the header is parsed with
+     `ast.parse(mode="eval")`, the node must be a dict display, and each value goes through `ast.literal_eval`.
+     **Open-source check (ADR-0176):** numpy's own `read_array_header_1_0`/`_2_0` were considered and not used: there is
+     no public reader for version 3.0 (only the private `_read_array_header`, the same kind of private call that broke
+     modelscan), and, measured on numpy 2.4.6, numpy keeps the LAST of a repeated key, so a header with `descr` `<f8`
+     then `|O` loads as an object array (ambiguous, refused here). They would also need numpy in the checking process,
+     which CI does not have. `ast` is the standard library; nothing is added.
+181. **What the check accepts, and every refusal's code.** In order: at least 8 bytes, else `npy_truncated`; the magic
+     `\x93NUMPY`, else `npy_magic_invalid`; version exactly 1.0, 2.0 or 3.0, else `npy_version_unsupported`; the length
+     field (2 bytes for 1.0, 4 for 2.0 and 3.0) present, else `npy_truncated`; a header length from 1 to 10000 bytes
+     (numpy's own default bound), else `npy_header_length`; the header within the file, else `npy_truncated`; ASCII
+     (every header we accept is), else `npy_header_encoding`; starting with `{`, ending with a newline and parsing as a
+     dict display of constants, else `npy_header_not_literal`; keys exactly `descr`, `fortran_order` and `shape`, each
+     once and each a string constant (no `**`), else `npy_header_keys`; `fortran_order` a bool and `shape` a tuple of at
+     most 64 non-negative ints (not bools), else `npy_header_value`; `descr` exactly `|O` (object) or one of the plain
+     numeric dtypes numpy's writer emits (`|b1 |i1 |u1`, and `<`/`>` with `i2 i4 i8 u2 u4 u8 f2 f4 f8 f16 c8 c16 c32`),
+     else `npy_dtype_unsupported` (strings, void, datetime, structured or subarray dtypes, `<O`: a structured dtype's
+     fields may hold objects). A numeric payload must be exactly itemsize × the product of `shape` (short:
+     `npy_truncated`; long: `npy_trailing_bytes`); an object payload must be non-empty (`npy_truncated`) and at most
+     48 MiB (`npy_payload_too_large`, decision 183). The script prints one JSON line of fixed codes and integers (no
+     artifact text) and exits 0; anything else is `npy_check_failed`.
+182. **The verdicts (decision 105 unchanged: numpy's ceiling stays `no_known_unsafe`, and it stays executable).**
+     - **Numeric:** modelscan is not started (there is no pickle and nothing for it to scan). The scan item passes
+       (`regulait-npy-header`/`numeric`), so the artifact reads `no_known_unsafe` with its `executable_format`
+       finding, exactly as a scanned pickle with no finding does. A report beside a numeric answer is
+       `report_inconsistent`.
+     - **Object:** exactly the payload bytes are copied to a new file (`artifact.pkl` in a directory of their own on the
+       result volume) and handed to modelscan under `.pkl`, so its PICKLE scanner reads every pickle in the stream. The
+       report must name `artifact.pkl`, else `report_inconsistent`. The copy is removed before `done.json` is written.
+       An `os.system` payload is `unsafe`; a benign one is `no_known_unsafe`.
+     - **Refused, or the check did not answer:** modelscan is not started; the run completes with the scan item
+       `unknown` and a `modelscan-error` item whose id is the problem code, so the artifact scan reads `unknown` with a
+       `scan_error` finding naming the code. Never `clean`.
+     - **A `numpy` run with no header check at all** (any scanner that did not run it) fails `npy_check_missing`
+       (`unknown`). A check cut off by the time limit is `engine_timeout`, as before.
+
+     The gateway's `deriveArtifactScanVerdict` and the DB's `clean`-only-for-safetensors CHECK are unchanged.
+183. **The exchange carries the answer; the payload copy is bounded by the result volume.** `done.json` gains a
+     required, nullable `npy` (strict zod, `npyCheckSchema`); `ScanExecutor.scan` returns a `ScanOutcome`
+     (`ModelscanOutcome` + `npy`); `runScanJob` is the one entry point both executors use. The script runs from a fresh
+     empty working directory with modelscan's environment built from nothing, its stdout bounded at 4 KiB and
+     validated as exactly one line. The object payload bound is `NPY_OBJECT_PAYLOAD_MAX_BYTES` = 48 MiB because the
+     copy lands on the result volume, a 64 MiB tmpfs that also holds the report (at most 4 MiB); compose is unchanged.
+     Larger object arrays read `unknown` (`npy_payload_too_large`), never better.
+184. **Proofs, red first.** `npy.test.ts` runs the real script with the host's `python3 -I -S` (stdlib only, so no numpy;
+     skipped where there is no `python3`, as for the patch test) and replays modelscan exactly as the pinned 0.8.8
+     answers for the file it is handed (measured 2026-10-10: a `.npy` is a `MODEL_SCAN` error, exit 3; `os.system` in a
+     `.pkl` a CRITICAL issue, exit 1; a benign `.pkl` exit 0). Synthetic fixtures only, written byte by byte
+     (`npyFile`, `numericNpy`, `objectNpy`). Covered: numeric and object files of versions 1.0, 2.0 and 3.0; a benign
+     object pickle; an `os.system` object pickle (`unsafe`); a header with a call, `**`, `dict(...)`, an unclosed dict
+     or deep nesting (nothing in it runs: a `touch MARK` call leaves no file); an extra, missing, repeated or
+     non-string key; a header length of 0, over 10000 and past the end of the file; a file cut at every part; versions
+     4.0, 1.1, 0.0 and 2.1 and a wrong magic; bad value types, unsupported dtypes, trailing bytes, the payload bound
+     and a non-ASCII header; a check that does not answer; the answer carried through the exchange; and the mapper's
+     rules. **Red:** against the code before this change, 17 of the file's 18 tests then written failed (the helper did
+     not exist; an `os.system` object `.npy` read `unknown`, not `unsafe`; a numeric `.npy` read `unknown`; modelscan
+     was handed `artifact.npy`; no problem code reached the verdict). **Real engine (opt-in,** a Python 3.11 venv with
+     modelscan 0.8.8 patched, numpy 2.4.6): decision 108's pinned case now reads `unsafe` for an `os.system` object
+     `.npy` of each version, `no_known_unsafe` for benign and numeric ones and `unknown` (`npy_truncated`) for a cut
+     one; and files numpy itself writes (versions 1.0, 2.0 and 3.0; float64, int64 and an object array of a dict and
+     None) all pass the check and read `no_known_unsafe`. Mutation: with the check bypassed (modelscan handed the
+     `.npy`, as before) both real tests fail, the `os.system` case reading `unknown`. `image.test.ts` fails without the
+     Dockerfile's COPY of the script, and pins it to the standard library with no `eval`, `exec`, `compile` or dynamic
+     import. **Not run here:** the image build (no Docker daemon); CI's engine-image leg is the first build with the
+     script. The image runs Python 3.12 with numpy 2.5.3; the script needs neither numpy nor any version-specific API.
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -2099,7 +2179,16 @@ RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
     bundled HDF5 libraries (LicenseRef-HDF5) and CPython's PSF-2.0, not yet put to the owner (their allow-file entries
     say "pending owner decision", so the image is not admissible yet); (b) modelscan 0.8.8's NumPy scanner fails on
     numpy 2.x, so every `.npy` reads `unknown` (fail safe, kept): pin numpy 1.26 for the image, or strip the header in
-    the runner and scan the object payload as a pickle.
+    the runner and scan the object payload as a pickle. *2026-10-10, decisions 180–184:* **(b) closed for `.npy`.**
+    Pinning numpy 1.26 was rejected (its last release, 1.26.4, is from 2024-02-05; ADR-0176's 12-month rule). The
+    scanner now checks the header strictly itself (stdlib `ast`, no eval): a numeric array reads `no_known_unsafe`
+    without running modelscan, an object array's pickle payload goes to modelscan's pickle scanner, and anything
+    malformed, oversized or ambiguous reads `unknown` with a problem code. **Still open:** (c) a `.npz` archive is
+    still handed to modelscan as a zip, whose `.npy` members go through the same broken NumPy scanner (measured: a
+    `MODEL_SCAN` error on `artifact.zip:x.npy`), so every `.npz` still reads `unknown`; applying the header check to
+    each member is a separate slice. (d) Object arrays over 48 MiB read `unknown` (`npy_payload_too_large`) while the
+    result volume stays 64 MiB; raising both is an owner call. (e) Dtypes outside the accepted list
+    (strings, datetimes, structured arrays) read `unknown` (`npy_dtype_unsupported`); widening the list is optional.
 16. ~~Building the engine images in CI (B5-P and B5-M)~~ — **closed 2026-10-09 by decision 120.** `security.yml`
     builds every `engines/*/Dockerfile`, scans it and records its digests on every run, and signs it on each push to
     main.
