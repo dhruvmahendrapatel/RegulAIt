@@ -1,3 +1,27 @@
+## X37 — S2 kernel/Cedar independent review — 2026-10-10
+
+Review target: exact main `94fffb656cbc505468a7b8e43c478ca4ad499a08`, including S2 #274 (`2cc46b1b`, merged `3ce6feb2`). No production changes. Independent reproducible tests are retained in `apps/web/review/x37-intersection.probe.ts`; copy that file to `packages/policy-kernel/src/x37-independent.test.ts` before using the declared kernel runner, then remove the temporary copy. Reproduce with `source /workspace/.regulait-onboarding/activate.sh; pnpm --filter @regulait/policy-kernel build; pnpm --filter @regulait/policy-kernel test` after copying. The probe imports relative kernel modules and uses the kernel’s existing fast-check dependency.
+
+**Result: no confirmed S2 defect found.** Acceptance is bounded to the pure kernel plus actual Cedar/gateway enforcement below. It is not a claim that S4 workload routes or S5 token exchange are complete.
+
+| Requirement | Independent evidence / source finding |
+| --- | --- |
+| Required actor on all three inputs | Compile-time mapped-type assertion requires `actor` in `EvaluationInput`, `EvaluateAgentInput`, `EvaluateConnectorInput`; full kernel build compiles it. `governedEvaluate` also requires `opts.actor`; null retains the human path. |
+| Sponsor AND every actor AND scope AND ceiling | 3,072 exhaustive evaluations: 1,024 per path varying sponsor, each of three own grants, scopes, liveness, budget, Cedar, read/write, and explicit entitlement mode. Exactly 18 allow / 1,006 deny per path. 3,600 fixed-seed generated clean-witness-then-restrict cases span 1–9 actors and root/middle/leaf restrictions. No union accepted. Tool and agent lead ceilings and agent tier ceiling remain restrictive under both modes. |
+| Explicit `sponsor_only` relaxation | Only own-grant restrictions are skipped. Scope, liveness, sponsor, depth, budget, Cedar and lead ceilings remain mandatory. The tests distinguish this accepted setting from accidentally dropping all actor terms. |
+| Strict modes/read/write scope | 1,000 generated atoms assert exact kind and mode, missing modes deny, and child scope cannot add another mode. Exhaustive read/write path checks use plan/execute and connector read/write. |
+| Root first, leaf last, depth/live chain | Reversed facts, repeated grant ids and child scope wider than root fail with `actor-chain-invalid` and deny trace. Generated depths cover 1–9 hops; stored depth is hops−1, so maxDepth8 permits root+8 descendants. Every position's liveness and Cedar verdict restricts. |
+| Budget and approvals cannot widen | Unknown price under a cap, negative ancestor, zero leaf and nonfinite remaining budget refuse. Zero ancestor with a positive reserved leaf allows as designed. Existing consent and execution approval posture do not rescue missing actor rights. This proves supplied-fact semantics, not S3 ledger concurrency. |
+| Cedar v4 Agent / per-principal evaluation | Actual Cedar WASM evaluates sponsor plus three Agent principals separately: only middle actor forbids, and all three kernel paths refuse with that policy id. Legacy v3 forbid binds sponsor but is neutral for Agent. A Cedar permit cannot confer missing own grants. Gateway real-PG owner suite independently rerun: 11/11 tests pass including principal bag, per-principal enforcement, no-v4 neutral path and direct/role entitlement loading. |
+| Mutation sensitivity | Three deliberately widened deciders (sponsor union, leaf-only rights, dropped Cedar) each produce an actual fast-check counterexample. These are expected rejected mutants, not product reds. |
+| New refusal ids and audit | Shared `DELEGATION_RULE_IDS` includes actor-allow-list, actor-chain-invalid, delegation-scope/depth/budget and lead-ceiling. Independent refusals assert deny traces. Source inspection confirms gateway audit writers persist `decision.ruleId` and the full `decision.ruleChain` (including link/grant/policy ids), e.g. `mcp-proxy.ts`. No fresh end-to-end actor-route audit append claimed: MCP/connector routes still explicitly pass null pending S4. |
+
+Validation: frozen install PASS; kernel build PASS and declared full suite **241/241 PASS**, including **16 independent cases**; gateway real-PG S2/contract suites **11/11 PASS**. Gateway dependency closure build, web tsc and web production build all PASS. No actual red, no skipped review case, no product edit. The independent file asserts no elapsed wall time and adds no caller-input regex.
+
+Evidence: `/tmp/x37-install.log`, `/tmp/x37-kernel-build.log`, `/tmp/x37-kernel-test.log`, `/tmp/x37-gateway-tests.log`, `/tmp/x37-gateway-build.log`, `/tmp/x37-web-tsc.log`, `/tmp/x37-web-build.log`. Fresh DB `regulait_review_x37_oct10b` was created and dropped without FORCE; base DB untouched. Temporary kernel source copy removed before commit; its compiled output is ignored.
+
+---
+
 ## X32 — ADR-0188 S0 identity-library spike (2026-10-10 04:17 UTC)
 
 **GO for the library choice in OWNER DECISION2**, with the owned wrappers and integration requirements in `docs/research/R11-identity-s0-spike.md`. Reproducible throwaway code lives under `spikes/identity-s0/`, excluded from workspace packages/builds; product gateway/shared/db/config were not edited. Baseline1f6cc6b5.
@@ -142,7 +166,7 @@ Validation on the exact reviewed source:
 - `pnpm --filter @regulait/shared exec vitest run src/identity/identity.test.ts src/audit-chain.test.ts` **62/62 PASS** (`/tmp/oct10-x35-shared.log`).
 - Actual PostgreSQL gateway `src/audit-chain.test.ts`: **60 PASS, 9 explicitly skipped** (`/tmp/oct10-x35-audit.log`); skipped external/optional cases are not live verification.
 - Web `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS (`/tmp/oct10-x35-web-{tsc,build}.log`).
-- Independent negatives: **two expected-broken assertions genuinely fail**, and v2 actor-tamper positive control **1/1 PASS** (`/tmp/oct10-x35-independent.log`). Reproduction preserved in `apps/web/review/x35-s1-independent.probe.ts`; copy temporarily to `apps/gateway/src/zz-x35-independent-review.test.ts`, run with the scratch DATABASE_URL as above, then remove the temporary copy. It is deliberately outside normal test collection. Each probe uses a rolled-back transaction; unknown-version DDL is rolled back too.
+- Independent negatives: **two expected-broken assertions genuinely fail**, and v2 actor-tamper positive control **1/1 PASS** (`/tmp/oct10-x35-independent.log`). Reproduction preserved in `apps/web/review/x35-s1-independent.probe.ts`; copy temporarily to `apps/gateway/src/zz-x35-independent-review.test.ts`, run with the scratch DATABASE_URL as above, then remove the temporary copy. Reproduce with `source /workspace/.regulait-onboarding/activate.sh; pnpm --filter @regulait/policy-kernel build; pnpm --filter @regulait/policy-kernel test` after copying. The probe imports relative kernel modules and uses the kernel’s existing fast-check dependency. It is deliberately outside normal test collection. Each probe uses a rolled-back transaction; unknown-version DDL is rolled back too.
 
 The dedicated scratch database was dropped after validation; the shared base database was untouched.
 
