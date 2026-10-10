@@ -219,7 +219,7 @@ beforeAll(async () => {
   restoreGates = await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
 
   keyDir = mkdtempSync(path.join(os.tmpdir(), "s3-issuer-"));
-  for (let i = 0; i < 5; i++) issuerKeys.push(generateKeyPairSync("ed25519").privateKey);
+  for (let i = 0; i < 7; i++) issuerKeys.push(generateKeyPairSync("ed25519").privateKey);
   writeIssuerKeys([issuerKeys[0]!]);
   const k0 = (await configuredIdentitySigningKeys())[0]!;
   // a shared database may already hold an active key from another run: make ours the signer
@@ -447,12 +447,14 @@ describe("ADR-0188 S3 — decision 22 budgets on edges (worked examples)", () =>
 
   it("idempotency compares the subject credential: the same key with another credential (or none) is a conflict, the same one replays", async () => {
     const r = await root(100);
-    const credX = randomUUID();
+    // the subject credential of a child is a live credential of the PARENT's actor (I0 here)
+    const credX = await registerJwk(ids[0]!, workloadKey());
+    const credY = await registerJwk(ids[0]!, workloadKey());
     const req = (subjectCredentialId: string | null | undefined) =>
       admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: r.id, actorIdentityId: ids[1]!, scope: toolScope([T.write]), capMicros: M(30), expiresAt: CHILD_EXP, binding: inProc, idempotencyKey: "idem-sc", ...(subjectCredentialId === undefined ? {} : { subjectCredentialId }) });
     const first = await req(credX);
     expect(first.grant.subjectCredentialId).toBe(credX);
-    for (const other of [randomUUID(), null, undefined]) {
+    for (const other of [credY, null, undefined]) {
       const e = await refusal(req(other));
       expect([e.ruleId, e.code]).toEqual(["delegation-idempotency-conflict", "idempotency_key_reused"]);
     }
@@ -509,6 +511,30 @@ describe("ADR-0188 S3 — decision 22 budgets on edges (worked examples)", () =>
     expect(edge).toMatchObject({ status: "closed", releasedMicros: M(15) });
     await sweepDelegationAllocations(db);
     expect(await balances(r.id)).toEqual({ S: 5, R: 0, rem: 95 });
+  });
+
+  it("revoking a tree never stamps a grant that had already expired: it only has its edge closed, and the audit says so", async () => {
+    const r = await root(100);
+    const past = new Date(Date.now() - 7200_000);
+    const dead = (
+      await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: r.id, actorIdentityId: ids[1]!, scope: toolScope([T.write]), capMicros: M(10), expiresAt: new Date(past.getTime() + 3600_000), binding: inProc, idempotencyKey: "rev-dead", now: past })
+    ).grant;
+    const live = (await child(r.id, 2, 20, "rev-live")).grant;
+    // revoking the expired child on its own stamps nothing but returns its unspent allocation
+    const own = await revokeDelegationGrant(db, { grantId: dead.id, reason: "admin" });
+    expect(own.revokedGrantIds).toEqual([]);
+    expect((await grant(dead.id)).revokedAt).toBeNull();
+    expect(await balances(r.id)).toEqual({ S: 0, R: 20, rem: 80 });
+    // revoking the root revokes the root and the live child; the expired child stays unrevoked
+    const out = await revokeDelegationGrant(db, { grantId: r.id, reason: "admin" });
+    expect([...out.revokedGrantIds].sort()).toEqual([r.id, live.id].sort());
+    expect((await grant(dead.id)).revokedAt).toBeNull();
+    expect((await grant(live.id)).revokedReason).toBe("cascade");
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "delegation-revoke"), eq(auditLog.objectId, r.id)));
+    expect((audit!.detail as { alreadyExpiredGrantIds: string[] }).alreadyExpiredGrantIds).toEqual([dead.id]);
+    const [ownAudit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "delegation-revoke"), eq(auditLog.objectId, dead.id)));
+    expect(ownAudit!.detail).toMatchObject({ revokedGrantIds: [], alreadyExpiredGrantIds: [dead.id] });
+    expect(ownAudit!.reason).toContain("already expired");
   });
 
   it("the sweep reads expiry by the DATABASE clock: a replica whose clock runs ahead never releases a live child, one behind still releases an expired one", async () => {
@@ -626,6 +652,56 @@ describe("ADR-0188 S3 — decision 17: the live chain, read fresh at every use",
     } finally {
       await db.execute(sql`insert into identity_tool_grants (identity_id, server_id, tool_name) values (${ids[1]!}, ${serverId}, ${T.write})`);
     }
+  });
+
+  it("admission checks every EXISTING link's current own grants: a middle actor that lost a tool cannot admit a child for it, and nothing is reserved", async () => {
+    const both = [...toolScope([T.write]), ...toolScope([T.read], "read")];
+    const root = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: both, capMicros: M(100), environment: ENV, expiresAt: hour(), projectId: null, binding: inProc });
+    const exp = new Date(root.expiresAt.getTime() - 1000);
+    const mid = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: root.id, actorIdentityId: ids[1]!, scope: both, capMicros: M(50), expiresAt: exp, binding: inProc, idempotencyKey: "ent-m" })).grant;
+    const admit = (key: string, scope: DelegationScope) =>
+      admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: mid.id, actorIdentityId: ids[2]!, scope, capMicros: M(10), expiresAt: exp, binding: inProc, idempotencyKey: key });
+    await db.execute(sql`delete from identity_tool_grants where identity_id = ${ids[1]!} and tool_name = ${T.write}`);
+    try {
+      const e = await refusal(admit("ent-w", toolScope([T.write])));
+      expect([e.ruleId, e.code]).toEqual(["actor-allow-list", "chain_actor_not_entitled"]);
+      expect(await balances(mid.id)).toEqual({ S: 0, R: 0, rem: 50 });
+      // what the middle actor still holds is admitted
+      expect((await admit("ent-r", toolScope([T.read], "read"))).replayed).toBe(false);
+    } finally {
+      await db.execute(sql`insert into identity_tool_grants (identity_id, server_id, tool_name) values (${ids[1]!}, ${serverId}, ${T.write})`);
+    }
+    expect((await admit("ent-w2", toolScope([T.write]))).replayed).toBe(false);
+  });
+
+  it("a replica whose process clock runs two hours AHEAD creates, admits and decides by the database clock", async () => {
+    const real = Date.now();
+    const exp = new Date(real + 3600_000);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(real + 2 * 3600_000);
+      const r = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: exp, projectId: null, binding: inProc });
+      expect(Math.abs(r.createdAt.getTime() - real)).toBeLessThan(60_000);
+      const c = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: r.id, actorIdentityId: ids[1]!, scope: toolScope([T.write]), capMicros: null, expiresAt: new Date(exp.getTime() - 1000), binding: inProc, idempotencyKey: "ahead" })).grant;
+      expect((await loadLiveChain(db, c.id))!.failure).toBeNull();
+      expect((await decide(c.id, T.write)).effect).toBe("allow");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a halted organisation refuses new grants as well as their use (one predicate for creation and use)", async () => {
+    const [before] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    await db.update(orgSettings).set({ executionMode: "halted", executionModeReason: "s3 test halt" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    try {
+      const e = await refusal(
+        createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc }),
+      );
+      expect([e.ruleId, e.code]).toEqual(["actor-chain-invalid", "org_halted"]);
+    } finally {
+      await db.update(orgSettings).set({ executionMode: before!.executionMode, executionModeReason: before!.executionModeReason }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    expect((await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[0]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc })).id).toBeTruthy();
   });
 
   it("revoking the sponsor's grant after the child was created refuses the child's next call; disabling the sponsor too", async () => {
@@ -773,15 +849,11 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     // (Minting "400 s ago" no longer makes an expired token: a mint never stamps `iat` before its key's
     // activation, so that token was refused for its signing key, never for its expiry.)
     const fresh = await mint(rootExt);
+    // the verifier's clock is pinned (`now`); the library's own checks are shifted to it too
     const presentedAt = async (offsetMs: number) => {
-      const real = Date.now();
-      vi.useFakeTimers({ toFake: ["Date"] });
-      try {
-        vi.setSystemTime(real + offsetMs);
-        return await verify(resourceRequest(fresh.accessToken, await dpopProof(B, { token: fresh.accessToken })));
-      } finally {
-        vi.useRealTimers();
-      }
+      const at = new Date(Date.now() + offsetMs);
+      const proof = await dpopProof(B, { token: fresh.accessToken, iat: Math.floor(at.getTime() / 1000), nonce: issueDpopNonce(SECRETS.nonceKey, at) });
+      return verify(resourceRequest(fresh.accessToken, proof), { now: at });
     };
     const inLife = await presentedAt(200_000);
     expect(inLife.ok, JSON.stringify(inLife)).toBe(true);
@@ -802,6 +874,66 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     const forged = await issuerSigned({ cnf: { jkt: await jkt(B) } });
     const rf = await tryIt(forged);
     expect(rf.ok ? "" : rf.code).toBe("issued_token_mismatch");
+  });
+
+  it("an authenticating credential past its not_after refuses the chain: mint and verify both refuse, at the database clock", async () => {
+    const credW = await registerJwk(ids[5]!, workloadKey());
+    const g = await externalRoot(5, credW, { kind: "dpop", thumbprint: await jkt(B) });
+    const t = await mint(g.id);
+    expect((await verify(resourceRequest(t.accessToken, await dpopProof(B, { token: t.accessToken })))).ok).toBe(true);
+    // the credential's window closes (rotation may only move not_after earlier)
+    await db.execute(sql`update workload_credentials set not_after = greatest(not_before + interval '1 millisecond', now() - interval '1 second') where id = ${credW}`);
+    expect((await loadLiveChain(db, g.id))!.failure).toEqual({ index: 0, code: "credential_not_live" });
+    await expect(mint(g.id)).rejects.toMatchObject({ code: "chain_not_live" });
+    const r = await verify(resourceRequest(t.accessToken, await dpopProof(B, { token: t.accessToken })));
+    expect(r.ok ? "" : r.code).toBe("chain_credential_not_live");
+  });
+
+  it("an authenticating credential before its not_before refuses the chain, and so does a child's subject credential outside its window", async () => {
+    // a credential valid only from an hour from now; a grant made with a pinned clock inside that window
+    const k = workloadKey();
+    const credF = rows<{ id: string }>(
+      await db.execute(sql`insert into workload_credentials (identity_id, kind, public_jwk, jwk_thumbprint, not_before, not_after)
+        values (${ids[6]!}, 'jwk', ${JSON.stringify(k.jwk)}::jsonb, ${await jkt(k)}, now() + interval '1 hour', now() + interval '3 hours') returning id`),
+    )[0]!.id;
+    const inWindow = new Date(Date.now() + 90 * 60_000);
+    const g = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[6]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: new Date(inWindow.getTime() + 600_000), projectId: null, binding: { kind: "dpop", thumbprint: await jkt(B), authCredentialId: credF, audience }, now: inWindow });
+    expect((await loadLiveChain(db, g.id, inWindow))!.failure).toBeNull();
+    expect((await loadLiveChain(db, g.id))!.failure).toEqual({ index: 0, code: "credential_not_live" });
+    await expect(mint(g.id)).rejects.toMatchObject({ code: "chain_not_live" });
+
+    // a child whose subject credential (the parent actor's) leaves its window: the child's chain is refused
+    const credS = await registerJwk(ids[4]!, workloadKey());
+    const parent = await createRootGrant(db, { sponsorUserId: userId, actorIdentityId: ids[4]!, scope: toolScope([T.write]), capMicros: null, environment: ENV, expiresAt: hour(), projectId: null, binding: inProc });
+    const kid = (await admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: parent.id, actorIdentityId: ids[3]!, scope: toolScope([T.write]), capMicros: null, expiresAt: new Date(parent.expiresAt.getTime() - 1000), binding: inProc, idempotencyKey: "subj-window", subjectCredentialId: credS })).grant;
+    expect((await loadLiveChain(db, kid.id))!.failure).toBeNull();
+    await db.execute(sql`update workload_credentials set not_after = greatest(not_before + interval '1 millisecond', now() - interval '1 second') where id = ${credS}`);
+    expect((await loadLiveChain(db, kid.id))!.failure).toEqual({ index: 1, code: "credential_not_live" });
+    expect((await decide(kid.id, T.write)).ruleId).toBe("actor-chain-invalid");
+    // and a subject credential that is not the parent actor's is refused at admission
+    const foreign = await registerJwk(ids[3]!, workloadKey());
+    const e = await refusal(admitChildGrant(db, { environment: ENV, projectId: null, parentGrantId: parent.id, actorIdentityId: ids[2]!, scope: toolScope([T.write]), capMicros: null, expiresAt: new Date(parent.expiresAt.getTime() - 1000), binding: inProc, idempotencyKey: "subj-foreign", subjectCredentialId: foreign }));
+    expect([e.ruleId, e.code]).toEqual(["actor-chain-invalid", "subject_credential_not_live"]);
+  });
+
+  it("the authorization scheme is case-insensitive (RFC 9110): dpop, DPOP and dPoP verify; bearer on the mTLS branch too", async () => {
+    for (const scheme of ["dpop", "DPOP", "dPoP", "DPoP"]) {
+      const t = await mint(rootExt);
+      const r = await verify(resourceRequest(t.accessToken, await dpopProof(B, { token: t.accessToken }), { scheme }));
+      expect(r.ok, `${scheme}: ${JSON.stringify(r)}`).toBe(true);
+    }
+    // a scheme that is neither is still refused
+    const t = await mint(rootExt);
+    const bad = await verify(resourceRequest(t.accessToken, await dpopProof(B, { token: t.accessToken }), { scheme: "DPoPx" }));
+    expect(bad.ok ? "" : bad.code).toBe("no_token");
+    const cert = new Uint8Array(Buffer.from(`synthetic-validated-leaf-der-case-${RUN}`));
+    const credM = await registerJwk(ids[2]!, workloadKey());
+    const g = await externalRoot(2, credM, { kind: "mtls", thumbprint: b64sha(cert) });
+    const tm = await mint(g.id);
+    for (const scheme of ["bearer", "BEARER", "Bearer"]) {
+      const r = await verify(resourceRequest(tm.accessToken, null, { scheme }), { cert });
+      expect(r.ok, `${scheme}: ${JSON.stringify(r)}`).toBe(true);
+    }
   });
 
   it("the mTLS branch: the right certificate verifies; another, none, or a DPoP header → 401", async () => {
@@ -930,7 +1062,7 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     expect((await mint(rootExt)).kid).toBe(fresh.kid);
   });
 
-  it("activation uses the database clock: right after a rotation, a replica whose clock is 30 s behind mints tokens that verify", async () => {
+  it("activation and minting use the database clock: right after a rotation, a replica whose clock is 30 s behind mints tokens that verify", async () => {
     writeIssuerKeys(issuerKeys);
     const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
     const fresh = (await configuredIdentitySigningKeys()).find((k) => !recorded.has(k.kid))!;
@@ -940,14 +1072,51 @@ describe("ADR-0188 S3 — signing keys, JWKS and the decision 13 verifier", () =
     // the stamps are the database's (a statement-start time, so never after the database's now)
     expect(row!.activatedAt!.getTime()).toBe(row!.createdAt.getTime());
     expect(row!.activatedAt!.getTime()).toBeLessThanOrEqual(new Date(dbNow).getTime());
-    const behind = new Date(new Date(dbNow).getTime() - 30_000);
-    const t = await mint(rootExt, behind);
+    // this replica's process clock runs 30 s behind the database; nothing it mints may depend on that clock
+    const real = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let t: Awaited<ReturnType<typeof mint>>;
+    try {
+      vi.setSystemTime(real - 30_000);
+      t = await mint(rootExt);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(t.kid).toBe(fresh.kid);
     const p = JSON.parse(Buffer.from(t.accessToken.split(".")[1]!, "base64url").toString()) as { iat: number; exp: number };
-    expect(p.iat * 1000).toBeGreaterThanOrEqual(row!.activatedAt!.getTime());
+    // iat is the database clock in whole seconds (rounded down), inside the verifier's 1 s allowance
+    expect(p.iat * 1000).toBeGreaterThan(row!.activatedAt!.getTime() - 1000);
     expect(p.exp - p.iat).toBe(300);
     const ok = await verify(resourceRequest(t.accessToken, await dpopProof(B, { token: t.accessToken })));
     expect(ok.ok, JSON.stringify(ok)).toBe(true);
+  });
+
+  it("a token minted just before a rotation by a replica whose clock is 500 ms AHEAD still verifies inside the overlap (CI on 2d2645e)", async () => {
+    writeIssuerKeys(issuerKeys);
+    // line up on the database clock so that +500 ms crosses into the next whole second: then a process-clock
+    // iat (whole seconds) lands AFTER the retirement stamp the rotation writes a moment later
+    const dbMs = async () => Number(rows<{ ms: number }>(await db.execute(sql`select (extract(epoch from clock_timestamp()) * 1000)::float8 as ms`))[0]!.ms);
+    for (let i = 0; i < 40; i++) {
+      const frac = (await dbMs()) % 1000;
+      if (frac >= 600 && frac < 750) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const real = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let before: Awaited<ReturnType<typeof mint>>;
+    try {
+      vi.setSystemTime(real + 500);
+      before = await mint(rootExt);
+    } finally {
+      vi.useRealTimers();
+    }
+    const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
+    const fresh = (await configuredIdentitySigningKeys()).find((k) => !recorded.has(k.kid))!;
+    const rot = await rotateIdentitySigningKey(db, { kid: fresh.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+    expect(rot.previousKid).toBe(before.kid);
+    const r = await verify(resourceRequest(before.accessToken, await dpopProof(B, { token: before.accessToken })));
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    expect((await mint(rootExt)).kid).toBe(fresh.kid);
   });
 });
 
@@ -1137,6 +1306,27 @@ describe("ADR-0188 S3 — decision 14: replay claims are one atomic insert", () 
     expect(await claimReplay(db2, "client_assertion", key, until)).toBe(false);
     // the same key in another namespace is a different claim
     expect(await claimReplay(db, "as_dpop", key, until)).toBe(true);
+  });
+
+  it("the one-second minimum is computed by the database: a replica whose clock is a minute behind never breaks the expiry check", async () => {
+    const key = `s3-${RUN}-skew-${randomUUID()}`;
+    const real = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let won: boolean;
+    try {
+      vi.setSystemTime(real - 60_000);
+      // a window that "ends now" on this replica's clock: already a minute in the database's past
+      won = await claimReplay(db, "rs_dpop", key, new Date());
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(won).toBe(true);
+    const [row] = rows<{ live: boolean; gap: number }>(
+      await db.execute(sql`select expires_at > now() as live, extract(epoch from expires_at - claimed_at)::float8 as gap from replay_claims where namespace = 'rs_dpop' and key = ${key}`),
+    );
+    expect(row!.live).toBe(true);
+    expect(row!.gap).toBeGreaterThanOrEqual(1);
+    expect(await claimReplay(db, "rs_dpop", key, new Date(Date.now() + 60_000))).toBe(false);
   });
 
   it("the sweep selects by the database clock: expired claims go, live ones stay, and the guard never aborts it", async () => {
