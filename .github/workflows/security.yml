@@ -164,7 +164,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # the gates' own code and configuration (unquoted on purpose: a path list)
-          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
+          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml .github/workflows/release-ai-bom.yml scripts/release-ai-bom.mjs packages/shared/src/bom/release-switch.ts packages/shared/src/bom/release-ai-bom.ts scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
         run: |
           set -euo pipefail
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED})"
@@ -449,6 +449,25 @@ jobs:
             echo ""
             echo "Signed keylessly by \`.github/workflows/security.yml@refs/heads/main\`; the Rekor entry is public."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ADR-0189 B7: release-ai-bom.yml (a separate workflow, so a separate
+      # signing identity) reads the signed image's digest from this artifact
+      # through `workflow_run`. Only the digest, after the verify above passed.
+      - name: Record the signed image digest for the release AI BOM
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/signed-image"
+          printf '%s\n' "${REF#*@}" > "$RUNNER_TEMP/signed-image/digest.txt"
+
+      - name: Keep the signed image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-image-digest
+          path: ${{ runner.temp }}/signed-image/digest.txt
+          if-no-files-found: error
+          retention-days: 30
 
   # ---------------------------------------------------------------------------
   # ADR-0187 decision 120 (open question 16): the sidecar engine images

@@ -70,10 +70,22 @@ describe("the shapes it catches", () => {
       ["assignment", 'client_secret = "abcdefghijklmnopq"'],
       ["provider_token", "sk-abcdefghijklmnopqrstuvwxyz012345"],
       ["regulait_token", `bearer ${RGL_KEY}`],
+      ["bearer_token", `Authorization: Bearer ${"9f8e7d6c".repeat(5)}`],
     ] as const) {
       const out = scrubAuditText(text);
       expect(out, label).toContain(AUDIT_SCRUB_MARKER_PREFIX);
     }
+  });
+
+  it("ADR-0189 B7 review: an opaque bearer token is replaced, the header name survives, prose is untouched", () => {
+    const token = "9f8e7d6c".repeat(5);
+    const out = scrubAuditText(`POST /mcp 401 "Authorization: Bearer ${token}"`);
+    expect(out).not.toContain(token);
+    expect(out).toMatch(/^POST \/mcp 401 "Authorization: Bearer \[redacted:bearer_token:40:[0-9a-f]{12}\]"$/);
+    expect(scrubAuditText(`bearer\t${"aZ09._~+/-".repeat(3)}==`)).toMatch(/^bearer\t\[redacted:bearer_token:32:[0-9a-f]{12}\]$/);
+    // scrub-only: the DLP detector's credential rules do not carry it (mcp-discovery.ts's reason)
+    expect(CREDENTIAL_MATERIAL_RULES.map((r) => r.id)).not.toContain("bearer_token");
+    for (const prose of ["Bearer token missing", "Bearer abc.def", "the Bearer of bad news"]) expect(scrubAuditText(prose)).toBe(prose);
   });
 
   it("covers the credential shapes THIS product mints, not just third-party ones", () => {

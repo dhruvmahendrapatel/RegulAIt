@@ -29,6 +29,8 @@
  */
 import { createHash } from "node:crypto";
 import { scrubAuditText } from "../audit-scrub.js";
+import { aiDevStackToolSchema, bomSafeIssue, type AiDevStackTool } from "./ai-dev-stack.js";
+import { RELEASE_SBOM_IDENTITY_BASES, RELEASE_SBOM_KINDS, releaseCommitSchema, releaseImageDigestSchema, releaseSbomSerialSchema, type ReleaseSbomRecord } from "./release-sbom-identity.js";
 import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, isBomExportEndpoint, isBomSpiffeId, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -331,14 +333,26 @@ export interface AiBomRecordSet {
   builderAgents: BuilderAgentRecord[];
   builderSkills: BuilderSkillRecord[];
   memoryStores: MemoryStoreRecord[];
+  /**
+   * B7 (R9): the release's ADR-0184 SBOMs, ONLY from a signature-verified
+   * identity file (`verifiedReleaseSbomRecords`) or, in our release build, from
+   * the SBOM bytes themselves (`releaseBuildSbomRecords`). Install subject only;
+   * omitted or empty means no BOM-Link and an `incomplete` subject.
+   */
+  releaseSboms?: ReleaseSbomRecord[];
+  /** B7: the reviewed inventory of AI tools in our development stack (`security/ai-dev-stack.json`); install subject only */
+  devStackTools?: AiDevStackTool[];
 }
+/** the record lists only an install snapshot may carry (B7) */
+export const AI_BOM_INSTALL_ONLY_LISTS = ["releaseSboms", "devStackTools"] as const;
+type RecordOf<K extends keyof AiBomRecordSet> = NonNullable<AiBomRecordSet[K]> extends ReadonlyArray<infer T> ? T : never;
 
 /** the list-valued keys of a record set, in a fixed order */
 export const AI_BOM_RECORD_LISTS = [
   "useCases", "agents", "customProviders", "modelCards", "modelCardApprovals", "modelCardEvidence", "evalRuns",
   "evalDatasets", "trainingDatasets", "trainingJobs", "trainingArtifacts", "modelArtifacts", "artifactScans",
   "engineRuns", "engines", "promptTags", "configVersions", "mcpServers", "mcpTools", "connectors", "grants",
-  "builderAgents", "builderSkills", "memoryStores",
+  "builderAgents", "builderSkills", "memoryStores", "releaseSboms", "devStackTools",
 ] as const satisfies ReadonlyArray<keyof AiBomRecordSet>;
 export type AiBomRecordList = (typeof AI_BOM_RECORD_LISTS)[number];
 
@@ -351,10 +365,12 @@ export const AI_BOM_RECORD_TABLES: Readonly<Record<AiBomRecordList, string>> = {
   engineRuns: "engine_runs", engines: "engines", promptTags: "prompt_tags", configVersions: "config_versions",
   mcpServers: "mcp_servers", mcpTools: "mcp_tools", connectors: "connectors", grants: "grants",
   builderAgents: "builder_agents", builderSkills: "builder_agent_skills", memoryStores: "memory_stores",
+  // B7: not tables; the signed release identity file and the checked-in inventory
+  releaseSboms: "release:sbom_identity", devStackTools: "release:ai_dev_stack",
 };
 
 /** THE ALLOWLISTS: exactly the fields each record may carry */
-const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof AiBomRecordSet[K][number]> } = {
+const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof RecordOf<K>> } = {
   useCases: ["id", "name", "ownerUserId", "ownerDisplayName", "dataSensitivity", "complianceTags", "euAiActTier", "status", "intendedAgentIds"],
   agents: ["id", "name", "provider", "model", "expectedServedModel", "customProviderId", "lifecycleStatus", "ownerUserId", "ownerDisplayName", "workloadIdentity", "observedLastSeen", "observedCount"],
   customProviders: ["id", "name", "wireProtocol", "baseUrl", "keySet"],
@@ -379,6 +395,8 @@ const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof AiBomRecordSet[K][nu
   builderAgents: ["id", "name", "modelAgentId", "ownerUserId", "ownerDisplayName", "workloadIdentity"],
   builderSkills: ["agentId", "skillId", "snapshotName", "snapshotDigest", "snapshotVersion", "snapshotAdmissionState"],
   memoryStores: ["kind", "builderAgentId"],
+  releaseSboms: ["kind", "serialNumber", "version", "sha256", "imageDigest", "releaseCommit", "identityBasis"],
+  devStackTools: ["id", "category", "description", "deployment", "networkEgress", "repositoryAccess", "dataShared", "outputControl", "governedBy", "introducedOn"],
 };
 const BIAS_FIELDS = ["dimension", "method", "status", "resultRef", "assessedAt"] as const;
 
@@ -393,6 +411,8 @@ export function aiBomRecordKey(list: AiBomRecordList, r: Record<string, unknown>
       return `${r.agentId}:${r.skillId}`;
     case "memoryStores":
       return `${r.kind}:${r.builderAgentId ?? "org"}`;
+    case "releaseSboms":
+      return String(r.kind);
     case "evalDatasets":
     case "trainingDatasets":
       return `${r.id}:${r.version}`;
@@ -451,7 +471,8 @@ function digest(what: string, v: unknown, nullable = false): string | null {
 }
 const ident = (what: string, v: unknown): string => {
   if (!bomIdentifierSchema.safeParse(v).success) fail(`${what}: not an identifier`);
-  return v as string;
+  // X41 B9F-01: an identifier-shaped credential (`sk-…`) is still a credential (policy (c))
+  return guardName(what, v as string);
 };
 const bool = (what: string, v: unknown): boolean => (typeof v === "boolean" ? v : fail(`${what}: not a boolean`));
 function strings(what: string, v: unknown, max: number): string[] {
@@ -472,7 +493,7 @@ export function sanitiseAiBomEndpoint(url: string, what: string): string {
     return fail(`${what}: endpoint is not an absolute URL`);
   }
   if (u.username || u.password) fail(`${what}: endpoint carries userinfo; snapshot refused (R47)`);
-  if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) fail(`${what}: endpoint scheme ${u.protocol} is not exportable`);
+  if (!["http:", "https:", "ws:", "wss:"].includes(u.protocol)) fail(`${what}: endpoint scheme is not exportable`); // never the scheme text: it is part of the value
   if (!/^[A-Za-z0-9.-]+$/.test(u.hostname)) fail(`${what}: endpoint host is not exportable as plain ASCII`);
   const origin = `${u.protocol}//${u.host}`;
   // belt and braces: the B1 export shape (R47), checked by its linear splitter
@@ -485,8 +506,24 @@ const SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]{0,31}:/;
 /** an identifier of known shape: no `:`, `/`, `=`, `+`, `@`, `#` (PR #287 decision) */
 const REF_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const isRefId = (v: string) => UUID.test(v) || REF_ID.test(v);
-/** does the text carry a URL (a scheme prefix, or `://` anywhere)? */
-const carriesUrl = (v: string) => SCHEME_PREFIX.test(v) || v.includes("://");
+const WEB_SCHEMES: readonly string[] = ["http:", "https:", "ws:", "wss:"];
+/**
+ * B7 fix round F4: a scheme-prefixed value IS a URL only when `//` follows the
+ * scheme, or the scheme is http, https, ws or wss. `Prod: claims triage` and
+ * `llama3:8b` are text (still credential-guarded), not refused URLs.
+ */
+function isUrlValue(v: string): boolean {
+  const m = SCHEME_PREFIX.exec(v);
+  if (!m) return false;
+  return v.startsWith("//", m[0].length) || WEB_SCHEMES.includes(m[0].toLowerCase());
+}
+/**
+ * B7 fix round F3: a protocol-relative URL (`//host/path?q=`) or a scheme-less
+ * one with a query (`host/path?sig=`). Plain string checks, no regex (linear).
+ */
+const hiddenUrl = (v: string) => v.startsWith("//") || (v.includes("/") && v.includes("?"));
+/** does the text carry a URL (a URL value, or `://` anywhere)? */
+const carriesUrl = (v: string) => isUrlValue(v) || v.includes("://");
 
 /**
  * #280 (4237488597) and the PR #287 decision (ADR-0180): a free-form
@@ -514,10 +551,30 @@ function guardText(what: string, v: string): string {
   if (scrubAuditText(v) !== v) fail(`${what}: holds credential-shaped material (refused, never redacted)`);
   return v;
 }
-const free = (what: string, v: unknown, max: number) => guardText(what, req(what, v, max));
+/**
+ * X41 B9F-02 (ADR-0180 policy (b)+(c)): free text (names, intended use,
+ * limitations, prompt names): a value that IS a URL keeps its origin only, a URL
+ * inside prose is refused, and other text passes the credential guard.
+ */
+const free = (what: string, v: unknown, max: number) => urlOrText(what, req(what, v, max));
 const freeOpt = (what: string, v: unknown, max: number) => {
   const t = opt(what, v, max);
-  return t === null ? null : guardText(what, t);
+  return t === null ? null : urlOrText(what, t);
+};
+/**
+ * X41 B9F-01 (policy (c)): a name or identifier that is not a fixed shape
+ * (provider, model, served model, owner display name, pinned model version):
+ * refused when it holds credential material or any URL. Not cut to an origin,
+ * because `name:tag` model ids look like a scheme and must stay exact.
+ */
+function guardName(what: string, v: string): string {
+  if (carriesUrl(v) || hiddenUrl(v)) fail(`${what}: a URL is refused in a name or identifier`);
+  return guardText(what, v);
+}
+const name = (what: string, v: unknown, max: number) => guardName(what, req(what, v, max));
+const nameOpt = (what: string, v: unknown, max: number) => {
+  const t = opt(what, v, max);
+  return t === null ? null : guardName(what, t);
 };
 /**
  * A value that may be a URL or text (claims, standard refs, bias method): a
@@ -525,8 +582,8 @@ const freeOpt = (what: string, v: unknown, max: number) => {
  * text passes the credential guard.
  */
 function urlOrText(what: string, v: string): string {
-  if (SCHEME_PREFIX.test(v)) return sanitiseAiBomEndpoint(v, what);
-  if (v.includes("://")) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
+  if (isUrlValue(v)) return sanitiseAiBomEndpoint(v, what);
+  if (v.includes("://") || hiddenUrl(v)) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
   return guardText(what, v);
 }
 /** a timestamp (date or date-time), checked linearly then parsed */
@@ -591,8 +648,10 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
   const install = input.install === null ? null : { installId: input.install?.installId === null ? null : ident("install.installId", input.install?.installId) };
   if (subjectKind === "install" && install === null) fail("an install subject needs its install record");
 
-  const each = <K extends AiBomRecordList>(list: K, map: (r: Record<string, unknown>, at: string) => AiBomRecordSet[K][number]): AiBomRecordSet[K] => {
-    const raw = (input as unknown as Record<string, unknown>)[list];
+  const each = <K extends AiBomRecordList>(list: K, map: (r: Record<string, unknown>, at: string) => RecordOf<K>): RecordOf<K>[] => {
+    let raw = (input as unknown as Record<string, unknown>)[list];
+    // B7's install-only lists are optional on input; every other list is required
+    if (raw === undefined && (AI_BOM_INSTALL_ONLY_LISTS as readonly string[]).includes(list)) raw = [];
     if (!Array.isArray(raw)) return fail(`${list}: expected a list`);
     if (raw.length > AI_BOM_MAX_RECORDS_PER_LIST) fail(`${list}: more than the cap of ${AI_BOM_MAX_RECORDS_PER_LIST} records (refused)`);
     const out = raw.map((r, i) => map(onlyFields(list, r, `${list}[${i}]`), `${list}[${i}]`));
@@ -601,7 +660,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       const a = aiBomRecordKey(list, sorted[i - 1] as unknown as Record<string, unknown>);
       if (a === aiBomRecordKey(list, sorted[i] as unknown as Record<string, unknown>)) fail(`${list}: record ${a} loaded twice`);
     }
-    return sorted as AiBomRecordSet[K];
+    return sorted;
   };
 
   const n: AiBomRecordSet = {
@@ -611,7 +670,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       id: uuid(`${at}.id`, r.id) as string,
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
-      ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
+      ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       dataSensitivity: oneOf(`${at}.dataSensitivity`, r.dataSensitivity, AI_BOM_DATA_SENSITIVITIES),
       complianceTags: strings(`${at}.complianceTags`, r.complianceTags, 128).map((t, i) => ident(`${at}.complianceTags[${i}]`, t)),
       euAiActTier: r.euAiActTier === null ? null : ident(`${at}.euAiActTier`, r.euAiActTier),
@@ -621,13 +680,13 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
     agents: each("agents", (r, at) => ({
       id: uuid(`${at}.id`, r.id) as string,
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
-      provider: req(`${at}.provider`, r.provider, AI_BOM_NAME_MAX_CHARS),
-      model: opt(`${at}.model`, r.model, AI_BOM_NAME_MAX_CHARS),
-      expectedServedModel: opt(`${at}.expectedServedModel`, r.expectedServedModel, AI_BOM_NAME_MAX_CHARS),
+      provider: name(`${at}.provider`, r.provider, AI_BOM_NAME_MAX_CHARS),
+      model: nameOpt(`${at}.model`, r.model, AI_BOM_NAME_MAX_CHARS),
+      expectedServedModel: nameOpt(`${at}.expectedServedModel`, r.expectedServedModel, AI_BOM_NAME_MAX_CHARS),
       customProviderId: uuid(`${at}.customProviderId`, r.customProviderId, true),
       lifecycleStatus: ident(`${at}.lifecycleStatus`, r.lifecycleStatus),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
-      ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
+      ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       workloadIdentity: spiffeOrNull(`${at}.workloadIdentity`, r.workloadIdentity),
       observedLastSeen: time(`${at}.observedLastSeen`, r.observedLastSeen, true),
       observedCount: int(`${at}.observedCount`, r.observedCount) as number,
@@ -636,7 +695,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       id: uuid(`${at}.id`, r.id) as string,
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       wireProtocol: ident(`${at}.wireProtocol`, r.wireProtocol),
-      baseUrl: r.baseUrl === null ? null : sanitiseAiBomEndpoint(req(`${at}.baseUrl`, r.baseUrl, 2048), `custom provider ${String(r.id)}`),
+      baseUrl: r.baseUrl === null ? null : sanitiseAiBomEndpoint(req(`${at}.baseUrl`, r.baseUrl, 2048), `${at}.baseUrl`),
       keySet: bool(`${at}.keySet`, r.keySet),
     })),
     modelCards: each("modelCards", (r, at) => {
@@ -662,7 +721,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         } satisfies BiasFairnessRecord;
       });
       const limitations = freeOpt(`${at}.limitations`, r.limitations, AI_BOM_TEXT_MAX_CHARS);
-      const pinned = opt(`${at}.pinnedModelVersion`, r.pinnedModelVersion, AI_BOM_NAME_MAX_CHARS);
+      const pinned = nameOpt(`${at}.pinnedModelVersion`, r.pinnedModelVersion, AI_BOM_NAME_MAX_CHARS);
       return {
         id: uuid(`${at}.id`, r.id) as string,
         agentId,
@@ -812,13 +871,13 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
         transport,
         // a stdio server's url is the `stdio:<name>` sentinel, not an endpoint (R12 section 12)
-        url: transport === "stdio" ? null : sanitiseAiBomEndpoint(url, `mcp server ${String(r.id)}`),
+        url: transport === "stdio" ? null : sanitiseAiBomEndpoint(url, `${at}.url`),
         releaseDigest: r.releaseDigest === null ? null : digest(`${at}.releaseDigest`, String(r.releaseDigest).replace(/^sha256:/, "")),
         admissionState: ident(`${at}.admissionState`, r.admissionState),
         admissionManifestDigest: r.admissionManifestDigest === null ? null : digest(`${at}.admissionManifestDigest`, String(r.admissionManifestDigest).replace(/^sha256:/, "")),
         identityPropagation: ident(`${at}.identityPropagation`, r.identityPropagation),
         ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
-        ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
+        ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       };
     }),
     mcpTools: each("mcpTools", (r, at) => ({
@@ -832,9 +891,9 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       kind: ident(`${at}.kind`, r.kind),
       // a governance-only connector has no base_url: no endpoint at all
-      url: r.url === null ? null : sanitiseAiBomEndpoint(req(`${at}.url`, r.url, 2048), `connector ${String(r.id)}`),
+      url: r.url === null ? null : sanitiseAiBomEndpoint(req(`${at}.url`, r.url, 2048), `${at}.url`),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
-      ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
+      ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       credentialSet: bool(`${at}.credentialSet`, r.credentialSet),
     })),
     grants: each("grants", (r, at) => ({
@@ -849,7 +908,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
       modelAgentId: uuid(`${at}.modelAgentId`, r.modelAgentId, true),
       ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
-      ownerDisplayName: opt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
+      ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       workloadIdentity: spiffeOrNull(`${at}.workloadIdentity`, r.workloadIdentity),
     })),
     builderSkills: each("builderSkills", (r, at) => {
@@ -858,7 +917,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       return {
         agentId: uuid(`${at}.agentId`, r.agentId) as string,
         skillId: uuid(`${at}.skillId`, r.skillId) as string,
-        snapshotName: guardText(`${at}.snapshotName`, text(`${at}.snapshotName`, r.snapshotName, AI_BOM_NAME_MAX_CHARS) as string),
+        snapshotName: free(`${at}.snapshotName`, r.snapshotName, AI_BOM_NAME_MAX_CHARS),
         snapshotDigest: d,
         snapshotVersion: int(`${at}.snapshotVersion`, r.snapshotVersion) as number,
         snapshotAdmissionState: oneOf(`${at}.snapshotAdmissionState`, r.snapshotAdmissionState, AI_BOM_SKILL_ADMISSION_STATES),
@@ -868,6 +927,35 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       kind: oneOf(`${at}.kind`, r.kind, AI_BOM_MEMORY_STORE_KINDS),
       builderAgentId: uuid(`${at}.builderAgentId`, r.builderAgentId, true),
     })),
+    releaseSboms: each("releaseSboms", (r, at) => {
+      const kind = oneOf(`${at}.kind`, r.kind, RELEASE_SBOM_KINDS);
+      if (!releaseSbomSerialSchema.safeParse(r.serialNumber).success) fail(`${at}.serialNumber: not a urn:uuid serial`);
+      if (kind === "image" ? !releaseImageDigestSchema.safeParse(r.imageDigest).success : r.imageDigest !== null) fail(`${at}.imageDigest: set for the image SBOM only, as sha256:<hex>`);
+      if (!releaseCommitSchema.safeParse(r.releaseCommit).success) fail(`${at}.releaseCommit: not a commit id`);
+      const version = int(`${at}.version`, r.version) as number;
+      if (version < 1) fail(`${at}.version: not positive`);
+      return {
+        kind,
+        serialNumber: r.serialNumber as string,
+        version,
+        sha256: digest(`${at}.sha256`, r.sha256) as string,
+        imageDigest: (r.imageDigest ?? null) as string | null,
+        releaseCommit: r.releaseCommit as string,
+        // R9: a verified signature (install time) or derived from the SBOM bytes (release build); nothing else
+        identityBasis: oneOf(`${at}.identityBasis`, r.identityBasis, RELEASE_SBOM_IDENTITY_BASES),
+      };
+    }),
+    devStackTools: each("devStackTools", (r, at) => {
+      const t = aiDevStackToolSchema.safeParse(r);
+      // name the field and the rule only, never the value (PR #287)
+      if (!t.success) return fail(`${at}: ${t.error.issues.map(bomSafeIssue).join("; ")}`);
+      return { ...t.data, dataShared: sortedStrings(t.data.dataShared) as AiDevStackTool["dataShared"], governedBy: sortedStrings(t.data.governedBy) };
+    }),
   };
+  for (const list of AI_BOM_INSTALL_ONLY_LISTS) {
+    if (subjectKind !== "install" && (n[list]?.length ?? 0) > 0) fail(`${list}: only an install snapshot carries release records (B7)`);
+  }
+  const commits = new Set((n.releaseSboms ?? []).map((r) => r.releaseCommit));
+  if (commits.size > 1) fail("releaseSboms: every SBOM identity must name the same release commit");
   return n;
 }

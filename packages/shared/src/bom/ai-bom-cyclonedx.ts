@@ -38,6 +38,7 @@
  */
 import { aiBomSerialNumber, parseTrainingDatasetChecksum, type AiBomSnapshotTrigger, type AiBomSubjectKind } from "./contract.js";
 import { cmpCodeUnits, sortedBy, type AgentRecord, type AiBomRecordSet, type ModelCardRecord } from "./ai-bom-records.js";
+import { cycloneDxBomLink, RELEASE_SBOM_KINDS } from "./release-sbom-identity.js";
 import canonicalize from "canonicalize";
 
 /** the rendering tool's own name and version (a constant: never a clock or a build stamp) */
@@ -91,6 +92,7 @@ export const aiBomRef = {
   connector: (id: string) => `service:connector:${id}`,
   skill: (agentId: string, skillId: string) => `skill:${agentId}:${skillId}`,
   memory: (kind: string, builderAgentId: string | null) => `memory:${kind}:${builderAgentId ?? "org"}`,
+  devTool: (id: string) => `dev-tool:${id}`,
 };
 
 const userRef = (id: string | null) => (id === null ? "not_recorded" : `user:${id}`);
@@ -216,8 +218,25 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
     for (const u of n.useCases) dep(subjectRef, aiBomRef.useCase(u.id));
     for (const a of n.agents) dep(subjectRef, aiBomRef.agent(a.id));
     for (const b of n.builderAgents) dep(subjectRef, aiBomRef.builderAgent(b.id));
-    // R9: the release SBOM identity file arrives with B7; until then no externalReferences, and said so
-    gap(subjectRef, "externalReferences", "release_sbom_identity_not_available");
+    // R9 (B7): BOM-Link to ADR-0184's SBOMs ONLY from a signature-verified release identity (the records'
+    // normaliser refuses anything else); without one, no externalReferences and said so
+    const sboms = n.releaseSboms ?? [];
+    if (!sboms.length) gap(subjectRef, "externalReferences", "release_sbom_identity_not_available");
+    else {
+      for (const k of RELEASE_SBOM_KINDS) if (!sboms.some((x) => x.kind === k)) gap(subjectRef, `externalReferences:${k}`, "release_sbom_identity_not_available");
+      root.externalReferences = sboms.map((x) => ({
+        type: "bom",
+        url: cycloneDxBomLink(x.serialNumber, x.version),
+        comment: `ADR-0184 ${x.kind} SBOM of this release (identity basis: ${x.identityBasis})`,
+        hashes: [{ alg: "SHA-256", content: x.sha256 }],
+      }));
+      const r = root as { properties?: Obj[] };
+      r.properties = props([
+        ...(r.properties ?? []),
+        prop("regulait:release:commit", sboms[0]!.releaseCommit),
+        prop("regulait:release:imageDigest", sboms.find((x) => x.kind === "image")?.imageDigest ?? null),
+      ]);
+    }
     for (const u of n.useCases) {
       components.push({
         type: "application", "bom-ref": aiBomRef.useCase(u.id), name: u.name,
@@ -580,6 +599,30 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
     dep(from, to);
   }
 
+  // ------------------------------------------------------------- B7: the AI tools that MADE the release
+  // (PathForward "inventory of AI tools in the development stack"): formulation, never install components
+  const devTools = n.devStackTools ?? [];
+  const formulation: Obj[] = [];
+  if (devTools.length) {
+    formulation.push({
+      "bom-ref": "formulation:development-stack",
+      components: devTools.map((t) => {
+        const ref = aiBomRef.devTool(t.id);
+        // the inventory describes tools by role and names no supplier, product or model version (B7)
+        gap(ref, "version", "dev_stack_version_not_recorded");
+        return {
+          type: "application", "bom-ref": ref, name: t.id, description: t.description,
+          ...withProps([
+            prop("regulait:devStack:category", t.category), prop("regulait:devStack:deployment", t.deployment),
+            prop("regulait:devStack:networkEgress", t.networkEgress), prop("regulait:devStack:repositoryAccess", t.repositoryAccess),
+            prop("regulait:devStack:outputControl", t.outputControl), prop("regulait:devStack:introducedOn", t.introducedOn),
+            ...t.dataShared.map((d) => prop("regulait:devStack:dataShared", d)), ...t.governedBy.map((a) => prop("regulait:devStack:governedBy", a)),
+          ]),
+        };
+      }),
+    });
+  }
+
   // ------------------------------------------------------------- declarations, compositions, document
   const decl = declarations(n, engineOf, gaps);
   const allRefs = new Set<string>([root["bom-ref"] as string, ...components.map((c) => c["bom-ref"] as string), ...services.flatMap(serviceRefs)]);
@@ -603,6 +646,7 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
     dependencies: sortedBy([...deps].map(([r, set]) => ({ ref: r, ...(set.size ? { dependsOn: [...set].sort(cmpCodeUnits) } : {}) })), (d) => d.ref),
     compositions: compositions.map((c, i) => ({ "bom-ref": `composition:${i}`, aggregate: c.aggregate, assemblies: c.assemblies })),
     ...(decl ? { declarations: decl } : {}),
+    ...(formulation.length ? { formulation } : {}),
   };
   return { doc, gaps: sortedBy(gaps, (g) => `${g.ref}\u0000${g.field}\u0000${g.reason}`), compositions };
 }

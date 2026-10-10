@@ -9,3 +9,8 @@ export * from "./ai-bom-records.js";
 export * from "./ai-bom-cyclonedx.js";
 export * from "./ai-bom-cyclonedx-schema.js";
 export * from "./ai-bom-builder.js";
+// slice B7: our own install-scope AI BOM per release (R9, R28)
+export * from "./release-switch.js";
+export * from "./ai-dev-stack.js";
+export * from "./release-sbom-identity.js";
+export * from "./release-ai-bom.js";

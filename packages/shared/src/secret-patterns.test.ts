@@ -62,6 +62,10 @@ const NEGATIVE: string[] = [
   `AIza${body("Sy09_-Kq", 36)}`, // one long: not a Google key
   "glpat-short",
   "the gl-pat-plan and AIza-Rodriguez are not credentials",
+  // bearer prose and short examples are not tokens
+  "Bearer token missing from the request",
+  "Bearer abc.def",
+  `the Bearer of ${body("aZ09", 30)} news`,
   // ADR-0176 review: Stripe placeholders and Stripe's own docs example keys
   `sk_live_${"x".repeat(24)}`,
   `sk_test_${"0".repeat(10)}`,
@@ -137,7 +141,7 @@ describe("near misses are left alone", () => {
 
 describe("linear time on pathological input (ReDoS)", () => {
   const N = 50_000;
-  const prefixes = ["sk-ant-api03-", "sk-ant-", "sk-proj-", "sk-", "github_pat_", "ghp_", "sk_live_", "rk_live_", "AIza", "glpat-", "eyJ", "xoxb-", "rgl_", "api_key=", "-----BEGIN "];
+  const prefixes = ["sk-ant-api03-", "sk-ant-", "sk-proj-", "sk-", "github_pat_", "ghp_", "sk_live_", "rk_live_", "AIza", "glpat-", "eyJ", "xoxb-", "rgl_", "api_key=", "-----BEGIN ", "Bearer ", "Bearer\t"];
   const shapes: Array<[string, string]> = [];
   for (const p of prefixes) {
     shapes.push([`${p} repeated`, p.repeat(Math.ceil(N / p.length)).slice(0, N)]);
