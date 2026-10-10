@@ -17,7 +17,7 @@
  * `check-vectors.mjs` re-verifies every digest and signature independently.
  */
 import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import canonicalizeModule from "canonicalize";
 
 const canonicalize = canonicalizeModule.default ?? canonicalizeModule;
@@ -30,6 +30,16 @@ const canon = (v) => {
 };
 const byCodeUnit = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const clone = (v) => JSON.parse(JSON.stringify(v));
+
+/** a fenced block of ADR-0189 (the AI BOM worked example, B4.9 G12, is taken from the spec text itself) */
+const ADR_LINES = readFileSync(new URL("../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md", import.meta.url), "utf8").split("\n");
+function adrBlock(tag) {
+  const i = ADR_LINES.indexOf(`\`\`\`text ${tag}`);
+  if (i < 0) throw new Error(`ADR-0189 has no block ${tag}`);
+  const out = [];
+  for (let j = i + 1; ADR_LINES[j] !== "\`\`\`"; j++) out.push(ADR_LINES[j]);
+  return out.join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // keys (B4.6 "Keys", plus vector-only keys built by the same rule)
@@ -131,14 +141,28 @@ function spanRow(id, traceId, { seq = 1, usageEventId = EX.usage1, costUsd = "0.
     },
   };
 }
-/** ASSUMPTION A3: the ADR does not list the approvals / approval_decisions projection columns (B1 shared zod) */
+/** ADR-0189 B4.9 G2: the approvals and approval_decisions projections are exactly the B1 column lists */
 function approvalRow(id, status) {
-  return { table: "approvals", id, projection: { decidedAt: "2026-10-10T11:59:00.000Z", id, quorum: 1, status } };
+  return {
+    table: "approvals", id,
+    projection: {
+      approvalScope: "single_call", approverRoleId: null, approverUserId: null, argumentsDigest: h("TEST-ONLY CANARY arguments"),
+      connectorId: null, contextDigest: null, decidedAt: status === "pending" ? null : "2026-10-10T11:59:00.000Z", decidedBy: status === "pending" ? null : EX.sponsor,
+      expiresAt: "2026-10-11T11:58:00.000Z", id, namedApproverUserId: null, objectType: "mcp_tool", projectId: null, quorum: 1,
+      requestedAt: "2026-10-10T11:58:00.000Z", ruleId: "rule-allow-search", serverId: EX.serverId, signatureMode: "none", status, toolName: "search",
+    },
+  };
 }
 function approvalDecisionRow(id, approvalId) {
-  return { table: "approval_decisions", id, projection: { approvalId, decidedAt: "2026-10-10T11:59:00.000Z", deciderUserId: EX.sponsor, id, outcome: "approved", stepUpMethod: "passkey" } };
+  return {
+    table: "approval_decisions", id,
+    projection: {
+      approvalId, counterBefore: null, credentialId: null, decidedAt: "2026-10-10T11:59:00.000Z", decision: "approved", deciderUserId: EX.sponsor, id,
+      principalUserId: EX.sponsor, signedDigest: null, stepUpMethod: "passkey",
+    },
+  };
 }
-/** the row digest: SHA-256 of the canonical {table, projection} (inferred from B4.6's two digests; gap G1) */
+/** the row digest: SHA-256 of the canonical {table, projection} (ADR-0189 B4.9 G1; `bomRowDigest`) */
 const withDigest = (r) => ({ digest: sha(canon({ projection: r.projection, table: r.table })), id: r.id, projection: r.projection, table: r.table });
 
 const baseAction = (target) => ({
@@ -242,14 +266,14 @@ const README =
   "This bundle carries no audit row payloads (ADR-0189 R39): audit/chain.tsv\n" +
   "holds hashes only, so the decision row's content is not disclosed.\n";
 
-/** ASSUMPTION A2: the ADR names these anchor fields by column or prose; the camelCase spelling is this author's */
+/** ADR-0189 B4.9 G4: exactly decisionBomAnchorSchema; no RFC 3161 token (node:crypto cannot build one, G5) */
 function makeAnchor({ toSeq, status = "flushed", tamperResistant = true, retainUntil = "2036-10-10T00:00:00.000Z", record } = {}) {
   const last = chainRows(toSeq).at(-1);
   const rec = record ?? { algorithm: "sha256", capturedAt: "2026-10-10T12:05:00.000Z", headAt: "2026-10-10T12:04:59.000Z", payloadVersion: "regulait.audit.v1", rowHash: last.rowHash, seq: last.seq };
   return {
-    destination: "s3_object_lock", externalRef: "s3://TEST-ONLY-CANARY-anchors/a9000000.json", flushedAt: "2026-10-10T12:05:01.000Z",
-    id: EX.anchorId, record: rec, retainUntil, status, tamperObservationMode: "compliance", tamperObservedAt: "2026-10-10T12:05:01.000Z",
-    tamperResistant, tsaMessageImprint: null, tsaNonce: null, tsaPolicyOid: null, tsaRequestSentAt: null, tsaToken: null,
+    destination: "s3_object_lock", externalRef: "s3://TEST-ONLY-CANARY-anchors/a9000000.json", flushedAt: status === "flushed" ? "2026-10-10T12:05:01.000Z" : null,
+    id: EX.anchorId, observationMode: tamperResistant ? "compliance" : "governance", observedAt: "2026-10-10T12:05:01.000Z", record: rec, retainUntil, status,
+    tamperResistant, tsa: null,
   };
 }
 
@@ -270,10 +294,11 @@ function buildDecisionBundle(o = {}) {
   let prev = factsBytes === null ? null : sha(factsBytes);
   for (const [i, a] of (o.addenda ?? []).entries()) {
     const n = a.n ?? i + 1;
-    const payloadObj = { auditId: EX.auditId, n, prevHash: a.prevHash ?? prev, rows: a.rows.map(withDigest), v: "regulait.decision-facts-addendum.v1" };
+    // ADR-0189 B4.9 G3: exactly decisionFactsAddendumSchema
+    const payloadObj = { auditId: EX.auditId, n, postActionVerification: a.postActionVerification ?? null, prev: a.prevHash ?? prev, rows: a.rows.map(withDigest), v: "regulait.decision-facts-addendum.v1" };
     const payload = canon(payloadObj);
     const key = a.key ?? K.R1;
-    addenda.push({ keyId: a.keyId ?? key.keyId, n, payload, prevHash: payloadObj.prevHash, signature: a.signature ?? signB64url(key, payload), _obj: payloadObj });
+    addenda.push({ keyId: a.keyId ?? key.keyId, n, payload, prevHash: payloadObj.prev, signature: a.signature ?? signB64url(key, payload), _obj: payloadObj });
     prev = sha(payload);
   }
 
@@ -300,7 +325,7 @@ function buildDecisionBundle(o = {}) {
   let body = {
     ...sections,
     auditId: EX.auditId,
-    basis: { aiBomSnapshotId: null, anchorId: anchor ? anchor.id : null, auditSeq: chain.at(-1).seq, receiptSeq: 1 },
+    basis: { aiBomSnapshotId: facts?.model?.aiBomSnapshotId ?? null, anchorId: anchor ? anchor.id : null, auditSeq: chain.at(-1).seq, receiptSeq: 1 },
     completeness,
     facts: { addenda: addenda.map(({ _obj, ...a }) => a), payload: factsBytes },
     finality,
@@ -319,7 +344,8 @@ function buildDecisionBundle(o = {}) {
 
   // receipt-keys.json: one entry per distinct key id named by body, receipt and addendum signatures
   const named = new Map();
-  for (const key of [bodyKey, receiptKey, ...(o.addenda ?? []).map((a) => a.key ?? K.R1)]) named.set(key.keyId, key);
+  const linked = o.linkedAiBom ?? null; // B4.9: the linked snapshot and its signature file, when carried
+  for (const key of [bodyKey, receiptKey, ...(o.addenda ?? []).map((a) => a.key ?? K.R1), ...(linked ? [linked.key ?? K.R1] : [])]) named.set(key.keyId, key);
   let receiptKeys = { keys: [...named.values()].sort((a, b) => byCodeUnit(a.keyId, b.keyId)).map((k) => ({ fingerprint: k.pub.fingerprint, jwk: k.pub.jwk, keyId: k.keyId })) };
   if (hk.receiptKeys) receiptKeys = hk.receiptKeys(receiptKeys);
 
@@ -330,6 +356,11 @@ function buildDecisionBundle(o = {}) {
   files.set("content/decision-bom.json", bodyBytes);
   files.set("content/decision-bom.json.sig", sigFile);
   files.set("receipt-keys.json", canon(receiptKeys));
+  if (linked) {
+    files.set("content/ai-bom.json", linked.body);
+    const lk = linked.key ?? K.R1;
+    files.set("content/ai-bom.json.sig", canon({ alg: "Ed25519", keyId: lk.keyId, signature: signB64url(lk, linked.body), signedSha256: sha(linked.body) }));
+  }
   files.set("signing-key.pub", (o.signingKeyPub ?? exportKey).pub.publicKeyPem);
   if (hk.files) files = hk.files(files);
 
@@ -342,7 +373,7 @@ function buildDecisionBundle(o = {}) {
     product: "regulait", schema: "regulait.export-bundle/3",
     signingKeyFingerprint: exportKey.pub.fingerprint, signingKeyId: o.signingKeyId ?? exportKey.keyId,
     subject: {
-      descriptor: { aiBomSnapshotId: null, auditId: EX.auditId, bodySha256: bodySha, bomId: body.id, finality: body.finality, formats: [], receiptSeq: 1, version: body.version },
+      descriptor: { aiBomSnapshotId: body.basis.aiBomSnapshotId, auditId: EX.auditId, bodySha256: bodySha, bomId: body.id, finality: body.finality, formats: [], receiptSeq: 1, version: body.version },
       id: EX.auditId, kind: "decision-bom",
     },
   };
@@ -418,9 +449,44 @@ const V = { result: "valid" };
 const U = (reason) => ({ reason, result: "unverifiable" });
 const I = (reason) => (reason ? { reason, result: "invalid" } : { result: "invalid" });
 const ABSENT = "absent";
-const NOT_INVALID = "not_invalid";
 
-function positiveChecks({ receiptVersion = "v2", boundary = 42, seq = 42, anchored = false, addenda = false } = {}) {
+/**
+ * ADR-0189 B4.8: the results that are unverifiable BY DESIGN (listed in cannotProve; they do not lower the outcome).
+ * Every other unverifiable result lowers the outcome to `unverifiable`; any invalid gives `invalid`.
+ */
+function byDesign(check, r, ctx) {
+  if (r.result !== "unverifiable") return false;
+  if (ctx.subject === "decision-bom") {
+    if (check === "decision_content_binding" && r.reason === "preimage_not_exported") return true;
+    if (check === "receipt_facts_binding" && r.reason === "receipt_v1_no_factsHash" && ctx.receiptPayloadVersion === "v1") return true;
+    if (["anchor_record", "anchor_imprint", "tsa_token"].includes(check) && r.reason === "anchor_absent" && ctx.recordedFinality === "chain_signed") return true;
+  } else if (check === "supersedes" && r.reason === "earlier_snapshot_not_in_bundle" && ctx.source === "bundle" && ctx.version > 1) return true;
+  return check.startsWith("bundle_") && r.reason === "not_a_bundle" && ctx.source !== "bundle";
+}
+function outcomeOf(checks, ctx) {
+  const results = Object.entries(checks).filter(([, r]) => r !== ABSENT);
+  if (results.some(([, r]) => r.result === "invalid")) return "invalid";
+  return results.some(([c, r]) => r.result === "unverifiable" && !byDesign(c, r, ctx)) ? "unverifiable" : "valid";
+}
+/** B4.8: exactly the fixed list plus every conditional entry whose condition holds, in BOM_CANNOT_PROVE order (B4.10) */
+const CANNOT_PROVE_ORDER = [
+  "nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content",
+  "commitment_after_retain_until", "facts_recorded_at_decision_time", "finite_lock_under_unbounded_retention", "external_commitment", "superseded_snapshot",
+];
+function cannotProveOf(ctx) {
+  const set = new Set(ctx.subject === "decision-bom"
+    ? ["nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content"]
+    : ["facts_true", "signing_time_beyond_anchor"]);
+  if (ctx.subject === "decision-bom") {
+    if (ctx.receiptPayloadVersion === "v1") set.add("facts_recorded_at_decision_time");
+    if (ctx.reportedFinality === "anchored_lapsed") set.add("commitment_after_retain_until");
+    if (ctx.recordedFinality === "anchored_finite_lock") set.add("finite_lock_under_unbounded_retention");
+    if (ctx.recordedFinality === "chain_signed") set.add("external_commitment");
+  } else if (ctx.source === "bundle" && ctx.version > 1) set.add("superseded_snapshot");
+  return CANNOT_PROVE_ORDER.filter((c) => set.has(c));
+}
+
+function positiveChecks({ receiptVersion = "v2", boundary = 42, seq = 42, anchored = false, addenda = false, aiLink = ABSENT } = {}) {
   const v1Reason = receiptVersion === "v1" ? (boundary !== null && seq >= boundary ? I("v1_receipt_after_boundary") : U("receipt_v1_no_factsHash")) : V;
   return {
     bundle_manifest_signature: V, bundle_manifest_files: V, bundle_subject: V, bundle_email_scan: V,
@@ -428,11 +494,12 @@ function positiveChecks({ receiptVersion = "v2", boundary = 42, seq = 42, anchor
     receipt_signature: V, receipt_payload_hash: V, receipt_facts_binding: v1Reason,
     sections_projection: V, chain_links: V, decision_content_binding: U("preimage_not_exported"),
     anchor_record: anchored ? V : U("anchor_absent"),
-    anchor_imprint: anchored ? NOT_INVALID : U("anchor_absent"),
-    tsa_token: anchored ? NOT_INVALID : U("anchor_absent"),
+    // B4.9 G5: an anchored BOM with no RFC 3161 token (none of these vectors carries one); not by design
+    anchor_imprint: anchored ? U("no_timestamp_token") : U("anchor_absent"),
+    tsa_token: anchored ? U("no_timestamp_token") : U("anchor_absent"),
     finality: V,
     facts_addenda_chain: addenda ? V : ABSENT, facts_addenda_signatures: addenda ? V : ABSENT,
-    ai_bom_link: ABSENT,
+    ai_bom_link: aiLink,
   };
 }
 
@@ -459,26 +526,38 @@ const SPEC = {
   example: "B4.6 worked example", r1: "R1 complete canonical anchor record", r39: "R39 no audit preimage", r44: "R44 retain_until",
   r21: "R21 whole-bundle email scan", r37: "R37 exact facts", r35: "R35 addendum chain", r15: "R15 addendum signatures", r46: "R46 v1 facts not claimed", r23: "R23 lossless cost",
   owner2: "§5 / OWNER DECISION 2 domain separation by v", s6: "§6 verification offline, out-of-band trust root",
+  agg: "B4.8 the outcome and what is unverifiable by design", g9: "B4.9 G9 table (check and reason)",
+  g1: "B4.9 G1 row digest", g2: "B4.9 G2 approval columns", g3: "B4.9 G3 addendum payload", g4: "B4.9 G4 anchor spellings", g5: "B4.9 G5 anchor checks with no token",
+  g6: "B4.9 G6 finality notes are cannotProve", g7: "B4.9 G7 lapse at equality", g8: "B4.9 G8 null costUsd", g10: "B4.9 G10 v2 receipts and the boundary",
+  g11: "B4.9 G11 shortfall precedence", g13: "B4.9 G13 basis", g14: "B4.9 G14 identifier and email shapes", g15: "B4.9 G15 a row bound twice",
+  link: "B4.9 linked AI BOM (ai_bom_link)", ai: "B4.9 G12 the AI BOM bundle",
 };
+
+/** the assumptions #333 made are settled by ADR-0189 B4.9; a vector now cites the settled paragraph instead */
+const SETTLED = { A2: "g4", A3: "g2", A4: "g3", G5: "g5", G6: "g6", G7: "g7" };
+const specWith = (spec, assumptions, more = []) => [...new Set([...spec, ...assumptions.map((a) => SPEC[SETTLED[a]]), ...more])];
 
 function addPositive(id, { spec, title, build = {}, trustRoot = trust(), checks, extra = {}, assumptions = [] }) {
   const b = buildDecisionBundle(build);
   builtById.set(id, { b, build });
   const tar = ustar(b.entries);
   positives.push({
-    id, polarity: "positive", subject: "decision-bom", title, spec, assumptions,
+    id, polarity: "positive", subject: "decision-bom", title, spec: specWith(spec, assumptions, [SPEC.agg]),
     trust: trustRoot,
     bundle: { root: b.root, entries: b.entries, tarSha256: sha(tar), tarBytes: tar.length },
-    expect: {
-      outcome: "valid_with_unverifiable",
-      checks,
-      recordedFinality: b.body.finality,
-      reportedFinality: extra.reportedFinality ?? b.body.finality,
-      receiptPayloadVersion: b.receiptPayload.v === "regulait.receipt.v1" ? "v1" : "v2",
-      sections: "every section valid; completeness equal to the body's",
-      ...extra.expect,
-    },
-    authentic: { manifest: true, body: true, receipt: true, addenda: (build.addenda ?? []).length ? true : "none" },
+    expect: (() => {
+      const ctx = { subject: "decision-bom", source: "bundle", receiptPayloadVersion: b.receiptPayload.v === "regulait.receipt.v1" ? "v1" : "v2", recordedFinality: b.body.finality, reportedFinality: extra.reportedFinality ?? b.body.finality };
+      return {
+        outcome: outcomeOf(checks, ctx),
+        checks,
+        recordedFinality: ctx.recordedFinality,
+        reportedFinality: ctx.reportedFinality,
+        receiptPayloadVersion: ctx.receiptPayloadVersion,
+        cannotProve: cannotProveOf(ctx),
+        sections: "every section valid; completeness equal to the body's",
+      };
+    })(),
+    authentic: { manifest: true, body: true, receipt: true, addenda: (build.addenda ?? []).length ? true : "none", ...(build.linkedAiBom ? { aiBom: true } : {}) },
     projectionConsistent: true,
   });
 }
@@ -501,11 +580,11 @@ function addNegative(id, { base = "P01", spec, title, build = {}, trustRoot, exp
     bundle = { base, entries: b.entries, tarSha256: sha(tar), tarBytes: tar.length };
   }
   negatives.push({
-    id, polarity: "negative", subject: "decision-bom", title, spec, assumptions,
+    id, polarity: "negative", subject: "decision-bom", title, spec: specWith(spec, assumptions, [SPEC.g9]),
     trust: trustRoot ?? baseVec.trust,
     bundle,
     expect: { outcome: "invalid", ...expect },
-    authentic: authentic ?? { manifest: true, body: true, receipt: true, addenda: baseVec.authentic.addenda },
+    authentic: authentic ?? { manifest: true, body: true, receipt: true, addenda: baseVec.authentic.addenda, ...("aiBom" in baseVec.authentic ? { aiBom: baseVec.authentic.aiBom } : {}) },
     projectionConsistent,
   });
 }
@@ -639,7 +718,6 @@ addPositive("P17", {
   title: "anchored_finite_lock (emitted only under accept): reported as recorded, with finite_lock_under_unbounded_retention added",
   build: { anchor: makeAnchor({ toSeq: 42 }), finality: "anchored_finite_lock" },
   checks: positiveChecks({ anchored: true }),
-  extra: { expect: { finalityNotes: ["finite_lock_under_unbounded_retention"] } },
   assumptions: ["A2", "G5", "G6"],
 });
 addPositive("P18", {
@@ -647,7 +725,7 @@ addPositive("P18", {
   title: "anchored, verification time after retainUntil: reported anchored_lapsed with commitment_after_retain_until; the body is unchanged",
   build: { anchor: makeAnchor({ toSeq: 42, retainUntil: "2026-10-10T23:00:00.000Z" }) },
   checks: positiveChecks({ anchored: true }),
-  extra: { reportedFinality: "anchored_lapsed", expect: { finalityNotes: ["commitment_after_retain_until"] } },
+  extra: { reportedFinality: "anchored_lapsed" },
   assumptions: ["A2", "G5", "G6"],
 });
 addPositive("P19", {
@@ -655,7 +733,7 @@ addPositive("P19", {
   title: "anchored, verification time exactly equal to retainUntil: lapsed (\"not after the verification time\")",
   build: { anchor: makeAnchor({ toSeq: 42, retainUntil: EX.verificationTime }) },
   checks: positiveChecks({ anchored: true }),
-  extra: { reportedFinality: "anchored_lapsed", expect: { finalityNotes: ["commitment_after_retain_until"] } },
+  extra: { reportedFinality: "anchored_lapsed" },
   assumptions: ["A2", "G5", "G6", "G7"],
 });
 addPositive("P20", {
@@ -701,8 +779,44 @@ addPositive("P25", {
 });
 addPositive("P26", {
   spec: [SPEC.projection, SPEC.fixed],
-  title: "decision.ruleChain is not recomputed by sections_projection: a body with a two-entry ruleChain is still valid_with_unverifiable",
+  title: "decision.ruleChain is not recomputed by sections_projection: a body with a two-entry ruleChain is still valid",
   build: { ruleChain: ["rule-allow-search", "rule-base-default"] },
+  checks: positiveChecks(),
+});
+
+// --- positives settled by ADR-0189 B4.9 -------------------------------------
+
+const AI = {
+  v1: { id: "ab000000-0000-4000-8000-000000000001", body: adrBlock("b4-ai-example:v1/content/ai-bom.json"), cdx17: adrBlock("b4-ai-example:v1/content/ai-bom.cyclonedx-1.7.json") },
+  v2: { id: "ab000000-0000-4000-8000-000000000002", body: adrBlock("b4-ai-example:v2/content/ai-bom.json") },
+};
+const linkedModel = (aiBomSnapshotId) => ({ agentId: null, aiBomSnapshotId, modelCardApprovalId: null, modelCardId: null, pinnedModelVersion: null, provider: null, requestedModel: null, servedModel: null });
+
+addPositive("P27", {
+  spec: [SPEC.table, SPEC.r23, SPEC.g8],
+  title: "a bound usage event with a null costUsd: cost.costUsd null, tokens still summed, completeness.cost recorded",
+  build: { facts: makeFacts({ rows: [usageRow(EX.usage1, { costUsd: null }), usageRow(EX.usage2, { costUsd: "0.25", inputTokens: 1, outputTokens: 1 })] }) },
+  checks: positiveChecks(),
+});
+addPositive("P28", {
+  spec: [SPEC.files, SPEC.link, SPEC.ai],
+  title: "a linked AI BOM (facts.model.aiBomSnapshotId): content/ai-bom.json and its .sig carried, ai_bom_link valid, descriptor.aiBomSnapshotId set",
+  build: { facts: makeFacts({ model: linkedModel(AI.v1.id) }), linkedAiBom: { body: AI.v1.body } },
+  checks: positiveChecks({ aiLink: V }),
+});
+addPositive("P29", {
+  spec: [SPEC.link, SPEC.agg],
+  title: "a linked AI BOM whose snapshot was pruned before export: not carried, ai_bom_link unverifiable snapshot_not_in_bundle (not by design), outcome unverifiable",
+  build: { facts: makeFacts({ model: linkedModel(AI.v1.id) }) },
+  checks: positiveChecks({ aiLink: U("snapshot_not_in_bundle") }),
+});
+addPositive("P30", {
+  spec: [SPEC.g14, SPEC.table],
+  title: "toolName search@v2: a bomIdentifierSchema identifier with an @ but no email shape (no dotted domain)",
+  build: {
+    receiptDecision: { toolName: "search@v2" },
+    facts: makeFacts({ action: baseAction({ agentId: null, connectorId: null, kind: "mcp_tool", serverId: EX.serverId, toolName: "search@v2", toolNameHash: null }) }),
+  },
   checks: positiveChecks(),
 });
 
@@ -714,13 +828,13 @@ const reSignBodyOnly = { manifest: true, body: true, receipt: true };
 // envelope: manifest signature and keys
 addNegative("N-M01", { spec: [SPEC.manifest, SPEC.signed], title: "manifest.json.sig signs other bytes (manifest edited after signing)",
   build: { hooks: { manifestSignedBytes: (b) => b.replace("\"exportedAtSource\":\"database\"", "\"exportedAtSource\":\"database\" ") } },
-  expect: { checks: { bundle_manifest_signature: I() } }, authentic: { manifest: false, body: true, receipt: true } });
+  expect: { checks: { bundle_manifest_signature: I("signature_mismatch") } }, authentic: { manifest: false, body: true, receipt: true } });
 addNegative("N-M02", { spec: [SPEC.findOnline, SPEC.unknownKey], title: "signingKeyId names a key in neither the keyring nor the own key (rogue export key)",
   build: { exportKey: K.EX }, trustRoot: trust({ mode: "online", exp: exportKeyring([K.E1], K.E2) }),
   expect: { checks: { bundle_manifest_signature: I("unknown_key") } }, authentic: { manifest: "untrusted", body: true, receipt: true } });
 addNegative("N-M03", { spec: [SPEC.findOnline, SPEC.s6], title: "a rogue key signs the manifest under E1's key id, with its own signing-key.pub and fingerprint: the bundle key is never trusted",
   build: { manifestSigner: K.EX, signingKeyPub: K.EX, hooks: { manifest: (m) => ({ ...m, signingKeyFingerprint: K.EX.pub.fingerprint }) } },
-  expect: { checks: { bundle_manifest_signature: I() } }, authentic: { manifest: false, body: true, receipt: true } });
+  expect: { checks: { bundle_manifest_signature: I("signature_mismatch") } }, authentic: { manifest: false, body: true, receipt: true } });
 addNegative("N-M04", { spec: [SPEC.unknownKey], title: "the export trust root holds E1's id twice with different keys",
   trustRoot: trust({ exp: { keyring: [{ fingerprint: K.E1.pub.fingerprint, keyId: K.E1.keyId, publicKeyPem: K.E1.pub.publicKeyPem }, { fingerprint: K.E2.pub.fingerprint, keyId: K.E1.keyId, publicKeyPem: K.E2.pub.publicKeyPem }], ownKey: null } }),
   expect: { checks: { bundle_manifest_signature: I("unknown_key") }, onlineKeyringLoad: "refused (each id once)" }, authentic: { manifest: "untrusted", body: true, receipt: true } });
@@ -729,74 +843,74 @@ addNegative("N-M05", { spec: [SPEC.findOnline], title: "online keyring entry who
   expect: { outcome: "not_run", onlineKeyringLoad: "refused (fingerprint does not match its key)" }, authentic: { manifest: "untrusted", body: true, receipt: true } });
 addNegative("N-M06", { spec: [SPEC.manifest, SPEC.encoding], title: "manifest.json.sig as unpadded base64url instead of padded standard base64 and a newline",
   build: { hooks: { manifestSig: (s) => Buffer.from(s.trim(), "base64").toString("base64url") } },
-  expect: { checks: { bundle_manifest_signature: I() } }, authentic: { manifest: "encoding", body: true, receipt: true } });
+  expect: { checks: { bundle_manifest_signature: I("schema_violation") } }, authentic: { manifest: "encoding", body: true, receipt: true } });
 addNegative("N-M07", { spec: [SPEC.files, "B4.2 'Encoding': manifest signature ends with a newline"], title: "manifest.json.sig without its trailing newline",
   build: { hooks: { manifestSig: (s) => s.trim() } },
-  expect: { checks: { bundle_manifest_signature: I() } }, authentic: { manifest: "encoding", body: true, receipt: true } });
+  expect: { checks: { bundle_manifest_signature: I("schema_violation") } }, authentic: { manifest: "encoding", body: true, receipt: true } });
 addNegative("N-M08", { spec: [SPEC.files], title: "manifest.json not canonical (pretty-printed) yet correctly signed",
-  build: { hooks: { manifestBytes: (m) => JSON.stringify(m, null, 1) } }, expect: {} });
+  build: { hooks: { manifestBytes: (m) => JSON.stringify(m, null, 1) } }, expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 // envelope: file membership
 addNegative("N-M09", { spec: [SPEC.manifest, "B4.4 'Required checks': bundle_manifest_files"], title: "README.txt changed after the manifest listed its SHA-256",
   build: { hooks: { finalFiles: (f) => { f.set("README.txt", f.get("README.txt").replace("published test key", "published test key!")); return f; } } },
-  expect: { checks: { bundle_manifest_files: I() } } });
+  expect: { checks: { bundle_manifest_files: I("hash_mismatch") } } });
 addNegative("N-M10", { spec: [SPEC.files, SPEC.r39], title: "an extra audit/rows/42.payload entry in the archive, not in the manifest (R39: no audit preimage)",
   build: { hooks: { finalFiles: (f) => { f.set("audit/rows/42.payload", "{\"TEST-ONLY\":\"CANARY preimage\"}"); return f; } } },
-  expect: { checks: { bundle_manifest_files: I() } } });
+  expect: { checks: { bundle_manifest_files: I("manifest_mismatch") } } });
 addNegative("N-M11", { spec: [SPEC.files, SPEC.r39], title: "audit/rows/42.payload listed in a re-signed manifest: no such file may exist in a BOM bundle",
   build: { hooks: { files: (f) => { f.set("audit/rows/42.payload", "{\"TEST-ONLY\":\"CANARY preimage\"}"); return f; } } },
-  expect: {} });
+  expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 addNegative("N-M12", { spec: [SPEC.manifest], title: "a file listed in the manifest is missing from the archive",
   build: { hooks: { finalFiles: (f) => { f.delete("signing-key.pub"); return f; } } },
-  expect: { checks: { bundle_manifest_files: I() } } });
+  expect: { checks: { bundle_manifest_files: I("manifest_mismatch") } } });
 addNegative("N-M13", { spec: [SPEC.manifest], title: "manifest.files not sorted by path (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, files: [...m.files].reverse() }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, files: [...m.files].reverse() }) } }, expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 addNegative("N-M14", { spec: [SPEC.manifest], title: "manifest.files lists manifest.json itself (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, files: [...m.files, { path: "manifest.json", sha256: ZERO64 }].sort((a, b) => byCodeUnit(a.path, b.path)) }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, files: [...m.files, { path: "manifest.json", sha256: ZERO64 }].sort((a, b) => byCodeUnit(a.path, b.path)) }) } }, expect: { checks: { bundle_manifest_files: I("manifest_mismatch") } } });
 addNegative("N-M15", { spec: [SPEC.manifest], title: "manifest.files lists one path twice (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, files: [...m.files, m.files[0]].sort((a, b) => byCodeUnit(a.path, b.path)) }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, files: [...m.files, m.files[0]].sort((a, b) => byCodeUnit(a.path, b.path)) }) } }, expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 addNegative("N-M16", { spec: [SPEC.files], title: "a directory entry in the archive (no directory entry exists)",
-  build: { hooks: { entries: (e, root) => [{ name: `${root}/content/`, type: "directory", text: "" }, ...e].sort((a, b) => byCodeUnit(a.name, b.name)) } }, expect: {} });
+  build: { hooks: { entries: (e, root) => [{ name: `${root}/content/`, type: "directory", text: "" }, ...e].sort((a, b) => byCodeUnit(a.name, b.name)) } }, expect: { checks: { bundle_manifest_files: I("bundle_unreadable") } } });
 addNegative("N-M17", { spec: [SPEC.root], title: "entries under two root directories",
-  build: { hooks: { entries: (e, root) => e.map((x) => (x.name.endsWith("/README.txt") ? { ...x, name: x.name.replace(root, `${root}-other`) } : x)).sort((a, b) => byCodeUnit(a.name, b.name)) } }, expect: {} });
+  build: { hooks: { entries: (e, root) => e.map((x) => (x.name.endsWith("/README.txt") ? { ...x, name: x.name.replace(root, `${root}-other`) } : x)).sort((a, b) => byCodeUnit(a.name, b.name)) } }, expect: { checks: { bundle_manifest_files: I("bundle_unreadable") } } });
 addNegative("N-M18", { spec: ["ADR-0116 amendment 2026-10-03 (non-regular entries)", SPEC.files], title: "a symlink entry in the archive",
-  build: { hooks: { entries: (e, root) => [...e, { name: `${root}/content/link`, type: "symlink", linkname: "../manifest.json", text: "" }].sort((a, b) => byCodeUnit(a.name, b.name)) } }, expect: {} });
+  build: { hooks: { entries: (e, root) => [...e, { name: `${root}/content/link`, type: "symlink", linkname: "../manifest.json", text: "" }].sort((a, b) => byCodeUnit(a.name, b.name)) } }, expect: { checks: { bundle_manifest_files: I("bundle_unreadable") } } });
 addNegative("N-M19", { spec: [SPEC.root], title: "root directory named -v2 for a version 1 Decision BOM",
-  build: { root: `regulait-export-decision-bom-${EX.auditId}-v2` }, expect: {} });
+  build: { root: `regulait-export-decision-bom-${EX.auditId}-v2` }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
 // envelope: manifest fields
 addNegative("N-M20", { spec: [SPEC.buildOrder, SPEC.r21, SPEC.manifest], title: "email-shaped operator installId (signed): the email scan covers manifest.json",
-  build: { installId: "ops-TEST-ONLY-CANARY@example.com" }, expect: { checks: { bundle_email_scan: I() } } });
+  build: { installId: "ops-TEST-ONLY-CANARY@example.com" }, expect: { checks: { bundle_email_scan: I("email_shape") } } });
 addNegative("N-M21", { spec: [SPEC.manifest], title: "installId non-null with installIdSource absent (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, installId: "TEST-ONLY-CANARY-install-7", installIdSource: "absent" }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, installId: "TEST-ONLY-CANARY-install-7", installIdSource: "absent" }) } }, expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 addNegative("N-M22", { spec: [SPEC.buildOrder, SPEC.r21], title: "an email address in README.txt (listed and signed)",
   build: { readme: README.replace("convenience copies", "convenience copies (questions: TEST-ONLY-CANARY@example.com)") },
-  expect: { checks: { bundle_email_scan: I() } } });
+  expect: { checks: { bundle_email_scan: I("email_shape") } } });
 addNegative("N-M23", { spec: [SPEC.manifest, SPEC.sigFile], title: "descriptor.bodySha256 differs from content/decision-bom.json (re-signed manifest)",
   build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, descriptor: { ...m.subject.descriptor, bodySha256: flipLastHex(m.subject.descriptor.bodySha256) } } }) } },
-  expect: { checks: { bundle_subject: I() } } });
+  expect: { checks: { bundle_subject: I("subject_mismatch") } } });
 addNegative("N-M24", { spec: [SPEC.manifest], title: "subject.id is not the auditId (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, id: EX.bomId } }) } }, expect: { checks: { bundle_subject: I() } } });
-addNegative("N-M25", { spec: [SPEC.manifest], title: "audit.segmentToSeq does not equal the last proof.chain seq (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, audit: { ...m.audit, segmentToSeq: 43 } }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, id: EX.bomId } }) } }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
+addNegative("N-M25", { spec: [SPEC.manifest], title: "audit segment 42..43 (count 2, consistent with itself) while proof.chain is the one row 42 (re-signed)",
+  build: { hooks: { manifest: (m) => ({ ...m, audit: { ...m.audit, segmentRowCount: 2, segmentToSeq: 43 } }) } }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
 addNegative("N-M26", { spec: [SPEC.manifest], title: "schema regulait.export-bundle/2 on a BOM bundle (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, schema: "regulait.export-bundle/2" }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, schema: "regulait.export-bundle/2" }) } }, expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 addNegative("N-M27", { spec: [SPEC.manifest], title: "descriptor.finality differs from the body's finality (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, descriptor: { ...m.subject.descriptor, finality: "anchored" } } }) } }, expect: { checks: { bundle_subject: I() } } });
+  build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, descriptor: { ...m.subject.descriptor, finality: "anchored" } } }) } }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
 addNegative("N-M28", { spec: [SPEC.manifest], title: "audit.payloadScope other than none (re-signed)",
-  build: { hooks: { manifest: (m) => ({ ...m, audit: { ...m.audit, payloadScope: "decision_row" } }) } }, expect: {} });
+  build: { hooks: { manifest: (m) => ({ ...m, audit: { ...m.audit, payloadScope: "decision_row" } }) } }, expect: { checks: { bundle_manifest_files: I("schema_violation") } } });
 
 // body signature
 addNegative("N-B01", { spec: [SPEC.signedBytes, SPEC.sigFile], title: "body signature made over other bytes (signedSha256 matches the file, signature does not)",
   build: { hooks: { sigFile: (s, bytes) => canon({ ...s, signature: signB64url(K.R1, `${bytes} `) }) } },
-  expect: { checks: { body_signature: I() } }, authentic: { manifest: true, body: false, receipt: true } });
+  expect: { checks: { body_signature: I("signature_mismatch") } }, authentic: { manifest: true, body: false, receipt: true } });
 addNegative("N-B02", { spec: [SPEC.sigFile], title: "signature file's signedSha256 is not the SHA-256 of the body file",
-  build: { hooks: { sigFile: (s) => canon({ ...s, signedSha256: flipLastHex(s.signedSha256) }) } }, expect: { checks: { body_signature: I() } } });
+  build: { hooks: { sigFile: (s) => canon({ ...s, signedSha256: flipLastHex(s.signedSha256) }) } }, expect: { checks: { body_signature: I("hash_mismatch") } } });
 addNegative("N-B03", { spec: [SPEC.sigFile], title: "signature file not canonical (keys out of order)",
-  build: { hooks: { sigFile: (s) => JSON.stringify({ signature: s.signature, keyId: s.keyId, alg: s.alg, signedSha256: s.signedSha256 }) } }, expect: {} });
+  build: { hooks: { sigFile: (s) => JSON.stringify({ signature: s.signature, keyId: s.keyId, alg: s.alg, signedSha256: s.signedSha256 }) } }, expect: { checks: { body_signature: I("schema_violation") } } });
 addNegative("N-B04", { spec: [SPEC.encoding, SPEC.sigFile], title: "body signature as padded standard base64 (88 characters), not 86-character base64url",
   build: { hooks: { sigFile: (s) => canon({ ...s, signature: Buffer.from(s.signature, "base64url").toString("base64") }) } },
-  expect: { checks: { body_signature: I() } }, authentic: { manifest: true, body: "encoding", receipt: true } });
+  expect: { checks: { body_signature: I("schema_violation") } }, authentic: { manifest: true, body: "encoding", receipt: true } });
 addNegative("N-B05", { spec: [SPEC.sigFile], title: "signature file alg is not Ed25519",
-  build: { hooks: { sigFile: (s) => canon({ ...s, alg: "EdDSA" }) } }, expect: { checks: { body_signature: I() } } });
+  build: { hooks: { sigFile: (s) => canon({ ...s, alg: "EdDSA" }) } }, expect: { checks: { body_signature: I("schema_violation") } } });
 addNegative("N-B06", { spec: [SPEC.unknownKey, SPEC.findOffline], title: "body signed by a receipt key the trust root does not hold (R2, carried in receipt-keys.json)",
   build: { bodyKey: K.R2 }, expect: { checks: { body_signature: I("unknown_key") } }, authentic: { manifest: true, body: "untrusted", receipt: true } });
 addNegative("N-B07", { spec: [SPEC.s6, SPEC.findOffline], title: "a rogue key signs the body and receipt under R1's id; receipt-keys.json carries the rogue JWK: bundled keys are never the trust root",
@@ -805,14 +919,14 @@ addNegative("N-B07", { spec: [SPEC.s6, SPEC.findOffline], title: "a rogue key si
     sigFile: (s, bytes) => canon({ ...s, signature: signB64url(K.RX, bytes) }),
     receiptKeys: (rk) => ({ keys: rk.keys.map((k) => ({ ...k, fingerprint: K.RX.pub.fingerprint, jwk: K.RX.pub.jwk })) }),
   } },
-  expect: { checks: { body_signature: I(), receipt_signature: I() } }, authentic: { manifest: true, body: false, receipt: false } });
+  expect: { checks: { body_signature: I("signature_mismatch"), receipt_signature: I("signature_mismatch") } }, authentic: { manifest: true, body: false, receipt: false } });
 addNegative("N-B08", { spec: [SPEC.owner2, SPEC.signedBytes], title: "domain separation: the signature file carries the receipt's signature",
   build: { hooks: { sigFile: (s, bytes) => canon({ ...s, signature: JSON.parse(bytes).receipt.signature }) } },
-  expect: { checks: { body_signature: I() } }, authentic: { manifest: true, body: false, receipt: true } });
+  expect: { checks: { body_signature: I("signature_mismatch") } }, authentic: { manifest: true, body: false, receipt: true } });
 addNegative("N-B09", { spec: [SPEC.owner2, "§5 every verifier rejects an unknown v"], title: "body v is regulait.decision-bom.v2, correctly signed",
-  build: { hooks: { body: (b) => ({ ...b, v: "regulait.decision-bom.v2" }) } }, expect: { checks: { body_version: I() } } });
+  build: { hooks: { body: (b) => ({ ...b, v: "regulait.decision-bom.v2" }) } }, expect: { checks: { body_version: I("unknown_body_version") } } });
 addNegative("N-B10", { spec: [SPEC.files, SPEC.signedBytes], title: "body not canonical (pretty-printed) but signed over those bytes",
-  build: { hooks: { bodyBytes: (b) => JSON.stringify(b, null, 1) } }, expect: {} });
+  build: { hooks: { bodyBytes: (b) => JSON.stringify(b, null, 1) } }, expect: { checks: { body_schema: I("schema_violation") } } });
 addNegative("N-B11", { spec: [SPEC.unknownKey], title: "the receipt trust root holds R1's id twice with different keys",
   trustRoot: trust({ receipt: { keyring: { keys: [{ jwk: K.R1.pub.jwk, keyId: K.R1.keyId }, { jwk: K.R2.pub.jwk, keyId: K.R1.keyId }], receiptV2FromAuditSeq: 42 } } }),
   expect: { checks: { body_signature: I("unknown_key"), receipt_signature: I("unknown_key") } }, authentic: { manifest: true, body: "untrusted", receipt: "untrusted" } });
@@ -822,33 +936,33 @@ addNegative("N-B12", { spec: [SPEC.findOffline], title: "offline pinned receipt 
 
 // receipt
 addNegative("N-R01", { spec: [SPEC.rPayloadHash], title: "receipt.payloadHash is not the SHA-256 of payload",
-  build: { hooks: { body: (b) => ({ ...b, receipt: { ...b.receipt, payloadHash: flipLastHex(b.receipt.payloadHash) } }) } }, expect: { checks: { receipt_payload_hash: I() } } });
+  build: { hooks: { body: (b) => ({ ...b, receipt: { ...b.receipt, payloadHash: flipLastHex(b.receipt.payloadHash) } }) } }, expect: { checks: { receipt_payload_hash: I("hash_mismatch") } } });
 addNegative("N-R02", { spec: [SPEC.rPayloadHash], title: "receipt payload not canonical (re-hashed and re-signed over the non-canonical bytes)",
-  build: { hooks: { receiptBytes: (p) => JSON.stringify(p) } }, expect: { checks: { receipt_payload_hash: I() } } });
+  build: { hooks: { receiptBytes: (p) => JSON.stringify(p) } }, expect: { checks: { receipt_payload_hash: I("schema_violation") } } });
 addNegative("N-R03", { spec: [SPEC.rPayloadHash, SPEC.owner2], title: "receipt v regulait.receipt.v3: parses as neither v1 nor v2",
-  build: { hooks: { receiptPayload: (p) => ({ ...p, v: "regulait.receipt.v3" }) } }, expect: { checks: { receipt_payload_hash: I() } } });
+  build: { hooks: { receiptPayload: (p) => ({ ...p, v: "regulait.receipt.v3" }) } }, expect: { checks: { receipt_payload_hash: I("schema_violation") } } });
 addNegative("N-R04", { spec: [SPEC.rSig], title: "receipt signature does not verify (signed over other bytes)",
-  build: { hooks: { receiptSignature: (bytes) => signB64url(K.R1, `${bytes} `) } }, expect: { checks: { receipt_signature: I() } }, authentic: { manifest: true, body: true, receipt: false } });
+  build: { hooks: { receiptSignature: (bytes) => signB64url(K.R1, `${bytes} `) } }, expect: { checks: { receipt_signature: I("signature_mismatch") } }, authentic: { manifest: true, body: true, receipt: false } });
 addNegative("N-R05", { spec: [SPEC.rSig, SPEC.unknownKey], title: "receipt signed by a key the trust root does not hold (R2)",
   build: { receiptKey: K.R2 }, expect: { checks: { receipt_signature: I("unknown_key") } }, authentic: { manifest: true, body: true, receipt: "untrusted" } });
 addNegative("N-R06", { spec: [SPEC.rSig], title: "payload.keyId differs from receipt.keyId",
-  build: { hooks: { receiptPayload: (p) => ({ ...p, keyId: K.R2.keyId }) } }, expect: { checks: { receipt_signature: I() } } });
+  build: { hooks: { receiptPayload: (p) => ({ ...p, keyId: K.R2.keyId }) } }, expect: { checks: { receipt_signature: I("subject_mismatch") } } });
 addNegative("N-R07", { spec: [SPEC.rSig], title: "payload.receiptSeq differs from receipt.receiptSeq",
-  build: { hooks: { receiptPayload: (p) => ({ ...p, receiptSeq: 2 }) } }, expect: { checks: { receipt_signature: I() } }, projectionConsistent: true });
+  build: { hooks: { receiptPayload: (p) => ({ ...p, receiptSeq: 2 }) } }, expect: { checks: { receipt_signature: I("subject_mismatch") } }, projectionConsistent: true });
 addNegative("N-R08", { spec: [SPEC.rSig], title: "payload.audit.rowHash is not proof.chain[0].rowHash",
-  build: { hooks: { receiptPayload: (p) => ({ ...p, audit: { ...p.audit, rowHash: flipLastHex(p.audit.rowHash) } }) } }, expect: { checks: { receipt_signature: I() } } });
+  build: { hooks: { receiptPayload: (p) => ({ ...p, audit: { ...p.audit, rowHash: flipLastHex(p.audit.rowHash) } }) } }, expect: { checks: { receipt_signature: I("subject_mismatch") } } });
 addNegative("N-R09", { spec: [SPEC.rSig], title: "payload.audit.id is not the body's auditId",
-  build: { hooks: { receiptPayload: (p) => ({ ...p, audit: { ...p.audit, id: "a0000000-0000-4000-8000-000000000043" } }) } }, expect: { checks: { receipt_signature: I() } } });
+  build: { hooks: { receiptPayload: (p) => ({ ...p, audit: { ...p.audit, id: "a0000000-0000-4000-8000-000000000043" } }) } }, expect: { checks: { receipt_signature: I("subject_mismatch") } } });
 addNegative("N-R10", { spec: [SPEC.rFacts, SPEC.factsHash, SPEC.r37], title: "v2 captured: factsHash is not the SHA-256 of facts.payload",
   build: { hooks: { receiptPayload: (p) => ({ ...p, factsHash: flipLastHex(p.factsHash) }) } }, expect: { checks: { receipt_facts_binding: I("facts_hash_mismatch") } } });
 addNegative("N-R11", { spec: [SPEC.rFacts], title: "v2 capture_off but facts.payload is not null",
-  build: { factsStatus: "capture_off" }, expect: { checks: { receipt_facts_binding: I() } } });
+  build: { factsStatus: "capture_off" }, expect: { checks: { receipt_facts_binding: I("facts_hash_mismatch") } } });
 addNegative("N-R12", { base: "P02", spec: [SPEC.rFacts, SPEC.boundary, SPEC.fixed], title: "v1 receipt at a seq at or above the known boundary (boundary 42, seq 42)",
   trustRoot: trust({ receipt: receiptKeyring([K.R1], 42) }), expect: { checks: { receipt_facts_binding: I("v1_receipt_after_boundary") } } });
 addNegative("N-R13", { base: "P25", spec: [SPEC.rActor], title: "v2 actor.identityId differs from actors.actorIdentityId",
-  build: { receiptActor: { chain: [EX.identity1], delegationGrantId: EX.grant1, identityId: "c1000000-0000-4000-8000-000000000009" } }, expect: {} });
+  build: { receiptActor: { chain: [EX.identity1], delegationGrantId: EX.grant1, identityId: "c1000000-0000-4000-8000-000000000009" } }, expect: { checks: { sections_projection: I("section_mismatch") }, sections: { actors: "invalid" } }, projectionConsistent: false });
 addNegative("N-R14", { base: "P25", spec: [SPEC.rActor], title: "v2 actor.delegationGrantId differs from actors.delegationGrantId",
-  build: { receiptActor: { chain: [EX.identity1], delegationGrantId: "c2000000-0000-4000-8000-000000000009", identityId: EX.identity1 } }, expect: {} });
+  build: { receiptActor: { chain: [EX.identity1], delegationGrantId: "c2000000-0000-4000-8000-000000000009", identityId: EX.identity1 } }, expect: { checks: { sections_projection: I("section_mismatch") }, sections: { actors: "invalid" } }, projectionConsistent: false });
 
 // sections
 const sectionBreak = (fn) => ({ hooks: { body: fn } });
@@ -889,58 +1003,201 @@ addNegative("N-S14", { base: "P09", spec: [SPEC.sources, SPEC.table], title: "ro
 // chain
 addNegative("N-C01", { base: "P14", spec: ["§6 chain links", SPEC.table], title: "a chain row's rowHash is not SHA-256(prevHash || contentHash)",
   build: { chain: chainRows(44).map((r) => (r.seq === 43 ? { ...r, rowHash: flipLastHex(r.rowHash) } : r)) },
-  expect: { checks: { chain_links: I() } }, assumptions: ["A2", "G5"] });
+  expect: { checks: { chain_links: I("chain_break") } }, assumptions: ["A2", "G5"] });
 addNegative("N-C02", { base: "P14", spec: ["§6 chain links"], title: "chain rows do not link (row 44's prevHash is not row 43's rowHash; rowHash recomputed)",
   build: { chain: (() => { const c = chainRows(44); c[2] = { ...c[2], prevHash: ZERO64, rowHash: h(`${ZERO64}${c[2].contentHash}`) }; return c; })(),
     anchor: (() => { const c = chainRows(44); const last = h(`${ZERO64}${c[2].contentHash}`); const a = makeAnchor({ toSeq: 44 }); return { ...a, record: { ...a.record, rowHash: last } }; })() },
-  expect: { checks: { chain_links: I() } }, assumptions: ["A2", "G5"] });
+  expect: { checks: { chain_links: I("chain_break") } }, assumptions: ["A2", "G5"] });
 addNegative("N-C03", { spec: [SPEC.files], title: "audit/chain.tsv differs from proof.chain (listed and signed)",
-  build: { hooks: { files: (f) => { f.set("audit/chain.tsv", f.get("audit/chain.tsv").replace(/^42\t/, "41\t")); return f; } } }, expect: {} });
+  build: { hooks: { files: (f) => { f.set("audit/chain.tsv", f.get("audit/chain.tsv").replace(/^42\t/, "41\t")); return f; } } }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
 addNegative("N-C04", { spec: [SPEC.table], title: "chain_signed but proof.chain holds two rows (it is the decision row alone)",
-  build: { chain: chainRows(43) }, expect: {} });
+  build: { chain: chainRows(43) }, expect: { checks: { chain_links: I("chain_break") } } });
 
 // anchor and finality (verifier side)
 addNegative("N-F01", { base: "P14", spec: [SPEC.r1], title: "anchor record seq is not the last chain row's seq",
-  build: { chain: chainRows(43) }, expect: { checks: { anchor_record: I() } }, assumptions: ["A2", "G5"] });
+  build: { chain: chainRows(43) }, expect: { checks: { anchor_record: I("anchor_mismatch") } }, assumptions: ["A2", "G5"] });
 addNegative("N-F02", { base: "P14", spec: [SPEC.r1], title: "anchor record rowHash is not the last chain row's rowHash",
   build: { anchor: (() => { const a = makeAnchor({ toSeq: 44 }); return { ...a, record: { ...a.record, rowHash: flipLastHex(a.record.rowHash) } }; })() },
-  expect: { checks: { anchor_record: I() } }, assumptions: ["A2", "G5"] });
+  expect: { checks: { anchor_record: I("anchor_mismatch") } }, assumptions: ["A2", "G5"] });
 addNegative("N-F03", { base: "P14", spec: [SPEC.r1], title: "anchor record without capturedAt: a proof without all six fields is invalid, not unverifiable",
   build: { anchor: (() => { const a = makeAnchor({ toSeq: 44 }); const { capturedAt, ...rec } = a.record; return { ...a, record: rec }; })() },
-  expect: { checks: { anchor_record: I() } }, assumptions: ["A2", "G5"] });
+  expect: { checks: { anchor_record: I("anchor_record_incomplete") } }, assumptions: ["A2", "G5"] });
 addNegative("N-F04", { spec: [SPEC.verifierFinality], title: "finality chain_signed but proof.anchor is not null",
-  build: { anchor: makeAnchor({ toSeq: 42 }), finality: "chain_signed" }, expect: { checks: { finality: I() } }, assumptions: ["A2"] });
+  build: { anchor: makeAnchor({ toSeq: 42 }), finality: "chain_signed" }, expect: { checks: { finality: I("anchor_mismatch") } }, assumptions: ["A2"] });
 addNegative("N-F05", { base: "P14", spec: [SPEC.verifierFinality, SPEC.table], title: "finality anchored but proof.anchor is null",
-  build: { anchor: null, chain: chainRows(42), finality: "anchored" }, expect: { checks: { finality: I() } } });
+  build: { anchor: null, chain: chainRows(42), finality: "anchored" }, expect: { checks: { finality: I("anchor_mismatch") } } });
 addNegative("N-F06", { base: "P14", spec: [SPEC.verifierFinality], title: "finality anchored with tamperResistant false",
-  build: { anchor: makeAnchor({ toSeq: 44, tamperResistant: false }) }, expect: { checks: { finality: I() } }, assumptions: ["A2"] });
+  build: { anchor: makeAnchor({ toSeq: 44, tamperResistant: false }) }, expect: { checks: { finality: I("anchor_mismatch") } }, assumptions: ["A2"] });
 addNegative("N-F07", { base: "P14", spec: [SPEC.verifierFinality], title: "finality anchored with retainUntil null",
-  build: { anchor: makeAnchor({ toSeq: 44, retainUntil: null }) }, expect: { checks: { finality: I() } }, assumptions: ["A2"] });
+  build: { anchor: makeAnchor({ toSeq: 44, retainUntil: null }) }, expect: { checks: { finality: I("anchor_mismatch") } }, assumptions: ["A2"] });
 addNegative("N-F08", { base: "P14", spec: [SPEC.verifierFinality], title: "finality anchored with anchor.status not flushed",
-  build: { anchor: makeAnchor({ toSeq: 44, status: "pending" }) }, expect: { checks: { finality: I() } }, assumptions: ["A2"] });
+  build: { anchor: makeAnchor({ toSeq: 44, status: "pending" }) }, expect: { checks: { finality: I("anchor_mismatch") } }, assumptions: ["A2"] });
 addNegative("N-F09", { base: "P15", spec: [SPEC.verifierFinality], title: "finality anchored_unverified_destination with anchor.status not flushed",
-  build: { anchor: makeAnchor({ toSeq: 42, tamperResistant: false, retainUntil: null, status: "pending" }) }, expect: { checks: { finality: I() } }, assumptions: ["A2"] });
+  build: { anchor: makeAnchor({ toSeq: 42, tamperResistant: false, retainUntil: null, status: "pending" }) }, expect: { checks: { finality: I("anchor_mismatch") } }, assumptions: ["A2"] });
 addNegative("N-F10", { base: "P17", spec: [SPEC.verifierFinality], title: "finality anchored_finite_lock with tamperResistant false",
-  build: { anchor: makeAnchor({ toSeq: 42, tamperResistant: false }) }, expect: { checks: { finality: I() } }, assumptions: ["A2"] });
+  build: { anchor: makeAnchor({ toSeq: 42, tamperResistant: false }) }, expect: { checks: { finality: I("anchor_mismatch") } }, assumptions: ["A2"] });
 addNegative("N-F11", { base: "P14", spec: [SPEC.table, SPEC.projection], title: "anchored body whose completeness.proof still says not_recorded anchor_absent",
   build: { hooks: { body: (b) => ({ ...b, completeness: { ...b.completeness, proof: { reason: "anchor_absent", status: "not_recorded" } } }) } },
   expect: { checks: { sections_projection: I("section_mismatch") }, sections: { proof: "invalid" } }, projectionConsistent: false, assumptions: ["A2"] });
 
 // addenda
 addNegative("N-A01", { base: "P09", spec: [SPEC.r35, "R5 verifier checks the chain back to factsHash"], title: "addendum 1's prevHash is not facts_hash",
-  build: { addenda: [{ rows: [usageRow(EX.usage1)], prevHash: ZERO64 }, { rows: [spanRow(EX.span1, EX.trace1)] }] }, expect: { checks: { facts_addenda_chain: I() } }, assumptions: ["A4"] });
+  build: { addenda: [{ rows: [usageRow(EX.usage1)], prevHash: ZERO64 }, { rows: [spanRow(EX.span1, EX.trace1)] }] }, expect: { checks: { facts_addenda_chain: I("addendum_chain_break") } }, assumptions: ["A4"] });
 addNegative("N-A02", { base: "P09", spec: [SPEC.r15, SPEC.signedBytes], title: "addendum 2's signature does not verify",
   build: { addenda: [{ rows: [usageRow(EX.usage1)] }, { rows: [spanRow(EX.span1, EX.trace1)], signature: signB64url(K.R1, "TEST-ONLY CANARY other bytes") }] },
-  expect: { checks: { facts_addenda_signatures: I() } }, authentic: { manifest: true, body: true, receipt: true, addenda: false }, assumptions: ["A4"] });
+  expect: { checks: { facts_addenda_signatures: I("signature_mismatch") } }, authentic: { manifest: true, body: true, receipt: true, addenda: false }, assumptions: ["A4"] });
 addNegative("N-A03", { base: "P09", spec: [SPEC.r35], title: "addenda numbered 1 and 3 (a gap)",
-  build: { addenda: [{ rows: [usageRow(EX.usage1)] }, { rows: [spanRow(EX.span1, EX.trace1)], n: 3 }] }, expect: { checks: { facts_addenda_chain: I() } }, assumptions: ["A4"] });
+  build: { addenda: [{ rows: [usageRow(EX.usage1)] }, { rows: [spanRow(EX.span1, EX.trace1)], n: 3 }] }, expect: { checks: { facts_addenda_chain: I("addendum_chain_break") } }, assumptions: ["A4"] });
 addNegative("N-A04", { base: "P09", spec: [SPEC.r15, SPEC.unknownKey], title: "addendum signed by a key the trust root does not hold (RX)",
   build: { addenda: [{ rows: [usageRow(EX.usage1)], key: K.RX }, { rows: [spanRow(EX.span1, EX.trace1)] }] },
   expect: { checks: { facts_addenda_signatures: I("unknown_key") } }, authentic: { manifest: true, body: true, receipt: true, addenda: "untrusted" }, assumptions: ["A4"] });
 addNegative("N-A05", { base: "P09", spec: [SPEC.signedBytes, SPEC.r15], title: "an addendum signature made over the receipt payload bytes (domain separation by v)",
   build: { addenda: [{ rows: [usageRow(EX.usage1)] }, { rows: [spanRow(EX.span1, EX.trace1)], signature: "__RECEIPT__" }],
     hooks: { body: (b) => ({ ...b, facts: { ...b.facts, addenda: b.facts.addenda.map((a) => (a.signature === "__RECEIPT__" ? { ...a, signature: b.receipt.signature } : a)) } }) } },
-  expect: { checks: { facts_addenda_signatures: I() } }, authentic: { manifest: true, body: true, receipt: true, addenda: false }, assumptions: ["A4"] });
+  expect: { checks: { facts_addenda_signatures: I("signature_mismatch") } }, authentic: { manifest: true, body: true, receipt: true, addenda: false }, assumptions: ["A4"] });
+
+
+// settled by ADR-0189 B4.9 (G8, G10, G13, G14, G15, linked AI BOM)
+addNegative("N-R15", { spec: [SPEC.g10, SPEC.boundaryTrust], title: "v2 receipt at seq 42 below the trust root's boundary (100)",
+  trustRoot: trust({ receipt: receiptKeyring([K.R1], 100) }), expect: { checks: { receipt_facts_binding: I("v2_receipt_before_boundary") } } });
+addNegative("N-R16", { spec: [SPEC.g10, SPEC.boundaryTrust], title: "v2 receipt verified against a trust root that records no boundary (no cutover)",
+  trustRoot: trust({ receipt: receiptKeyring([K.R1], null) }), expect: { checks: { receipt_facts_binding: I("v2_receipt_before_boundary") } } });
+addNegative("N-S15", { spec: [SPEC.g13], title: "basis.auditSeq is not the last proof.chain seq", build: sectionBreak((b) => ({ ...b, basis: { ...b.basis, auditSeq: 43 } })),
+  expect: { checks: { sections_projection: I("section_mismatch") }, sections: { proof: "invalid" } }, projectionConsistent: false });
+addNegative("N-S16", { base: "P14", spec: [SPEC.g13], title: "basis.anchorId is not proof.anchor.id", build: sectionBreak((b) => ({ ...b, basis: { ...b.basis, anchorId: "a9000000-0000-4000-8000-000000000002" } })),
+  expect: { checks: { sections_projection: I("section_mismatch") }, sections: { proof: "invalid" } }, projectionConsistent: false, assumptions: ["A2"] });
+addNegative("N-S17", { base: "P09", spec: [SPEC.g15, SPEC.g3], title: "usage event e…01 bound in facts.rows and again in addendum 1 (assembly refuses this, X04)",
+  build: { facts: makeFacts({ rows: [usageRow(EX.usage1)] }), addenda: [{ rows: [usageRow(EX.usage1)] }, { rows: [spanRow(EX.span1, EX.trace1)] }] },
+  expect: { checks: { sections_projection: I("section_mismatch"), facts_addenda_chain: I("addendum_chain_break") }, sections: { cost: "invalid" } }, projectionConsistent: false, assumptions: ["A4"] });
+addNegative("N-S18", { base: "P27", spec: [SPEC.g8], title: "costUsd given as the one non-null row's value although a bound row's costUsd is null",
+  build: sectionBreak((b) => ({ ...b, cost: { ...b.cost, costUsd: "0.25" } })),
+  expect: { checks: { sections_projection: I("section_mismatch") }, sections: { cost: "invalid" } }, projectionConsistent: false });
+addNegative("N-S19", { base: "P28", spec: [SPEC.g13], title: "basis.aiBomSnapshotId is not facts.model.aiBomSnapshotId (descriptor follows basis)",
+  build: { hooks: { body: (b) => ({ ...b, basis: { ...b.basis, aiBomSnapshotId: AI.v2.id } }) } },
+  expect: { checks: { sections_projection: I("section_mismatch") }, sections: { model: "invalid" } }, projectionConsistent: false });
+addNegative("N-M29", { base: "P30", spec: [SPEC.g14, SPEC.r21], title: "toolName search@v2.x: an identifier that is also an email shape (dotted domain after the @)",
+  build: {
+    receiptDecision: { toolName: "search@v2.x" },
+    facts: makeFacts({ action: baseAction({ agentId: null, connectorId: null, kind: "mcp_tool", serverId: EX.serverId, toolName: "search@v2.x", toolNameHash: null }) }),
+  },
+  expect: { checks: { bundle_email_scan: I("email_shape") } } });
+addNegative("N-L01", { base: "P28", spec: [SPEC.link], title: "the carried AI BOM is another snapshot (A03) than basis.aiBomSnapshotId (A01)",
+  build: { linkedAiBom: { body: AI.v2.body } }, expect: { checks: { ai_bom_link: I("bom_link_mismatch") } } });
+addNegative("N-L02", { base: "P28", spec: [SPEC.link, SPEC.unknownKey], title: "the carried AI BOM is signed by a receipt key the trust root does not hold (RX)",
+  build: { linkedAiBom: { body: AI.v1.body, key: K.RX } }, expect: { checks: { ai_bom_link: I("unknown_key") } }, authentic: { manifest: true, body: true, receipt: true, aiBom: "untrusted" } });
+addNegative("N-L03", { base: "P01", spec: [SPEC.files, SPEC.link], title: "content/ai-bom.json carried (listed and signed) while basis.aiBomSnapshotId is null",
+  build: { linkedAiBom: { body: AI.v1.body } }, expect: { checks: { bundle_manifest_files: I("manifest_mismatch") } }, authentic: { manifest: true, body: true, receipt: true, aiBom: true } });
+
+// ---------------------------------------------------------------------------
+// AI BOM bundles (ADR-0189 B4.9 G12): the worked example's bodies, signed and enveloped per B4.1 and B4.2
+// ---------------------------------------------------------------------------
+
+const AI_README =
+  "RegulAIt signed export bundle (regulait.export-bundle/3, subject ai-bom)\n\n" +
+  "TEST-ONLY CANARY EXAMPLE: every key that signed this bundle is a published test key.\n\n" +
+  "Verify with an out-of-band trust root only: the export key fingerprint for\n" +
+  "manifest.json.sig, and the receipt key for content/ai-bom.json.sig.\n" +
+  "signing-key.pub and receipt-keys.json are convenience copies, never the trust root.\n";
+const AI_FORMAT_ORDER = ["native", "cyclonedx-1.7", "cyclonedx-1.6", "spdx-3.0.1"];
+
+function buildAiBundle(o = {}) {
+  const hk = o.hooks ?? {};
+  const bodyKey = o.bodyKey ?? K.R1;
+  const exportKey = o.exportKey ?? K.E1;
+  const bodyText = hk.bodyText ? hk.bodyText(o.body) : o.body;
+  const body = JSON.parse(bodyText);
+  const renderings = o.renderings ?? {}; // format -> exact bytes carried
+  const format = o.format ?? "native";
+  const sigObj = { alg: "Ed25519", keyId: bodyKey.keyId, signature: signB64url(bodyKey, bodyText), signedSha256: sha(bodyText) };
+  let files = new Map();
+  files.set("README.txt", AI_README);
+  files.set("content/ai-bom.json", bodyText);
+  files.set("content/ai-bom.json.sig", hk.sigFile ? hk.sigFile(sigObj, bodyText) : canon(sigObj));
+  for (const [f, bytes] of Object.entries(renderings)) files.set(`content/ai-bom.${f}.json`, bytes);
+  files.set("receipt-keys.json", canon({ keys: [{ fingerprint: bodyKey.pub.fingerprint, jwk: bodyKey.pub.jwk, keyId: bodyKey.keyId }] }));
+  files.set("signing-key.pub", exportKey.pub.publicKeyPem);
+  if (hk.files) files = hk.files(files);
+  const listed = [...files.entries()].map(([path, text]) => ({ path, sha256: sha(Buffer.from(text, "utf8")) })).sort((a, b) => byCodeUnit(a.path, b.path));
+  let manifest = {
+    audit: null, exportedAt: EX.exportedAt, exportedAtSource: "database", exportedByUserId: EX.exporter, files: listed,
+    installId: null, installIdSource: "absent", product: "regulait", schema: "regulait.export-bundle/3",
+    signingKeyFingerprint: exportKey.pub.fingerprint, signingKeyId: exportKey.keyId,
+    subject: {
+      descriptor: {
+        bodySha256: sha(bodyText), formats: AI_FORMAT_ORDER.filter((f) => f === "native" || f in renderings), serialNumber: body.serialNumber,
+        snapshotId: body.snapshot.id, subjectId: body.snapshot.subjectId, subjectKind: body.snapshot.subjectKind, trigger: body.snapshot.trigger, version: body.snapshot.version,
+      },
+      id: body.snapshot.id, kind: "ai-bom",
+    },
+  };
+  if (hk.manifest) manifest = hk.manifest(manifest);
+  const manifestBytes = canon(manifest);
+  files.set("manifest.json", manifestBytes);
+  files.set("manifest.json.sig", `${signB64(exportKey, manifestBytes)}\n`);
+  const root = o.root ?? `regulait-export-ai-bom-${body.snapshot.id}-${format}`;
+  const entries = [...files.entries()].map(([path, text]) => ({ name: `${root}/${path}`, type: "file", text })).sort((a, b) => byCodeUnit(a.name, b.name));
+  return { root, files, entries, body };
+}
+
+const aiBuilt = new Map();
+function addAiPositive(id, { spec, title, build, checks }) {
+  const b = buildAiBundle(build);
+  aiBuilt.set(id, build);
+  const tar = ustar(b.entries);
+  const ctx = { subject: "ai-bom", source: "bundle", version: b.body.snapshot.version };
+  positives.push({
+    id, polarity: "positive", subject: "ai-bom", title, spec: specWith(spec, [], [SPEC.ai, SPEC.agg]),
+    trust: trust(),
+    bundle: { root: b.root, entries: b.entries, tarSha256: sha(tar), tarBytes: tar.length },
+    expect: {
+      outcome: outcomeOf(checks, ctx), checks, cannotProve: cannotProveOf(ctx),
+      identity: { serialNumber: b.body.serialNumber, snapshotId: b.body.snapshot.id, subject: "ai-bom", subjectId: b.body.snapshot.subjectId, subjectKind: b.body.snapshot.subjectKind, version: b.body.snapshot.version },
+      sections: "none (an AI BOM has no Decision BOM sections)",
+    },
+    authentic: { manifest: true, body: true },
+  });
+}
+function addAiNegative(id, { base, spec, title, build = {}, expect, authentic = { manifest: true, body: true } }) {
+  const b = buildAiBundle({ ...aiBuilt.get(base), ...build });
+  const tar = ustar(b.entries);
+  negatives.push({
+    id, polarity: "negative", subject: "ai-bom", title, spec: specWith(spec, [], [SPEC.ai, SPEC.g9]),
+    trust: trust(), bundle: { base, entries: b.entries, tarSha256: sha(tar), tarBytes: tar.length },
+    expect: { outcome: "invalid", ...expect }, authentic,
+  });
+}
+const aiChecks = ({ rendering = null, version = 1 } = {}) => ({
+  bundle_manifest_signature: V, bundle_manifest_files: V, bundle_subject: V, bundle_email_scan: V,
+  body_version: V, body_schema: V, body_signature: V, serial_number: V,
+  supersedes: version > 1 ? U("earlier_snapshot_not_in_bundle") : ABSENT,
+  rendering_hashes: rendering ? { ref: rendering, result: "valid" } : ABSENT,
+});
+addAiPositive("A01", { spec: [SPEC.root, SPEC.files, SPEC.manifest], title: "AI BOM worked example A01 (install subject, version 1) as ?format=native: the signed body alone",
+  build: { body: AI.v1.body }, checks: aiChecks() });
+addAiPositive("A02", { spec: [SPEC.root, SPEC.files, SPEC.manifest], title: "A01 as ?format=cyclonedx-1.7: the body plus the rendering its renderings[\"cyclonedx-1.7\"] commits to",
+  build: { body: AI.v1.body, format: "cyclonedx-1.7", renderings: { "cyclonedx-1.7": AI.v1.cdx17 } }, checks: aiChecks({ rendering: "cyclonedx-1.7" }) });
+addAiPositive("A03", { spec: [SPEC.root, SPEC.agg], title: "worked example A03 (version 2, supersedes A01) as ?format=native: supersedes unverifiable earlier_snapshot_not_in_bundle by design, outcome valid",
+  build: { body: AI.v2.body }, checks: aiChecks({ version: 2 }) });
+
+const reBody = (fn) => (text) => canon(fn(JSON.parse(text)));
+addAiNegative("NA01", { base: "A02", spec: [SPEC.ai], title: "the carried CycloneDX 1.7 file is not the bytes the body commits to (listed and signed)",
+  build: { renderings: { "cyclonedx-1.7": AI.v1.cdx17.replace("\"version\":1}", "\"version\":2}") } }, expect: { checks: { rendering_hashes: I("hash_mismatch") } } });
+addAiNegative("NA02", { base: "A01", spec: [SPEC.ai], title: "a cyclonedx-1.6 file carried although the body has no rendered cyclonedx-1.6 entry",
+  build: { format: "cyclonedx-1.6", renderings: { "cyclonedx-1.6": AI.v1.cdx17.replace("\"specVersion\":\"1.7\"", "\"specVersion\":\"1.6\"") } }, expect: { checks: { rendering_hashes: I("rendering_not_in_body") } } });
+addAiNegative("NA03", { base: "A01", spec: [SPEC.ai], title: "serialNumber not derived from snapshot.id (body re-signed)",
+  build: { hooks: { bodyText: reBody((b) => ({ ...b, serialNumber: "urn:uuid:589e3cf8-69ef-8a44-acc8-a8c6bda58791" })) } }, expect: { checks: { serial_number: I("serial_mismatch") } } });
+addAiNegative("NA04", { base: "A01", spec: [SPEC.ai, SPEC.manifest], title: "descriptor.version 2 for a version 1 snapshot (re-signed manifest)",
+  build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, descriptor: { ...m.subject.descriptor, version: 2 } } }) } }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
+addAiNegative("NA05", { base: "A01", spec: [SPEC.ai, SPEC.sigFile], title: "content/ai-bom.json.sig signs other bytes",
+  build: { hooks: { sigFile: (s, bytes) => canon({ ...s, signature: signB64url(K.R1, `${bytes} `) }) } }, expect: { checks: { body_signature: I("signature_mismatch") } }, authentic: { manifest: true, body: false } });
+addAiNegative("NA06", { base: "A01", spec: [SPEC.ai, SPEC.owner2], title: "body v regulait.ai-bom.v2 (re-signed)",
+  build: { hooks: { bodyText: reBody((b) => ({ ...b, v: "regulait.ai-bom.v2" })) } }, expect: { checks: { body_version: I("unknown_body_version") } } });
+addAiNegative("NA07", { base: "A02", spec: [SPEC.ai, SPEC.manifest], title: "descriptor.formats lists native only while the CycloneDX file is carried (re-signed manifest)",
+  build: { hooks: { manifest: (m) => ({ ...m, subject: { ...m.subject, descriptor: { ...m.subject.descriptor, formats: ["native"] } } }) } }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
+addAiNegative("NA08", { base: "A01", spec: [SPEC.ai, SPEC.files], title: "an audit/chain.tsv in an AI BOM bundle (listed and signed)",
+  build: { hooks: { files: (f) => { f.set("audit/chain.tsv", "42\t0\t0\t0\n"); return f; } } }, expect: { checks: { bundle_manifest_files: I("manifest_mismatch") } } });
+addAiNegative("NA09", { base: "A01", spec: [SPEC.ai, SPEC.root], title: "root directory without the -native suffix for a ?format=native bundle",
+  build: { root: `regulait-export-ai-bom-${AI.v1.id}` }, expect: { checks: { bundle_subject: I("subject_mismatch") } } });
 
 // ---------------------------------------------------------------------------
 // B4.5 finality as emitted (server side, data only)
@@ -950,7 +1207,7 @@ const RANK = { anchored: 4, anchored_finite_lock: 3, anchored_unverified_destina
 const freezeAt = "2026-10-10T13:00:00.000Z";
 const anchorIn = (o = {}) => ({ status: "flushed", tamperResistant: true, retainUntil: "2036-10-10T00:00:00.000Z", timestampGranted: false, ...o });
 const emission = [];
-const em = (id, title, input, expect, spec = [SPEC.emitted, SPEC.freezeRule]) => emission.push({ id, title, spec, input: { freezeAt, timestampMode: "optional", finiteLockFinality: "refuse", retentionEnd: "2033-10-10T12:00:00.000Z", ...input }, expect });
+const em = (id, title, input, expect, spec = [SPEC.emitted, SPEC.freezeRule]) => emission.push({ id, title, spec, input: { freezeAt, timestampMode: "off", finiteLockFinality: "refuse", retentionEnd: "2033-10-10T12:00:00.000Z", ...input }, expect });
 em("E01", "no flushed anchor, floor anchored", { anchor: null, floor: "anchored" }, { pending: "anchor_not_flushed" });
 em("E02", "no flushed anchor, floor chain_signed", { anchor: null, floor: "chain_signed" }, { freeze: "chain_signed", shortOf: "anchor_not_flushed" });
 em("E03", "anchor not yet flushed counts as no flushed anchor", { anchor: anchorIn({ status: "pending" }), floor: "anchored_unverified_destination" }, { pending: "anchor_not_flushed" });
@@ -971,32 +1228,55 @@ em("E17", "unbounded retention, refuse, floor anchored: pending with retention_u
 em("E18", "unbounded retention, accept, floor anchored: anchored_finite_lock freezes whatever the floor", { anchor: anchorIn(), retentionEnd: null, finiteLockFinality: "accept", floor: "anchored" }, { freeze: "anchored_finite_lock" });
 em("E19", "unbounded retention, accept, floor chain_signed", { anchor: anchorIn(), retentionEnd: null, finiteLockFinality: "accept", floor: "chain_signed" }, { freeze: "anchored_finite_lock" });
 em("E20", "timestamps required and granted, everything recorded", { anchor: anchorIn({ timestampGranted: true }), timestampMode: "required", floor: "anchored" }, { freeze: "anchored" });
+// ADR-0189 B4.9 G11: several shortfalls at once; the first in strongest()'s order wins (finality.ts:88-103)
+const g11 = [SPEC.emitted, SPEC.freezeRule, SPEC.g11];
+em("E21", "not tamper-resistant AND retain_until null, floor anchored_unverified_destination: destination_not_tamper_resistant", { anchor: anchorIn({ tamperResistant: false, retainUntil: null }), floor: "anchored_unverified_destination" }, { freeze: "anchored_unverified_destination", shortOf: "destination_not_tamper_resistant" }, g11);
+em("E22", "unbounded retention on a non-tamper-resistant destination under accept: never a finite lock", { anchor: anchorIn({ tamperResistant: false }), retentionEnd: null, finiteLockFinality: "accept", floor: "anchored" }, { pending: "destination_not_tamper_resistant" }, g11);
+em("E23", "timestamps required and none granted AND retain_until null, floor anchored: timestamp_pending", { anchor: anchorIn({ retainUntil: null }), timestampMode: "required", floor: "anchored" }, { pending: "timestamp_pending" }, g11);
+em("E24", "retain_until lapsed AND unbounded retention under accept: lock_lapsed, never a finite lock", { anchor: anchorIn({ retainUntil: "2026-10-10T12:00:00.000Z" }), retentionEnd: null, finiteLockFinality: "accept", floor: "chain_signed" }, { freeze: "anchored_unverified_destination", shortOf: "lock_lapsed" }, g11);
+em("E25", "unbounded retention on a non-tamper-resistant destination under accept, floor anchored_unverified_destination", { anchor: anchorIn({ tamperResistant: false }), retentionEnd: null, finiteLockFinality: "accept", floor: "anchored_unverified_destination" }, { freeze: "anchored_unverified_destination", shortOf: "destination_not_tamper_resistant" }, g11);
 
 // ---------------------------------------------------------------------------
 // B4.4 required-checks rules over a verify response (abstract response shape)
 // ---------------------------------------------------------------------------
 
 const requiredDecision = ["body_version", "body_schema", "body_signature", "receipt_signature", "receipt_payload_hash", "receipt_facts_binding", "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality"];
+const requiredAi = ["body_version", "body_schema", "body_signature", "serial_number"];
 const bundleChecks = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"];
 const ok = (name) => (name === "decision_content_binding" ? { name, result: "unverifiable", reason: "preimage_not_exported" } : name.startsWith("anchor_") || name === "tsa_token" ? { name, result: "unverifiable", reason: "anchor_absent" } : { name, result: "valid" });
 const goodChecks = () => [...bundleChecks, ...requiredDecision].map(ok);
+const anchoredChecks = () => [...bundleChecks, ...requiredDecision].map((name) => (name === "decision_content_binding" ? ok(name) : name === "anchor_imprint" || name === "tsa_token" ? { name, result: "unverifiable", reason: "no_timestamp_token" } : { name, result: "valid" }));
 const responseRules = [];
-const rr = (id, title, spec, response, conforms) => responseRules.push({ id, title, spec, response, conforms });
-rr("Q01", "the B4.6 report: every required check, fixed results, outcome valid_with_unverifiable", [SPEC.required, SPEC.example], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks() }, true);
-rr("Q02", "a non-invalid outcome missing the finality check", [SPEC.required], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks().filter((c) => c.name !== "finality") }, false);
-rr("Q03", "decision_content_binding reported valid", [SPEC.fixed], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks().map((c) => (c.name === "decision_content_binding" ? { name: c.name, result: "valid" } : c)) }, false);
-rr("Q04", "a Decision BOM outcome valid (impossible: decision_content_binding is always unverifiable)", [SPEC.fixed, SPEC.sectionsAgg], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid", checks: goodChecks() }, false);
-rr("Q05", "a stored source reporting bundle_manifest_signature valid", [SPEC.required], { source: "stored", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: [...requiredDecision.map(ok), { name: "bundle_manifest_signature", result: "valid" }] }, false);
-rr("Q06", "a stored source reporting the bundle checks unverifiable not_a_bundle", [SPEC.required], { source: "stored", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: [...requiredDecision.map(ok), ...bundleChecks.map((name) => ({ name, result: "unverifiable", reason: "not_a_bundle" }))] }, true);
-rr("Q07", "a bundle source reporting not_a_bundle", [SPEC.required], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks().map((c) => (c.name === "bundle_subject" ? { name: c.name, result: "unverifiable", reason: "not_a_bundle" } : c)) }, false);
-rr("Q08", "a check reported twice without distinct non-null refs", [SPEC.required], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: [...goodChecks(), { name: "chain_links", result: "valid" }] }, false);
-rr("Q09", "a v2 receipt with receipt_facts_binding unverifiable receipt_v1_no_factsHash", [SPEC.fixed], { source: "bundle", subject: "decision_bom", receiptPayloadVersion: "v2", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks().map((c) => (c.name === "receipt_facts_binding" ? { name: c.name, result: "unverifiable", reason: "receipt_v1_no_factsHash" } : c)) }, false);
-rr("Q10", "a v1 receipt with receipt_facts_binding valid", [SPEC.fixed], { source: "bundle", subject: "decision_bom", receiptPayloadVersion: "v1", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks() }, false);
-rr("Q11", "anchor_absent on an anchored BOM's anchor checks", [SPEC.fixed], { source: "bundle", subject: "decision_bom", finality: "anchored", outcome: "valid_with_unverifiable", checks: goodChecks() }, false);
-rr("Q12", "sections_projection reported unverifiable", [SPEC.sectionsAgg], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks().map((c) => (c.name === "sections_projection" ? { name: c.name, result: "unverifiable", reason: "preimage_not_exported" } : c)) }, false);
-rr("Q13", "an invalid check with outcome valid_with_unverifiable (any invalid gives invalid)", [SPEC.sectionsAgg], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: goodChecks().map((c) => (c.name === "chain_links" ? { name: c.name, result: "invalid" } : c)) }, false);
-rr("Q14", "a stored ai_bom_snapshot source used for a Decision BOM", [SPEC.required, "B4.4 'Required checks': stored source names its own subject (B4C-03)"], { source: "stored", storedKind: "ai_bom_snapshot", subject: "decision_bom", finality: "chain_signed", outcome: "valid_with_unverifiable", checks: requiredDecision.map(ok) }, false);
-rr("Q15", "a missing required check with outcome invalid is admissible (a response missing one can only be invalid)", [SPEC.required], { source: "bundle", subject: "decision_bom", finality: "chain_signed", outcome: "invalid", checks: [{ name: "bundle_manifest_signature", result: "invalid" }] }, true);
+/** a response: `cannotProve` defaults to what B4.8 requires for its subject and conditions */
+const rr = (id, title, spec, response, conforms) => {
+  const r = { receiptPayloadVersion: "v2", ...response };
+  const ctx = { subject: r.subject === "ai_bom" ? "ai-bom" : "decision-bom", source: r.source, receiptPayloadVersion: r.receiptPayloadVersion, recordedFinality: r.finality, reportedFinality: r.finality, version: r.version ?? 1 };
+  responseRules.push({ id, title, spec, response: { cannotProve: cannotProveOf(ctx), ...r }, conforms });
+};
+const DB = { source: "bundle", subject: "decision_bom", finality: "chain_signed" };
+rr("Q01", "the B4.6 report: every required check, fixed results, outcome valid (B4.8: every unverifiable result is by design)", [SPEC.required, SPEC.example, SPEC.agg], { ...DB, outcome: "valid", checks: goodChecks() }, true);
+rr("Q02", "a non-invalid outcome missing the finality check", [SPEC.required], { ...DB, outcome: "valid", checks: goodChecks().filter((c) => c.name !== "finality") }, false);
+rr("Q03", "decision_content_binding reported valid", [SPEC.fixed], { ...DB, outcome: "valid", checks: goodChecks().map((c) => (c.name === "decision_content_binding" ? { name: c.name, result: "valid" } : c)) }, false);
+rr("Q04", "outcome unverifiable although every unverifiable result is by design (it must be valid)", [SPEC.agg], { ...DB, outcome: "unverifiable", checks: goodChecks() }, false);
+rr("Q05", "a stored source reporting bundle_manifest_signature valid", [SPEC.required], { ...DB, source: "stored", outcome: "valid", checks: [...requiredDecision.map(ok), { name: "bundle_manifest_signature", result: "valid" }] }, false);
+rr("Q06", "a stored source reporting the bundle checks unverifiable not_a_bundle: by design, outcome valid", [SPEC.required, SPEC.agg], { ...DB, source: "stored", outcome: "valid", checks: [...requiredDecision.map(ok), ...bundleChecks.map((name) => ({ name, result: "unverifiable", reason: "not_a_bundle" }))] }, true);
+rr("Q07", "a bundle source reporting not_a_bundle", [SPEC.required], { ...DB, outcome: "unverifiable", checks: goodChecks().map((c) => (c.name === "bundle_subject" ? { name: c.name, result: "unverifiable", reason: "not_a_bundle" } : c)) }, false);
+rr("Q08", "a check reported twice without distinct non-null refs", [SPEC.required], { ...DB, outcome: "valid", checks: [...goodChecks(), { name: "chain_links", result: "valid" }] }, false);
+rr("Q09", "a v2 receipt with receipt_facts_binding unverifiable receipt_v1_no_factsHash", [SPEC.fixed], { ...DB, outcome: "unverifiable", checks: goodChecks().map((c) => (c.name === "receipt_facts_binding" ? { name: c.name, result: "unverifiable", reason: "receipt_v1_no_factsHash" } : c)) }, false);
+rr("Q10", "a v1 receipt with receipt_facts_binding valid", [SPEC.fixed], { ...DB, receiptPayloadVersion: "v1", outcome: "valid", checks: goodChecks() }, false);
+rr("Q11", "anchor_absent on an anchored BOM's anchor checks", [SPEC.fixed], { ...DB, finality: "anchored", outcome: "valid", checks: goodChecks() }, false);
+rr("Q12", "sections_projection reported unverifiable", [SPEC.sectionsAgg], { ...DB, outcome: "unverifiable", checks: goodChecks().map((c) => (c.name === "sections_projection" ? { name: c.name, result: "unverifiable", reason: "preimage_not_exported" } : c)) }, false);
+rr("Q13", "an invalid check with outcome valid (any invalid gives invalid)", [SPEC.sectionsAgg, SPEC.agg], { ...DB, outcome: "valid", checks: goodChecks().map((c) => (c.name === "chain_links" ? { name: c.name, result: "invalid", reason: "chain_break" } : c)) }, false);
+rr("Q14", "a stored ai_bom_snapshot source used for a Decision BOM", [SPEC.required, "B4.4 'Required checks': stored source names its own subject (B4C-03)"], { ...DB, source: "stored", storedKind: "ai_bom_snapshot", outcome: "valid", checks: requiredDecision.map(ok) }, false);
+rr("Q15", "a missing required check with outcome invalid is admissible (a response missing one can only be invalid)", [SPEC.required], { ...DB, outcome: "invalid", checks: [{ name: "bundle_manifest_signature", result: "invalid", reason: "signature_mismatch" }] }, true);
+rr("Q16", "anchored with no timestamp token, outcome valid (no_timestamp_token is not by design: it must be unverifiable)", [SPEC.agg, SPEC.g5], { ...DB, finality: "anchored", outcome: "valid", checks: anchoredChecks() }, false);
+rr("Q17", "anchored with no timestamp token, outcome unverifiable", [SPEC.agg, SPEC.g5], { ...DB, finality: "anchored", outcome: "unverifiable", checks: anchoredChecks() }, true);
+rr("Q18", "a v1 receipt below the boundary: receipt_v1_no_factsHash is by design, outcome valid, facts_recorded_at_decision_time listed", [SPEC.agg, SPEC.r46], { ...DB, receiptPayloadVersion: "v1", outcome: "valid", checks: goodChecks().map((c) => (c.name === "receipt_facts_binding" ? { name: c.name, result: "unverifiable", reason: "receipt_v1_no_factsHash" } : c)) }, true);
+rr("Q19", "the B4.6 report without external_commitment in cannotProve", [SPEC.agg], { ...DB, outcome: "valid", checks: goodChecks(), cannotProve: ["nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content"] }, false);
+rr("Q20", "a section reported unverifiable (a section is valid or invalid in v1)", [SPEC.agg], { ...DB, outcome: "unverifiable", checks: goodChecks(), sections: { model: "unverifiable" } }, false);
+rr("Q21", "a v1 receipt reported v2_receipt_before_boundary", [SPEC.g10], { ...DB, receiptPayloadVersion: "v1", outcome: "invalid", checks: goodChecks().map((c) => (c.name === "receipt_facts_binding" ? { name: c.name, result: "invalid", reason: "v2_receipt_before_boundary" } : c)) }, false);
+rr("Q22", "an AI BOM bundle of version 2: supersedes unverifiable earlier_snapshot_not_in_bundle is by design, outcome valid, superseded_snapshot listed", [SPEC.agg, SPEC.ai], { source: "bundle", subject: "ai_bom", version: 2, outcome: "valid", checks: [...bundleChecks, ...requiredAi].map((name) => ({ name, result: "valid" })).concat([{ name: "supersedes", result: "unverifiable", reason: "earlier_snapshot_not_in_bundle" }]) }, true);
+rr("Q23", "a stored AI BOM of version 2 whose earlier snapshot was pruned, outcome valid (on a stored source it is not by design)", [SPEC.agg, SPEC.ai], { source: "stored", subject: "ai_bom", version: 2, outcome: "valid", checks: requiredAi.map((name) => ({ name, result: "valid" })).concat([{ name: "supersedes", result: "unverifiable", reason: "earlier_snapshot_not_in_bundle" }]) }, false);
 
 // ---------------------------------------------------------------------------
 // assembly refusals (server side; given / expect, no bytes)
@@ -1026,7 +1306,7 @@ const assembly = [
 const keys = Object.values(K).map((k) => k.pub);
 const out = {
   format: "regulait.b4-spec-vectors.v1",
-  note: "TEST-ONLY CANARY vectors written from ADR-0189 B4.1-B4.7 text alone (ADR-0191 decision 4). Every key is derived from its published seedText (seed = SHA-256 of the UTF-8 text); no private key is stored. See README.md for the field meanings, the assumptions A1-A4 and the gaps G1-G15.",
+  note: "TEST-ONLY CANARY vectors written from ADR-0189 B4.1-B4.10 text alone (ADR-0191 decision 4). Every key is derived from its published seedText (seed = SHA-256 of the UTF-8 text); no private key is stored. See README.md for the field meanings; the gaps G1-G15 are settled by ADR-0189 B4.8-B4.10.",
   keys,
   verificationTime: EX.verificationTime,
   positives,

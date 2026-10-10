@@ -14,8 +14,13 @@
  *  - negatives: the overlay really changes the bundle (or the trust root), the
  *    signature layers it calls authentic verify and the one it breaks does not,
  *    and `projectionConsistent` is true to the bytes;
+ *  - AI BOM bundles (B4.9 G12): the same, and A01 to A03 equal the ADR's
+ *    `b4-ai-example:` blocks byte for byte;
+ *  - expectations: every positive's outcome and cannotProve are what this
+ *    file's own reading of B4.8 derives from its checks, and every negative
+ *    names its failing check WITH a reason (B4.9 G9);
  *  - finality emission and response rules: a reference reading of B4.5 and of
- *    B4.4's required-checks rules agrees with every expectation.
+ *    B4.4 and B4.8's required-checks and outcome rules agrees with every expectation.
  *
  *   node packages/shared/test-vectors/decision-bom/check-vectors.mjs [--vectors <path>]
  */
@@ -52,11 +57,87 @@ const CHECKS = new Set([
   "bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan",
   "body_version", "body_schema", "body_signature", "receipt_signature", "receipt_payload_hash", "receipt_facts_binding",
   "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality",
-  "facts_addenda_chain", "facts_addenda_signatures", "ai_bom_link",
+  "facts_addenda_chain", "facts_addenda_signatures", "ai_bom_link", "rendering_hashes", "serial_number", "supersedes",
 ]);
-const OUTCOMES = new Set(["valid", "valid_with_unverifiable", "invalid", "not_run"]);
+/** contract-b4.ts BOM_VERIFY_INVALID_REASONS plus B4.10's v2_receipt_before_boundary */
+const INVALID_REASONS = new Set([
+  "signature_mismatch", "unknown_key", "unknown_body_version", "schema_violation", "hash_mismatch", "manifest_mismatch", "subject_mismatch",
+  "facts_hash_mismatch", "v1_receipt_after_boundary", "v2_receipt_before_boundary", "addendum_chain_break", "section_mismatch", "chain_break",
+  "anchor_record_incomplete", "anchor_mismatch", "timestamp_invalid", "rendering_not_in_body", "serial_mismatch", "supersedes_mismatch",
+  "bom_link_mismatch", "email_shape", "bundle_unreadable",
+]);
+const UNVERIFIABLE_REASONS = new Set([
+  "preimage_not_exported", "receipt_v1_no_factsHash", "request_facts_not_recorded", "no_timestamp_token", "no_tsa_trust_bundle", "anchor_absent",
+  "snapshot_not_in_bundle", "earlier_snapshot_not_in_bundle", "rendering_not_producible", "not_a_bundle",
+]);
+/** B4.8 (outcomes as amended by B4.10): valid, unverifiable, invalid */
+const OUTCOMES = new Set(["valid", "unverifiable", "invalid", "not_run"]);
 const FINALITY = new Set(["anchored", "anchored_finite_lock", "anchored_unverified_destination", "chain_signed", "anchored_lapsed"]);
 const SECTIONS = ["action", "actors", "approval", "cost", "decision", "model", "outcome", "policy", "principal", "proof", "receipt", "trace"];
+
+/** ADR-0189 B4.9 G14: an email shape, as the spec states it (a linear scan) */
+const LOCAL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]$/;
+const LABEL = /^[A-Za-z0-9-]$/;
+function hasEmailShape(text) {
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    if (at === 0 || !LOCAL.test(text[at - 1])) continue;
+    let i = at + 1;
+    while (i < text.length && LABEL.test(text[i])) i++;
+    if (i > at + 1 && text[i] === "." && i + 1 < text.length && LABEL.test(text[i + 1])) return true;
+  }
+  return false;
+}
+
+/** ADR-0189 B4.8: by-design unverifiable results, the outcome rule and the exact cannotProve list */
+function byDesign(check, r, ctx) {
+  if (r.result !== "unverifiable") return false;
+  if (check.startsWith("bundle_")) return r.reason === "not_a_bundle" && ctx.source !== "bundle";
+  if (ctx.subject === "decision-bom") {
+    return (check === "decision_content_binding" && r.reason === "preimage_not_exported")
+      || (check === "receipt_facts_binding" && r.reason === "receipt_v1_no_factsHash" && ctx.receiptPayloadVersion === "v1")
+      || (["anchor_record", "anchor_imprint", "tsa_token"].includes(check) && r.reason === "anchor_absent" && ctx.recordedFinality === "chain_signed");
+  }
+  return check === "supersedes" && r.reason === "earlier_snapshot_not_in_bundle" && ctx.source === "bundle" && ctx.version > 1;
+}
+function outcomeFor(results, ctx) {
+  if (results.some(([, r]) => r.result === "invalid")) return "invalid";
+  return results.some(([n, r]) => r.result === "unverifiable" && !byDesign(n, r, ctx)) ? "unverifiable" : "valid";
+}
+const CANNOT_PROVE = [
+  "nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content",
+  "commitment_after_retain_until", "facts_recorded_at_decision_time", "finite_lock_under_unbounded_retention", "external_commitment", "superseded_snapshot",
+];
+function cannotProveFor(ctx) {
+  const want = ctx.subject === "decision-bom"
+    ? ["nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content",
+      ...(ctx.receiptPayloadVersion === "v1" ? ["facts_recorded_at_decision_time"] : []),
+      ...(ctx.reportedFinality === "anchored_lapsed" ? ["commitment_after_retain_until"] : []),
+      ...(ctx.recordedFinality === "anchored_finite_lock" ? ["finite_lock_under_unbounded_retention"] : []),
+      ...(ctx.recordedFinality === "chain_signed" ? ["external_commitment"] : [])]
+    : ["facts_true", "signing_time_beyond_anchor", ...(ctx.source === "bundle" && ctx.version > 1 ? ["superseded_snapshot"] : [])];
+  return CANNOT_PROVE.filter((c) => want.includes(c));
+}
+
+/** B1's projection column lists (contract.ts:328-363), as B4.9 G2 restates the two approval tables */
+const PROJECTION_COLUMNS = {
+  approvals: ["id", "objectType", "serverId", "toolName", "ruleId", "connectorId", "projectId", "approverUserId", "namedApproverUserId", "approverRoleId", "status", "requestedAt", "decidedBy", "decidedAt", "argumentsDigest", "contextDigest", "approvalScope", "quorum", "signatureMode", "expiresAt"],
+  approval_decisions: ["id", "approvalId", "deciderUserId", "principalUserId", "decision", "stepUpMethod", "credentialId", "signedDigest", "counterBefore", "decidedAt"],
+  usage_events: ["id", "at", "userId", "objectType", "agentId", "requestedAgentId", "connectorId", "operation", "provider", "model", "servedModel", "inputTokens", "outputTokens", "costUsd", "refusal", "projectId", "configVersionId", "configVersion", "configCanary", "agentConfigVersionId", "agentConfigVersion", "actorIdentityId", "delegationGrantId"],
+  trace_spans: ["id", "traceId", "parentSpanId", "seq", "kind", "status", "startedAt", "endedAt", "durationMs", "usageEventId", "auditLogId", "agentId", "mcpServerId", "connectorId", "provider", "model", "inputTokens", "outputTokens", "costUsd", "contentWithheld", "actorIdentityId", "delegationGrantId"],
+};
+/** B4.9 G4: decisionBomAnchorSchema's keys */
+const ANCHOR_KEYS = ["destination", "externalRef", "flushedAt", "id", "observationMode", "observedAt", "record", "retainUntil", "status", "tamperResistant", "tsa"];
+/** B4.9 G3: decisionFactsAddendumSchema's keys */
+const ADDENDUM_KEYS = ["auditId", "n", "postActionVerification", "prev", "rows", "v"];
+
+/** amendment 5: the AI BOM serial number (contract.ts:191-199, as B4.9 G12 cites it) */
+function aiBomSerial(id) {
+  const x = createHash("sha256").update(`regulait:ai-bom:${id.toLowerCase()}`, "utf8").digest();
+  x[6] = (x[6] & 0x0f) | 0x80;
+  x[8] = (x[8] & 0x3f) | 0x80;
+  const s = x.subarray(0, 16).toString("hex");
+  return `urn:uuid:${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`;
+}
 
 // ---------------------------------------------------------------------------
 // keys
@@ -178,6 +259,14 @@ function project(body) {
   const adds = body.facts.addenda.map((a) => JSON.parse(a.payload));
   const d = receipt.decision;
   const bound = facts ? [...facts.rows, ...adds.flatMap((a) => a.rows)] : [];
+  // B4.9 G15: a usage event or span bound twice has no valid projection
+  const once = bound.filter((r) => r.table === "usage_events" || r.table === "trace_spans").map((r) => `${r.table}\u0000${r.id}`);
+  assert.equal(new Set(once).size, once.length, "a usage event or span is bound once");
+  // B4.3 v2 bullet (B4.9 G9: under sections_projection): the receipt's actor equals the recorded actors
+  if (receipt.v === "regulait.receipt.v2" && facts?.actors) {
+    assert.equal(receipt.actor.identityId, facts.actors.actorIdentityId);
+    assert.equal(receipt.actor.delegationGrantId, facts.actors.delegationGrantId);
+  }
   const pick = (tables) => bound.filter((r) => tables.includes(r.table));
   const approvals = pick(["approvals", "approval_decisions"]).map((r, i) => [r, i]).sort(([a, i], [b, j]) => cmp(a.table, b.table) || cmp(a.id, b.id) || i - j).map(([r]) => ({ digest: r.digest, id: r.id, projection: r.projection, table: r.table }));
   const usage = pick(["usage_events"]).sort((a, b) => cmp(a.id, b.id));
@@ -205,6 +294,8 @@ function project(body) {
         inputTokens: usage.reduce((s, u) => s + u.projection.inputTokens, 0), outputTokens: usage.reduce((s, u) => s + u.projection.outputTokens, 0), usageEventIds: usage.map((u) => u.id),
       } : null,
       trace: spans.length ? { spanIds: spans.map((s) => s.id), traceIds: [...new Set(spans.map((s) => s.projection.traceId))].sort(cmp) } : null,
+      // B4.9 G13: basis is recomputed too
+      basis: { aiBomSnapshotId: facts?.model?.aiBomSnapshotId ?? null, anchorId: body.proof.anchor ? body.proof.anchor.id : null, auditSeq: body.proof.chain.at(-1).seq, receiptSeq: body.receipt.receiptSeq },
     },
     completeness: {
       action: fact(facts?.action ?? null, "not_captured_by_path"),
@@ -263,6 +354,10 @@ function layers(files, trust) {
     receipt: layer(jwk(receiptKeyFor(trust, body.receipt.keyId, rk)), body.receipt.payload, body.receipt.signature, urlEnc(body.receipt.signature)),
     addenda: "none",
   };
+  if (files.has("content/ai-bom.json")) {
+    const s = JSON.parse(files.get("content/ai-bom.json.sig"));
+    out.aiBom = layer(jwk(receiptKeyFor(trust, s.keyId, rk)), files.get("content/ai-bom.json"), s.signature, urlEnc(s.signature));
+  }
   if (body.facts.addenda.length) {
     const each = body.facts.addenda.map((a) => layer(jwk(receiptKeyFor(trust, a.keyId, rk)), a.payload, a.signature, urlEnc(a.signature)));
     out.addenda = each.every((x) => x === "true") ? "true" : each.includes("untrusted") ? "untrusted" : "false";
@@ -278,16 +373,18 @@ function checkPositiveBundle(v) {
   const files = filesOf(entries);
   const root = rootOf(entries);
   const { out, manifest, body, sigFile, rk } = layers(files, v.trust);
-  assert.deepEqual(out, { manifest: "true", body: "true", receipt: "true", addenda: asFlag(v.authentic.addenda) }, "every layer verifies");
+  assert.deepEqual(out, { manifest: "true", body: "true", receipt: "true", addenda: asFlag(v.authentic.addenda), ...("aiBom" in v.authentic ? { aiBom: "true" } : {}) }, "every layer verifies");
   // B4.1 layout
   assert.equal(root, `regulait-export-decision-bom-${body.auditId}-v${body.version}`);
   assert.deepEqual(entries.map((e) => e.name), entries.map((e) => e.name).sort(cmp), "entries sorted by full name");
   assert.ok(entries.every((e) => e.type === "file" && e.name.startsWith(`${root}/`)), "regular files under one root");
-  assert.deepEqual([...files.keys()].sort(cmp), FILES);
+  const linkedFiles = files.has("content/ai-bom.json") ? ["content/ai-bom.json", "content/ai-bom.json.sig"] : [];
+  const fileSet = [...FILES, ...linkedFiles].sort(cmp);
+  assert.deepEqual([...files.keys()].sort(cmp), fileSet);
   for (const p of ["manifest.json", "content/decision-bom.json", "content/decision-bom.json.sig", "receipt-keys.json"]) assert.equal(canonicalize(JSON.parse(files.get(p))), files.get(p), `${p} canonical, no trailing newline`);
   // the manifest
   assert.equal(manifest.schema, "regulait.export-bundle/3");
-  assert.deepEqual(manifest.files, FILES.filter((p) => !p.startsWith("manifest.json")).map((path) => ({ path, sha256: sha(Buffer.from(files.get(path), "utf8")) })));
+  assert.deepEqual(manifest.files, fileSet.filter((p) => !p.startsWith("manifest.json")).map((path) => ({ path, sha256: sha(Buffer.from(files.get(path), "utf8")) })));
   assert.equal(manifest.signingKeyFingerprint, spkiFingerprint(files.get("signing-key.pub")));
   assert.equal(manifest.subject.id, body.auditId);
   assert.equal(manifest.subject.kind, "decision-bom");
@@ -295,7 +392,7 @@ function checkPositiveBundle(v) {
   assert.deepEqual(desc, { aiBomSnapshotId: body.basis.aiBomSnapshotId, auditId: body.auditId, bodySha256: sha(files.get("content/decision-bom.json")), bomId: body.id, finality: body.finality, formats: [], receiptSeq: body.receipt.receiptSeq, version: body.version });
   assert.deepEqual(manifest.audit, { payloadScope: "none", segmentFromSeq: body.proof.chain[0].seq, segmentRowCount: body.proof.chain.length, segmentToSeq: body.proof.chain.at(-1).seq });
   assert.equal(manifest.installId === null, manifest.installIdSource === "absent");
-  assert.ok(entries.every((e) => !e.text.includes("@")), "no email shape anywhere");
+  assert.ok(entries.every((e) => !hasEmailShape(e.text)), "no email shape anywhere (B4.9 G14)");
   // the signature file
   assert.deepEqual(Object.keys(sigFile), ["alg", "keyId", "signature", "signedSha256"]);
   assert.equal(sigFile.alg, "Ed25519");
@@ -312,6 +409,7 @@ function checkPositiveBundle(v) {
     assert.equal(v.expect.receiptPayloadVersion, "v2");
     if (payload.factsStatus === "capture_off") assert.ok(payload.factsHash === null && body.facts.payload === null);
     else assert.equal(payload.factsHash, sha(body.facts.payload));
+    assert.ok(boundary !== null && body.decision.auditSeq >= boundary, "a v2 receipt needs a recorded boundary at or below its seq (B4.9 G10)");
     assert.deepEqual(v.expect.checks.receipt_facts_binding, { result: "valid" });
     if (body.actors) {
       assert.equal(payload.actor.identityId, body.actors.actorIdentityId);
@@ -328,13 +426,19 @@ function checkPositiveBundle(v) {
   body.facts.addenda.forEach((a, i) => {
     assert.equal(a.n, i + 1);
     assert.equal(a.prevHash, prev);
-    assert.equal(JSON.parse(a.payload).v, "regulait.decision-facts-addendum.v1");
+    const ap = JSON.parse(a.payload);
+    assert.deepEqual(Object.keys(ap).sort(cmp), ADDENDUM_KEYS, "addendum payload keys (B4.9 G3)");
+    assert.ok(ap.n === a.n && ap.prev === a.prevHash && ap.auditId === body.auditId, "addendum n, prev and auditId agree (B4.9 G3)");
+    assert.equal(ap.v, "regulait.decision-facts-addendum.v1");
     assert.equal(canonicalize(JSON.parse(a.payload)), a.payload);
     prev = sha(a.payload);
   });
   const facts = body.facts.payload === null ? null : JSON.parse(body.facts.payload);
   if (facts) assert.equal(canonicalize(facts), body.facts.payload);
-  for (const r of facts ? [...facts.rows, ...body.facts.addenda.flatMap((a) => JSON.parse(a.payload).rows)] : []) assert.equal(r.digest, sha(canonicalize({ projection: r.projection, table: r.table })));
+  for (const r of facts ? [...facts.rows, ...body.facts.addenda.flatMap((a) => JSON.parse(a.payload).rows)] : []) {
+    assert.equal(r.digest, sha(canonicalize({ projection: r.projection, table: r.table })), "row digest (B4.9 G1)");
+    assert.deepEqual(Object.keys(r.projection).sort(cmp), [...PROJECTION_COLUMNS[r.table]].sort(cmp), `${r.table} projection is the B1 column list (B4.9 G2)`);
+  }
   // the chain (§6) and chain.tsv
   body.proof.chain.forEach((r, i) => {
     assert.equal(r.rowHash, sha(`${r.prevHash}${r.contentHash}`));
@@ -349,6 +453,7 @@ function checkPositiveBundle(v) {
   const a = body.proof.anchor;
   assert.equal(body.finality === "chain_signed", a === null);
   if (a) {
+    assert.deepEqual(Object.keys(a).sort(cmp), ANCHOR_KEYS, "proof.anchor keys (B4.9 G4)");
     assert.deepEqual(Object.keys(a.record).sort(cmp), ["algorithm", "capturedAt", "headAt", "payloadVersion", "rowHash", "seq"]);
     assert.equal(a.record.seq, body.proof.chain.at(-1).seq);
     assert.equal(a.record.rowHash, body.proof.chain.at(-1).rowHash);
@@ -359,7 +464,15 @@ function checkPositiveBundle(v) {
     assert.equal(v.expect.reportedFinality, lapsed ? "anchored_lapsed" : body.finality);
   } else assert.equal(v.expect.reportedFinality, "chain_signed");
   assert.equal(v.expect.recordedFinality, body.finality);
-  assert.deepEqual(body.basis, { aiBomSnapshotId: null, anchorId: a ? a.id : null, auditSeq: body.proof.chain.at(-1).seq, receiptSeq: body.receipt.receiptSeq });
+  assert.deepEqual(body.basis, { aiBomSnapshotId: facts?.model?.aiBomSnapshotId ?? null, anchorId: a ? a.id : null, auditSeq: body.proof.chain.at(-1).seq, receiptSeq: body.receipt.receiptSeq });
+  // the linked AI BOM (B4.9): carried with its signature file, or reported snapshot_not_in_bundle
+  const link = body.basis.aiBomSnapshotId;
+  if (files.has("content/ai-bom.json")) {
+    const ai = JSON.parse(files.get("content/ai-bom.json"));
+    assert.equal(ai.snapshot.id, link);
+    assert.equal(JSON.parse(files.get("content/ai-bom.json.sig")).signedSha256, sha(files.get("content/ai-bom.json")));
+    assert.deepEqual(v.expect.checks.ai_bom_link, { result: "valid" });
+  } else assert.deepEqual(v.expect.checks.ai_bom_link, link === null ? "absent" : { reason: "snapshot_not_in_bundle", result: "unverifiable" });
   // sections (B4.4)
   assert.ok(projectionHolds(body), "sections and completeness re-derive from the facts and the receipt");
   assert.deepEqual(Object.keys(body.completeness), SECTIONS);
@@ -367,8 +480,73 @@ function checkPositiveBundle(v) {
   const c = v.expect.checks;
   assert.equal(c.facts_addenda_chain === "absent", body.facts.addenda.length === 0);
   assert.equal(c.anchor_record?.reason === "anchor_absent", a === null);
+  if (a && a.tsa === null) for (const n of ["anchor_imprint", "tsa_token"]) assert.deepEqual(c[n], { reason: "no_timestamp_token", result: "unverifiable" }, `${n} with no token (B4.9 G5)`);
   assert.deepEqual(c.decision_content_binding, { reason: "preimage_not_exported", result: "unverifiable" });
-  assert.equal(v.expect.outcome, "valid_with_unverifiable");
+  // B4.8: the outcome and cannotProve follow from the checks and the bundle
+  const ctx = { subject: "decision-bom", source: "bundle", receiptPayloadVersion: v.expect.receiptPayloadVersion, recordedFinality: body.finality, reportedFinality: v.expect.reportedFinality };
+  assert.equal(v.expect.outcome, outcomeFor(Object.entries(c).filter(([, r]) => r !== "absent"), ctx), "outcome (B4.8)");
+  assert.deepEqual(v.expect.cannotProve, cannotProveFor(ctx), "cannotProve (B4.8)");
+}
+
+/** an AI BOM bundle (B4.9 G12) */
+const AI_FORMATS = ["native", "cyclonedx-1.7", "cyclonedx-1.6", "spdx-3.0.1"];
+function aiLayers(files, trust) {
+  const manifestText = files.get("manifest.json");
+  const manifest = JSON.parse(manifestText);
+  const sigText = files.get("manifest.json.sig") ?? "";
+  const mEnc = sigText.endsWith("\n") && B64STD88.test(sigText.slice(0, -1)) ? "std" : false;
+  const rk = JSON.parse(files.get("receipt-keys.json"));
+  const sigFile = JSON.parse(files.get("content/ai-bom.json.sig"));
+  const key = receiptKeyFor(trust, sigFile.keyId, rk);
+  return {
+    out: {
+      manifest: layer(exportKeyFor(trust, manifest.signingKeyId, files.get("signing-key.pub")), manifestText, sigText.slice(0, -1), mEnc),
+      body: layer(key && { key, format: "jwk" }, files.get("content/ai-bom.json"), sigFile.signature, urlEnc(sigFile.signature)),
+    },
+    manifest, sigFile, rk,
+  };
+}
+function checkAiPositive(v) {
+  const entries = v.bundle.entries;
+  const files = filesOf(entries);
+  const root = rootOf(entries);
+  const { out, manifest, sigFile, rk } = aiLayers(files, v.trust);
+  assert.deepEqual(out, { manifest: "true", body: "true" }, "every layer verifies");
+  const bodyText = files.get("content/ai-bom.json");
+  const body = JSON.parse(bodyText);
+  assert.equal(canonicalize(body), bodyText);
+  assert.equal(body.v, "regulait.ai-bom.v1");
+  const carried = [...files.keys()].filter((p) => /^content\/ai-bom\.[a-z0-9.-]+\.json$/.test(p) && p !== "content/ai-bom.json.sig").map((p) => p.slice("content/ai-bom.".length, -".json".length));
+  const formats = AI_FORMATS.filter((f) => f === "native" || carried.includes(f));
+  assert.equal(root, `regulait-export-ai-bom-${body.snapshot.id}-${formats.length === 1 ? "native" : formats[1]}`);
+  assert.ok(entries.every((e) => e.type === "file" && e.name.startsWith(`${root}/`)), "regular files under one root");
+  const fileSet = ["README.txt", "content/ai-bom.json", "content/ai-bom.json.sig", ...carried.map((f) => `content/ai-bom.${f}.json`), "manifest.json", "manifest.json.sig", "receipt-keys.json", "signing-key.pub"].sort(cmp);
+  assert.deepEqual([...files.keys()].sort(cmp), fileSet);
+  assert.deepEqual(manifest.files, fileSet.filter((p) => !p.startsWith("manifest.json")).map((path) => ({ path, sha256: sha(Buffer.from(files.get(path), "utf8")) })));
+  assert.equal(manifest.audit, null);
+  assert.equal(manifest.subject.kind, "ai-bom");
+  assert.equal(manifest.subject.id, body.snapshot.id);
+  const s = body.snapshot;
+  assert.deepEqual(manifest.subject.descriptor, { bodySha256: sha(bodyText), formats, serialNumber: body.serialNumber, snapshotId: s.id, subjectId: s.subjectId, subjectKind: s.subjectKind, trigger: s.trigger, version: s.version });
+  assert.equal(manifest.signingKeyFingerprint, spkiFingerprint(files.get("signing-key.pub")));
+  assert.ok(entries.every((e) => !hasEmailShape(e.text)), "no email shape anywhere");
+  assert.deepEqual(Object.keys(sigFile), ["alg", "keyId", "signature", "signedSha256"]);
+  assert.equal(sigFile.signedSha256, sha(bodyText));
+  assert.deepEqual(rk.keys.map((k) => k.keyId), [sigFile.keyId]);
+  // serial number and rendering commitments
+  assert.equal(body.serialNumber, aiBomSerial(s.id));
+  assert.equal(s.version === 1, s.supersedes === null);
+  for (const f of carried) {
+    const r = body.renderings[f];
+    assert.ok(r && r.status === "rendered" && r.sha256 === sha(files.get(`content/ai-bom.${f}.json`)) && r.bytes === Buffer.byteLength(files.get(`content/ai-bom.${f}.json`)), `rendering ${f} commitment`);
+  }
+  const c = v.expect.checks;
+  assert.deepEqual(c.supersedes, s.version > 1 ? { reason: "earlier_snapshot_not_in_bundle", result: "unverifiable" } : "absent");
+  assert.deepEqual(c.rendering_hashes, carried.length ? { ref: carried[0], result: "valid" } : "absent");
+  const ctx = { subject: "ai-bom", source: "bundle", version: s.version };
+  assert.equal(v.expect.outcome, outcomeFor(Object.entries(c).filter(([, r]) => r !== "absent"), ctx), "outcome (B4.8)");
+  assert.deepEqual(v.expect.cannotProve, cannotProveFor(ctx), "cannotProve (B4.8)");
+  assert.deepEqual(v.expect.identity, { serialNumber: body.serialNumber, snapshotId: s.id, subject: "ai-bom", subjectId: s.subjectId, subjectKind: s.subjectKind, version: s.version });
 }
 
 function checkAgainstAdrExample(v) {
@@ -391,18 +569,33 @@ for (const v of corpus.positives) {
     assert.ok(v.title && v.spec.length > 0 && v.trust && v.bundle.entries.length);
     for (const [n, r] of Object.entries(v.expect.checks)) {
       assert.ok(CHECKS.has(n), n);
-      assert.ok(r === "absent" || r === "not_invalid" || ["valid", "unverifiable"].includes(r.result), `${n} on a positive`);
+      assert.ok(r === "absent" || ["valid", "unverifiable"].includes(r.result), `${n} on a positive`);
+      if (r !== "absent" && r.result === "unverifiable") assert.ok(UNVERIFIABLE_REASONS.has(r.reason), `${n} reason`);
     }
-    assert.ok(FINALITY.has(v.expect.reportedFinality));
+    assert.ok(OUTCOMES.has(v.expect.outcome) && v.expect.outcome !== "invalid");
+    if (v.subject === "decision-bom") assert.ok(FINALITY.has(v.expect.reportedFinality));
   });
   check(`${v.id} tar bytes`, () => {
     const tar = tarOf(v.bundle.entries);
     assert.equal(sha(tar), v.bundle.tarSha256);
     assert.equal(tar.length, v.bundle.tarBytes);
   });
-  check(`${v.id} every layer verifies and every section re-derives`, () => checkPositiveBundle(v));
+  check(`${v.id} every layer verifies and every section re-derives`, () => (v.subject === "ai-bom" ? checkAiPositive(v) : checkPositiveBundle(v)));
 }
 check("P01 equals the B4.6 worked example byte for byte", () => checkAgainstAdrExample(positives.get("P01")));
+check("A01 to A03 carry the B4.9 AI BOM worked example byte for byte", () => {
+  const lines = readFileSync(new URL("../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md", dir), "utf8").split("\n");
+  const block = (name) => {
+    const i = lines.indexOf(`\`\`\`text b4-ai-example:${name}`);
+    assert.ok(i >= 0, `ADR block ${name}`);
+    const out = [];
+    for (let j = i + 1; lines[j] !== "\`\`\`"; j++) out.push(lines[j]);
+    return out.join("\n");
+  };
+  assert.equal(filesOf(positives.get("A01").bundle.entries).get("content/ai-bom.json"), block("v1/content/ai-bom.json"));
+  assert.equal(filesOf(positives.get("A02").bundle.entries).get("content/ai-bom.cyclonedx-1.7.json"), block("v1/content/ai-bom.cyclonedx-1.7.json"));
+  assert.equal(filesOf(positives.get("A03").bundle.entries).get("content/ai-bom.json"), block("v2/content/ai-bom.json"));
+});
 
 for (const v of corpus.negatives) {
   check(`${v.id} shape`, () => {
@@ -410,9 +603,11 @@ for (const v of corpus.negatives) {
     assert.ok(v.title && v.spec.length > 0, "names its spec paragraph");
     assert.ok(positives.has(v.bundle.base), "has a positive base");
     assert.ok(v.expect.outcome === "invalid" || v.expect.outcome === "not_run");
+    if (v.expect.outcome === "invalid") assert.ok(Object.keys(v.expect.checks ?? {}).length > 0, "names its failing check (B4.9 G9)");
     for (const [n, r] of Object.entries(v.expect.checks ?? {})) {
       assert.ok(CHECKS.has(n), n);
       assert.equal(r.result, "invalid", `${n}: a negative's named checks are invalid`);
+      assert.ok(INVALID_REASONS.has(r.reason), `${n}: names an invalid reason (B4.9 G9)`);
     }
   });
   check(`${v.id} mutation is real and isolated`, () => {
@@ -422,8 +617,12 @@ for (const v of corpus.negatives) {
     assert.equal(sha(tar), v.bundle.tarSha256);
     assert.equal(tar.length, v.bundle.tarBytes);
     assert.ok(sha(tar) !== base.bundle.tarSha256 || canonicalize(v.trust) !== canonicalize(base.trust), "the vector differs from its base");
-    const { out, body } = layers(filesOf(entries), v.trust);
     const want = Object.fromEntries(Object.entries(v.authentic).map(([k, x]) => [k, asFlag(x)]));
+    if (v.subject === "ai-bom") {
+      assert.deepEqual(aiLayers(filesOf(entries), v.trust).out, want, "authentic layers as declared");
+      return;
+    }
+    const { out, body } = layers(filesOf(entries), v.trust);
     assert.deepEqual(out, { addenda: "none", ...want }, "authentic layers as declared");
     assert.equal(projectionHolds(body), v.projectionConsistent, "projectionConsistent as declared");
   });
@@ -463,34 +662,48 @@ for (const e of corpus.finalityEmission.vectors) {
 // ---------------------------------------------------------------------------
 
 const REQUIRED = ["body_version", "body_schema", "body_signature", "receipt_signature", "receipt_payload_hash", "receipt_facts_binding", "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality"];
+const REQUIRED_AI = ["body_version", "body_schema", "body_signature", "serial_number"];
 const BUNDLE = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"];
+const ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"];
+/** B4.4 required checks and fixed results, with B4.8's outcome, by-design and cannotProve rules (as B4.10 puts them in the contract) */
 function conforms(r) {
   const by = new Map();
   for (const c of r.checks) {
     if (!CHECKS.has(c.name)) return false;
+    const kindOk = c.result === "valid" ? c.reason === undefined : c.result === "invalid" ? INVALID_REASONS.has(c.reason) : UNVERIFIABLE_REASONS.has(c.reason);
+    if (!kindOk) return false;
     by.set(c.name, [...(by.get(c.name) ?? []), c]);
   }
   for (const list of by.values()) if (list.length > 1 && (list.some((c) => !c.ref) || new Set(list.map((c) => c.ref)).size !== list.length)) return false;
-  const results = r.checks.map((c) => c.result);
-  const aggregate = results.includes("invalid") ? "invalid" : results.includes("unverifiable") ? "valid_with_unverifiable" : "valid";
-  if (r.outcome !== aggregate) return false;
+  const sections = Object.values(r.sections ?? {});
+  if (sections.includes("unverifiable")) return false; // B4.8: a section is valid or invalid in v1
+  const ai = r.subject === "ai_bom";
+  const ctx = { subject: ai ? "ai-bom" : "decision-bom", source: r.source, receiptPayloadVersion: r.receiptPayloadVersion, recordedFinality: r.finality, reportedFinality: r.finality, version: r.version ?? 1 };
+  const outcome = sections.includes("invalid") ? "invalid" : outcomeFor(r.checks.map((c) => [c.name, c]), ctx);
+  if (r.outcome !== outcome) return false;
   if (r.storedKind && r.storedKind !== r.subject) return false;
-  if (r.outcome === "invalid") return true;
-  if ((r.source === "bundle" ? [...BUNDLE, ...REQUIRED] : REQUIRED).some((n) => !by.has(n))) return false;
-  const one = (n) => by.get(n)?.[0];
-  const dcb = one("decision_content_binding");
-  if (dcb.result !== "unverifiable" || dcb.reason !== "preimage_not_exported") return false;
-  const rfb = one("receipt_facts_binding");
-  if (r.receiptPayloadVersion === "v1" && rfb.result === "valid") return false;
-  if (r.receiptPayloadVersion !== "v1" && ["receipt_v1_no_factsHash", "v1_receipt_after_boundary"].includes(rfb.reason)) return false;
-  if (one("sections_projection").result === "unverifiable") return false;
-  for (const c of r.checks) if (c.reason === "anchor_absent" && (r.finality !== "chain_signed" || !["anchor_record", "anchor_imprint", "tsa_token"].includes(c.name))) return false;
+  if (canonicalize(r.cannotProve) !== canonicalize(cannotProveFor(ctx))) return false;
+  const all = (n, pred) => (by.get(n) ?? []).every(pred);
+  // fixed results hold on whatever is reported, whatever the outcome
   for (const n of BUNDLE) {
-    const c = one(n);
-    if (c && r.source === "stored" && c.result === "valid") return false;
-    if (c && r.source === "bundle" && c.reason === "not_a_bundle") return false;
+    if (r.source === "stored" && !all(n, (c) => c.result === "unverifiable" && c.reason === "not_a_bundle")) return false;
+    if (r.source === "bundle" && !all(n, (c) => c.reason !== "not_a_bundle")) return false;
   }
-  return true;
+  if (r.checks.some((c) => c.reason === "not_a_bundle" && !BUNDLE.includes(c.name))) return false;
+  if (!ai) {
+    if (!all("decision_content_binding", (c) => c.result === "unverifiable" && c.reason === "preimage_not_exported")) return false;
+    const v1Reasons = ["receipt_v1_no_factsHash", "v1_receipt_after_boundary"];
+    if (r.receiptPayloadVersion === "v1" && !all("receipt_facts_binding", (c) => (c.result === "unverifiable" && c.reason === "receipt_v1_no_factsHash") || (c.result === "invalid" && c.reason === "v1_receipt_after_boundary"))) return false;
+    if (r.receiptPayloadVersion !== "v1" && r.checks.some((c) => v1Reasons.includes(c.reason))) return false;
+    if (!all("sections_projection", (c) => c.result !== "unverifiable")) return false;
+    if (r.finality === "chain_signed") {
+      for (const n of ANCHOR_CHECKS) if (!all(n, (c) => c.result === "unverifiable" && c.reason === "anchor_absent")) return false;
+    } else if (r.checks.some((c) => c.reason === "anchor_absent")) return false;
+  } else if (r.version === 1 && by.has("supersedes")) return false;
+  if (outcome === "invalid") return true;
+  // a non-invalid response reports every required check
+  const required = [...(ai ? REQUIRED_AI : REQUIRED), ...(r.source === "bundle" ? BUNDLE : []), ...(ai && r.version > 1 ? ["supersedes"] : [])];
+  return required.every((n) => by.has(n));
 }
 for (const q of corpus.responseRules) {
   check(`${q.id} response rule`, () => {
