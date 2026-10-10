@@ -211,9 +211,9 @@ beforeAll(async () => {
   const reg = await client.register(t.json().token, runnerSecret, { name: `modelscan-${RUN}`, ...MS_BUILD, selfTest });
   expect(reg.selfTest).toEqual({ passed: true, failures: [] });
   expect((await inject("POST", "/v1/engines/modelscan/self-test", admin.key)).json().passed).toBe(true);
-  const refused = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true });
+  const refused = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.modelscan.version, expectedDigest: MS_DIGEST });
   expect(refused.statusCode, refused.body).toBe(403);
-  const ok = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+  const ok = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.modelscan.version, expectedDigest: MS_DIGEST }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
   expect(ok.statusCode, ok.body).toBe(200);
 }, 180_000);
 
