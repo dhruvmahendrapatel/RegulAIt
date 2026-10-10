@@ -32,9 +32,22 @@ function configuration() {
     if (!statSync(file).isFile() || statSync(file).size > TSA_DER_LIMIT) throw new Error();
     const trust = parseTimestampTrustBundle(readFileSync(file, "utf8"));
     const policyOid = process.env.REGULAIT_TSA_POLICY_OID?.trim();
-    if (policyOid && !/^[0-2](\.[0-9]+)+$/.test(policyOid)) throw new Error();
+    if (policyOid && !isCanonicalPolicyOid(policyOid)) throw new Error();
     return { url: url.toString(), trust, ...(policyOid ? { policyOid } : {}) };
   } catch { throw new TimestampValidationError("timestamp_configuration_invalid"); }
+}
+/** ADR-0186 decision 30 item 4: a policy OID must be the canonical dotted form that the ASN.1 encoder in use
+ * (asn1js, which pkijs serialises `reqPolicy` with) encodes and decodes back to the same string. The round trip
+ * enforces the X.660 grammar: the first arc 0-2, the second arc 0-39 under 0 or 1 (asn1js folds a larger one
+ * into the next first arc, so it decodes differently), no leading zeros and at least two arcs. */
+export function isCanonicalPolicyOid(value: string): boolean {
+  if (value.length > 256 || !/^[0-2](?:\.(?:0|[1-9][0-9]*))+$/.test(value)) return false;
+  try {
+    const oid = new asn1.ObjectIdentifier({ value });
+    if (oid.valueBlock.error) return false;
+    const decoded = asn1.fromBER(oid.toBER(false));
+    return decoded.offset !== -1 && decoded.result instanceof asn1.ObjectIdentifier && decoded.result.getValue() === value;
+  } catch { return false; }
 }
 export function anchorCanonicalBytes(record: AnchorRecord): Uint8Array {
   return Buffer.from(canonicalJson(record), "utf8");
@@ -97,8 +110,15 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
     anchorRecordFromRow(row);
     let request: ReturnType<typeof timestampRequest> | undefined;
     let tsaUrl: string | undefined;
+    // A configuration error is an operator fault, not a TSA failure: it never consumes an attempt or schedules
+    // backoff, and the anchor is retried as soon as the configuration is corrected (ADR-0186 decision 30 item 4).
+    let config: ReturnType<typeof configuration>;
+    try { config = configuration(); } catch (error) {
+      const code = error instanceof TimestampValidationError ? error.message : "timestamp_configuration_invalid";
+      await tx.update(auditAnchors).set({ tsaStatus: "pending", tsaLastError: code }).where(eq(auditAnchors.id, id));
+      return { state: "configuration_invalid" as const, attempted: 0, granted: 0, failed: 0 };
+    }
     try {
-      const config = configuration();
       if (!config) {
         await tx.update(auditAnchors).set({ tsaStatus: "not_configured", tsaLastError: null, tsaNextAttemptAt: null }).where(eq(auditAnchors.id, id));
         return { state: "not_configured" as const, attempted: 0, granted: 0, failed: 0 };
@@ -130,7 +150,7 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
 export const anchorTimestamper: AnchorTimestamper = {
   async afterFlush(db, anchor) { await timestampAnchor(db, anchor.id, new Date(), { record: anchor.record }); },
 };
-export interface AnchorTimestampSweepResult { attempted: number; granted: number; failed: number; state: "not_built" | "not_configured" | "off" | "active" }
+export interface AnchorTimestampSweepResult { attempted: number; granted: number; failed: number; state: "not_built" | "not_configured" | "configuration_invalid" | "off" | "active" }
 export async function runAnchorTimestampSweep(db: Db, opts: { now: Date } = { now: new Date() }): Promise<AnchorTimestampSweepResult> {
   if ((await loadOrgSettings(db)).auditAnchorTimestampMode === "off") return { attempted: 0, granted: 0, failed: 0, state: "off" };
   const rows = await db.select().from(auditAnchors).where(and(eq(auditAnchors.status, "flushed"), ne(auditAnchors.tsaStatus, "granted"), sql`${auditAnchors.tsaAttempts} < ${MAX_ATTEMPTS}`, sql`(${auditAnchors.tsaNextAttemptAt} IS NULL OR ${auditAnchors.tsaNextAttemptAt} <= ${opts.now})`)).orderBy(asc(auditAnchors.seq)).limit(10);
@@ -139,6 +159,7 @@ export async function runAnchorTimestampSweep(db: Db, opts: { now: Date } = { no
     const out = await timestampAnchor(db, row.id, opts.now);
     result.attempted += out.attempted; result.granted += out.granted; result.failed += out.failed;
     if (out.state === "not_configured") result.state = "not_configured";
+    if (out.state === "configuration_invalid") result.state = "configuration_invalid";
   }
   if (!rows.length && !process.env.REGULAIT_TSA_URL && !process.env.REGULAIT_TSA_TRUST_BUNDLE) result.state = "not_configured";
   return result;

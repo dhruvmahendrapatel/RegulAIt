@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { auditAnchors, createDb, egressAllowHosts, eq, orgSettings, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { anchorCanonicalBytes, anchorRecordFromRow, anchorTimestamper, runAnchorTimestampSweep } from "./audit-timestamp.js";
+import { anchorCanonicalBytes, anchorRecordFromRow, anchorTimestamper, isCanonicalPolicyOid, runAnchorTimestampSweep } from "./audit-timestamp.js";
 import { flushPendingAnchors, captureAnchor, type AnchorSink } from "./audit-chain.js";
 import { parseTimestampTrustBundle, verifyTimestampResponse } from "./audit-timestamp-verify.js";
 import { readFileSync } from "node:fs";
@@ -164,9 +164,34 @@ describe.skipIf(!base)("X22 real timestamp persistence and guarded transport", (
     await db.update(auditAnchors).set({tsaToken:"{broken"}).where(eq(auditAnchors.id,row.id));
     expect((await app.inject({method:"POST",url:`/v1/audit/anchors/${row.id}/timestamp`,headers:auth})).statusCode).toBe(500);
   });
+  it("PR #234 item 4: a non-canonical policy OID is a configuration error that never consumes an attempt", async () => {
+    process.env.REGULAIT_TSA_URL = "https://tsa.example.test/"; process.env.REGULAIT_TSA_TRUST_BUNDLE = tsa.trustBundle;
+    try {
+      // second arc over 39 under 1, a leading zero, a first arc over 2, a single arc
+      for (const oid of ["1.40", "1.2.03", "3.1", "0.40.1", "1"]) {
+        process.env.REGULAIT_TSA_POLICY_OID = oid;
+        const row = await anchor();
+        const before = transport.requests.length;
+        await anchorTimestamper.afterFlush(db, { id: row.id, record: anchorRecordFromRow(row), flushStatus: "flushed" });
+        const retried = await app.inject({ method: "POST", url: `/v1/audit/anchors/${row.id}/timestamp`, headers: auth });
+        expect(retried.statusCode, oid).toBe(409);
+        expect(retried.json().state, oid).toBe("configuration_invalid");
+        const [stored] = await db.select().from(auditAnchors).where(eq(auditAnchors.id, row.id));
+        expect(stored, oid).toMatchObject({ tsaStatus: "pending", tsaAttempts: 0, tsaNextAttemptAt: null, tsaLastError: "timestamp_configuration_invalid" });
+        expect(transport.requests.length, oid).toBe(before);
+      }
+    } finally { delete process.env.REGULAIT_TSA_POLICY_OID; delete process.env.REGULAIT_TSA_URL; delete process.env.REGULAIT_TSA_TRUST_BUNDLE; }
+  });
   it("refuses anonymous access and malformed or unknown anchor IDs", async () => {
     expect((await app.inject({ method: "POST", url: `/v1/audit/anchors/${randomUUID()}/timestamp` })).statusCode).toBe(401);
     expect((await app.inject({ method: "POST", url: "/v1/audit/anchors/invalid/timestamp", headers: auth })).statusCode).toBe(400);
     expect((await app.inject({ method: "POST", url: `/v1/audit/anchors/${randomUUID()}/timestamp`, headers: auth })).statusCode).toBe(404);
+  });
+});
+
+describe("PR #234 item 4: TSA policy OID grammar (asn1js round trip)", () => {
+  it("accepts canonical OIDs and refuses every non-canonical form", () => {
+    for (const oid of ["1.2.3.4.5.6", "0.39", "1.0", "2.999.1", "2.100.3", "1.2.840.113549.1.1.11"]) expect(isCanonicalPolicyOid(oid), oid).toBe(true);
+    for (const oid of ["1.40", "0.40", "3.1", "1.02", "01.2", "1", "1..2", "1.2.", ".1.2", "1.2.a", " 1.2", "1.2.99999999999999999999", `1.${"2.".repeat(200)}3`]) expect(isCanonicalPolicyOid(oid), oid).toBe(false);
   });
 });

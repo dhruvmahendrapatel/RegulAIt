@@ -167,3 +167,36 @@ condition = "AND"
 paths = ['''^apps/gateway/src/zz-b4s-approver-eligibility\.test\.ts$''']
 regexTarget = "secret"
 regexes = ['''^b4s1-synthetic$''']
+
+[[allowlists]]
+description = "ADR-0189 spike B0 evidence: an Ed25519 signature (not a key) over synthetic records, made with a fixed public test seed to prove deterministic output"
+condition = "AND"
+paths = ['''^spikes/bom-b0/evidence/sample\.sha256\.json$''']
+regexTarget = "secret"
+regexes = [
+  '''^lrUdt/mQ6eFJnk4y2wrf2HUy45nTgzoern/fPd0dq4rEABF/OlRN0s4KO7y/MGzPxVsgss9tcc0tqiC2axZ2BA==$''',
+  # the first B0 run's signature, still in this branch's history (3c87da9)
+  '''^n9ZXFfLcsSpY5GYt/cD6Bfx9YIAL5a4gDsKXIZ6ArhWy7/8LEAT\+5\+SK8dmm\+HqDjewnMSNA8T\+G6iRXS6kcBA==$''',
+  # the third review round's run (persisted-shape fixtures)
+  '''^/MUhBadUVzalO1ZfHUer57dPy\+aSxoQmz55QOsvvlw\+qfIl/j/niAdYZt5r94QsO/Mv6a6v\+xNKVddX\+WehMBg==$''',
+  # the sixth review round's run (regulated sensitivity in the fixture)
+  '''^prg/VxDGBsJT8LQzt\+eeSUzqVeX51yw\+N83\+aN5uKMLO6n/alyHE2hjq0/YXinQJtBG89\+qgll5Mvoql00C/Bg==$''',
+  # the ninth review round's run (scalar data claims, install-only SBOM links)
+  '''^Emabpcf1Nf9TxaSu7mzIWSIo4yLnlgbhgNKvbVBWQPswsBdec1JIHZlyZHuUogSAxkvjJ0WCk9pfRjfdjxUqBQ==$''',
+  # the tenth review round's run (pinned skill digests, sanitised endpoints)
+  '''^7csMwSO2PO/Mobnk\+Va1IPxR5oxjO/Ntdin5lkRnj220qlFDB0aFfEH3JmX7s/y6UyUA6aVcH0u0xIy1zRMpAQ==$''',
+]
+
+[[allowlists]]
+description = "B4I-02 scrub-equivalence snapshot: a SHA-256 group digest of scrub output (not a key)"
+condition = "AND"
+paths = ['''^packages/shared/src/detection-content/scrub-equivalence\.snapshot\.json$''']
+regexTarget = "secret"
+regexes = ['''^283f4705bdec4d97544386f0aad190c9d4a7c09824b2adb8a65a25f6180e0355$''']
+
+[[allowlists]]
+description = "B4I-02 scrub-equivalence corpus: synthetic secret-shaped inputs the scrubber must redact (placeholder token and the public jwt.io example JWT)"
+condition = "AND"
+paths = ['''^packages/shared/src/__fixtures__/scrub-equivalence-corpus\.ts$''']
+regexTarget = "secret"
+regexes = ['''^abcdefgh12345678$''', '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$''']

@@ -1,0 +1,124 @@
+{
+  "library": "@cyclonedx/cyclonedx-library@10.3.0",
+  "node": "v22.22.2",
+  "fieldsSeen": {
+    "Bom": [
+      "components",
+      "metadata",
+      "serialNumber",
+      "services",
+      "version",
+      "vulnerabilities"
+    ],
+    "Component": [
+      "author",
+      "bomRef",
+      "compare",
+      "components",
+      "copyright",
+      "cpe",
+      "dependencies",
+      "description",
+      "evidence",
+      "externalReferences",
+      "group",
+      "hashes",
+      "licenses",
+      "name",
+      "properties",
+      "publisher",
+      "purl",
+      "scope",
+      "supplier",
+      "swid",
+      "type",
+      "version"
+    ],
+    "Service": [
+      "bomRef",
+      "compare",
+      "dependencies",
+      "description",
+      "externalReferences",
+      "group",
+      "licenses",
+      "name",
+      "properties",
+      "provider",
+      "services",
+      "version"
+    ]
+  },
+  "absent": {
+    "Bom": [
+      "formulation",
+      "declarations",
+      "definitions",
+      "compositions",
+      "annotations",
+      "externalReferences"
+    ],
+    "Component": [
+      "modelCard",
+      "data",
+      "omniborId",
+      "swhid",
+      "manufacturer",
+      "authors",
+      "tags"
+    ],
+    "Service": [
+      "endpoints",
+      "data",
+      "trustZone",
+      "authenticated",
+      "x-trust-boundary"
+    ]
+  },
+  "present": {
+    "Bom": [],
+    "Component": [],
+    "Service": []
+  },
+  "serializedKeys": {
+    "bomKeys": [
+      "$schema",
+      "bomFormat",
+      "components",
+      "dependencies",
+      "metadata",
+      "serialNumber",
+      "services",
+      "specVersion",
+      "version"
+    ],
+    "modelComponentKeys": [
+      "bom-ref",
+      "description",
+      "name",
+      "type",
+      "version"
+    ],
+    "dataComponentKeys": [
+      "bom-ref",
+      "name",
+      "type"
+    ],
+    "serviceKeys": [
+      "bom-ref",
+      "name"
+    ]
+  },
+  "positiveControlEmitted": true,
+  "droppedOnSerialize": {
+    "modelCard": true,
+    "componentData": true,
+    "serviceData": true,
+    "serviceEndpoints": true,
+    "declarations": true,
+    "formulation": true,
+    "compositions": true
+  },
+  "externalReferenceTypeHasModelCard": true,
+  "libraryStrictJsonValidator": "MissingOptionalDependencyError: No JsonValidator available."
+}

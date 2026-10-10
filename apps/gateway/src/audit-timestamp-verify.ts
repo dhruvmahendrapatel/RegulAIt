@@ -4,7 +4,7 @@ import * as asn1 from "asn1js";
 import { ESSCertIDv2, SigningCertificate, SigningCertificateV2 } from "@peculiar/asn1-ess";
 import { AlgorithmIdentifier as EssAlgorithmIdentifier } from "@peculiar/asn1-x509";
 import { AsnProp, AsnConvert } from "@peculiar/asn1-schema";
-import { Certificate, ContentInfo, ExtKeyUsage, PKIStatusInfo, RelativeDistinguishedNames, SignedData, TSTInfo, TimeStampResp } from "pkijs";
+import { AlgorithmIdentifier as PkiAlgorithmIdentifier, Certificate, ContentInfo, ExtKeyUsage, PKIStatusInfo, RelativeDistinguishedNames, RSASSAPSSParams, SignedData, TSTInfo, TimeStampResp, type SignerInfo } from "pkijs";
 
 export const TSA_SHA256_OID = "2.16.840.1.101.3.4.2.1";
 const TST_INFO_OID = "1.2.840.113549.1.9.16.1.4";
@@ -52,6 +52,39 @@ function essBinding(cms: SignedData, signer: Certificate) {
  }
 }
 
+// ADR-0186 decision 30 item 5: the hash a CMS signature is computed with comes from the signer's EFFECTIVE
+// signatureAlgorithm; digestAlgorithm only governs the messageDigest attribute. Only SHA-2 forms are accepted,
+// and the signature's hash must be the digest algorithm's hash.
+const SHA2_OIDS: Readonly<Record<string, string>> = { [TSA_SHA256_OID]: "sha256", "2.16.840.1.101.3.4.2.2": "sha384", "2.16.840.1.101.3.4.2.3": "sha512" };
+const RSA_ENCRYPTION = "1.2.840.113549.1.1.1", RSASSA_PSS = "1.2.840.113549.1.1.10", MGF1 = "1.2.840.113549.1.1.8";
+const SIGNATURE_HASHES: Readonly<Record<string, string>> = {
+  "1.2.840.113549.1.1.11": "sha256", "1.2.840.113549.1.1.12": "sha384", "1.2.840.113549.1.1.13": "sha512", // shaNNNWithRSAEncryption
+  "1.2.840.10045.4.3.2": "sha256", "1.2.840.10045.4.3.3": "sha384", "1.2.840.10045.4.3.4": "sha512", // ecdsa-with-SHANNN
+};
+export function timestampSignatureHash(signer: SignerInfo): string {
+  const digest = SHA2_OIDS[signer.digestAlgorithm.algorithmId] ?? refuse("timestamp_signature_hash_unsupported");
+  const { algorithmId, algorithmParams } = signer.signatureAlgorithm;
+  let effective: string | undefined;
+  if (algorithmId === RSA_ENCRYPTION) effective = digest; // RFC 5754 section 3.2: the hash is the digestAlgorithm's
+  else if (algorithmId === RSASSA_PSS) {
+    // Absent PSS parameters mean RFC 4055's SHA-1 defaults; the library materialises them, so they refuse below.
+    let params: RSASSAPSSParams;
+    try { params = new RSASSAPSSParams(algorithmParams ? { schema: algorithmParams } : {}); } catch { return refuse("timestamp_signature_algorithm_unsupported"); }
+    const hash = SHA2_OIDS[params.hashAlgorithm.algorithmId];
+    let mgfHash: string | undefined;
+    try {
+      mgfHash = params.maskGenAlgorithm.algorithmId === MGF1 && params.maskGenAlgorithm.algorithmParams
+        ? SHA2_OIDS[new PkiAlgorithmIdentifier({ schema: params.maskGenAlgorithm.algorithmParams }).algorithmId]
+        : undefined;
+    } catch { mgfHash = undefined; }
+    if (!hash || mgfHash !== hash || params.trailerField !== 1) refuse("timestamp_signature_algorithm_unsupported");
+    effective = hash;
+  } else effective = SIGNATURE_HASHES[algorithmId];
+  if (!effective) refuse("timestamp_signature_algorithm_unsupported");
+  if (effective !== digest) refuse("timestamp_signature_hash_mismatch");
+  return effective;
+}
+
 export interface TimestampRequestFacts { bytes: Uint8Array; nonceHex: string; trust: Certificate[]; policyOid?: string; now: Date; sentAt: Date }
 export async function verifyTimestampResponse(der: Uint8Array, facts: TimestampRequestFacts) {
   try {
@@ -60,7 +93,7 @@ export async function verifyTimestampResponse(der: Uint8Array, facts: TimestampR
     const cms = new SignedData({ schema: response.timeStampToken.content });
     if (cms.signerInfos.length !== 1 || !cms.certificates?.length || cms.certificates.length > 32 || (cms.signerInfos[0]?.signedAttrs?.attributes.length ?? 0) > 32 || cms.encapContentInfo.eContentType !== TST_INFO_OID || !cms.encapContentInfo.eContent) refuse("timestamp_token_structure");
     const info = new TSTInfo({ schema: derSchema(new Uint8Array(cms.encapContentInfo.eContent.getValue())) });
-    if (![TSA_SHA256_OID, "2.16.840.1.101.3.4.2.2", "2.16.840.1.101.3.4.2.3"].includes(cms.signerInfos[0]!.digestAlgorithm.algorithmId)) refuse("timestamp_signature_hash_unsupported");
+    timestampSignatureHash(cms.signerInfos[0]!);
     const imprint = createHash("sha256").update(facts.bytes).digest("hex");
     if (info.version !== 1 || info.messageImprint.hashAlgorithm.algorithmId !== TSA_SHA256_OID || Buffer.from(info.messageImprint.hashedMessage.valueBlock.valueHexView).toString("hex") !== imprint) refuse("timestamp_imprint_mismatch");
     if (!info.nonce || Buffer.from(info.nonce.valueBlock.valueHexView).toString("hex") !== facts.nonceHex) refuse("timestamp_nonce_mismatch");

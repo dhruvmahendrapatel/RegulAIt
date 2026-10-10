@@ -16,7 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ExchangeScanExecutor, LocalScanExecutor, scannerTick } from "./exchange.js";
-import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, numericNpy, objectNpy, safetensorsFile, torchZip, truncatedMaliciousPickle } from "./fixtures.js";
+import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, npzFile, numericNpy, objectNpy, safetensorsFile, torchZip, truncatedMaliciousPickle } from "./fixtures.js";
 import { scanAndJudge } from "./harness.js";
 
 const BIN = process.env.REGULAIT_MODELSCAN_BIN;
@@ -92,6 +92,42 @@ describe.skipIf(!BIN)("B5-M real modelscan 0.8.8 (opt-in: REGULAIT_MODELSCAN_BIN
           const r = await scanAndJudge(await readFile(path.join(dir, `${name}-${v}.npy`)), local);
           expect([name, v, r.stored, r.envelope.status, r.judged.verdict]).toEqual([name, v, "numpy", "completed", "no_known_unsafe"]);
         }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("a .npz: an os.system object member is unsafe; numeric and benign ones, and files numpy writes, are no_known_unsafe (decisions 219–224)", async () => {
+    // open question 15(c): modelscan's zip path sent each member to its broken NumPy scanner, so every
+    // .npz read `unknown`. The scanner now checks the archive and hands only object payloads over.
+    for (const method of [0, 8] as const) {
+      const evil = await scanAndJudge(npzFile([["w.npy", numericNpy()], ["evil.npy", objectNpy(maliciousPickle())]], method), local);
+      expect([method, evil.stored, evil.judged.verdict]).toEqual([method, "numpy_npz", "unsafe"]);
+      expect(evil.judged.findings).toContainEqual({ kind: "unsafe_operator", id: "os.system", severity: "critical" });
+      expect((await scanAndJudge(npzFile([["a.npy", objectNpy(cleanPickle())], ["b.npy", numericNpy()]], method), local)).judged.verdict).toBe("no_known_unsafe");
+    }
+    const dup = await scanAndJudge(npzFile([["a.npy", numericNpy()], ["a.npy", objectNpy(maliciousPickle())]]), local);
+    expect(dup.judged.verdict).toBe("unknown");
+    expect(dup.judged.findings).toContainEqual({ kind: "scan_error", id: "npz_member_duplicate", severity: "medium" });
+    const dir = await mkdtemp(path.join(tmpdir(), "b5m-npz-"));
+    try {
+      // the venv's own numpy writes them (savez and savez_compressed): the check must accept exactly what numpy writes
+      const script = [
+        "import sys, numpy as np",
+        "d = sys.argv[1]",
+        "arrays = dict(w=np.arange(6.0).reshape(2, 3), i=np.arange(5, dtype='<i8'))",
+        "np.savez(f'{d}/num.npz', **arrays)",
+        "np.savez_compressed(f'{d}/numz.npz', **arrays)",
+        "np.savez(f'{d}/obj.npz', o=np.array([{'a': 1}, None], dtype=object), w=np.zeros(3))",
+        "np.savez_compressed(f'{d}/objz.npz', o=np.array([{'a': 1}, None], dtype=object), w=np.zeros(3))",
+        "np.savez(f'{d}/pos.npz', np.zeros(2), np.ones(3))",
+      ].join("\n");
+      const made = spawnSync(path.join(path.dirname(BIN!), "python"), ["-I", "-c", script, dir], { encoding: "utf8" });
+      expect(made.status).toBe(0);
+      for (const name of ["num", "numz", "obj", "objz", "pos"]) {
+        const r = await scanAndJudge(await readFile(path.join(dir, `${name}.npz`)), local);
+        expect([name, r.stored, r.envelope.status, r.judged.verdict]).toEqual([name, "numpy_npz", "completed", "no_known_unsafe"]);
       }
     } finally {
       await rm(dir, { recursive: true, force: true });
