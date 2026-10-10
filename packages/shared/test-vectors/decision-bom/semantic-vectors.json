@@ -1,0 +1,778 @@
+{
+  "format": "x46.adr-semantic-vectors.v1",
+  "scope": "Specification obligations; descriptive fields are not product wire DTOs.",
+  "source": {
+    "commit": "2276739bb1ca3d5cddfcf03cbef186d59e1966a7",
+    "adr0189Blob": "73653a8c4b000dfccf734c8512b7dfcaa4129036",
+    "adr0189LastChange": "4f9f50a2cdc7f540d269e30eabbaa55e736e36f3",
+    "adr0116Blob": "311263cb8f9dc8d8888ba15edf98887615227b05",
+    "coordinationCommit": "5164b2f20bfaf124b509b931d0ad36f3279d1d35"
+  },
+  "productWirePositiveStatus": "BLOCKED",
+  "cases": [
+    {
+      "id": "S01",
+      "refs": [
+        "§5",
+        "§6"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Recognised Decision BOM; authentic signature; independently pinned receipt public key; all applicable evidence agrees.",
+      "operation": "Verify body signature.",
+      "expected": "Body signature valid; this does not assert all sections valid."
+    },
+    {
+      "id": "S02",
+      "refs": [
+        "§5",
+        "Test strategy: Signature and binding"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "S01; original signature retained.",
+      "operation": "Flip one byte of the signed body.",
+      "expected": "Body signature invalid or structural refusal."
+    },
+    {
+      "id": "S03",
+      "refs": [
+        "§5",
+        "Owner decision 2"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "A correctly signed receipt payload.",
+      "operation": "Present its bytes and signature as a Decision BOM.",
+      "expected": "Refuse receipt v as unknown BOM v; never valid BOM."
+    },
+    {
+      "id": "S04",
+      "refs": [
+        "§5"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Body signed by a trusted key with an unknown v.",
+      "operation": "Verify as BOM.",
+      "expected": "Refuse unknown v even though primitive signature is valid."
+    },
+    {
+      "id": "S05",
+      "refs": [
+        "§6",
+        "Test strategy: Signature and binding"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Independent trust root A.",
+      "operation": "Replace body and bundle keys with fresh key B and re-sign both with B.",
+      "expected": "Invalid or refused; self-consistent embedded key never becomes authority."
+    },
+    {
+      "id": "S06",
+      "refs": [
+        "§6",
+        "R6",
+        "ADR-0116 §4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Historic body signed by A; deployment now signs with B; A remains independently pinned.",
+      "operation": "Verify historic body with no private key.",
+      "expected": "Body signature valid; rotation or retirement alone does not invalidate history."
+    },
+    {
+      "id": "S07",
+      "refs": [
+        "§6",
+        "ADR-0116 §1"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Authentic body and bundled public key, no supplied trust root.",
+      "operation": "Verify offline.",
+      "expected": "Refuse verification; never trust embedded key alone."
+    },
+    {
+      "id": "S08",
+      "refs": [
+        "§6",
+        "R48"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Canonical receipt payload and signature authentic under independently pinned receipt key A; matching payload hash.",
+      "operation": "Verify exact stored receipt envelope.",
+      "expected": "Receipt signature and payload hash valid."
+    },
+    {
+      "id": "S09",
+      "refs": [
+        "§6",
+        "R48"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt from S08; body is freshly validly signed after mutation.",
+      "operation": "Change receipt payload bytes but retain receipt signature.",
+      "expected": "Receipt signature invalid; outer/body authenticity cannot repair receipt."
+    },
+    {
+      "id": "S10",
+      "refs": [
+        "R48"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt authentic under independently pinned A; body freshly signed after mutation.",
+      "operation": "Change declared receipt payload hash.",
+      "expected": "Receipt payload-hash binding invalid."
+    },
+    {
+      "id": "S11",
+      "refs": [
+        "§6",
+        "R48"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt signed by A; independent keyring binds declared receipt key id to B.",
+      "operation": "Verify receipt with B.",
+      "expected": "Receipt signature invalid; never choose a different bundled key to repair declared binding."
+    },
+    {
+      "id": "S12",
+      "refs": [
+        "§6",
+        "R48"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt signed under an unpinned key; body valid under a separately trusted key.",
+      "operation": "Verify receipt.",
+      "expected": "Receipt signature cannot be accepted from bundled key alone; invalid or refused."
+    },
+    {
+      "id": "F01",
+      "refs": [
+        "§4",
+        "§6",
+        "R37",
+        "R48"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "v2 receipt commits SHA-256 of the exact canonical facts.payload bytes.",
+      "operation": "Verify facts payload digest.",
+      "expected": "Receipt-to-facts binding valid when digests equal."
+    },
+    {
+      "id": "F02",
+      "refs": [
+        "§6",
+        "R37"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "F01; body freshly signed after mutation.",
+      "operation": "Swap facts.payload from another decision without replacing receipt.",
+      "expected": "Receipt-to-facts binding invalid."
+    },
+    {
+      "id": "F03",
+      "refs": [
+        "R37"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt and payload digest authentic; sections were projected from payload.",
+      "operation": "Change any action/policy/model/approval/outcome/cost/trace/actors section and re-sign BOM.",
+      "expected": "Projection binding invalid for each changed section; body signature valid is insufficient."
+    },
+    {
+      "id": "F04",
+      "refs": [
+        "R34",
+        "R42",
+        "R46"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Audit seq at or above independently trusted v2 boundary; v2 receipt has missing factsHash without capture_off.",
+      "operation": "Verify.",
+      "expected": "Invalid; do not downgrade to unverifiable."
+    },
+    {
+      "id": "F05",
+      "refs": [
+        "R34",
+        "R42"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Audit seq at or above v2 boundary; signed v2 payload has factsHash null and factsStatus capture_off; decision-time marker agrees.",
+      "operation": "Verify capture status.",
+      "expected": "Honest capture_off limit; affected sections not_recorded forever."
+    },
+    {
+      "id": "F06",
+      "refs": [
+        "R34",
+        "R42"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Audit seq at or above v2 boundary; null factsHash but capture-off only claimed outside signed receipt.",
+      "operation": "Verify.",
+      "expected": "Invalid; external current setting cannot justify null signed commitment."
+    },
+    {
+      "id": "F07",
+      "refs": [
+        "R42",
+        "R46"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Audit seq below boundary; authentic v1 receipt; exact captured facts and valid addenda.",
+      "operation": "Verify receipt-to-facts binding.",
+      "expected": "unverifiable, reason receipt_v1_no_factsHash; cannotProve facts were recorded at decision time."
+    },
+    {
+      "id": "F08",
+      "refs": [
+        "R34",
+        "R42"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Audit seq exactly equal to from_audit_seq; otherwise authentic v1 receipt.",
+      "operation": "Verify.",
+      "expected": "Invalid; equality belongs to v2 boundary."
+    },
+    {
+      "id": "F09",
+      "refs": [
+        "R42"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Audit seq below from_audit_seq; signing sweep runs after cutover.",
+      "operation": "Issue receipt for backlog.",
+      "expected": "v1 receipt; signing time does not move pre-boundary audit row into v2."
+    },
+    {
+      "id": "F10",
+      "refs": [
+        "R35",
+        "R37"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Authentic facts digest H0 and signed addenda 1,2 with prev_hash H0,H1 respectively.",
+      "operation": "Verify each exact payload, signature and links.",
+      "expected": "Addendum chain valid."
+    },
+    {
+      "id": "F11",
+      "refs": [
+        "R35",
+        "R37"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "F10; body freshly signed after mutation.",
+      "operation": "Remove addendum1 but retain addendum2.",
+      "expected": "Invalid gap; n begins at1 and increments without forks."
+    },
+    {
+      "id": "F12",
+      "refs": [
+        "R35",
+        "R37"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "F10; body freshly signed after mutation.",
+      "operation": "Change prev_hash on addendum2.",
+      "expected": "Invalid addendum chain even if its signature is freshly valid."
+    },
+    {
+      "id": "F13",
+      "refs": [
+        "R5",
+        "R15",
+        "R37"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Exact addendum payload present; BOM signature valid.",
+      "operation": "Corrupt addendum signature.",
+      "expected": "Invalid addendum signature."
+    },
+    {
+      "id": "R01",
+      "refs": [
+        "R7",
+        "R19"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "AI native body and signatures authentic; rendering SHA-256 and byte length committed inside signed native body.",
+      "operation": "Verify rendering file against native commitment.",
+      "expected": "Rendering binding valid if both digest and byte length equal."
+    },
+    {
+      "id": "R02",
+      "refs": [
+        "R7",
+        "R19"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Rendering is listed and hashed in an authentic outer manifest; signed native body contains no hash for it.",
+      "operation": "Verify inner rendering binding.",
+      "expected": "Rendering invalid; outer signature alone never authenticates rendering."
+    },
+    {
+      "id": "R03",
+      "refs": [
+        "R19"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "R01; outer manifest freshly re-signed after file mutation; native body unchanged.",
+      "operation": "Change rendering bytes.",
+      "expected": "Rendering invalid against native hash."
+    },
+    {
+      "id": "R04",
+      "refs": [
+        "R19"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "R01; digest matches signed value but signed byte length differs.",
+      "operation": "Verify rendering.",
+      "expected": "Rendering invalid; matching SHA-256 alone is insufficient."
+    },
+    {
+      "id": "R05",
+      "refs": [
+        "R7"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Bare CycloneDX or SPDX rendering requested through format download.",
+      "operation": "Serve format.",
+      "expected": "Deliver export-bundle/3 with signed native body and signature; never bare rendering bytes."
+    },
+    {
+      "id": "R06",
+      "refs": [
+        "R2"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Frozen old snapshot lacks a newly added renderer.",
+      "operation": "Request new format for old snapshot.",
+      "expected": "404 format_not_rendered_for_snapshot with available formats; no backfill."
+    },
+    {
+      "id": "R07",
+      "refs": [
+        "R3"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Model missing supplier releaseTime or downloadLocation.",
+      "operation": "Freeze AI snapshot.",
+      "expected": "No SPDX rendering; signed native body records spdx-3.0.1 not_producible with missing names; incomplete; CycloneDX unaffected."
+    },
+    {
+      "id": "L01",
+      "refs": [
+        "§5",
+        "R4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt signed; covering anchor not flushed; strict anchored setting.",
+      "operation": "First Decision BOM freeze request.",
+      "expected": "409 bom_anchor_pending with Retry-After; no frozen row."
+    },
+    {
+      "id": "L02",
+      "refs": [
+        "R4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt signed; covering anchor flushed; tamper-resistance observation false; strict setting.",
+      "operation": "First freeze request.",
+      "expected": "409 bom_anchor_pending, destination_not_tamper_resistant; no frozen row."
+    },
+    {
+      "id": "L03",
+      "refs": [
+        "§5",
+        "R4",
+        "R44"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt and all addenda signed; anchor covering decision flushed; observation true; retain_until equals evidence-retention end; required timestamp verified.",
+      "operation": "First freeze request.",
+      "expected": "Freeze anchored; equality satisfies retention coverage."
+    },
+    {
+      "id": "L04",
+      "refs": [
+        "R4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt and all addenda signed; flushed covering anchor observation false; audited anchored_unverified_destination relaxation; timestamps not required.",
+      "operation": "Freeze.",
+      "expected": "Freeze anchored_unverified_destination; signed observation false; report recorded observation limit."
+    },
+    {
+      "id": "L05",
+      "refs": [
+        "R4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt and all addenda signed; no anchor; audited chain_signed relaxation.",
+      "operation": "Freeze.",
+      "expected": "Freeze chain_signed with proof.anchor absent; never report anchored."
+    },
+    {
+      "id": "L06",
+      "refs": [
+        "§5",
+        "R4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Otherwise L03 but timestamp mode required and token absent.",
+      "operation": "Freeze under strict setting.",
+      "expected": "409 bom_anchor_pending; flushed tamper-resistant destination alone is insufficient."
+    },
+    {
+      "id": "L07",
+      "refs": [
+        "R15"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Receipt and anchor ready; existing addendum unsigned; signing key present.",
+      "operation": "Freeze.",
+      "expected": "409 bom_anchor_pending; unsigned addendum neither dropped nor frozen not_recorded."
+    },
+    {
+      "id": "L08",
+      "refs": [
+        "R6",
+        "R15"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Existing unsigned addendum and no signing key.",
+      "operation": "Freeze new BOM.",
+      "expected": "409 bom_signing_unavailable; no unsigned fallback."
+    },
+    {
+      "id": "L09",
+      "refs": [
+        "R6"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Already frozen authentic bytes; no private signing key.",
+      "operation": "Read frozen bytes and verify with pinned public key.",
+      "expected": "Read and verification remain available; building newly signed outer bundle is a separate key-dependent operation."
+    },
+    {
+      "id": "L10",
+      "refs": [
+        "§5",
+        "R18"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Frozen version1; current policy, grants, model card and prompt change.",
+      "operation": "Export same version.",
+      "expected": "Return byte-identical stored body/hash/signature; no live historical reads or re-render."
+    },
+    {
+      "id": "L11",
+      "refs": [
+        "§5",
+        "R40"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Version1 frozen; a later fact or timestamp becomes available.",
+      "operation": "Assemble updated evidence.",
+      "expected": "Version2 supersedes version1; earlier bytes remain unchanged."
+    },
+    {
+      "id": "L12",
+      "refs": [
+        "R40"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Late-fact transaction commits before locked final addendum recheck.",
+      "operation": "Freeze.",
+      "expected": "Include signed late fact or wait for signature; never omit it."
+    },
+    {
+      "id": "L13",
+      "refs": [
+        "R40"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Late-fact transaction commits after frozen insert.",
+      "operation": "Request updated evidence.",
+      "expected": "New version with supersedes; immutable earlier version."
+    },
+    {
+      "id": "L14",
+      "refs": [
+        "Entry conditions: B1/B4 4237344247"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Two concurrent first requests for a decision with no facts row.",
+      "operation": "Freeze using capture-status-row lock, or audit-id advisory lock for pre-marker decision.",
+      "expected": "Return same frozen BOM/version; no concurrent fork."
+    },
+    {
+      "id": "L15",
+      "refs": [
+        "R2",
+        "R17"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Either B4 or B5 has not shipped.",
+      "operation": "Request AI snapshot or run automatic trigger.",
+      "expected": "Snapshot route501 bom_snapshots_not_released; triggers do nothing; no admin override."
+    },
+    {
+      "id": "P01",
+      "refs": [
+        "R4"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "All finality evidence valid.",
+      "operation": "Compare strictness.",
+      "expected": "anchored > anchored_unverified_destination > chain_signed; policy admits only evidence at least as strong as required setting."
+    },
+    {
+      "id": "P02",
+      "refs": [
+        "R44"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Flushed true observation; retain_until one millisecond before evidence-retention end.",
+      "operation": "Freeze under strict anchored.",
+      "expected": "Cannot freeze anchored; at most anchored_unverified_destination under audited relaxation."
+    },
+    {
+      "id": "P03",
+      "refs": [
+        "R44"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Frozen anchored body; verification time after retain_until.",
+      "operation": "Verify without editing frozen bytes.",
+      "expected": "Reported anchored_lapsed; cannotProve external commitment exists after retain-until date."
+    },
+    {
+      "id": "P04",
+      "refs": [
+        "R44"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Frozen anchored body; verification time equals retain_until.",
+      "operation": "Verify finality.",
+      "expected": "Not yet passed: no anchored_lapsed from equality alone."
+    },
+    {
+      "id": "P05",
+      "refs": [
+        "R1",
+        "§6"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Anchor has seq,rowHash,headAt,algorithm,payloadVersion,capturedAt exactly stored.",
+      "operation": "Remove each field in turn; freshly sign body.",
+      "expected": "Proof invalid for each omission; never merely unverifiable."
+    },
+    {
+      "id": "P06",
+      "refs": [
+        "R1",
+        "§6"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Body signature authentic; anchor rowHash differs from last chain row.",
+      "operation": "Verify proof.",
+      "expected": "Invalid anchor-to-chain binding."
+    },
+    {
+      "id": "P07",
+      "refs": [
+        "§6",
+        "Test strategy: Signature and binding"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Authentic body.",
+      "operation": "Drop middle chain row or break prevHash link; freshly sign body.",
+      "expected": "Invalid chain segment."
+    },
+    {
+      "id": "P08",
+      "refs": [
+        "R33"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Pre-column granted TSA token lacks request send time.",
+      "operation": "Verify RFC3161 check.",
+      "expected": "unverifiable, request_facts_not_recorded; never valid."
+    },
+    {
+      "id": "P09",
+      "refs": [
+        "R39"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Hash-only contiguous chain and anchor verify; no raw row preimage.",
+      "operation": "Verify decision content binding.",
+      "expected": "unverifiable, preimage_not_exported; cannotProve chained content is decision described."
+    },
+    {
+      "id": "C01",
+      "refs": [
+        "§2",
+        "§7",
+        "Test strategy: Honesty"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Pre-facts decision; no stored action,policy,model facts; current live tables have values.",
+      "operation": "Assemble BOM.",
+      "expected": "Affected sections not_recorded; no backfill from current values."
+    },
+    {
+      "id": "C02",
+      "refs": [
+        "§2",
+        "Test strategy: Honesty"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Pre-identity decision.",
+      "operation": "Assemble actors.",
+      "expected": "not_recorded with pre_identity reason; never invent actor chain."
+    },
+    {
+      "id": "C03",
+      "refs": [
+        "§3",
+        "§7"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Assembly includes an unrecorded member.",
+      "operation": "Render composition.",
+      "expected": "aggregate incomplete or unknown; never complete."
+    },
+    {
+      "id": "C04",
+      "refs": [
+        "§3",
+        "§7"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "C03 rendered complete; body freshly signed.",
+      "operation": "Validate honesty rule.",
+      "expected": "Reject violated invariant; authentic signature cannot make completeness true."
+    },
+    {
+      "id": "C05",
+      "refs": [
+        "§3",
+        "Amendments after spike B0:8",
+        "Test strategy: Honesty"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Model supplier licence/training source unknown.",
+      "operation": "Render.",
+      "expected": "Explicit unknown and incomplete composition; no inferred supplier declaration."
+    },
+    {
+      "id": "C06",
+      "refs": [
+        "R24",
+        "R26"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Training checksum empty, or legacy fnv1a32 checksum.",
+      "operation": "Render dataset.",
+      "expected": "No SHA-256 hashes entry; incomplete; legacy checksum only as labelled legacy property."
+    },
+    {
+      "id": "C07",
+      "refs": [
+        "R27",
+        "R49"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Agent belongs to no known use case.",
+      "operation": "Render provider data flows.",
+      "expected": "classification unknown, regulait:dataFlow:classification unknown, incomplete composition."
+    },
+    {
+      "id": "C08",
+      "refs": [
+        "Entry conditions: B3 4237376660"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Scan engine_run_id null.",
+      "operation": "Render attestation.",
+      "expected": "Unknown assessor and incomplete composition; no invented engine version/image digest."
+    },
+    {
+      "id": "B01",
+      "refs": [
+        "§6",
+        "R19"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Signed native v is regulait.ai-bom.v1; outer subject decision-bom.",
+      "operation": "Verify export-bundle/3.",
+      "expected": "Refuse mismatched subject/native-v pair."
+    },
+    {
+      "id": "B02",
+      "refs": [
+        "§6",
+        "R19"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Signed native v is regulait.ai-bom.v1; outer subject ai-bom; independent outer and receipt trust roots supplied.",
+      "operation": "Verify matching subject and inner evidence.",
+      "expected": "Subject/v binding valid; other checks remain independently required."
+    },
+    {
+      "id": "B03",
+      "refs": [
+        "R39",
+        "R21"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Otherwise authentic bundle.",
+      "operation": "Add audit/rows/1.payload containing raw invocation data.",
+      "expected": "Refuse forbidden audit preimage; ADR0189 overrides ADR0116 payload inclusion for BOM bundles."
+    },
+    {
+      "id": "B04",
+      "refs": [
+        "R21"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Native body and renderings have no email; final README or manifest installId contains synthetic person@example.invalid.",
+      "operation": "Build final bundle.",
+      "expected": "Refuse export naming file/path; whole-bundle scan includes non-body files."
+    },
+    {
+      "id": "B05",
+      "refs": [
+        "ADR-0116 §5",
+        "ADR-0116: Tests"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Authentic manifest and content.",
+      "operation": "Add unlisted regular file or remove listed content file.",
+      "expected": "Refuse manifest membership violation."
+    },
+    {
+      "id": "B06",
+      "refs": [
+        "ADR-0116 amendment 2026-10-03"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Authentic manifest.",
+      "operation": "Include symlink,FIFO or device entry.",
+      "expected": "Refuse non-regular entry."
+    },
+    {
+      "id": "S13",
+      "refs": [
+        "§1",
+        "§2",
+        "Test strategy: Signature and binding"
+      ],
+      "kind": "semantic-or-lifecycle",
+      "given": "Two distinct decisions with authentic receipts under independently pinned keys; original BOM decision scope retained.",
+      "operation": "Replace receipt with the other decision receipt and freshly sign BOM.",
+      "expected": "Invalid or refused decision-to-receipt binding; authentic receipt signature alone does not bind the receipt to this decision."
+    }
+  ]
+}
