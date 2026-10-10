@@ -951,6 +951,15 @@ R50. **An on-demand snapshot is one writable transaction.** R22's `READ ONLY` lo
     `REPEATABLE READ` read-write transaction that takes the per-subject lock first and holds it through the snapshot
     and rendering inserts. The automatic snapshot after a trigger (R25) uses the same transaction shape.
 
+### B4 contract frozen (2026-10-10)
+
+The request and response bodies of the five B4 routes of §9 (`GET /v1/decisions/:auditId/bom` and `…/bom/bundle`,
+`GET /v1/ai-bom/snapshots/:snapshotId` and `…/bundle`, `POST /v1/boms/verify`), the `export-bundle/3` manifest and
+download headers, the capability fields and the refusal envelope are frozen in
+`packages/shared/src/bom/contract-b4.ts` (`BOM_B4_ROUTE_CONTRACT`) so that B6 can be built against them. B4 must
+implement exactly these shapes; a change to them is a contract change reviewed with B6. This records the freeze only and
+changes no decision above.
+
 ### Owner items from the review (not decided here)
 
 1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX

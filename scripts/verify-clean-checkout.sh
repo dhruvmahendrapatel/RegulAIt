@@ -41,10 +41,13 @@
 #   7. `git status --short --untracked-files=all` must be empty
 #
 # Stages 1, 3, 5 and 6 are the build, test and pre-flight steps of CI's
-# `build-and-test` job (.github/workflows/ci.yml), and stage 2 installs the
-# way it does. That job's one other step, the AgentCoordination.md lint, is
-# deliberately not here: it checks the agents' bookkeeping file, not the
-# product a checkout builds.
+# `build-and-test` check (.github/workflows/ci.yml), and stage 2 installs the
+# way it does. In CI that check aggregates `build-and-test-base` (build, the
+# non-gateway tests, stage 1), four `gateway-tests` shards (the gateway suite,
+# each shard on its own Postgres and running stage 6 after its tests) and
+# `gateway-coverage`; here it all runs serially on one database. The base
+# job's AgentCoordination.md lint is deliberately not here: it checks the
+# agents' bookkeeping file, not the product a checkout builds.
 #
 # BUILD-SCRIPT POLICY. pnpm 10 refuses to run dependency lifecycle scripts
 # that are not approved in `pnpm.onlyBuiltDependencies`, and a fresh install

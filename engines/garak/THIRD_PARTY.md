@@ -22,6 +22,18 @@ with pip removed as the Dockerfile does, 2026-10-10): **197 allowed, 23 admitted
 owner: 3 by decision 106, 20 by decision 193), 0 denied.** The gate prints the whole per-distribution inventory in the
 build log.
 
+**Open advisories on the pinned closure (OSV, 2026-10-10). None can be fixed without breaking garak's own pins:**
+- fsspec 2025.3.0, GHSA-27vj-qcqg-25rc (high, fixed in 2026.6.0): allow-listed with an expiry, as described above.
+- datasets 3.6.0, GHSA-379c-qx7v-6h59 (moderate, path traversal through `file_name` metadata in folder-based
+  builders, fixed only in 5.0.1). garak 0.17.0, its latest release, requires `datasets<4.0`, and the last 3.x release
+  is 3.6.0, so the fix is a major upgrade that garak forbids. Moderate is below the image gate (HIGH and CRITICAL), and
+  datasets is reached only on the same read-only, pre-seeded cache path as fsspec. Take 5.x when a garak release
+  allows it: datasets 5.0.1 also lifts the fsspec cap to `<=2026.6.0`, which clears the fsspec advisory too.
+- nltk 3.10.3, GHSA-8mgp-746c-j5xp (high, model-artifact APIs bypass the path checks): no patched release exists
+  (3.10.3 is both the latest release and the last affected one), so the image gate does not count it. garak requires
+  `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak.
+Re-check all three at each garak or nltk release.
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `garak` (PyPI, github.com/NVIDIA/garak) | `0.17.0` (released 2026-09-09; wheel sha256 `9a67e629…db145`, the hash R10 checked independently) | Apache-2.0 (`LICENSE`, SPDX headers; its METADATA names no licence) | The engine (ADR-0187 B5-G). Only the probes in the shared catalogue run (`packages/shared/src/engines/garak.ts`); 23 data paths whose licence or provenance is excluded are DELETED from the image (`excluded-data.txt`, decisions 145 and 197). Its probe metadata (`plugin_cache.json`, sha256 `25484e24…134a52`) is what the catalogue's detector and OWASP columns are generated from; the build refuses another. |
