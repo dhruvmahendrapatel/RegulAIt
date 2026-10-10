@@ -170,7 +170,14 @@ export async function authenticateWorkloadRequest(db: Db, req: FastifyRequest, o
   }
   return {
     kind: "ok",
-    ctx: { userId: v.live.leaf.sponsorUserId, isAdmin: false, via: "workload", workloadIdentityId: leaf.identity.id, delegationGrantId: v.grantId },
+    ctx: {
+      userId: v.live.leaf.sponsorUserId,
+      isAdmin: false,
+      via: "workload",
+      workloadIdentityId: leaf.identity.id,
+      delegationGrantId: v.grantId,
+      actorChain: v.live.links.map((l) => l.identity.id),
+    },
   };
 }
 

@@ -60,6 +60,7 @@ import {
   toolGrants,
   users,
   workflowInstances,
+  runWithAuditActor,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -1354,6 +1355,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin && !scopedKeyMayReach) {
       return reply.status(403).send({ error: "admin_only" });
     }
+  });
+
+  // ADR-0188 decision 9 (S4+S5 follow-up): every audit row, trace span and usage row a WORKLOAD caller's request
+  // writes is stamped with its chain, through the same async context the in-process chains use (S4 amendment 5).
+  // Callback style, so the handler runs INSIDE the context (the pattern @fastify/request-context uses).
+  app.addHook("preHandler", (req, _reply, done) => {
+    const c = req.authCtx;
+    if (c?.via === "workload" && c.workloadIdentityId && c.delegationGrantId && c.actorChain) {
+      void runWithAuditActor({ actorIdentityId: c.workloadIdentityId, delegationGrantId: c.delegationGrantId, actorChain: c.actorChain }, async () => done());
+      return;
+    }
+    done();
   });
 
   // identity echo for UI clients — who am I, what may I see. Additively
