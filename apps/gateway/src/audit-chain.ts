@@ -57,6 +57,7 @@ import {
   eq,
   gt,
   isNotNull,
+  loadAuditChainBoundary,
   lte,
   sql,
   type Db,
@@ -69,6 +70,7 @@ import {
   AUDIT_GENESIS_SEQ,
   AUDIT_LEGACY_DISCLOSURE,
   AUDIT_PAYLOAD_VERSION,
+  AUDIT_CHAIN_BOUNDARY_VERSIONS,
   verifyChainBatch,
   type ChainBreak,
   type ChainedAuditRow,
@@ -943,6 +945,15 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
     prevRowHash = before[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   }
 
+  // ADR-0188 decision 19: the v2 boundary comes from the verifier-trusted
+  // `audit_chain_versions` table, never from a row's own flag (bounded
+  // verification from any seq loads it the same way). The SAME loader the
+  // writer uses (X35 I7S-02): a boundary of a version this build does not know
+  // is not skipped — the scan stops in front of it and reports it as a break.
+  const boundary = await loadAuditChainBoundary(db);
+  const v2FromSeq = boundary.supported ? boundary.v2FromSeq : null;
+  const unsupportedFrom = boundary.supported ? null : boundary.fromSeq;
+
   let cursor = fromSeq - 1;
   let rowsScanned = 0;
   let batches = 0;
@@ -953,6 +964,8 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
   for (;;) {
     const where = [isNotNull(auditLog.seq), gt(auditLog.seq, cursor)];
     if (opts.toSeq !== undefined) where.push(lte(auditLog.seq, opts.toSeq));
+    // rows from an unknown version's boundary on are never graded by this build
+    if (unsupportedFrom !== null) where.push(lte(auditLog.seq, unsupportedFrom - 1));
     const page = (await db
       .select({
         seq: auditLog.seq,
@@ -969,6 +982,10 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
         ruleChain: auditLog.ruleChain,
         reason: auditLog.reason,
         deployMode: auditLog.deployMode,
+        chainVersion: auditLog.chainVersion,
+        actorIdentityId: auditLog.actorIdentityId,
+        delegationGrantId: auditLog.delegationGrantId,
+        actorChain: auditLog.actorChain,
         contentHash: auditLog.contentHash,
         prevHash: auditLog.prevHash,
         rowHash: auditLog.rowHash,
@@ -982,7 +999,7 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
     batches += 1;
     rowsScanned += page.length;
 
-    const res = verifyChainBatch(page, { expectedSeq, prevRowHash });
+    const res = verifyChainBatch(page, { expectedSeq, prevRowHash, v2FromSeq });
     if (res.break) {
       firstBreak = res.break;
       break;
@@ -996,6 +1013,19 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
     if (page.length < batchSize) break;
   }
 
+  // X35 I7S-02: fail closed on a boundary this build cannot read. Rows before
+  // it were verified above; from it on, the chain is reported broken, with the
+  // version named, whenever the requested range reaches it.
+  if (!firstBreak && !boundary.supported && (opts.toSeq === undefined || opts.toSeq >= boundary.fromSeq)) {
+    firstBreak = {
+      seq: boundary.fromSeq,
+      kind: "unsupported_chain_version",
+      expected: AUDIT_CHAIN_BOUNDARY_VERSIONS.join(","),
+      actual: String(boundary.version),
+      detail: `${boundary.detail}; rows from this seq on were not verified`,
+    };
+  }
+
   const anchor = await compareAgainstAnchor(db, sink, opts.anchor, { lastSeq, firstBreak });
 
   const limits = [
@@ -1003,6 +1033,9 @@ export async function verifyAuditChain(db: Db, sink: AnchorSink | null, opts: Ve
     "Rows written after the newest anchor are not yet pinned; tampering confined to them can be made internally consistent. Anchor cadence bounds this window, it does not remove it.",
     "This is detection and evidence, not prevention. It does not block writes, and it provides no confidentiality — a hash is not encryption.",
   ];
+  if (!boundary.supported) {
+    limits.unshift(`Unsupported serialisation boundary: ${boundary.detail}. Verify with a build that knows version ${boundary.version}.`);
+  }
   if (bounded) {
     limits.unshift(
       `Bounded scan: rows before seq ${fromSeq} were NOT recomputed. The starting prev_hash was taken on trust from the stored chain, so tampering before seq ${fromSeq} is outside this result. Verify from genesis for evidence.`,

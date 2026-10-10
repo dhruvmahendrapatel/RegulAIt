@@ -13,7 +13,7 @@
  */
 import type { EngineAdapter } from "@regulait/engine-runner";
 import type { EngineLease } from "@regulait/shared";
-import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GarakConfigRefused, planGarakRun, type GarakPlan } from "./config.js";
+import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GarakConfigRefused, garakProbeNeedsJudge, planGarakRun, type GarakPlan } from "./config.js";
 import type { GarakExecutor, GarakJob } from "./exchange.js";
 import { mapGarakRun, type GarakEnvelopeBody } from "./mapper.js";
 
@@ -50,10 +50,16 @@ export function notRunAll(plan: GarakPlan, errorCode: string): GarakEnvelopeBody
 /** the job a lease becomes (validated again by the worker) */
 export function garakJobOf(lease: EngineLease, plan: GarakPlan, timeoutMs: number): GarakJob {
   if (!lease.target) throw new GarakConfigRefused("target_required", "a garak run needs a model target behind the gateway");
+  // ADR-0187 decision 204: a judge probe needs the run's judge (the gateway refuses such a run without one;
+  // this is the runner's own check). The worker is handed the judge's model and headers only when a planned
+  // probe calls it; its key is the run key the target already uses, never a second credential.
+  const needsJudge = plan.probes.some((p) => garakProbeNeedsJudge(p.probe));
+  if (needsJudge && !lease.judge) throw new GarakConfigRefused("judge_required", "a judge probe needs a judge agent behind the gateway; the lease names none");
   return {
     runId: lease.runId,
     probes: plan.probes.map((p) => ({ probe: p.probe, detector: p.detector })),
     target: { baseUrl: lease.target.baseUrl, model: lease.target.model, headers: { ...lease.target.headers } },
+    judge: needsJudge && lease.judge ? { model: lease.judge.model, headers: { ...lease.judge.headers } } : null,
     apiKey: lease.target.apiKey,
     trials: Math.max(1, Math.min(25, Math.trunc(lease.spec.trials))),
     timeoutMs,
@@ -72,7 +78,11 @@ export function garakAdapter(opts: GarakAdapterOptions): EngineAdapter {
       // the runner checks every probe's config before anything leaves it (the worker checks again)
       const dirs = { home: "/w/h", config: "/w/c", data: "/w/d", cache: "/w/k", report: "/w/r" };
       for (const p of plan.probes) {
-        assertGatewayOnly(buildGarakConfig({ target: job.target, probe: p.probe, trials: job.trials, reportDir: dirs.report }), buildGarakEnv(job.apiKey, dirs, "/usr/bin"), job.target.baseUrl);
+        assertGatewayOnly(
+          buildGarakConfig({ target: job.target, judge: job.judge, probe: p.probe, trials: job.trials, reportDir: dirs.report }),
+          buildGarakEnv(job.apiKey, dirs, "/usr/bin"),
+          job.target.baseUrl,
+        );
       }
     } catch (e) {
       if (e instanceof GarakConfigRefused) return notRunAll(plan, e.code);

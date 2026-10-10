@@ -6,7 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -22,6 +22,7 @@ import {
 } from "@regulait/shared";
 import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
 import { garakAdapter } from "./adapter.js";
+import { linkPreseededDatasets } from "./garak-run.js";
 import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GarakConfigRefused, planGarakRun, type PlannedProbe } from "./config.js";
 import { ExchangeGarakExecutor, garakJobSchema, LocalGarakExecutor, workerTick, type GarakExecutor, type GarakJob } from "./exchange.js";
 import { boundedCounts, mapGarakProbe, mapGarakRun, readGarakProbeReport, type GarakProbeOutcome } from "./mapper.js";
@@ -242,7 +243,7 @@ describe("B5-G plan: unknown and licence-excluded probes never reach garak", () 
   });
 
   it("the worker refuses a job naming a probe this build does not run", () => {
-    const job = { runId: randomUUID(), probes: [{ probe: ENC, detector: ENC_DET }], target: { baseUrl: "http://gateway:3000/v1", model: "m", headers: {} }, apiKey: "rglv_x", trials: 2, timeoutMs: 5000 };
+    const job = { runId: randomUUID(), probes: [{ probe: ENC, detector: ENC_DET }], target: { baseUrl: "http://gateway:3000/v1", model: "m", headers: {} }, apiKey: "rglv_x", judge: null, trials: 2, timeoutMs: 5000 };
     expect(garakJobSchema.safeParse(job).success).toBe(true);
     for (const probe of ["leakreplay.NYTCloze", "test.Test", "propile.PIILeakTwin", "encoding.injectbase64", "../../etc.passwd"]) {
       expect(garakJobSchema.safeParse({ ...job, probes: [{ probe, detector: ENC_DET }] }).success, probe).toBe(false);
@@ -290,10 +291,52 @@ describe("B5-G config invariant", () => {
       ["a switch unset", () => [cfg(), { ...env(), HF_HUB_OFFLINE: "0" }]],
       ["no key", () => [cfg(), { ...env(), OPENAICOMPATIBLE_API_KEY: "" }]],
       ["a relative report dir", () => [{ ...c, reporting: { ...c.reporting, report_dir: "reports" } }, env()]],
+      // decisions 198-200: the Hub caches are the image's read-only tree and fresh per-probe directories
+      ["a writable or foreign hub cache", () => [cfg(), { ...env(), HF_HUB_CACHE: "/w/k/hub" }]],
+      ["a datasets cache outside the probe's cache dir", () => [cfg(), { ...env(), HF_DATASETS_CACHE: "/opt/garak/hf/datasets" }]],
+      ["HF_HOME pointed at the pre-seeded tree", () => [cfg(), { ...env(), HF_HOME: "/opt/garak/hf" }]],
+      ["a traversal out of the probe's cache dir", () => [cfg(), { ...env(), HF_DATASETS_CACHE: "/w/k/../../opt/garak/hf/datasets" }]],
+      // a probe gets exactly this build's fixed settings, or none
+      ["settings for a probe that has none", () => [{ ...c, plugins: { ...c.plugins, probes: { encoding: { InjectBase64: { payloads: ["x"] } } } } }, env()]],
     ];
     for (const [name, v] of variants) {
       const [cc, ee] = v();
       expect(refused(cc, ee), name).not.toBeNull();
+    }
+  });
+
+  it("reads the pre-seeded Hub tree read-only and pins the system-prompt probe to the pre-seeded dataset", () => {
+    expect(env()).toMatchObject({ HF_HOME: "/w/k/huggingface", HF_HUB_CACHE: "/opt/garak/hf/hub", HF_DATASETS_CACHE: "/w/k/hf-datasets" });
+    const SP = "sysprompt_extraction.SystemPromptExtraction";
+    const sp = buildGarakConfig({ target, probe: SP, trials: 4, reportDir: dirs.report }) as { plugins: Record<string, unknown> };
+    expect(sp.plugins["probes"]).toEqual({ sysprompt_extraction: { SystemPromptExtraction: { system_prompt_sources: ["garak-llm/drh-System-Prompt-processed"] } } });
+    expect(refused(sp, env())).toBeNull();
+    // the probe's default second source (CC-BY-4.0, not pre-seeded) can never be written back in
+    const widened = { ...sp, plugins: { ...sp.plugins, probes: { sysprompt_extraction: { SystemPromptExtraction: { system_prompt_sources: ["garak-llm/drh-System-Prompt-processed", "garak-llm/tm-system_prompt"] } } } } };
+    expect(refused(widened, env())).toBe("config_probe_settings");
+    const dropped = { ...sp, plugins: { ...sp.plugins, probes: undefined } };
+    expect(refused(JSON.parse(JSON.stringify(dropped)) as Record<string, unknown>, env())).toBe("config_probe_settings");
+    // the packagehallucination probes use garak's own (pre-seeded) dataset ids: no settings at all
+    expect((buildGarakConfig({ target, probe: "packagehallucination.Python", trials: 4, reportDir: dirs.report }) as { plugins: Record<string, unknown> }).plugins["probes"]).toBeUndefined();
+  });
+});
+
+describe("B5-G the per-probe datasets cache", () => {
+  it("links every materialised dataset of the pre-seeded tree, and nothing else; a missing tree links nothing", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "b5g-hf-"));
+    try {
+      const pre = path.join(tmp, "hf");
+      await mkdir(path.join(pre, "datasets", "garak-llm___pypi-20241031", "default"), { recursive: true });
+      await mkdir(path.join(pre, "datasets", "garak-llm___drh-system-prompt-processed"), { recursive: true });
+      await writeFile(path.join(pre, "datasets", "stray.lock"), "");
+      const target = path.join(tmp, "probe", "hf-datasets");
+      expect(await linkPreseededDatasets(pre, target)).toBe(2);
+      expect((await readdir(target)).sort()).toEqual(["garak-llm___drh-system-prompt-processed", "garak-llm___pypi-20241031"]);
+      expect((await lstat(path.join(target, "garak-llm___pypi-20241031"))).isSymbolicLink()).toBe(true);
+      expect(await readlink(path.join(target, "garak-llm___pypi-20241031"))).toBe(path.join(pre, "datasets", "garak-llm___pypi-20241031"));
+      expect(await linkPreseededDatasets(path.join(tmp, "absent"), path.join(tmp, "probe2"))).toBe(0);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
     }
   });
 });
@@ -331,6 +374,7 @@ function job(over: Partial<GarakJob> = {}): GarakJob {
     ],
     target: { baseUrl: "http://gateway:3000/v1", model: "model-x", headers: { "x-regulait-agent-id": "a1", "x-regulait-project-id": "p1" } },
     apiKey: "rglv_synthetic",
+    judge: null,
     trials: 3,
     timeoutMs: 10_000,
     ...over,
