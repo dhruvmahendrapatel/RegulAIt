@@ -39,6 +39,7 @@ import {
   ISOLABLE_WORKLOAD_KINDS,
   REQUIRABLE_ISOLATION_CLASSES,
   REQUIRED_CLASS_SOURCES,
+  executionProfileBodySchema,
   type AppliedIsolationKind,
 } from "./contract.js";
 import { ISOLATION_ENFORCEMENT_MODES } from "./settings.js";
@@ -137,12 +138,18 @@ export const executorEndSchema = z.object({ outcome: z.enum(EXECUTION_OFFER_END_
 // Answers
 // ---------------------------------------------------------------------------
 
+/**
+ * a live profile as the executor receives it: the BODY travels with the
+ * digest (the executor starts sandboxes from the body and refuses one whose
+ * digest it does not recompute, fail closed)
+ */
 const profileRef = z
   .object({
     digest: z.string().regex(/^[0-9a-f]{64}$/),
     name: z.string(),
     version: z.number().int().min(1),
     minClass: z.enum(REQUIRABLE_ISOLATION_CLASSES),
+    body: executionProfileBodySchema,
   })
   .strict();
 export type ExecutorProfileRef = z.infer<typeof profileRef>;

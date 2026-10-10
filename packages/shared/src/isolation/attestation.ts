@@ -63,7 +63,7 @@ export const RUNTIME_ATTESTS: Readonly<Record<ObservedRuntime, AppliedIsolationK
 };
 
 /** fixed-vocabulary strings only: a short token, never prose (reports are stored and audited) */
-const token = (max: number) => z.string().min(1).max(max).regex(/^[A-Za-z0-9._:+@/-]+$/);
+const token = (max: number) => z.string().min(1).max(max).regex(/^[A-Za-z0-9._:+=@/-]+$/);
 const IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 /** an IPv4 literal (the egress probe's public literal address) */
 const ipv4 = z.string().regex(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/);
