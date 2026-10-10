@@ -140,7 +140,21 @@ export async function createDelegationProofRoute(db: Db, req: FastifyRequest, re
   if (writes && (project.classifications ?? []).length > 0) {
     const su = await requireStepUp(db, req, reply, {
       kind: "identity_manage",
-      facts: { op: "delegation_proof", agentIdentityId: ident.id, projectId: project.id, resource },
+      // X45 I7S5-02: the grant binds the WHOLE authority the proof will carry (the resolved cap and lifetime, not the
+      // request's possibly-omitted ones), so a step-up approved for a narrow delegation cannot sign a wider one.
+      // The 403 hands these exact facts back as `action.body`; the client posts them verbatim to /options.
+      facts: {
+        op: "delegation_proof",
+        agentIdentityId: ident.id,
+        projectId: project.id,
+        resource,
+        env,
+        authorizationDetails: body.authorizationDetails,
+        capMicros: cap.cap,
+        maxDepth,
+        lifetimeSeconds: lifetime,
+        agentKeyThumbprint: body.agentKeyThumbprint ?? null,
+      },
     });
     if (!su.ok) return reply;
   }

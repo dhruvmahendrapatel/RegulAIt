@@ -499,6 +499,30 @@ describe("S5 — DPoP at the token endpoint", () => {
     expect([r1.statusCode, r2.statusCode].sort()).toEqual([200, 400]);
   });
 
+  it("X45 I7S5-04: with the process clock 30 s ahead, the replay claims still last the whole signed window", async () => {
+    const a = agents[2]!;
+    const bind = wkey();
+    const assertionJti = randomUUID();
+    const dpopJti = randomUUID();
+    const iat = nowS();
+    const form = await rootForm(a, await makeProof(a, { cnf: await jkt(bind) }), { assertionOpts: { jti: assertionJti, iat, exp: iat + 120 } });
+    const proofJwt = await dpop(bind, { jti: dpopJti, iat });
+    vi.useFakeTimers({ now: Date.now() + 30_000, toFake: ["Date"] });
+    let r;
+    try {
+      r = await token(form, proofJwt);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(r.statusCode, r.body).toBe(200);
+    const claim = async (ns: string, key: string) =>
+      (await db.select().from(replayClaims).where(and(eq(replayClaims.namespace, ns as never), eq(replayClaims.key, key))))[0]!;
+    const ca = await claim("client_assertion", providerKey(a.clientId, assertionJti));
+    expect(ca.expiresAt.getTime()).toBeGreaterThanOrEqual((iat + 120 + 5) * 1000);
+    const dp = await claim("as_dpop", providerKey(a.clientId, dpopJti));
+    expect(dp.expiresAt.getTime()).toBeGreaterThanOrEqual((iat + 60 + 5) * 1000);
+  });
+
   it("the process clock ±500 ms changes nothing: every window is judged on the database clock", async () => {
     const a = agents[2]!;
     for (const skew of [500, -500]) {
