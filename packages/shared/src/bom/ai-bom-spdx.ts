@@ -119,8 +119,9 @@ export function isSpdxDateTime(v: unknown): v is string {
 /**
  * A download location we may export: an https ORIGIN only, exactly as B3's endpoint rule leaves it
  * (`sanitiseAiBomEndpoint`: R47 and #280 4237493036, a path can carry a credential such as `/bot<TOKEN>/`).
- * A value with a path, query, fragment or userinfo is not exported, so the property is missing and the
- * rendering is not_producible (R3); it is never rewritten into a different location.
+ * B3's normaliser already reduces a `downloadLocation` claim to that origin (PR #287 security round); this
+ * check is defence in depth: a value with a path, query, fragment or userinfo is not exported, so the
+ * property is missing and the rendering is not_producible (R3). The renderer never rewrites it itself.
  */
 export function isSpdxDownloadLocation(v: unknown): v is string {
   if (typeof v !== "string" || !v.startsWith("https://") || !isBomExportEndpoint(v)) return false;

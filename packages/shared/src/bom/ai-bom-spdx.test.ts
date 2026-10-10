@@ -185,7 +185,6 @@ describe("B5: R3 mandatory properties, never invented", () => {
     ["fractional seconds (never truncated)", { releaseTime: "2026-06-01T00:00:00.5Z" }, {}, ["ai_AIPackage.releaseTime"]],
     ["an impossible date", { releaseTime: "2026-02-30T00:00:00Z" }, {}, ["ai_AIPackage.releaseTime"]],
     ["no downloadLocation claim", { downloadLocation: undefined }, {}, ["ai_AIPackage.software_downloadLocation"]],
-    ["a location with a path (never cut to its origin)", { downloadLocation: "https://models.provider-a.example/org/model-x" }, {}, ["ai_AIPackage.software_downloadLocation"]],
     ["plain http", { downloadLocation: "http://models.provider-a.example" }, {}, ["ai_AIPackage.software_downloadLocation"]],
     ["no pinned version (agents have no version column)", {}, { pinnedModelVersion: null }, ["ai_AIPackage.software_packageVersion"]],
   ];
@@ -366,14 +365,28 @@ describe("B5: no leakage of endpoints, paths or secrets (canaries)", () => {
     for (const c of CANARIES) expect(spdx.includes(c), c).toBe(false);
   });
 
-  it("a presigned or token-bearing downloadLocation is never exported (not_producible, never cut down)", () => {
+  it("a presigned or token-bearing downloadLocation reaches SPDX only as B3's origin (no path, query or fragment)", () => {
     const f = producible();
-    for (const loc of ["https://bucket.example/m.bin?X-Amz-Signature=CANARY_PRESIGN", "https://hub.example/sk-live-CANARY/model", "https://hub.example?token=CANARY_QUERY"]) {
+    for (const [loc, origin] of [
+      ["https://bucket.example/m.bin?X-Amz-Signature=CANARY_PRESIGN", "https://bucket.example"],
+      ["https://hub.example/sk-live-CANARY/model", "https://hub.example"],
+      ["https://hub.example:8443?token=CANARY_QUERY#CANARY_FRAG", "https://hub.example:8443"],
+    ] as const) {
       const b = buildAiBom(withCard(f, 0, { downloadLocation: loc }), f.meta, opts);
-      expect(b.body.renderings["spdx-3.0.1"], loc).toEqual({ status: "not_producible", missing: ["ai_AIPackage.software_downloadLocation"] });
-      const draft = JSON.stringify(draftOf({ meta: f.meta, records: withCard(f, 0, { downloadLocation: loc }) }));
-      for (const c of CANARIES) expect(draft.includes(c), `${loc}: ${c}`).toBe(false);
+      const spdx = b.renderings.find((r) => r.format === "spdx-3.0.1")!.bytes;
+      for (const c of CANARIES) expect(`${spdx}\n${b.bodyBytes}`.includes(c), `${loc}: ${c}`).toBe(false);
+      const card = of(JSON.parse(spdx) as Doc, "ai_AIPackage").find((p) => p.ai_informationAboutApplication === "Claims triage summaries")!;
+      expect(card.software_downloadLocation, loc).toBe(origin);
     }
+  });
+
+  it("defence in depth: the renderer itself never exports a path-bearing location, even if a record bypassed normalisation", () => {
+    const f = producible();
+    const n = normaliseAiBomRecords(f.records);
+    (n.modelCards[0]!.dataClaims as Record<string, unknown>).downloadLocation = "https://hub.example/sk-live-CANARY/model";
+    const d = renderAiBomSpdx(n, f.meta, renderAiBomCycloneDx(n, f.meta, "1.7")).doc;
+    expect(JSON.stringify(d).includes("sk-live-CANARY")).toBe(false);
+    expect(spdxMandatoryMissing(d)).toEqual(["ai_AIPackage.software_downloadLocation"]);
   });
 
   it("negative control for the canary scan: the seeded records really carry every endpoint canary", () => {
