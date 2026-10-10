@@ -48,6 +48,50 @@ async function open(page: Page, init: Partial<EnginesMockState> = {}): Promise<E
 }
 
 const card = (page: Page, id: string) => page.getByTestId(`engine-${id}`);
+
+// ---- B5W-07: a stateful stand-in for the gateway's build-bound acceptance ----
+type Build = { version: string; imageDigest: string };
+const BUILD_A: Build = { version: "0.123.1", imageDigest: `sha256:${"a".repeat(64)}` }; // the fixture's promptfoo
+const BUILD_C: Build = { version: "99.0.0", imageDigest: `sha256:${"c".repeat(64)}` };
+const acceptanceOf = (b: Build) => ({ enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: b.version, expectedDigest: b.imageDigest });
+/** the step-up facts the gateway names: the build accepted (engineRowRelaxations) */
+const acceptanceFacts = (body: unknown) => {
+  const b = body as Json;
+  return { values: { "engine.promptfoo.enabled": true, "engine.promptfoo.acceptCredentialIsolationRisk": { version: b.expectedVersion, imageDigest: b.expectedDigest } } };
+};
+
+/**
+ * Answers PATCH /v1/engines/promptfoo as engines.ts decides BEFORE the step-up (so it is
+ * registered last and answers first): a plain enable is refused naming the current
+ * build; an acceptance naming another build is refused `engine_build_changed`; a
+ * matching one falls through to the step-up harness and the fixture.
+ */
+async function installBuildGateway(page: Page, st: EnginesMockState, initial: Build) {
+  const gw = { current: initial, patches: [] as Json[], enabledBuild: null as Build | null, rollTo: (b: Build) => (gw.current = b) };
+  await page.route("**/v1/engines/promptfoo", (route) => {
+    const req = route.request();
+    if (req.method() !== "PATCH") return route.fallback();
+    const body = req.postDataJSON() as Json;
+    gw.patches.push(body);
+    if (body.enabled === true && body.acceptCredentialIsolationRisk !== true) {
+      return json(route, 409, { error: "engine_credential_isolation_missing", ...gw.current, detail: ISOLATION_DETAIL });
+    }
+    if (body.acceptCredentialIsolationRisk === true && (body.expectedVersion !== gw.current.version || body.expectedDigest !== gw.current.imageDigest)) {
+      return json(route, 409, { error: "engine_build_changed", ...gw.current, detail: `engine promptfoo's current build is ${gw.current.version}; nothing was changed.` });
+    }
+    if (body.acceptCredentialIsolationRisk === true && req.headers()["x-regulait-step-up"]) gw.enabledBuild = gw.current;
+    return route.fallback();
+  });
+  void st;
+  return gw;
+}
+
+async function startEnable(page: Page) {
+  await card(page, "promptfoo").getByRole("button", { name: "Enable…" }).click();
+  const confirm = page.getByRole("dialog", { name: "Enable promptfoo?" });
+  await expect(confirm).toContainText("confirm it's you");
+  await confirm.getByRole("button", { name: "Enable" }).click();
+}
 const sent = (st: EnginesMockState, method: string, path: string) => st.calls.filter((c) => c.method === method && c.path === path);
 
 test.describe("ADR-0187 X26: the Engines page", () => {
@@ -81,46 +125,83 @@ test.describe("ADR-0187 X26: the Engines page", () => {
     await expectAxeClean(page, "engines page");
   });
 
-  test("decision 79: the credential-isolation refusal opens an explicit, stepped-up acceptance", async ({ page }) => {
+  test("decision 79: the credential-isolation refusal opens an explicit, stepped-up acceptance of the build it names", async ({ page }) => {
     const st = await open(page, { engines: enginesWithPromptfooOff() });
-    const su = await requireStepUpOn(page, {
-      method: "PATCH",
-      path: "/v1/engines/promptfoo",
-      kind: "settings_relax",
-      facts: () => ({ values: { "engine.promptfoo.enabled": true, "engine.promptfoo.acceptCredentialIsolationRisk": true } }),
-    });
-    // the gateway decides isolation BEFORE the step-up (engines.ts), so this answers first
-    await page.route("**/v1/engines/promptfoo", (route) => {
-      const req = route.request();
-      const body = req.method() === "PATCH" ? (req.postDataJSON() as Json) : null;
-      if (body?.enabled === true && body.acceptCredentialIsolationRisk !== true) {
-        st.calls.push({ method: "PATCH", path: "/v1/engines/promptfoo", body, headers: req.headers() });
-        return json(route, 409, { error: "engine_credential_isolation_missing", detail: ISOLATION_DETAIL });
-      }
-      return route.fallback();
-    });
+    const su = await requireStepUpOn(page, { method: "PATCH", path: "/v1/engines/promptfoo", kind: "settings_relax", facts: acceptanceFacts });
+    const gw = await installBuildGateway(page, st, BUILD_A);
 
-    await card(page, "promptfoo").getByRole("button", { name: "Enable…" }).click();
-    const confirm = page.getByRole("dialog", { name: "Enable promptfoo?" });
-    await expect(confirm).toContainText("confirm it's you");
-    await confirm.getByRole("button", { name: "Enable" }).click();
-
+    await startEnable(page);
     const accept = page.getByRole("dialog", { name: "Accept the credential-isolation risk for promptfoo?" });
     await expect(accept.getByTestId("credential-isolation-reason")).toHaveText(ISOLATION_DETAIL);
     await expect(accept).toContainText("engine-credential-isolation-risk-accepted");
+    await expect(accept.getByRole("checkbox")).toHaveAccessibleName(new RegExp(`build ${BUILD_A.version} \\(sha256:aaaaaaaaaaaa…\\)`));
     const go = accept.getByRole("button", { name: "Accept risk and enable" });
     await expect(go).toBeDisabled();
     // the first request never carried the acceptance
-    expect(sent(st, "PATCH", "/v1/engines/promptfoo")).toHaveLength(1);
-    expect(sent(st, "PATCH", "/v1/engines/promptfoo")[0]!.body).toEqual({ enabled: true });
+    expect(gw.patches).toEqual([{ enabled: true }]);
     await expectAxeClean(page, "credential-isolation acceptance");
 
     await accept.getByRole("checkbox").check();
     await go.click();
     await confirmStepUp(page);
     await su.expectResentOnce();
-    expect(su.attempts[1]!.body).toEqual({ enabled: true, acceptCredentialIsolationRisk: true });
+    // B5W-07: the acceptance names the build the refusal named
+    expect(su.attempts[1]!.body).toEqual(acceptanceOf(BUILD_A));
     await expect(card(page, "promptfoo").getByText("On — self-test passed")).toBeVisible();
+  });
+
+  test("B5W-07: a rollover before the refusal — the dialog names the build the gateway names, not the page's", async ({ page }) => {
+    const st = await open(page, { engines: enginesWithPromptfooOff() });
+    await requireStepUpOn(page, { method: "PATCH", path: "/v1/engines/promptfoo", kind: "settings_relax", facts: acceptanceFacts });
+    const gw = await installBuildGateway(page, st, BUILD_C); // the page still shows 0.123.1
+    await startEnable(page);
+    const accept = page.getByRole("dialog", { name: "Accept the credential-isolation risk for promptfoo?" });
+    await expect(accept.getByRole("checkbox")).toHaveAccessibleName(new RegExp(`build ${BUILD_C.version} \\(sha256:cccccccccccc…\\)`));
+    await expect(accept).not.toContainText(BUILD_A.version);
+    await accept.getByRole("checkbox").check();
+    await accept.getByRole("button", { name: "Accept risk and enable" }).click();
+    await confirmStepUp(page);
+    await expect.poll(() => gw.patches.at(-1)).toEqual(acceptanceOf(BUILD_C));
+  });
+
+  test("B5W-07: a rollover during the risk dialog refuses the stale acceptance and reopens it for the new build", async ({ page }) => {
+    const st = await open(page, { engines: enginesWithPromptfooOff() });
+    const gw = await installBuildGateway(page, st, BUILD_A);
+    await startEnable(page);
+    const accept = page.getByRole("dialog", { name: "Accept the credential-isolation risk for promptfoo?" });
+    await accept.getByRole("checkbox").check();
+    gw.rollTo(BUILD_C); // the next build becomes current while the dialog is open
+    await accept.getByRole("button", { name: "Accept risk and enable" }).click();
+    // refused; the dialog comes back naming the new build, unticked, and says why
+    await expect(accept.getByTestId("build-changed-notice")).toContainText(`now ${BUILD_C.version}`);
+    await expect(accept.getByRole("checkbox")).toHaveAccessibleName(new RegExp(`build ${BUILD_C.version} \\(`));
+    await expect(accept.getByRole("checkbox")).not.toBeChecked();
+    await expect(accept.getByRole("button", { name: "Accept risk and enable" })).toBeDisabled();
+    expect(gw.patches).toEqual([{ enabled: true }, acceptanceOf(BUILD_A)]);
+    expect(gw.enabledBuild).toBeNull();
+    await expectAxeClean(page, "acceptance reopened after a build change");
+  });
+
+  test("B5W-07: a rollover during the step-up refuses the stale acceptance; nothing is enabled", async ({ page }) => {
+    const st = await open(page, { engines: enginesWithPromptfooOff() });
+    const su = await requireStepUpOn(page, { method: "PATCH", path: "/v1/engines/promptfoo", kind: "settings_relax", facts: acceptanceFacts });
+    const gw = await installBuildGateway(page, st, BUILD_A);
+    await startEnable(page);
+    const accept = page.getByRole("dialog", { name: "Accept the credential-isolation risk for promptfoo?" });
+    await accept.getByRole("checkbox").check();
+    await accept.getByRole("button", { name: "Accept risk and enable" }).click();
+    await expect(page.getByRole("dialog", { name: "Confirm it's you" })).toBeVisible();
+    gw.rollTo(BUILD_C); // the build rolls over while the person confirms it's them
+    await confirmStepUp(page);
+    // the plain enable, the acceptance refused for a step-up, and its resend WITH the grant, refused as stale
+    await expect.poll(() => gw.patches.length).toBe(3);
+    expect(gw.patches[2]).toEqual(acceptanceOf(BUILD_A));
+    expect(su.attempts).toHaveLength(1); // the stale resend never reached the step-up check
+    const reopened = page.getByRole("dialog", { name: "Accept the credential-isolation risk for promptfoo?" });
+    await expect(reopened.getByTestId("build-changed-notice")).toContainText(`now ${BUILD_C.version}`);
+    await expect(reopened.getByRole("checkbox")).not.toBeChecked();
+    expect(gw.enabledBuild).toBeNull();
+    await expect(card(page, "promptfoo").getByText(/^Off — /)).toBeVisible();
   });
 
   test("keeping it off sends nothing more after the refusal", async ({ page }) => {
@@ -254,6 +335,64 @@ test.describe("ADR-0187 X26: the Engines page", () => {
     await confirmStepUp(page);
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual({ timeoutSeconds: 3600 });
+  });
+
+  test("the revocation reason is bounded like the gateway's, and a refusal keeps the dialog and its text", async ({ page }) => {
+    const st = await open(page);
+    await page.route(`**/v1/engine-runners/${RUNNER_PF}`, (route) =>
+      route.request().method() === "DELETE"
+        ? json(route, 422, { error: "validation", issues: [{ path: "reason", message: "String must contain at most 500 character(s)" }] })
+        : route.fallback(),
+    );
+    await card(page, "promptfoo").getByRole("button", { name: "Revoke runner promptfoo-runner-1" }).click();
+    const dialog = page.getByRole("dialog", { name: "Revoke runner promptfoo-runner-1?" });
+    const reason = dialog.getByLabel("Reason");
+    const submit = dialog.getByRole("button", { name: "Revoke runner" });
+    await reason.fill("x".repeat(501));
+    await expect(dialog.getByText("501 / 500 characters")).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await reason.fill("host decommissioned");
+    await expect(dialog.getByText("19 / 500 characters")).toBeVisible();
+    await submit.click();
+    // the gateway refused: the dialog stays, with the text and the refusal in it
+    await expect(dialog.getByRole("alert")).toContainText("Reason must be at most 500 characters");
+    await expect(reason).toHaveValue("host decommissioned");
+    await expect(card(page, "promptfoo").getByRole("heading", { name: "Runners (1)" })).toBeVisible();
+    expect(sent(st, "DELETE", `/v1/engine-runners/${RUNNER_PF}`)).toHaveLength(0); // the override answered
+    await expectAxeClean(page, "revoke dialog with a refusal");
+  });
+
+  test("a runner's passing report older than 24 h reads stale, never passed", async ({ page }) => {
+    const list = enginesList();
+    list.engines[0].runners[0].selfTestReportedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+    await open(page, { engines: list });
+    const row = card(page, "promptfoo").getByRole("row", { name: /promptfoo-runner-1/ });
+    await expect(row.getByText("self-test report stale")).toBeVisible();
+    await expect(row.getByText("passed", { exact: true })).toHaveCount(0);
+  });
+
+  test("a runner report that expires while the page is open stops reading passed, with no user action", async ({ page }) => {
+    await page.clock.install();
+    const list = enginesList();
+    list.engines[0].runners[0].selfTestReportedAt = new Date(Date.now() - 23.5 * 3600_000).toISOString();
+    await open(page, { engines: list });
+    const row = card(page, "promptfoo").getByRole("row", { name: /promptfoo-runner-1/ });
+    await expect(row.getByText("passed", { exact: true })).toBeVisible();
+    await page.clock.fastForward("00:31:00");
+    await expect(row.getByText("self-test report stale")).toBeVisible();
+    await expect(row.getByText("passed", { exact: true })).toHaveCount(0);
+  });
+
+  test("enabling modelscan explains the artifact-only path; only a model-access engine claims run-scoped keys", async ({ page }) => {
+    await open(page);
+    await card(page, "modelscan").getByRole("button", { name: "Enable…" }).click();
+    const ms = page.getByRole("dialog", { name: "Enable modelscan?" });
+    await expect(ms).toContainText("scans an uploaded model artifact");
+    await expect(ms).toContainText("no model credentials");
+    await expect(ms).not.toContainText("run-scoped key");
+    await ms.getByRole("button", { name: "Cancel" }).click();
+    await card(page, "garak").getByRole("button", { name: "Enable…" }).click();
+    await expect(page.getByRole("dialog", { name: "Enable garak?" })).toContainText("run-scoped key");
   });
 
   test("a failed engine list is an error with a retry, never an empty page", async ({ page }) => {

@@ -157,14 +157,16 @@ describe("ADR-0188 migration 0180 on a freshly migrated database", () => {
     for (const t of NEW_TABLES) expect(have.has(t), t).toBe(true);
   });
 
-  it("is journalled past every other migration, and past 0175 + 4,000,000 (0177–0179 may be taken elsewhere)", async () => {
+  it("is journalled past every earlier migration, every later one is past it, and past 0175 + 4,000,000", async () => {
     const journal = JSON.parse(readFileSync(path.join(migrationsFolder, "meta/_journal.json"), "utf8")) as {
       entries: Array<{ idx: number; when: number; tag: string }>;
     };
     const mine = journal.entries.find((e) => e.tag === "0180_agent_workload_identity")!;
     expect(mine).toMatchObject({ idx: 180, when: 1785115000000 });
-    const others = journal.entries.filter((e) => e !== mine);
-    expect(mine.when).toBeGreaterThan(Math.max(...others.map((e) => e.when)));
+    // journal order and `when` must agree, or drizzle silently skips later migrations
+    const at = journal.entries.indexOf(mine);
+    for (const e of journal.entries.slice(0, at)) expect(mine.when).toBeGreaterThan(e.when);
+    for (const e of journal.entries.slice(at + 1)) expect(e.when).toBeGreaterThan(mine.when);
     expect(mine.when).toBeGreaterThan(journal.entries.find((e) => e.tag.startsWith("0175_"))!.when + 4_000_000);
     const applied = await db.execute(sql`select max(created_at)::bigint as w from drizzle.__drizzle_migrations`);
     expect(Number(rows<{ w: string }>(applied)[0]!.w)).toBeGreaterThanOrEqual(1785115000000);
