@@ -59,7 +59,7 @@ import {
   UseDpopNonce,
   type OIDCProviderError,
 } from "oidc-provider/lib/helpers/errors.js";
-import { auditLog, delegationGrants, eq, type Db } from "@regulait/db";
+import { auditLog, delegationGrants, eq, type Db, type DelegationGrantRow } from "@regulait/db";
 import {
   CLIENT_ASSERTION_MAX_AGE_SECONDS,
   DELEGATION_DEPTH_CEILING,
@@ -423,8 +423,9 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
   }
   // decision 15 open question, answered strictly for v1: a child's single audience is its parent's
   if (authz.parentLive.leaf.audience !== resource) throw refuse(new InvalidTarget("a child's resource is its parent's"), "audience_not_parent");
-  // S5 review item 1: refused BEFORE any claim unless the parent's signed depth is enforced (today: never)
-  if (!parentDepthEnforced(authz.parentLive.leaf as unknown as Record<string, unknown>)) {
+  // S5 review item 1 and PR #339 review item 3: refused BEFORE any claim unless the chain's root stored the
+  // person's SIGNED depth (links are root first)
+  if (!rootDepthSigned(authz.parentLive.links[0]?.grant, authz.parentLive.leaf)) {
     throw refuse(new InvalidGrant("delegation depth is not enforced for this parent"), "delegation_depth_unenforced");
   }
   // the parent's stored limit, judged BEFORE any claim (admitChildGrant judges it again under the parent's lock)
@@ -449,16 +450,21 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
 /**
  * S3 amendment item 1 and the S5 security review item 1 (HIGH), closed by the
  * S4+S5 follow-up. The root exchange persists min(org limit, the person's
- * SIGNED `max_depth`) as the root grant's `depth_limit` (migration 0184), and
- * every child admission (`admitChildGrant`) and every use (`loadLiveChain`,
- * `actorForGrant`) enforces the stored limit. An external child exchange is
- * still refused `delegation_depth_unenforced` when its parent carries no
- * integer `depth_limit`, and refused `delegation_depth`, before any replay
- * claim, when the parent may delegate no further.
+ * SIGNED `max_depth`) as the root grant's `depth_limit` (migration 0184) and
+ * marks the root `depth_limit_signed` (migration 0190); every child admission
+ * (`admitChildGrant`) and every use (`loadLiveChain`, `actorForGrant`) enforces
+ * the stored limit. A root minted before that stored the org's limit instead,
+ * and nothing else in its row tells the two apart, so an external child
+ * exchange is refused `delegation_depth_unenforced` unless the chain's root
+ * carries the marker (no grandfathering, ADR-0180), and refused
+ * `delegation_depth`, before any replay claim, when the parent may delegate
+ * no further.
  */
-const SIGNED_ROOT_DEPTH_PERSISTED = true;
-export function parentDepthEnforced(parent: Record<string, unknown>): boolean {
-  return SIGNED_ROOT_DEPTH_PERSISTED && typeof parent.depthLimit === "number" && Number.isInteger(parent.depthLimit);
+export function rootDepthSigned(
+  root: Pick<DelegationGrantRow, "id" | "depth" | "depthLimitSigned"> | undefined,
+  parent: Pick<DelegationGrantRow, "rootGrantId" | "depthLimit">,
+): boolean {
+  return root !== undefined && root.id === parent.rootGrantId && root.depth === 0 && root.depthLimitSigned === true && Number.isInteger(parent.depthLimit);
 }
 
 /** the root's stored `depth_limit`: the person's signed `max_depth`, never more than the org's limit now */
@@ -511,6 +517,7 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
           const org = await loadOrgSettings(txDb);
           const g = await createRootGrant(txDb, {
             maxFurtherDepth: rootDepthLimit(b.max_depth, org.delegationMaxDepth),
+            depthLimitSigned: true,
             sponsorUserId: pf.root.proof.sponsorUserId,
             actorIdentityId: pf.client.identity.id,
             scope: b.authorization_details,
@@ -525,7 +532,9 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
           const c = pf.child!;
           const [parent] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, c.parentGrantId));
           if (!parent) throw refuse(new InvalidGrant("no parent grant"), "parent_not_found");
-          if (!parentDepthEnforced(parent as unknown as Record<string, unknown>)) throw refuse(new InvalidGrant("delegation depth is not enforced for this parent"), "delegation_depth_unenforced");
+          // re-read in this transaction: the chain's root must carry the signed-depth marker (migration 0190)
+          const [root] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, parent.rootGrantId));
+          if (!rootDepthSigned(root, parent)) throw refuse(new InvalidGrant("delegation depth is not enforced for this parent"), "delegation_depth_unenforced");
           const r = await admitChildGrant(txDb, {
             parentGrantId: c.parentGrantId,
             idempotencyKey: c.idempotencyKey,
