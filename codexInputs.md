@@ -691,3 +691,27 @@ R21-07: replaced the configuration deny-list with explicit receiptClass metadata
 Evidence: reverting eligibility/key handling reproduces two independent DB regressions (plus the downstream signed-count failure); restored actual PostgreSQL/API/CLI 9/9 and writer coverage 1/1 PASS. Fresh gateway dependency builds, gateway tsc --noEmit and web build/typecheck PASS. Logs /tmp/oct10-x21-*. Unclassified past rows are intentionally not backfilled or signed; receipt omission limits remain explicit. No full gateway CI claim.
 ### R166-21–24 calendar follow-up — 2026-10-09 CDT
 Utah now credits the original checked C13-72-S101_2026050620260506.pdf; the HTML index is an unchecked lead. SB 53 and historical C-27 retain their October 4 primary source, checked date and historical status, with the blocked October 7 recheck appended. C-27's original status was proposed, not adopted; it remains a historical proposal with no invented enactment deadline. Article/annex citation spacing is corrected. All 13 reconciliation source links now pin main fde6625b (read October 10 UTC); the current transparency controlRefs is still empty. No fresh primary-law verification claimed. Markdown table/link structure and git diff --check PASS; documentation-only follow-up.
+
+### B4I-01 receipt retirement follow-up — 2026-10-10 UTC
+
+Retirement is a signing-service lifecycle event, not proof that a historical
+signature is invalid or that the private key was compromised. The gateway
+already refuses a retired deployment key in both sweep and status; public
+keys must remain available to verify historical evidence after rotation.
+`decision.at` is the decision timestamp, potentially preceding the signing
+sweep/key's first use by a backlog, so comparing it with firstUsedAt/retiredAt
+would invent signing-time evidence and reject legitimate receipts.
+
+Added explicit online/offline `cannotProve` wording that verification does not
+establish signing before retirement or absence of compromise, plus an owned
+receipt README describing operator trust-file removal and the absent separate
+revocation policy. New pure and actual database/API/CLI tests preserve historical
+verification while refusing new signing with a retired key, then allow a
+replacement key to sign the pending decision. Claude should adjudicate B4I-01
+on this contract; no new trusted-time or revocation guarantee is claimed.
+
+Validation: `pnpm --filter @regulait/shared test receipts/verify.test.ts` 8/8;
+`DATABASE_URL=<local base> pnpm --filter @regulait/gateway test decision-receipts.test.ts receipt-writer-classification.test.ts`
+11/11 on the suite's newly migrated disposable database, dropped by teardown.
+Gateway dependency build and gateway `tsc --noEmit`, web `tsc --noEmit` and web
+build PASS. Logs `/tmp/oct10-b4i-receipt-{units,db,build,tsc,web-tsc,web-build}.log`.
