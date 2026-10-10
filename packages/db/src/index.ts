@@ -19,7 +19,11 @@ export {
   appendChainedAuditRows,
   loadAuditChainBoundary,
   readAuditV2Boundary,
+  runWithAuditActor,
+  runAuditV2Cutover,
+  currentAuditActor,
   withAuditChain,
+  type AuditActorStamp,
 } from "./audit-chain.js";
 
 // ADR-0189 — the per-decision and per-subject lock targets of the BOM writers

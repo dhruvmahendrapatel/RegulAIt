@@ -21,9 +21,11 @@ import {
   runMigrations,
   usageEvents,
   users,
+  sql,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 /**
@@ -48,6 +50,8 @@ import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
+const SCRATCH = `setup_status_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
+let scratchAdmin: Db;
 
 const migrationsFolder = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -101,7 +105,15 @@ const stepByKey = (body: { steps: Array<{ key: string }> }, key: string) => {
 let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   clearEnv();
-  db = createDb(DATABASE_URL);
+  // ADR-0188 S4: this file asserts a database with NO projects, and a project an agent once acted in is
+  // referenced by its delegation grants, which are never deleted (decision 4). So the file runs on a
+  // database of its own, created here and dropped in afterAll, instead of emptying the shared one.
+  scratchAdmin = createDb(DATABASE_URL);
+  await scratchAdmin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`));
+  await scratchAdmin.execute(sql.raw(`CREATE DATABASE ${SCRATCH}`));
+  const scratchUrl = new URL(DATABASE_URL);
+  scratchUrl.pathname = `/${SCRATCH}`;
+  db = createDb(scratchUrl.toString());
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   // ADR-0181: the env-key fallback ships OFF. This file pins the checklist's env-key
@@ -164,6 +176,9 @@ afterAll(async () => {
       .where(inArray(users.id, reactivateIds));
   }
   await db.delete(modelCredentials); // leave the shared anthropic slot clean
+  app.server.closeAllConnections();
+  await app.close();
+  await closeAll([async () => db.$client.end(), async () => dropScratchDatabase(scratchAdmin, SCRATCH), async () => scratchAdmin.$client.end()]);
   clearEnv();
   for (const name of PROVIDER_ENV_VARS) {
     if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];

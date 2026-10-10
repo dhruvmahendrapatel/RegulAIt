@@ -36,6 +36,9 @@
  * `verifyDataKeyOnBoot`. Constructing an app is not putting a deployment into
  * service, and ~103 test files construct apps.
  */
+import { runAuditV2Cutover } from "@regulait/db";
+import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
+import { ensureInternalIdentities } from "./in-process-delegation.js";
 import { runMigrations, type Db } from "@regulait/db";
 import { buildApp, type BuildAppOptions } from "./app.js";
 import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
@@ -117,11 +120,33 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // ADR-0189 R43: a build that cannot emit v2 receipts with facts refuses to
   // start once a receipt v2 boundary is recorded (a v1 receipt there is
   // invalid). Before listen, like the data-key gate, so nothing is left behind.
+  // ADR-0188 decision 19 (slice S4) — THE AUDIT v2 BOOT CHECK. A chain whose recorded boundary is a
+  // version this build cannot write refuses the boot (nothing is appended by a binary that would fork
+  // the chain). The cutover itself is an operator act, run ONCE after every replica runs v2-aware code
+  // (a drained rolling deploy): `REGULAIT_AUDIT_V2_CUTOVER=run` on the boot that performs it. The
+  // database trigger `audit_log_v2_floor` (migration 0184) refuses a v1 row past the boundary from any
+  // writer that was not drained.
   try {
     await assertReceiptEmitterBootable(db);
+    await assertAuditChainWritable(db);
+    if (env[AUDIT_V2_CUTOVER_ENV]?.trim() === "run") {
+      const cut = await runAuditV2Cutover(db, { setBy: null });
+      log(`[regulait] audit chain v2 cutover: ${cut.created ? `recorded from seq ${cut.fromSeq}` : `already at v2 from seq ${cut.fromSeq}`}`);
+    }
   } catch (err) {
     await app.close().catch(() => {});
     throw err;
+  }
+
+  // ADR-0188 S4 — THE FIRST-LOAD STEP: every agent, builder agent and engine runner gets its one
+  // workload identity before any agent path can need it. Identities only: an identity starts with no
+  // grants of its own (OWNER DECISION 1; ADR-0180, nothing is grandfathered). Never fatal: a subject
+  // missed here is given its identity at first use.
+  try {
+    const ensured = await ensureInternalIdentities(db);
+    if (ensured.created > 0) log(`[regulait] created ${ensured.created} internal workload identit${ensured.created === 1 ? "y" : "ies"} (no grants; an admin grants them)`);
+  } catch (err) {
+    log(`[regulait] internal workload identities not ensured at boot: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // ADR-0176 (migration 0145): the one-time re-pin of stored MCP manifest

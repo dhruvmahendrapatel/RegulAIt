@@ -35,6 +35,9 @@ import {
   agentGrants,
   agents,
   and,
+  delegationGrants,
+  desc,
+  isNull,
   auditLog,
   costEvents,
   count,
@@ -124,6 +127,20 @@ export const AGENT_HEADER = "x-regulait-agent-id";
  * call is evaluated as `execute` — a grant restricted to other modes denies it,
  * which is the same answer `/invoke` gives. */
 export const COMPAT_MODE = "execute";
+
+/** the nil grant id: resolves to no grant, so a delegated call without one is refused (`grant_not_found`) */
+const NO_DELEGATION_GRANT = "00000000-0000-0000-0000-000000000000";
+
+/** ADR-0188 S4: the live root grant made for an engine run at lease, if any */
+async function liveEngineRunGrant(db: Db, engineRunId: string): Promise<string | null> {
+  const [g] = await db
+    .select({ id: delegationGrants.id })
+    .from(delegationGrants)
+    .where(and(eq(delegationGrants.engineRunId, engineRunId), isNull(delegationGrants.revokedAt), isNull(delegationGrants.parentGrantId)))
+    .orderBy(desc(delegationGrants.createdAt))
+    .limit(1);
+  return g?.id ?? null;
+}
 
 export const COMPAT_ANTHROPIC_ROUTE = "POST /v1/messages";
 export const COMPAT_OPENAI_ROUTE = "POST /v1/chat/completions";
@@ -507,6 +524,13 @@ export interface CompatPrepared {
    * re-query it. `passthrough` disables the semantic cache here exactly as it
    * does on the invoke path. */
   routingMode: string;
+  /**
+   * ADR-0188 S4 (for S5): the delegation grant of a WORKLOAD caller (`AuthContext.via === "workload"`, a
+   * gateway-issued delegated token resolved by S5's auth). Every dispatch is then decided with that stored
+   * chain; a workload caller with no grant is refused in the core (never decided as the person). Undefined
+   * for every other caller.
+   */
+  workloadGrantId?: string | undefined;
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -698,7 +722,7 @@ export async function prepareCompatCall(
     withModelPolicy(
       evaluateAgent({
         userId,
-        actor: null, // ADR-0188 S4 replaces
+        actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
         // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
         // Developers' traffic is exactly what a halt is usually thrown for.
         execution: { ...postureOf(compatExecutionMode, agentHaltOf(a)), ...compatLiteracy },
@@ -908,6 +932,7 @@ export async function prepareCompatCall(
       useStream: args.stream && !streamingSuppressed,
       ignoredFields: args.ignoredFields ?? [],
       virtualKey,
+      ...(req.authCtx.via === "workload" ? { workloadGrantId: req.authCtx.delegationGrantId ?? NO_DELEGATION_GRANT } : {}),
       routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
     },
   };
@@ -1010,7 +1035,16 @@ export async function executeCompatCall(
       })
     : null;
 
+  // ADR-0188 S4 (decision 6): an ENGINE run's key acts for its runner's workload identity under the
+  // run's delegation grant (made at lease). Every call it makes is decided with that stored chain; an
+  // engine key whose run has no live grant is refused (the nil id resolves to no grant: never `actor: null`).
+  const engineGrantId =
+    prepared.workloadGrantId ??
+    (prepared.virtualKey?.purpose === "engine"
+      ? ((prepared.virtualKey.engineRunId ? await liveEngineRunGrant(db, prepared.virtualKey.engineRunId) : null) ?? NO_DELEGATION_GRANT)
+      : undefined);
   const dispatchArgs: GovernedDispatchArgs = {
+    ...(engineGrantId ? { delegationGrantId: engineGrantId } : {}),
     userId: prepared.userId,
     served: prepared.served,
     requestedAgentId: prepared.requested.id,

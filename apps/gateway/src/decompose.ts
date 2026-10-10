@@ -339,7 +339,7 @@ export function registerDecomposeRoutes(
       withModelPolicy(
         evaluateAgent({
           userId,
-          actor: null, // ADR-0188 S4 replaces
+          actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
           // ADR-0124 — decomposition dispatches a lead agent to draft the graph,
           // so it is execution and is gated.
           execution: { ...postureOf(decomposeExecutionMode, agentHaltOf(a)), ...decomposeLiteracy },
