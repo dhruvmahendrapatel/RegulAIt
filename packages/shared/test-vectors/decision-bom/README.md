@@ -87,7 +87,8 @@ positives, and one that accepts everything fails the negatives.
 | outcome never `valid` | by-design results (B4.8) do not lower the outcome | P01 and most Decision BOM positives are now `valid`; Q01, Q04, Q06, Q18 to Q23 |
 
 The B4.10 contract changes (outcome enum, two `cannotProve` entries, one invalid reason, the by-design refinement) are
-not on `main` yet; these vectors already expect them. #312's P08 obligation (a real RFC 3161 token) stands: node:crypto
+in `contract-b4.ts` (`isUnverifiableByDesign`, `bomVerifyResponseSchema`); `contract-b4.test.ts` restates every
+`responseRules` entry in the contract's shape and requires the schema to accept exactly the ones marked `conforms`. #312's P08 obligation (a real RFC 3161 token) stands: node:crypto
 cannot build a TSA token, so B4's own tests cover `tsa_token` `valid` and `timestamp_invalid`.
 
 ## Vector map
