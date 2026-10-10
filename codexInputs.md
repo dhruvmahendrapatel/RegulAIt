@@ -1275,3 +1275,100 @@ or claimed B4I-03 closed without their integration/CI verification.
 The proposed CI filter was dry-checked:18 remaining workspace projects, with
 both shared and the recursive root script explicitly excluded. The first
 negative-only filter included the root; the reviewed proposal now excludes it.
+
+
+### X34 — Batch4 outbound audience and returned-fix independent review — 2026-10-10 UTC
+
+Reviewed main `94fffb65` (exact source checkout), containing #234 merge
+`28659335`, #272 merge `0bedec74` and #273 merge `033a450e`, against
+ADR-0186 decisions30–32. Review only: no gateway, shared, database, scripts
+or product UI implementation changes. Three durable independent probe
+fragments are in `apps/web/review/x34-{outbound,receipt,tsa}-independent.probe.ts`.
+
+**Disposition: no additional product defect reproduced in this scope.**
+The returned receipt/TSA/scrub points are addressed on this main head:
+
+- Outbound enforcement consumes caller invocation content only, runs after
+  entitlement but before decision-row payload digests/approval/dispatch, and
+  structurally excludes decrypted connector credentials and registered upstream
+  credentials. Tool refusal suppresses captured trace input; protocol capture
+  remains absent and connector refusal omits its caller-controlled object.
+  The original real MCP/webhook controls still show gateway-injected credentials
+  sent successfully. Ten new probes cover percent-encoded URL queries and keys,
+  a malformed escape alongside a valid encoded token, nested caller header/body
+  carriers, arrays, encoded protocol arguments, caller content equal to the
+  injected credential, non-admin setting refusal, 12,000-level/cyclic traversal,
+  and hostname/userinfo/scheme tricks. Actual refusal probes assert receiver
+  counts unchanged and no raw credential/fragment/hash retained in audit rows.
+- Strict migrated default remains `enforce`; the original actual passkey
+  ceremony proves `off` requires a consumed `settings_relax` grant and audited
+  `detail.transitions`/`detail.relaxed`. The new ordinary-user negative cannot
+  relax it. Personal-data SSNs remain governed by the separate PII cascade;
+  stdio is expressly outside this network-audience check.
+- Receipt classification's source/type guard and actual signing pipeline pass.
+  A new PostgreSQL counterexample with a decision-looking rule name but
+  `excluded`, `configuration`, future/unknown or absent classification stays
+  unsigned; a new explicitly classified governed denial signs and verifies.
+  Retired-key historical verification and the API/CLI limitations remain
+  explicit: retirement stops new signing and is not revocation or trusted-time
+  evidence. No signing-time or compromise guarantee was introduced.
+- TSA OID grammar and actual invalid-configuration persistence tests pass;
+  CMS effective signature/digest hash binding rejects SHA-1/default PSS,
+  inconsistent SHA-2 and unsupported forms. Four new OpenSSL-backed probes
+  verify a valid PSS control then refuse a changed signature, substituted
+  anchor bytes/nonce, absent trust and an unrelated non-empty configured root.
+  The token's embedded root does not replace configured trust.
+- Dense scrub tests retain their original 100ms budgets, including gate-dense,
+  Slack and Google inputs; forged markers and exact RE2 scan-plan/corpus/Unicode
+  differential tests pass. Shared timing tests run in the configured serialized
+  project and its list-completeness guard passes. This fresh run used a global
+  quiet window, after every build finished; no budget/timeout was changed.
+
+**Fresh validation (synthetic data, real local PostgreSQL and loopback HTTP):**
+
+1. Frozen install `CI=true pnpm install --frozen-lockfile` PASS.
+2. `pnpm --filter '@regulait/gateway...' build`,
+   `pnpm --filter @regulait/web exec tsc --noEmit`, and
+   `pnpm --filter @regulait/web build` PASS. The gateway build also compiled
+   the temporary independent fixture copies; these were removed afterward.
+3. With `DATABASE_URL` pointing only at owned scratch
+   `regulait_review_x34_oct10b`,
+   `pnpm --filter @regulait/gateway test zz-x34-outbound-independent.test.ts`
+   **24/24 PASS**: original14 plus independent10.
+4. `pnpm --filter @regulait/shared test receipts/verify.test.ts
+   audit-scrub-forged-marker.test.ts detection-content/scan-plans.test.ts
+   detection-content/scrub-dense.test.ts timing-isolation.test.ts`
+   **70/70 PASS**, five files, no skips; unit/timing scheduling unchanged.
+5. Actual receipt/API/CLI plus classification and timestamp persistence:
+   `pnpm --filter @regulait/gateway test zz-x34-receipt-independent.test.ts
+   receipt-writer-classification.test.ts audit-timestamp.test.ts
+   zz-x34-tsa-independent.test.ts` first run had **36 PASS/1 probe assertion
+   failure**. The failure expected `timestamp_signature_or_chain_invalid`
+   but the absent-trust response was safely refused as
+   `timestamp_signature_or_encoding_invalid`; it was not acceptance.
+   Corrected only this overly narrow assertion to require a signature-validation
+   failure and added the unrelated non-empty-root control. Focused
+   `pnpm --filter @regulait/gateway test zz-x34-tsa-independent.test.ts`
+   final **14/14 PASS**. The unchanged other three files passed **24/24** in
+   the combined run. Therefore **62 distinct selected gateway tests PASS
+   across these runs**, including15 independent probes; no skipped cases.
+   Do not describe the initial combined command as green.
+
+**Replay mechanics:** append the outbound/TSA fragments to temporary gateway
+copies of `zz-b4o-outbound-audience.test.ts` and
+`audit-timestamp-verify.test.ts`; insert the receipt fragment just before the
+last `});` in a temporary `decision-receipts.test.ts` copy (inside its owned
+fixture describe block). Use the temporary names in the commands above and
+remove them afterward. Fixture helpers/signers/transports are the original real
+ones, not replacements. Receipt and timestamp persistence fixtures create/drop
+additional databases with their existing unique `regulait_x21_`/`regulait_x22_`
+patterns; this review's explicit scratch database was also dropped. Base
+`regulait` was never reset. No surviving review process or temporary owner-file
+copy remains.
+
+Logs (local, not committed): `/tmp/oct10-x34-{install,gateway-build,web-tsc,
+web-build,outbound,shared,receipt-tsa,tsa-final}.log`.
+No full gateway/workspace-suite claim, live vendor/public TSA, certificate
+revocation check, browser/a11y rerun, or universal sub-100ms performance claim.
+Audience scope is the accepted recursive strings/keys plus percent decoding;
+no additional base64 or transport-dependent decoding contract was invented.
