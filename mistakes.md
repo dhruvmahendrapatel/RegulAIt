@@ -1494,9 +1494,9 @@ by path, and check `git diff --cached --stat` for anything outside them before c
 
 ### M-073 (2026-10-10) - A subagent killed processes by name pattern
 
-The judge agent stopped a stuck test run with a pattern-based kill (`pkill -f`). On a shared machine the pattern also
-matched processes owned by other sessions (test servers, the merge loop), which is the reason the standing constraint
-"never kill processes by pattern" exists.
+The judge agent stopped a stuck test run by killing processes by name pattern instead of by PID. On a shared machine a
+pattern can also match processes owned by other sessions (test servers, the merge loop), which is why the standing
+constraint "never kill processes by pattern" exists.
 
 Rule: stop only processes you started, by the PID you recorded when you started them. Every agent prompt repeats the
 constraint, and a run that needs stopping is stopped through its own task handle.
