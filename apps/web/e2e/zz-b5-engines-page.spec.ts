@@ -76,8 +76,10 @@ test("the Engines page states an unbuilt install honestly and shows the gateway'
   const dialog = page.getByRole("dialog", { name: "Mint an enrolment token for promptfoo" });
   await dialog.getByLabel("Valid for (minutes)").fill("5");
   await dialog.getByRole("button", { name: "Mint token" }).click();
-  const secret = page.getByTestId("revealed-secret");
+  // shown in the dialog that minted it, focused, and gone when it closes
+  const secret = dialog.getByTestId("revealed-secret");
   await expect(secret).toHaveText(/^rgee_/);
-  await page.getByRole("button", { name: "Dismiss" }).click();
-  await expect(secret).toHaveCount(0);
+  await expect(dialog.getByRole("region", { name: "Enrolment token, shown once" })).toBeFocused();
+  await dialog.getByRole("button", { name: "I've copied it — close" }).click();
+  await expect(page.getByTestId("revealed-secret")).toHaveCount(0);
 });

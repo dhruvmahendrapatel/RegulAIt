@@ -1,17 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../../api/client";
 import {
   dialPatch,
   dialProblem,
+  FRESHNESS_RECHECK_CAP_MS,
   egressReadings,
   engineHealth,
   failureText,
   isCredentialIsolationRefusal,
+  nextFreshnessExpiry,
   pagesUsing,
   raisedDials,
   runnerOnCurrentBuild,
   selfTestFresh,
   shortDigest,
+  startFreshnessClock,
 } from "./engineModel";
 import type { Engine } from "./engineTypes";
 
@@ -161,5 +164,46 @@ describe("misc", () => {
     expect(pagesUsing("redteam").map((p) => p.to)).toEqual(["/admin/redteam", "/admin/evals"]);
     expect(shortDigest(DIGEST)).toBe("sha256:aaaaaaaaaaaa…");
     expect(shortDigest(null)).toBe("none");
+  });
+});
+
+describe("the freshness clock (PR #230 review: no stale green while the page is open)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const greenFor = (passedHoursAgo: number) =>
+    engine({ enabled: true, selfTest: passed(hoursAgo(passedHoursAgo)), selfTestPassedAt: hoursAgo(passedHoursAgo) });
+
+  it("the next expiry is the earliest future one; past and missing ones are ignored", () => {
+    expect(nextFreshnessExpiry([greenFor(1), greenFor(20), greenFor(30), engine()], NOW)).toBe(NOW + 4 * 3600_000);
+    expect(nextFreshnessExpiry([engine(), greenFor(30)], NOW)).toBeNull();
+  });
+
+  it("green before expiry, not green after it, with no action but the clock", () => {
+    const engines = [greenFor(23.5)]; // expires in 30 minutes
+    const labels: string[] = [];
+    const stop = startFreshnessClock(() => engines, (now) => labels.push(engineHealth(engines[0]!, now).label));
+    expect(engineHealth(engines[0]!, Date.now()).tone).toBe("ok");
+    vi.advanceTimersByTime(29 * 60_000);
+    expect(labels.at(-1)).toBe("On — self-test passed"); // re-checked under the cap, still fresh
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(labels.at(-1)).toBe("On — self-test not current");
+    stop();
+  });
+
+  it("re-checks at least every cap even when the earliest expiry is far off, and stops when stopped", () => {
+    const engines = [greenFor(0)];
+    let ticks = 0;
+    const stop = startFreshnessClock(() => engines, () => ticks++);
+    vi.advanceTimersByTime(FRESHNESS_RECHECK_CAP_MS);
+    expect(ticks).toBe(1);
+    vi.advanceTimersByTime(FRESHNESS_RECHECK_CAP_MS);
+    expect(ticks).toBe(2);
+    stop();
+    vi.advanceTimersByTime(10 * FRESHNESS_RECHECK_CAP_MS);
+    expect(ticks).toBe(2);
   });
 });

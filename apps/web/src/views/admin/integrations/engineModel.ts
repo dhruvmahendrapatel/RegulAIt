@@ -175,6 +175,53 @@ export function shortDigest(digest: string | null | undefined): string {
   return `${algo ? `${algo}:` : ""}${hex.slice(0, 12)}…`;
 }
 
+/**
+ * PR #230 review: a page left open must not keep showing a self-test as fresh
+ * after the gateway stopped accepting it. The earliest future moment one of
+ * these engines' passing self-tests crosses the 24 h bound, or null.
+ */
+export function nextFreshnessExpiry(engines: ReadonlyArray<Pick<Engine, "selfTest" | "selfTestPassedAt">>, now: number): number | null {
+  let next: number | null = null;
+  for (const e of engines) {
+    if (!e.selfTest?.passed || !e.selfTestPassedAt) continue;
+    const expiry = Date.parse(e.selfTestPassedAt) + SELF_TEST_MAX_AGE_MS;
+    if (Number.isFinite(expiry) && expiry >= now && (next === null || expiry < next)) next = expiry;
+  }
+  return next;
+}
+
+/** the longest the page goes without re-reading the clock, whatever the next expiry */
+export const FRESHNESS_RECHECK_CAP_MS = 5 * 60_000;
+
+/**
+ * Calls `onTick(now)` just after the earliest freshness expiry of `getEngines()`
+ * (and at least every FRESHNESS_RECHECK_CAP_MS), re-arming after each tick.
+ * Returns the function that stops it.
+ */
+export function startFreshnessClock(
+  getEngines: () => ReadonlyArray<Pick<Engine, "selfTest" | "selfTestPassedAt">>,
+  onTick: (now: number) => void,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  const arm = () => {
+    const now = Date.now();
+    const expiry = nextFreshnessExpiry(getEngines(), now);
+    // +1 ms: fresh means "at most 24 h old", so the reading changes just after the bound
+    const delay = expiry === null ? FRESHNESS_RECHECK_CAP_MS : Math.min(expiry - now + 1, FRESHNESS_RECHECK_CAP_MS);
+    timer = setTimeout(() => {
+      if (stopped) return;
+      onTick(Date.now());
+      arm();
+    }, delay);
+  };
+  arm();
+  return () => {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+  };
+}
+
 /** a run status from the engine's `lastRun` — a status, never a verdict, so never toned as a pass */
 export function lastRunText(status: string): string {
   return status.replaceAll("_", " ");

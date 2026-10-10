@@ -11,7 +11,8 @@
  *  - a refused enable (no passing self-test) is shown in that engine's card;
  *  - switching off, revoking a runner and running the self-test are confirmed,
  *    with their consequences, before anything is sent;
- *  - an enrolment token is shown once, then gone;
+ *  - an enrolment token is shown once, inside the dialog that minted it, focused, then gone;
+ *  - a self-test that expires while the page is open stops reading green on its own;
  *  - raising a limit steps up; lowering one does not;
  *  - axe is clean in both themes, with and without the acceptance dialog open.
  */
@@ -157,19 +158,49 @@ test.describe("ADR-0187 X26: the Engines page", () => {
     expect(patches[0]!.headers["x-regulait-step-up"]).toBeUndefined();
   });
 
-  test("an enrolment token is shown once, then gone", async ({ page }) => {
+  test("an enrolment token is shown once, in the dialog that minted it, with focus on it; then gone", async ({ page }) => {
     const st = await open(page);
+    // garak is the LAST card: the reveal must not land screens away from it (PR #230 review)
     await card(page, "garak").getByRole("button", { name: "Mint enrolment token…" }).click();
     const dialog = page.getByRole("dialog", { name: "Mint an enrolment token for garak" });
     await dialog.getByLabel("Label (optional)").fill("rack-2");
     await dialog.getByRole("button", { name: "Mint token" }).click();
-    const secret = page.getByTestId("revealed-secret");
+    // the dialog stays open and holds the token; focus moves to it for screen readers
+    const secret = dialog.getByTestId("revealed-secret");
     await expect(secret).toHaveText(`rgee_${"f".repeat(64)}`);
-    await expect(page.getByText("shown once")).toBeVisible();
+    await expect(dialog.getByRole("region", { name: "Enrolment token, shown once" })).toBeFocused();
+    await expect(dialog).toContainText("shown once");
+    await expect(page.getByTestId("revealed-secret")).toHaveCount(1); // nowhere else on the page
     expect(sent(st, "POST", "/v1/engines/garak/enrollment-tokens").map((c) => c.body)).toEqual([{ label: "rack-2", ttlMinutes: 15 }]);
-    await page.getByRole("button", { name: "Dismiss" }).click();
-    await expect(secret).toHaveCount(0);
+    await expectAxeClean(page, "enrolment token reveal");
+    await dialog.getByRole("button", { name: "I've copied it — close" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByTestId("revealed-secret")).toHaveCount(0);
     await expect(page.getByText(/rgee_/)).toHaveCount(0);
+  });
+
+  test("closing the token dialog with Escape discards the token too", async ({ page }) => {
+    await open(page);
+    await card(page, "promptfoo").getByRole("button", { name: "Mint enrolment token…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Mint an enrolment token for promptfoo" });
+    await dialog.getByRole("button", { name: "Mint token" }).click();
+    await expect(dialog.getByTestId("revealed-secret")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByText(/rgee_/)).toHaveCount(0);
+  });
+
+  test("a self-test passing as the page was opened stops reading green at its 24 h expiry, with no user action", async ({ page }) => {
+    await page.clock.install();
+    await open(page);
+    const pf = card(page, "promptfoo");
+    // the fixture's promptfoo self-test passed 30 minutes ago: green until 23 h 30 min from now
+    await expect(pf.getByText("On — self-test passed")).toBeVisible();
+    await page.clock.fastForward("23:29:00");
+    await expect(pf.getByText("On — self-test passed")).toBeVisible();
+    await page.clock.fastForward("00:02:00");
+    await expect(pf.getByText("On — self-test not current")).toBeVisible();
+    await expect(pf.getByText("On — self-test passed")).toHaveCount(0);
   });
 
   test("revoking a runner asks for a reason, states the consequence, and sends the DELETE", async ({ page }) => {

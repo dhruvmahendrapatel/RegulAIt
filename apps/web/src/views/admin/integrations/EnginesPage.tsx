@@ -22,14 +22,17 @@
  *    the gateway's reason shown and an explicit acknowledgement ticked, and
  *    then still through the step-up.
  *  - Nothing unmeasured reads as healthy (engineModel.ts). A run status is
- *    never shown as a verdict; results live on the run surfaces.
+ *    never shown as a verdict; results live on the run surfaces. Health is
+ *    re-judged at the earliest self-test expiry, so an open page never keeps
+ *    a stale green.
  *  - Destructive actions (switching off, revoking a runner, a self-test that
  *    may switch the engine off) are confirmed with their consequences and the
  *    audit record they write.
- *  - An enrolment token is shown once, kept only in this component's state,
- *    and gone on dismiss.
+ *  - An enrolment token is shown once, in the dialog that minted it (focused,
+ *    open until dismissed), kept only in this component's state, and gone when
+ *    the dialog closes.
  */
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
@@ -38,7 +41,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { KV, QueryGate, ReasonModal, RevealCard, type RevealedSecret } from "../adminKit";
+import { KV, QueryGate, ReasonModal } from "../adminKit";
 import { EngineStatusBadge } from "./EngineStatusBadge";
 import {
   ENGINE_DIAL_LIMITS,
@@ -54,6 +57,7 @@ import {
   raisedDials,
   runnerOnCurrentBuild,
   shortDigest,
+  startFreshnessClock,
   type EngineDial,
 } from "./engineModel";
 import type {
@@ -66,6 +70,7 @@ import type {
   EnrollmentTokenMinted,
   RunnerRevoked,
 } from "./engineTypes";
+import a from "../admin.module.css";
 import v from "../../views.module.css";
 
 export const ENGINES_KEY = ["admin", "engines"] as const;
@@ -86,7 +91,7 @@ type ModalState =
   | { kind: "accept-risk"; engine: Engine; detail: string }
   | { kind: "disable"; engine: Engine }
   | { kind: "self-test"; engine: Engine }
-  | { kind: "enrol"; engine: Engine }
+  | { kind: "enrol"; engine: Engine; minted?: EnrollmentTokenMinted }
   | { kind: "limits"; engine: Engine }
   | { kind: "revoke"; engine: Engine; runner: EngineRunner }
   | null;
@@ -130,11 +135,22 @@ export default function EnginesPage() {
   const content = useDetectionContent();
   const act = useEngineAction();
   const [modal, setModal] = useState<ModalState>(null);
-  const [reveal, setReveal] = useState<(RevealedSecret & { engineId: string }) | null>(null);
   const [selfTestRan, setSelfTestRan] = useState<Record<string, EngineSelfTest>>({});
   const close = () => setModal(null);
-  const now = Date.now();
   const list = engines.data?.engines ?? [];
+  // PR #230 review: health is judged against the clock at every render, and a
+  // render is forced just after the earliest self-test expiry (at least every
+  // FRESHNESS_RECHECK_CAP_MS), so a page left open never keeps a stale green.
+  // Re-armed whenever the engine list changes.
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const engineList = engines.data?.engines ?? [];
+    return startFreshnessClock(
+      () => engineList,
+      () => setClockTick((t) => t + 1),
+    );
+  }, [engines.data]);
+  const now = Date.now();
 
   const enable = async (engine: Engine, acceptRisk: boolean) => {
     close();
@@ -168,14 +184,6 @@ export default function EnginesPage() {
         }
       />
       <div className={v.stack}>
-        {reveal && (
-          <RevealCard
-            reveal={reveal}
-            onDismiss={() => {
-              setReveal(null);
-            }}
-          />
-        )}
         <QueryGate loading={engines.isLoading} error={engines.error} onRetry={() => void engines.refetch()}>
           {list.length === 0 ? (
             <Card>
@@ -274,10 +282,12 @@ export default function EnginesPage() {
       {modal?.kind === "enrol" && (
         <EnrolModal
           engine={modal.engine}
+          minted={modal.minted ?? null}
+          busy={act.busy}
+          // closing (the button, Escape or the backdrop) drops the token: it lives only in this dialog's state
           onCancel={close}
           onMint={(body) => {
             const engine = modal.engine;
-            close();
             void act
               .run(
                 engine.id,
@@ -285,13 +295,12 @@ export default function EnginesPage() {
                 () => `Enrolment token minted for ${engine.displayName}`,
               )
               .then((res) => {
-                if (!res.ok) return act.fail(engine.id, res.err);
-                setReveal({
-                  engineId: engine.id,
-                  title: `Enrolment token for ${engine.displayName}`,
-                  secret: res.out.token,
-                  note: `It expires ${fmtAt(res.out.expiresAt)} and registers one runner, once. Give it to the runner as its enrolment token.`,
-                });
+                if (!res.ok) {
+                  close();
+                  return act.fail(engine.id, res.err);
+                }
+                // PR #230 review: the token is shown in the dialog that minted it, which stays open until dismissed
+                setModal({ kind: "enrol", engine, minted: res.out });
               });
           }}
         />
@@ -669,7 +678,74 @@ function AcceptRiskModal(props: { engine: Engine; detail: string; onCancel: () =
   );
 }
 
-function EnrolModal(props: { engine: Engine; onCancel: () => void; onMint: (body: { label?: string; ttlMinutes: number }) => void }) {
+function EnrolModal(props: {
+  engine: Engine;
+  minted: EnrollmentTokenMinted | null;
+  busy: boolean;
+  onCancel: () => void;
+  onMint: (body: { label?: string; ttlMinutes: number }) => void;
+}) {
+  if (props.minted) return <EnrolTokenReveal engine={props.engine} minted={props.minted} onClose={props.onCancel} />;
+  return <EnrolForm engine={props.engine} busy={props.busy} onCancel={props.onCancel} onMint={props.onMint} />;
+}
+
+/**
+ * PR #230 review: the one-time token, in the dialog that minted it — never at
+ * the top of a long page, screens away from the card that asked for it. Focus
+ * moves to it so a screen reader announces it, and it stays until the admin
+ * closes the dialog; closing discards it (it never leaves component state).
+ */
+function EnrolTokenReveal(props: { engine: Engine; minted: EnrollmentTokenMinted; onClose: () => void }) {
+  const { toast } = useToast();
+  const [copied, setCopied] = useState(false);
+  const region = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    region.current?.focus();
+  }, []);
+  return (
+    <Modal
+      open
+      title={`Mint an enrolment token for ${props.engine.displayName}`}
+      onClose={props.onClose}
+      actions={
+        <Button variant="primary" onClick={props.onClose}>
+          I&apos;ve copied it — close
+        </Button>
+      }
+    >
+      <div ref={region} tabIndex={-1} role="region" aria-label="Enrolment token, shown once" className={v.stack}>
+        <p>
+          <Badge tone="warn">shown once</Badge> Copy it now: this is the only time it is shown, and the gateway keeps only its
+          hash. Closing this dialog discards it.
+        </p>
+        <div className={a.secretRow}>
+          <code className={a.secretCode} data-testid="revealed-secret">
+            {props.minted.token}
+          </code>
+          <Button
+            size="sm"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(props.minted.token);
+                setCopied(true);
+              } catch {
+                toast("Clipboard unavailable — select the text manually", "error");
+              }
+            }}
+          >
+            {copied ? "Copied" : "Copy"}
+          </Button>
+        </div>
+        <p className={v.faint}>
+          It expires {fmtAt(props.minted.expiresAt)} and registers one runner, once. Give it to the runner as its enrolment
+          token.
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
+function EnrolForm(props: { engine: Engine; busy: boolean; onCancel: () => void; onMint: (body: { label?: string; ttlMinutes: number }) => void }) {
   const [label, setLabel] = useState("");
   const [ttl, setTtl] = useState(String(ENROLLMENT_TTL_MINUTES.default));
   const n = Number(ttl);
@@ -689,7 +765,7 @@ function EnrolModal(props: { engine: Engine; onCancel: () => void; onMint: (body
           <Button onClick={props.onCancel}>Cancel</Button>
           <Button
             variant="primary"
-            disabled={problem !== null}
+            disabled={problem !== null || props.busy}
             onClick={() => props.onMint({ ...(label.trim() ? { label: label.trim() } : {}), ttlMinutes: n })}
           >
             Mint token
