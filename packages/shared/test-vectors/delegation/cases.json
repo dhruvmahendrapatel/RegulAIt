@@ -1,0 +1,2390 @@
+{
+  "format": "regulait.delegation-spec-vectors.v1",
+  "source": {
+    "adr": "docs/decisions/0188-batch6-agent-workload-identity.md",
+    "commit": "b91c6072b2e28c38bed163c68ff33be6635b852c"
+  },
+  "cases": [
+    {
+      "id": "root-request-template",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "method": "POST",
+        "path": "/oauth/token",
+        "headers": {
+          "DPoP": "<agent-signed-proof>"
+        },
+        "formPairs": [
+          [
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange"
+          ],
+          [
+            "subject_token",
+            "<one-use-human-proof>"
+          ],
+          [
+            "subject_token_type",
+            "urn:regulait:params:oauth:token-type:delegation-proof"
+          ],
+          [
+            "client_assertion_type",
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+          ],
+          [
+            "client_assertion",
+            "<registered-key-assertion>"
+          ],
+          [
+            "resource",
+            "https://resource.example.invalid/mcp/server"
+          ],
+          [
+            "authorization_details",
+            "<exact-proof-scope-json>"
+          ],
+          [
+            "requested_token_type",
+            "urn:ietf:params:oauth:token-type:access_token"
+          ]
+        ]
+      },
+      "expected": {
+        "effect": "eligible",
+        "outputBinding": "agent-proof-key",
+        "tokenType": "DPoP",
+        "issuedTokenType": "urn:ietf:params:oauth:token-type:access_token"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-grant_type-missing",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "grant_type": "missing"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-grant_type-duplicate",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "grant_type": "duplicate"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-subject_token-missing",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "subject_token": "missing"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-subject_token-duplicate",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "subject_token": "duplicate"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-subject_token_type-missing",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "subject_token_type": "missing"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-subject_token_type-duplicate",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "subject_token_type": "duplicate"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-resource-missing",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "resource": "missing"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-resource-duplicate",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "resource": "duplicate"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-requested_token_type-missing",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "requested_token_type": "missing"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-requested_token_type-duplicate",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "rootTemplateMutation": {
+          "requested_token_type": "duplicate"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-other",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "resource": "different-audience"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_target"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "root-actor-token",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "actor_token": "unexpected"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_request"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "subject-session",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "subject_token": "session-cookie"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-expired",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "humanProofExpired": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-bad-signature",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "humanProofSignatureValid": false
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-wrong-agent",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "humanProofIntendedIdentity": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-mismatch-authorization_details",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "boundFieldMismatch": "authorization_details"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-mismatch-resource",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "boundFieldMismatch": "resource"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-mismatch-project_id",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "boundFieldMismatch": "project_id"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-mismatch-env",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "boundFieldMismatch": "env"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-mismatch-key_thumbprint",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "boundFieldMismatch": "key_thumbprint"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-one-use",
+      "sections": [
+        "Decision 15",
+        "Decision 14"
+      ],
+      "input": {
+        "namespace": "human_delegation_proof",
+        "jti": "synthetic-human-1"
+      },
+      "expected": {
+        "effect": "sequence"
+      },
+      "profile": "active",
+      "sequence": [
+        {
+          "operation": "first-valid-exchange",
+          "expected": "eligible"
+        },
+        {
+          "operation": "repeat-valid-exchange",
+          "expected": "invalid_grant"
+        }
+      ]
+    },
+    {
+      "id": "replay-client_assertion",
+      "sections": [
+        "Decision 14"
+      ],
+      "input": {
+        "namespace": "client_assertion",
+        "sameKeyConcurrentReplicas": 2
+      },
+      "expected": {
+        "effect": "race",
+        "claimWinners": 1,
+        "claimLosers": 1,
+        "loserRefusal": "invalid_client",
+        "claimSurvivesWinnerFailure": true,
+        "claimSurvivesRestart": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "replay-as_dpop",
+      "sections": [
+        "Decision 14"
+      ],
+      "input": {
+        "namespace": "as_dpop",
+        "sameKeyConcurrentReplicas": 2
+      },
+      "expected": {
+        "effect": "race",
+        "claimWinners": 1,
+        "claimLosers": 1,
+        "loserRefusal": "invalid_dpop_proof",
+        "claimSurvivesWinnerFailure": true,
+        "claimSurvivesRestart": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "replay-rs_dpop",
+      "sections": [
+        "Decision 14"
+      ],
+      "input": {
+        "namespace": "rs_dpop",
+        "sameKeyConcurrentReplicas": 2
+      },
+      "expected": {
+        "effect": "race",
+        "claimWinners": 1,
+        "claimLosers": 1,
+        "loserRefusal": "401",
+        "claimSurvivesWinnerFailure": true,
+        "claimSurvivesRestart": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "replay-human_delegation_proof",
+      "sections": [
+        "Decision 14"
+      ],
+      "input": {
+        "namespace": "human_delegation_proof",
+        "sameKeyConcurrentReplicas": 2
+      },
+      "expected": {
+        "effect": "race",
+        "claimWinners": 1,
+        "claimLosers": 1,
+        "loserRefusal": "invalid_grant",
+        "claimSurvivesWinnerFailure": true,
+        "claimSurvivesRestart": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "replay-delegation_authz",
+      "sections": [
+        "Decision 14"
+      ],
+      "input": {
+        "namespace": "delegation_authz",
+        "sameKeyConcurrentReplicas": 2
+      },
+      "expected": {
+        "effect": "race",
+        "claimWinners": 1,
+        "claimLosers": 1,
+        "loserRefusal": "invalid_grant",
+        "claimSurvivesWinnerFailure": true,
+        "claimSurvivesRestart": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "replay-namespace-isolation",
+      "sections": [
+        "Decision 14"
+      ],
+      "input": {
+        "sameKey": "synthetic-shared-jti",
+        "namespaces": [
+          "client_assertion",
+          "as_dpop",
+          "rs_dpop",
+          "human_delegation_proof",
+          "delegation_authz"
+        ]
+      },
+      "expected": {
+        "effect": "eligible",
+        "independentClaims": 5
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-valid",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "ageSeconds": 30,
+        "futureSeconds": 0,
+        "nonce": "current",
+        "htm": "POST",
+        "htu": "expected",
+        "ath": "expected",
+        "jti": "fresh"
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-age-60",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "ageSeconds": 60
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-age-61",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "ageSeconds": 61
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-future-5",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "futureSeconds": 5
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-future-6",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "futureSeconds": 6
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-wrong-htm",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "htm": "GET"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-wrong-htu",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "htu": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-wrong-ath",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "ath": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-missing-nonce",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "nonce": null
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-stale-nonce",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "nonce": "stale"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-replay-jti",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "jti": "already-claimed"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-wrong-key",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "keyThumbprint": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-dpop-no-proof",
+      "sections": [
+        "Decision 13",
+        "Decision 5"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "proof": null
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "cnf-invalid-42",
+      "sections": [
+        "Decision 13"
+      ],
+      "input": {
+        "cnf": {}
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "cnf-invalid-43",
+      "sections": [
+        "Decision 13"
+      ],
+      "input": {
+        "cnf": {
+          "jkt": "A",
+          "x5t#S256": "B"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "cnf-invalid-44",
+      "sections": [
+        "Decision 13"
+      ],
+      "input": {
+        "cnf": {
+          "unknown": "A"
+        }
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "mtls-no-dpop-fallback",
+      "sections": [
+        "Decision 13",
+        "Decision 21"
+      ],
+      "input": {
+        "cnf": {
+          "x5t#S256": "registered-cert"
+        },
+        "certificate": null,
+        "validDPoP": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-wrong-issuer",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "iss": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-wrong-subject",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "sub": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-aud-array",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "aud": [
+          "https://issuer.example.invalid/oauth/token"
+        ]
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-aud-wrong",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "aud": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-older-than-5-min",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "ageSeconds": 301
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-expiry-over-5-min",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "expMinusIat": 301
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-repeated-jti",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "jti": "spent"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-unregistered-key",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "key": "unregistered"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-revoked-key",
+      "sections": [
+        "Decision 15",
+        "Decision 5",
+        "Amendments from the S5 security review, item 7"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "credentialRevoked": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_client"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "client-assertion-valid",
+      "sections": [
+        "Decision 15"
+      ],
+      "input": {
+        "iss": "client_id",
+        "sub": "client_id",
+        "aud": "https://issuer.example.invalid/oauth/token",
+        "ageSeconds": 30,
+        "expMinusIat": 300,
+        "jti": "fresh",
+        "registeredKey": true
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-identity",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "identity"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-grant",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "grant"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-authCredential",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "authCredential"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-subjectCredential",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "subjectCredential"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-ownGrants",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "ownGrants"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-haltState",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "haltState"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-sponsorRights",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "sponsorRights"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-sponsorEnabled",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "sponsorEnabled"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-path",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "path"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-depth",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "depth"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-root",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "root"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-project",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "project"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-env",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "env"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-middle-runContext",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "leafOtherwiseValid": true,
+        "storedMiddleLinkFailure": "runContext"
+      },
+      "expected": {
+        "effect": "refuse",
+        "upstreamCalls": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "live-chain-held-turn",
+      "sections": [
+        "Decision 17"
+      ],
+      "input": {
+        "turnAlreadyOpen": true
+      },
+      "expected": {
+        "effect": "sequence"
+      },
+      "profile": "active",
+      "sequence": [
+        {
+          "operation": "governed-use-before-revoke",
+          "expected": "eligible"
+        },
+        {
+          "operation": "commit-middle-revocation",
+          "expected": "committed"
+        },
+        {
+          "operation": "next-governed-use-no-wait",
+          "expected": "refuse",
+          "upstreamCalls": 0
+        }
+      ]
+    },
+    {
+      "id": "act-stored-path",
+      "sections": [
+        "Decision 15",
+        "Decision 25"
+      ],
+      "input": {
+        "storedRootToLeaf": [
+          "spiffe://synthetic.invalid/A",
+          "spiffe://synthetic.invalid/B",
+          "spiffe://synthetic.invalid/C"
+        ],
+        "callerAct": {
+          "sub": "forged"
+        },
+        "callerDepth": 0
+      },
+      "expected": {
+        "effect": "eligible",
+        "act": {
+          "sub": "spiffe://synthetic.invalid/C",
+          "act": {
+            "sub": "spiffe://synthetic.invalid/B",
+            "act": {
+              "sub": "spiffe://synthetic.invalid/A"
+            }
+          }
+        }
+      },
+      "profile": "active"
+    },
+    {
+      "id": "depth-stored-0-max-0",
+      "sections": [
+        "Decision 26",
+        "Decision 34",
+        "Decision 15"
+      ],
+      "input": {
+        "storedGrantDepth": 0,
+        "actorHopCount": 1,
+        "orgMaxDepth": 0
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "depth-stored-3-max-3",
+      "sections": [
+        "Decision 26",
+        "Decision 34",
+        "Decision 15"
+      ],
+      "input": {
+        "storedGrantDepth": 3,
+        "actorHopCount": 4,
+        "orgMaxDepth": 3
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "depth-stored-4-max-3",
+      "sections": [
+        "Decision 26",
+        "Decision 34",
+        "Decision 15"
+      ],
+      "input": {
+        "storedGrantDepth": 4,
+        "actorHopCount": 5,
+        "orgMaxDepth": 3
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "errorCode": "delegation_depth"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "depth-stored-8-max-8",
+      "sections": [
+        "Decision 26",
+        "Decision 34",
+        "Decision 15"
+      ],
+      "input": {
+        "storedGrantDepth": 8,
+        "actorHopCount": 9,
+        "orgMaxDepth": 8
+      },
+      "expected": {
+        "effect": "eligible"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "depth-stored-9-max-8",
+      "sections": [
+        "Decision 26",
+        "Decision 34",
+        "Decision 15",
+        "Decision 30"
+      ],
+      "input": {
+        "storedGrantDepth": 9,
+        "actorHopCount": 10,
+        "orgMaxDepth": 8
+      },
+      "expected": {
+        "effect": "refuse",
+        "exactErrorUnspecified": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "child-depth-unenforced",
+      "sections": [
+        "Amendments from the S5 security review, item 1"
+      ],
+      "input": {
+        "signedDepthEnforced": false,
+        "otherwiseValidChildExchange": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "errorCode": "delegation_depth_unenforced",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "active"
+    },
+    {
+      "id": "child-substitution-child",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "child"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-child_cnf",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "child_cnf"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-authorization_details",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "authorization_details"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-resource",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "resource"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-project_id",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "project_id"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-env",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "env"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-cap_micros",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "cap_micros"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-max_depth",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "max_depth"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-expires_at",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "expires_at"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-substitution-parent_grant_id",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "genuineUnusedParentAuthorization": true,
+        "substitutedField": "parent_grant_id"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "replayClaims": 0,
+        "allocations": 0
+      },
+      "profile": "signed-depth-enabled",
+      "sequence": [
+        {
+          "operation": "substituted-request",
+          "expected": "refuse-no-claims"
+        },
+        {
+          "operation": "intended-request-same-parent-authorization",
+          "expected": "eligible"
+        }
+      ]
+    },
+    {
+      "id": "child-authorization-valid",
+      "sections": [
+        "Decision 23",
+        "Decision 15"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "parentBinding": "dpop",
+        "allSignedFieldsEqual": true,
+        "authenticatedClient": "B",
+        "headerProofKey": "B-binding",
+        "actorTokenSigner": "A-binding",
+        "actor_token_type": "urn:regulait:params:oauth:token-type:delegation-authz"
+      },
+      "expected": {
+        "effect": "eligible",
+        "outputBinding": "B-binding",
+        "clientId": "B",
+        "authorizationClaimNamespace": "delegation_authz"
+      },
+      "profile": "signed-depth-enabled"
+    },
+    {
+      "id": "child-mtls-parent",
+      "sections": [
+        "Decision 23"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "parentBinding": "mtls"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "errorCode": "mtls_parent_handoff_unsupported"
+      },
+      "profile": "signed-depth-enabled"
+    },
+    {
+      "id": "signed-root-zero-depth",
+      "sections": [
+        "Amendments from the S5 security review, item 1"
+      ],
+      "input": {
+        "rootSignedMaxDepth": 0,
+        "orgMaxDepth": 3,
+        "requestChild": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "errorCode": "delegation_depth"
+      },
+      "profile": "signed-depth-enabled"
+    },
+    {
+      "id": "child-other-audience",
+      "sections": [
+        "Amendments from the S5 security review, recorded child resource ruling"
+      ],
+      "input": {
+        "signedDepthEnforced": true,
+        "parentAudience": "https://resource.example.invalid/A",
+        "childResource": "https://resource.example.invalid/B"
+      },
+      "expected": {
+        "effect": "refuse",
+        "exactErrorUnspecified": true
+      },
+      "profile": "signed-depth-enabled"
+    },
+    {
+      "id": "s5-not-steward",
+      "sections": [
+        "Amendments from the S5 security review, items 2 and 6"
+      ],
+      "input": {
+        "steward": false
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 403,
+        "errorCode": "delegation_not_steward"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "s5-no-project-access",
+      "sections": [
+        "Amendments from the S5 security review, items 2 and 6"
+      ],
+      "input": {
+        "steward": true,
+        "projectAccess": false
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 403,
+        "errorCode": "delegation_project_access"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "s5-cap-required",
+      "sections": [
+        "Amendments from the S5 security review, items 2 and 6"
+      ],
+      "input": {
+        "rootCap": null,
+        "defaultCapMicros": 0,
+        "uncappedAllowed": false
+      },
+      "expected": {
+        "effect": "refuse",
+        "errorCode": "delegation_cap_required"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "s5-lifetime-over-default",
+      "sections": [
+        "Amendments from the S5 security review, items 2 and 6"
+      ],
+      "input": {
+        "rootLifetimeSeconds": 901,
+        "maxLifetimeSeconds": 900
+      },
+      "expected": {
+        "effect": "refuse",
+        "errorCode": "delegation_lifetime"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "s5-tightening-between-proof-exchange",
+      "sections": [
+        "Amendments from the S5 security review, items 2 and 6"
+      ],
+      "input": {
+        "validProofIssuedBeforeTightening": true,
+        "rootCap": null,
+        "currentUncappedAllowed": false
+      },
+      "expected": {
+        "effect": "refuse",
+        "errorCode": "delegation_cap_required"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "timeout-grant-revoked",
+      "sections": [
+        "Amendments from the S5 security review, item 5"
+      ],
+      "input": {
+        "timeoutDuringCommit": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "liveNewGrants": 0,
+        "auditOutcome": "timeout_grant_revoked"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-unknownCA",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "unknownCA"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-expired",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "expired"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-notYetValid",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "notYetValid"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-wrongSAN",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "wrongSAN"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-wrongTrustDomain",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "wrongTrustDomain"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-leafCA",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "leafCA"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-missingDigitalSignature",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "missingDigitalSignature"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-brokenPath",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "brokenPath"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-issuerNotCA",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "issuerNotCA"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true,
+        "errorCode": "certificate_issuer"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-issuerMissingKeyCertSign",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "issuerMissingKeyCertSign"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true,
+        "errorCode": "certificate_issuer"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-issuerPathLenTooSmall",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "issuerPathLenTooSmall"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true,
+        "errorCode": "certificate_issuer"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-untrustedProxy",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "untrustedProxy"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-unauthenticatedProxy",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "unauthenticatedProxy"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-headerNotConfigured",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "headerNotConfigured"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "certificate-proxyPeerCertUsedAsClient",
+      "sections": [
+        "Decision 21",
+        "Amendments from the S5 security review, items 3 and 4"
+      ],
+      "input": {
+        "certificateFailure": "proxyPeerCertUsedAsClient"
+      },
+      "expected": {
+        "effect": "refuse",
+        "noNetworkFetch": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "endpoint-dpop-nonce-missing",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Spike S0 result, own DPoP profile"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "nonce": null
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "use_dpop_nonce"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "endpoint-dpop-nonce-stale",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Spike S0 result, own DPoP profile"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "nonce": "stale"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "use_dpop_nonce"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "endpoint-dpop-age-61",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Spike S0 result, own DPoP profile"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "ageSeconds": 61
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_dpop_proof"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "endpoint-dpop-wrong-method",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Spike S0 result, own DPoP profile"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "htm": "GET"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_dpop_proof"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "endpoint-dpop-wrong-uri",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Spike S0 result, own DPoP profile"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "htu": "other"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_dpop_proof"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "endpoint-dpop-wrong-key",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Spike S0 result, own DPoP profile"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "proofSigner": "other-output-binding"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_dpop_proof"
+      },
+      "profile": "active"
+    },
+    {
+      "id": "request-over-budget",
+      "sections": [
+        "Decision 15",
+        "Decision 16",
+        "Decision 22"
+      ],
+      "input": {
+        "childCapMicros": "60000000",
+        "parentRemainingMicros": "40000000"
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_grant",
+        "errorCode": "delegation_budget"
+      },
+      "profile": "signed-depth-enabled"
+    },
+    {
+      "id": "request-over-scope",
+      "sections": [
+        "Decision 15",
+        "Decision 16"
+      ],
+      "input": {
+        "childScopeOutsideParent": true
+      },
+      "expected": {
+        "effect": "refuse",
+        "oauthError": "invalid_authorization_details"
+      },
+      "profile": "signed-depth-enabled"
+    },
+    {
+      "id": "root-mtls-bound-output",
+      "sections": [
+        "Decision 13",
+        "Decision 15",
+        "Decision 21"
+      ],
+      "input": {
+        "clientAuth": "tls_client_auth",
+        "certificatePathValid": true,
+        "allOtherChecksValid": true
+      },
+      "expected": {
+        "effect": "eligible",
+        "tokenType": "Bearer",
+        "cnfMembers": [
+          "x5t#S256"
+        ],
+        "unboundBearer": false
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-credential-bootstrap",
+      "sections": [
+        "Decision 15",
+        "Owner decision 4"
+      ],
+      "input": {
+        "humanCredential": "bootstrap"
+      },
+      "expected": {
+        "effect": "refuse",
+        "exactErrorUnspecified": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-credential-virtual-key",
+      "sections": [
+        "Decision 15",
+        "Owner decision 4"
+      ],
+      "input": {
+        "humanCredential": "virtual-key"
+      },
+      "expected": {
+        "effect": "refuse",
+        "exactErrorUnspecified": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-credential-api-key-owner-without-required-MFA",
+      "sections": [
+        "Decision 15",
+        "Owner decision 4"
+      ],
+      "input": {
+        "humanCredential": "api-key-owner-without-required-MFA"
+      },
+      "expected": {
+        "effect": "refuse",
+        "exactErrorUnspecified": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "human-proof-sensitive-write-stepup",
+      "sections": [
+        "Decision 15",
+        "Owner decision 4"
+      ],
+      "input": {
+        "sensitiveProject": true,
+        "scopeKind": "write",
+        "stepUp": false
+      },
+      "expected": {
+        "effect": "refuse",
+        "exactErrorUnspecified": true
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-wrongAudience",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "wrongAudience"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-wrongEnvironment",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "wrongEnvironment"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-expiredToken",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "expiredToken"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-algNone",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "algNone"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-unknownKid",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "unknownKid"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-signerWorkloadNotIssuer",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "signerWorkloadNotIssuer"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-issuedBindingMismatch",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "issuedBindingMismatch"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-issuedRowMissing",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "issuedRowMissing"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    },
+    {
+      "id": "resource-token-issuerKeyRevoked",
+      "sections": [
+        "Decision 5",
+        "Decision 12",
+        "Decision 13"
+      ],
+      "input": {
+        "allOtherChecksValid": true,
+        "tokenFailure": "issuerKeyRevoked"
+      },
+      "expected": {
+        "effect": "refuse",
+        "httpStatus": 401
+      },
+      "profile": "active"
+    }
+  ]
+}
