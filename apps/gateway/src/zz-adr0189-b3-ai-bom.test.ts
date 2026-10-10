@@ -80,7 +80,7 @@ import { buildApp } from "./app.js";
 import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomSnapshotTriggerGate, captureAiBomSnapshotInTx, loadAiBomRecords, takeAiBomSnapshot } from "./ai-bom.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
-import { buildAiBom } from "@regulait/shared";
+import { buildAiBom, validateSpdx } from "@regulait/shared";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -247,9 +247,19 @@ describe("R31/R32: the loader on real rows, every subject kind", () => {
     for (const kind of ["use_case", "agent", "builder_agent", "install"] as const) {
       const { build } = await loadAndBuild(kind);
       for (const r of build.renderings) {
+        if (r.format === "spdx-3.0.1") {
+          expect(validateSpdx(JSON.parse(r.bytes)).errors, `${kind} spdx`).toEqual([]);
+          continue;
+        }
         const v = r.format === "cyclonedx-1.7" ? "1.7" : "1.6";
         expect(validateCycloneDx(JSON.parse(r.bytes), v).errors, `${kind} ${v}`).toEqual([]);
       }
+      // B5 (R2, R3): SPDX is always attempted; on these real rows (datasets, cards without supplier release facts)
+      // the body records not_producible with the missing property names, never a placeholder
+      const spdx = build.body.renderings["spdx-3.0.1"];
+      expect(spdx, kind).toBeDefined();
+      if (spdx!.status === "not_producible") expect(spdx!.missing.length, kind).toBeGreaterThan(0);
+      else expect(build.renderings.some((r) => r.format === "spdx-3.0.1"), kind).toBe(true);
       expect(aiBomNativeBodySchema.safeParse(JSON.parse(build.bodyBytes)).success, kind).toBe(true);
     }
   }, 120_000);

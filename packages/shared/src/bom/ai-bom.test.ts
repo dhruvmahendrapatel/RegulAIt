@@ -166,7 +166,9 @@ describe("exact bytes (§5, amendment 5)", () => {
   });
   it("1.6 is rendered only when the setting adds it; 1.7 is always required", () => {
     const b = buildAiBom(fixture(), meta(), { cyclonedxVersions: ["1.7"] });
-    expect(Object.keys(b.body.renderings)).toEqual(["cyclonedx-1.7"]);
+    // B5: SPDX is always attempted (R2); this fixture has datasets, so it is recorded as not_producible (R3)
+    expect(Object.keys(b.body.renderings).sort()).toEqual(["cyclonedx-1.7", "spdx-3.0.1"]);
+    expect(b.body.renderings["spdx-3.0.1"]).toMatchObject({ status: "not_producible" });
     refused(() => buildAiBom(fixture(), meta(), { cyclonedxVersions: ["1.6"] }), /1\.7 is always rendered/);
   });
 });

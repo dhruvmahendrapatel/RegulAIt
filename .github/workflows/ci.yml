@@ -159,6 +159,35 @@ jobs:
       # leaves the gateway to the `gateway-tests` shards below — this job has no database to give it.
       # The shared budget tests therefore no longer share a runner with the gateway suite at all.
       - run: pnpm --filter @regulait/shared test
+
+      # ADR-0189 slice B5 — SPDX 3.0.1 SHACL conformance of renderings MADE BY THE PRODUCT CODE.
+      # The product validates every SPDX rendering against the official JSON schema (Ajv, offline); that is
+      # necessary but not sufficient (R12 §5: `suppliedBy` -> Tool passes the schema and fails SHACL). This
+      # step runs `spdx3-validate` 0.0.7's own schema + SHACL checks through the offline driver:
+      #   - the Python closure is hash-locked (`--require-hashes --no-deps`; halo 0.0.31 is built from its pinned sdist), CI only;
+      #   - the renderings come from the BUILT @regulait/shared (`render-fixtures.mjs`), one per subject kind,
+      #     plus the with-datasets draft and the suppliedBy->Tool negative control, which must FAIL;
+      #   - validation runs in a fresh NETWORK NAMESPACE (`sudo unshare --net`, then `setpriv` back to the
+      #     runner user), and the driver's `--require-offline` probe refuses to run if any outside TCP
+      #     connection succeeds, so a lost isolation fails the step instead of passing silently;
+      #   - fail closed: no input (R13), a vendored file off its sha256 pin, a conforming negative control, or
+      #     a triple count that differs from `expected-triples.json` all exit non-zero.
+      - name: SPDX 3.0.1 SHACL conformance, offline (ADR-0189 B5)
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/spdx3-venv"
+          out="$RUNNER_TEMP/spdx3-out"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --disable-pip-version-check --no-deps --require-hashes -r scripts/spdx3/requirements.lock
+          node scripts/spdx3/render-fixtures.mjs "$out"
+          isolated() { sudo unshare --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups -- "$@"; }
+          # R13 proof on the real command line: no document must fail
+          if isolated "$venv/bin/python" -I scripts/spdx3/run_offline.py --require-offline; then
+            echo "run_offline.py accepted an empty document list"; exit 1
+          fi
+          isolated "$venv/bin/python" -I scripts/spdx3/run_offline.py --require-offline \
+            --expect scripts/spdx3/expected-triples.json "$out"/*.json
+
       - run: pnpm -r --filter '!@regulait/shared' --filter '!regulait' --filter '!@regulait/gateway' test
         env:
           # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
