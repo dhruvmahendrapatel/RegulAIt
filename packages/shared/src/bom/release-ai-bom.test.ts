@@ -279,6 +279,9 @@ describe("B7 release workflow shape (F1, F5)", () => {
   it("is its own workflow, triggered by a successful Security run on main, with no default permissions", () => {
     expect(wf).toContain("workflow_run:");
     expect(wf).toContain("workflows: [Security]");
+    // round 3: only this repository's own security.yml run
+    expect(job("build")).toContain("github.event.workflow_run.head_repository.full_name == github.repository");
+    expect(job("build")).toContain("github.event.workflow_run.path == '.github/workflows/security.yml'");
     expect(wf).not.toContain("pull_request_target");
     expect(wf).toMatch(/\npermissions: \{\}\n/);
     const security = readFileSync(path.join(repo, ".github/workflows/security.yml"), "utf8");
@@ -324,7 +327,7 @@ describe("B7 release workflow shape (F1, F5)", () => {
   it("F5: the switch, builder, CLI and workflow are WATCHED and code-owned", () => {
     const security = readFileSync(path.join(repo, ".github/workflows/security.yml"), "utf8");
     const owners = readFileSync(path.join(repo, ".github/CODEOWNERS"), "utf8");
-    for (const f of [".github/workflows/release-ai-bom.yml", "scripts/release-ai-bom.mjs", "packages/shared/src/bom/release-switch.ts", "packages/shared/src/bom/release-ai-bom.ts"]) {
+    for (const f of [".github/workflows/release-ai-bom.yml", "scripts/release-ai-bom.mjs", "packages/shared/src/bom/release-switch.ts", "packages/shared/src/bom/release-ai-bom.ts", "packages/shared/src/bom/release-sbom-identity.ts"]) {
       expect(security).toMatch(new RegExp(`WATCHED: .* ${f.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} `));
       expect(owners).toContain(`/${f} `);
     }

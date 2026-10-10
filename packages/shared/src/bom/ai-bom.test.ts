@@ -579,7 +579,22 @@ describe("X41: no string field carries a credential or a URL path/query into any
   const COLON_CANARY = `XFIELDCANARY-sk-${"q".repeat(20)}:x`;
   const PROTO_RELATIVE = "//internal.example/XFIELDPATH?q=XFIELDQUERY";
   const SCHEMELESS = "internal.example/XFIELDPATH?sig=XFIELDQUERY";
-  const CANARIES = [SECRET, URL_CANARY, COLON_CANARY, PROTO_RELATIVE, SCHEMELESS];
+  // B7 round 3: F3 bypasses (backslashes, percent-escaped delimiters, leading space, fragment and
+  // parameter delimiters, fullwidth forms) and script schemes
+  const BYPASSES = [
+    "\\\\internal.example\\XFIELDPATH?sig=XFIELDQUERY",
+    "\\\\\\\\internal.example\\\\XFIELDPATH?sig=XFIELDQUERY",
+    "internal.example\\XFIELDPATH?sig=XFIELDQUERY",
+    "%2F%2Finternal.example%2FXFIELDPATH%3Fsig%3DXFIELDQUERY",
+    "%2f%2finternal.example%2fXFIELDPATH",
+    " //internal.example/XFIELDPATH",
+    "internal.example/XFIELDPATH#sig=XFIELDQUERY",
+    "internal.example/XFIELDPATH;sig=XFIELDQUERY",
+    "\uff0f\uff0finternal.example\uff0fXFIELDPATH\uff1fsig=XFIELDQUERY",
+    "javascript:alert('XFIELDPATH')",
+    "data:text/html,XFIELDPATH",
+  ];
+  const CANARIES = [SECRET, URL_CANARY, COLON_CANARY, PROTO_RELATIVE, SCHEMELESS, ...BYPASSES];
   const BA_ID = u(40);
   const SK = u(41);
   const rich = (): AiBomRecordSet =>
@@ -630,8 +645,9 @@ describe("X41: no string field carries a credential or a URL path/query into any
     // the record types with string fields were all exercised (a new list must join this test)
     // (B7's install-only lists are exercised in release-ai-bom.test.ts on an install subject)
     expect(new Set(cases.map((c) => c.split(".")[0]))).toEqual(new Set(AI_BOM_RECORD_LISTS.filter((l) => l !== "releaseSboms" && l !== "devStackTools")));
-    expect(cases.length).toBeGreaterThan(400);
-  });
+    expect(cases.length).toBeGreaterThan(1000);
+    // over a thousand full builds (two schema-validated renderings each): a generous limit, not a budget
+  }, 300_000);
   it("F2: an endpoint with a colon-bearing scheme is refused without echoing it", () => {
     const f = fixture();
     f.connectors[0]!.url = `${COLON_CANARY}//host`;
@@ -648,14 +664,29 @@ describe("X41: no string field carries a credential or a URL path/query into any
       refused(() => buildAiBom(b, meta(), opts), /URL is refused in a name/);
     }
   });
+  it("round 3: every F3 bypass is refused in agents[].name (urlOrText) and agents[].model (guardName)", () => {
+    for (const v of BYPASSES) {
+      for (const field of ["name", "model"] as const) {
+        const f = fixture();
+        f.agents[0]![field] = v;
+        let out = "";
+        try { out = all(buildAiBom(f, meta(), opts)); } catch (e) {
+          expect((e as Error).message).not.toMatch(/XFIELD|internal\.example/);
+          continue;
+        }
+        expect(out.includes("XFIELD"), `${field} <- ${JSON.stringify(v)}`).toBe(false);
+      }
+    }
+  });
   it("F4: a colon in an ordinary name or model id is text, not a refused URL", () => {
     const f = fixture();
     f.useCases[0]!.name = "Prod: claims triage";
     f.agents[0]!.name = "Prod: triage agent";
     f.agents[0]!.model = "llama3:8b";
-    f.modelCards[0]!.intendedUse = "Note: summaries only";
+    f.agents[1]!.model = "team/model-name";
+    f.modelCards[0]!.intendedUse = "Note: summaries only, 50% of cases; Data: claims";
     const out = all(buildAiBom(f, meta(), opts));
-    for (const v of ["Prod: claims triage", "Prod: triage agent", "llama3:8b", "Note: summaries only"]) expect(out).toContain(v);
+    for (const v of ["Prod: claims triage", "Prod: triage agent", "llama3:8b", "team/model-name", "Note: summaries only, 50% of cases; Data: claims"]) expect(out).toContain(v);
     // still a URL when it is one: a web scheme, or `//` after any scheme
     const g = fixture();
     g.agents[0]!.name = "https://internal.example/x?y=z";

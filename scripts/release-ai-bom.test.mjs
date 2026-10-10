@@ -39,4 +39,15 @@ describe("release-ai-bom.mjs (ADR-0189 B7)", () => {
     expect(run("publish").status).toBe(2);
     expect(run("identity").status).toBe(2);
   });
+  it("usage and parse errors are value-free", () => {
+    const secretish = ["--x", "CANARY-VALUE"];
+    const r = run("check-inventory", ...secretish);
+    expect(r.status).toBe(2);
+    expect(r.stderr).not.toContain("CANARY");
+    expect(r.stderr).not.toContain("--x");
+    const bad = run("check-inventory", "--inventory", path.join(here, "CANARY-missing.json"));
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toMatch(/--inventory is not readable JSON/);
+    expect(bad.stderr).not.toContain("CANARY");
+  });
 });

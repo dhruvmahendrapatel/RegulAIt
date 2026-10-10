@@ -48,10 +48,13 @@ env:
 jobs:
   build:
     name: Build the release AI BOM (no signing identity)
+    # round 3: only this repository's own security.yml run (never a fork's head, never another workflow named Security)
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.path == '.github/workflows/security.yml'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

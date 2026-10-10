@@ -164,7 +164,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # the gates' own code and configuration (unquoted on purpose: a path list)
-          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml .github/workflows/release-ai-bom.yml scripts/release-ai-bom.mjs packages/shared/src/bom/release-switch.ts packages/shared/src/bom/release-ai-bom.ts scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
+          WATCHED: .gitleaks.toml security/ .github/workflows/security.yml .github/workflows/release-ai-bom.yml scripts/release-ai-bom.mjs packages/shared/src/bom/release-switch.ts packages/shared/src/bom/release-ai-bom.ts packages/shared/src/bom/release-sbom-identity.ts scripts/security-gate.mjs scripts/security-cosign-verify.sh scripts/security-suppressions.mjs scripts/security-runtime-contents.mjs Dockerfile :(glob)engines/*/Dockerfile :(glob)engines/*/licence-gate.mjs :(glob)engines/*/licence-allow.json
         run: |
           set -euo pipefail
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- ${WATCHED})"

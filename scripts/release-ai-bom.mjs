@@ -37,9 +37,11 @@ const { AI_BOM_SNAPSHOTS_RELEASED, parseAiDevStackInventory, runReleaseAiBomStep
 
 const [cmd, ...rest] = process.argv.slice(2);
 const args = {};
+const KNOWN_ARGS = ["inventory", "commit", "committed-at", "image-digest", "workspace", "image", "out-dir"];
 for (let i = 0; i < rest.length; i += 2) {
   const k = rest[i];
-  if (!k?.startsWith("--") || rest[i + 1] === undefined) usage(`bad argument ${k ?? ""}`);
+  // value-free: an argument is named by its position, never echoed
+  if (!k?.startsWith("--") || rest[i + 1] === undefined || !KNOWN_ARGS.includes(k.slice(2))) usage(`argument ${i + 1} is not a known --name value pair`);
   args[k.slice(2)] = rest[i + 1];
 }
 function usage(msg) {
@@ -47,7 +49,23 @@ function usage(msg) {
   process.exit(2);
 }
 const need = (k) => args[k] ?? usage(`--${k} is required`);
-const json = (f) => JSON.parse(readFileSync(f, "utf8"));
+// value-free: a read error names the argument, never the path or the content
+const read = (k) => {
+  const f = need(k);
+  try {
+    return readFileSync(f);
+  } catch {
+    throw new Error(`--${k} is not readable`);
+  }
+};
+// value-free: a parse error names the argument, never the file's content (JSON.parse echoes it)
+const json = (f, what) => {
+  try {
+    return JSON.parse(readFileSync(f, "utf8"));
+  } catch {
+    throw new Error(`${what} is not readable JSON`);
+  }
+};
 const inert = () => {
   console.log("release AI BOM: inert (ADR-0189 R28): AI_BOM_SNAPSHOTS_RELEASED is false; nothing built, signed or written");
   process.exit(0);
@@ -59,7 +77,7 @@ try {
       console.log(`released=${AI_BOM_SNAPSHOTS_RELEASED === true}`);
       break;
     case "check-inventory": {
-      const inv = parseAiDevStackInventory(json(args.inventory ?? path.join(root, "security/ai-dev-stack.json")));
+      const inv = parseAiDevStackInventory(json(args.inventory ?? path.join(root, "security/ai-dev-stack.json"), "--inventory"));
       console.log(`ai dev-stack inventory: ${inv.tools.length} tool(s), reviewed ${inv.reviewedOn} (${inv.reviewRef})`);
       break;
     }
@@ -68,8 +86,8 @@ try {
       const result = runReleaseAiBomStep({
         commit: need("commit"),
         committedAt: need("committed-at"),
-        inventory: json(args.inventory ?? path.join(root, "security/ai-dev-stack.json")),
-        sboms: { imageDigest: need("image-digest"), workspace: readFileSync(need("workspace")), image: readFileSync(need("image")) },
+        inventory: json(args.inventory ?? path.join(root, "security/ai-dev-stack.json"), "--inventory"),
+        sboms: { imageDigest: need("image-digest"), workspace: read("workspace"), image: read("image") },
       });
       if (result.status !== "built") inert();
       const out = need("out-dir");

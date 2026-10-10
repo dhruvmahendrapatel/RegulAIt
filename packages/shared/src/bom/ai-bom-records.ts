@@ -513,17 +513,56 @@ const WEB_SCHEMES: readonly string[] = ["http:", "https:", "ws:", "wss:"];
  * `llama3:8b` are text (still credential-guarded), not refused URLs.
  */
 function isUrlValue(v: string): boolean {
-  const m = SCHEME_PREFIX.exec(v);
+  const n = urlView(v);
+  const m = SCHEME_PREFIX.exec(n);
   if (!m) return false;
-  return v.startsWith("//", m[0].length) || WEB_SCHEMES.includes(m[0].toLowerCase());
+  return n.startsWith("//", m[0].length) || WEB_SCHEMES.includes(m[0].toLowerCase());
+}
+/** the percent-escapes that spell a URL delimiter (`/`, `?`, `#`, `;`), decoded for the checks only */
+const URL_DELIMITER_ESCAPES: Readonly<Record<string, string>> = { "2f": "/", "3f": "?", "23": "#", "3b": ";" };
+/**
+ * B7 round 3 (F3 bypasses): the view of a value a URL check looks at, built
+ * on a COPY in one linear pass, never a regex: NFKC (fullwidth `／？` become
+ * `/?`), leading whitespace trimmed, `\` read as `/`, and the four delimiter
+ * escapes `%2F %3F %23 %3B` decoded (any case). Only those four: a general
+ * `decodeURIComponent` would throw on ordinary prose such as "50% of cases",
+ * and these four cannot fail to decode. The value itself is never rewritten.
+ */
+function urlView(v: string): string {
+  const n = v.normalize("NFKC").trimStart();
+  let out = "";
+  for (let i = 0; i < n.length; i++) {
+    const c = n[i]!;
+    if (c === "\\") out += "/";
+    else if (c === "%" && i + 2 < n.length && URL_DELIMITER_ESCAPES[n.slice(i + 1, i + 3).toLowerCase()] !== undefined) {
+      out += URL_DELIMITER_ESCAPES[n.slice(i + 1, i + 3).toLowerCase()]!;
+      i += 2;
+    } else out += c;
+  }
+  return out;
 }
 /**
- * B7 fix round F3: a protocol-relative URL (`//host/path?q=`) or a scheme-less
- * one with a query (`host/path?sig=`). Plain string checks, no regex (linear).
+ * B7 fix rounds F3 and 3: a protocol-relative URL (`//host/path`) or a
+ * scheme-less one carrying a query, fragment or parameter (`host/path?sig=`,
+ * `host/path#sig=`, `host/path;sig=`), on the normalised view. Plain string
+ * checks, no regex (linear). `team/model-name` (a `/`, no delimiter) is text.
  */
-const hiddenUrl = (v: string) => v.startsWith("//") || (v.includes("/") && v.includes("?"));
-/** does the text carry a URL (a URL value, or `://` anywhere)? */
-const carriesUrl = (v: string) => isUrlValue(v) || v.includes("://");
+const hiddenUrl = (v: string) => {
+  const n = urlView(v);
+  return n.startsWith("//") || (n.includes("/") && (n.includes("?") || n.includes("#") || n.includes(";")));
+};
+/** does the text carry a URL (a URL value, or `://` anywhere), on the normalised view? */
+const carriesUrl = (v: string) => isUrlValue(v) || urlView(v).includes("://");
+/**
+ * B7 round 3: a scheme a consumer may turn into an executable link is refused
+ * in names and free text. `data:` only when a payload follows directly
+ * (`data:text/html,…`), so "Data: claims summary" stays prose.
+ */
+function scriptScheme(v: string): boolean {
+  const n = urlView(v).toLowerCase();
+  if (n.startsWith("javascript:") || n.startsWith("vbscript:")) return true;
+  return n.startsWith("data:") && n.length > 5 && n[5] !== " " && n[5] !== "\t";
+}
 
 /**
  * #280 (4237488597) and the PR #287 decision (ADR-0180): a free-form
@@ -536,7 +575,7 @@ export function safeReference(v: string, what: string): string {
   if (v.startsWith("sha256:") && HEX64.test(v.slice(7))) return v;
   if (v.startsWith("id:")) return isRefId(v.slice(3)) ? v : `sha256:${sha256(v)}`;
   if (v.startsWith("url:")) return `url:${sanitiseAiBomEndpoint(v.slice(4), what)}`;
-  if (carriesUrl(v)) return `url:${sanitiseAiBomEndpoint(v, what)}`;
+  if (carriesUrl(v)) return `url:${sanitiseAiBomEndpoint(urlView(v), what)}`;
   if (isRefId(v)) return `id:${v}`;
   return `sha256:${sha256(v)}`;
 }
@@ -568,7 +607,7 @@ const freeOpt = (what: string, v: unknown, max: number) => {
  * because `name:tag` model ids look like a scheme and must stay exact.
  */
 function guardName(what: string, v: string): string {
-  if (carriesUrl(v) || hiddenUrl(v)) fail(`${what}: a URL is refused in a name or identifier`);
+  if (carriesUrl(v) || hiddenUrl(v) || scriptScheme(v)) fail(`${what}: a URL is refused in a name or identifier`);
   return guardText(what, v);
 }
 const name = (what: string, v: unknown, max: number) => guardName(what, req(what, v, max));
@@ -582,8 +621,9 @@ const nameOpt = (what: string, v: unknown, max: number) => {
  * text passes the credential guard.
  */
 function urlOrText(what: string, v: string): string {
-  if (isUrlValue(v)) return sanitiseAiBomEndpoint(v, what);
-  if (v.includes("://") || hiddenUrl(v)) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
+  if (scriptScheme(v)) fail(`${what}: a script or data URL is refused`);
+  if (isUrlValue(v)) return sanitiseAiBomEndpoint(urlView(v), what);
+  if (carriesUrl(v) || hiddenUrl(v)) fail(`${what}: a URL inside free text is refused; record the URL on its own`);
   return guardText(what, v);
 }
 /** a timestamp (date or date-time), checked linearly then parsed */
@@ -614,7 +654,7 @@ function dataClaims(v: unknown, at: string): Record<string, string | number | bo
       if (x.length > AI_BOM_DATA_CLAIM_MAX_CHARS) fail(`${at}.${k}: longer than ${AI_BOM_DATA_CLAIM_MAX_CHARS} characters`);
       // PR #287: a URL claim keeps its origin only (R47), a time claim must be a time, other text is guarded
       if (k === "releaseTime") x = stamp(`${at}.${k}`, x, false);
-      else if (k === "downloadLocation") x = carriesUrl(x as string) ? sanitiseAiBomEndpoint(x as string, `${at}.${k}`) : fail(`${at}.${k}: not a URL`);
+      else if (k === "downloadLocation") x = carriesUrl(x as string) ? sanitiseAiBomEndpoint(urlView(x as string), `${at}.${k}`) : fail(`${at}.${k}: not a URL`);
       else x = urlOrText(`${at}.${k}`, x as string);
     } else if (!(typeof x === "boolean" || (typeof x === "number" && Number.isSafeInteger(x)))) {
       fail(`${at}.${k}: only a string, safe integer or boolean is allowed (no nested object or array)`);
