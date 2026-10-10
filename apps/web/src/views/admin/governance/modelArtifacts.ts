@@ -173,14 +173,37 @@ const FINDING_SENTENCE: Record<string, (f: ArtifactScanFinding) => string> = {
     `${formatName(safeFindingId(f.id))} is an executable format: loading it can run code, so it can never be clean. A scan that finds nothing does not make it safe to load.`,
   scan_error: (f) => `The scanner reported an error (${safeFindingId(f.id)}), so the result is inconclusive.`,
 };
-function severityWord(s: unknown): string {
-  return typeof s === "string" && /^(critical|high|medium|low|info)$/.test(s) ? s : "unrated";
+/** the severities a scan finding carries (the gateway's closed vocabulary) */
+export const FINDING_SEVERITIES = ["critical", "high", "medium", "low"] as const;
+/** B5W-08: a finding's severity, or null when it is absent, not a string, or not in the vocabulary */
+export function findingSeverity(s: unknown): (typeof FINDING_SEVERITIES)[number] | null {
+  return typeof s === "string" && (FINDING_SEVERITIES as readonly string[]).includes(s) ? (s as (typeof FINDING_SEVERITIES)[number]) : null;
 }
+/** the words for a severity: the value when it is one of ours, else a fixed "unknown severity" (never the raw value) */
+export function severityLabel(s: unknown): string {
+  return findingSeverity(s) ?? "unknown severity";
+}
+const severityWord = severityLabel;
 export function findingKindLabel(kind: string): string {
   return kind === "unsafe_operator" ? "Unsafe operator" : kind === "executable_format" ? "Executable format" : kind === "scan_error" ? "Scan error" : "Other finding";
 }
 export function findingSentence(f: ArtifactScanFinding): string {
   return (FINDING_SENTENCE[f.kind] ?? ((x) => `A finding of an unrecognised kind was recorded (${safeFindingId(x.id)}); it is treated as not clean.`))(f);
+}
+
+const isFinding = (f: unknown): f is ArtifactScanFinding =>
+  typeof f === "object" && f !== null && typeof (f as ArtifactScanFinding).kind === "string" && typeof (f as ArtifactScanFinding).id === "string";
+
+/** does a scan record have the shape this page reads? (findings a list of findings, a verdict, an id) */
+export function scanRecordValid(scan: unknown): scan is ArtifactScan {
+  if (typeof scan !== "object" || scan === null) return false;
+  const x = scan as Partial<ArtifactScan>;
+  return typeof x.id === "string" && typeof x.verdict === "string" && typeof x.format === "string" && Array.isArray(x.findings) && x.findings.every(isFinding);
+}
+
+/** the findings to list: a malformed record lists none (its status already says it is inconclusive) */
+export function scanFindings(scan: ArtifactScan | null | undefined): ArtifactScanFinding[] {
+  return scan && scanRecordValid(scan) ? scan.findings : [];
 }
 
 /**
@@ -192,10 +215,34 @@ export function scanStatus(scan: ArtifactScan | null | undefined, artifact?: Pic
   if (!scan) {
     return { label: "Not scanned", tone: "neutral", clean: false, admissible: false, verdict: "none", reasons: ["No scan has been recorded for this artifact, so it is not clean."] };
   }
+  // B5W-06: a record whose shape does not hold (findings absent or not a list of findings, no verdict) is
+  // inconclusive. It is never clean, and reading it never throws
+  if (!scanRecordValid(scan)) {
+    return {
+      label: SCAN_CHIP.unknown,
+      tone: "warn",
+      clean: false,
+      admissible: false,
+      verdict: "unknown",
+      reasons: ["The scan record is incomplete or malformed (its findings are missing or unreadable), so it is treated as inconclusive."],
+    };
+  }
   const known = (KNOWN_VERDICTS as string[]).includes(scan.verdict);
   const verdict: ArtifactScanVerdict = known ? (scan.verdict as ArtifactScanVerdict) : "unknown";
-  const findings = Array.isArray(scan.findings) ? scan.findings : [];
+  const findings = scan.findings;
   const reasons = findings.map(findingSentence);
+  // B5W-08: a finding whose severity is unknown or malformed makes the record inconclusive (an unsafe
+  // verdict stays unsafe: it is already the strongest "not clean"); the finding still lists, as "unknown severity"
+  if (findings.some((f) => findingSeverity(f.severity) === null) && verdict !== "unsafe") {
+    return {
+      label: SCAN_CHIP.unknown,
+      tone: "warn",
+      clean: false,
+      admissible: false,
+      verdict: "unknown",
+      reasons: ["A finding has an unknown or malformed severity, so the scan is treated as inconclusive.", ...reasons],
+    };
+  }
 
   if (verdict === "clean") {
     const problems: string[] = [];
@@ -244,9 +291,34 @@ export function statusWord(s: ScanStatus): string {
 }
 
 /** the newest scan (the gateway orders newest first; this does not trust that) */
-export function latestScan(scans: ArtifactScan[] | undefined): ArtifactScan | null {
-  if (!scans || scans.length === 0) return null;
-  return [...scans].sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0] ?? null;
+const createdMs = (s: ArtifactScan) => {
+  const t = typeof s?.createdAt === "string" ? Date.parse(s.createdAt) : NaN;
+  return Number.isFinite(t) ? t : -Infinity;
+};
+
+export function latestScan(scans: ArtifactScan[] | undefined | null): ArtifactScan | null {
+  if (!Array.isArray(scans) || scans.length === 0) return null;
+  return [...scans].sort((x, y) => createdMs(y) - createdMs(x))[0] ?? null;
+}
+
+export type ScanChoice =
+  | { kind: "latest"; scan: ArtifactScan | null }
+  | { kind: "cited"; scan: ArtifactScan }
+  | { kind: "cited_missing"; scanId: string | null; runId: string | null };
+
+/**
+ * B5W-01: which scan the detail shows. A link from a model card names the CITED scan (and its run); that
+ * scan is shown, never the newest one in its place. A citation that matches nothing is unavailable.
+ * With nothing cited, the newest scan.
+ */
+export function chooseScan(scans: ArtifactScan[] | undefined | null, cited: { scanId?: string | null; runId?: string | null }): ScanChoice {
+  const list = Array.isArray(scans) ? scans : [];
+  const scanId = cited.scanId || null;
+  const runId = cited.runId || null;
+  if (!scanId && !runId) return { kind: "latest", scan: latestScan(list) };
+  // the scan id names one scan; a link that carries only a run (an older link) is matched by its run
+  const hit = list.find((x) => (scanId ? x?.id === scanId : x?.engineRunId === runId));
+  return hit ? { kind: "cited", scan: hit } : { kind: "cited_missing", scanId, runId };
 }
 
 /** a run's status as words (structured: status + error code only) */
@@ -270,6 +342,34 @@ export function runStatusText(run: Pick<EngineRunLite, "status" | "errorCode">):
 export const MIB = 1024 * 1024;
 /** the strict shipped default of `modelArtifactMaxMegabytes`, used until the org's value is read */
 export const DEFAULT_MAX_MEGABYTES = 512;
+/** the strict shipped default of `modelArtifactRetentionDays` (ADR-0187 decision 127) */
+export const DEFAULT_RETENTION_DAYS = 30;
+
+const DAY_MS = 24 * 3_600_000;
+const day = (t: number) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+/**
+ * Retention as the gateway applies it (ADR-0187 decision 127): an artifact older
+ * than the setting that nothing keeps (no scan of it cited as model-card
+ * evidence, no unfinished run on it) is deleted by the hourly sweep. The API
+ * sends no per-artifact expiry, so this states the rule and the date from which
+ * the sweep may delete it.
+ */
+export function retentionText(createdAt: string, retentionDays: number, known: boolean): string {
+  // B5W-09: without the setting there is no lifetime to promise; the server applies its live setting
+  if (!known) {
+    return (
+      "The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here. " +
+      `The server applies its own setting (the strict default is ${DEFAULT_RETENTION_DAYS} days), and never deletes an artifact while a scan of it is cited as model-card evidence or a run on it is unfinished.`
+    );
+  }
+  const from = Date.parse(createdAt) + retentionDays * DAY_MS;
+  const when = Number.isFinite(from) ? ` It may be deleted from ${day(from)}` : " It may be deleted once that age is reached";
+  return (
+    `Kept for ${retentionDays} days.` +
+    `${when}, unless a scan of it is cited as model-card evidence or a run on it is unfinished. The setting is read when the sweep runs, so a change applies to artifacts already stored.`
+  );
+}
 
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "—";
@@ -302,11 +402,31 @@ const REFUSAL_SENTENCE: Record<string, string> = {
   engine_config_invalid: "The scan request was refused as invalid.",
   engine_approver_required: "This scan needs an approver before it can run.",
   human_required: "An artifact must be uploaded by a signed-in person.",
+  artifact_in_use:
+    "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",
 };
+
+const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : null);
+
+/** 413/409 `artifact_quota_exceeded`: whose quota (`scope`), of what (`measure`), its limit and use */
+function quotaSentence(p: ApiErrorPayload): string {
+  const whose = p.scope === "org" ? "this deployment's" : p.scope === "uploader" ? "your" : null;
+  const limit = n(p.limit);
+  const used = n(p.used);
+  const tail = " Delete artifacts you no longer need, or an admin may raise the quota (the change needs a step-up). Nothing of this upload was kept.";
+  if (whose && p.measure === "count") {
+    return `Storing this would take ${whose} model artifacts past the limit of ${limit ?? "?"} artifacts${used !== null ? ` (${used} stored)` : ""}.${tail}`;
+  }
+  if (whose && p.measure === "bytes") {
+    return `Storing this would take ${whose} model artifacts past the limit of ${limit !== null ? formatBytes(limit) : "?"}${used !== null ? ` (${formatBytes(used)} stored)` : ""}.${tail}`;
+  }
+  return `Storing this would exceed a model-artifact storage quota.${tail}`;
+}
 
 export function refusalText(e: unknown): string {
   if (e instanceof ApiError) {
     const code = typeof e.payload.error === "string" ? e.payload.error : "";
+    if (code === "artifact_quota_exceeded") return quotaSentence(e.payload);
     const sentence = REFUSAL_SENTENCE[code];
     if (sentence) {
       const detail = code === "artifact_too_large" && typeof e.payload.detail === "string" ? ` (${e.payload.detail.replace(/[^\x20-\x7e]/g, "").slice(0, 160)})` : "";
@@ -341,7 +461,26 @@ export function uploadPath(filename: string): string {
  */
 export function uploadModelArtifact(file: Blob, opts: UploadOptions): Promise<{ artifact: ModelArtifact }> {
   const path = uploadPath(opts.filename);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolveOuter, rejectOuter) => {
+    const cancelled = () => new Error("Upload cancelled. Check the list: an artifact is recorded only if the server received the whole file.");
+    // B5W-04: an XMLHttpRequest aborted before send() fires no event, so a signal already aborted rejects here
+    if (opts.signal?.aborted) {
+      rejectOuter(cancelled());
+      return;
+    }
+    let onAbort: (() => void) | null = null;
+    const settle = () => {
+      if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
+      onAbort = null;
+    };
+    const resolve = (v: { artifact: ModelArtifact }) => {
+      settle();
+      resolveOuter(v);
+    };
+    const reject = (e: unknown) => {
+      settle();
+      rejectOuter(e);
+    };
     const xhr = opts.xhr ? opts.xhr() : new XMLHttpRequest();
     xhr.open("POST", path);
     xhr.withCredentials = true;
@@ -370,13 +509,10 @@ export function uploadModelArtifact(file: Blob, opts: UploadOptions): Promise<{ 
           "The upload was cut off before the server answered. The file may be over the size limit, or the connection dropped. Nothing is recorded unless the artifact appears in the list.",
         ),
       );
-    xhr.onabort = () => reject(new Error("Upload cancelled. Check the list: an artifact is recorded only if the server received the whole file."));
+    xhr.onabort = () => reject(cancelled());
     if (opts.signal) {
-      if (opts.signal.aborted) {
-        xhr.abort();
-        return;
-      }
-      opts.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      onAbort = () => xhr.abort();
+      opts.signal.addEventListener("abort", onAbort, { once: true });
     }
     xhr.send(file);
   });
