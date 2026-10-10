@@ -820,6 +820,17 @@ class CedarAbacEngine implements AbacEngine {
         // means nothing matched at all. That distinction is what keeps a
         // `permit`-less policy set from denying everything.
         const { decision, diagnostics } = answer.response;
+        // ADR-0188 S2 (decision 18): a v4 group that hits an evaluation error refuses the call (fail closed).
+        // Cedar skips an erroring policy and reports it here, which would otherwise read as "nothing matched".
+        // Scoped to v4 so every v1–v3 decision stays exactly what it was.
+        if (hasAgentPrincipal(schemaVersion) && diagnostics.errors.length > 0) {
+          return {
+            effect: "forbid",
+            policyId: "abac-engine-error",
+            policyName: null,
+            reason: `ABAC evaluation failed: ${diagnostics.errors.map((e) => `${e.policyId}: ${e.error.message}`).join("; ")}`,
+          };
+        }
         if (decision !== "deny" || diagnostics.reason.length === 0) continue;
         const hit = new Set(diagnostics.reason);
         for (const p of subset) if (hit.has(p.id)) matched.push(p);
