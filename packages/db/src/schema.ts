@@ -50,6 +50,7 @@ import {
   APPROVAL_SIGNATURE_MODES,
   AUDIT_ANCHOR_TIMESTAMP_MODES,
   DECISION_RECEIPTS_MODES,
+  OUTBOUND_CREDENTIAL_AUDIENCE_MODES,
   SSO_REAUTH_PROVIDER_KINDS,
   STEP_UP_ACTION_KINDS,
   STEP_UP_METHODS,
@@ -3833,6 +3834,10 @@ export const orgSettings = pgTable(
       .$type<VendoredDetectionPack[]>()
       .notNull()
       .default(["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]),
+    /** V (decision 32, migration 0181): refuse caller-supplied credentials bound for a host outside their audience */
+    outboundCredentialAudience: text("outbound_credential_audience", { enum: OUTBOUND_CREDENTIAL_AUDIENCE_MODES })
+      .notNull()
+      .default("enforce"),
     /** M: the MCP server baseline window, 1–90 days; longer relaxes it */
     monitorMcpBaselineDays: integer("monitor_mcp_baseline_days").notNull().default(14),
     /** M: jailbreak findings before an alert, 1–100; higher relaxes it */
@@ -4484,6 +4489,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_vendored_detection_packs_check",
       sql`jsonb_typeof(${t.vendoredDetectionPacks}) = 'array' AND ${t.vendoredDetectionPacks} <@ '["pipelock-secrets", "pipelock-normalise", "nemo-yara-injection", "agt-mcp-heuristics"]'::jsonb`,
+    ),
+    check(
+      "org_settings_outbound_credential_audience_check",
+      sql`${t.outboundCredentialAudience} IN ('enforce', 'off')`,
     ),
     check("org_settings_monitor_mcp_baseline_days_check", sql`${t.monitorMcpBaselineDays} BETWEEN 1 AND 90`),
     check("org_settings_monitor_jailbreak_threshold_check", sql`${t.monitorJailbreakThreshold} BETWEEN 1 AND 100`),
