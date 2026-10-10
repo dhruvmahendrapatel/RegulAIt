@@ -356,6 +356,26 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
   });
 });
 
+test.describe("ADR-0189 B9: the panel fails on its own", () => {
+  for (const [name, status, body] of [
+    ["an answer in another shape", 200, {}],
+    ["a server error", 500, { error: "internal", detail: "db unavailable" }],
+  ] as const) {
+    test(`${name}: the panel says so and the rest of the model card still renders`, async ({ page }) => {
+      await setup(page);
+      await page.route(/\/v1\/ai-bom\/spdx-fields\//, (route) => json(route, body, status));
+      await openCard(page);
+      await expect(panel(page).getByRole("alert")).toBeVisible();
+      await expect(panel(page).getByRole("button", { name: "Retry" })).toBeVisible();
+      await expect(page.getByTestId("spdx-banner")).toHaveCount(0);
+      // the card's own content is untouched
+      await expect(page.getByLabel("Attach a model-artifact scan as evidence")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Request" })).toBeVisible();
+      await expectAxeClean(page, `SPDX panel load failure (${name})`);
+    });
+  }
+});
+
 test.describe("ADR-0189 B9: admin only", () => {
   test("a non-admin gets the administrative refusal, no SPDX panel and no SPDX request", async ({ page }) => {
     const spdx = await setup(page, { isAdmin: false });

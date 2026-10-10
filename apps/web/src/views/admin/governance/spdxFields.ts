@@ -106,6 +106,42 @@ export interface SpdxFieldsResponse {
   historyLimit: number;
 }
 
+const isProperty = (x: unknown): x is SpdxProperty => typeof x === "string" && (SPDX_PROPERTIES as readonly string[]).includes(x);
+const isDeclaration = (x: unknown): x is SpdxDeclarationView => {
+  const d = x as Partial<SpdxDeclarationView> | null;
+  return (
+    !!d &&
+    typeof d === "object" &&
+    typeof d.seq === "number" &&
+    isProperty(d.property) &&
+    typeof d.withdrawn === "boolean" &&
+    (d.value === null || typeof d.value === "string" || (Array.isArray(d.value) && d.value.every((v) => typeof v === "string"))) &&
+    (SPDX_SOURCES as readonly string[]).includes(String(d.source)) &&
+    typeof d.declaredByUserId === "string" &&
+    typeof d.declaredAt === "string"
+  );
+};
+
+/**
+ * The GET answer, checked before anything renders it. An answer in any other
+ * shape (an older gateway, a proxy page, a partial body) is a load failure the
+ * panel reports on its own; it must never throw during render and take the
+ * rest of the record's page with it.
+ */
+export function parseSpdxFieldsResponse(raw: unknown): SpdxFieldsResponse {
+  const r = raw as Partial<SpdxFieldsResponse> | null;
+  const ok =
+    !!r &&
+    typeof r === "object" &&
+    Array.isArray(r.declarable) && r.declarable.every(isProperty) &&
+    Array.isArray(r.undeclared) && r.undeclared.every(isProperty) &&
+    Array.isArray(r.current) && r.current.every(isDeclaration) &&
+    Array.isArray(r.history) && r.history.every(isDeclaration) &&
+    typeof r.historyLimit === "number";
+  if (!ok) throw new Error("The gateway's SPDX fields answer was not in the expected shape, so nothing is shown. Retry, or check the gateway version.");
+  return r as SpdxFieldsResponse;
+}
+
 /** what the banner says is still missing, split by whether it blocks the SPDX rendering */
 export function undeclaredSummary(kind: SpdxSubjectKind, undeclared: readonly SpdxProperty[], pinnedModelVersion?: string | null) {
   return {

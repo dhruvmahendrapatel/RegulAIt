@@ -15,6 +15,7 @@ import {
   checkSpdxTime,
   checkSpdxValue,
   isMandatory,
+  parseSpdxFieldsResponse,
   refusalSentence,
   spdxFieldPath,
   undeclaredSummary,
@@ -139,5 +140,21 @@ describe("refusals never carry the value", () => {
     );
     expect(refusalSentence("releaseTime", new ApiError(404, { error: "spdx_subject_not_found" })).text).toContain("no longer exists");
     expect(refusalSentence("releaseTime", new Error("network")).text).toContain("Nothing is known to have been recorded");
+  });
+});
+
+describe("the GET answer is checked before it is rendered", () => {
+  const good = { subject: { kind: "model_card", id: "x" }, declarable: ["releaseTime"], current: [], undeclared: ["releaseTime"], history: [], historyLimit: 200 };
+  it("passes a well-formed answer through", () => {
+    expect(parseSpdxFieldsResponse(good)).toEqual(good);
+  });
+  it.each([
+    ["an empty object", {}],
+    ["null", null],
+    ["an unknown property", { ...good, undeclared: ["licence"] }],
+    ["a malformed history row", { ...good, history: [{ seq: 1 }] }],
+    ["a missing limit", { ...good, historyLimit: undefined }],
+  ])("refuses %s with a load error, not a render crash", (_name, raw) => {
+    expect(() => parseSpdxFieldsResponse(raw)).toThrow("not in the expected shape");
   });
 });

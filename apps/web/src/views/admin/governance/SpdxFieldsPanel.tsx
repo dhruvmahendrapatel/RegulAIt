@@ -25,6 +25,7 @@ import { actorLabel, ago } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { Badge, Button, Field, Fieldset, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
+import { CardBoundary } from "../../../ui/CardBoundary";
 import { QueryGate, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./spdxFields.module.css";
@@ -38,6 +39,7 @@ import {
   SUBJECT_LABEL,
   checkSpdxValue,
   isMandatory,
+  parseSpdxFieldsResponse,
   refusalSentence,
   spdxFieldPath,
   spdxFieldsPath,
@@ -521,7 +523,12 @@ type PanelProps = { kind: SpdxSubjectKind; subjectId: string; pinnedModelVersion
 export function SpdxFieldsPanel(props: PanelProps) {
   const { auth } = useSession();
   if (auth?.isAdmin !== true) return null;
-  return <AdminSpdxFieldsPanel {...props} />;
+  // a failure inside this panel stays inside it: the record's other content keeps rendering
+  return (
+    <CardBoundary title="SPDX fields">
+      <AdminSpdxFieldsPanel {...props} />
+    </CardBoundary>
+  );
 }
 
 function AdminSpdxFieldsPanel(props: PanelProps) {
@@ -530,7 +537,8 @@ function AdminSpdxFieldsPanel(props: PanelProps) {
   const queryKey = ["admin", "spdx-fields", props.kind, props.subjectId] as const;
   const fields = useQuery({
     queryKey,
-    queryFn: () => api.get<SpdxFieldsResponse>(spdxFieldsPath(props.kind, props.subjectId)),
+    retry: false,
+    queryFn: async () => parseSpdxFieldsResponse(await api.get<unknown>(spdxFieldsPath(props.kind, props.subjectId))),
   });
   const users = useUsers();
   const [setting, setSetting] = useState<SpdxProperty | null>(null);
