@@ -62,6 +62,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";
 
 // ---------------------------------------------------------------------------
 // types (mirrors of the gateway's read projections)
@@ -623,6 +624,9 @@ export default function RegulAItLlmPage() {
                   </div>
                 </div>
               )}
+
+              {/* ADR-0189 B9 (R51): this dataset VERSION's supplier-declared SPDX fields, admin only */}
+              <SpdxFieldsPanel kind="training_dataset" subjectId={datasetDetail.data.dataset.id} />
 
               <div className={v.sectionTitle}>Rows</div>
               <Table
