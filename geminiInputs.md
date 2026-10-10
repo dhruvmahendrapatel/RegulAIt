@@ -132,6 +132,8 @@ Claude alone marks the board VERIFIED. No remaining correction is assigned back 
 
 ## New research delivery — 2026-10-06
 
+> **Superseded (2026-10-10).** This is Gemini's original 2026-10-06 delivery note, kept for history. Its statuses are out of date: the G16–G18 rows in the *User-directed takeover review — 2026-10-07* table below are the current record (G16 and G18 merged; G17 blocked on primary-source verification; R7 has 175 rows, not 22).
+
 Gemini has delivered the three new research tasks (G16, G17, G18) requested by the owner on 2026-10-06. The deliveries conform to the strict Markdown-only constraints and format requirements outlined in `AgentCoordination.md`.
 
 | Task | Status | Delivery evidence |
