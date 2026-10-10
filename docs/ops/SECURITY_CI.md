@@ -133,6 +133,24 @@ different failure, such as a network error, fails the job as inconclusive.
   signed image is `publish-image.yml`'s job (ADR-0184 lists the change it needs);
 - release-key signing of update bundles, which stays the owner's offline ceremony (`infra/release-keys/`, PENDING S3).
 
+### 6a. Our own AI BOM per release (`release-ai-bom` job; ADR-0189 slice B7, amendments R9 and R28)
+
+**Inert today.** On a push to `main` the job builds the shared package, validates the reviewed inventory of AI tools in
+our development stack (`security/ai-dev-stack.json`, schema `aiDevStackInventorySchema`), and reads the R17 switch
+`AI_BOM_SNAPSHOTS_RELEASED` (`packages/shared/src/bom/release-switch.ts`, the same constant the gateway's snapshot routes
+read). While it is `false` the job writes one summary line and nothing else: no download, no snapshot, no signature, no
+artifact. Every producing step is gated on `steps.switch.outputs.released == 'true'`, and a shared test fails if one is not.
+
+**Once the switch flips** (in whichever of B4 and B5 merges second), the job writes the release SBOM identity file
+(`regulait.release-sbom-identity.v1`: serial number, version, SHA-256 and kind of the workspace and image SBOMs above,
+the signed image digest and the commit), signs it keylessly with this workflow's identity and verifies it, then builds
+the install-scope AI BOM (`scripts/release-ai-bom.mjs build`), which cites both SBOMs by CycloneDX BOM-Link
+(`urn:cdx:<serial>/<version>` plus the file's SHA-256) and lists the dev-stack tools as `formulation`. The AI BOM files
+are signed and verified the same way and kept as the `release-ai-bom` artifact (90 days).
+
+**Does not prove:** that an install verifies the identity file; the install-time trust root is ADR-0189 owner item 2.
+No release key is involved (`infra/release-keys/` is untouched).
+
 ### 7. Engine images (`engines`, `engine-image` and `engine-sign` jobs; ADR-0187 decision 120)
 
 Every `engines/<name>/Dockerfile` is found by `engines` and becomes one matrix leg. There is no list to keep up to date.

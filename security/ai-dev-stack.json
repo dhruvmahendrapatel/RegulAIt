@@ -1,0 +1,55 @@
+{
+  "v": "regulait.ai-dev-stack.v1",
+  "reviewedOn": "2026-10-10",
+  "reviewRef": "ADR-0189",
+  "tools": [
+    {
+      "id": "primary-coding-agent",
+      "category": "coding_agent",
+      "description": "Hosted large-language-model coding agent, run from a local terminal and from cloud sessions, that writes code, tests and design records under the repository's agent instruction file; every change reaches main only through a reviewed pull request and CI.",
+      "deployment": "hosted_and_local",
+      "networkEgress": true,
+      "repositoryAccess": "read_write",
+      "dataShared": ["source_code", "design_docs", "ci_logs"],
+      "outputControl": "pull_request_review_and_ci",
+      "governedBy": ["ADR-0176", "ADR-0180"],
+      "introducedOn": "2026-07-22"
+    },
+    {
+      "id": "second-vendor-coding-agent",
+      "category": "review_agent",
+      "description": "Hosted large-language-model coding agent from a second vendor that reviews pull requests and design records, and builds assigned slices; its findings and changes go through the same pull request review and CI as any other.",
+      "deployment": "hosted",
+      "networkEgress": true,
+      "repositoryAccess": "read_write",
+      "dataShared": ["source_code", "design_docs", "pull_request_diffs"],
+      "outputControl": "pull_request_review_and_ci",
+      "governedBy": ["ADR-0176", "ADR-0180"],
+      "introducedOn": "2026-09-07"
+    },
+    {
+      "id": "code-knowledge-graph",
+      "category": "code_analysis",
+      "description": "Local, open-source code knowledge-graph tool that parses source files into a graph for navigation; run in code-only mode, which is local syntax-tree parsing with no model call, and never on prose.",
+      "deployment": "local",
+      "networkEgress": false,
+      "repositoryAccess": "read_only",
+      "dataShared": ["none"],
+      "outputControl": "local_only",
+      "governedBy": ["ADR-0005"],
+      "introducedOn": "2026-07-22"
+    },
+    {
+      "id": "output-compression-plugin",
+      "category": "agent_plugin",
+      "description": "Local plugin for the coding agent that shortens its own replies to save tokens; no network calls and no repository writes.",
+      "deployment": "local",
+      "networkEgress": false,
+      "repositoryAccess": "none",
+      "dataShared": ["none"],
+      "outputControl": "local_only",
+      "governedBy": ["ADR-0005"],
+      "introducedOn": "2026-07-22"
+    }
+  ]
+}

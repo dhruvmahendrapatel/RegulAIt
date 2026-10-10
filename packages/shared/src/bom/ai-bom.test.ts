@@ -10,6 +10,7 @@ import { Models } from "@cyclonedx/cyclonedx-library";
 import {
   AI_BOM_INSTALL_SUBJECT_ID,
   AI_BOM_SCAN_VERDICTS,
+  AI_BOM_RECORD_LISTS,
   AI_BOM_MAX_RECORDS_PER_LIST,
   aiBomInventoryIndex,
   aiBomSerialNumber,
@@ -560,5 +561,68 @@ describe("security review round (PR #287): free-form references and claims never
     const f = fixture();
     f.mcpTools = Array.from({ length: AI_BOM_MAX_RECORDS_PER_LIST + 1 }, (_, i) => ({ id: u(100000 + i), serverId: MCP, name: `t${i}`, kind: "read" }));
     refused(() => normaliseAiBomRecords(f), /cap/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// X41 (PR #294) B9F-01 / B9F-02, fixed in B7: EVERY string field of EVERY record
+// type, seeded in turn with a recognised credential and with a URL carrying a
+// private path and query, is refused or absent from the native body and every
+// rendering (CycloneDX now; B5's SPDX joins `renderings` and is covered too).
+// A refusal names the field, never the value.
+// ---------------------------------------------------------------------------
+describe("X41: no string field carries a credential or a URL path/query into any output", () => {
+  const SECRET = ["sk", `XFIELDCANARY${"q".repeat(20)}`].join("-");
+  const URL_CANARY = ["https:", "", "internal.example", "XFIELDPATH", `doc?signature=XFIELDQUERY`].join("/");
+  const BA_ID = u(40);
+  const SK = u(41);
+  const rich = (): AiBomRecordSet =>
+    fixture({
+      useCases: [{ ...fixture().useCases[0]!, ownerDisplayName: "Owner One" }],
+      builderAgents: [{ id: BA_ID, name: "builder", modelAgentId: AG, ownerUserId: null, ownerDisplayName: "Owner Two", workloadIdentity: null }],
+      builderSkills: [{ agentId: BA_ID, skillId: SK, snapshotName: "skill one", snapshotDigest: H("5"), snapshotVersion: 1, snapshotAdmissionState: "admitted" }],
+      memoryStores: [{ kind: "builder_agent_memory", builderAgentId: BA_ID }],
+      connectors: [{ ...fixture().connectors[0]!, ownerDisplayName: "Owner Three" }],
+    });
+  /** every path to a string (or string-array element) in the first record of each list */
+  const stringPaths = (v: unknown, at: Array<string | number>): Array<Array<string | number>> => {
+    if (typeof v === "string") return [at];
+    if (Array.isArray(v)) return v.flatMap((x, i) => stringPaths(x, [...at, i]));
+    if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => stringPaths(x, [...at, k]));
+    return [];
+  };
+  const setAt = (root: unknown, p: Array<string | number>, value: string) => {
+    let o = root as Record<string | number, unknown>;
+    for (const k of p.slice(0, -1)) o = o[k] as Record<string | number, unknown>;
+    o[p[p.length - 1]!] = value;
+  };
+  it("enumerates every string field and none leaks", () => {
+    const base = rich();
+    const cases: string[] = [];
+    for (const list of AI_BOM_RECORD_LISTS) {
+      const recs = (base as unknown as Record<string, unknown[] | undefined>)[list] ?? [];
+      if (!recs.length) continue;
+      for (const p of stringPaths(recs[0], [list, 0])) {
+        for (const canary of [SECRET, URL_CANARY]) {
+          const f = rich();
+          setAt(f, p, canary);
+          const label = `${p.join(".")} <- ${canary === SECRET ? "credential" : "url"}`;
+          cases.push(label);
+          let out = "";
+          try {
+            out = all(buildAiBom(f, meta(), opts));
+          } catch (e) {
+            const msg = `${(e as Error).message} ${((e as AiBomBuildError).paths ?? []).join(" ")}`;
+            expect(msg, `${label}: a refusal never echoes the value`).not.toMatch(/XFIELD/);
+            continue;
+          }
+          expect(out.includes("XFIELD"), `${label} reached a signed output`).toBe(false);
+        }
+      }
+    }
+    // the record types with string fields were all exercised (a new list must join this test)
+    // (B7's install-only lists are exercised in release-ai-bom.test.ts on an install subject)
+    expect(new Set(cases.map((c) => c.split(".")[0]))).toEqual(new Set(AI_BOM_RECORD_LISTS.filter((l) => l !== "releaseSboms" && l !== "devStackTools")));
+    expect(cases.length).toBeGreaterThan(150);
   });
 });

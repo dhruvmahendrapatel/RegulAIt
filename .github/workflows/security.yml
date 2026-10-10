@@ -389,6 +389,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      # ADR-0189 B7: the signed image's digest, for the release SBOM identity file
+      image-ref: ${{ steps.ref.outputs.ref }}
     services:
       registry:
         image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
@@ -449,6 +452,114 @@ jobs:
             echo ""
             echo "Signed keylessly by \`.github/workflows/security.yml@refs/heads/main\`; the Rekor entry is public."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # ADR-0189 slice B7 (amendments R9, R28): our own install-scope AI BOM per
+  # release, BOM-linked to this run's workspace and image SBOMs through a signed
+  # SBOM identity file. INERT until the R17 switch (`AI_BOM_SNAPSHOTS_RELEASED`,
+  # packages/shared/src/bom/release-switch.ts) flips: the job reads the switch
+  # and, while it is false, only validates the checked-in AI dev-stack inventory
+  # and writes a summary line. It downloads nothing, builds no snapshot, signs
+  # nothing and uploads nothing. Every producing step is gated on the switch.
+  # When on: the identity file and the AI BOM files are signed keylessly with
+  # this workflow's identity (the `sign` job's), the identity is verified
+  # before it is BOM-linked, and everything is kept as a workflow artifact.
+  # ---------------------------------------------------------------------------
+  release-ai-bom:
+    name: Release AI BOM (ADR-0189 B7, inert until R17)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Build the shared BOM package
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm --filter @regulait/shared build
+
+      - name: Validate the AI dev-stack inventory
+        run: node scripts/release-ai-bom.mjs check-inventory
+
+      - name: Read the R17 switch
+        id: switch
+        run: node scripts/release-ai-bom.mjs switch >> "$GITHUB_OUTPUT"
+
+      - name: Inert until the R17 switch flips (R28)
+        if: steps.switch.outputs.released != 'true'
+        run: echo "Release AI BOM is inert (ADR-0189 R28); nothing built, signed or published." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.switch.outputs.released == 'true'
+        with:
+          name: sbom-and-image-scan
+          path: ${{ runner.temp }}/sbom
+
+      - name: Install cosign (pinned version and SHA-256)
+        if: steps.switch.outputs.released == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/bin/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  $RUNNER_TEMP/bin/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bin/cosign"
+
+      - name: Write, sign and verify the release SBOM identity (R9)
+        if: steps.switch.outputs.released == 'true'
+        env:
+          IMAGE_REF: ${{ needs.sign.outputs.image-ref }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-ai-bom"
+          mkdir -p "$out"
+          node scripts/release-ai-bom.mjs identity --commit "$GITHUB_SHA" --image-digest "${IMAGE_REF#*@}" \
+            --workspace "$RUNNER_TEMP/sbom/sbom-workspace.cdx.json" --image "$RUNNER_TEMP/sbom/sbom-image.cdx.json" \
+            --out "$out/release-sbom-identity.json"
+          "$RUNNER_TEMP/bin/cosign" sign-blob --yes --bundle "$out/release-sbom-identity.json.sigstore.json" "$out/release-sbom-identity.json"
+          "$RUNNER_TEMP/bin/cosign" verify-blob --bundle "$out/release-sbom-identity.json.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/security.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$out/release-sbom-identity.json"
+
+      - name: Build, sign and verify the release AI BOM
+        if: steps.switch.outputs.released == 'true'
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-ai-bom"
+          committed_at="$(date -u -d "@$(git log -1 --format=%ct)" +%Y-%m-%dT%H:%M:%S.000Z)"
+          node scripts/release-ai-bom.mjs build --commit "$GITHUB_SHA" --committed-at "$committed_at" \
+            --identity "$out/release-sbom-identity.json" --identity-verified sigstore_keyless_ci \
+            --workspace "$RUNNER_TEMP/sbom/sbom-workspace.cdx.json" --image "$RUNNER_TEMP/sbom/sbom-image.cdx.json" \
+            --out-dir "$out"
+          for f in "$out"/ai-bom.*.json; do
+            "$RUNNER_TEMP/bin/cosign" sign-blob --yes --bundle "$f.sigstore.json" "$f"
+            "$RUNNER_TEMP/bin/cosign" verify-blob --bundle "$f.sigstore.json" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/security.yml@refs/heads/main" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f"
+          done
+
+      - name: Keep the release AI BOM, the SBOM identity and their signatures
+        if: steps.switch.outputs.released == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-ai-bom
+          path: ${{ runner.temp }}/release-ai-bom
+          if-no-files-found: error
+          retention-days: 90
 
   # ---------------------------------------------------------------------------
   # ADR-0187 decision 120 (open question 16): the sidecar engine images

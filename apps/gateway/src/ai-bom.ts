@@ -94,15 +94,17 @@ import {
   type AiBomSubjectKind,
   type CycloneDxSpecVersion,
 } from "@regulait/shared";
+import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
 import { retentionFloorDays } from "./org-settings.js";
 
 /**
- * R2/R17: NOT RELEASED. A code constant, never a setting. The PR that merges
- * second of B4 (export-bundle/3) and B5 (SPDX) sets it to true, with tests
- * that download every format as a verified bundle.
+ * R2/R17: NOT RELEASED. A code constant, never a setting, defined ONCE in
+ * `packages/shared/src/bom/release-switch.ts` (B7's release step reads the same
+ * one). The PR that merges second of B4 (export-bundle/3) and B5 (SPDX) flips it
+ * there, with tests that download every format as a verified bundle.
  */
-export const AI_BOM_SNAPSHOTS_RELEASED = false as boolean;
+export { AI_BOM_SNAPSHOTS_RELEASED };
 
 export class AiBomError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {

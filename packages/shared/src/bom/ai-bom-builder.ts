@@ -36,6 +36,7 @@ import {
 import { AI_BOM_RECORD_LISTS, AI_BOM_RECORD_TABLES, aiBomRecordKey, cmpCodeUnits, normaliseAiBomRecords, sortedBy, type AiBomRecordSet } from "./ai-bom-records.js";
 import { renderAiBomCycloneDx, type AiBomGap, type AiBomSnapshotMeta, type CycloneDxRenderResult, type CycloneDxSpecVersion } from "./ai-bom-cyclonedx.js";
 import { cycloneDxValidatorId, validateCycloneDx } from "./ai-bom-cyclonedx-schema.js";
+import { bomSafeIssue } from "./ai-dev-stack.js";
 
 export class AiBomBuildError extends Error {
   constructor(message: string, readonly paths: string[] = []) {
@@ -214,7 +215,7 @@ export function buildAiBom(records: AiBomRecordSet, meta: AiBomSnapshotMeta, opt
   const emails = findEmailShapesBroad(candidate);
   if (emails.length) throw new AiBomBuildError("email-shaped value in the native body", emails);
   const parsed = aiBomNativeBodySchema.safeParse(candidate);
-  if (!parsed.success) throw new AiBomBuildError("native body fails the regulait.ai-bom.v1 contract", parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`));
+  if (!parsed.success) throw new AiBomBuildError("native body fails the regulait.ai-bom.v1 contract", parsed.error.issues.map(bomSafeIssue));
   const bodyBytes = bomCanonicalBytes(candidate);
   return { records: n, body: parsed.data, bodyBytes, bodySha256: bomSha256(bodyBytes), renderings, gaps, basis };
 }
