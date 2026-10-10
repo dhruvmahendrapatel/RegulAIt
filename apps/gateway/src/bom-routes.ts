@@ -29,7 +29,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { auditLog, type Db } from "@regulait/db";
-import { AI_BOM_INSTALL_SUBJECT_ID, AI_BOM_SUBJECT_KINDS, AiBomBuildError, AiBomRecordError, BOM_NOT_BUILT, TrainingChecksumError, type AiBomSubjectKind } from "@regulait/shared";
+import { AI_BOM_INSTALL_SUBJECT_ID, AI_BOM_SUBJECT_KINDS, AiBomBuildError, AiBomRecordError, BOM_NOT_BUILT, BOM_VERIFY_MAX_REQUEST_BYTES, TrainingChecksumError, type AiBomSubjectKind } from "@regulait/shared";
 import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomDrift, listAiBomSnapshots, loadAiBomSettings, takeAiBomSnapshot, type AiBomSubject } from "./ai-bom.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 
@@ -123,5 +123,19 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/ai-bom/snapshots/:snapshotId/bundle", notBuilt);
   app.get("/v1/decisions/:auditId/bom", notBuilt);
   app.get("/v1/decisions/:auditId/bom/bundle", notBuilt);
-  app.post("/v1/boms/verify", notBuilt);
+  // the B4 contract admits an 8 MiB decoded bundle (about 11.2 MiB of base64 in JSON), above Fastify's 1 MiB default:
+  // the limit is sized for the largest admitted request, and anything over it is the contract's 413
+  app.post(
+    "/v1/boms/verify",
+    {
+      bodyLimit: BOM_VERIFY_MAX_REQUEST_BYTES,
+      errorHandler: (err, req, reply) => {
+        if ((err as { code?: unknown }).code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+          return reply.status(413).send({ error: "bom_bundle_too_large", detail: `a verify request is at most ${BOM_VERIFY_MAX_REQUEST_BYTES} bytes` });
+        }
+        return app.errorHandler(err, req, reply);
+      },
+    },
+    notBuilt,
+  );
 }

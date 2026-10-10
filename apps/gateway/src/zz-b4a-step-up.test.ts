@@ -443,11 +443,14 @@ describe("passkey enrolment (attestation none only; the bootstrap rule)", () => 
     const opt = await as(fresh, "POST", "/v1/auth/passkeys/registration-options", {});
     expect(opt.statusCode, opt.body).toBe(200);
     const auth = new SoftAuthenticator({ origin: ORIGIN });
-    const label = "work laptop AKIAZ7XQK3NWQOPXR4LT";
+    // AWS's published example access key (the literal ADR-0102 and audit-scrub.ts also use): it
+    // has the real key shape, so the scrubber must redact it, and gitleaks's default AWS rule
+    // already excludes it, so this file needs no .gitleaks.toml allow-list.
+    const label = "work laptop AKIAIOSFODNN7EXAMPLE";
     const reg = await as(fresh, "POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: auth.register(opt.json().options), label });
     expect(reg.statusCode, reg.body).toBe(201);
     const [row] = await db.select().from(webauthnCredentials).where(eq(webauthnCredentials.id, reg.json().id));
-    expect(row!.label).not.toContain("AKIAZ7XQK3NWQOPXR4LT");
+    expect(row!.label).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(row!.counter).toBe(0);
     expect(row!.publicKey).toMatch(/^[A-Za-z0-9_-]+$/);
     const list = await as(fresh, "GET", "/v1/auth/passkeys");

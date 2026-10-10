@@ -45,6 +45,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   assignRoleSchema,
+  BOM_B4_ROUTE_CONTRACT,
+  bomErrorEnvelopeSchema,
   createApiKeySchema,
   createProjectSchema,
   createRoleSchema,
@@ -151,7 +153,40 @@ export interface RouteDoc {
   body?: z.ZodType;
   /** a named response shape, when one is worth stating */
   responseNote?: string;
+  /** the query-string schema (a zod object), rendered as `in: query` parameters */
+  query?: z.ZodType;
+  /** the path-parameter schema (a zod object keyed by parameter name); unnamed parameters stay plain strings */
+  params?: z.ZodType;
+  /** the 2XX JSON body schema, when the route's contract freezes one */
+  response?: z.ZodType;
+  /** a 2XX that is bytes, not JSON (ADR-0189 bundles): its content type and the headers it carries */
+  responseBinary?: { contentType: string; headers: z.ZodType };
+  /** refusal statuses and their `error` codes; each body is `errorBody` */
+  errors?: Readonly<Record<number, readonly string[]>>;
+  errorBody?: z.ZodType;
 }
+
+/**
+ * ADR-0189 slice B4: the FROZEN contract of the five §9 routes B1 registered as
+ * 501 stubs (`@regulait/shared` `contract-b4.ts`). Internal stability, so they
+ * render only with `?include=all`; the routes still answer 501 `not_built`
+ * until B4 implements exactly these shapes.
+ */
+const BOM_B4_DOCS: Record<string, RouteDoc> = Object.fromEntries(
+  Object.entries(BOM_B4_ROUTE_CONTRACT).map(([key, c]) => {
+    const doc: RouteDoc = {
+      summary: `${c.summary} Not built yet: answers 501 \`not_built\` until ADR-0189 slice B4.`,
+      errors: c.errors,
+      errorBody: bomErrorEnvelopeSchema,
+    };
+    doc.params = c.params;
+    if ("query" in c) doc.query = c.query;
+    if ("body" in c) doc.body = c.body;
+    if (c.response.kind === "json") doc.response = c.response.schema;
+    else doc.responseBinary = { contentType: "application/gzip", headers: c.response.headers };
+    return [key, doc];
+  }),
+);
 
 /**
  * Bodies are bound to the ACTUAL shared schema the handler calls `.parse()`
@@ -287,6 +322,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "GET /v1/conversations": { summary: "The caller's conversations." },
   "GET /v1/conversations/:conversationId": { summary: "One conversation." },
   "DELETE /v1/conversations/:conversationId": { summary: "Delete a conversation." },
+  ...BOM_B4_DOCS,
 };
 
 // ===========================================================================
@@ -325,10 +361,11 @@ function securityFor(auth: RouteAuthClass): Array<Record<string, string[]>> {
   }
 }
 
-function jsonSchemaFor(schema: z.ZodType): Record<string, unknown> {
-  // a request body is what the caller sends, so render the INPUT side (a defaulted field is optional);
-  // refinements and transforms have no JSON Schema form and render as their base type
-  const out = z.toJSONSchema(schema, { target: "openapi-3.0", io: "input", unrepresentable: "any" }) as Record<string, unknown>;
+function jsonSchemaFor(schema: z.ZodType, io: "input" | "output" = "input"): Record<string, unknown> {
+  // a request is what the caller sends, so it renders the INPUT side (a defaulted field is optional); a
+  // response is what we send, the OUTPUT side (a defaulted field is always present). Refinements and
+  // transforms have no JSON Schema form and render as their base type.
+  const out = z.toJSONSchema(schema, { target: "openapi-3.0", io, unrepresentable: "any" }) as Record<string, unknown>;
   delete out.$schema;
   return out;
 }
@@ -391,13 +428,23 @@ export function buildOpenApiDocument(
       operation["x-regulait-deprecation"] = deprecation;
     }
 
+    // path parameters render their OUTPUT side: a case-folding pipe (`bomPathUuidSchema`) would otherwise show only
+    // its pre-transform string, and a path segment has no defaults for the two sides to disagree on
+    const paramShape = doc?.params ? ((jsonSchemaFor(doc.params, "output") as { properties?: Record<string, Record<string, unknown>> }).properties ?? {}) : {};
     const params = pathParams(entry.url).map((name) => ({
       name,
       in: "path",
       required: true,
-      schema: { type: "string" },
+      schema: paramShape[name] ?? { type: "string" },
     }));
-    if (params.length > 0) operation.parameters = params;
+    const queryShape = doc?.query ? (jsonSchemaFor(doc.query) as { properties?: Record<string, unknown>; required?: string[] }) : null;
+    const queryParams = Object.entries(queryShape?.properties ?? {}).map(([name, schema]) => ({
+      name,
+      in: "query",
+      required: (queryShape?.required ?? []).includes(name),
+      schema,
+    }));
+    if (params.length + queryParams.length > 0) operation.parameters = [...params, ...queryParams];
 
     if (doc?.body) {
       operation.requestBody = {
@@ -411,8 +458,26 @@ export function buildOpenApiDocument(
       operation["x-regulait-schema"] = "unspecified";
     }
 
-    operation.responses = {
-      "2XX": { description: doc?.responseNote ?? "Success." },
+    const success: Record<string, unknown> = { description: doc?.responseNote ?? "Success." };
+    if (doc?.response) success.content = { "application/json": { schema: jsonSchemaFor(doc.response, "output") } };
+    if (doc?.responseBinary) {
+      success.content = { [doc.responseBinary.contentType]: { schema: { type: "string", format: "binary" } } };
+      const headers = jsonSchemaFor(doc.responseBinary.headers, "output") as { properties?: Record<string, unknown> };
+      success.headers = Object.fromEntries(Object.entries(headers.properties ?? {}).map(([name, schema]) => [name, { schema }]));
+    }
+    const refusals: Record<string, unknown> = {};
+    if (doc?.errors && doc.errorBody) {
+      const body = jsonSchemaFor(doc.errorBody, "output");
+      for (const [status, codes] of Object.entries(doc.errors)) {
+        refusals[status] = {
+          description: codes.length ? `Refused: ${codes.map((c) => `\`${c}\``).join(", ")}.` : "Refused.",
+          ...(codes.length ? { content: { "application/json": { schema: body } } } : {}),
+          "x-regulait-error-codes": codes,
+        };
+      }
+    }
+    const responses: Record<string, unknown> = {
+      "2XX": success,
       "400": { description: "Request body failed schema validation." },
       ...(auth === "public"
         ? {}
@@ -439,6 +504,12 @@ export function buildOpenApiDocument(
           : {}),
       "429": { description: "Rate limited. Retry after the `retry-after` header." },
     };
+    // a contract's refusal codes are ADDED to a generic entry (its description, e.g. the MFA refusal, is kept)
+    for (const [status, refusal] of Object.entries(refusals) as Array<[string, Record<string, unknown>]>) {
+      const generic = responses[status] as { description?: string } | undefined;
+      responses[status] = generic ? { ...refusal, description: `${generic.description ?? ""} ${String(refusal.description)}`.trim() } : refusal;
+    }
+    operation.responses = responses;
 
     const p = openApiPath(entry.url);
     paths[p] ??= {};
