@@ -1020,6 +1020,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/identity/signing-keys": "internal",
   "POST /v1/identity/signing-keys/rotate": "internal",
   "POST /v1/identity/signing-keys/:kid/revoke": "internal",
+  // --- ADR-0189 (batch 6 item 2) B1: 501 stubs until their slices land
+  "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
+  "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
+  "GET /v1/ai-bom/:subjectKind/:subjectId/drift": "internal",
+  "GET /v1/ai-bom/snapshots/:snapshotId": "internal",
+  "GET /v1/ai-bom/snapshots/:snapshotId/bundle": "internal",
+  "GET /v1/decisions/:auditId/bom": "internal",
+  "GET /v1/decisions/:auditId/bom/bundle": "internal",
+  "POST /v1/boms/verify": "internal",
 };
 
 /**
@@ -1920,4 +1929,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/identity/signing-keys": "identity",
   "POST /v1/identity/signing-keys/rotate": "identity",
   "POST /v1/identity/signing-keys/:kid/revoke": "identity",
+  // --- ADR-0189 (batch 6 item 2) B1: 501 stubs until their slices land
+  "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": "audit",
+  "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": "audit",
+  "GET /v1/ai-bom/:subjectKind/:subjectId/drift": "audit",
+  "GET /v1/ai-bom/snapshots/:snapshotId": "audit",
+  "GET /v1/ai-bom/snapshots/:snapshotId/bundle": "audit",
+  "GET /v1/decisions/:auditId/bom": "audit",
+  "GET /v1/decisions/:auditId/bom/bundle": "audit",
+  "POST /v1/boms/verify": "audit",
 };
