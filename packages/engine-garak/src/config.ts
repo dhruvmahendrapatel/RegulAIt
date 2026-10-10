@@ -17,10 +17,17 @@
  *     are never loaded); one generation per prompt; the prompt cap is the run's trials;
  *   - the report directory and XDG config/data/cache directories are fresh and empty on the worker's
  *     tmpfs, so no `garak.site.yaml` and no data override can be picked up (R10);
- *   - every usage-data switch is set; no proxy, vendor key or inherited variable but PATH.
+ *   - every usage-data switch is set; no proxy, vendor key or inherited variable but PATH;
+ *   - ADR-0187 decisions 203-206: a probe that calls a model as a judge (a `judge.*` or
+ *     `agent_breaker.*` detector) or as its attacker (`agent_breaker.AgentBreaker`) has every such
+ *     model re-pointed at the run's JUDGE agent through the same gateway route, with the judge's own
+ *     agent and project headers and the SAME run key (from the same env var): no second credential, no
+ *     other endpoint. Such a probe without a judge is refused (`judge_required`); a probe that needs no
+ *     judge carries no judge section at all.
  * `assertGatewayOnly` re-checks the finished config and environment before anything is written.
  */
 import {
+  GARAK_JUDGE_MODULES,
   GARAK_TAXONOMY_SYSTEM,
   GARAK_USAGE_DATA_ENV,
   garakNotRunReason,
@@ -93,6 +100,27 @@ export interface GarakTarget {
   headers: Record<string, string>;
 }
 
+/** decision 204: the run's judge agent behind the gateway (the lease's `judge`): its model and headers, never a key */
+export interface GarakJudge {
+  model: string;
+  headers: Record<string, string>;
+}
+
+/** the reply budget of one judge verdict (garak's own default for agent_breaker is 8192; a verdict is short) */
+export const GARAK_JUDGE_MAX_TOKENS = 1024;
+/** the reply budget of one attacker turn (an exploit prompt, a tool analysis, a discovery parse) */
+export const GARAK_ATTACKER_MAX_TOKENS = 2048;
+/** what the gateway's compat route does not take (n would also be wrong for one generation) */
+const SUPPRESSED_PARAMS = ["n", "stop", "frequency_penalty", "presence_penalty", "seed"] as const;
+
+/** does this probe call a model as judge or attacker (decision 203)? an unknown probe: no (it never runs) */
+export function garakProbeNeedsJudge(probe: string): boolean {
+  return garakProbeForSet(probe.toLowerCase())?.requiresJudge ?? false;
+}
+
+/** the module part of `module.Class` */
+const moduleOf = (name: string): string => name.split(".")[0]!;
+
 const MODEL_RE = /^[\x21-\x7e]{1,200}$/;
 const HEADER_NAME_RE = /^x-regulait-[a-z-]{1,40}$/;
 const HEADER_VALUE_RE = /^[\x21-\x7e]{1,200}$/;
@@ -102,13 +130,67 @@ export function garakUri(baseUrl: string): string {
   return baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 }
 
+/** one gateway generator config for a judge or attacker model (garak's `*_model_config`) */
+function judgeGeneratorConfig(baseUrl: string, judge: GarakJudge, maxTokens: number): Record<string, unknown> {
+  return {
+    uri: garakUri(baseUrl),
+    max_tokens: maxTokens,
+    suppressed_params: [...SUPPRESSED_PARAMS],
+    extra_params: { extra_headers: { ...judge.headers } },
+  };
+}
+
+/**
+ * Decision 204: the `plugins.detectors` and `plugins.probes` sections that re-point a judge probe's
+ * models at the gateway judge: the detector module's `detector_model_*` (garak's `judge.*` and
+ * `agent_breaker.AgentBreakerResult` read these) and, for an `agent_breaker` probe, its
+ * `red_team_model_*` and `parse_model_*` (the attacker and the discovery parser). Every one is garak's
+ * OpenAI-compatible generator at the gateway's `/v1/`; its key is the run key garak reads from
+ * `OPENAICOMPATIBLE_API_KEY`, the same variable as the target's.
+ */
+function judgeSections(probe: string, detector: string | null, baseUrl: string, judge: GarakJudge): { detectors: Record<string, unknown>; probes?: Record<string, unknown> } {
+  const detectorModule = detector ? moduleOf(detector) : null;
+  const detectors: Record<string, unknown> = {};
+  if (detectorModule && GARAK_JUDGE_MODULES.includes(detectorModule)) {
+    detectors[detectorModule] = {
+      detector_model_type: GARAK_TARGET_TYPE,
+      detector_model_name: judge.model,
+      detector_model_config: judgeGeneratorConfig(baseUrl, judge, GARAK_JUDGE_MAX_TOKENS),
+    };
+  }
+  if (moduleOf(probe) !== "agent_breaker") return { detectors };
+  const attacker = judgeGeneratorConfig(baseUrl, judge, GARAK_ATTACKER_MAX_TOKENS);
+  return {
+    detectors,
+    probes: {
+      agent_breaker: {
+        red_team_model_type: GARAK_TARGET_TYPE,
+        red_team_model_name: judge.model,
+        red_team_model_config: attacker,
+        parse_model_type: GARAK_TARGET_TYPE,
+        parse_model_name: judge.model,
+        parse_model_config: attacker,
+      },
+    },
+  };
+}
+
 /** one probe's garak config (garak reads JSON with its YAML loader) */
-export function buildGarakConfig(args: { target: GarakTarget; probe: string; trials: number; reportDir: string; seed?: number }): Record<string, unknown> {
+export function buildGarakConfig(args: { target: GarakTarget; probe: string; trials: number; reportDir: string; seed?: number; judge?: GarakJudge | null }): Record<string, unknown> {
   if (!MODEL_RE.test(args.target.model)) throw new GarakConfigRefused("model_invalid", "a model name must be printable with no spaces");
   for (const [k, v] of Object.entries(args.target.headers)) {
     if (!HEADER_NAME_RE.test(k) || !HEADER_VALUE_RE.test(v)) throw new GarakConfigRefused("header_invalid", "only the gateway's own x-regulait headers may be sent");
   }
+  const needsJudge = garakProbeNeedsJudge(args.probe);
+  if (needsJudge && !args.judge) throw new GarakConfigRefused("judge_required", "this probe calls a judge model, reached only through the gateway: the run names no judge");
+  if (needsJudge && args.judge) {
+    if (!MODEL_RE.test(args.judge.model)) throw new GarakConfigRefused("model_invalid", "a model name must be printable with no spaces");
+    for (const [k, v] of Object.entries(args.judge.headers)) {
+      if (!HEADER_NAME_RE.test(k) || !HEADER_VALUE_RE.test(v)) throw new GarakConfigRefused("header_invalid", "only the gateway's own x-regulait headers may be sent");
+    }
+  }
   const cap = Math.max(1, Math.min(25, Math.trunc(args.trials)));
+  const judge = needsJudge ? judgeSections(args.probe, garakPrimaryDetector(args.probe), args.target.baseUrl, args.judge!) : null;
   return {
     system: {
       verbose: 0,
@@ -136,11 +218,14 @@ export function buildGarakConfig(args: { target: GarakTarget; probe: string; tri
           OpenAICompatible: {
             uri: garakUri(args.target.baseUrl),
             // the gateway does not take these; n would also be wrong for one generation
-            suppressed_params: ["n", "stop", "frequency_penalty", "presence_penalty", "seed"],
+            suppressed_params: [...SUPPRESSED_PARAMS],
             extra_params: { extra_headers: { ...args.target.headers } },
           },
         },
       },
+      // decision 204: only a judge probe carries these, and only at the gateway judge
+      ...(judge ? { detectors: judge.detectors } : {}),
+      ...(judge?.probes ? { probes: judge.probes } : {}),
     },
     reporting: {
       report_dir: args.reportDir,
@@ -238,7 +323,8 @@ export function assertGatewayOnly(config: Record<string, unknown>, env: Record<s
     throw new GarakConfigRefused("config_probe", "the probe is not one this build runs");
   }
   if (run["generations"] !== 1 || run["eval_threshold"] !== GARAK_EVAL_THRESHOLD) throw new GarakConfigRefused("config_run", "one generation per prompt, the fixed threshold");
-  const plugins = onlyKeys(top["plugins"], "plugins", ["target_type", "target_name", "extended_detectors", "generators"]);
+  const plugins = onlyKeys(top["plugins"], "plugins", ["target_type", "target_name", "extended_detectors", "generators", "detectors", "probes"]);
+  assertJudgeSections(plugins, entry.probe, gatewayBaseUrl);
   if (plugins["target_type"] !== GARAK_TARGET_TYPE) throw new GarakConfigRefused("config_generator", "the only generator is the gateway's OpenAI-compatible route");
   if (plugins["extended_detectors"] !== false) throw new GarakConfigRefused("config_detectors", "only the probe's primary detector may run");
   const generators = onlyKeys(plugins["generators"], "plugins.generators", ["openai"]);
@@ -267,6 +353,70 @@ export function assertGatewayOnly(config: Record<string, unknown>, env: Record<s
     if (!ALLOWED_ENV.has(name)) throw new GarakConfigRefused("env_forbidden", `${name} must not reach garak`);
   }
   if (!env[GARAK_KEY_ENV]) throw new GarakConfigRefused("env_key_missing", "the run's key is required");
+}
+
+/** a judge or attacker generator config: garak's OpenAI-compatible generator at the gateway, x-regulait headers only */
+function assertJudgeGenerator(v: unknown, path: string, gatewayBaseUrl: string): void {
+  const gen = onlyKeys(v, path, ["uri", "max_tokens", "suppressed_params", "extra_params"]);
+  if (gen["uri"] !== garakUri(gatewayBaseUrl)) throw new GarakConfigRefused("config_not_gateway", "a judge is reached only at the gateway's /v1/");
+  if (gen["max_tokens"] !== GARAK_JUDGE_MAX_TOKENS && gen["max_tokens"] !== GARAK_ATTACKER_MAX_TOKENS) throw new GarakConfigRefused("config_judge", "a judge's reply budget is fixed");
+  if (!Array.isArray(gen["suppressed_params"]) || !gen["suppressed_params"].every((p) => typeof p === "string")) {
+    throw new GarakConfigRefused("config_unexpected_key", "suppressed_params is a list of names");
+  }
+  const extra = onlyKeys(gen["extra_params"], `${path}.extra_params`, ["extra_headers"]);
+  const headers = onlyKeys(extra["extra_headers"], `${path}.extra_params.extra_headers`, Object.keys((extra["extra_headers"] ?? {}) as object));
+  if (Object.keys(headers).length === 0) throw new GarakConfigRefused("header_invalid", "a judge call carries the judge's agent and project headers");
+  for (const [k, hv] of Object.entries(headers)) {
+    if (!HEADER_NAME_RE.test(k) || typeof hv !== "string" || !HEADER_VALUE_RE.test(hv) || URL_RE.test(hv)) {
+      throw new GarakConfigRefused("header_invalid", "only the gateway's own x-regulait headers may be sent");
+    }
+  }
+}
+
+const isModelName = (v: unknown): boolean => typeof v === "string" && MODEL_RE.test(v);
+
+/**
+ * Decision 204, the judge half of the invariant: a probe that needs no judge carries no `detectors` or
+ * `probes` section; a judge probe carries exactly the sections its detector and (for agent_breaker) its
+ * attacker need, each naming garak's OpenAI-compatible generator at the gateway: never another
+ * generator type (garak's hosted default), another endpoint, an inline key or a non-gateway header.
+ */
+function assertJudgeSections(plugins: Record<string, unknown>, probe: string, gatewayBaseUrl: string): void {
+  if (!garakProbeNeedsJudge(probe)) {
+    if ("detectors" in plugins || "probes" in plugins) throw new GarakConfigRefused("config_unexpected_key", "only a judge probe configures a detector or probe model");
+    return;
+  }
+  const detector = garakPrimaryDetector(probe);
+  const detectorModule = detector ? moduleOf(detector) : null;
+  const wantDetectors = detectorModule && GARAK_JUDGE_MODULES.includes(detectorModule) ? [detectorModule] : [];
+  const detectors = onlyKeys(plugins["detectors"], "plugins.detectors", wantDetectors);
+  if (Object.keys(detectors).length !== wantDetectors.length) throw new GarakConfigRefused("judge_required", "the probe's judge detector must be pointed at the gateway judge");
+  for (const m of wantDetectors) {
+    const d = onlyKeys(detectors[m], `plugins.detectors.${m}`, ["detector_model_type", "detector_model_name", "detector_model_config"]);
+    if (d["detector_model_type"] !== GARAK_TARGET_TYPE || !isModelName(d["detector_model_name"])) {
+      throw new GarakConfigRefused("config_generator", "a judge is garak's OpenAI-compatible generator at the gateway, never a hosted default");
+    }
+    assertJudgeGenerator(d["detector_model_config"], `plugins.detectors.${m}.detector_model_config`, gatewayBaseUrl);
+  }
+  if (moduleOf(probe) !== "agent_breaker") {
+    if ("probes" in plugins) throw new GarakConfigRefused("config_unexpected_key", "only agent_breaker configures an attacker model");
+    return;
+  }
+  const probes = onlyKeys(plugins["probes"], "plugins.probes", ["agent_breaker"]);
+  const ab = onlyKeys(probes["agent_breaker"], "plugins.probes.agent_breaker", [
+    "red_team_model_type",
+    "red_team_model_name",
+    "red_team_model_config",
+    "parse_model_type",
+    "parse_model_name",
+    "parse_model_config",
+  ]);
+  for (const role of ["red_team", "parse"] as const) {
+    if (ab[`${role}_model_type`] !== GARAK_TARGET_TYPE || !isModelName(ab[`${role}_model_name`])) {
+      throw new GarakConfigRefused("config_generator", "the attacker is garak's OpenAI-compatible generator at the gateway, never a hosted default");
+    }
+    assertJudgeGenerator(ab[`${role}_model_config`], `plugins.probes.agent_breaker.${role}_model_config`, gatewayBaseUrl);
+  }
 }
 
 /** the item key and taxonomy id of a probe (garak's `module.Class`) */

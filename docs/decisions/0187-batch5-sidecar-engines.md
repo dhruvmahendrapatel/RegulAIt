@@ -1917,6 +1917,110 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
   and modelscan are each re-checked against the CI-built image layout, and whichever has not been checked reads
   `false`.
 
+### Implementation decisions (garak judge through the gateway, open question 24, 2026-10-10, branch `b5-garak-judge`)
+
+Builds the owner's decision on question 24. **No migration.** Code: `packages/shared/src/engines/garak.ts` (the
+judge flag, agent_breaker admitted), `manifest.ts` (`judgeSets`, `engineRunNeedsJudge`),
+`packages/engine-garak/src/{config,exchange,adapter,garak-run}.ts`, and two lines in `apps/gateway/src/engine-runs.ts`.
+Tests: `packages/engine-garak/src/judge.test.ts` (9, new), `garak-real.test.ts` (+2, opt-in, run here against the real
+garak 0.17.0), `garak.test.ts` (fixtures gain `judge: null`), `apps/gateway/src/zz-b5-garak.test.ts` (+5, the real
+gateway). Each guard was shown red by breaking it (named with each decision).
+
+203. **The judge requirement is per set, through the mechanism promptfoo already uses.** promptfoo needs a judge for
+     every run (`requiresJudge: true`, PR #205 round 6 [73]); garak needs one only for the probes that call a model.
+     So the manifest gains `judgeSets` (the sets that need a judge even when the engine as a whole does not) and one
+     predicate, `engineRunNeedsJudge(manifest, sets)` = `requiresJudge` OR any selected set is a judge set. It
+     replaces `manifest.requiresJudge` at the two places that already enforced the judge: run validation (so runs,
+     schedules and workflow bindings: 422 `judge_required`) and the lease (a judge deleted after queueing ends the
+     run `not_run`, `judge_required`, before any key is minted, round 9 [81]). Everything else is promptfoo's path
+     unchanged: `target.judgeAgentId`, the entitlement check (403 `judge_not_entitled`), the dispatchable-model check,
+     the run key's `allowedModels` = target + judge, and the lease's `judge: {model, headers}`. No second mechanism.
+     A probe needs the judge when its module or its primary detector's module is `judge` or `agent_breaker`
+     (`GARAK_JUDGE_MODULES`), read from garak's own generated metadata, so the flag cannot drift from what ships.
+     **Deviation from the brief:** the brief asked for the flag on the `judge.*` and `agent_breaker.*` rows of
+     `garak-upstream.ts`. That file is generated from the wheel's `plugin_cache.json` (decision 142: "GENERATED — do
+     not edit"), its `active` column is garak's own default and admits nothing, and it has no `judge.*` probe rows
+     (`judge.*` are detectors). So it is unchanged; the flag is `GarakProbeEntry.requiresJudge` in the catalogue,
+     derived from it. Red: with both checks reading `manifest.requiresJudge` again, the gateway's "refused with no
+     judge" case fails, and a run whose judge was removed is leased with a key minted.
+204. **How the judge is re-pointed (R10: `detector_model_type`/`name`/`config`).** For a judge probe the config gains
+     `plugins.detectors.<module>` (`judge` or `agent_breaker`: `detector_model_type: openai.OpenAICompatible`, the
+     judge's model, and a generator config with the gateway's `/v1/`, the judge's own `x-regulait-agent-id` and
+     project headers and a fixed reply budget of 1024 tokens) and, for `agent_breaker.AgentBreaker`,
+     `plugins.probes.agent_breaker` with the same generator for its attacker (`red_team_model_*`) and its discovery
+     parser (`parse_model_*`, 2048 tokens), so garak's hosted defaults are never loaded. The key is not in the config:
+     garak's OpenAI-compatible generator reads `OPENAICOMPATIBLE_API_KEY` for every instance, which already holds the
+     run key, so the judge uses the run's own scoped key and the worker gains no credential. `assertGatewayOnly` is
+     extended: a probe that needs no judge may carry no `detectors` or `probes` section; a judge probe must carry
+     exactly the sections it needs, each naming the OpenAI-compatible generator at the gateway with only gateway
+     headers (at least one), the fixed budgets and no other key (an inline key, an `agent_config_file` override, a
+     second detector, garak's `nim` default or an off-gateway URI are each refused). **Measured on the real garak
+     0.17.0** (the image's lockfile closure without the torch wheel, which this path never imports, plus the two
+     hashed sdists) against a fake gateway: discovery went to the target; the parser, the analysis and the judge's
+     verification all called the judge model with the run key and the judge's header; the judge's YES read `fail`,
+     its NO read `pass`. Red: with the invariant's judge half removed, the refusal test fails at its first variant
+     (garak's hosted default judge is accepted).
+205. **What is admitted.** `agent_breaker.AgentBreaker` runs (its payloads are garak-authored YAML, R10 admissible):
+     set class **agentic** (it attacks an agent's tool use), so it waits for approval as agentic sets do (owner
+     decision 4, decision 9), severity high, **attack class null**. It reaches the agent over the chat compat route,
+     where no tool call is executed, governed or visible, so, as for promptfoo's agentic-named plugins (decision 40,
+     open question 9), it is reported and never counted toward an agentic class. Its default agent description is
+     empty, so it asks the target to describe its tools and has the judge parse the answer (no run param can point
+     it at another file; decision 149 still takes no params). The two probes whose primary detector is a `judge.*`
+     detector, `fitd.FITD` and `goat.GOATAttack`, stay unrun: their payload data has no licence G19 could find and is
+     deleted from the image (decision 145), which the owner's question 20 did not admit; their reason moves from
+     `cloud_only` to `excluded_licence` (the judge would no longer stop them). `tap.TAP`/`PAIR` and `dan.AutoDAN` are
+     outside question 24 and unchanged. Red: classing agent_breaker `standard` fails three gateway cases (no approver
+     asked for, and the queued runs no longer wait).
+206. **Default-deny at every layer the run passes.** The gateway refuses at creation, schedule creation and lease
+     (decision 203). The runner's adapter refuses a lease that plans a judge probe with no `judge` (`not_run`,
+     `judge_required`; the worker is never asked). The job schema refuses a judge probe with `judge: null` (the worker
+     answers `invalid`). The config builder throws `judge_required`, and the invariant refuses a judge probe whose
+     judge section is missing. The adapter's check and the builder's overlap: with either removed alone the lease still
+     ends `not_run` (`judge_required`) without reaching the worker; with both removed the adapter cases fail.
+207. **The worker holds nothing new (decision 79, B5-P2 isolation, decision 140).** The job gains `judge: {model,
+     headers}` (strict; null unless a planned probe needs it; a key inside it is refused). The run key is the one the
+     target already uses. Compose is unchanged: the worker still has no state volume, no runner or enrolment token.
+     Pinned through the real exchange with a runner and an enrolment token planted in the worker's own environment:
+     the judge probe's garak process saw only the allow-listed environment and the run key, and its config named the
+     judge model and no `rge_`/`rgee_`/`rglv_` value.
+208. **Governed, costed and audited on the run.** The judge's calls go through the compat route on the run key, so the
+     gateway's own pipeline applies: entitlement through the key's allowed models, the run's project and purpose
+     (`engine:garak`) on each usage row with the judge as `agent_id`, the run's one budget for target and judge
+     together (a spent budget refuses the judge with 401 like the target, and the probe reads `unknown`, decision
+     152), the audit trail per dispatch (`object_type = 'agent'`, the judge, the run-as person), and the run's
+     `cost_usd`, which sums every row of the run's keys. Pinned end to end through the real gateway with a priced
+     judge agent: the judge's usage rows equal its calls, cost more than zero, and the run's cost equals target plus
+     judge.
+209. **A judge that cannot be read is never a pass.** garak's `AgentBreakerResult` scores an output it could not have
+     judged (a model error, an empty or unparseable verdict) as `None`; the report's `nones` then block a pass
+     (decision 152), and a judge call refused by the gateway leaves no completion line (`unknown`). Established by
+     reading garak 0.17.0's detector source; the real-engine run covered only the YES and NO verdicts.
+210. **No new run surface.** `judgeAgentId` already exists on runs, schedules and workflow bindings (`judgeAgent`), and
+     the Engines run form already offers a judge. The form's help text still names promptfoo only, and the run's
+     not-run reason `judge_required` has no label on the page (it had none for promptfoo either): **left to the UI
+     slice** (open item J1 below).
+211. **Manifest.** `requiresJudge` stays false for garak (most probes need no judge); `judgeSets` lists
+     `agent_breaker.agentbreaker`; the generation is not bumped (no change of image or version: the agent_breaker
+     data was never pruned). Other engines: promptfoo `judgeSets: []` (every run already needs the judge), modelscan
+     `[]`.
+212. **Open-source check (ADR-0176) and what was not done.** garak's own parameters do the re-pointing and garak's own
+     generator makes the calls; the gateway's existing judge path is reused, so no proxy, no judge client and no new
+     key type were written. Our code is the governance part: the per-set requirement, the invariant and the
+     default-deny checks. **Not done:** the image is still not built (decision 158), so the judge path inside the
+     container is exercised first by CI's image build and a deployment; the real-engine suite ran outside a container
+     without torch; the Engines page text (open item J1 below).
+
+**Open items from this slice** (lettered, not numbered, so they cannot collide with parallel slices' additions to
+the list below; the coordinator numbers them when merging).
+
+- **J1. The Engines run form and the judge (decision 210).** The judge field's help names promptfoo only, and
+  `judge_required` has no not-run label. Both belong to the UI slice.
+- **J2. Re-pointing the remaining attacker probes.** `tap.TAP`/`PAIR` and `dan.AutoDAN` drive attacker models through
+  the same kind of parameters; the owner's question 24 named only `judge.*` and `agent_breaker.*`. Admitting them
+  through the gateway judge would be the same mechanism, but it is a separate owner decision. `fitd` and `goat`
+  additionally need their deleted payload data admitted (question 20 did not list them).
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -2028,6 +2132,7 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
     behind the gateway through their model parameters (R10). Excluded until the owner decides B5-G should support it
     (it would make garak `requiresJudge` for those probes).
     *decided 2026-10-10 by the owner: supported through a gateway judge.*
+    *2026-10-10, decisions 203–212: built (agent_breaker runs with the run's judge through the gateway).*
 25. **B5-G: `credentialIsolation: true` before the image is verified (decision 140).** Set on the lead's instruction for
     the two-container build; modelscan's equivalent build keeps `false` until verified (question 18). The two should be
     reconciled once either image is built and its layout checked.

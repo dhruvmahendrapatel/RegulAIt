@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runProcessGroup, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
-import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GARAK_REPORT_PREFIX, type GarakTarget } from "./config.js";
+import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GARAK_REPORT_PREFIX, type GarakJudge, type GarakTarget } from "./config.js";
 import { GARAK_MAX_REPORT_BYTES, type GarakProbeOutcome } from "./mapper.js";
 
 /** where the image keeps garak (image.test.ts checks the Dockerfile agrees) */
@@ -27,6 +27,8 @@ export const GARAK_IMAGE_PATHS = Object.freeze({
 export interface GarakInvocation {
   probe: string;
   target: GarakTarget;
+  /** ADR-0187 decision 204: the run's judge behind the gateway, for a probe that calls one (else null) */
+  judge?: GarakJudge | null;
   apiKey: string;
   trials: number;
   /** a directory this probe owns (created fresh, removed after) */
@@ -65,7 +67,7 @@ export async function runGarakProbe(inv: GarakInvocation, opts: GarakRunnerOptio
   };
   for (const d of Object.values(dirs)) await mkdir(d, { recursive: true, mode: 0o700 });
   try {
-    const config = buildGarakConfig({ target: inv.target, probe: inv.probe, trials: inv.trials, reportDir: dirs.report });
+    const config = buildGarakConfig({ target: inv.target, judge: inv.judge ?? null, probe: inv.probe, trials: inv.trials, reportDir: dirs.report });
     const env = buildGarakEnv(inv.apiKey, dirs, opts.path ?? GARAK_IMAGE_PATHS.venvBin);
     assertGatewayOnly(config, env, inv.target.baseUrl);
     const configPath = path.join(dir, "run.json");

@@ -208,7 +208,7 @@ describe("B5-G plan: unknown and licence-excluded probes never reach garak", () 
   });
 
   it("the worker refuses a job naming a probe this build does not run", () => {
-    const job = { runId: randomUUID(), probes: [{ probe: ENC, detector: ENC_DET }], target: { baseUrl: "http://gateway:3000/v1", model: "m", headers: {} }, apiKey: "rglv_x", trials: 2, timeoutMs: 5000 };
+    const job = { runId: randomUUID(), probes: [{ probe: ENC, detector: ENC_DET }], target: { baseUrl: "http://gateway:3000/v1", model: "m", headers: {} }, apiKey: "rglv_x", judge: null, trials: 2, timeoutMs: 5000 };
     expect(garakJobSchema.safeParse(job).success).toBe(true);
     for (const probe of ["leakreplay.NYTCloze", "test.Test", "propile.PIILeakTwin", "encoding.injectbase64", "../../etc.passwd"]) {
       expect(garakJobSchema.safeParse({ ...job, probes: [{ probe, detector: ENC_DET }] }).success, probe).toBe(false);
@@ -297,6 +297,7 @@ function job(over: Partial<GarakJob> = {}): GarakJob {
     ],
     target: { baseUrl: "http://gateway:3000/v1", model: "model-x", headers: { "x-regulait-agent-id": "a1", "x-regulait-project-id": "p1" } },
     apiKey: "rglv_synthetic",
+    judge: null,
     trials: 3,
     timeoutMs: 10_000,
     ...over,

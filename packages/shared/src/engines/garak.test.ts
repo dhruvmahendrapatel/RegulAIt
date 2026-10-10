@@ -11,6 +11,7 @@ import {
   engineConfigNeedsApproval,
   engineRunConfigSchema,
   engineTaxonomyProblems,
+  GARAK_JUDGE_MODULES,
   GARAK_OWASP_CROSSWALK,
   GARAK_PROBES,
   GARAK_UPSTREAM_PROBES,
@@ -62,7 +63,7 @@ describe("B5-G garak catalogue", () => {
     }
   });
 
-  it("every admitted probe's primary detector runs locally: no Hub model, hosted judge, hosted API or unlicensed word list", () => {
+  it("every admitted probe's primary detector runs locally, or is a judge re-pointed at the gateway judge: no Hub model, hosted judge, hosted API or unlicensed word list", () => {
     const allowedDetectorModules = new Set([
       "ansiescape",
       "apikey",
@@ -82,8 +83,12 @@ describe("B5-G garak catalogue", () => {
     for (const p of local) {
       const d = garakPrimaryDetector(p.probe);
       expect(d, p.probe).not.toBeNull();
-      expect(allowedDetectorModules.has(d!.split(".")[0]!), `${p.probe} -> ${d}`).toBe(true);
+      // ADR-0187 decisions 203-205: a model-calling detector is admitted only on a judge probe, which runs
+      // only with the run's judge behind the gateway (never garak's hosted default)
+      const allowed = p.requiresJudge ? GARAK_JUDGE_MODULES.includes(d!.split(".")[0]!) : allowedDetectorModules.has(d!.split(".")[0]!);
+      expect(allowed, `${p.probe} -> ${d}`).toBe(true);
     }
+    expect(local.filter((p) => p.requiresJudge).map((p) => p.probe)).toEqual(["agent_breaker.AgentBreaker"]);
     // the HF-backed mitigation detector is never a primary detector of an admitted probe
     expect(local.some((p) => garakPrimaryDetector(p.probe) === "mitigation.ModernBERTRefusal")).toBe(false);
   });

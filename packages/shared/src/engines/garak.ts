@@ -84,6 +84,28 @@ export interface GarakProbeEntry {
   severity: RedTeamSeverity;
   /** why it does not run here (a fixed sentence), or null */
   note: string | null;
+  /**
+   * ADR-0187 decision 203 (owner decision on open question 24): the probe calls a model as a judge (its
+   * primary detector is a `judge.*` or `agent_breaker.*` detector) or as its attacker (an `agent_breaker`
+   * probe). Such a probe runs only with a judge agent behind the gateway, reached with the run's own key:
+   * a run selecting it names a judge the requester is entitled to, or it is refused (default-deny).
+   */
+  requiresJudge: boolean;
+}
+
+/**
+ * Decision 203: the garak modules whose detectors (and, for `agent_breaker`, whose probe's attacker and
+ * parser) call a model. In garak 0.17.0 those default to a hosted endpoint (R10); this build re-points
+ * every one of them at the run's judge agent through the gateway's compat route (engine-garak config.ts).
+ */
+export const GARAK_JUDGE_MODULES: readonly string[] = Object.freeze(["judge", "agent_breaker"]);
+
+const moduleOf = (name: string): string => name.split(".")[0]!;
+
+/** does this probe call a model as judge or attacker (decision 203)? derived from garak's own metadata */
+function probeNeedsJudge(probe: string): boolean {
+  const detector = GARAK_UPSTREAM_PROBES.find((p) => p.probe === probe)?.detector ?? null;
+  return GARAK_JUDGE_MODULES.includes(moduleOf(probe)) || (detector !== null && GARAK_JUDGE_MODULES.includes(moduleOf(detector)));
 }
 
 type Local = [probe: string, setClass: GarakSetClass, attackClass: RedTeamAttackClass | null, severity: RedTeamSeverity];
@@ -132,6 +154,11 @@ const LOCAL: readonly Local[] = [
   ...moduleProbes("exploitation").map((p): Local => [p, "offensive", null, "high"]),
   ...moduleProbes("malwaregen").map((p): Local => [p, "offensive", null, "high"]),
   ...moduleProbes("av_spam_scanning").map((p): Local => [p, "offensive", null, "medium"]),
+  // --- decision 204 (owner decision on open question 24): attacks an agent's tool use, with its attacker,
+  // parser and judge all re-pointed at the run's judge agent behind the gateway. Agentic for approvals. It
+  // reaches the agent over the chat route only, where no tool call is governed or visible, so — as for
+  // promptfoo's agentic-named plugins (decision 40) — it is reported, never counted toward an agentic class.
+  ["agent_breaker.AgentBreaker", "agentic", null, "high"],
 ];
 
 /** not run here, with the reason and the fixed sentence the Engines page shows */
@@ -174,11 +201,11 @@ const NOT_RUN: ReadonlyArray<[probes: readonly string[], disposition: Exclude<Ga
   [["ansiescape.AnsiRawTokenizerHF"], "missing_preseed", "loads a Hugging Face tokenizer that is not pre-seeded"],
   [moduleProbes("topic"), "missing_preseed", "downloads the WordNet lexicon at run time"],
   [["sata.MLM"], "missing_preseed", "downloads an NLTK tagger at run time"],
-  [
-    ["agent_breaker.AgentBreaker", "tap.TAP", "tap.PAIR", "goat.GOATAttack", "fitd.FITD", "dan.AutoDAN"],
-    "cloud_only",
-    "drives a hosted or downloaded attacker or judge model",
-  ],
+  [["tap.TAP", "tap.PAIR", "dan.AutoDAN"], "cloud_only", "drives a hosted or downloaded attacker or judge model"],
+  // decision 205: their primary detector is a `judge.*` detector, which this build can re-point at the
+  // gateway judge, but their payload data has no licence G19 could find and is deleted from the image
+  // (decision 145), so they still never run
+  [["fitd.FITD", "goat.GOATAttack"], "excluded_licence", "its payload data has no licence found and is deleted from the image (its judge could run through the gateway)"],
   [["suffix.GCG", "suffix.BEAST"], "cloud_only", "fetches its attack corpus from a git host at run time"],
   [moduleProbes("visual_jailbreak"), "cloud_only", "fetches its images from a git host at run time"],
   [["fileformats.HF_Files"], "cloud_only", "downloads the target's Hub repository"],
@@ -190,9 +217,9 @@ function buildCatalogue(): GarakProbeEntry[] {
     if (out.has(e.probe)) throw new Error(`garak catalogue: ${e.probe} listed twice`);
     out.set(e.probe, e);
   };
-  for (const [probe, setClass, attackClass, severity] of LOCAL) add({ probe, disposition: "local", setClass, attackClass, severity, note: null });
+  for (const [probe, setClass, attackClass, severity] of LOCAL) add({ probe, disposition: "local", setClass, attackClass, severity, note: null, requiresJudge: probeNeedsJudge(probe) });
   for (const [probes, disposition, note] of NOT_RUN) {
-    for (const probe of probes) add({ probe, disposition, setClass: "offensive", attackClass: null, severity: "medium", note });
+    for (const probe of probes) add({ probe, disposition, setClass: "offensive", attackClass: null, severity: "medium", note, requiresJudge: probeNeedsJudge(probe) });
   }
   return [...out.values()].sort((a, b) => (a.probe < b.probe ? -1 : a.probe > b.probe ? 1 : 0));
 }
@@ -237,6 +264,15 @@ export function garakManifestSets(): Record<string, GarakSetClass> {
   const out: Record<string, GarakSetClass> = {};
   for (const p of GARAK_PROBES) if (p.disposition === "local") out[garakSetId(p.probe)] = p.setClass;
   return out;
+}
+
+/**
+ * Decision 203: the set ids that run here only with a judge agent behind the gateway. The manifest
+ * publishes them (`judgeSets`), and run validation and the lease refuse a run selecting one with no
+ * judge (`judge_required`).
+ */
+export function garakJudgeSets(): string[] {
+  return GARAK_PROBES.filter((p) => p.disposition === "local" && p.requiresJudge).map((p) => garakSetId(p.probe));
 }
 
 /** what this build never runs, keyed by the probe name the runner reports (the declared reduced set) */

@@ -17,7 +17,12 @@
  *   - approvals routing: standard sets queue; offensive, licence-excluded and unknown sets wait for
  *     approval; an over-threshold budget waits; run params are refused;
  *   - a run: garak "exits 0" with hits → fail; classes from the shipped taxonomy; usage attributed;
- *   - budget spent → 401 mid-run: the measured probe counts, the rest is unknown, never pass.
+ *   - budget spent → 401 mid-run: the measured probe counts, the rest is unknown, never pass;
+ *   - ADR-0187 decisions 203-206 (owner decision on open question 24): a run selecting a judge probe
+ *     (agent_breaker) names a judge the requester is entitled to, or is refused (422 `judge_required`,
+ *     403 `judge_not_entitled`), at creation, for a schedule and again at lease; it is agentic (approval
+ *     first); and the judge's calls go through the gateway on the run's own key, so they are governed,
+ *     audited and costed on the run like the target's.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
@@ -75,6 +80,8 @@ let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: b
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 let alice: { id: string; key: { authorization: string } };
 let targetId: string;
+let judgeId: string;
+let foreignJudgeId: string;
 let projectId: string;
 let client: RunnerClient;
 let workerResults: string;
@@ -129,11 +136,13 @@ interface Call {
  * garak's generator does); a refused call ends that probe's garak with no completion line (garak on a
  * 401). `hits` names the probes whose every output is a hit. Exit code 0 always, as garak.
  */
-function workerStandIn(opts: { hits?: string[]; afterCall?: (c: Call, n: number) => Promise<void> } = {}): GarakExecutor & { calls: Call[]; jobs: GarakJob[] } {
+function workerStandIn(opts: { hits?: string[]; afterCall?: (c: Call, n: number) => Promise<void> } = {}): GarakExecutor & { calls: Call[]; judgeCalls: Call[]; jobs: GarakJob[] } {
   const calls: Call[] = [];
+  const judgeCalls: Call[] = [];
   const jobs: GarakJob[] = [];
   return {
     calls,
+    judgeCalls,
     jobs,
     reconcile: async () => [],
     async run(job, signal) {
@@ -156,6 +165,21 @@ function workerStandIn(opts: { hits?: string[]; afterCall?: (c: Call, n: number)
           if (r.statusCode !== 200) {
             refused = true;
             break;
+          }
+          // decision 204: a judge probe's detector asks the run's judge, as garak's re-pointed judge does:
+          // the gateway's compat route, the judge's model and headers, the SAME run key
+          if (job.judge) {
+            const jr = await app.inject({
+              method: "POST",
+              url: `${new URL(job.target.baseUrl).pathname}/chat/completions`,
+              headers: { authorization: `Bearer ${job.apiKey}`, ...job.judge.headers },
+              payload: { model: job.judge.model, messages: [{ role: "user", content: `judge the output of ${p.probe}` }] },
+            });
+            judgeCalls.push({ probe: p.probe, status: jr.statusCode, body: jr.body });
+            if (jr.statusCode !== 200) {
+              refused = true;
+              break;
+            }
           }
           scores.push(opts.hits?.includes(p.probe) ? 1 : 0);
         }
@@ -231,6 +255,14 @@ beforeAll(async () => {
   expect(ag.statusCode, ag.body).toBe(201);
   targetId = ag.json().id;
   expect((await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId: targetId })).statusCode).toBe(201);
+  // decisions 203-206: a judge agent alice is entitled to, and one she is not (no grant)
+  const jg = await inject("POST", "/v1/agents", AUTH, { name: `b5g-judge-${RUN}`, provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 6, model: "b5g-judge-model" });
+  expect(jg.statusCode, jg.body).toBe(201);
+  judgeId = jg.json().id;
+  expect((await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId: judgeId })).statusCode).toBe(201);
+  const fj = await inject("POST", "/v1/agents", AUTH, { name: `b5g-foreign-judge-${RUN}`, provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 6, model: "b5g-foreign-judge-model" });
+  expect(fj.statusCode, fj.body).toBe(201);
+  foreignJudgeId = fj.json().id;
   const p = await inject("POST", "/v1/projects", AUTH, { name: `b5g-project-${RUN}` });
   expect(p.statusCode, p.body).toBe(201);
   projectId = p.json().id;
@@ -389,5 +421,109 @@ describe("B5-G a garak run through the real gateway", () => {
     const run = await runRow(runId);
     expect(run.status).toBe("completed");
     expect((run.summary as { verdict: string }).verdict).toBe("unknown");
+  });
+});
+
+// ADR-0187 decisions 203-206 (owner decision on open question 24)
+describe("B5-G the gateway judge: agent_breaker runs only with an entitled judge, through the gateway", () => {
+  const AB = "agent_breaker.AgentBreaker";
+  const abRun = (target: Record<string, unknown>, more: Record<string, unknown> = {}) =>
+    startRun({ target, config: { sets: ["agent_breaker.agentbreaker", "encoding.injectbase64"] }, approverUserId: admin.id, ...more });
+  const approve = async (approvalId: string) => {
+    const d = await inject("POST", `/v1/approvals/${approvalId}/decide`, admin.key, { decision: "approved", reason: "reviewed the agentic set" });
+    expect(d.statusCode, d.body).toBe(200);
+  };
+
+  it("refused with no judge (422 judge_required), for a run and a schedule; nothing queued", async () => {
+    const before = await db.select({ id: engineRuns.id }).from(engineRuns).where(eq(engineRuns.engineId, "garak"));
+    const r = await abRun({ agentId: targetId });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json()).toMatchObject({ error: "judge_required" });
+    expect(r.json().detail).toMatch(/agent_breaker\.agentbreaker/);
+    const sch = await inject("POST", "/v1/engine-schedules", alice.key, {
+      request: { engineId: "garak", target: { agentId: targetId }, config: { sets: ["agent_breaker.agentbreaker"] }, projectId, budgetUsd: 1, approverUserId: admin.id },
+      intervalHours: 24,
+    });
+    expect(sch.statusCode, sch.body).toBe(422);
+    expect(sch.json()).toMatchObject({ error: "judge_required" });
+    expect(await db.select({ id: engineRuns.id }).from(engineRuns).where(eq(engineRuns.engineId, "garak"))).toHaveLength(before.length);
+    // control: a garak run of probes that need no judge still needs none
+    const plain = await startRun();
+    expect(plain.statusCode, plain.body).toBe(202);
+    await inject("POST", `/v1/engine-runs/${plain.json().run.id}/cancel`, alice.key, {});
+  });
+
+  it("refused with a judge the requester is not entitled to (403 judge_not_entitled)", async () => {
+    const r = await abRun({ agentId: targetId, judgeAgentId: foreignJudgeId });
+    expect(r.statusCode, r.body).toBe(403);
+    expect(r.json()).toMatchObject({ error: "judge_not_entitled" });
+  });
+
+  it("with an entitled judge it is agentic: it needs an approver and waits for approval", async () => {
+    const none = await abRun({ agentId: targetId, judgeAgentId: judgeId }, { approverUserId: undefined });
+    expect(none.statusCode, none.body).toBe(422);
+    expect(none.json().error).toBe("engine_approver_required");
+    const s = await abRun({ agentId: targetId, judgeAgentId: judgeId });
+    expect(s.statusCode, s.body).toBe(202);
+    expect(s.json().run.status).toBe("awaiting_approval");
+    await inject("POST", `/v1/engine-runs/${s.json().run.id}/cancel`, alice.key, {});
+  });
+
+  it("a judge removed after queueing: the lease ends the run not_run (judge_required) and mints no key", async () => {
+    const s = await abRun({ agentId: targetId, judgeAgentId: judgeId });
+    const runId = s.json().run.id as string;
+    await approve(s.json().approvalId as string);
+    // what deleting the judge agent does to a queued run (the foreign key nulls it)
+    await db.execute(sql`UPDATE engine_runs SET judge_agent_id = NULL WHERE id = ${runId}`);
+    const w = workerStandIn();
+    await once(w);
+    expect(w.jobs).toHaveLength(0);
+    expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "judge_required", virtualKeyId: null });
+  });
+
+  it("end to end: the judge is called through the gateway on the run key; governed, audited and costed on the run", async () => {
+    const s = await abRun({ agentId: targetId, judgeAgentId: judgeId });
+    expect(s.statusCode, s.body).toBe(202);
+    const runId = s.json().run.id as string;
+    await approve(s.json().approvalId as string);
+    const w = workerStandIn({ hits: [AB] });
+    const out = await once(w);
+    expect(out).toMatchObject({ outcome: "posted", runId, status: 200 });
+    // the worker's job: the judge's model and headers, the run's one key, and nothing of the runner's
+    const job = w.jobs[0]!;
+    expect(job.judge).toEqual({ model: "b5g-judge-model", headers: { "x-regulait-agent-id": judgeId, "x-regulait-project-id": projectId } });
+    expect(Object.keys(job).sort()).toEqual(["apiKey", "judge", "probes", "runId", "target", "timeoutMs", "trials"]);
+    expect(job.apiKey).toMatch(/^rglv_/);
+    expect(JSON.stringify(job)).not.toMatch(/rgee?_/);
+    expect(w.judgeCalls.length).toBeGreaterThan(0);
+    expect(w.judgeCalls.every((c) => c.status === 200)).toBe(true);
+    const run = await runRow(runId);
+    expect(run.status).toBe("completed");
+    const items = await db.select().from(engineRunItems).where(eq(engineRunItems.runId, runId));
+    expect(items.find((i) => i.key === AB)).toMatchObject({ verdict: "fail", attackClass: null });
+    // governed: the run key allowed exactly the target and the judge
+    const k = await keyOf(runId);
+    expect([...(k.allowedModels as string[])].sort()).toEqual([targetId, judgeId].sort());
+    expect(k.revokedAt).not.toBeNull();
+    // costed: the judge's calls are usage on the run's key, in the run's project, and the run's cost includes them
+    const usage = await db.select().from(usageEvents).where(eq(usageEvents.virtualKeyId, k.id));
+    const judgeUsage = usage.filter((u) => u.agentId === judgeId);
+    const targetUsage = usage.filter((u) => u.agentId === targetId);
+    expect(judgeUsage).toHaveLength(w.judgeCalls.length);
+    expect(targetUsage).toHaveLength(w.calls.length);
+    expect(usage.every((u) => u.projectId === projectId && (u.detail as { purpose?: string }).purpose === "engine:garak")).toBe(true);
+    const judgeCost = judgeUsage.reduce((n, u) => n + (u.costUsd ?? 0), 0);
+    const allCost = usage.reduce((n, u) => n + (u.costUsd ?? 0), 0);
+    expect(judgeCost).toBeGreaterThan(0);
+    expect(run.costUsd).toBeCloseTo(allCost, 9);
+    expect(run.costUsd).toBeGreaterThan(allCost - judgeCost);
+    // audited: every judge dispatch is in the audit trail, attributed to the run-as person, on the judge agent
+    const audit = (
+      (await db.execute(
+        sql`SELECT user_id, effect FROM audit_log WHERE object_type = 'agent' AND object_id = ${judgeId} AND at >= ${run.createdAt.toISOString()}::timestamptz`,
+      )) as unknown as { rows: Array<{ user_id: string; effect: string }> }
+    ).rows;
+    expect(audit.length).toBeGreaterThanOrEqual(w.judgeCalls.length);
+    expect(audit.every((a) => a.user_id === alice.id && a.effect === "allow")).toBe(true);
   });
 });
