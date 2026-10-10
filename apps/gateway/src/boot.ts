@@ -54,6 +54,7 @@ import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
+import { assertReceiptEmitterBootable } from "./decision-receipts.js";
 
 /** ADR-0035: how often the chain head is captured when anchoring is on. */
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
@@ -112,6 +113,16 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
 
   // migrations are idempotent — booting always converges the schema
   await runMigrations(db, migrationsFolder);
+
+  // ADR-0189 R43: a build that cannot emit v2 receipts with facts refuses to
+  // start once a receipt v2 boundary is recorded (a v1 receipt there is
+  // invalid). Before listen, like the data-key gate, so nothing is left behind.
+  try {
+    await assertReceiptEmitterBootable(db);
+  } catch (err) {
+    await app.close().catch(() => {});
+    throw err;
+  }
 
   // ADR-0176 (migration 0145): the one-time re-pin of stored MCP manifest
   // digests from FNV-1a 64 to SHA-256, before listen and before the scheduler,

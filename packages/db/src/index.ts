@@ -22,6 +22,9 @@ export {
   withAuditChain,
 } from "./audit-chain.js";
 
+// ADR-0189 — the per-decision and per-subject lock targets of the BOM writers
+export { BOM_DECISION_LOCK_NAMESPACE, BOM_SUBJECT_LOCK_NAMESPACE, lockAiBomSubject, lockDecisionForBom } from "./bom-locks.js";
+
 // ADR-0102 — the operator-prose credential scrub for reason/note columns
 // OUTSIDE `audit_log`. Exported so the covered/not-covered inventory can be
 // asserted by test rather than only claimed in the ADR.

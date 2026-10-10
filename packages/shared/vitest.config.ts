@@ -25,6 +25,8 @@ export const TIMING_FILES = [
   // no budget, but a full RE2 scan of all 61 rules over seven 400k inputs: serialized so it neither starves nor
   // is starved by the parallel project (ADR-0186 decision 31)
   "src/detection-content/scan-plans.test.ts",
+  // ADR-0189 B1: 100k-character adversarial inputs for every BOM pattern check (CodeQL js/polynomial-redos)
+  "src/bom/bom-timing.test.ts",
   // ADR-0190 I1: the isolation contract's patterns on 100k adversarial inputs (CodeQL js/redos)
   "src/isolation/isolation-redos-timing.test.ts",
 ];
