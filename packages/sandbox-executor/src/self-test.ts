@@ -35,6 +35,8 @@ export function indexProfiles(refs: readonly ExecutorProfileRef[], log?: (m: str
 
 /** the highest class among `declared` (never customer_declared) that satisfies `minClass`; null if none */
 export function topClassFor(declared: readonly AppliedIsolationKind[], minClass: RequirableIsolationClass): AppliedIsolationKind | null {
+  // a customer plane attests only its own declaration; whether that satisfies a class is the admin's mapping (OWNER DECISION 6)
+  if (declared.includes("customer_declared")) return "customer_declared";
   const ranked = declared.filter((c): c is RequirableIsolationClass => c !== "customer_declared").sort((a, b) => isolationClassRank(b) - isolationClassRank(a));
   return ranked.find((c) => isolationClassRank(c) >= isolationClassRank(minClass)) ?? null;
 }

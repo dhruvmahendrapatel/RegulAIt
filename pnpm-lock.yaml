@@ -134,6 +134,9 @@ importers:
       '@regulait/policy-kernel':
         specifier: workspace:*
         version: link:../../packages/policy-kernel
+      '@regulait/sandbox-executor':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-executor
       '@regulait/shared':
         specifier: workspace:*
         version: link:../../packages/shared

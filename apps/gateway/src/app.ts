@@ -313,6 +313,8 @@ export interface BuildAppOptions {
    * Exposed so a test can drive a real WORM buffer without touching the
    * environment. */
   auditAnchorSink?: AnchorSink | null;
+  /** ADR-0190 I3: the executor channel's stream cadence (tests shorten the poll) */
+  executorChannel?: ExecutorChannelOptions;
   /** L6a TEST SEAM (ADR-0056 amendment): inject a deterministic copilot
    * narrator instead of the real, governed `ModelBackedNarrator`. Absent =
    * the real path. */
@@ -461,6 +463,8 @@ import { registerIdentityRoutes } from "./identity-routes.js";
 import { registerBomRoutes } from "./bom-routes.js";
 // ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
 import { registerIsolationRoutes } from "./isolation-routes.js";
+// ADR-0190 I3 — the executor channel (in-route ADR-0188 proof) and the placement broker
+import { registerExecutorChannelRoutes, type ExecutorChannelOptions } from "./executor-channel.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
@@ -5253,6 +5257,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
   registerBomRoutes(app, db);
   registerIsolationRoutes(app, db);
+  registerExecutorChannelRoutes(app, db, opts.executorChannel ?? {});
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (runner token only: registerEngineRunnerScopeHook).

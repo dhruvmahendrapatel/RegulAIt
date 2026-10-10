@@ -60,6 +60,7 @@
     "@regulait/orchestration-kernel": "workspace:*",
     "@regulait/pm-provider": "workspace:*",
     "@regulait/policy-kernel": "workspace:*",
+    "@regulait/sandbox-executor": "workspace:*",
     "@regulait/shared": "workspace:*",
     "@regulait/training-provider": "workspace:*",
     "@regulait/workflow-kernel": "workspace:*",

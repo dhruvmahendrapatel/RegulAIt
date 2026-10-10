@@ -260,6 +260,10 @@ export const REPORT_FAILURE_CODES = [
   "host_pids_max_mismatch",
   "runtime_flags_missing",
   "placement_fields_missing",
+  /** the placement report names an image other than the offer's (checked by the gateway against the offer) */
+  "image_digest_mismatch",
+  /** the report's signature does not verify under a live credential of the executor's identity */
+  "signature_invalid",
 ] as const;
 export type ReportFailureCode = (typeof REPORT_FAILURE_CODES)[number];
 

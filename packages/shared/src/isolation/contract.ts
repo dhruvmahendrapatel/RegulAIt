@@ -148,6 +148,10 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-profile-retired",
   "execution-profile-relaxed",
   "executor-registered",
+  // I3: the executor's own announce over its channel (what it is, what runtime it runs)
+  "executor-announced",
+  "executor-revoked",
+  "executor-declared-class-set",
   "executor-attestation-passed",
   "executor-attestation-failed",
   "executor-quarantined",
@@ -605,20 +609,20 @@ export const ISOLATION_NOT_BUILT = { error: "not_built" } as const;
  * stream, self-test and per-placement reports) authenticates with ADR-0188
  * credentials and is designed by slice I3; it is not stubbed here.
  */
-export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; path: string; cls: "admin"; slice: string }> = [
-  { method: "GET", path: "/v1/execution-profiles", cls: "admin", slice: "I2" },
-  { method: "POST", path: "/v1/execution-profiles", cls: "admin", slice: "I2" },
-  { method: "GET", path: "/v1/execution-profiles/:name", cls: "admin", slice: "I2" },
-  { method: "POST", path: "/v1/execution-profiles/:name/versions", cls: "admin", slice: "I2" },
-  { method: "POST", path: "/v1/execution-profiles/:name/retire", cls: "admin", slice: "I2" },
-  { method: "GET", path: "/v1/executors", cls: "admin", slice: "I3" },
-  { method: "POST", path: "/v1/executors", cls: "admin", slice: "I3" },
-  { method: "GET", path: "/v1/executors/:executorId", cls: "admin", slice: "I3" },
-  { method: "GET", path: "/v1/executors/:executorId/attestations", cls: "admin", slice: "I3" },
-  { method: "POST", path: "/v1/executors/:executorId/quarantine", cls: "admin", slice: "I3" },
-  { method: "POST", path: "/v1/executors/:executorId/reenable", cls: "admin", slice: "I3" },
-  { method: "POST", path: "/v1/executors/:executorId/revoke", cls: "admin", slice: "I3" },
-  { method: "PUT", path: "/v1/executors/:executorId/declared-class", cls: "admin", slice: "I3" },
-  { method: "GET", path: "/v1/execution-placements", cls: "admin", slice: "I2" },
-  { method: "GET", path: "/v1/execution-placements/:placementId", cls: "admin", slice: "I2" },
+export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; path: string; cls: "admin"; slice: string; built: boolean }> = [
+  { method: "GET", path: "/v1/execution-profiles", cls: "admin", slice: "I2", built: false },
+  { method: "POST", path: "/v1/execution-profiles", cls: "admin", slice: "I2", built: false },
+  { method: "GET", path: "/v1/execution-profiles/:name", cls: "admin", slice: "I2", built: false },
+  { method: "POST", path: "/v1/execution-profiles/:name/versions", cls: "admin", slice: "I2", built: false },
+  { method: "POST", path: "/v1/execution-profiles/:name/retire", cls: "admin", slice: "I2", built: false },
+  { method: "GET", path: "/v1/executors", cls: "admin", slice: "I3", built: true },
+  { method: "POST", path: "/v1/executors", cls: "admin", slice: "I3", built: true },
+  { method: "GET", path: "/v1/executors/:executorId", cls: "admin", slice: "I3", built: true },
+  { method: "GET", path: "/v1/executors/:executorId/attestations", cls: "admin", slice: "I3", built: true },
+  { method: "POST", path: "/v1/executors/:executorId/quarantine", cls: "admin", slice: "I3", built: true },
+  { method: "POST", path: "/v1/executors/:executorId/reenable", cls: "admin", slice: "I3", built: true },
+  { method: "POST", path: "/v1/executors/:executorId/revoke", cls: "admin", slice: "I3", built: true },
+  { method: "PUT", path: "/v1/executors/:executorId/declared-class", cls: "admin", slice: "I3", built: true },
+  { method: "GET", path: "/v1/execution-placements", cls: "admin", slice: "I2", built: false },
+  { method: "GET", path: "/v1/execution-placements/:placementId", cls: "admin", slice: "I2", built: false },
 ];

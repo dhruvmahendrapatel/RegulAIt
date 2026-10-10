@@ -1467,6 +1467,10 @@ export const auditLog = pgTable(
         // delegation grants (cascade revocation). Plain text column — no DDL.
         "identity_signing_key",
         "delegation_grant",
+        // ADR-0190 I3: an executor (registration, announce, attestation, quarantine, re-enable, revoke,
+        // the customer mapping) and a placement offer (placed, refused, mismatch). Plain text column — no DDL.
+        "executor",
+        "execution_placement",
       ],
     })
       .notNull()

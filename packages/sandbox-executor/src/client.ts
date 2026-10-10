@@ -108,7 +108,9 @@ export class ExecutorClient {
   private readonly base: string;
   constructor(private readonly opts: ExecutorClientOptions) {
     this.http = opts.http ?? fetchExecutorHttp();
-    this.base = opts.gatewayUrl.replace(/\/+$/, "");
+    let base = opts.gatewayUrl;
+    while (base.endsWith("/")) base = base.slice(0, -1);
+    this.base = base;
   }
 
   private url(path: string): string {
