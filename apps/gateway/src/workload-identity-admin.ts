@@ -301,9 +301,9 @@ async function roleItems(tx: Db, roleId: string) {
  * - a connector: in its mode and for every listed object, by ONE grant;
  * - a server: a server grant, read-only-all when the item asks for it;
  * - a role (S4+S5 follow-up, review L3): assigned to the steward AND none of what the role bundles is revoked for
- *   that steward. A tool revocation (or a whole-server one) on a role tool, any revocation on a role server (a
- *   tool revocation takes part of it), an agent revocation on a role agent, or a connector revocation on a role
- *   connector each mean that steward does not hold the whole role.
+ *   that steward. A tool revocation (or a whole-server one) on a role tool, a whole-server revocation on a role
+ *   server (the same rule as a server item), an agent revocation on a role agent, or a connector revocation on a
+ *   role connector each mean that steward does not hold the whole role.
  * A disabled or unknown steward holds nothing; the system principal is no person and holds nothing.
  *
  * Locking (review L5 and the force role-delete deadlock): the stewards' `users` rows `FOR SHARE` in id order
@@ -377,7 +377,7 @@ export async function firstItemNoStewardHolds(tx: Db, stewardIds: readonly strin
         (h) =>
           h.roleIds.includes(r) &&
           !bundle.tools.some((t) => h.toolRevocations.some((rv) => rv.serverId === t.serverId && (rv.toolName === null || rv.toolName === t.toolName))) &&
-          !bundle.servers.some((v) => h.toolRevocations.some((rv) => rv.serverId === v.serverId)) &&
+          !bundle.servers.some((v) => serverRevoked(h, v.serverId)) &&
           !bundle.agents.some((a) => h.agentRevocations.some((rv) => rv.agentId === a.agentId)) &&
           !bundle.connectors.some((c) => h.connectorRevocations.some((rv) => rv.connectorId === c.connectorId)),
       );

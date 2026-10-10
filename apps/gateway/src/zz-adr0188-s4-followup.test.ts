@@ -26,11 +26,14 @@ import {
   mcpTools,
   revocations,
   roleAssignments,
+  roleAgentGrants,
   roleConnectorGrants,
+  roleServerGrants,
   roles,
   roleToolGrants,
   runMigrations,
   serverGrants,
+  sql,
   stepUpGrants,
   toolGrants,
   users,
@@ -44,7 +47,7 @@ import { agentScopeItem, ensureIdentityFor, startInProcessChain } from "./in-pro
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { hashToken } from "./token-hash.js";
-import { firstItemNoStewardHolds, getIdentityGrants, grantSetDigest, identityGrantsStepUp, identityUpdateStepUp } from "./workload-identity-admin.js";
+import { firstItemNoStewardHolds, getIdentityGrants, grantSetDigest, identityGrantsStepUp, identityUpdateStepUp, putIdentityGrants, stewardCheckTestHooks } from "./workload-identity-admin.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import type { VirtualKeyContext } from "./virtual-keys.js";
 
@@ -855,5 +858,184 @@ describe("L3/L7: each branch of the steward check, with the revocation subtracti
     expect(
       await check([p.id], { agents: [{ agentId: x, allowedModes: ["plan"] }] }),
     ).toBe(`agent ${x} mode plan`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S4+S5 follow-up: the three Low items left by the #336 review
+// ---------------------------------------------------------------------------
+describe("S4+S5 follow-up: role bundles (L3), revocation serialization (L5), force role delete (40P01)", () => {
+  let serverId = "";
+  let connectorId = "";
+  let db2: Db;
+  beforeAll(async () => {
+    db2 = createDb(process.env.DATABASE_URL!);
+    const [s] = await db.insert(mcpServers).values({ name: `s4f45-srv-${RUN}`, url: "http://127.0.0.1:9/mcp45" }).returning({ id: mcpServers.id });
+    serverId = s!.id;
+    await db.insert(mcpTools).values([
+      { serverId, name: "rd", kind: "read" },
+      { serverId, name: "wr", kind: "write" },
+    ]);
+    const [c] = await db.insert(connectors).values({ name: `s4f45-conn-${RUN}`, kind: "crm" }).returning({ id: connectors.id });
+    connectorId = c!.id;
+  });
+  afterAll(async () => {
+    stewardCheckTestHooks.afterStewardReads = undefined;
+  });
+  const check = (stewards: string[], set: Partial<Omit<PutAgentGrants, "revision">>) =>
+    db.transaction((tx) => firstItemNoStewardHolds(tx as unknown as Db, stewards, { ...emptySet, agents: [], revision: 0, ...set }));
+  const mkRole = async (label: string) => (await db.insert(roles).values({ name: `s4f45-${label}-${RUN}` }).returning({ id: roles.id }))[0]!.id;
+
+  it("L3: a role is held only by a steward for whom none of its tools, servers, agents or connectors is revoked", async () => {
+    const agentId = await mkAgent("l3b-agent");
+    const role = await mkRole("bundle");
+    await db.insert(roleToolGrants).values({ roleId: role, serverId, toolName: "wr" });
+    await db.insert(roleServerGrants).values({ roleId: role, serverId, readOnlyAll: true });
+    await db.insert(roleAgentGrants).values({ roleId: role, agentId, allowedModes: ["plan"] });
+    await db.insert(roleConnectorGrants).values({ roleId: role, connectorId, mode: "read" });
+
+    // one steward per revocation kind, each first proven to hold the role (the positive control)
+    const revokers: Array<[string, (userId: string) => Promise<unknown>]> = [
+      ["tool", (userId) => db.insert(revocations).values({ userId, serverId, toolName: "wr" })],
+      ["server", (userId) => db.insert(revocations).values({ userId, serverId, toolName: null })],
+      ["agent", (userId) => db.insert(agentRevocations).values({ userId, agentId })],
+      ["connector", (userId) => db.insert(connectorRevocations).values({ userId, connectorId })],
+    ];
+    for (const [kind, revoke] of revokers) {
+      const p = await mkUser(`l3b-${kind}`);
+      await db.insert(roleAssignments).values({ userId: p.id, roleId: role });
+      expect(await check([p.id], { roleIds: [role] }), `${kind}: control`).toBeNull();
+      await revoke(p.id);
+      expect(await check([p.id], { roleIds: [role] }), `${kind}: revoked`).toBe(`role ${role}`);
+    }
+    // a tool revocation for a tool the role does NOT bundle leaves the role whole
+    const other = await mkUser("l3b-unrelated");
+    await db.insert(roleAssignments).values({ userId: other.id, roleId: role });
+    await db.insert(revocations).values({ userId: other.id, serverId, toolName: "rd-not-bundled" });
+    expect(await check([other.id], { roleIds: [role] })).toBeNull();
+
+    // "for every steward who holds the role": one revoked steward and one whole steward → held
+    const revoked = await mkUser("l3b-revoked");
+    const whole = await mkUser("l3b-whole");
+    for (const u of [revoked, whole]) await db.insert(roleAssignments).values({ userId: u.id, roleId: role });
+    await db.insert(agentRevocations).values({ userId: revoked.id, agentId });
+    expect(await check([revoked.id], { roleIds: [role] })).toBe(`role ${role}`);
+    expect(await check([revoked.id, whole.id], { roleIds: [role] })).toBeNull();
+  });
+
+  /** start `fn` with the steward check paused after its locked reads; resolves once it is paused */
+  async function pausedCheck<T>(fn: () => Promise<T>) {
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const atPause = new Promise<void>((r) => (reached = r));
+    stewardCheckTestHooks.afterStewardReads = async () => {
+      stewardCheckTestHooks.afterStewardReads = undefined; // this one check only
+      reached();
+      await gate;
+    };
+    const done = fn();
+    await atPause;
+    return { done, release };
+  }
+  const settledWithin = async (p: Promise<unknown>, ms: number) => {
+    let settled = false;
+    void p.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await new Promise((r) => setTimeout(r, ms));
+    return settled;
+  };
+
+  it("L5: a revocation of a steward waits for a grant-set write whose check relied on that steward", async () => {
+    const p = await mkUser("l5-steward");
+    await db.insert(toolGrants).values({ userId: p.id, serverId, toolName: "wr" });
+    const subject = await mkAgent("l5-subject");
+    const ident = await ensureIdentityFor(db, { kind: "agent", id: subject });
+    await db.update(workloadIdentities).set({ sponsorUserIds: [p.id] }).where(eq(workloadIdentities.id, ident.id));
+    const set = { ...emptySet, agents: [], revision: 0, tools: [{ serverId, toolName: "wr" }] };
+
+    const { done, release } = await pausedCheck(() => putIdentityGrants(db, ident.id, set, null));
+    // the revocation through the real route takes the person's row and must wait for the check's transaction
+    const order: string[] = [];
+    const revoke = inject("POST", "/v1/revocations", AUTH, { userId: p.id, serverId, toolName: "wr" }).then((r) => {
+      order.push("revocation");
+      return r;
+    });
+    expect(await settledWithin(revoke, 750), "the revocation committed while the steward check was open").toBe(false);
+    release();
+    const written = await done.then((r) => {
+      order.push("grant");
+      return r;
+    });
+    expect(written.revision).toBe(1);
+    expect((await revoke).statusCode).toBe(201);
+    expect(order).toEqual(["grant", "revocation"]); // a serial history: the grant was valid when it committed
+    // the other order is seen: with the revocation committed, the next write is refused
+    await expect(putIdentityGrants(db, ident.id, { ...set, revision: 1 }, null)).rejects.toMatchObject({ code: "grant_exceeds_stewards" });
+
+    // positive control: an insert that does NOT take the person's row (the pre-fix route) is not held back by the
+    // check's FOR SHARE reads, which is the race L5 named
+    const q = await mkUser("l5-control");
+    await db.insert(toolGrants).values({ userId: q.id, serverId, toolName: "wr" });
+    const subject2 = await mkAgent("l5-subject2");
+    const ident2 = await ensureIdentityFor(db, { kind: "agent", id: subject2 });
+    await db.update(workloadIdentities).set({ sponsorUserIds: [q.id] }).where(eq(workloadIdentities.id, ident2.id));
+    const paused = await pausedCheck(() => putIdentityGrants(db, ident2.id, set, null));
+    const raw = db2.insert(revocations).values({ userId: q.id, serverId, toolName: "wr" });
+    expect(await settledWithin(raw, 2000), "an unlocked insert slips past the open check").toBe(true);
+    paused.release();
+    await paused.done; // committed against a revocation that was already committed: the race the lock closes
+  });
+
+  it("deadlock: a force role delete during the steward check waits on the role row; both finish, no 40P01", async () => {
+    const p = await mkUser("dl-steward");
+    const role = await mkRole("dl");
+    await db.insert(roleToolGrants).values({ roleId: role, serverId, toolName: "wr" });
+    await db.insert(roleConnectorGrants).values({ roleId: role, connectorId, mode: "read" });
+    await db.insert(roleAssignments).values({ userId: p.id, roleId: role });
+    const subject = await mkAgent("dl-subject");
+    const ident = await ensureIdentityFor(db, { kind: "agent", id: subject });
+    await db.update(workloadIdentities).set({ sponsorUserIds: [p.id] }).where(eq(workloadIdentities.id, ident.id));
+
+    const { done, release } = await pausedCheck(() => putIdentityGrants(db, ident.id, { ...emptySet, agents: [], revision: 0, roleIds: [role] }, null));
+    const del = app.inject({ method: "DELETE", url: `/v1/roles/${role}`, headers: AUTH, payload: { force: true, reason: "deadlock probe" } });
+    expect(await settledWithin(del, 750), "the delete went ahead while the check held the role").toBe(false);
+    release();
+    const written = await done;
+    expect(written.roleIds).toEqual([role]);
+    const deleted = await del;
+    expect(deleted.statusCode, deleted.body).toBe(200);
+    expect(await db.select().from(roles).where(eq(roles.id, role))).toHaveLength(0);
+  });
+
+  it("deadlock positive control: the old lock order (assignments before the role) deadlocks with the cascade", async () => {
+    const p = await mkUser("dl-control");
+    const role = await mkRole("dl-control");
+    await db.insert(roleToolGrants).values({ roleId: role, serverId, toolName: "wr" });
+    await db.insert(roleServerGrants).values({ roleId: role, serverId, readOnlyAll: true });
+    await db.insert(roleAgentGrants).values({ roleId: role, agentId: await mkAgent("dl-control-agent"), allowedModes: ["plan"] });
+    await db.insert(roleConnectorGrants).values({ roleId: role, connectorId, mode: "read" });
+    await db.insert(roleAssignments).values({ userId: p.id, roleId: role });
+    const errors: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // the pre-fix order: the steward's assignment rows FOR SHARE, then (after the delete has started) the role's
+    // bundled rows FOR SHARE, never the role row first
+    const oldCheck = db
+      .transaction(async (tx) => {
+        await tx.execute(sql`select role_id from role_assignments where user_id = ${p.id} for share`);
+        await gate;
+        for (const t of ["role_connector_grants", "role_agent_grants", "role_server_grants", "role_tool_grants"]) {
+          await tx.execute(sql`select 1 from ${sql.identifier(t)} where role_id = ${role} for share`);
+        }
+      })
+      .catch((e: { cause?: { code?: string }; code?: string }) => errors.push(e.cause?.code ?? e.code ?? "?"));
+    const del = db2.execute(sql`delete from roles where id = ${role}`).catch((e: { cause?: { code?: string }; code?: string }) => errors.push(e.cause?.code ?? e.code ?? "?"));
+    await new Promise((r) => setTimeout(r, 500)); // the delete has locked the role and is cascading
+    release();
+    await Promise.all([oldCheck, del]);
+    expect(errors, "the old order deadlocks (40P01)").toContain("40P01");
   });
 });
