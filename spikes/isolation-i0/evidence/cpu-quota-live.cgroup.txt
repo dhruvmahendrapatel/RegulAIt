@@ -1,0 +1,5 @@
+cfs_quota_us: 50000
+host_tasks_in_cgroup: 28
+cpu.stat: nr_periods 28 nr_throttled 17 throttled_time 1116295890 nr_bursts 0 burst_time 0 
+memory.limit_in_bytes: 268435456
+pids.max: 64 pids.current: 28
