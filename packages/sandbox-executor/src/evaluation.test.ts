@@ -11,7 +11,9 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateExecutorReport,
   executionProfileDigest,
+  executionProfileBodySchema,
   executorReportSchema,
+  requiredReportProbes,
   SHIPPED_EXECUTION_PROFILES,
   type AttestationProbe,
   type ExecutionProfileBody,
@@ -27,7 +29,7 @@ const microvm = SHIPPED_EXECUTION_PROFILES["restricted-microvm"];
 
 async function selfTestReport(backend: FakeSandboxBackend, profile: ExecutionProfileBody, cls: Parameters<FakeSandboxBackend["startCanary"]>[1]) {
   const canary = await backend.startCanary(profile, cls);
-  const probes = await canary.probe(profile.attestation.probes);
+  const probes = await canary.probe(requiredReportProbes(profile, backend.describe().backend, cls));
   await canary.kill();
   return buildReport({ kind: "self_test", identifier: ID, backend: backend.describe(), profileDigest: executionProfileDigest(profile), cls, probes });
 }
@@ -145,5 +147,44 @@ describe("the claimed class", () => {
     const backend = new FakeSandboxBackend();
     const report = await selfTestReport(backend, restricted, "user_space_kernel");
     expect(evaluateExecutorReport(report, { ...input(backend, restricted), profileDigest: executionProfileDigest(microvm) }).failures).toContainEqual({ probe: "report", code: "profile_digest_mismatch" });
+  });
+});
+
+describe("the runtime evidence no profile can drop (amendment U, review M3)", () => {
+  const withoutRuntimeProbes = (profile: ExecutionProfileBody): ExecutionProfileBody => ({
+    ...profile,
+    attestation: { ...profile.attestation, probes: profile.attestation.probes.filter((p) => p !== "runtime_identity" && p !== "runtime_config") },
+  });
+
+  it("the profile schema refuses a profile that omits runtime_identity or runtime_config", () => {
+    // the negative control: the shipped profile parses
+    expect(executionProfileBodySchema.safeParse(restricted).success).toBe(true);
+    for (const drop of ["runtime_identity", "runtime_config"] as const) {
+      const body = { ...restricted, attestation: { ...restricted.attestation, probes: restricted.attestation.probes.filter((p) => p !== drop) } };
+      expect(executionProfileBodySchema.safeParse(body).success, drop).toBe(false);
+    }
+  });
+
+  it("a report with no runtime evidence fails, even against a profile that does not list the runtime probes", async () => {
+    const backend = new FakeSandboxBackend();
+    const thin = withoutRuntimeProbes(restricted);
+    // the negative control: a report that carries the runtime evidence passes against the thin profile
+    const honest = await selfTestReport(backend, thin, "user_space_kernel");
+    expect(evaluateExecutorReport(honest, input(backend, thin))).toEqual({ verdict: "pass", failures: [] });
+    // the executor probes the required set itself, whatever the profile lists
+    expect(requiredReportProbes(thin, "gvisor", "user_space_kernel")).toEqual(expect.arrayContaining(["runtime_identity", "runtime_config"]));
+    const bare = structuredClone(honest);
+    delete (bare.probes as Record<string, unknown>).runtime_identity;
+    delete (bare.probes as Record<string, unknown>).runtime_config;
+    const v = evaluateExecutorReport(bare, input(backend, thin));
+    expect(v.verdict).toBe("fail");
+    expect(v.failures).toEqual(expect.arrayContaining([{ probe: "runtime_identity", code: "probe_missing" }, { probe: "runtime_config", code: "probe_missing" }]));
+  });
+
+  it("runtime_config is required for the gVisor class even on another backend; runtime_identity always", () => {
+    const thin = withoutRuntimeProbes(microvm);
+    expect(requiredReportProbes(thin, "kata", "microvm")).toContain("runtime_identity");
+    expect(requiredReportProbes(thin, "kata", "microvm")).not.toContain("runtime_config");
+    expect(requiredReportProbes(thin, "customer", "user_space_kernel")).toContain("runtime_config");
   });
 });

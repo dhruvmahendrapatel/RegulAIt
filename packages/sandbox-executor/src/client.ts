@@ -23,6 +23,40 @@ import {
 } from "@regulait/shared";
 import type { ChannelCredential } from "./channel-credential.js";
 
+import { isIPv4 } from "node:net";
+
+/** review L2: the longest stream line the executor reads (then it drops the stream) */
+export const EXECUTOR_STREAM_MAX_LINE_BYTES = 1024 * 1024;
+/** review L2: how long past the asked window the stream may stay silent before the executor drops it */
+export const EXECUTOR_STREAM_IDLE_SLACK_MS = 15_000;
+
+/** the gateway URL is not one the executor may use (amendment V) */
+export class ExecutorConfigError extends Error {}
+
+const isLoopbackHost = (host: string): boolean => {
+  const h = host.toLowerCase();
+  if (h === "localhost" || h === "[::1]") return true;
+  return isIPv4(h) && h.split(".")[0] === "127";
+};
+
+/**
+ * ADR-0190 amendment V: the executor speaks to the gateway over `https:`.
+ * Plain `http:` is accepted for a loopback host, or when the development flag
+ * (`allowInsecureHttp`, default off) is set; anything else is refused.
+ */
+export function checkGatewayUrl(gatewayUrl: string, allowInsecureHttp = false): URL {
+  let u: URL;
+  try {
+    u = new URL(gatewayUrl);
+  } catch {
+    throw new ExecutorConfigError(`the gateway URL is not a URL: ${gatewayUrl}`);
+  }
+  if (u.username || u.password) throw new ExecutorConfigError("the gateway URL must not carry credentials");
+  if (u.protocol === "https:") return u;
+  if (u.protocol === "http:" && (isLoopbackHost(u.hostname) || allowInsecureHttp)) return u;
+  throw new ExecutorConfigError(`the gateway URL must be https: (got ${u.protocol}//${u.host}); plain http is allowed only for a loopback host or with REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP=1 in development`);
+}
+
 export type ExecutorRoute = "announce" | "self-test" | "stream" | "accept" | "decline" | "report" | "end";
 
 /** the HTTP seam: `fetch`-shaped, with a body that may stream (the stream route) or be whole text */
@@ -44,9 +78,19 @@ export interface ExecutorClientOptions {
   http?: ExecutorHttp;
   /** every non-stream request (body included) is bounded by this (default 30 s) */
   requestTimeoutMs?: number;
+  /** development only (amendment V): accept a plain `http:` gateway URL on a non-loopback host; default false */
+  allowInsecureHttp?: boolean;
+  /** the stream may be silent this long past its window before it is dropped (default EXECUTOR_STREAM_IDLE_SLACK_MS) */
+  streamIdleSlackMs?: number;
 }
 
 export class ExecutorTimeoutError extends Error {}
+/** a stream line above EXECUTOR_STREAM_MAX_LINE_BYTES: the stream is dropped (transient) */
+export class ExecutorStreamLineTooLongError extends Error {
+  constructor() {
+    super(`a stream line exceeded ${EXECUTOR_STREAM_MAX_LINE_BYTES} bytes; stream dropped`);
+  }
+}
 /** a 2xx that is not a valid answer: transient, never an instruction */
 export class ExecutorMalformedResponseError extends Error {
   constructor(
@@ -85,16 +129,22 @@ export function fetchExecutorHttp(fetchImpl: typeof fetch = fetch): ExecutorHttp
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, nl).trim();
-            buffer = buffer.slice(nl + 1);
-            if (line) yield line;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let nl: number;
+            while ((nl = buffer.indexOf("\n")) >= 0) {
+              const line = buffer.slice(0, nl).trim();
+              buffer = buffer.slice(nl + 1);
+              if (line) yield line;
+            }
+            // review L2: a line that never ends is not buffered without bound
+            if (buffer.length > EXECUTOR_STREAM_MAX_LINE_BYTES) throw new ExecutorStreamLineTooLongError();
           }
+        } finally {
+          await reader.cancel().catch(() => undefined);
         }
         const rest = buffer.trim();
         if (rest) yield rest;
@@ -108,6 +158,7 @@ export class ExecutorClient {
   private readonly base: string;
   constructor(private readonly opts: ExecutorClientOptions) {
     this.http = opts.http ?? fetchExecutorHttp();
+    checkGatewayUrl(opts.gatewayUrl, opts.allowInsecureHttp ?? false);
     let base = opts.gatewayUrl;
     while (base.endsWith("/")) base = base.slice(0, -1);
     this.base = base;
@@ -205,11 +256,36 @@ export class ExecutorClient {
     const w = Math.min(EXECUTOR_STREAM_WINDOW.max, Math.max(EXECUTOR_STREAM_WINDOW.min, Math.floor(windowSeconds)));
     const url = this.url(`/stream?window=${w}`);
     const auth = await this.opts.credential.authorizeRequest("GET", url, undefined);
-    const res = await this.http(url, { method: "GET", headers: auth, ...(signal ? { signal } : {}) });
+    // review L2: the transport is aborted when the caller aborts or the stream goes idle past its window plus slack
+    const abort = new AbortController();
+    const onCallerAbort = () => abort.abort();
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const idleMs = w * 1000 + Math.max(0, this.opts.streamIdleSlackMs ?? EXECUTOR_STREAM_IDLE_SLACK_MS);
+    try {
+      await this.readStream(url, auth, abort, idleMs, onMessage);
+    } finally {
+      signal?.removeEventListener("abort", onCallerAbort);
+      abort.abort();
+    }
+  }
+
+  private async readStream(url: string, auth: Record<string, string>, abort: AbortController, idleMs: number, onMessage: (m: ExecutorStreamMessage) => Promise<void> | void): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const idle = <T>(p: Promise<T>): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abort.abort();
+            reject(new ExecutorTimeoutError(`the stream was idle for more than ${idleMs} ms; dropped`));
+          }, idleMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    const res = await idle(this.http(url, { method: "GET", headers: auth, signal: abort.signal }));
     if (!is2xx(res.status)) {
       let j: { error?: unknown; next?: unknown } = {};
       try {
-        j = JSON.parse(await res.text()) as typeof j;
+        j = JSON.parse(await idle(res.text())) as typeof j;
       } catch {
         // a refusal with no JSON body still refuses
       }
@@ -219,18 +295,27 @@ export class ExecutorClient {
       ? res.lines()
       : (async function* (text: string) {
           for (const line of text.split("\n")) if (line.trim()) yield line.trim();
-        })(await res.text());
-    for await (const line of lines) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
+        })(await idle(res.text()));
+    const it = lines[Symbol.asyncIterator]();
+    try {
+      for (;;) {
+        const step = await idle(it.next());
+        if (step.done) return;
+        const line = step.value;
+        if (Buffer.byteLength(line, "utf8") > EXECUTOR_STREAM_MAX_LINE_BYTES) throw new ExecutorStreamLineTooLongError();
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const m = executorStreamMessageSchema.safeParse(parsed);
+        if (!m.success) continue;
+        await onMessage(m.data);
+        if (m.data.type === "bye") return;
       }
-      const m = executorStreamMessageSchema.safeParse(parsed);
-      if (!m.success) continue;
-      await onMessage(m.data);
-      if (m.data.type === "bye") return;
+    } finally {
+      void Promise.resolve(it.return?.()).catch(() => undefined);
     }
   }
 }

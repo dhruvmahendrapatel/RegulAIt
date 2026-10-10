@@ -13205,6 +13205,8 @@ export const executors = pgTable(
     status: text("status", { enum: EXECUTOR_STATUSES }).notNull().default("active"),
     quarantineCode: text("quarantine_code", { enum: EXECUTOR_QUARANTINE_CODES }),
     quarantinedAt: timestamp("quarantined_at", { withTimezone: true }),
+    /** ADR-0190 amendment T: the last re-enable (database clock); only attestations observed after it count */
+    reenabledAt: timestamp("reenabled_at", { withTimezone: true }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

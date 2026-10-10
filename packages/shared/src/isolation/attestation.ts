@@ -287,6 +287,19 @@ export type ReportVerdict = { verdict: "pass"; failures: [] } | { verdict: "fail
 const ZERO_CAPS = "0".repeat(16);
 
 /**
+ * Amendment U: the probes a report must carry. The profile's list, plus the
+ * runtime evidence no profile can drop: `runtime_identity` always, and
+ * `runtime_config` whenever the backend is gVisor or the claimed class is the
+ * gVisor class (`user_space_kernel`). The executor probes exactly this set.
+ */
+export function requiredReportProbes(profile: ExecutionProfileBody, backend: ExecutorBackend, cls: AppliedIsolationKind): AttestationProbe[] {
+  const out = new Set<AttestationProbe>(profile.attestation.probes);
+  out.add("runtime_identity");
+  if (backend === "gvisor" || cls === "user_space_kernel") out.add("runtime_config");
+  return [...out];
+}
+
+/**
  * THE RULES. Every probe the profile asks for must have run; every observation
  * must agree with the profile; the claimed class must be declared, attestable
  * by the backend, supported by what the runtime probe saw, and (for a
@@ -322,7 +335,7 @@ export function evaluateExecutorReport(report: ExecutorReport, input: EvaluateRe
     return entry.observed;
   };
 
-  for (const probe of p.attestation.probes) {
+  for (const probe of requiredReportProbes(p, input.backend, report.class)) {
     switch (probe) {
       case "runtime_identity": {
         const o = observed(probe);

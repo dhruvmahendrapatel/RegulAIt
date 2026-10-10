@@ -81,7 +81,7 @@ import {
   type RequiredClassSource,
   type SignedExecutorReport,
 } from "@regulait/shared";
-import { authenticateExecutorRequest, NO_IDENTITY, sendExecutorRefusal, type ExecutorAuth } from "./executor-channel-auth.js";
+import { completeExecutorRequest, NO_IDENTITY, sendExecutorRefusal, verifyExecutorProofHeader, type ExecutorAuth, type ExecutorProofHeaderResult } from "./executor-channel-auth.js";
 import { databaseNow } from "./delegation.js";
 import { loadOrgSettings } from "./org-settings.js";
 
@@ -172,12 +172,26 @@ export interface FreshAttestationRow {
   reportSha256: string;
 }
 
-/** the executor's latest attestation for a profile, if it is a fresh `pass` on the database clock */
+/**
+ * Amendment T: THE ONE PREDICATE for "this attestation row still counts". A row
+ * counts only if it was observed after the executor's last re-enable (both
+ * stamped by the database): a quarantine voids every earlier verdict, even one
+ * whose `expires_at` has not passed, so a re-enabled executor takes no work
+ * before a new `pass`. Every reader of attestations for placement uses this.
+ */
+export function attestationCounts(executorId: string) {
+  return and(
+    eq(executorAttestations.executorId, executorId),
+    sql`${executorAttestations.observedAt} > coalesce((SELECT ${executors.reenabledAt} FROM ${executors} WHERE ${executors.id} = ${executorId}), '-infinity'::timestamptz)`,
+  );
+}
+
+/** the executor's latest counting attestation for a profile, if it is a fresh `pass` on the database clock */
 export async function freshAttestation(db: Db, executorId: string, profileDigest: string, now: Date): Promise<FreshAttestationRow | null> {
   const [row] = await db
     .select({ class: executorAttestations.class, expiresAt: executorAttestations.expiresAt, verdict: executorAttestations.verdict, reportSha256: executorAttestations.reportSha256 })
     .from(executorAttestations)
-    .where(and(eq(executorAttestations.executorId, executorId), eq(executorAttestations.profileDigest, profileDigest)))
+    .where(and(attestationCounts(executorId), eq(executorAttestations.profileDigest, profileDigest)))
     .orderBy(desc(executorAttestations.observedAt), desc(executorAttestations.createdAt))
     .limit(1);
   // the LATEST report decides: a fail after a pass withdraws the class until the next pass
@@ -347,7 +361,7 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
     const [any] = await db
       .select({ id: executorAttestations.id })
       .from(executorAttestations)
-      .where(and(eq(executorAttestations.executorId, row.id), eq(executorAttestations.profileDigest, input.profileDigest)))
+      .where(and(attestationCounts(row.id), eq(executorAttestations.profileDigest, input.profileDigest)))
       .limit(1);
     if (any) sawAttestation = true;
     const fresh = await freshAttestation(db, row.id, input.profileDigest, now);
@@ -408,24 +422,35 @@ export async function awaitPlacement(db: Db, offerId: string, opts: { timeoutMs?
   }
 }
 
-/** offers not accepted in time, and accepted offers not reported in time, expire (each a refused placement) */
+/** the SQL condition for an offer whose deadline has passed on the database clock (one predicate: sweep and report) */
+const offerOverdue = sql`((${executionOffers.status} = 'offered' AND ${executionOffers.expiresAt} <= now())
+  OR (${executionOffers.status} = 'accepted' AND ${executionOffers.acceptedAt} + make_interval(secs => ${EXECUTION_OFFER_REPORT_TTL_SECONDS}) <= now()))`;
+
+/** expire one offer the caller holds locked and has re-checked as overdue: its refused placement, then the status */
+async function expireLockedOffer(tx: Db, o: ExecutionOfferRow): Promise<void> {
+  const placementId = await refusedPlacement(tx, o, "no_executor");
+  await tx.update(executionOffers).set({ status: "expired", endedAt: sql`now()`, placementId }).where(eq(executionOffers.id, o.id));
+}
+
+/**
+ * Offers not accepted in time, and accepted offers not reported in time,
+ * expire (each a refused placement). Each expiry is one transaction: the row
+ * is locked (`SKIP LOCKED`: a row another sweep, a report or a withdrawal
+ * holds is theirs), re-checked as still overdue on the database clock, and
+ * only then given its placement, audit row and status. Concurrent sweeps
+ * write exactly one of each.
+ */
 export async function expireOffers(db: Db): Promise<number> {
-  const due = await db
-    .select()
-    .from(executionOffers)
-    .where(
-      sql`(${executionOffers.status} = 'offered' AND ${executionOffers.expiresAt} <= now())
-        OR (${executionOffers.status} = 'accepted' AND ${executionOffers.acceptedAt} + make_interval(secs => ${EXECUTION_OFFER_REPORT_TTL_SECONDS}) <= now())`,
-    );
+  const due = await db.select({ id: executionOffers.id }).from(executionOffers).where(offerOverdue);
   let n = 0;
-  for (const o of due) {
-    const placementId = await refusedPlacement(db, o, "no_executor");
-    const r = await db
-      .update(executionOffers)
-      .set({ status: "expired", endedAt: sql`now()`, placementId })
-      .where(and(eq(executionOffers.id, o.id), inArray(executionOffers.status, ["offered", "accepted"])))
-      .returning({ id: executionOffers.id });
-    n += r.length;
+  for (const { id } of due) {
+    const done = await db.transaction(async (tx) => {
+      const [o] = await tx.select().from(executionOffers).where(and(eq(executionOffers.id, id), offerOverdue)).for("update", { skipLocked: true });
+      if (!o) return false;
+      await expireLockedOffer(tx as unknown as Db, o);
+      return true;
+    });
+    if (done) n += 1;
   }
   return n;
 }
@@ -465,10 +490,23 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
     const refused = (reply: FastifyReply, status: number, code: string, executor: ExecutorRow | null, extra: Record<string, unknown> = {}) =>
       reply.status(status).send({ error: code, next: nextFor(executor), ...extra });
 
+    // review L6: the proof's header phase runs BEFORE the body is read; an unproven caller is refused (and audited)
+    // without the gateway buffering its body. Only the body hash, the jti claim and the executor wait for the body.
+    const proven = new WeakMap<FastifyRequest, ExecutorProofHeaderResult>();
+    scope.addHook("onRequest", async (req, reply) => {
+      const head = await verifyExecutorProofHeader(db, req);
+      if (!head.ok) {
+        await sendExecutorRefusal(db, reply, head, `${req.method} ${req.routeOptions.url ?? ""}`);
+        return reply;
+      }
+      proven.set(req, head.pre);
+    });
+
     /** authenticate, or answer the refusal; `registered` = the identity must already be an executor */
     async function authed(req: FastifyRequest, reply: FastifyReply, registered: boolean): Promise<ExecutorAuth | null> {
-      const out = await authenticateExecutorRequest(db, req, rawOf(req));
       const route = `${req.method} ${req.routeOptions.url ?? ""}`;
+      const pre = proven.get(req);
+      const out = pre ? await completeExecutorRequest(db, pre, rawOf(req)) : ({ ok: false, status: 401, code: "proof_missing" } as const);
       if (!out.ok) {
         await sendExecutorRefusal(db, reply, out, route);
         return null;
@@ -509,6 +547,8 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       const auth = await authed(req, reply, true);
       if (!auth) return reply;
       const row = auth.executor!;
+      // amendment T: a quarantined executor's self-test is refused; its classes return only through a re-enable and a new pass
+      if (row.status !== "active") return refused(reply, 409, "executor_quarantined", row);
       const body = executorSelfTestSchema.safeParse(jsonOf(req));
       if (!body.success) return refused(reply, 400, "invalid_body", row);
       const seen = new Set<string>();
@@ -520,51 +560,60 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         if (!(await verifyReportSignature(auth, s))) return refused(reply, 401, "report_signature_invalid", row);
       }
       const org = await loadOrgSettings(db);
-      const results = [];
-      for (const s of body.data.reports) {
-        const profile = await profileByDigest(db, s.report.profileDigest);
-        const failures: ReportFailure[] = [];
-        let verdict: "pass" | "fail" = "fail";
-        if (!profile || profile.retiredAt) failures.push({ probe: "report", code: "profile_digest_mismatch" });
-        else {
-          const v = evaluateExecutorReport(s.report, { profile: profile.parsed, profileDigest: profile.digest, backend: row.backend, classesDeclared: row.classesDeclared });
-          verdict = v.verdict;
-          failures.push(...v.failures);
+      // the verdicts are written under a share lock on the executor row, re-checked active: a quarantine or a
+      // re-enable cannot cross a self-test while it is judged (amendment T)
+      const out = await db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        const [current] = await tx.select().from(executors).where(eq(executors.id, row.id)).for("share");
+        if (!current || current.status !== "active") return { ok: false as const, current: current ?? null };
+        const results = [];
+        for (const s of body.data.reports) {
+          const profile = await profileByDigest(txDb, s.report.profileDigest);
+          const failures: ReportFailure[] = [];
+          let verdict: "pass" | "fail" = "fail";
+          if (!profile || profile.retiredAt) failures.push({ probe: "report", code: "profile_digest_mismatch" });
+          else {
+            const v = evaluateExecutorReport(s.report, { profile: profile.parsed, profileDigest: profile.digest, backend: row.backend, classesDeclared: row.classesDeclared });
+            verdict = v.verdict;
+            failures.push(...v.failures);
+          }
+          if (!profile) {
+            results.push({ profileDigest: s.report.profileDigest, class: s.report.class, verdict, failures, expiresAt: null });
+            continue;
+          }
+          const maxAge = attestationMaxAgeMinutes(profile.parsed, org.executorAttestationMaxAgeMinutes);
+          const reportSha256 = executorReportDigest(s.report);
+          const [inserted] = await txDb
+            .insert(executorAttestations)
+            .values({
+              executorId: row.id,
+              profileDigest: profile.digest,
+              class: s.report.class,
+              reportSha256,
+              report: { ...s.report, signature: s.signature } as Record<string, unknown>,
+              verdict,
+              observedAt: sql`now()`,
+              expiresAt: sql`now() + make_interval(mins => ${maxAge})`,
+            })
+            .returning({ expiresAt: executorAttestations.expiresAt });
+          await auditExecutor(txDb, {
+            userId: NO_IDENTITY,
+            objectType: "executor",
+            objectId: row.id,
+            ruleId: verdict === "pass" ? "executor-attestation-passed" : "executor-attestation-failed",
+            effect: verdict === "pass" ? "allow" : "deny",
+            detail: { executorName: row.name, profileDigest: profile.digest, profileName: profile.name, profileVersion: profile.version, class: s.report.class, reportSha256, failures, maxAgeMinutes: maxAge },
+            reason:
+              verdict === "pass"
+                ? `executor ${row.name} attested ${s.report.class} for profile ${profile.name} v${profile.version} (software-attested, ADR-0190 decision 6)`
+                : `executor ${row.name} failed the self-test for profile ${profile.name} v${profile.version} at ${s.report.class}; the class is withdrawn until the next pass`,
+          });
+          results.push({ profileDigest: profile.digest, class: s.report.class, verdict, failures, expiresAt: verdict === "pass" ? inserted!.expiresAt.toISOString() : null });
         }
-        if (!profile) {
-          results.push({ profileDigest: s.report.profileDigest, class: s.report.class, verdict, failures, expiresAt: null });
-          continue;
-        }
-        const maxAge = attestationMaxAgeMinutes(profile.parsed, org.executorAttestationMaxAgeMinutes);
-        const reportSha256 = executorReportDigest(s.report);
-        const [inserted] = await db
-          .insert(executorAttestations)
-          .values({
-            executorId: row.id,
-            profileDigest: profile.digest,
-            class: s.report.class,
-            reportSha256,
-            report: { ...s.report, signature: s.signature } as Record<string, unknown>,
-            verdict,
-            observedAt: sql`now()`,
-            expiresAt: sql`now() + make_interval(mins => ${maxAge})`,
-          })
-          .returning({ expiresAt: executorAttestations.expiresAt });
-        await auditExecutor(db, {
-          userId: NO_IDENTITY,
-          objectType: "executor",
-          objectId: row.id,
-          ruleId: verdict === "pass" ? "executor-attestation-passed" : "executor-attestation-failed",
-          effect: verdict === "pass" ? "allow" : "deny",
-          detail: { executorName: row.name, profileDigest: profile.digest, profileName: profile.name, profileVersion: profile.version, class: s.report.class, reportSha256, failures, maxAgeMinutes: maxAge },
-          reason:
-            verdict === "pass"
-              ? `executor ${row.name} attested ${s.report.class} for profile ${profile.name} v${profile.version} (software-attested, ADR-0190 decision 6)`
-              : `executor ${row.name} failed the self-test for profile ${profile.name} v${profile.version} at ${s.report.class}; the class is withdrawn until the next pass`,
-        });
-        results.push({ profileDigest: profile.digest, class: s.report.class, verdict, failures, expiresAt: verdict === "pass" ? inserted!.expiresAt.toISOString() : null });
-      }
-      return reply.status(200).send({ results, next: nextFor(row) });
+        return { ok: true as const, results, current };
+      });
+      if (!out.ok) return refused(reply, 409, "executor_quarantined", out.current);
+      return reply.status(200).send({ results: out.results, next: nextFor(out.current) });
     });
 
     // ---- stream -----------------------------------------------------------
@@ -700,6 +749,13 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         const o = await lockedOffer(txDb, row.id, p.data.offerId);
         if (!o) return { status: 404, code: "offer_unknown" } as const;
         if (o.status !== "accepted") return { status: 409, code: "offer_unavailable" } as const;
+        // review M2: the report deadline (accepted_at + EXECUTION_OFFER_REPORT_TTL_SECONDS) on the database clock; a late
+        // report is refused and the offer expires in this same transaction (as the sweep would have)
+        const [late] = await tx.select({ id: executionOffers.id }).from(executionOffers).where(and(eq(executionOffers.id, o.id), offerOverdue));
+        if (late) {
+          await expireLockedOffer(txDb, o);
+          return { status: 409, code: "offer_expired" } as const;
+        }
         const profile = await profileByDigest(txDb, o.profileDigest);
         const failures: ReportFailure[] = [];
         if (!profile || profile.retiredAt) failures.push({ probe: "report", code: "profile_digest_mismatch" });
@@ -761,12 +817,26 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       const p = uuidParam.safeParse(req.params);
       const body = executorEndSchema.safeParse(jsonOf(req));
       if (!p.success || !body.success) return refused(reply, 400, "invalid_body", row);
-      const r = await db
-        .update(executionOffers)
-        .set({ status: "ended", endOutcome: body.data.outcome, endedAt: sql`now()` })
-        .where(and(eq(executionOffers.id, p.data.offerId), eq(executionOffers.executorId, row.id), eq(executionOffers.status, "placed")))
-        .returning({ id: executionOffers.id });
-      if (r.length === 0) return refused(reply, 409, "offer_unavailable", row);
+      const ended = await db.transaction(async (tx) => {
+        const [o] = await tx
+          .update(executionOffers)
+          .set({ status: "ended", endOutcome: body.data.outcome, endedAt: sql`now()` })
+          .where(and(eq(executionOffers.id, p.data.offerId), eq(executionOffers.executorId, row.id), eq(executionOffers.status, "placed")))
+          .returning();
+        if (!o) return false;
+        // review L5: how a placed sandbox ended is audit evidence too
+        await auditExecutor(tx as unknown as Db, {
+          userId: NO_IDENTITY,
+          objectType: "execution_placement",
+          objectId: o.id,
+          ruleId: "execution-ended",
+          effect: body.data.outcome === "completed" ? "allow" : "deny",
+          detail: { offerId: o.id, placementId: o.placementId, executorId: row.id, executorName: row.name, workloadKind: o.workloadKind, outcome: body.data.outcome },
+          reason: `the sandbox placed on executor ${row.name} ended: ${body.data.outcome} (ADR-0190 decision 13)`,
+        });
+        return true;
+      });
+      if (!ended) return refused(reply, 409, "offer_unavailable", row);
       return reply.status(204).send();
     });
   });

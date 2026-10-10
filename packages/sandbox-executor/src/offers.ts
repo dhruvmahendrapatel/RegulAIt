@@ -10,7 +10,7 @@
  *     the sandbox and quarantines this executor; a transient failure kills the
  *     sandbox too (an unconfirmed sandbox never gets input: fail closed).
  */
-import { isolationClassRank, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
+import { isolationClassRank, requiredReportProbes, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
 import type { SandboxBackend, SandboxHandle } from "./backend.js";
 import type { ChannelCredential } from "./channel-credential.js";
 import { ExecutorClient, ExecutorHttpError } from "./client.js";
@@ -28,6 +28,8 @@ export interface OfferContext {
   /** how many sandboxes may run at once (default 4) */
   capacity?: number;
   quarantined: () => boolean;
+  /** a quarantine (or stop) is in force now: input is never released (review L3); defaults to `quarantined` */
+  quarantineActive?: () => boolean;
   /** the gateway said `next: quarantined` (or `revoked`): the loop reacts */
   onSignal: (next: "quarantined" | "revoked" | "reannounce_required", why: string) => Promise<void>;
   now?: () => Date;
@@ -79,7 +81,7 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
   const handle = await ctx.backend.start(offer, profile.body, admissible.cls);
   ctx.sandboxes.set(offer.id, handle);
   try {
-    const probes = await handle.probe(profile.body.attestation.probes);
+    const probes = await handle.probe(requiredReportProbes(profile.body, desc.backend, admissible.cls));
     const report = buildReport({
       kind: "placement",
       identifier: ctx.credential.identifier,
@@ -109,6 +111,20 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       return { kind: "unconfirmed", why };
     }
     if (answer.next !== "ok") await ctx.onSignal(answer.next, `report ${offer.id}`);
+    // review L3: `release: true` alone is not enough. A gateway that also says this executor is no longer `ok`, or a
+    // quarantine entered meanwhile, means the input is never released: the sandbox is killed and the end reported.
+    if (answer.next !== "ok" || (ctx.quarantineActive ?? ctx.quarantined)()) {
+      await handle.kill();
+      ctx.sandboxes.delete(offer.id);
+      try {
+        await ctx.client.end(offer.id, "killed");
+      } catch (e) {
+        ctx.log?.(`offer ${offer.id}: end (killed) not delivered: ${(e as Error).message}`);
+      }
+      const why = answer.next !== "ok" ? `next: ${answer.next}` : "quarantined";
+      ctx.log?.(`offer ${offer.id}: placed but input withheld (${why}); sandbox killed`);
+      return { kind: "unconfirmed", why };
+    }
     await handle.releaseInput();
     const ended = await handle.ended;
     ctx.sandboxes.delete(offer.id);

@@ -6,7 +6,7 @@
  * remembers as its FRESH ATTESTATION for that profile: an offer is taken only
  * against one of those, never against the executor's own opinion.
  */
-import { executionProfileDigest, isolationClassRank, type AppliedIsolationKind, type ExecutorProfileRef, type RequirableIsolationClass, type SignedExecutorReport } from "@regulait/shared";
+import { executionProfileDigest, isolationClassRank, requiredReportProbes, type AppliedIsolationKind, type ExecutorProfileRef, type RequirableIsolationClass, type SignedExecutorReport } from "@regulait/shared";
 import type { SandboxBackend } from "./backend.js";
 import type { ChannelCredential } from "./channel-credential.js";
 import type { ExecutorClient } from "./client.js";
@@ -69,7 +69,7 @@ export async function runSelfTests(input: SelfTestInput): Promise<{ fresh: Fresh
     const canary = await input.backend.startCanary(ref.body, cls);
     let probes;
     try {
-      probes = await canary.probe(ref.body.attestation.probes);
+      probes = await canary.probe(requiredReportProbes(ref.body, desc.backend, cls));
     } finally {
       await canary.kill();
     }

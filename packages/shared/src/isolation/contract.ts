@@ -159,6 +159,8 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-placed",
   "execution-refused",
   "execution-profile-mismatch",
+  // I3 review L5: how a placed sandbox ended (completed, failed, killed, limit_exceeded)
+  "execution-ended",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -396,7 +398,11 @@ export const executionProfileBodySchema = z
           .array(z.enum(ATTESTATION_PROBE_IDS as [AttestationProbe, ...AttestationProbe[]]))
           .min(1)
           .max(ATTESTATION_PROBE_IDS.length)
-          .refine(uniqueBy(String), { message: "duplicate probe" }),
+          .refine(uniqueBy(String), { message: "duplicate probe" })
+          // amendment U: the runtime evidence is never optional (every profile can be placed on gVisor: `runsc` is required)
+          .refine((ps) => ps.includes("runtime_identity") && ps.includes("runtime_config"), {
+            message: "attestation.probes must include runtime_identity and runtime_config (ADR-0190 amendment U)",
+          }),
         /** the executor self-test's freshness limit, in minutes */
         executorMaxAgeMinutes: z
           .number()

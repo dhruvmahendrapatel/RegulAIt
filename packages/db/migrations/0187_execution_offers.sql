@@ -7,6 +7,8 @@
 --    offer is never deleted; its status moves forward only (guard trigger), and every terminal state is one of
 --    the fixed vocabulary. The placement it ends in (`execution_placements`, append-only, I1) is named once known.
 -- 2. `replay_claims.namespace` gains `executor_channel` (decision 14 claims for the channel's one-use request proofs).
+-- 3. `executors.reenabled_at` (amendment T): stamped `now()` when an admin re-enables a quarantined executor; only
+--    attestations observed AFTER it count, so a re-enabled executor takes no work before a new self-test pass.
 --
 -- Database clock rule (M-075): every stamp here is `now()`; the gateway compares with `now()` too.
 
@@ -116,3 +118,7 @@ ALTER TABLE "replay_claims" DROP CONSTRAINT IF EXISTS "replay_claims_namespace_c
 ALTER TABLE "replay_claims" ADD CONSTRAINT "replay_claims_namespace_check" CHECK (
   "namespace" IN ('client_assertion', 'as_dpop', 'rs_dpop', 'human_delegation_proof', 'delegation_authz', 'executor_channel')
 );
+--> statement-breakpoint
+
+-- ===== 3. re-attestation after re-enable (amendment T) ========================
+ALTER TABLE "executors" ADD COLUMN IF NOT EXISTS "reenabled_at" timestamp with time zone;

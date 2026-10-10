@@ -26,7 +26,7 @@ import { generateExecutorKey } from "./keys.js";
 import { ExecutorFatalError, runExecutorLoop, transition, type ExecutorEvent, type ExecutorState } from "./loop.js";
 import type { OfferOutcome } from "./offers.js";
 
-const ISSUER = "http://gateway.test";
+const ISSUER = "https://gateway.test";
 const ID = "spiffe://test.example/regulait/worker_runtime/exec-1";
 const restricted = executionProfileDigest(SHIPPED_EXECUTION_PROFILES.restricted);
 const microvm = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["restricted-microvm"]);

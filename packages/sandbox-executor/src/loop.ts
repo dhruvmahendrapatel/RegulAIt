@@ -164,6 +164,7 @@ export async function runExecutorLoop(opts: ExecutorLoopOptions): Promise<void> 
     sandboxes,
     ...(opts.capacity !== undefined ? { capacity: opts.capacity } : {}),
     quarantined: () => quarantine.active || current() !== "streaming",
+    quarantineActive: () => quarantine.active || current() === "quarantined" || current() === "stopped",
     onSignal: async (next: "quarantined" | "revoked" | "reannounce_required", why: string) => go({ kind: "next", next }, why),
     now,
     ...(log ? { log } : {}),

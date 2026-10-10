@@ -59,6 +59,7 @@ async function adminExecutorView(db: Db, row: ExecutorRow) {
     runtimeVersion: row.runtimeVersion,
     declaredClass: row.declaredClass,
     quarantinedAt: row.quarantinedAt?.toISOString() ?? null,
+    reenabledAt: row.reenabledAt?.toISOString() ?? null,
     lastSeenAt: row.lastSeenAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     attestations,
@@ -182,20 +183,26 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     // re-enabling restores the classes a quarantine withdrew: a relaxation, with the step-up every relaxation needs
     const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "executor_reenable", executorId: row.id, quarantineCode: row.quarantineCode } });
     if (!su.ok) return reply;
-    await db
+    // amendment T: `reenabled_at` (database clock) voids every earlier attestation; the executor must pass again
+    const [moved] = await db
       .update(executors)
-      .set({ status: "active", quarantineCode: null, quarantinedAt: null, updatedAt: sql`now()` })
-      .where(and(eq(executors.id, row.id), eq(executors.status, "quarantined")));
+      .set({ status: "active", quarantineCode: null, quarantinedAt: null, reenabledAt: sql`now()`, updatedAt: sql`now()` })
+      .where(and(eq(executors.id, row.id), eq(executors.status, "quarantined")))
+      .returning();
+    // review L4: a concurrent re-enable (or revoke) moved the row first: nothing changed here, so nothing is audited
+    if (!moved) {
+      const [now] = await db.select({ status: executors.status }).from(executors).where(eq(executors.id, row.id));
+      return reply.status(409).send({ error: "executor_not_quarantined", status: now?.status ?? row.status });
+    }
     await auditExecutor(db, {
       userId: actor(req),
       objectType: "executor",
       objectId: row.id,
       ruleId: "executor-reenabled",
-      detail: { executorName: row.name, backend: row.backend, previousQuarantineCode: row.quarantineCode, stepUp: su.method },
-      reason: `executor ${row.name} re-enabled by an admin after quarantine (${row.quarantineCode}); it re-attests before taking work (ADR-0190 decision 6)`,
+      detail: { executorName: row.name, backend: row.backend, previousQuarantineCode: row.quarantineCode, reenabledAt: moved.reenabledAt?.toISOString() ?? null, stepUp: su.method },
+      reason: `executor ${row.name} re-enabled by an admin after quarantine (${row.quarantineCode}); its earlier attestations no longer count and it takes no work before a new self-test pass (ADR-0190 decision 6, amendment T)`,
     });
-    const [after] = await db.select().from(executors).where(eq(executors.id, row.id));
-    return reply.send(await adminExecutorView(db, after!));
+    return reply.send(await adminExecutorView(db, moved));
   });
 
   app.post("/v1/executors/:executorId/revoke", async (req, reply) => {

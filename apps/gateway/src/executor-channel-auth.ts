@@ -58,7 +58,7 @@ export interface ExecutorAuth {
 
 export type ExecutorAuthOutcome = { ok: true; auth: ExecutorAuth } | { ok: false; status: 401 | 403 | 503; code: string; next?: ExecutorNext };
 
-const refuse = (status: 401 | 403 | 503, code: string, next?: ExecutorNext): ExecutorAuthOutcome => ({ ok: false, status, code, ...(next ? { next } : {}) });
+const refuse = (status: 401 | 403 | 503, code: string, next?: ExecutorNext): Extract<ExecutorAuthOutcome, { ok: false }> => ({ ok: false, status, code, ...(next ? { next } : {}) });
 
 export function executorBodyHash(raw: string | undefined): string {
   return createHash("sha256")
@@ -73,11 +73,35 @@ function jwkOf(c: WorkloadCredentialRow): JWK | null {
   return j.kty === "OKP" ? { kty: "OKP", crv: "Ed25519", x: j.x! } : { kty: "EC", crv: "P-256", x: j.x!, y: j.y! };
 }
 
+/** what the header phase proved; the body phase finishes it */
+export interface ExecutorProofHeaderResult {
+  client: WorkloadClient;
+  credential: WorkloadCredentialRow;
+  issuer: string;
+  now: Date;
+  bh: unknown;
+  jti: string;
+}
+export type ExecutorProofHeaderOutcome = { ok: true; pre: ExecutorProofHeaderResult } | Extract<ExecutorAuthOutcome, { ok: false }>;
+
 /**
  * Authenticate one executor-channel request. `rawBody` is the exact body as
  * received (the channel routes keep it as a string), or undefined.
  */
 export async function authenticateExecutorRequest(db: Db, req: FastifyRequest, rawBody: string | undefined): Promise<ExecutorAuthOutcome> {
+  const head = await verifyExecutorProofHeader(db, req);
+  if (!head.ok) return head;
+  return completeExecutorRequest(db, head.pre, rawBody);
+}
+
+/**
+ * The HEADER phase (review L6): everything the proof proves without the body
+ * (header, identity, live credential, signature, sub/aud, htm, htu, iat, jti
+ * shape) on the database clock. The channel runs it in `onRequest`, before
+ * any body is read, so an unproven caller cannot make the gateway buffer a
+ * large body.
+ */
+export async function verifyExecutorProofHeader(db: Db, req: FastifyRequest): Promise<ExecutorProofHeaderOutcome> {
   const issuer = identityIssuer();
   if (!issuer) return refuse(503, "issuer_not_configured");
   const header = req.headers[EXECUTOR_PROOF_HEADER];
@@ -131,11 +155,21 @@ export async function authenticateExecutorRequest(db: Db, req: FastifyRequest, r
   const path = new URL(req.url, "http://local").pathname;
   if (payload.htm !== req.method.toUpperCase()) return refuse(401, "proof_htm");
   if (payload.htu !== `${issuer}${path}`) return refuse(401, "proof_htu");
-  if (payload.bh !== executorBodyHash(rawBody)) return refuse(401, "proof_body");
   const nowS = Math.floor(now.getTime() / 1000);
   // the library's window check used the database clock above; restated so a library default never widens it
   if (typeof payload.iat !== "number" || payload.iat > nowS + EXECUTOR_PROOF_MAX_FUTURE_SECONDS || payload.iat < nowS - EXECUTOR_PROOF_MAX_AGE_SECONDS) return refuse(401, "proof_stale");
   if (typeof payload.jti !== "string" || payload.jti.length < 8 || payload.jti.length > 128) return refuse(401, "proof_jti");
+  return { ok: true, pre: { client, credential, issuer, now, bh: payload.bh, jti: payload.jti } };
+}
+
+/**
+ * The BODY phase: the body hash binds the exact bytes, then the one-use jti is
+ * claimed (only for a proof whose body matched), then the executor row.
+ */
+export async function completeExecutorRequest(db: Db, pre: ExecutorProofHeaderResult, rawBody: string | undefined): Promise<ExecutorAuthOutcome> {
+  const { client, credential, issuer, now } = pre;
+  if (pre.bh !== executorBodyHash(rawBody)) return refuse(401, "proof_body");
+  const payload = { jti: pre.jti };
   const claimed = await claimReplay(db, "executor_channel", `${client.identity.id}:${payload.jti}`, new Date(now.getTime() + EXECUTOR_PROOF_CLAIM_SECONDS * 1000));
   if (!claimed) return refuse(401, "proof_replayed");
 

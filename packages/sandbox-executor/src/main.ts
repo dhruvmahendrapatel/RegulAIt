@@ -12,7 +12,7 @@
  */
 import { loadOrCreateExecutorKey } from "./keys.js";
 import { ProofChannelCredential } from "./channel-credential.js";
-import { ExecutorClient } from "./client.js";
+import { checkGatewayUrl, ExecutorClient, ExecutorConfigError } from "./client.js";
 import { ExecutorFatalError, runExecutorLoop } from "./loop.js";
 import type { SandboxBackend } from "./backend.js";
 
@@ -34,6 +34,18 @@ export async function main(): Promise<void> {
   const identifier = required("REGULAIT_EXECUTOR_IDENTIFIER");
   const keyFile = required("REGULAIT_EXECUTOR_KEY_FILE");
   const backendName = required("REGULAIT_EXECUTOR_BACKEND");
+  // amendment V: https only; plain http for a loopback host, or behind this development flag (default off, logged)
+  const allowInsecureHttp = process.env.REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP === "1";
+  if (allowInsecureHttp) console.warn("REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP=1: a plain http gateway URL is accepted (development only; never in a deployment)");
+  try {
+    checkGatewayUrl(gatewayUrl, allowInsecureHttp);
+  } catch (e) {
+    if (e instanceof ExecutorConfigError) {
+      console.error(`REGULAIT_GATEWAY_URL: ${e.message}`);
+      process.exit(2);
+    }
+    throw e;
+  }
   const factory = BACKENDS[backendName];
   if (!factory) {
     console.error(`REGULAIT_EXECUTOR_BACKEND=${backendName}: no such backend in this build (ADR-0190 I3 ships none; I4 adds gvisor)`);
@@ -45,7 +57,7 @@ export async function main(): Promise<void> {
     console.log(JSON.stringify({ publicJwk: key.publicJwk, thumbprint: key.thumbprint }));
   }
   const credential = new ProofChannelCredential({ identifier, key, issuer });
-  const client = new ExecutorClient({ gatewayUrl, credential });
+  const client = new ExecutorClient({ gatewayUrl, credential, allowInsecureHttp });
   const backend = await factory();
   try {
     await runExecutorLoop({ client, backend, credential, log: (m) => console.log(m) });

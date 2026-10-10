@@ -39,6 +39,7 @@ import { randomUUID } from "node:crypto";
 import { SignJWT } from "jose";
 import { and, auditLog, createDb, desc, eq, executionOffers, executionPlacements, executorAttestations, executors, governanceAlerts, inArray, runMigrations, sql, type Db } from "@regulait/db";
 import {
+  EXECUTION_OFFER_REPORT_TTL_SECONDS,
   EXECUTOR_CHANNEL_ROUTES,
   EXECUTOR_PROOF_HEADER,
   EXECUTOR_PROOF_TYP,
@@ -50,15 +51,18 @@ import {
   ExecutorClient,
   ExecutorFatalError,
   generateExecutorKey,
+  indexProfiles,
   ProofChannelCredential,
   runExecutorLoop,
+  runSelfTests,
   type ExecutorHttp,
   type ExecutorKey,
   type OfferOutcome,
 } from "@regulait/sandbox-executor";
 import { FakeSandboxBackend } from "@regulait/sandbox-executor/testing";
 import { buildApp } from "./app.js";
-import { awaitPlacement, expireOffers, offerPlacement } from "./executor-channel.js";
+import { createHash } from "node:crypto";
+import { awaitPlacement, expireOffers, liveProfileRefs, offerPlacement } from "./executor-channel.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { routeAuthClass } from "./route-classes.js";
 import { ROUTE_STABILITY, ROUTE_TAGS } from "./openapi-registry.js";
@@ -284,6 +288,21 @@ describe("channel authentication: the one-use proof", () => {
     expect((await audits("executor-channel-refused", null)).length).toBe(before + cases.length + 1);
   });
 
+  it("an unproven request is refused before its body is read (review L6); a proven one still meets the body limit", async () => {
+    const r = await rig("prebody");
+    const big = JSON.stringify({ reports: [], pad: "z".repeat(5 * 1024 * 1024) });
+    const before = (await audits("executor-channel-refused", null)).length;
+    const unproven = await inject("POST", "/v1/executor-channel/self-test", { "content-type": "application/json" }, big);
+    // 401 from the header phase, not 413: the 5 MiB body was never buffered
+    expect(unproven.statusCode, unproven.body).toBe(401);
+    expect(unproven.json().error).toBe("proof_missing");
+    expect((await audits("executor-channel-refused", null)).length).toBe(before + 1);
+    // the negative control: with a valid proof for those exact bytes, the body IS read, and its limit refuses it
+    const bh = createHash("sha256").update(big, "utf8").digest("base64url");
+    const proven = await inject("POST", "/v1/executor-channel/self-test", { "content-type": "application/json", [EXECUTOR_PROOF_HEADER]: await proof(r.ident, { htm: "POST", htu: `${ISSUER}/v1/executor-channel/self-test`, bh }) }, big);
+    expect(proven.statusCode, proven.body).toBe(413);
+  });
+
   it("a revoked credential, a suspended identity, an agent identity and an unregistered identity are refused", async () => {
     const r = await rig("auth2");
     await db.execute(sql`update workload_credentials set revoked_at = now() where id = ${r.ident.credentialId}`);
@@ -351,6 +370,12 @@ describe("the loop against the real gateway", () => {
     expect(sb).toHaveLength(1);
     expect(sb[0]).toMatchObject({ probed: true, released: true, killed: false });
     expect(r.outcomes[0]!.outcome).toMatchObject({ kind: "placed", placementId: placed.placementId });
+    // review L5: the end is audited once, with its outcome; a second end is refused and writes nothing
+    const ended = await audits("execution-ended", offerId);
+    expect(ended).toHaveLength(1);
+    expect(ended[0]!.detail).toMatchObject({ outcome: "completed", placementId: placed.placementId, executorId: r.executorId });
+    expect(await r.client.end(offerId, "completed").catch((e: unknown) => e)).toMatchObject({ status: 409, code: "offer_unavailable" });
+    expect(await audits("execution-ended", offerId)).toHaveLength(1);
   });
 
   it("a self-test that fails withdraws the class (the latest verdict decides) and the broker refuses attestation_stale", async () => {
@@ -460,14 +485,31 @@ describe("mismatch and quarantine (decision 6)", () => {
     expect(await offerTo(r)).toMatchObject({ kind: "refused", code: "executor_quarantined" });
     // the stream tells a quarantined executor so, and its accept is refused
     expect((await inject("POST", `/v1/executors/${r.executorId}/reenable`, memberAuth, {})).statusCode).toBe(403);
-    const re = await inject("POST", `/v1/executors/${r.executorId}/reenable`, adminAuth, {});
-    expect(re.statusCode, re.body).toBe(200);
+    // review L4: two concurrent re-enables: one moves the row and is audited; the other is 409 and writes nothing
+    const both = await Promise.all([inject("POST", `/v1/executors/${r.executorId}/reenable`, adminAuth, {}), inject("POST", `/v1/executors/${r.executorId}/reenable`, adminAuth, {})]);
+    expect(both.map((x) => x.statusCode).sort()).toEqual([200, 409]);
+    const re = both.find((x) => x.statusCode === 200)!;
     expect(re.json()).toMatchObject({ status: "active", quarantineCode: null });
+    expect(re.json().reenabledAt).not.toBeNull();
     expect((await audits("executor-reenabled", r.executorId)).length).toBe(1);
     expect((await inject("POST", `/v1/executors/${r.executorId}/reenable`, adminAuth, {})).statusCode).toBe(409);
-    // honest again: a fresh self-test, then work
+    // review M1 / amendment T: the passes from before the quarantine have NOT expired (the negative control: only
+    // reenabled_at voids them) ...
+    const [counts] = rows<{ unexpired: number; after: number }>(
+      await db.execute(sql`select count(*) filter (where a.expires_at > now())::int as unexpired, count(*) filter (where a.observed_at > e.reenabled_at)::int as after
+        from executor_attestations a join executors e on e.id = a.executor_id where a.executor_id = ${r.executorId} and a.verdict = 'pass'`),
+    );
+    expect(counts!.unexpired).toBeGreaterThan(0);
+    expect(counts!.after).toBe(0);
+    // ... yet nothing is offered before a new pass, and the admin view shows no fresh attestation
+    const sandboxesBefore = placementSandboxes(backend).length;
+    expect(await offerTo(r, { ttlSeconds: 60 })).toMatchObject({ kind: "refused", code: "no_executor" });
+    expect((await inject("GET", `/v1/executors/${r.executorId}`, adminAuth)).json().attestations.every((a: { fresh: boolean }) => !a.fresh)).toBe(true);
+    expect(placementSandboxes(backend)).toHaveLength(sandboxesBefore);
+    // honest again: a fresh self-test (a new pass after the re-enable), then work
     backend.truthful();
     const canariesBefore = backend.sandboxes.filter((s) => s.kind === "canary").length;
+    await r.run(1);
     const again = await offerTo(r, { ttlSeconds: 60 });
     expect(again.kind).toBe("offered");
     const [res2] = await Promise.all([awaitPlacement(db, (again as { offerId: string }).offerId, { pollMs: 50 }), r.run(2)]);
@@ -489,18 +531,87 @@ describe("mismatch and quarantine (decision 6)", () => {
 });
 
 // ---------------------------------------------------------------------------
+describe("offer expiry and the report deadline (review M2)", () => {
+  /** the placement rows written for one offer (each sits under an audit row naming the offer) */
+  const placementsFor = async (offerId: string) =>
+    rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from execution_placements p join audit_log a on a.id = p.audit_id where a.object_id = ${offerId}`))[0]!.n;
+
+  it("concurrent sweeps expire an overdue offer exactly once (one placement, one audit row); an offer not yet due is untouched", async () => {
+    const r = await rig("sweep");
+    await r.run(1);
+    const due = await offerTo(r, { ttlSeconds: 1 });
+    const notDue = await offerTo(r, { ttlSeconds: 300 });
+    expect([due.kind, notDue.kind]).toEqual(["offered", "offered"]);
+    const dueId = (due as { offerId: string }).offerId;
+    const notDueId = (notDue as { offerId: string }).offerId;
+    await new Promise((res) => setTimeout(res, 1_200));
+    await Promise.all([expireOffers(db), expireOffers(db), expireOffers(db), expireOffers(db), expireOffers(db)]);
+    expect((await offerRow(dueId)).status).toBe("expired");
+    expect(await audits("execution-refused", dueId)).toHaveLength(1);
+    expect(await placementsFor(dueId)).toBe(1);
+    expect((await placementRow((await offerRow(dueId)).placementId!)).refusalCode).toBe("no_executor");
+    // the negative control: the offer that is not due is still offered, with nothing written for it
+    expect((await offerRow(notDueId)).status).toBe("offered");
+    expect(await audits("execution-refused", notDueId)).toHaveLength(0);
+  });
+
+  it("a report after accepted_at + the report TTL is refused offer_expired and the offer expires in the same transaction; an on-time report places", async () => {
+    const r = await rig("late");
+    await r.run(1);
+    // the executor's transport: before the FIRST report reaches the gateway, the offer's acceptance is moved past the
+    // deadline on the database clock (as if the probes had taken longer than the report TTL)
+    let shift = true;
+    const inner = injectHttp();
+    const lateHttp: ExecutorHttp = async (url, init) => {
+      if (shift && url.endsWith("/report")) {
+        shift = false;
+        const id = url.split("/offers/")[1]!.split("/")[0]!;
+        await db.execute(sql`update execution_offers set accepted_at = now() - make_interval(secs => ${EXECUTION_OFFER_REPORT_TTL_SECONDS + 5}) where id = ${id}`);
+      }
+      return inner(url, init);
+    };
+    const client = new ExecutorClient({ gatewayUrl: ISSUER, credential: r.credential, http: lateHttp });
+    const outcomes: Array<{ offer: ExecutionOffer; outcome: OfferOutcome }> = [];
+    const loop = (maxWindows: number) =>
+      runExecutorLoop({ client, backend: r.backend, credential: r.credential, maxWindows, streamWindowSeconds: 1, backoffMs: 5, maxBackoffMs: 10, onOffer: (offer, outcome) => outcomes.push({ offer, outcome }) });
+    const offered = await offerTo(r, { ttlSeconds: 60 });
+    const offerId = (offered as { offerId: string }).offerId;
+    await loop(1);
+    expect(outcomes.find((o) => o.offer.id === offerId)!.outcome).toEqual({ kind: "unconfirmed", why: "offer_expired" });
+    const o = await offerRow(offerId);
+    expect(o.status).toBe("expired");
+    expect((await placementRow(o.placementId!)).refusalCode).toBe("no_executor");
+    expect(await audits("execution-refused", offerId)).toHaveLength(1);
+    expect(await audits("execution-placed", offerId)).toHaveLength(0);
+    expect(await placementsFor(offerId)).toBe(1);
+    expect(r.backend.sandboxes.find((s) => s.offerId === offerId)).toMatchObject({ released: false, killed: true });
+    // the negative control: the same transport, on time, places
+    const second = await offerTo(r, { ttlSeconds: 60 });
+    const [res] = await Promise.all([awaitPlacement(db, (second as { offerId: string }).offerId, { pollMs: 50 }), loop(2)]);
+    expect(res).toMatchObject({ kind: "placed" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("admin quarantine, revoke, the customer mapping", () => {
   it("an admin quarantine withdraws open offers; revoke is terminal and stops the loop", async () => {
     const r = await rig("admin");
     await r.run(1);
     const offered = await offerTo(r, { ttlSeconds: 300 });
     expect(offered.kind).toBe("offered");
+    // review M1: a self-test while active is judged (the negative control) ...
+    const selfTest = async () => runSelfTests({ backend: r.backend, credential: r.credential, client: r.client, profiles: indexProfiles(await liveProfileRefs(db)), classesDeclared: [...r.backend.describe().classes] });
+    expect((await selfTest()).next).toBe("ok");
     expect((await inject("POST", `/v1/executors/${r.executorId}/quarantine`, adminAuth, { code: "execution_profile_mismatch" })).statusCode).toBe(400);
     const q = await inject("POST", `/v1/executors/${r.executorId}/quarantine`, adminAuth, { code: "admin" });
     expect(q.statusCode, q.body).toBe(200);
     expect(q.json()).toMatchObject({ status: "quarantined", quarantineCode: "admin" });
     expect((await offerRow((offered as { offerId: string }).offerId)).status).toBe("withdrawn");
     expect((await inject("POST", `/v1/executors/${r.executorId}/quarantine`, adminAuth, { code: "admin" })).statusCode).toBe(409);
+    // ... and while quarantined it is refused 409 executor_quarantined, writing no attestation row
+    const attBefore = (await db.select().from(executorAttestations).where(eq(executorAttestations.executorId, r.executorId))).length;
+    expect(await selfTest().catch((e: unknown) => e)).toMatchObject({ status: 409, code: "executor_quarantined", next: "quarantined" });
+    expect((await db.select().from(executorAttestations).where(eq(executorAttestations.executorId, r.executorId))).length).toBe(attBefore);
     // the executor's own stream hears it
     await r.run(1, { selfTestIntervalMs: 24 * 3600_000 });
     expect(r.logs.some((l) => l.includes("-> quarantined"))).toBe(true);
