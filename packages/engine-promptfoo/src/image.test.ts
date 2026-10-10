@@ -56,7 +56,10 @@ describe("the promptfoo image's inputs", () => {
     expect(isPublicAddress(env["REGULAIT_EGRESS_PROBE_ADDRESS"])).toBe(true);
     // PR #205 review [49]: the runner's state dir exists, owned by the runner uid, 0700
     expect(env["REGULAIT_RUNNER_STATE_DIR"]).toBe("/state");
-    expect(dockerfile).toMatch(/\nRUN mkdir -p \/state && chown 10001:10001 \/state && chmod 0700 \/state\n/);
+    // B5-P2: and the exchange mount points of both containers, owned by the same uid
+    expect(dockerfile).toMatch(/\nRUN mkdir -p \/state \/jobs \/results \/out && chown 10001:10001 \/state \/jobs \/results \/out && chmod 0700 \/state\n/);
+    // the default command is the runner; the worker's entrypoint ships beside it (compose names it)
+    expect(dockerfile).toMatch(/\nCMD \["node", "\/app\/dist\/main\.js"\]\n?$/);
     expect(dockerfile).toMatch(/\nUSER 10001:10001\n/);
     expect(dockerfile).toMatch(/rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     expect(dockerfile).toMatch(/npm ci --omit=optional --ignore-scripts/);
@@ -72,6 +75,21 @@ describe("the promptfoo image's inputs", () => {
     expect(inv.pending).toHaveLength(11);
     // optional dependencies are not installed and so not counted; the native sqlite binding is direct
     expect(lock.packages["node_modules/@libsql/linux-x64-gnu"]!.optional).toBeUndefined();
+  });
+
+  it("B5-P2 [177]: the packages with a published advisory and NO patched release are never installed (optional only)", () => {
+    // `npm audit --omit=dev` on this lockfile (2026-10-10, promptfoo 0.124.1) reports 6 high: braces
+    // (<=3.0.3, the latest) through chokidar 3 → nunjucks' optional peer, and node-forge (<=1.4.0, the
+    // latest) through jks-js. No release of either is patched, and no promptfoo release drops them.
+    // Each is an OPTIONAL package here, so `npm ci --omit=optional` (the Dockerfile) never installs
+    // it, and `npm audit --omit=optional` (the installed closure) reports 0. If one becomes a
+    // required dependency, this fails and the advisory must be dealt with before the image ships.
+    for (const name of ["braces", "fill-range", "chokidar", "picomatch", "jks-js", "node-forge"]) {
+      const entry = lock.packages[`node_modules/${name}`];
+      if (entry) expect(entry.optional, name).toBe(true);
+    }
+    // the moderate advisory (smol-toml via an optional peer) is gone from the 0.124.1 closure
+    expect(lock.packages["node_modules/smol-toml"]).toBeUndefined();
   });
 
   it("a GPL package, an AGPL alternative-only expression or a missing licence is denied", () => {

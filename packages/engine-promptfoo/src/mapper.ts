@@ -44,7 +44,7 @@ import type { PromptfooPlan } from "./config.js";
 
 export type PromptfooEnvelopeBody = Omit<EngineResultEnvelope, "version" | "runId" | "engineId" | "engineVersion">;
 
-/** promptfoo's ResultFailureReason (0 none, 1 assertion failed, 2 error), read at 0.123.1 */
+/** promptfoo's ResultFailureReason (0 none, 1 assertion failed, 2 error), read at 0.123.1, unchanged in 0.124.1 */
 export const PROMPTFOO_FAILURE_REASON = { NONE: 0, ASSERT: 1, ERROR: 2 } as const;
 /** the exit codes of `promptfoo eval`: 0 all passed, 100 some tests failed (PROMPTFOO_FAILED_TEST_EXIT_CODE) */
 export const PROMPTFOO_OK_EXIT_CODES: readonly number[] = [0, 100];

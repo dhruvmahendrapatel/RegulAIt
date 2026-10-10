@@ -56,7 +56,7 @@ import {
 import { buildSelfTest, FileRunnerTokenStore, generateRunnerSecret, runOnce, RunnerClient, RunnerFatalError, runRunnerLoop, runnerTokenHash, type RunnerHttp } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
-import { engineRunTestHooks, runEngineRunSweep, runEngineScheduleSweep } from "./engine-runs.js";
+import { engineRunTestHooks, engineRuntime, runEngineRunSweep, runEngineScheduleSweep, setEngineRuntime } from "./engine-runs.js";
 import { recordVirtualKeySpend } from "./virtual-keys.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -1277,24 +1277,63 @@ describe("PR #205 review round 9: credential-isolation gate, the judge at lease,
   const enabled = async () => ((await db.execute(sql`SELECT enabled FROM engines WHERE id = 'promptfoo'`)) as unknown as { rows: Array<{ enabled: boolean }> }).rows[0]!.enabled;
 
   it("[79] a build without credential isolation is not enabled unless an admin accepts the risk with a step-up, audited", async () => {
-    expect(ENGINE_MANIFEST.promptfoo.credentialIsolation).toBe(false);
+    // B5-P2: the SHIPPED promptfoo build isolates the credential (runner/worker split), so the gate
+    // is exercised on a build that does not: the same gateway code and database, a manifest whose
+    // promptfoo entry says false (the flag is the manifest's, never stored on the engine row)
+    expect(ENGINE_MANIFEST.promptfoo.credentialIsolation).toBe(true);
+    // buildApp installs the engine runtime module-wide (setEngineRuntime): put this suite's back after
+    const priorRuntime = engineRuntime();
+    const legacy = buildApp(db, {
+      bootstrapToken: BOOT,
+      dataKey: "f".repeat(64),
+      engines: { manifest: { ...MANIFEST, promptfoo: { ...MANIFEST.promptfoo, credentialIsolation: false } }, gatewayBaseUrl: GATEWAY_BASE },
+    });
+    await legacy.ready();
+    const asAdminOn = (a: typeof app, payload: unknown, headers: Record<string, string> = {}) =>
+      a.inject({ method: "PATCH", url: "/v1/engines/promptfoo", headers: { ...CSRF, ...headers }, cookies: { regulait_session: admin.session.token }, payload: payload as object });
+    try {
+      expect(await enabled()).toBe(false);
+      const plain = await asAdminOn(legacy, { enabled: true });
+      expect(plain.statusCode, plain.body).toBe(409);
+      expect(plain.json()).toMatchObject({ error: "engine_credential_isolation_missing" });
+      expect(plain.json().detail).toMatch(/runner token/);
+      expect(await enabled()).toBe(false);
+      // accepting it is a relaxation: the step-up binds to it
+      const refused = await asAdminOn(legacy, { enabled: true, acceptCredentialIsolationRisk: true });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json().action.body.values).toMatchObject({ "engine.promptfoo.acceptCredentialIsolationRisk": true });
+      const ok = await asAdminOn(legacy, { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect(await enabled()).toBe(true);
+      const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-credential-isolation-risk-accepted' ORDER BY seq DESC LIMIT 1`)) as unknown as {
+        rows: Array<{ detail: Record<string, unknown> }>;
+      }).rows;
+      expect(audit[0]!.detail).toMatchObject({ engineId: "promptfoo", credentialIsolation: false });
+      expect((await asAdminOn(legacy, { enabled: false })).statusCode).toBe(200);
+    } finally {
+      await legacy.close();
+      setEngineRuntime(priorRuntime);
+    }
+  });
+
+  it("[79] B5-P2: the shipped promptfoo build isolates the credential: enabling needs only the step-up, no risk acceptance, and writes no risk audit", async () => {
+    expect(MANIFEST.promptfoo.credentialIsolation).toBe(true);
     expect(await enabled()).toBe(false);
-    const plain = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
-    expect(plain.statusCode, plain.body).toBe(409);
-    expect(plain.json()).toMatchObject({ error: "engine_credential_isolation_missing" });
-    expect(plain.json().detail).toMatch(/runner token/);
-    expect(await enabled()).toBe(false);
-    // accepting it is a relaxation: the step-up binds to it
-    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true });
+    const riskAudits = async () =>
+      Number(
+        ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_log WHERE rule_id = 'engine-credential-isolation-risk-accepted' AND detail->>'engineId' = 'promptfoo'`)) as unknown as {
+          rows: Array<{ n: number }>;
+        }).rows[0]!.n,
+      );
+    const before = await riskAudits();
+    // enabling is still a relaxation (step-up), but no acceptance of a credential risk is asked for
+    const refused = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true });
     expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json().action.body.values).toMatchObject({ "engine.promptfoo.acceptCredentialIsolationRisk": true });
-    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
+    expect(refused.json().action.body.values).toEqual({ "engine.promptfoo.enabled": true });
+    const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
     expect(ok.statusCode, ok.body).toBe(200);
     expect(await enabled()).toBe(true);
-    const audit = ((await db.execute(sql`SELECT detail FROM audit_log WHERE rule_id = 'engine-credential-isolation-risk-accepted' ORDER BY seq DESC LIMIT 1`)) as unknown as {
-      rows: Array<{ detail: Record<string, unknown> }>;
-    }).rows;
-    expect(audit[0]!.detail).toMatchObject({ engineId: "promptfoo", credentialIsolation: false });
+    expect(await riskAudits()).toBe(before);
     expect((await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: false })).statusCode).toBe(200);
   });
 
