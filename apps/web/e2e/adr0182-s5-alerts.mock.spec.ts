@@ -191,6 +191,9 @@ test.describe("ADR-0182 S5: governance alerts — owner, SLA, ticket and the sug
     await detail.getByLabel("Independent approver").selectOption("u2");
     await propose.click();
     await expect.poll(() => cap.remediationPosts).toEqual([{ kind: "halt_agent", params: { agentId: AGENT }, approverUserId: "u2" }]);
+    // the POST is recorded before its response renders the confirmation toast; let that response land
+    // so the toast's fade-in is inside expectAxeClean's animation wait, not racing the contrast check
+    await page.waitForLoadState("networkidle");
     await expectAxeClean(page, "alerts with a suggested halt");
   });
 
