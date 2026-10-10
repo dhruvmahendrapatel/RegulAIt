@@ -607,6 +607,8 @@ describe("6. the covered / NOT-covered inventory", () => {
       "delegation_grants.revoked_reason",
       // ADR-0187: a CHECK-constrained six-member code
       "engine_run_items.not_run_reason",
+      // ADR-0190 I3: a CHECK-constrained five-member decline code
+      "execution_offers.decline_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
       "risk_acceptances.compensating_controls",

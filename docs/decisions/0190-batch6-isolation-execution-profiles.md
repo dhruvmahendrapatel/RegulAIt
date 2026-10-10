@@ -476,7 +476,9 @@ decisions it had to make, each recorded here; none relaxes a strict default.
   refuses to start without a real backend (I3 ships none: I4 adds `gvisor`). A fake that attests isolation that does
   not exist is the one thing the gateway cannot tell from the real thing.
 - **S. Migration 0187** (`execution_offers`, the widened `replay_claims` namespace CHECK), `when` 1785122000000; the
-  journal is re-ordered at merge time against 0184–0186 and S5's 0188.
+  journal is re-ordered at merge time against 0184–0186 and S5's 0188. `execution_offers.decline_reason` is named in
+  the ADR-0102 prose-scrub EXCLUSIONS (`PROSE_SCRUB_EXCLUSIONS`), not registered for scrubbing: a DB CHECK limits it to
+  the five decline codes and the channel route accepts only that enum, so no operator text can reach it.
 
 Amendments from the independent review of the I3 PR (#323, reviewed at 985f5b3; master decisions, 2026-10-10). Each
 tightens amendments K–S; none relaxes a strict default.
