@@ -62,6 +62,24 @@ describe("ADR-0189 B4 contract in the OpenAPI document", () => {
     expect(operation(all, "GET /v1/ai-bom/snapshots/:snapshotId").parameters?.map((p) => `${p.in}:${p.name}`)).toEqual(["path:snapshotId", "query:format"]);
   });
 
+  it("review item 3: the 403 keeps the generic admin and MFA text and adds the contract's codes", () => {
+    for (const r of BOM_B4_ROUTES) {
+      const forbidden = operation(all, r).responses["403"] as { description: string; "x-regulait-error-codes"?: string[] };
+      expect(forbidden.description, r).toContain("ADR-0181");
+      expect(forbidden.description, r).toContain("`admin_only`");
+      expect(forbidden["x-regulait-error-codes"], r).toEqual(["bom_export_forbidden", "admin_only", "mfa_enrollment_required"]);
+    }
+  });
+
+  it("review item 7: the path parameters carry the contract's lower-case uuid schema", () => {
+    const schemaOf = (route: string, name: string) =>
+      JSON.stringify((operation(all, route).parameters as Array<{ name: string; in: string; schema?: unknown }>).find((p) => p.in === "path" && p.name === name)?.schema);
+    for (const r of ["GET /v1/decisions/:auditId/bom", "GET /v1/decisions/:auditId/bom/bundle"]) expect(schemaOf(r, "auditId"), r).toContain("[0-9a-f]{8}-");
+    for (const r of ["GET /v1/ai-bom/snapshots/:snapshotId", "GET /v1/ai-bom/snapshots/:snapshotId/bundle"]) expect(schemaOf(r, "snapshotId"), r).toContain("[0-9a-f]{8}-");
+    // a route with no params schema keeps the plain string
+    expect(schemaOf("GET /v1/ai-bom/:subjectKind/:subjectId/drift", "subjectId")).toBe(JSON.stringify({ type: "string" }));
+  });
+
   it("the B3 routes are untouched by the B4 binding", () => {
     const list = operation(all, "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots");
     expect(list.responses["2XX"]!.content).toBeUndefined();

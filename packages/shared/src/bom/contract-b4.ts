@@ -46,6 +46,8 @@ import {
   DECISION_BOM_FINALITY_STATES,
   DECISION_BOM_SECTIONS,
   decisionBomBodySchema,
+  findEmailShapes,
+  hasEmailShape,
 } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,8 @@ export const bomErrorEnvelopeSchema = z.discriminatedUnion("error", [
   plain("ai_bom_too_large"),
   plain("bom_snapshot_busy"),
   z.object({ error: z.literal("rate_limited"), detail, retryAfterSeconds }).strict(),
+  /** the global MFA gate (ADR-0181/0183): a session, or an API key (`credential: "api_key"`), whose owner must enroll TOTP */
+  z.object({ error: z.literal("mfa_enrollment_required"), detail, credential: z.literal("api_key").optional() }).strict(),
   z.object({ error: z.literal("bom_signing_unavailable"), detail, missingKey: z.enum(BOM_MISSING_KEYS) }).strict(),
   z.object({ error: z.literal("bom_anchor_pending"), detail, reason: z.enum(BOM_ANCHOR_PENDING_REASONS), retryAfterSeconds }).strict(),
   z.object({ error: z.literal("format_not_rendered_for_snapshot"), detail, formats: z.array(z.enum(AI_BOM_DOWNLOAD_FORMATS)).min(1).max(8) }).strict(),
@@ -196,6 +200,9 @@ export const decisionBomVersionSummarySchema = z
   })
   .strict();
 export type DecisionBomVersionSummary = z.infer<typeof decisionBomVersionSummarySchema>;
+
+/** the one download path of a Decision BOM version (`bundle.href` is bound to it) */
+export const decisionBomBundleHref = (auditId: string, version: number): string => `/v1/decisions/${auditId}/bom/bundle?version=${version}`;
 
 export const bomBundleLinkSchema = z
   .object({
@@ -246,6 +253,7 @@ export const decisionBomReadResponseSchema = z
     if (!r.versions.some((v) => v.id === r.bom.id && v.version === r.bom.version)) issue("versions lists the returned version");
     if (r.versions.some((v, i) => i > 0 && v.version <= r.versions[i - 1]!.version)) issue("versions ascend");
     if (r.bundle.subject !== "decision-bom") issue("a Decision BOM links a decision-bom bundle");
+    if (r.bundle.href !== decisionBomBundleHref(r.auditId, r.bom.version)) issue("bundle.href downloads exactly this decision's returned version");
     const lapsedOk = r.bom.reportedFinality === r.bom.finality || (r.bom.reportedFinality === "anchored_lapsed" && (r.bom.finality === "anchored" || r.bom.finality === "anchored_finite_lock"));
     if (!lapsedOk) issue("reportedFinality is the frozen state, or anchored_lapsed for an anchored state (R44)");
   });
@@ -328,7 +336,9 @@ export const exportBundleV3ManifestSchema = z
   .object({
     schema: z.literal(EXPORT_BUNDLE_V3_SCHEMA),
     product: z.literal("regulait"),
-    installId: z.string().min(1).max(256).nullable(),
+    /** ADR-0116's install identity; refused when email-shaped (R21: the manifest is scanned too) */
+    installId: z.string().min(1).max(256).refine((v) => !hasEmailShape(v), "an email-shaped installId is refused (R21)").nullable(),
+    /** `absent` exactly when `installId` is null */
     installIdSource: z.enum(["operator", "license", "absent"]),
     exportedAt: bomTimeSchema,
     exportedAtSource: z.literal("database"),
@@ -362,8 +372,44 @@ export const exportBundleV3ManifestSchema = z
     const paths = m.files.map((f) => f.path);
     if (paths.some((p, i) => i > 0 && p <= paths[i - 1]!)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "files sorted by path, each once" });
     if (paths.some((p) => p.startsWith("audit/rows/"))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "no audit row payloads (R39)" });
+    if ((m.installIdSource === "absent") !== (m.installId === null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "installIdSource is absent exactly when installId is null" });
+    }
+    // R21: the manifest is email-scanned before it is signed, like every other bundle entry
+    const emails = findEmailShapes(m);
+    if (emails.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `email-shaped value at ${emails.join(", ")}` });
   });
 export type ExportBundleV3Manifest = z.infer<typeof exportBundleV3ManifestSchema>;
+
+// ---------------------------------------------------------------------------
+// the export-key VERIFICATION trust root (master decision, round 2; spec B4.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Online verify authenticates a bundle's manifest against a configured list of export PUBLIC keys, loaded
+ * independently of the signing key, so a deployment with no export private key can still verify bundles. Two forms,
+ * the same JSON document (`bomExportVerifyKeyringSchema`): inline in `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS`, or in a
+ * file named by `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE` (air-gapped installs). A manifest whose `signingKeyId` is
+ * not in the trusted set is `bundle_manifest_signature` `invalid` `unknown_key`. Implemented in B4.
+ */
+export const BOM_EXPORT_VERIFY_KEYS_ENV = "REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS" as const;
+export const BOM_EXPORT_VERIFY_KEYS_FILE_ENV = "REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE" as const;
+/** an Ed25519 SubjectPublicKeyInfo PEM, as `KeyObject.export({type: "spki", format: "pem"})` writes it */
+const spkiPem = z.string().max(1024).regex(/^-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----\n?$/);
+export const bomExportVerifyKeySchema = z
+  .object({
+    keyId: bomKeyIdSchema,
+    publicKeyPem: spkiPem,
+    /** optional pin: when given, the fingerprint of `publicKeyPem` must equal it or the keyring is refused at load */
+    fingerprint: bomKeyFingerprintSchema.optional(),
+  })
+  .strict();
+export const bomExportVerifyKeyringSchema = z
+  .array(bomExportVerifyKeySchema)
+  .min(1)
+  .max(64)
+  .refine((keys) => new Set(keys.map((k) => k.keyId)).size === keys.length, "each keyId once");
+export type BomExportVerifyKeyring = z.infer<typeof bomExportVerifyKeyringSchema>;
 
 // ---------------------------------------------------------------------------
 // POST /v1/boms/verify (§6, §9, R6, R19)
@@ -371,7 +417,12 @@ export type ExportBundleV3Manifest = z.infer<typeof exportBundleV3ManifestSchema
 
 /** the decoded bundle ceiling; the base64 text is at most 4/3 of it */
 export const BOM_VERIFY_MAX_BUNDLE_BYTES = 8 * 1024 * 1024;
-const BOM_VERIFY_MAX_BASE64 = Math.ceil(BOM_VERIFY_MAX_BUNDLE_BYTES / 3) * 4;
+export const BOM_VERIFY_MAX_BASE64 = Math.ceil(BOM_VERIFY_MAX_BUNDLE_BYTES / 3) * 4;
+/**
+ * The route's `bodyLimit`: the largest admitted request (the base64 text plus its JSON envelope,
+ * `{"source":"bundle","bundleBase64":"…"}`) with headroom; above it the route answers 413 `bom_bundle_too_large`.
+ */
+export const BOM_VERIFY_MAX_REQUEST_BYTES = BOM_VERIFY_MAX_BASE64 + 1024;
 
 /**
  * Three sources. The trust root is ALWAYS the server's recorded keys
@@ -433,6 +484,23 @@ export const DECISION_BOM_ONLY_CHECKS = [
   "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality", "ai_bom_link",
 ] as const satisfies readonly BomVerifyCheck[];
 export const AI_BOM_ONLY_CHECKS = ["rendering_hashes", "serial_number", "supersedes"] as const satisfies readonly BomVerifyCheck[];
+/**
+ * B4C-01: the checks a readable, non-`invalid` response MUST report (spec B4.4: a check that does not apply is left
+ * out, so the conditional ones are named here too). Conditional, left out when not applicable:
+ *  - Decision BOM: `facts_addenda_chain` and `facts_addenda_signatures` (no addenda), `ai_bom_link` (no snapshot link);
+ *  - AI BOM: `rendering_hashes` (no rendering carried), `supersedes` (required exactly when version > 1).
+ */
+export const DECISION_BOM_REQUIRED_CHECKS = [
+  "body_version", "body_schema", "body_signature",
+  "receipt_signature", "receipt_payload_hash", "receipt_facts_binding",
+  "sections_projection", "chain_links", "decision_content_binding",
+  "anchor_record", "anchor_imprint", "tsa_token", "finality",
+] as const satisfies readonly BomVerifyCheck[];
+export const AI_BOM_REQUIRED_CHECKS = ["body_version", "body_schema", "body_signature", "serial_number"] as const satisfies readonly BomVerifyCheck[];
+/** required for a `bundle` source; a stored source has no envelope and reports these only as `unverifiable` `not_a_bundle` */
+export const BOM_BUNDLE_REQUIRED_CHECKS = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"] as const satisfies readonly BomVerifyCheck[];
+/** a `chain_signed` BOM reports these `unverifiable` `anchor_absent` (B4.4) */
+export const BOM_ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"] as const satisfies readonly BomVerifyCheck[];
 
 export const BOM_VERIFY_INVALID_REASONS = [
   "signature_mismatch",
@@ -596,22 +664,68 @@ export const bomVerifyResponseSchema = z
   .strict()
   .superRefine((r, ctx) => {
     const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-    const statuses = new Set(r.checks.map((c) => c.status));
+    // the outcome aggregates the checks AND the sections (B4C-02): any invalid -> invalid; else any unverifiable -> valid_with_unverifiable
+    const statuses = new Set([...r.checks.map((c) => c.status), ...r.sections.map((s) => s.status)]);
     const want = statuses.has("invalid") ? "invalid" : statuses.has("unverifiable") ? "valid_with_unverifiable" : "valid";
-    if (r.outcome !== want) issue(`outcome is ${want} for these checks`);
+    if (r.outcome !== want) issue(`outcome is ${want} for these checks and sections`);
+    // a check reported more than once names a distinct `ref` each time (B4C-01)
+    const seen = new Map<string, Array<string | null>>();
+    for (const c of r.checks) seen.set(c.check, [...(seen.get(c.check) ?? []), c.ref]);
+    for (const [check, refs] of seen) {
+      if (refs.length > 1 && (refs.includes(null) || new Set(refs).size !== refs.length)) issue(`${check}: a repeated check needs a distinct ref each time`);
+    }
+    const of = (check: BomVerifyCheck) => r.checks.filter((c) => c.check === check);
+    const all = (check: BomVerifyCheck, status: BomVerifyStatus, reason: string) => of(check).every((c) => c.status === status && c.reason === reason);
     if (r.identity === null || r.bodyVersion === null) {
-      if (r.outcome !== "invalid") issue("an unreadable bundle is invalid");
+      if (r.outcome !== "invalid" || !r.checks.some((c) => c.status === "invalid")) issue("an unreadable bundle is invalid, with the failing check");
     } else {
       const decision = r.identity.subject === "decision-bom";
       if (r.bodyVersion !== (decision ? "regulait.decision-bom.v1" : "regulait.ai-bom.v1")) issue("bodyVersion matches the subject");
+      // B4C-03: a stored source names its own subject; a bundle may hold either
+      if ((r.source === "decision_bom" && !decision) || (r.source === "ai_bom_snapshot" && decision)) issue("the stored source matches the verified subject");
       const foreign = decision ? AI_BOM_ONLY_CHECKS : DECISION_BOM_ONLY_CHECKS;
       if (r.checks.some((c) => (foreign as readonly string[]).includes(c.check))) issue("checks belong to the subject (R19)");
       if (decision && r.sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join()) issue("every Decision BOM section, in order");
       if (!decision && r.sections.length) issue("an AI BOM has no Decision BOM sections");
       const fixed = decision ? DECISION_BOM_CANNOT_PROVE_FIXED : AI_BOM_CANNOT_PROVE_FIXED;
       if (fixed.some((c) => !r.cannotProve.includes(c))) issue("the fixed cannotProve list is always present");
+
+      // B4C-01: the minimum check set for this source and subject; an inapplicable conditional check is left out (B4.4)
+      const required: readonly BomVerifyCheck[] = [
+        ...(decision ? DECISION_BOM_REQUIRED_CHECKS : AI_BOM_REQUIRED_CHECKS),
+        ...(r.source === "bundle" ? BOM_BUNDLE_REQUIRED_CHECKS : []),
+        ...(r.identity.subject === "ai-bom" && r.identity.version > 1 ? (["supersedes"] as const) : []),
+      ];
+      const missing = required.filter((c) => of(c).length === 0);
+      if (missing.length && r.outcome !== "invalid") issue(`a ${r.outcome} response reports every required check; missing: ${missing.join(", ")}`);
+      // the bundle envelope: claimed only for a bundle; a stored source may report it only as not_a_bundle
+      for (const c of BOM_BUNDLE_REQUIRED_CHECKS) {
+        if (r.source !== "bundle" && !all(c, "unverifiable", "not_a_bundle")) issue(`${c}: a stored source has no bundle envelope (only unverifiable not_a_bundle)`);
+      }
+      if (r.source === "bundle" && r.checks.some((c) => c.reason === "not_a_bundle")) issue("not_a_bundle is never reported for a bundle");
+      if (r.checks.some((c) => c.reason === "not_a_bundle" && !(BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(c.check))) issue("not_a_bundle applies to the bundle_* checks only");
+      if (r.identity.subject === "ai-bom" && r.identity.version === 1 && of("supersedes").length) issue("version 1 supersedes nothing: the supersedes check is left out");
       if (r.identity.subject === "decision-bom") {
         const id = r.identity;
+        // R39: the decision row's preimage is never exported, so its content binding is never claimed
+        if (!all("decision_content_binding", "unverifiable", "preimage_not_exported")) issue("decision_content_binding is unverifiable preimage_not_exported (R39)");
+        // R46: a v1 receipt never commits to the facts (or is invalid after the boundary, B4.3)
+        const v1Binding = of("receipt_facts_binding").every((c) => (c.status === "unverifiable" && c.reason === "receipt_v1_no_factsHash") || (c.status === "invalid" && c.reason === "v1_receipt_after_boundary"));
+        if (id.receiptPayloadVersion === "v1" && !v1Binding) issue("a v1 receipt's facts binding is unverifiable receipt_v1_no_factsHash, or invalid after the boundary (R46)");
+        if (id.receiptPayloadVersion === "v2" && r.checks.some((c) => c.reason === "receipt_v1_no_factsHash" || c.reason === "v1_receipt_after_boundary")) issue("a v2 receipt takes no v1 reason");
+        // a chain_signed BOM has no anchor: its anchor checks are unverifiable anchor_absent (B4.4)
+        if (id.recordedFinality === "chain_signed") {
+          for (const c of BOM_ANCHOR_CHECKS) if (!all(c, "unverifiable", "anchor_absent")) issue(`${c}: unverifiable anchor_absent for chain_signed`);
+        } else if (r.checks.some((c) => c.reason === "anchor_absent")) issue("anchor_absent only for chain_signed");
+        // B4C-02: a section result is the sections_projection result broken down; completeness is separate from validity
+        const projection = of("sections_projection");
+        const sectionInvalid = r.sections.some((s) => s.status === "invalid");
+        const projectionInvalid = projection.some((c) => c.status === "invalid");
+        if (sectionInvalid !== projectionInvalid) issue("a section is invalid exactly when sections_projection is invalid (section_mismatch)");
+        if (projection.some((c) => c.status === "unverifiable")) issue("sections_projection is a pure recomputation: never unverifiable");
+        if (r.sections.some((s) => s.status === "unverifiable") && !r.checks.some((c) => c.status === "unverifiable")) {
+          issue("a section is unverifiable only through an unverifiable check it depends on");
+        }
         const lapsed = id.reportedFinality === "anchored_lapsed";
         if (!(id.reportedFinality === id.recordedFinality || (lapsed && (id.recordedFinality === "anchored" || id.recordedFinality === "anchored_finite_lock")))) {
           issue("reportedFinality is the recorded state, or anchored_lapsed for an anchored state");
@@ -641,7 +755,7 @@ export interface BomRouteContract {
   errors: Readonly<Record<number, readonly BomErrorCode[]>>;
 }
 
-const ACCESS_ERRORS = { 401: [], 403: ["bom_export_forbidden", "admin_only"], 429: ["rate_limited"], 501: ["not_built"] } as const;
+const ACCESS_ERRORS = { 401: [], 403: ["bom_export_forbidden", "admin_only", "mfa_enrollment_required"], 429: ["rate_limited"], 501: ["not_built"] } as const;
 
 export const BOM_B4_ROUTE_CONTRACT = {
   "GET /v1/decisions/:auditId/bom": {
