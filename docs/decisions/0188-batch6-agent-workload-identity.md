@@ -912,6 +912,23 @@ covering. Eight deliberate kernel mutations were each shown to turn unit tests a
 grants, a union of grants, a spent leaf allowed, depth off by one, liveness ignored, write implies read, actor Cedar
 ignored and unknown cost ignored.
 
+## Spike S0 result (2026-10-10)
+
+S0 ([R11](../research/R11-identity-s0-spike.md), Codex X32, PR #250) returned **GO** for owner decision 2:
+`oidc-provider` 9.12.2, `oauth4webapi` 3.8.8 and `pkijs` 3.4.1 support the accepted profile under our real Fastify
+hooks, with Postgres state shared across two replicas. The `jose` fallback in owner decision 2 is not needed. This is
+a library-feasibility result only; S1 to S5 still ship the product code. S5 must keep the two integration details R11
+records:
+
+- **Check the whole delegation authorization before the first claim.** `oidc-provider` claims the client assertion
+  before a custom grant handler runs, so the delegation checks go in its `assertJwtClientAuthClaimsAndHeader` hook,
+  which runs after signature verification and before replay detection.
+- **Use our own DPoP profile in the custom grant.** The provider's built-in nonce helper does not implement decision
+  20's 5-minute HMAC nonce or decision 13's 60-second freshness rule. The custom grant enforces them itself, and the
+  resource wrapper around `validateJwtAccessToken` adds nonce, freshness, live-chain and its own atomic replay claim.
+
+S5 exact-pins the closure R11 lists in the product lockfile and carries its notices (decision 20).
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches: `schema.ts`, migrations, `app.ts`, `auth.ts`, `route-classes.ts`,
