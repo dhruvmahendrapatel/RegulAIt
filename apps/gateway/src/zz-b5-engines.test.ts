@@ -975,6 +975,27 @@ describe("review round 1", () => {
     await inject("POST", `/v1/engine-runs/${s.json().run.id}/cancel`, alice.key, {});
   });
 
+  it("[X26 review] GET /v1/engines exposes each runner's report time, the one the lease judges freshness by", async () => {
+    const read = async () => {
+      const r = await inject("GET", "/v1/engines", alice.key);
+      expect(r.statusCode, r.body).toBe(200);
+      const pf = (r.json().engines as Array<{ id: string; runners: Array<{ id: string; selfTestPassed: boolean; selfTestReportedAt: string | null }> }>).find((e) => e.id === "promptfoo")!;
+      return pf.runners.find((x) => x.id === pfRunner.id)!;
+    };
+    const [runner] = await db.execute(sql`SELECT self_test FROM engine_runners WHERE id = ${pfRunner.id}`).then((r) => (r as unknown as { rows: Array<{ self_test: Record<string, unknown> }> }).rows);
+    expect((await read()).selfTestReportedAt).toBe(runner!.self_test.at);
+    // a stale report keeps its recorded "passed" verdict; the time is what lets a reader see it no longer counts
+    const staleAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify({ ...runner!.self_test, at: staleAt })}::jsonb WHERE id = ${pfRunner.id}`);
+    try {
+      const view = await read();
+      expect(view.selfTestPassed).toBe(true);
+      expect(view.selfTestReportedAt).toBe(staleAt);
+    } finally {
+      await db.execute(sql`UPDATE engine_runners SET self_test = ${JSON.stringify(runner!.self_test)}::jsonb WHERE id = ${pfRunner.id}`);
+    }
+  });
+
   it("[8] a result after the deadline or the lease, before the sweep, ends the run timed out", async () => {
     for (const col of ["deadline_at", "lease_expires_at"] as const) {
       const l = await startAndLease();

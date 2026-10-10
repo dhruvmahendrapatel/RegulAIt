@@ -135,6 +135,8 @@ export const ENGINE_LEASE_TTL_SECONDS = 90;
 export const ENGINE_QUEUE_TTL_SECONDS = 24 * 3600;
 /** a runner self-test older than this does not admit enabling the engine (seconds) */
 export const ENGINE_SELF_TEST_MAX_AGE_SECONDS = 24 * 3600;
+/** a runner report dated further ahead of the gateway's clock than this is stale too (clock skew bound) */
+export const ENGINE_SELF_TEST_FUTURE_SKEW_MS = 300_000;
 /** an enrolment token's lifetime bounds (minutes) */
 export const ENGINE_ENROLLMENT_TTL_MINUTES = { min: 1, max: 60, default: 15 } as const;
 
@@ -556,11 +558,14 @@ export const createEnrollmentTokenSchema = z
   })
   .strict();
 
+/** the longest audited reason a runner revocation or a run cancel may carry (mirrored by the Engines page) */
+export const ENGINE_REASON_MAX_LENGTH = 500;
+
 /** DELETE /v1/engine-runners/:runnerId (optional body) */
-export const revokeRunnerSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() }).strict();
+export const revokeRunnerSchema = z.object({ reason: z.string().trim().min(1).max(ENGINE_REASON_MAX_LENGTH).optional() }).strict();
 
 /** POST /v1/engine-runs/:runId/cancel (optional body) */
-export const cancelEngineRunSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() }).strict();
+export const cancelEngineRunSchema = z.object({ reason: z.string().trim().min(1).max(ENGINE_REASON_MAX_LENGTH).optional() }).strict();
 
 /** POST /v1/engine-schedules — a scheduled run, executed as the person who configured it */
 export const createEngineScheduleSchema = z

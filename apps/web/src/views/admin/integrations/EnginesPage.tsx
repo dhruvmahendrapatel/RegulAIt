@@ -41,7 +41,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
-import { KV, QueryGate, ReasonModal } from "../adminKit";
+import { KV, QueryGate } from "../adminKit";
 import { EngineStatusBadge } from "./EngineStatusBadge";
 import {
   ENGINE_DIAL_LIMITS,
@@ -54,8 +54,11 @@ import {
   isCredentialIsolationRefusal,
   lastRunText,
   pagesUsing,
+  RUNNER_REVOKE_REASON_MAX,
   raisedDials,
+  revokeReasonProblem,
   runnerOnCurrentBuild,
+  runnerSelfTestReading,
   shortDigest,
   startFreshnessClock,
   type EngineDial,
@@ -318,37 +321,27 @@ export default function EnginesPage() {
           }}
         />
       )}
-      <ReasonModal
-        open={modal?.kind === "revoke"}
-        danger
-        title={modal?.kind === "revoke" ? `Revoke runner ${modal.runner.name}?` : ""}
-        confirmLabel="Revoke runner"
-        placeholder="reason (required, audited)"
-        body={
-          <div className={v.stack}>
-            <p>
-              Its runner token authenticates nothing from now on. Runs it holds end as cancelled and their run-scoped keys are
-              revoked at once. To serve this engine again, enrol a runner with a new enrolment token.
-            </p>
-            <p className={v.faint}>
-              Recorded in the audit log as <code>engine-runner-revoked</code>, with your reason.
-            </p>
-          </div>
-        }
-        onCancel={close}
-        onConfirm={(reason) => {
-          if (modal?.kind !== "revoke") return;
-          const { engine, runner } = modal;
-          close();
-          void act
-            .run(
+      {modal?.kind === "revoke" && (
+        <RevokeRunnerModal
+          runner={modal.runner}
+          busy={act.busy}
+          onCancel={close}
+          // PR #230 review: a refusal keeps the dialog open with the typed reason, and is shown in it
+          onRevoke={async (reason) => {
+            const { engine, runner } = modal;
+            const res = await act.run(
               engine.id,
               () => api.del<RunnerRevoked>(`/v1/engine-runners/${runner.id}`, { reason }),
               (out) => `Runner ${runner.name} revoked; ${plural(out.endedRuns, "run")} ended`,
-            )
-            .then((res) => !res.ok && act.fail(engine.id, res.err));
-        }}
-      />
+            );
+            if (res.ok) {
+              close();
+              return null;
+            }
+            return res.err instanceof Error ? res.err.message : String(res.err);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -471,7 +464,7 @@ function EngineCard(props: {
           </Section>
 
           <Section title={`Runners (${e.runners.length})`}>
-            <RunnersTable engine={e} busy={props.busy} onRevoke={(runner) => props.onModal({ kind: "revoke", engine: e, runner })} />
+            <RunnersTable engine={e} now={props.now} busy={props.busy} onRevoke={(runner) => props.onModal({ kind: "revoke", engine: e, runner })} />
           </Section>
 
           {unverified.length > 0 && (
@@ -558,7 +551,7 @@ function EgressBlock(props: { egress: EngineSelfTest["egress"]; at: string | nul
   );
 }
 
-function RunnersTable(props: { engine: Engine; busy: boolean; onRevoke: (r: EngineRunner) => void }) {
+function RunnersTable(props: { engine: Engine; now: number; busy: boolean; onRevoke: (r: EngineRunner) => void }) {
   const e = props.engine;
   if (e.runners.length === 0) {
     return (
@@ -587,16 +580,17 @@ function RunnersTable(props: { engine: Engine; busy: boolean; onRevoke: (r: Engi
         {
           key: "selftest",
           header: "Its self-test",
-          render: (r) =>
-            r.selfTestPassed === true ? (
-              <Badge tone="ok">passed</Badge>
-            ) : r.selfTestPassed === false ? (
+          // PR #230 review: the recorded verdict counts only while the report is fresh (the lease's own rule)
+          render: (r) => {
+            const reading = runnerSelfTestReading(r, props.now);
+            return (
               <span>
-                <Badge tone="danger">failed</Badge> <span className={v.dim}>{(r.selfTestFailures ?? []).map(failureText).join("; ")}</span>
+                <Badge tone={reading.tone}>{reading.label}</Badge>
+                {r.selfTestReportedAt && <span className={v.faint}> reported {ago(r.selfTestReportedAt)}</span>}
+                {r.selfTestPassed === false && <span className={v.dim}> {(r.selfTestFailures ?? []).map(failureText).join("; ")}</span>}
               </span>
-            ) : (
-              <Badge>no report</Badge>
-            ),
+            );
+          },
         },
         { key: "seen", header: "Last seen", render: (r) => (r.lastSeenAt ? <span title={fmtAt(r.lastSeenAt)}>{ago(r.lastSeenAt)}</span> : "never") },
         { key: "registered", header: "Registered", render: (r) => <span title={fmtAt(r.registeredAt)}>{ago(r.registeredAt)}</span> },
@@ -618,14 +612,90 @@ function RunnersTable(props: { engine: Engine; busy: boolean; onRevoke: (r: Engi
 // dialogs
 // ---------------------------------------------------------------------------
 
+/**
+ * PR #230 review: the revocation reason is bounded as the gateway bounds it
+ * (revokeRunnerSchema: trimmed, 1–RUNNER_REVOKE_REASON_MAX characters), with a
+ * counter; a refusal keeps this dialog open with the typed reason and shows why.
+ */
+function RevokeRunnerModal(props: { runner: EngineRunner; busy: boolean; onCancel: () => void; onRevoke: (reason: string) => Promise<string | null> }) {
+  const [reason, setReason] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const length = reason.trim().length;
+  const tooLong = length > RUNNER_REVOKE_REASON_MAX;
+  const counterId = `revoke-reason-count-${props.runner.id}`;
+  const go = async () => {
+    const problem = revokeReasonProblem(reason);
+    if (problem) {
+      setErr(problem);
+      return;
+    }
+    setErr(null);
+    setErr(await props.onRevoke(reason.trim()));
+  };
+  return (
+    <Modal
+      open
+      title={`Revoke runner ${props.runner.name}?`}
+      onClose={props.onCancel}
+      actions={
+        <>
+          <Button onClick={props.onCancel}>Cancel</Button>
+          <Button variant="danger" disabled={tooLong || props.busy} onClick={() => void go()}>
+            Revoke runner
+          </Button>
+        </>
+      }
+    >
+      <div className={v.stack}>
+        <p>
+          Its runner token authenticates nothing from now on. Runs it holds end as cancelled and their run-scoped keys are
+          revoked at once. To serve this engine again, enrol a runner with a new enrolment token.
+        </p>
+        <p className={v.faint}>
+          Recorded in the audit log as <code>engine-runner-revoked</code>, with your reason.
+        </p>
+        <Input
+          placeholder="reason (required, audited)"
+          aria-label="Reason"
+          aria-describedby={counterId}
+          aria-invalid={tooLong}
+          value={reason}
+          onChange={(ev) => setReason(ev.target.value)}
+          onKeyDown={(ev) => {
+            if (ev.key === "Enter" && !tooLong && !props.busy) void go();
+          }}
+        />
+        <span id={counterId} className={tooLong ? v.errLine : v.faint}>
+          {length} / {RUNNER_REVOKE_REASON_MAX} characters{tooLong ? " — too long; the gateway refuses more" : ""}
+        </span>
+        {err && (
+          <div className={v.errLine} role="alert">
+            {err}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function EnableBody(props: { engine: Engine }) {
   const e = props.engine;
   return (
     <div className={v.stack}>
-      <p>
-        Runners of {e.displayName} {e.version} may then lease its queued runs. Each run gets a run-scoped key, pinned to its
-        project, that stops at the run&apos;s budget (ceiling {fmtUsd(e.maxBudgetUsd)}) and its timeout ({e.timeoutSeconds} s).
-      </p>
+      {/* PR #230 review: only an engine whose manifest needs model access gets a run-scoped key */}
+      {e.needsModelAccess ? (
+        <p>
+          Runners of {e.displayName} {e.version} may then lease its queued runs. Each run gets a run-scoped key, pinned to its
+          project, that stops at the run&apos;s budget (ceiling {fmtUsd(e.maxBudgetUsd)}) and its timeout ({e.timeoutSeconds}{" "}
+          s).
+        </p>
+      ) : (
+        <p>
+          Runners of {e.displayName} {e.version} may then lease its queued runs. Each run scans an uploaded model artifact,
+          streamed to the runner through the gateway; it gets no model credentials and calls no model. A run stops at its
+          timeout ({e.timeoutSeconds} s).
+        </p>
+      )}
       <p>
         The gateway refuses unless a self-test of this build passed in the last 24 hours. You will be asked to confirm
         it&apos;s you. If this build cannot keep the runner token away from the engine process, the gateway says so and you

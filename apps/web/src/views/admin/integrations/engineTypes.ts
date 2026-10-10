@@ -36,6 +36,8 @@ export interface EngineRunner {
   reportedVersion: string;
   selfTestPassed: boolean | null;
   selfTestFailures: string[] | null;
+  /** the report's own time, which the lease judges freshness by; absent from an older gateway */
+  selfTestReportedAt?: string | null;
   registeredAt: string;
   lastSeenAt: string | null;
 }

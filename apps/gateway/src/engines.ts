@@ -288,6 +288,10 @@ function publicEngine(row: EngineRow, manifest: EngineManifestEntry, runners: Ar
       reportedVersion: r.reportedVersion,
       selfTestPassed: r.selfTestPassed,
       selfTestFailures: r.selfTestFailures,
+      // PR #230 review: the report's own time, which the lease judges against
+      // ENGINE_SELF_TEST_MAX_AGE_SECONDS (evaluateRunnerSelfTest's `stale`). Without it a
+      // reader cannot tell that a recorded "passed" no longer counts.
+      selfTestReportedAt: typeof (r.selfTest as { at?: unknown } | null)?.at === "string" ? (r.selfTest as { at: string }).at : null,
       registeredAt: r.registeredAt,
       lastSeenAt: r.lastSeenAt,
     })),

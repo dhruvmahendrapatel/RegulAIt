@@ -256,6 +256,64 @@ test.describe("ADR-0187 X26: the Engines page", () => {
     expect(su.attempts[1]!.body).toEqual({ timeoutSeconds: 3600 });
   });
 
+  test("the revocation reason is bounded like the gateway's, and a refusal keeps the dialog and its text", async ({ page }) => {
+    const st = await open(page);
+    await page.route(`**/v1/engine-runners/${RUNNER_PF}`, (route) =>
+      route.request().method() === "DELETE"
+        ? json(route, 422, { error: "validation", issues: [{ path: "reason", message: "String must contain at most 500 character(s)" }] })
+        : route.fallback(),
+    );
+    await card(page, "promptfoo").getByRole("button", { name: "Revoke runner promptfoo-runner-1" }).click();
+    const dialog = page.getByRole("dialog", { name: "Revoke runner promptfoo-runner-1?" });
+    const reason = dialog.getByLabel("Reason");
+    const submit = dialog.getByRole("button", { name: "Revoke runner" });
+    await reason.fill("x".repeat(501));
+    await expect(dialog.getByText("501 / 500 characters")).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await reason.fill("host decommissioned");
+    await expect(dialog.getByText("19 / 500 characters")).toBeVisible();
+    await submit.click();
+    // the gateway refused: the dialog stays, with the text and the refusal in it
+    await expect(dialog.getByRole("alert")).toContainText("Reason must be at most 500 characters");
+    await expect(reason).toHaveValue("host decommissioned");
+    await expect(card(page, "promptfoo").getByRole("heading", { name: "Runners (1)" })).toBeVisible();
+    expect(sent(st, "DELETE", `/v1/engine-runners/${RUNNER_PF}`)).toHaveLength(0); // the override answered
+    await expectAxeClean(page, "revoke dialog with a refusal");
+  });
+
+  test("a runner's passing report older than 24 h reads stale, never passed", async ({ page }) => {
+    const list = enginesList();
+    list.engines[0].runners[0].selfTestReportedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+    await open(page, { engines: list });
+    const row = card(page, "promptfoo").getByRole("row", { name: /promptfoo-runner-1/ });
+    await expect(row.getByText("self-test report stale")).toBeVisible();
+    await expect(row.getByText("passed", { exact: true })).toHaveCount(0);
+  });
+
+  test("a runner report that expires while the page is open stops reading passed, with no user action", async ({ page }) => {
+    await page.clock.install();
+    const list = enginesList();
+    list.engines[0].runners[0].selfTestReportedAt = new Date(Date.now() - 23.5 * 3600_000).toISOString();
+    await open(page, { engines: list });
+    const row = card(page, "promptfoo").getByRole("row", { name: /promptfoo-runner-1/ });
+    await expect(row.getByText("passed", { exact: true })).toBeVisible();
+    await page.clock.fastForward("00:31:00");
+    await expect(row.getByText("self-test report stale")).toBeVisible();
+    await expect(row.getByText("passed", { exact: true })).toHaveCount(0);
+  });
+
+  test("enabling modelscan explains the artifact-only path; only a model-access engine claims run-scoped keys", async ({ page }) => {
+    await open(page);
+    await card(page, "modelscan").getByRole("button", { name: "Enable…" }).click();
+    const ms = page.getByRole("dialog", { name: "Enable modelscan?" });
+    await expect(ms).toContainText("scans an uploaded model artifact");
+    await expect(ms).toContainText("no model credentials");
+    await expect(ms).not.toContainText("run-scoped key");
+    await ms.getByRole("button", { name: "Cancel" }).click();
+    await card(page, "garak").getByRole("button", { name: "Enable…" }).click();
+    await expect(page.getByRole("dialog", { name: "Enable garak?" })).toContainText("run-scoped key");
+  });
+
   test("a failed engine list is an error with a retry, never an empty page", async ({ page }) => {
     await installBuilderMock(page, { isAdmin: true });
     await page.route("**/v1/engines", (route) => json(route, 500, { error: "internal" }));

@@ -12,8 +12,15 @@ import { ApiError } from "../../../api/client";
 import type { Tone } from "../../../ui/kit";
 import type { Engine, EngineEgressProbe, EnginePatch, EngineRunner } from "./engineTypes";
 
-/** the gateway's freshness bound for a self-test that admits enabling (ENGINE_SELF_TEST_MAX_AGE_SECONDS) */
-export const SELF_TEST_MAX_AGE_MS = 24 * 3600 * 1000;
+// Mirrors of @regulait/shared constants (the SPA does not depend on that package);
+// packages/shared/src/engines/engines.test.ts pins each one to its source. Keep them
+// plain numeric literals so that test can read them.
+/** ENGINE_SELF_TEST_MAX_AGE_SECONDS × 1000: how long a self-test (engine record or runner report) counts */
+export const SELF_TEST_MAX_AGE_MS = 86_400_000;
+/** ENGINE_SELF_TEST_FUTURE_SKEW_MS: a runner report dated further ahead than this is stale */
+export const SELF_TEST_FUTURE_SKEW_MS = 300_000;
+/** ENGINE_REASON_MAX_LENGTH: revokeRunnerSchema's cap on the audited reason */
+export const RUNNER_REVOKE_REASON_MAX = 500;
 
 /** PATCH bounds, mirrored from ENGINE_ROW_LIMITS so the form refuses before the round trip */
 export const ENGINE_DIAL_LIMITS = {
@@ -180,14 +187,51 @@ export function shortDigest(digest: string | null | undefined): string {
  * after the gateway stopped accepting it. The earliest future moment one of
  * these engines' passing self-tests crosses the 24 h bound, or null.
  */
-export function nextFreshnessExpiry(engines: ReadonlyArray<Pick<Engine, "selfTest" | "selfTestPassedAt">>, now: number): number | null {
+export function nextFreshnessExpiry(engines: ReadonlyArray<FreshnessSource>, now: number): number | null {
   let next: number | null = null;
-  for (const e of engines) {
-    if (!e.selfTest?.passed || !e.selfTestPassedAt) continue;
-    const expiry = Date.parse(e.selfTestPassedAt) + SELF_TEST_MAX_AGE_MS;
+  const consider = (passedAt: string | null | undefined) => {
+    if (!passedAt) return;
+    const expiry = Date.parse(passedAt) + SELF_TEST_MAX_AGE_MS;
     if (Number.isFinite(expiry) && expiry >= now && (next === null || expiry < next)) next = expiry;
+  };
+  for (const e of engines) {
+    if (e.selfTest?.passed) consider(e.selfTestPassedAt);
+    // each runner's passing report expires on its own (PR #230 review)
+    for (const r of e.runners ?? []) if (r.selfTestPassed === true) consider(r.selfTestReportedAt);
   }
   return next;
+}
+
+type FreshnessSource = Pick<Engine, "selfTest" | "selfTestPassedAt"> & {
+  runners?: ReadonlyArray<Pick<EngineRunner, "selfTestPassed" | "selfTestReportedAt">>;
+};
+
+/**
+ * A runner's own self-test report as one reading. The gateway's lease refuses a
+ * runner whose report is older than 24 h (or dated more than 5 minutes ahead), so
+ * only a passing report inside that window is green; a recorded "passed" outside
+ * it reads "self-test report stale" (PR #230 review).
+ */
+export function runnerSelfTestReading(
+  runner: Pick<EngineRunner, "selfTestPassed" | "selfTestReportedAt">,
+  now: number,
+): { tone: Tone; label: string } {
+  if (runner.selfTestPassed === false) return { tone: "danger", label: "failed" };
+  if (runner.selfTestPassed !== true) return { tone: "neutral", label: "no report" };
+  if (!runner.selfTestReportedAt) return { tone: "neutral", label: "passed, report time unknown" };
+  const at = Date.parse(runner.selfTestReportedAt);
+  if (!Number.isFinite(at) || now - at > SELF_TEST_MAX_AGE_MS || at - now > SELF_TEST_FUTURE_SKEW_MS) {
+    return { tone: "warn", label: "self-test report stale" };
+  }
+  return { tone: "ok", label: "passed" };
+}
+
+/** the revocation reason as the gateway will judge it (trimmed, 1–RUNNER_REVOKE_REASON_MAX characters); null = fine */
+export function revokeReasonProblem(reason: string): string | null {
+  const t = reason.trim();
+  if (t.length === 0) return "A reason is required — it becomes the audited record.";
+  if (t.length > RUNNER_REVOKE_REASON_MAX) return `The reason must be at most ${RUNNER_REVOKE_REASON_MAX} characters (it is ${t.length}).`;
+  return null;
 }
 
 /** the longest the page goes without re-reading the clock, whatever the next expiry */
@@ -199,7 +243,7 @@ export const FRESHNESS_RECHECK_CAP_MS = 5 * 60_000;
  * Returns the function that stops it.
  */
 export function startFreshnessClock(
-  getEngines: () => ReadonlyArray<Pick<Engine, "selfTest" | "selfTestPassedAt">>,
+  getEngines: () => ReadonlyArray<FreshnessSource>,
   onTick: (now: number) => void,
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;

@@ -11,7 +11,10 @@ import {
   nextFreshnessExpiry,
   pagesUsing,
   raisedDials,
+  RUNNER_REVOKE_REASON_MAX,
+  revokeReasonProblem,
   runnerOnCurrentBuild,
+  runnerSelfTestReading,
   selfTestFresh,
   shortDigest,
   startFreshnessClock,
@@ -205,5 +208,57 @@ describe("the freshness clock (PR #230 review: no stale green while the page is 
     stop();
     vi.advanceTimersByTime(10 * FRESHNESS_RECHECK_CAP_MS);
     expect(ticks).toBe(2);
+  });
+});
+
+describe("a runner's self-test reading (PR #230 review: a stale report never reads passed)", () => {
+  const runner = (over: { selfTestPassed?: boolean | null; selfTestReportedAt?: string | null; selfTestFailures?: string[] }) => ({
+    selfTestPassed: true as boolean | null,
+    selfTestFailures: [] as string[],
+    selfTestReportedAt: hoursAgo(1) as string | null,
+    ...over,
+  });
+
+  it("a passing report from the last 24 h is the only green reading", () => {
+    expect(runnerSelfTestReading(runner({}), NOW)).toEqual({ tone: "ok", label: "passed" });
+  });
+
+  it("a passing report older than 24 h reads stale, never passed", () => {
+    const r = runnerSelfTestReading(runner({ selfTestReportedAt: hoursAgo(25) }), NOW);
+    expect(r.label).toBe("self-test report stale");
+    expect(r.tone).not.toBe("ok");
+  });
+
+  it("a report dated more than 5 minutes ahead is stale too (the gateway's rule)", () => {
+    const r = runnerSelfTestReading(runner({ selfTestReportedAt: new Date(NOW + 10 * 60_000).toISOString() }), NOW);
+    expect(r.label).toBe("self-test report stale");
+  });
+
+  it("a passing report with no time (an older gateway) is not green", () => {
+    const r = runnerSelfTestReading(runner({ selfTestReportedAt: null }), NOW);
+    expect(r.tone).not.toBe("ok");
+    expect(r.label).toBe("passed, report time unknown");
+  });
+
+  it("a failed report is failed whatever its age; no report is no report", () => {
+    expect(runnerSelfTestReading(runner({ selfTestPassed: false, selfTestReportedAt: hoursAgo(30) }), NOW)).toEqual({ tone: "danger", label: "failed" });
+    expect(runnerSelfTestReading(runner({ selfTestPassed: null }), NOW)).toEqual({ tone: "neutral", label: "no report" });
+  });
+
+  it("the freshness clock also wakes at a runner report's expiry", () => {
+    const e = engine({
+      runners: [{ id: "r", name: "r", reportedDigest: DIGEST, reportedVersion: "0.124.0", selfTestPassed: true, selfTestFailures: [], selfTestReportedAt: hoursAgo(23), registeredAt: hoursAgo(30), lastSeenAt: null }],
+    });
+    expect(nextFreshnessExpiry([e], NOW)).toBe(NOW + 3600_000);
+  });
+});
+
+describe("the revocation reason (the gateway's revokeRunnerSchema bound)", () => {
+  it("is required and at most RUNNER_REVOKE_REASON_MAX characters, trimmed as the gateway trims it", () => {
+    expect(RUNNER_REVOKE_REASON_MAX).toBe(500);
+    expect(revokeReasonProblem("   ")).toMatch(/required/);
+    expect(revokeReasonProblem("x".repeat(500))).toBeNull();
+    expect(revokeReasonProblem(`  ${"x".repeat(500)}  `)).toBeNull();
+    expect(revokeReasonProblem("x".repeat(501))).toMatch(/at most 500/);
   });
 });
