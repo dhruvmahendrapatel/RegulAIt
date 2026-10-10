@@ -10,6 +10,7 @@ import {
   desc,
   eq,
   inArray,
+  mcpTools,
   orchestrationRunEvents,
   orchestrationRuns,
   projectContextItems,
@@ -26,7 +27,21 @@ import {
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
-import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
+import { evaluateAgent, type AgentDecision, type DelegationScope, type DelegationScopeItem } from "@regulait/policy-kernel";
+import { actorEntitlementsReach, DelegationRefusedError, sponsorGrantsMiss } from "./delegation.js";
+import { loadActorEntitlements } from "./actor-entitlements.js";
+import {
+  agentScopeItem,
+  delegationRefusalDecision,
+  endInProcessChain,
+  ensureIdentityFor,
+  runAsActor,
+  startInProcessChain,
+  toolScopeItems,
+  usdToMicros,
+  type InProcessChain,
+  type InProcessHop,
+} from "./in-process-delegation.js";
 import {
   computeNodeCeiling,
   computeNodeBudgetCeiling,
@@ -769,7 +784,7 @@ async function dispatchRunNodeInner(
   // single ordinary turn — byte-identical to the pre-loop behaviour.
   const declaredServers = node.toolServers ?? [];
   const declaredNames = node.toolNames;
-  const { toolDefs, serverByTool } =
+  const resolvedTools =
     declaredServers.length > 0
       ? await resolveNodeToolContext(
           db,
@@ -779,6 +794,8 @@ async function dispatchRunNodeInner(
           ceiling.toolRefs,
         )
       : { toolDefs: [], serverByTool: new Map<string, string>() };
+  const serverByTool = resolvedTools.serverByTool;
+  let toolDefs = resolvedTools.toolDefs;
   // ADR-0021 worker caps: the default and the hard ceiling are org dials
   // (defaults 6/20 = the previous constants). The zod/kernel wall of 20 stays
   // the absolute maximum — the org ceiling can only narrow below it.
@@ -814,6 +831,41 @@ async function dispatchRunNodeInner(
   // + first-crossing escalation are evaluated PER TURN (§5.2), so a runaway
   // loop halts and escalates into the one approvals queue exactly like a single
   // dispatch. No path increases privilege entering the loop.
+  // ADR-0188 S4 (decisions 4, 6, 22) — THE DELEGATION CHAIN this node acts under:
+  // a root grant from the initiating user to the top lead's agent, then one child
+  // per lead down to this worker, each exactly the node's needs (its agent in its
+  // mode, its entitled tools) and the §5.1 ceiling folded in as each hop's
+  // `ceiling`. Created here, refused here when any hop is not entitled (its OWN
+  // grants under `own_grants`), and ended (revoked, `run_ended`) when this
+  // dispatch returns, so nothing outlives the work. Every model turn and tool
+  // call below is decided with the chain read fresh (decision 17) and every row
+  // written inside is stamped with the actor (decision 9).
+  const nodeCeilingUsd = computeNodeBudgetCeiling(graph, nodeId);
+  const delegation = await openNodeDelegation(db, run, graph, state, node, ownerId, toolDefs, serverByTool, ceiling, {
+    capMicros:
+      budget && nodeCeilingUsd !== null && !budget.overageApproved
+        ? usdToMicros(Math.max(0, nodeCeilingUsd - (budget.measuredPerNodeUsd?.[nodeId] ?? 0)))
+        : null,
+  });
+  if (!delegation.ok) {
+    await db.insert(auditLog).values({
+      userId: actorUserId,
+      objectType: "run",
+      objectId: run.id,
+      detail: { nodeId, ownerAgentId: ownerId, phase: "delegation", code: delegation.code },
+      effect: "deny",
+      ruleId: delegation.decision.ruleId,
+      ruleChain: delegation.decision.ruleChain,
+      reason: delegation.decision.reason,
+    });
+    return { kind: "entitlement_denied", decision: delegation.decision };
+  }
+  const delegationGrantId = delegation.chain.leafGrantId;
+  // the worker is OFFERED only what its chain was granted (the user's entitled tools, inside the ceiling,
+  // that every agent on the chain holds itself under `own_grants`); anything else it asks for is refused
+  toolDefs = toolDefs.filter((t) => delegation.toolNames.has(t.name));
+  try {
+    return await runAsActor(delegation.stamp, async (): Promise<NodeDispatchOutcome> => {
   let runningMeasured = measuredSpent;
   let budgetBreached = false;
   // §5.2 measured per-node ceiling (transitive MIN up the lead chain): enforced
@@ -865,6 +917,10 @@ async function dispatchRunNodeInner(
       userId: run.initiatingUserId,
       served: servedAgent,
       requestedAgentId: node.ownerAgentId,
+      // ADR-0188 S4: decided for the initiating user AND the stored chain, per turn
+      delegationGrantId,
+      delegationCeilingAgentIds: ceiling.agentIds,
+      mode: node.mode,
       baseline: null,
       input: firstInput,
       messages,
@@ -886,6 +942,14 @@ async function dispatchRunNodeInner(
       },
     });
 
+    if (!outcome.ok && outcome.error === "delegation_denied") {
+      // ADR-0188 S4: the chain (or the sponsor, through it) refused this turn; the
+      // core already audited the decision against the agent
+      return {
+        kind: "entitlement_denied",
+        decision: { effect: "deny", ruleId: outcome.ruleId ?? "actor-chain-invalid", ruleChain: [], reason: outcome.detail ?? "delegation refused" } as AgentDecision,
+      };
+    }
     if (!outcome.ok) {
       await db.insert(auditLog).values({
         userId: actorUserId,
@@ -1073,6 +1137,8 @@ async function dispatchRunNodeInner(
           // §5.1 hard enforcement: even if a tool leaked into context, the lead
           // ceiling denies the call with ruleId `lead-ceiling`.
           ceilingTools: ceiling.toolRefs,
+          // ADR-0188 S4: and the stored chain, read fresh for this call
+          delegationGrantId,
           // ADR-0019 pillar-5: a worker's tool calls bill to the run's project,
           // on the same ledger as its model dispatches — the run's projectId was
           // already attribution-checked when the run was created, so no second
@@ -1361,6 +1427,112 @@ async function dispatchRunNodeInner(
     budgetBreached,
     nodeBudgetBreached,
   };
+    });
+  } finally {
+    // the work ended: the chain is revoked (cascade) and unspent allocation returned
+    await endInProcessChain(db, delegation.chain);
+  }
+}
+
+/**
+ * ADR-0188 S4 — open the delegation chain for one node dispatch (see the call
+ * site). The hops run root first: the top lead's owner, each lead below it, then
+ * this node's owner. Consecutive hops by the same agent collapse (an identity is
+ * once in a chain). Every hop carries exactly the node's needs; a hop below a
+ * lead also carries that lead chain's §5.1 ceiling, so a worker can never be
+ * granted what its lead may not hand down.
+ */
+async function openNodeDelegation(
+  db: Db,
+  run: RunRow,
+  graph: TaskGraph,
+  state: RunState,
+  node: TaskNode,
+  ownerId: string,
+  toolDefs: ReadonlyArray<{ name: string }>,
+  serverByTool: ReadonlyMap<string, string>,
+  ceiling: { agentIds: string[] | null; toolRefs: string[] | null },
+  opts: { capMicros: number | null },
+): Promise<
+  | { ok: true; chain: InProcessChain; toolNames: Set<string>; stamp: { actorIdentityId: string; delegationGrantId: string; actorChain: string[] } }
+  | { ok: false; code: string; decision: AgentDecision }
+> {
+  // the node's needs: its agent in its mode, and the tools it is offered (with their manifest kinds)
+  // the lead chain above this node, top first, and every agent that will hold a hop
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const leads: TaskNode[] = [];
+  const seen = new Set<string>([node.id]);
+  for (let cur = node.leadNodeId; cur && !seen.has(cur); ) {
+    seen.add(cur);
+    const lead = byId.get(cur);
+    if (!lead) break;
+    leads.unshift(lead);
+    cur = lead.leadNodeId;
+  }
+  const leadIdentities: string[] = [];
+  for (const lead of leads) leadIdentities.push((await ensureIdentityFor(db, { kind: "agent", id: state.owners[lead.id] ?? lead.ownerAgentId })).id);
+  const worker = await ensureIdentityFor(db, { kind: "agent", id: ownerId });
+  const holders = [...leadIdentities, worker.id];
+
+  const candidates: Array<{ serverId: string; toolName: string; kind: "read" | "write" }> = [];
+  const offered = toolDefs.map((t) => t.name).filter((n) => serverByTool.has(n));
+  if (offered.length > 0) {
+    const rows = await db
+      .select({ serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind })
+      .from(mcpTools)
+      .where(inArray(mcpTools.name, offered));
+    for (const name of offered) {
+      const serverId = serverByTool.get(name)!;
+      const row = rows.find((r) => r.serverId === serverId && r.name === name);
+      candidates.push({ serverId, toolName: name, kind: row?.kind === "read" ? "read" : "write" });
+    }
+  }
+  // under `own_grants` a tool is requested only when every holder is granted it itself (decision 3); the agent
+  // ITSELF is always requested, so an agent with no grant of its own is refused (`actor-allow-list`), never
+  // silently run with fewer rights
+  const org = await loadOrgSettings(db);
+  let tools = candidates;
+  if (org.agentEntitlementMode === "own_grants" && candidates.length > 0) {
+    const own = await loadActorEntitlements(db, holders);
+    tools = candidates.filter((t) =>
+      holders.every((h) => actorEntitlementsReach(own.get(h)!, { type: "mcp_tool", serverId: t.serverId, toolName: t.toolName, kind: t.kind })),
+    );
+  }
+  // only what the initiating user holds is requested (a delegation beyond the person is refused, never narrowed)
+  const held: typeof tools = [];
+  for (const t of tools) {
+    if (!(await sponsorGrantsMiss(db, run.initiatingUserId, [{ type: "mcp_tool", serverId: t.serverId, toolName: t.toolName, kind: t.kind }]))) held.push(t);
+  }
+  tools = held;
+  const needs: DelegationScopeItem[] = [agentScopeItem(ownerId, node.mode), ...toolScopeItems(tools)];
+  // the §5.1 ceiling as a scope: the needs that pass it (a need it excludes makes the hop refuse `lead-ceiling`)
+  const ceilingScope: DelegationScope | null =
+    ceiling.agentIds === null && ceiling.toolRefs === null
+      ? null
+      : [
+          ...(ceiling.agentIds === null || ceiling.agentIds.includes(ownerId) ? [agentScopeItem(ownerId, node.mode)] : []),
+          ...toolScopeItems(tools.filter((t) => ceiling.toolRefs === null || ceiling.toolRefs.includes(t.toolName))),
+        ];
+
+  const hops: InProcessHop[] = [];
+  for (const identityId of leadIdentities) {
+    hops.push({ identityId, scope: needs, capMicros: opts.capMicros, ceiling: hops.length > 0 ? ceilingScope : null });
+  }
+  hops.push({ identityId: worker.id, scope: needs, capMicros: opts.capMicros, ceiling: leads.length > 0 ? ceilingScope : null });
+  try {
+    const chain = await startInProcessChain(db, {
+      sponsorUserId: run.initiatingUserId,
+      projectId: run.projectId ?? null,
+      context: { runId: run.id },
+      hops,
+    });
+    // the collapsed chain's identities, root first (consecutive duplicates removed)
+    const actorChain = hops.map((h) => h.identityId).filter((id, i, a) => i === 0 || a[i - 1] !== id);
+    return { ok: true, chain, toolNames: new Set(tools.map((t) => t.toolName)), stamp: { actorIdentityId: worker.id, delegationGrantId: chain.leafGrantId, actorChain } };
+  } catch (err) {
+    if (!(err instanceof DelegationRefusedError)) throw err;
+    return { ok: false, code: err.code, decision: delegationRefusalDecision(err) as AgentDecision };
+  }
 }
 
 /** The dispatch route's one outcome→HTTP mapping, shared verbatim by the
@@ -1473,7 +1645,7 @@ async function evaluateNodeOwner(
   }
   const kernelDecision = evaluateAgent({
     userId,
-    actor: null, // ADR-0188 S4 replaces
+    actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     // ADR-0124 — a pillar-7 worker is a real dispatch under the initiating
     // user's entitlements. It inherits the halt for the same reason it
     // inherits every other ceiling: a delegated run must never be able to do
@@ -1904,7 +2076,7 @@ export async function planRun(
       return withModelPolicy(
         evaluateAgent({
           userId,
-          actor: null, // ADR-0188 S4 replaces
+          actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
           // ADR-0124 — same rule as every other worker dispatch.
           execution: { ...postureOf(ownerExecutionMode, agentHaltOf(agent)), ...ownerLiteracy },
           agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },

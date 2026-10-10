@@ -2964,7 +2964,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       undefined,
       undefined,
-      { actor: null }, // ADR-0188 S4 replaces
+      { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
 
     // What the decision was actually computed ON. A proxy that believes it is
@@ -3064,7 +3064,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
       undefined,
       undefined,
-      { actor: null }, // ADR-0188 S4 replaces
+      { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     );
 
     // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"

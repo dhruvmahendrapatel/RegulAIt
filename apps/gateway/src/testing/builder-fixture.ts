@@ -11,6 +11,7 @@ import { buildApp } from "../app.js";
 import { enrolAdminTotpForTest } from "./identity-posture.js";
 import { forgetStepUpMethodsForTest } from "./step-up-posture.js";
 import { closeAll, dropScratchDatabase } from "./scratch-db.js";
+import { grantBuilderAgentConfiguredForTest } from "./agent-own-grants.js";
 
 export interface Person {
   id: string;
@@ -42,7 +43,7 @@ export interface BuilderKit {
  * `close()` — for a file that writes append-only rows (an approval decision)
  * which must not outlive the run in the shared database.
  */
-export async function builderKit(prefix: string, opts: { scratch?: boolean } = {}): Promise<BuilderKit> {
+export async function builderKit(prefix: string, opts: { scratch?: boolean; ownGrants?: boolean } = {}): Promise<BuilderKit> {
   const DATABASE_URL = process.env.DATABASE_URL;
   if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
   const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../packages/db/migrations");
@@ -62,8 +63,35 @@ export async function builderKit(prefix: string, opts: { scratch?: boolean } = {
   const db = createDb(dbUrl);
   await runMigrations(db, migrationsFolder);
   const app = buildApp(db, { bootstrapToken: bootToken, dataKey: "a".repeat(64) });
-  const req: BuilderKit["req"] = (method, url, headers, payload) =>
+  const rawReq: BuilderKit["req"] = (method, url, headers, payload) =>
     app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload: payload as object }) });
+  /**
+   * ADR-0188 S4: a builder agent acts only within grants OF ITS OWN (the strict `own_grants`
+   * default). Unless the kit is opened with `ownGrants: false`, every successful write to a
+   * builder agent (create, configure, tools) is followed by granting that agent exactly what it
+   * is configured with — through the same service an admin's PUT runs — so the builder suites
+   * stay under the strict default. A suite that proves the refusal opens the kit without it.
+   */
+  const req: BuilderKit["req"] = async (method, url, headers, payload) => {
+    const res = await rawReq(method, url, headers, payload);
+    if (opts.ownGrants !== false && method !== "GET" && method !== "DELETE" && res.statusCode < 300) {
+      // create, configure and tools only (a chat is not a configuration change)
+      const m = /^\/v1\/builder\/agents(?:\/([0-9a-f-]{36})(\/tools)?)?$/.exec(url.split("?")[0]!);
+      if (m && (m[1] ? method === "PATCH" || method === "PUT" : method === "POST")) {
+        let id = m[1];
+        if (!id) {
+          try {
+            const body = res.json() as { id?: string; agent?: { id?: string } };
+            id = body.agent?.id ?? body.id;
+          } catch {
+            id = undefined;
+          }
+        }
+        if (id) await grantBuilderAgentConfiguredForTest(db, id);
+      }
+    }
+    return res;
+  };
 
   /** B4S-06: the admins this kit enrolled, whose methods close() forgets (M-068) */
   const admins: string[] = [];

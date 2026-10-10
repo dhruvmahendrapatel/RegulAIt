@@ -1464,6 +1464,9 @@ export const auditLog = pgTable(
         // delegation grants (cascade revocation). Plain text column — no DDL.
         "identity_signing_key",
         "delegation_grant",
+        // ADR-0188 S4: an internal workload identity created at first load, and
+        // an admin replacing an identity's own grant set. Plain text — no DDL.
+        "workload_identity",
       ],
     })
       .notNull()
@@ -12884,6 +12887,11 @@ export const delegationGrants = pgTable(
     parentGrantId: uuid("parent_grant_id").references((): AnyPgColumn => delegationGrants.id, { onDelete: "restrict" }),
     path: uuid("path").array().notNull().default(sql`'{}'::uuid[]`),
     depth: integer("depth").notNull(),
+    /**
+     * ADR-0188 S4 (migration 0184): the ABSOLUTE deepest `depth` any grant in this subtree may have — the stored
+     * decision 23 `max_depth`. Root: the org's `delegation_max_depth`; child: min(parent.depthLimit, depth + max_depth).
+     */
+    depthLimit: integer("depth_limit").notNull(),
     sponsorUserId: uuid("sponsor_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
@@ -12922,6 +12930,7 @@ export const delegationGrants = pgTable(
   },
   (t) => [
     check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
+    check("delegation_grants_depth_limit_check", sql`${t.depthLimit} BETWEEN ${t.depth} AND 8`),
     check(
       "delegation_grants_parent_check",
       sql`(${t.depth} = 0 AND ${t.parentGrantId} IS NULL AND ${t.rootGrantId} = ${t.id}) OR (${t.depth} > 0 AND ${t.parentGrantId} IS NOT NULL AND ${t.path}[cardinality(${t.path})] = ${t.parentGrantId} AND ${t.path}[1] = ${t.rootGrantId})`,

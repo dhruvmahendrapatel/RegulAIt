@@ -10,6 +10,7 @@
  *    each carrying its connectionName) and by instanceId, and /v1/decisions
  *    enriched with the maker's name
  */
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import path from "node:path";
@@ -61,6 +62,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const agent = await app.inject({

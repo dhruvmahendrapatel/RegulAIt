@@ -24,6 +24,9 @@
  * `x-api-key` credential header the Anthropic SDK uses is accepted here for the
  * same reason `POST /v1/messages` accepts it.
  */
+import type { GovernedActor } from "@regulait/policy-kernel";
+import { DelegationRefusedError } from "./delegation.js";
+import { actorForGrant } from "./in-process-delegation.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   agentGrants,
@@ -85,7 +88,18 @@ export async function listEntitledModels(
   db: Db,
   userId: string,
   vk: VirtualKeyContext | null,
+  /** ADR-0188 S4: a WORKLOAD caller's leaf grant — the listing is then its chain's intersection, read now */
+  delegationGrantId?: string,
 ): Promise<EntitledModel[]> {
+  let actor: GovernedActor | null = null;
+  if (delegationGrantId) {
+    try {
+      actor = await actorForGrant(db, delegationGrantId, { costKnown: true });
+    } catch (err) {
+      if (err instanceof DelegationRefusedError) return [];
+      throw err;
+    }
+  }
   const [registry, grants, roleGrants, revocations, [policy]] = await Promise.all([
     db.select().from(agents).where(eq(agents.enabled, true)),
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
@@ -111,7 +125,8 @@ export async function listEntitledModels(
     // client sees listed and what it may call cannot drift.
     const kernelDecision = evaluateAgent({
       userId,
-      actor: null, // ADR-0188 S4 replaces
+      // ADR-0188 S4: a workload caller sees only what its chain may call; a person's own listing is `null`
+      actor,
       /**
        * ADR-0124 — VISIBILITY, not execution. This is the `/v1/models` listing
        * an IDE reads to populate its picker. Emptying it during a halt would
@@ -175,7 +190,12 @@ export function registerModelsDiscovery(app: FastifyInstance, db: Db) {
       });
     }
     const vk = await loadVirtualKeyContext(db, req);
-    const models = await listEntitledModels(db, userId, vk);
+    const models = await listEntitledModels(
+      db,
+      userId,
+      vk,
+      req.authCtx.via === "workload" ? (req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000") : undefined,
+    );
 
     // One audit row per listing. A discovery call is a read of the caller's own
     // entitlement surface, and "who enumerated what they could reach, and when"

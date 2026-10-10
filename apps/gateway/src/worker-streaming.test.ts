@@ -27,6 +27,7 @@
  * drop+recreate), so it can never pollute the database the other gateway suites
  * share — nor collide with another checkout running the same file.
  */
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,6 +171,8 @@ beforeAll(async () => {
   // PII floor, suppress-and-disclose on a block project, live deltas otherwise.
   restoreSb1Posture = await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: { streamingOnBlockMode: "suppress" }, guardrails: { promptInjectionMode: "warn" } });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const agent = await app.inject({

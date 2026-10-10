@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -156,6 +157,8 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   const up = await startUpstream();

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
@@ -70,6 +71,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // ADR-0052 §4: POST /v1/runs/decompose is tier-gated on
   // `advanced_orchestration` (the flag the ADR names "advanced orchestration
