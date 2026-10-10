@@ -50,6 +50,8 @@
  * exactly one test and restores the ENTIRE singleton snapshot in `afterAll`.
  * Everything it creates is `tr-` prefixed and removed.
  */
+import { agentsWithIdentity, sponsorsWithGrants } from "./testing/agent-own-grants.js";
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import http from "node:http";
@@ -251,6 +253,8 @@ beforeAll(async () => {
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await app.ready();
 
@@ -377,8 +381,15 @@ afterAll(async () => {
   if (createdUserIds.length) {
     await db.delete(traces).where(inArray(traces.userId, createdUserIds));
   }
-  if (createdAgentIds.length) await db.delete(agents).where(inArray(agents.id, createdAgentIds));
-  if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
+  // ADR-0188 S4: an agent that acted, and the person it acted for, are named by its workload identity and
+  // delegation grants, which are never deleted (decisions 2, 4); those rows stay (they are disabled-equivalent
+  // history), everything else this file made is removed
+  const keepAgents = await agentsWithIdentity(db, createdAgentIds);
+  const keepUsers = await sponsorsWithGrants(db, createdUserIds);
+  const agentsToDelete = createdAgentIds.filter((id) => !keepAgents.has(id));
+  const usersToDelete = createdUserIds.filter((id) => !keepUsers.has(id));
+  if (agentsToDelete.length) await db.delete(agents).where(inArray(agents.id, agentsToDelete));
+  if (usersToDelete.length) await db.delete(users).where(inArray(users.id, usersToDelete));
   if (toolServerId) await db.delete(mcpServers).where(eq(mcpServers.id, toolServerId));
   // the 2026-08-15 fixtures. Users cascade their grants, instances and runs;
   // these three own no user FK and would otherwise linger for other suites.

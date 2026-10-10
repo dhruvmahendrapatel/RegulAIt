@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { createDb, eq, mcpServers, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
@@ -182,6 +183,8 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "d".repeat(64) });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   upstream = await startUpstream();
 
@@ -205,6 +208,10 @@ beforeAll(async () => {
   });
   expect(server.statusCode).toBe(201);
   serverId = server.json().id;
+  // ADR-0188 S4: a run's chain is capped by its budget, and an UNPRICED call under a capped grant is refused
+  // (decision 16: an unknown cost never buys free authority) — the upstream is priced so the budget, which this
+  // file keeps generous, stays out of the lattice under test
+  await db.update(mcpServers).set({ pricePerCallUsd: 0.0001 }).where(eq(mcpServers.id, serverId));
   // granted: alpha, beta, gamma. dconf_delta exists upstream, NEVER granted.
   for (const t of ["dconf_alpha", "dconf_beta", "dconf_gamma"]) await grantTool(danaId, t);
 

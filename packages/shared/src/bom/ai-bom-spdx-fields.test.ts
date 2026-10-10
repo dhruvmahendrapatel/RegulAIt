@@ -239,6 +239,34 @@ describe("B9: the write-side validators (R51), each refusal named", () => {
     for (const [kind, p, v, rule] of cases) expect(refusal(() => normaliseSpdxDeclaration(kind as never, p, v)), `${p} ${String(v).slice(0, 40)}`).toBe(rule);
   });
 
+  it("B7's name check applies to B9 text too: hidden, escaped and fullwidth URLs and script schemes are refused", () => {
+    const cases: Array<[string, string, string]> = [
+      ["originatedBy", "team/models?sig=CANARY_B9_SIG", "name_check_refused"],
+      ["originatedBy", "//cdn.example/models", "name_check_refused"],
+      ["originatedBy", "team%2Fmodels%3Fsig=CANARY_B9_ESC", "name_check_refused"],
+      ["originatedBy", "\uFF48\uFF54\uFF54\uFF50\uFF53\uFF1A\uFF0F\uFF0Fhub.example", "name_check_refused"],
+      ["originatedBy", "javascript:alert(1)", "originated_by_invalid"],
+      ["packageVersion", "data:text/html,x", "package_version_invalid"],
+      ["packageVersion", "v1/x;sig=CANARY_B9_PARAM", "name_check_refused"],
+    ];
+    for (const [p, v, rule] of cases) {
+      const kind = p === "packageVersion" ? "model_card" : "training_dataset";
+      let message = "";
+      const got = refusal(() => {
+        try {
+          return normaliseSpdxDeclaration(kind, p, v.replace(/\\u([0-9A-F]{4})/g, (_m, h) => String.fromCharCode(parseInt(h, 16))));
+        } catch (e) {
+          message = (e as Error).message;
+          throw e;
+        }
+      });
+      expect(got, v).toBe(rule);
+      expect(message.includes("CANARY"), v).toBe(false);
+    }
+    // negative control: an ordinary name with a slash and no delimiter is text
+    expect(normaliseSpdxDeclaration("training_dataset", "originatedBy", "Supplier B / Data Team")).toBe("Supplier B / Data Team");
+  });
+
   it("dataset types: a non-empty set of SPDX DatasetType values, sorted", () => {
     expect(normaliseSpdxDeclaration("eval_dataset", "datasetType", ["text", "image"])).toEqual(["image", "text"]);
     for (const bad of [[], ["text", "text"], ["Text"], ["tabular"], "text", [1]]) {

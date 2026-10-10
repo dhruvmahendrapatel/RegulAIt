@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { grantAgentOwnGrantsForTest } from "./testing/agent-own-grants.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,7 +108,13 @@ async function authFor(userId: string): Promise<{ authorization: string }> {
 }
 async function mkAgent(payload: Record<string, unknown>): Promise<string> {
   const r = await app.inject({ method: "POST", headers: AUTH, url: "/v1/agents", payload });
-  return r.json().id as string;
+  const id = r.json().id as string;
+  // ADR-0188 S4: under the strict `own_grants` default the worker acts only within grants of its own
+  // (itself, and the upstream's tools); the USER's grants stay what each test sets
+  await grantAgentOwnGrantsForTest(db, id, {
+    tools: ["get_time", "write_note"].map((toolName) => ({ serverId, toolName })),
+  });
+  return id;
 }
 async function grantAgent(userId: string, agentId: string): Promise<void> {
   await app.inject({

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
+import { and, auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { snapshotOrgSettingsForTest } from "./testing/strict-data-posture.js";
 import { buildPostureReport } from "./posture-preset.js";
@@ -474,10 +474,13 @@ describe("idempotency and the audit trail", () => {
     const after = await db
       .select()
       .from(auditLog)
-      .where(eq(auditLog.ruleId, "org-posture-hardened"));
+      .where(eq(auditLog.ruleId, "org-posture-hardened"))
+      // the newest row by the audit chain's sequence, not by physical order: after an earlier
+      // file in the shard pruned audit rows, a fresh row can land in freed space BEFORE older ones
+      .orderBy(desc(auditLog.seq));
     expect(after.length).toBe(before.length + 1);
 
-    const row = after[after.length - 1]!;
+    const row = after[0]!;
     const detail = row.detail as { applied: Record<string, [unknown, unknown]> };
     expect(detail.applied.defaultPiiMode).toEqual(["none", "block"]);
     // its own rule id, NOT org-settings-updated: an operator must be able to

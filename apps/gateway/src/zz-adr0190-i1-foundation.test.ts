@@ -543,9 +543,10 @@ describe("ADR-0190 the stubs: every route answers 501 under its auth class", () 
     expect(tagged).toEqual(ISOLATION_ROUTES.map((r) => `${r.method} ${r.path}`).sort());
   });
 
-  it("each route is registered and answers 501 not_built to an admin, touching nothing", async () => {
+  it("each route not yet built is registered and answers 501 not_built to an admin, touching nothing", async () => {
     const before = await db.execute(sql`select (select count(*) from execution_profiles) as p, (select count(*) from executors) as e`);
-    for (const r of ISOLATION_ROUTES) {
+    // I3 built the executor routes (zz-adr0190-i3-executor-core.test.ts covers them); the rest are still stubs
+    for (const r of ISOLATION_ROUTES.filter((r) => !r.built)) {
       const res = await inject(r.method, url(r.path), users.admin.auth, r.method === "GET" ? undefined : {});
       expect(res.statusCode, `${r.method} ${r.path}: ${res.body}`).toBe(501);
       expect(res.json(), `${r.method} ${r.path}`).toEqual({ error: "not_built" });

@@ -130,3 +130,69 @@ export async function signInAdminFresh(page: Page, baseURL: string, seededOneTim
   await page.getByRole("button", { name: "Set password & continue" }).click();
   await passTotp(page, ADMIN_EMAIL, page.getByRole("heading", { name: /Welcome back/ }));
 }
+
+/**
+ * ADR-0188 S4 — an agent acts only within grants OF ITS OWN (the strict `own_grants` default; nothing is
+ * grandfathered). The journeys grant a builder agent exactly what it needs the way an admin does: Ada finds the
+ * agent's workload identity (`GET /v1/workload-identities`) and replaces its grant set
+ * (`PUT /v1/workload-identities/:id/grants`, an `identity_manage` step-up answered with her authenticator).
+ * ADDITIVE: the set read is merged with `add` before it is written back.
+ */
+export async function grantBuilderAgentAsAdmin(
+  baseURL: string,
+  oneTimePassword: string,
+  builderAgentId: string,
+  add: {
+    agents?: Array<{ agentId: string; allowedModes: string[] }>;
+    tools?: Array<{ serverId: string; toolName: string }>;
+  },
+  /**
+   * An admin request context that is already signed in (a signed-in page's `page.request`), reused and not
+   * disposed. Every sign-in and every step-up spends one of Ada's TOTP codes, the gateway takes each 30 s step
+   * once, so a fresh sign-in per grant waits out a window or two. A spec with an admin page passes its request.
+   */
+  reuse?: APIRequestContext,
+): Promise<void> {
+  const ctx = reuse ?? (await adminContext(baseURL, oneTimePassword));
+  try {
+    let identityId: string | null = null;
+    let cursor: string | null = null;
+    do {
+      const page = await ctx.get(`/v1/workload-identities?kind=builder_agent&limit=200${cursor ? `&cursor=${cursor}` : ""}`);
+      expect(page.status(), `identity list: ${await page.text()}`).toBe(200);
+      const body = (await page.json()) as { items: Array<{ id: string; builderAgentId: string | null }>; nextCursor: string | null };
+      identityId = body.items.find((i) => i.builderAgentId === builderAgentId)?.id ?? null;
+      cursor = identityId ? null : body.nextCursor;
+    } while (!identityId && cursor);
+    expect(identityId, `no workload identity for builder agent ${builderAgentId}`).toBeTruthy();
+    const cur = await ctx.get(`/v1/workload-identities/${identityId}/grants`);
+    expect(cur.status(), await cur.text()).toBe(200);
+    const set = (await cur.json()) as {
+      revision: number;
+      tools: Array<{ serverId: string; toolName: string }>;
+      servers: unknown[];
+      agents: Array<{ agentId: string; allowedModes: string[] }>;
+      connectors: unknown[];
+      roleIds: string[];
+    };
+    const agents = [...set.agents];
+    for (const a of add.agents ?? []) {
+      const have = agents.find((x) => x.agentId === a.agentId);
+      if (have) have.allowedModes = [...new Set([...have.allowedModes, ...a.allowedModes])];
+      else agents.push(a);
+    }
+    const tools = [...set.tools];
+    for (const t of add.tools ?? []) if (!tools.some((x) => x.serverId === t.serverId && x.toolName === t.toolName)) tools.push(t);
+    const r = await steppedUpAs(ctx, ADMIN_EMAIL, "PUT", `/v1/workload-identities/${identityId}/grants`, {
+      revision: set.revision,
+      tools,
+      servers: set.servers,
+      agents,
+      connectors: set.connectors,
+      roleIds: set.roleIds,
+    });
+    expect(r.status(), `identity grants: ${await r.text()}`).toBe(200);
+  } finally {
+    if (!reuse) await ctx.dispose();
+  }
+}

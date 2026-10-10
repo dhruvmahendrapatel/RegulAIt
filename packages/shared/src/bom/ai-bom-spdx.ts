@@ -167,8 +167,29 @@ const CYCLONEDX_ONLY_PREFIXES = ["memory"] as const;
 export const SPDX_DOCUMENT_COMMENT =
   "RegulAIt AI BOM, SPDX 3.0.1 view. The signed regulait.ai-bom.v1 body is the authority. Provider endpoints, MCP servers and tools, connectors, data flows, granted tool edges, scan and evidence declarations, memory-store descriptors and compositions have no SPDX 3.0.1 element and are carried in the CycloneDX rendering only. Concluded licences are never asserted. A relationship marked incomplete has members the build could not fully describe.";
 
+/**
+ * ADR-0189 B7 x B5 (R3, "never silently dropped"): what an SPDX 3.0.1 rendering
+ * of this record set could not express. B7's release records are CycloneDX-only:
+ * the development-stack tools are CycloneDX `formulation` (no SPDX element of
+ * this renderer models them), and the release SBOMs are CycloneDX BOM-Links
+ * (`urn:cdx:<serial>/<version>`), for which SPDX 3.0.1 has no external-reference
+ * type. Rather than a valid file that silently omits them, the builder records
+ * `not_producible` naming these, exactly as for a missing mandatory property.
+ */
+export function spdxInexpressible(n: AiBomRecordSet): string[] {
+  const out: string[] = [];
+  if ((n.devStackTools ?? []).length) out.push("formulation");
+  if ((n.releaseSboms ?? []).length) out.push("bomLinkExternalReferences");
+  return out;
+}
+
 export function renderAiBomSpdx(n: AiBomRecordSet, meta: AiBomSnapshotMeta, cdx: CycloneDxRenderResult): SpdxRenderResult {
   const doc = cdx.doc as { metadata: { component: Obj }; components: Obj[]; dependencies: Array<{ ref: string; dependsOn?: string[] }> };
+  // never silently dropped: the builder records `not_producible` before calling this for such a record set
+  const inexpressible = spdxInexpressible(n);
+  if (inexpressible.length || "formulation" in (cdx.doc as Obj) || "externalReferences" in doc.metadata.component) {
+    throw new Error(`ai-bom spdx: CycloneDX-only content cannot be rendered (${inexpressible.join(", ") || "formulation or BOM-Link"})`);
+  }
   const base = `https://regulait.invalid/spdx/ai-bom/${meta.id}/v${meta.version}`;
   const iri = (k: string) => `${base}#${k}`;
   const ci = "_:creationinfo";

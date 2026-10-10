@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, eq, runMigrations, usageEvents, workflowInstances, auditLog, inArray, type Db } from "@regulait/db";
@@ -106,6 +107,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a1".repeat(32) });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireProjectAttribution: false });
 
   // snapshot both singletons this file will flip (M-012 discipline)

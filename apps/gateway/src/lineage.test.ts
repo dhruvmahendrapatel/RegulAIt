@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { projectsWithGrants } from "./testing/agent-own-grants.js";
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -170,6 +172,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
 
   const o = await mkUser("lin-owner@example.com");
@@ -281,7 +285,9 @@ afterAll(async () => {
   await restoreSb2Gates();
   await app.close();
   // lineage nodes/edges cascade with the project
-  const ids = [projectId, secretProjectId].filter(Boolean);
+  // ADR-0188 S4: a project an agent acted in is named by never-deleted delegation grants; it stays
+  const held = await projectsWithGrants(db, [projectId, secretProjectId].filter(Boolean));
+  const ids = [projectId, secretProjectId].filter((id) => id && !held.has(id));
   if (ids.length) await db.delete(projects).where(inArray(projects.id, ids));
 });
 

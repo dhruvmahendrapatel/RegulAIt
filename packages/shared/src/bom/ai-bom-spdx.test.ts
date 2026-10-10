@@ -355,19 +355,27 @@ describe("B5: same elements and hashes as CycloneDX", () => {
     expect(of(d, "ai_AIPackage").map((p) => p.software_packageVersion).sort()).toEqual(["2026-05-01", "2026-06-01"]);
   });
 
+  // B7 round 3 refuses a name holding both `/` and a URL delimiter (`#`, `?`, `;`) before any renderer runs, so the
+  // IRI-hostile provider names are split into ones the name policy admits; each still has an IRI-significant character.
   it("provider names reach IRIs only as a digest; IRIs carry no record names", () => {
-    const f = producible();
-    const records = structuredClone(f.records);
-    records.agents[0]!.provider = "Provider Ä #1/../x";
-    const d = spdxOf(buildAiBom(records, f.meta, opts))!;
-    const iris = d["@graph"].flatMap((e) => [e.spdxId, e.from, ...(Array.isArray(e.to) ? e.to : [])]).filter((x): x is string => typeof x === "string");
-    for (const i of iris) {
-      expect(i, i).not.toContain("Provider");
-      expect(i, i).not.toContain("triage");
-      expect(i, i).not.toContain("modelscan");
+    for (const provider of ["Provider Ä #1 x", "Provider Ä/../x", "Provider Ä ?1 x"]) {
+      const f = producible();
+      const records = structuredClone(f.records);
+      records.agents[0]!.provider = provider;
+      const d = spdxOf(buildAiBom(records, f.meta, opts))!;
+      const iris = d["@graph"].flatMap((e) => [e.spdxId, e.from, ...(Array.isArray(e.to) ? e.to : [])]).filter((x): x is string => typeof x === "string");
+      for (const i of iris) {
+        expect(i, i).not.toContain("Provider");
+        expect(i, i).not.toContain("triage");
+        expect(i, i).not.toContain("modelscan");
+      }
+      const supplier = of(d, "Organization").find((o) => o.name === provider)!;
+      expect(supplier.spdxId).toMatch(/#supplier-[0-9a-f]{32}$/);
     }
-    const supplier = of(d, "Organization").find((o) => o.name === "Provider Ä #1/../x")!;
-    expect(supplier.spdxId).toMatch(/#supplier-[0-9a-f]{32}$/);
+    // the combined form is a hidden URL shape and is refused outright (round 3), so it never reaches a renderer
+    const g = structuredClone(producible().records);
+    g.agents[0]!.provider = "Provider Ä #1/../x";
+    expect(() => buildAiBom(g, producible().meta, opts)).toThrow(/URL is refused in a name/);
   });
 });
 

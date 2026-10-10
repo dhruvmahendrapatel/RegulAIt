@@ -194,7 +194,8 @@ describe("AER-020 — evidence samples are scrubbed before truncation", () => {
   it("the credential markers keep the KIND and lose the value", () => {
     const out = scrubEvidenceSample(`x-amz-key=AKIAIOSFODNN7EXAMPLE "Authorization: Bearer 9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e" to=jane.doe@customer-bank.example`);
     expect(out).toContain(`${AUDIT_SCRUB_MARKER_PREFIX}aws_key:20:`);
-    expect(out).toContain(`${AUDIT_SCRUB_MARKER_PREFIX}authorization_header:40:`);
+    // ADR-0189 B7 review: the audit scrub's own bearer_token rule now takes the header value first
+    expect(out).toContain(`Bearer ${AUDIT_SCRUB_MARKER_PREFIX}bearer_token:40:`);
     expect(out).toContain("[EMAIL]");
     expect(out).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(out).not.toContain("9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e");

@@ -23,6 +23,7 @@
  * reverted (delete-the-singleton: the belt-and-braces loader recreates the
  * defaults row, which IS the previous behaviour).
  */
+import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -144,6 +145,8 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0188 S4: agents created here act under the strict `own_grants` default with grants of their own
+  autoGrantCreatedAgentsForTest(app, db, { mirrorTools: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, SB2_RELAXED);
 
   // ADR-0034 amendment — model-credential / env `baseUrl` overrides are now

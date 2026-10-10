@@ -4,7 +4,9 @@
   ("accept all on ADR-0188"). Design only until the build slices land. Amended
   2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table; amended again
   after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23. Amended again during S1 (main-session rulings from
-  the S2 planning pass): decisions 24 to 28 (agent grant storage, actor order, depth, strict scope, rule ids).
+  the S2 planning pass): decisions 24 to 28 (agent grant storage, actor order, depth, strict scope, rule ids). Amended
+  again after the S5 security review (PR #302): external child exchanges refused until the signed depth is enforced,
+  steward and project checks on delegation proofs, CA rules on X.509 issuers, strict root caps and lifetimes.
 - **Date:** 2026-10-10
 - **Deciders:** owner (accepted all nine recommendations, 2026-10-10); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
@@ -949,6 +951,206 @@ Open questions carried to S5 and S6:
 - The S6 admin screens for grants (list, revoke, tree) have no backend routes yet. S5 or S6 must add them with the
   `identity_manage` step-up.
 
+### Amendments from the S5 security review (2026-10-10)
+
+The security review of S5 (PR #302, reviewed at 37476e9) found one high, two medium and four low issues. The main
+session's rulings below are binding on S5 and the slices after it. Items 1 to 6 are fixed in S5 itself.
+
+1. **External child exchanges are refused until the signed depth is enforced (HIGH).** The proof signs `max_depth`,
+   but `createRootGrant` does not store it, and S5's interim guard refused only when the parent was itself a child
+   (`depth > 0`). A person who signed `max_depth: 0` therefore did not stop the agent from authorising a child. The
+   guard is now fail-closed: a child exchange is refused, before any replay claim, unless the parent grant carries an
+   enforced depth limit, with `invalid_grant` and `error_code` `delegation_depth_unenforced`, audited like every other
+   token-endpoint refusal. Until S4's `depth_limit` (migration 0184) exists **and** the root exchange persists the
+   signed `max_depth` into it, no parent qualifies, so every external child exchange is refused. Lifting it is an
+   explicit code switch, not a column check alone: S4 storing the org limit on a root does not by itself make the
+   signed depth enforced. Follow-up (S4 + S5): persist min(org limit, signed `max_depth`) as the root's
+   `depth_limit`, enforce it on every admission, then lift the switch, with the reviewer's probe as the test (a proof
+   with `max_depth: 0`, the root exchange, A authorises child B → refused `delegation_depth`).
+2. **Only a steward with access to the project may start a delegation (MEDIUM).** `POST /v1/delegations/proofs`
+   checked no relation between the person, the agent and the project. Now the caller must be listed in the workload
+   identity's `sponsor_user_ids` (a steward) and must be an **explicit member** of `projectId` (a `project_members`
+   row). *Master ruling after the fix round:* a delegation-specific check, not ADR-0011's attribution rule: a project
+   with no members is NOT open for delegation, and being an admin is not membership (ADR-0180). ADR-0011's general
+   rule is unchanged. Otherwise 403 `delegation_not_steward` or `delegation_project_access`, each audited as a deny.
+3. **Every issuer on an X.509 path must be a CA (MEDIUM).** `pkijs` 3.4.1 `CertificateChainValidationEngine` checks
+   signatures and validity but not `basicConstraints.cA`, the `keyCertSign` key usage or `pathLenConstraint` on
+   issuers, so a leaf certificate could sign another leaf. After the engine accepts a path, our validator walks
+   `certificatePath` and requires every issuer (intermediates and the anchor) to have `cA = true`, the `keyCertSign`
+   bit, and a `pathLenConstraint`, when present, at least the number of intermediates below it; otherwise
+   `certificate_issuer`. Decision 21 is read with this: the engine does the path and the signatures, our code does
+   the CA rules.
+4. **An admitted proxy's own TLS certificate is never a client certificate (LOW).** When the socket peer is an
+   admitted proxy (trusted address and authenticated, decision 21), the client certificate is the forwarded one, or
+   none. The proxy's own TLS peer certificate only authenticates the proxy.
+5. **A timed-out exchange leaves no live grant (LOW).** The grant and the token are created in one transaction that
+   re-reads the timeout flag before it commits; an aborted request revokes the new grant in that same transaction
+   (reason `request_aborted`), and a timeout that fires during the commit revokes it straight after. The request's
+   audit row waits for the exchange to settle and records what really happened (`timeout`, or
+   `timeout_grant_revoked` with the grant id). A refusal is never recorded while a live grant exists.
+6. **Strict root-grant defaults (ADR-0180).** Three new org settings, all strict, relaxed only through the audited
+   `PUT /v1/org/settings` with the `settings_relax` step-up (migration 0188):
+   - `delegationUncappedRootAllowed` (strict `false`): a root grant with no cap is refused
+     (`delegation_cap_required`) unless an admin turns this on.
+   - `delegationRootDefaultCapMicros` (strict `0` = none, so the person must name a cap): the cap applied when a
+     person names none. Setting one, or raising it, is a relaxation that needs the `settings_relax` step-up (master ruling, confirmed).
+   - `delegationRootMaxLifetimeSeconds` (strict 900): the longest root grant. The default lifetime is 15 minutes (not
+     1 hour); a longer request is refused (`delegation_lifetime`) unless an admin raises the limit (up to 24 h).
+   The proof route and the root exchange both enforce them, so a setting tightened between the two still applies.
+7. **Introspection reads `aud` as one string,** as the token endpoint does: a client assertion's `aud` must be exactly
+   the token endpoint URL (not an array containing it), and a token whose `aud` is not a single string is inactive.
+
+8. **The delegation step-up binds the whole authority (Codex X45 I7S5-02, MEDIUM).** The `identity_manage` step-up
+   for a write delegation on a classified project bound only the agent, project and resource, so a grant approved for
+   a narrow delegation could sign a wider one. Its facts are now the whole intended authority, computed after the cap
+   and lifetime are resolved: `op`, `agentIdentityId`, `projectId`, `resource`, `env`, `authorizationDetails`, the
+   resolved `capMicros`, `maxDepth`, the resolved `lifetimeSeconds` and `agentKeyThumbprint` (or null). The 403
+   returns exactly these as `action.body`, and the client posts that object verbatim to `/v1/auth/step-up/options`
+   (no web client calls the proof route yet; S6's must echo it). A grant for other facts is refused and not spent.
+9. **Replay claims outlive their signed window on any process clock (Codex X45 I7S5-04, LOW).** The adapter added the
+   provider's process-relative `expiresIn` to the database clock, so under process skew a claim could expire before
+   the signed window ended. A `client_assertion` claim now lasts at least until the verified `exp` plus the 5 s
+   allowance; an `as_dpop` claim at least until the proof's `iat` plus its 60 s acceptance age plus 5 s.
+
+Recorded with these:
+
+- **A child's resource is its parent's audience, strictly, for v1.** This answers the S3 open question above. A child
+  may not narrow to another audience; revisit only on a proven multi-audience need.
+- **Workload-identity CRUD belongs to S6's backend,** under the `identity_manage` step-up, in one module beside
+  `oauth/grant-admin.ts`. Steward edits (`sponsor_user_ids`) and the SPIFFE trust bundles move from environment
+  variables into audited storage in S9.
+
+### Amendments from the S4 build and its review (2026-10-10)
+
+S4 (in-process wiring) is PR #326. These record what S4 built where the decisions left a choice. None changes an
+owner decision.
+
+1. **First load gives identities, never grants.** `ensureInternalIdentities` (boot) and `ensureIdentityFor` (first use)
+   give every `agents`, `builder_agents` and `engine_runners` row its one identity: `active`, allowed only in this
+   deployment's mode (`hosted | byoc | air_gapped`), steward = the subject's owner or the system principal, no grants
+   (OWNER DECISION 1, ADR-0180). An admin grants through `PUT /v1/workload-identities/:id/grants` (built in S4 with
+   the list, detail and grant-set read; `identity_manage` step-up). The demo seed grants each demo agent itself that
+   way. Identities and delegation grants are never deleted, so an agent, person or project they name can no longer be
+   hard-deleted (tests skip them in cleanup).
+   **Stewards bound what may be granted (S4 amendment 1, follow-up N1 from the #326 review):** a grant-set write is refused 422
+   `grant_exceeds_stewards`, audited, when an item is held by none of the identity's stewards (`sponsor_user_ids`:
+   their own direct or role grants minus revocations; a connector in its mode and for every listed object). The
+   system principal holds nothing, so an unowned agent's identity is granted nothing until an admin names a person
+   (`PATCH /v1/workload-identities/:id`, built for this; `identity_manage` step-up bound to the change). The
+   at-use intersection (decision 3) is unchanged. The PUT's step-up is bound to the identity, the revision and a
+   canonical digest of the set (N2), so a step-up for one set is never good for another.
+   **Fix round from the #336 review.**
+   - **Changing the stewards (M1).** A PATCH that changes the stewards re-checks the identity's CURRENT grant set
+     against the proposed stewards in the same transaction. If an item is no longer held it is refused 422
+     `grant_exceeds_stewards`, with a deny audit row. When a steward later loses a grant, nothing cascades: the
+     drift is bounded at use by the sponsor intersection (decision 3). Revocation cascades are not built.
+   - **"Holds" (L3).** It is the steward's direct and role grants minus the steward's revocations, the same
+     subtraction as `sponsorGrantsMiss`. A whole-server revocation (`tool_name IS NULL`) takes every tool and the
+     server grant. An agent or connector revocation also takes a role-derived grant.
+   - **Locking (L5).** The check reads those grant, assignment and revocation rows `FOR SHARE` inside the write's
+     transaction.
+   - **Digest (L2).** The set digest is the canonical JSON of structured, sorted entries; no strings are joined.
+   - **Auditing (L4).** Every PATCH refusal writes a deny audit row: `identity_not_found`, revoked,
+     `steward_not_found` and `grant_exceeds_stewards`. The PATCH step-up is bound to the identity and a digest of
+     exactly the change.
+2. **One chain per piece of work.** A pillar-7 node dispatch gets a root grant from the initiating user to the top
+   lead's agent and one child per lead down to the worker (consecutive same-agent hops collapse); a builder turn or
+   resumed segment, and each schedule firing, gets a root to the builder agent (context: the turn, or the schedule); an
+   engine run gets a root to its runner at lease, ended with the run. Each hop carries exactly the work's needs (the
+   agent in its mode, the tools and connectors the person holds and, under `own_grants`, every holder holds itself);
+   the §5.1 ceiling is each child's `ceiling` input. The chain is revoked (`run_ended`) when the work returns.
+3. **Lifetime and caps.** Lifetime = min(1 h, the run's own deadline), turned into an expiry inside each grant's
+   transaction from `clock_timestamp()` after the locks (review M1; I7S3-01). Caps: a node's chain is capped by
+   min(its §5.2 ceiling left, the run cap left); a builder chain by the agent's monthly limit left; an engine chain by
+   the run's budget. **Open:** a run, builder agent or schedule with no budget gets an uncapped chain; no number is
+   invented.
+4. **The person first.** Where the person alone would be refused, the person's reason is shown (decision 30): the
+   orchestration owner check and the builder step gate run before the chain is made, and on the tool path a
+   `delegation-scope` refusal the person would also get reports the person's rule (a ceiling exclusion keeps
+   `lead-ceiling`).
+5. **Stamping.** Audit rows written while an agent acts are stamped through one async context in the chained writer:
+   before the v2 boundary in `detail.delegation`, from it in the actor columns. Usage rows and trace spans carry the
+   actor columns; usage is settled along the chain in the usage row's transaction. Receipts carry the chain through
+   ADR-0189's v2 payload once B1's v2 emission lands (its source is these columns).
+6. **The audit v2 cutover** is `REGULAIT_AUDIT_V2_CUTOVER=run` on one boot after a drained deploy; every boot refuses
+   a boundary it cannot write; trigger `audit_log_v2_floor` (0184) refuses a v1 row past the boundary from any writer.
+7. **Calls still decided as the person (`actor: null`).** Each is one call the person made directly, with no agent
+   principal acting: the copilot narration, the eval harness and red-team dispatches, the playground, intake assist,
+   the access-recommendation judge, decomposition (a draft plan; the run's workers act under grants), plan-time
+   envelopes, policy simulation, routing and model listings for a person, and the MCP and compat routes for a person's
+   own key. A workload caller (S5's delegated token) is decided with its grant on `/mcp` tools/call, tools/list, every
+   protocol method and the logging relay, and on the compat dispatch and model listing.
+
+### Amendments from the conformance-vector gaps (2026-10-10)
+
+The specification vectors merged in PR #334 (`packages/shared/test-vectors/delegation/`) list six places where this
+ADR left a behaviour undefined. Each item below closes one. Where the decisions already imply the answer, it is
+written down. Where the code on `main` answers it securely and consistently with the decisions, the code's behaviour
+is adopted and cited. Where the code is weaker, the strict rule is written and marked **code follow-up required**.
+None relaxes a strict default (ADR-0180).
+
+1. **An mTLS parent's child exchange is refused `mtls_parent_handoff_unsupported`, before the depth guard.** Decision
+   23 checks the parent token first, and a certificate-bound parent fails that check: it can never hand off across
+   processes in v1, whatever its depth. S5 item 1's `delegation_depth_unenforced` guard runs after the parent's
+   authorization has been checked. So for a parent bound with `cnf.x5t#S256` the answer is `invalid_grant` with
+   `error_code` `mtls_parent_handoff_unsupported`, today and after the depth switch lifts. Both refusals come before
+   any replay claim and any allocation. *Adopted from the code:* `checkDelegationAuthorization`
+   (`apps/gateway/src/delegated-token.ts`) refuses the mTLS binding before it reads anything else, and the token
+   endpoint's depth guard (`apps/gateway/src/oauth/token-endpoint.ts`) runs only after that check passes. Vector
+   `child-mtls-parent-active`.
+2. **A child whose resource is not its parent's audience is refused `invalid_target` with `error_code`
+   `audience_not_parent`.** The recorded ruling under the S5 amendments makes the parent's audience the child's only
+   allowed resource. The error is `invalid_target`, the decision 15 error for a resource fault. The check runs after
+   the parent's authorization (item 1) and before the depth guard, so it answers in both profiles. *Adopted from the
+   code* (`token-endpoint.ts`, the child preflight). Vector `child-other-audience`.
+3. **A `delegationRootMaxLifetimeSeconds` above 86 400 is refused as a malformed setting, and nothing is saved.** The
+   bound is a validation limit, not a relaxation an admin may unlock. So `PUT /v1/org/settings` answers `400` with
+   `error` `validation`, the same as any value outside a setting's registered limits. The refusal comes before any
+   step-up is asked for, and a `settings_relax` step-up does not change it. *Adopted from the code:*
+   `IDENTITY_SETTING_LIMITS` (`packages/shared/src/identity/settings.ts`, 60 to 86 400) parsed by
+   `updateOrgSettingsSchema` and answered by the app's validation handler. The proof route's own `lifetimeSeconds`
+   carries the same 86 400 ceiling. Vector `s5-max-lifetime-setting-over-24h`.
+4. **A step-up grant made for other facts is refused as `step_up_required`, and it is not spent.** The grant is looked
+   up by the digest of the exact facts S5 item 8 lists. A grant for any other facts does not match, so nothing is
+   spent. The answer is the ADR-0186 refusal: `403` with `error` `step_up_required`, the current facts as
+   `action.body`, and `presentedGrant: "not_valid_for_this_action"`. A `step-up-grant-refused` deny row is written.
+   *Adopted from the code* (`checkStepUp`, `apps/gateway/src/step-up.ts`). Vectors `s5-step-up-other-*`.
+5. **Owner decision 4's credential refusals.** Each one is a `403` before any proof is signed:
+   - the **bootstrap token** (no person): `error` `delegation_proof_credential`;
+   - a **virtual key** (already a delegated credential): `error` `virtual_key_scope`. The route allow-list hook
+     answers first, because no virtual-key purpose lists `POST /v1/delegations/proofs`. The route's own
+     `delegation_proof_credential` stays as the backstop;
+   - an **API key whose owner does not meet the org MFA rule**: `error` `mfa_enrollment_required` with `credential`
+     `api_key`, from the authentication hook (ADR-0181 FX2), audited `api-key-mfa-enrollment-required`.
+
+   *Adopted from the code* (`createDelegationProofRoute`, the virtual-key hook and the MFA gate in
+   `apps/gateway/src/app.ts`). **Code follow-up required:** the route's `delegation_proof_credential` refusal writes no
+   audit row. Every other refusal on this route is an audited deny (S5 item 2), and refusing a person-less or
+   delegated credential that tries to start a delegation is a governance decision. It must write the same
+   `delegation-proof-refused` deny row, with the credential kind and no secret. Vectors `human-proof-credential-*`.
+6. **The root wire names and types are recorded as S5 built them.** Decision 15 names the fields; these are their
+   spellings and types. The suite RFC of owner decision 5 may still change them, but only in a later ADR.
+   - **The proof request** (`POST /v1/delegations/proofs`, JSON, `createDelegationProofSchema`): `agentIdentityId`
+     (uuid), `authorizationDetails` (the decision 27 scope, at least one entry), `resource` (URL), `projectId` (uuid),
+     `env`, and optionally `agentKeyThumbprint` (base64url SHA-256), `capMicros` (integer micro-dollars), `lifetimeSeconds`
+     (integer, 60 to 86 400) and `maxDepth` (integer, 0 to the depth ceiling). Unknown members are refused.
+   - **The proof** is a JWS with `alg` `EdDSA`, `typ` `regulait-delegation-proof+jwt` and the issuer key's `kid`. Its
+     claims are: `iss` and `aud`, both our issuer; `sub`, the person's user id; `jti`; `iat`; `exp`, at most 120 s
+     after `iat`; `agent`, the agent identity id; `child_cnf`, the agent's key thumbprint, present only when given; and
+     `delegation`.
+   - **`delegation` is canonical text, not an object.** In the proof and in the child's delegation authorization
+     (decision 23), `delegation` is a string: the RFC 8785 form of the body. A verifier compares that string with
+     the canonical form of what it was given, byte for byte. A JSON object in its place is refused.
+   - **The body** (`delegationBodySchema`, strict) has these members: `authorization_details`, `resource`,
+     `project_id` (uuid or `null`), `env`, `cap_micros` (integer or `null`; `null` means uncapped and is never
+     omitted), `max_depth` (integer), and `expires_at` (absolute epoch seconds). The proof route turns
+     `lifetimeSeconds` into `expires_at`. The root exchange takes cap, depth and lifetime only from the signed body and
+     never from the form. The child exchange restates them as the form fields `cap_micros` (decimal digits or the
+     literal `null`), `max_depth`, `expires_at`, `project_id` and `env`.
+
+   *Adopted from the code* (`packages/shared/src/identity/contract.ts`, `.../identity/delegation-authz.ts`,
+   `apps/gateway/src/oauth/delegation-proof.ts`). Vectors `root-request-template` and the `request-*` family.
+
 ## Spike S0 result (2026-10-10)
 
 S0 ([R11](../research/R11-identity-s0-spike.md), Codex X32, PR #250) returned **GO** for owner decision 2:
@@ -982,7 +1184,7 @@ and the audit cutover (19) are settled in this ADR before S1, so S1 freezes them
 | **S3 issuer and grants** | `delegation.ts` (refuse-over-scope creation, decision 22 edge allocations with idempotency, per-edge settlement, release sweep, the decision 23 authorization check, cascade revoke, the decision 17 live-chain query), signing-key management and rotation, JWKS route, token mint and the decision 13 verifier | S1, and S2's `ActorChain`/scope types | after S2's types land; then **yes**, with the rest of S2 and S6 |
 | **S4 in-process wiring** | Creates the internal identities and grants **before** any agent path requires them (one first-load step, then the paths switch on); grants through `executeGovernedDispatch` / `ToolCall` / `ConnectorCall`; orchestration lead→worker child grants (ceiling folded in), builder turns, schedules, engine runs; audit, trace, usage and receipt stamping; then the audit v2 cutover (decision 19) after all replicas run v2 code | S2, S3 | serial (orchestration, builder, mcp-proxy) |
 | **S5 token endpoint and external callers** | `/oauth/token` token exchange per decision 15, client auth (`private_key_jwt`, mTLS, SPIFFE), DPoP and nonce, revocation and introspection; delegated tokens accepted on `/mcp/:serverId` and the compat routes; RFC 9728 `authorization_servers` | S3, S0 closed | **Yes**, with S4, only with the split stated here: S5 owns `auth.ts` and `oauth/`, S2 owns the ABAC wiring, S4 owns the governed call paths; none edits another's files |
-| **S6 admin UI** | Agent identities page (create, bind key or SPIFFE ID, suspend, revoke, stewards), grants editor for agent principals, "proposed grants from observed usage", delegation chain in traces, audit and the agent card | S1 stubs | **Yes** (web only); its acceptance and merge come after S4/S5's real routes |
+| **S6 admin UI and its backend** | Agent identities page (create, bind key or SPIFFE ID, suspend, revoke, stewards), grants editor for agent principals, "proposed grants from observed usage", delegation chain in traces, audit and the agent card. *Ownership (2026-10-10):* Claude builds both halves (ADR-0191). The S6 **backend** owns workload-identity CRUD and the grant administration routes the S3 open question left unassigned (list, revoke, tree), under the `identity_manage` step-up, in one module beside `oauth/grant-admin.ts` (master ruling after the S5 security review, recorded with #302). The UI follows that review's rulings: delegation offered only to an agent's stewards with access to the project; a cap required on root grants unless an admin relaxed it; root grant lifetime 15 minutes by default; refusals `delegation_depth_unenforced` and `invalid_target` explained. The S3 open question on audience is answered there too: a child's resource is its parent's audience, strictly, for v1 | S1 stubs; S4/S5 for the real routes | Web part **yes**, against mocks; acceptance and merge after S4/S5's real routes |
 | **S7 retire bearer workload secrets** | Engine runners and PDP clients move to `private_key_jwt` + DPoP; `rge_` and `pdp` virtual keys removed only after tests prove the migrated clients keep the engine-key ceilings, project pinning and sponsorship of ADR-0187 | S5 | serial |
 | **S8 outbound MCP identity** | `identity_propagation` on upstream connects (signed assertion per call) | S5 | **Yes**, with S7 and S9 |
 | **S9 SPIFFE backend and docs** | Trust-bundle management, SVID client auth end to end, BYOC and air-gapped runbooks (each command executed, M-041) | S5 | **Yes**, with S7 and S8 |

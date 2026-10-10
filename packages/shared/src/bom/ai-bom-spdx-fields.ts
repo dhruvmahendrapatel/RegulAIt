@@ -19,13 +19,16 @@
  *    refused, never cut down: cutting would record a value nobody declared.
  *  - a VERSION and an ORIGINATOR are bounded plain text with no URL, no `@`
  *    (R10's email scan would refuse the snapshot), no control character and no
- *    credential-shaped material (the audit scrubber's own rules, ADR-0099).
+ *    credential-shaped material (the audit scrubber's own rules, ADR-0099),
+ *    and they pass B7's name check (`assertAiBomName`: hidden, escaped and
+ *    fullwidth URLs, `javascript:`/`data:` schemes).
  *  - a DATASET TYPE is a non-empty set of SPDX 3.0.1 `DatasetType` values.
  *
  * Refusal messages name the property and the rule, never the value.
  */
 import { z } from "zod";
 import { scrubAuditText } from "../audit-scrub.js";
+import { AiBomRecordError, assertAiBomName } from "./ai-bom-records.js";
 import { isSpdxDateTime, isSpdxDownloadLocation } from "./ai-bom-spdx.js";
 
 /** the parents a declaration may belong to (one foreign key each, R36's rule) */
@@ -105,6 +108,13 @@ function plainText(property: string, v: unknown, rule: string): string {
   if (v.includes("@")) return refuse(property, rule, "holds an @ (R10: no email shape in a BOM)");
   if (SCHEME_PREFIX.test(v) || v.includes("://")) return refuse(property, rule, "holds a URL");
   if (scrubAuditText(v) !== v) return refuse(property, "credential_shaped", "holds credential-shaped material (refused, never redacted)");
+  // B7's name check on top (one definition for every BOM name): hidden, escaped or fullwidth URLs and script schemes
+  try {
+    assertAiBomName(property, v);
+  } catch (e) {
+    if (e instanceof AiBomRecordError) return refuse(property, "name_check_refused", "refused by the AI BOM name check (a URL in any form, a script or data scheme, or credential-shaped material)");
+    throw e;
+  }
   return v;
 }
 

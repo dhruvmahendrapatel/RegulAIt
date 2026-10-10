@@ -8,8 +8,14 @@
  * file registers exactly that list.
  *
  * BUILT IN S3: the JWKS document and the issuer signing-key routes (list,
- * rotate, revoke), over `identity-signing-keys.ts`. Every other route below is
- * still the S1 stub.
+ * rotate, revoke), over `identity-signing-keys.ts`. BUILT IN S5 (`oauth/`):
+ * the token endpoint, revocation, introspection, the delegation proof and the
+ * delegation-grant admin routes. Every other route below is still the S1 stub.
+ *
+ * BUILT IN S4 (`workload-identity-admin.ts`): the identity list and detail, and
+ * an identity's own grant set (read, and replace under an `identity_manage`
+ * step-up), because S4 switches the agent paths on under the strict default
+ * and an admin must be able to grant.
  *
  * Public (no RegulAIt credential; each authenticates IN-ROUTE once built):
  *   GET  /.well-known/jwks.json             the issuer's public keys (S3, built)
@@ -40,6 +46,7 @@ import {
   type IdentitySigningKeyListView,
 } from "@regulait/shared";
 import { requireStepUp } from "./step-up.js";
+import { registerOAuthRoutes } from "./oauth/index.js";
 import {
   IdentitySigningKeyError,
   jwksDocument,
@@ -48,6 +55,7 @@ import {
   revokeIdentitySigningKey,
   rotateIdentitySigningKey,
 } from "./identity-signing-keys.js";
+import { workloadIdentityAdminHandlers } from "./workload-identity-admin.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const kidParam = z.object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN) });
@@ -64,8 +72,9 @@ function signingKeyRefusal(reply: FastifyReply, err: unknown) {
   return reply.status(status).send({ error: err.code, detail: err.message });
 }
 
-export function registerIdentityRoutes(app: FastifyInstance, db: Db): void {
+export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
   const notBuilt = async (_req: unknown, reply: FastifyReply) => reply.status(501).send(IDENTITY_NOT_BUILT);
+  const s4 = workloadIdentityAdminHandlers(db);
   // public: the issuer's PUBLIC keys (decision 5) — active, and retired ones
   // inside their overlap; never a revoked key. Short cache: a revocation must
   // reach verifiers quickly.
@@ -73,29 +82,22 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db): void {
     const doc = jwksDocument(await publishedSigningKeys(db));
     return reply.header("cache-control", "public, max-age=60").type("application/jwk-set+json").send(JSON.stringify(doc));
   });
-  app.post("/oauth/token", notBuilt);
-  app.post("/oauth/token/revocation", notBuilt);
-  app.post("/oauth/token/introspection", notBuilt);
-  // a person acting for themselves
-  app.post("/v1/delegations/proofs", notBuilt);
+  // S5: the token endpoint, revocation, introspection, the delegation proof and the grant admin backend
+  registerOAuthRoutes(app, db, { dataKey: opts.dataKey });
   // admin: identities, credentials, an agent's own grants
-  app.get("/v1/workload-identities", notBuilt);
+  app.get("/v1/workload-identities", s4.list);
   app.post("/v1/workload-identities", notBuilt);
-  app.get("/v1/workload-identities/:identityId", notBuilt);
-  app.patch("/v1/workload-identities/:identityId", notBuilt);
+  app.get("/v1/workload-identities/:identityId", s4.get);
+  app.patch("/v1/workload-identities/:identityId", s4.patch);
   app.post("/v1/workload-identities/:identityId/revoke", notBuilt);
   app.get("/v1/workload-identities/:identityId/credentials", notBuilt);
   app.post("/v1/workload-identities/:identityId/credentials", notBuilt);
   app.delete("/v1/workload-identities/:identityId/credentials/:credentialId", notBuilt);
-  app.get("/v1/workload-identities/:identityId/grants", notBuilt);
-  app.put("/v1/workload-identities/:identityId/grants", notBuilt);
+  app.get("/v1/workload-identities/:identityId/grants", s4.getGrants);
+  app.put("/v1/workload-identities/:identityId/grants", s4.putGrants);
   app.get("/v1/workload-identities/:identityId/grant-proposals", notBuilt);
   // admin: what the identity forms may offer (sponsors, subjects, environments, grant targets)
   app.get("/v1/identity/picker-sources", notBuilt);
-  // admin: delegation grants
-  app.get("/v1/delegation-grants", notBuilt);
-  app.get("/v1/delegation-grants/:grantId", notBuilt);
-  app.post("/v1/delegation-grants/:grantId/revoke", notBuilt);
   // admin: the issuer's signing keys (public halves only; every write needs an
   // `identity_manage` step-up and is audited inside identity-signing-keys.ts)
   app.get("/v1/identity/signing-keys", async (_req, reply) => {

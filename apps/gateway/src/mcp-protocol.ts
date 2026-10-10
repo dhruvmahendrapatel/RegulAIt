@@ -38,6 +38,9 @@
  * results go through the same output scans as a tool result (PII, guardrails
  * including prompt injection). An output block withholds the result.
  */
+import type { GovernedActor } from "@regulait/policy-kernel";
+import { DelegationRefusedError } from "./delegation.js";
+import { actorForGrant, delegationRefusalDecision } from "./in-process-delegation.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -224,6 +227,12 @@ export interface GovernedProtocolCallArgs {
   relay?: ((n: ServerNotification) => Promise<void>) | undefined;
   /** the caller's own progress token, when it asked for progress */
   progressToken?: string | number | undefined;
+  /**
+   * ADR-0188 S4 — the delegation grant of a WORKLOAD caller (a delegated token, S5): the method is then
+   * decided for the sponsor AND the stored chain, read fresh (decision 17). A grant that cannot be read
+   * refuses, audited; it is never decided as the person alone.
+   */
+  delegationGrantId?: string | undefined;
 }
 
 /**
@@ -313,6 +322,25 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
 
   // GATE 2 — the kernel, on the protocol surface
   const ref = { serverId, name: grant, kind, surface: "protocol" as const };
+  // ADR-0188 S4: a delegated caller's chain, read now (a protocol call bills nothing: its cost is known)
+  let delegatedActor: GovernedActor | null = null;
+  if (args.delegationGrantId) {
+    try {
+      delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: true });
+    } catch (err) {
+      if (!(err instanceof DelegationRefusedError)) throw err;
+      const decision = delegationRefusalDecision(err);
+      await db.insert(auditLog).values({
+        userId,
+        serverId,
+        toolName: grant,
+        detail: { receiptClass: "decision", phase: "protocol", method, projectId, delegationGrantId: args.delegationGrantId },
+        ...decision,
+      });
+      recordDecision({ surface: "mcp_protocol", effect: "deny" });
+      return { kind: "denied", decision };
+    }
+  }
   const {
     decision,
     approvedApprovalId,
@@ -334,7 +362,8 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       undefined,
       undefined,
       approvalTargetForServer(serverId, serverRow),
-      { actor: null }, // ADR-0188 S4 replaces
+      // ADR-0188 S4: a delegated (workload) caller is decided with its stored chain; a person's own call is `null`
+      { actor: delegatedActor },
     );
   // ADR-0186 V, decision 32 — the decided params (EXACTLY what is sent) against
   // the registered upstream URL, after the entitlement decision and before its
@@ -535,7 +564,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     const relayLogs =
       relaying &&
       (method === "logging/setLevel" ||
-        (await loggingRelayAllowed(db, { userId, serverId, serverRow, projectId, forMethod: method, principal: args.principal })));
+        (await loggingRelayAllowed(db, { userId, serverId, serverRow, projectId, forMethod: method, principal: args.principal, delegationGrantId: args.delegationGrantId })));
     if (relayLogs) {
       upstream.setNotificationHandler(LoggingMessageNotificationSchema, async (n) => {
         const params = await scanForRelay(n.params, { projectId, piiIntl, piiMode, guardrails });
@@ -675,9 +704,20 @@ async function loggingRelayAllowed(
     projectId: string | null;
     forMethod: string;
     principal: AbacPrincipalContext | undefined;
+    /** ADR-0188 S4 (review M2): a workload caller's relay is decided with its chain; unreadable = no relay */
+    delegationGrantId?: string | undefined;
   },
 ): Promise<boolean> {
   const { grant, kind } = MCP_PROTOCOL_METHOD_GRANTS["logging/setLevel"];
+  let relayActor: GovernedActor | null = null;
+  if (a.delegationGrantId) {
+    try {
+      relayActor = await actorForGrant(db, a.delegationGrantId, { costKnown: true });
+    } catch (err) {
+      if (err instanceof DelegationRefusedError) return false;
+      throw err;
+    }
+  }
   const ref = { serverId: a.serverId, name: grant, kind, surface: "protocol" as const };
   const { decision, argumentsDigest, contextDigest } = await governedEvaluate(
     db,
@@ -691,7 +731,7 @@ async function loggingRelayAllowed(
     undefined,
     undefined,
     approvalTargetForServer(a.serverId, a.serverRow),
-    { actor: null }, // ADR-0188 S4 replaces
+    { actor: relayActor },
   );
   await db.insert(auditLog).values({
     userId: a.userId,
