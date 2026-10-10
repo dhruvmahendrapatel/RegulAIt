@@ -1,9 +1,9 @@
 {
   "sha256": {
-    "native": "34e8e54b9e478d63742ab6d300bd542ee7088c7fcb33356f4f7e1c2fb77d9a6c",
-    "cyclonedx-1.7": "428fbe83fbaa844ed3f64d840147b4fd48d54940d2e4a5073ad7fa6ee2331a04",
-    "cyclonedx-1.6": "fc2b7b00c3ad2d1f5956e162f69da0315b590282d57aeaba659dbcbbd0ec7897",
+    "native": "c1403f2fa46295a04530f72d3208d26eb1b56973fcfed50059bd51931591d0fc",
+    "cyclonedx-1.7": "90d71a50ae7c7c3391ebda94a4a059affcd722f48fe442cc4f60f017f624492f",
+    "cyclonedx-1.6": "07237b81376c4580a8d8df4bd3d81d10c68c3b3217754b0bc8fc2c49facf09c3",
     "spdx-3.0.1": "47e136150dc34e4014bd186a515acf22e39f7f950d1d4bdda3955343f2637031"
   },
-  "signatureEd25519SyntheticKey": "/MUhBadUVzalO1ZfHUer57dPy+aSxoQmz55QOsvvlw+qfIl/j/niAdYZt5r94QsO/Mv6a6v+xNKVddX+WehMBg=="
+  "signatureEd25519SyntheticKey": "prg/VxDGBsJT8LQzt+eeSUzqVeX51yw+N83+aN5uKMLO6n/alyHE2hjq0/YXinQJtBG89+qgll5Mvoql00C/Bg=="
 }

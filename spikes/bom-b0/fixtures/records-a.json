@@ -194,7 +194,7 @@
    "version": 4,
    "checksum": "sha256:7d865e959b2466918c9863afca942d0fb89d7c9ac0c99bafc3749504ded97730:1200",
    "piiVerdict": "clean",
-   "projectDataSensitivity": "restricted"
+   "projectDataSensitivity": "regulated"
   }
  ],
  "promptCommits": [

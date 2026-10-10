@@ -165,7 +165,8 @@ const ref = {
   memory: (id) => `memory:${id}`,
   skill: (id) => `skill:${id}`,
 };
-const userRef = (id) => `user:${id}`;
+// owner columns are ON DELETE SET NULL: a null owner is `not_recorded`, never `user:null`
+const userRef = (id) => (id === null || id === undefined ? 'not_recorded' : `user:${id}`);
 // training_datasets.pii_verdict is `clean | flagged | blocked` (TRAINING_SCAN_VERDICTS). ADR-0189 R11: flagged and
 // blocked are known sensitive data; clean is NOT proof of absence (noAssertion in SPDX); anything else is refused.
 export const PII_VERDICTS = ['clean', 'flagged', 'blocked'];
@@ -366,7 +367,9 @@ export function renderCycloneDx(n, specVersion) {
   }
   for (const m of n.mcpServers) {
     services.push({
-      'bom-ref': ref.mcp(m.id), name: m.name, endpoints: [m.url], ...authOf(m),
+      'bom-ref': ref.mcp(m.id), name: m.name,
+      // a stdio server's url is the `stdio:<name>` sentinel, not an endpoint: none is emitted
+      ...(m.transport === 'stdio' ? {} : { endpoints: [m.url] }), ...authOf(m),
       services: m.tools.map((t) => ({
         'bom-ref': ref.tool(m.id, t.name), name: t.name,
         ...(t.observed ? { properties: props([prop('regulait:observed:lastSeen', t.observed.lastSeen), prop('regulait:observed:count', t.observed.count)]) } : {}),
@@ -486,7 +489,12 @@ function declarations(n, engines) {
 
 // ---------------------------------------------------------------- SPDX 3.0.1
 const toSecond = (iso) => iso.replace(/\.\d+Z$/, 'Z'); // SPDX DateTime has no fractional seconds
-const confidentiality = { public: 'clear', internal: 'green', confidential: 'amber', restricted: 'red' };
+// the persisted vocabulary (AI_USE_CASE_DATA_SENSITIVITIES): public | internal | confidential | regulated
+export const CONFIDENTIALITY = { public: 'clear', internal: 'green', confidential: 'amber', regulated: 'red' };
+const confidentialityOf = (v) => {
+  if (!Object.hasOwn(CONFIDENTIALITY, v)) throw new Error(`unknown data sensitivity: ${JSON.stringify(v)}`);
+  return CONFIDENTIALITY[v];
+};
 
 export function renderSpdx(n) {
   const s = n.snapshot;
@@ -508,7 +516,7 @@ export function renderSpdx(n) {
   for (const d of n.datasets) {
     const training = d.kind === 'training';
     const digest = datasetDigest(d).sha256;
-    const level = training && d.projectDataSensitivity ? confidentiality[d.projectDataSensitivity] : null;
+    const level = training && d.projectDataSensitivity ? confidentialityOf(d.projectDataSensitivity) : null;
     dsId.set(d.id, el({
       type: 'dataset_DatasetPackage', spdxId: id(`dataset-${encodeURIComponent(d.id)}`), name: d.name, software_packageVersion: String(d.version),
       software_primaryPurpose: 'data', dataset_datasetType: ['noAssertion'],

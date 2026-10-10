@@ -395,3 +395,19 @@ check of the new SPDX sample passes (`evidence/spdx3-validate-offline.txt`):
 | native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
 |---|---|---|---|---|
 | `34e8e54b…9a6c` | `428fbe83…1a04` | `fc2b7b00…7897` | `47e13615…7031` | `/MUhBadU…WehMBg==` |
+
+## 12. Sixth review round (2026-10-10, PR #265)
+
+- A null service owner (the column is `ON DELETE SET NULL`) renders as `regulait:owner = not_recorded`, never
+  `user:null`, on MCP servers and connectors.
+- SPDX confidentiality maps the persisted vocabulary `public | internal | confidential | regulated` (`regulated` →
+  `red`); the nonexistent `restricted` is gone, and any other value is refused rather than silently dropped.
+- A stdio MCP server emits no `endpoints`: its `url` is the `stdio:<name>` sentinel, which fails the strict
+  `uri-reference` check when the name has spaces or non-ASCII characters.
+
+New values, from `npm run test:offline` (36 tests, all passing); the offline SHACL check passes, and the SPDX rendering
+is unchanged:
+
+| native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
+|---|---|---|---|---|
+| `c1403f2f…91d0fc` | `90d71a50…4492f` | `07237b81…f09c3` | `47e13615…7031` (unchanged) | `prg/VxDG…00C/Bg==` |

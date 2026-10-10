@@ -179,4 +179,6 @@ regexes = [
   '''^n9ZXFfLcsSpY5GYt/cD6Bfx9YIAL5a4gDsKXIZ6ArhWy7/8LEAT\+5\+SK8dmm\+HqDjewnMSNA8T\+G6iRXS6kcBA==$''',
   # the third review round's run (persisted-shape fixtures)
   '''^/MUhBadUVzalO1ZfHUer57dPy\+aSxoQmz55QOsvvlw\+qfIl/j/niAdYZt5r94QsO/Mv6a6v\+xNKVddX\+WehMBg==$''',
+  # the sixth review round's run (regulated sensitivity in the fixture)
+  '''^prg/VxDGBsJT8LQzt\+eeSUzqVeX51yw\+N83\+aN5uKMLO6n/alyHE2hjq0/YXinQJtBG89\+qgll5Mvoql00C/Bg==$''',
 ]

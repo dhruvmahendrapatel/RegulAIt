@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import canonicalize from 'canonicalize';
 import { buildValidators, findEmails } from './validators.mjs';
-import { modelCardFromRow, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
+import { CONFIDENTIALITY, modelCardFromRow, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (p) => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
@@ -122,7 +122,7 @@ function decisionBom(i) {
       delegationGrantId: uuid(i + 5), path: Array.from({ length: 1 + (i % 3) }, (_, k) => uuid(i * 20 + k)), depth: 1 + (i % 3),
       scope: { tools: [`tool_${i}`], projects: [uuid(i + 6)] }, capMicroUsd: 2500000 + i, bindingKind: pick(['dpop', 'mtls'], i), thumbprint: hex(43, i + 7), authCredentialId: uuid(i + 8),
     },
-    action: { argumentsDigest: hex(64, i + 9), contextDigest: hex(64, i + 10), target: { server: `srv-${i}`, tool: `tool_${i}`, model: 'alpha-large' }, inputs: [{ kind: 'prompt_commit', hash: hex(64, i + 11) }, { kind: 'dataset', version: `v${i % 9}`, checksum: hex(64, i + 12) }], dataSensitivity: pick(['public', 'internal', 'confidential', 'restricted'], i), complianceProfile: pick(['none', 'hipaa', 'gdpr'], i) },
+    action: { argumentsDigest: hex(64, i + 9), contextDigest: hex(64, i + 10), target: { server: `srv-${i}`, tool: `tool_${i}`, model: 'alpha-large' }, inputs: [{ kind: 'prompt_commit', hash: hex(64, i + 11) }, { kind: 'dataset', version: `v${i % 9}`, checksum: hex(64, i + 12) }], dataSensitivity: pick(['public', 'internal', 'confidential', 'regulated'], i), complianceProfile: pick(['none', 'hipaa', 'gdpr'], i) },
     policy: { epoch: i, abac: [{ id: uuid(i + 13), version: i % 9, schemaVersion: 2 }], configVersionId: uuid(i + 14), canaryBucket: i % 100, guardrail: `gr-${i % 3}`, modelRuleIds: [`mr-${i}`], killSwitch: pick(['off', 'read_only', 'halt'], i) },
     model: { agentId: uuid(i + 15), provider: 'provider-alpha', requested: 'alpha-large', served: 'alpha-large-2026-08-01', pinned: i % 2 ? 'alpha-large-2026-08-01' : null, modelCardId: `mc-${i % 4}`, approvalId: uuid(i + 16), aiBomSnapshot: { serial: `urn:uuid:${uuid(i + 17)}`, version: 1 + (i % 5), sha256: hex(64, i + 18) } },
     approval: i % 3 ? notRecorded('not_applicable') : { id: uuid(i + 19), quorum: 2, deciders: [{ userId: uuid(i + 20), stepUp: 'passkey', signedDigest: hex(64, i + 21), credentialId: hex(22, i + 22) }, { userId: uuid(i + 23), stepUp: 'totp', signedDigest: null, credentialId: null }] },
@@ -466,4 +466,45 @@ test('review: `authenticated` comes only from the recorded credential state', ()
   assert.equal('authenticated' in svc('service:connector:conn-2'), false, 'no recorded state, no assertion');
   const bad = structuredClone(recordsA); bad.connectors[0].authenticated = 'yes';
   assert.throws(() => renderAll(bad), /must be a boolean/);
+});
+
+// ------------------------------------------------------------------------------------------------ round 6 (PR #265)
+test('review: a null service owner (ON DELETE SET NULL) is not_recorded, never user:null', () => {
+  const r = structuredClone(recordsA);
+  r.mcpServers[0].ownerUserId = null;
+  r.connectors[0].ownerUserId = null;
+  const out = renderAll(r);
+  for (const [k, b] of Object.entries(out.bytes)) assert.doesNotMatch(b, /user:(null|undefined)/, k);
+  const d = JSON.parse(out.bytes['cyclonedx-1.7']);
+  for (const ref of ['service:mcp:mcp-9', 'service:connector:conn-2']) {
+    assert.ok(d.services.find((s) => s['bom-ref'] === ref).properties.some((p) => p.name === 'regulait:owner' && p.value === 'not_recorded'), ref);
+  }
+  allValid(r);
+});
+
+test('review: every persisted data sensitivity maps to an SPDX confidentiality level; others are refused', () => {
+  assert.deepEqual(Object.keys(CONFIDENTIALITY), ['public', 'internal', 'confidential', 'regulated']);
+  for (const [v, level] of Object.entries(CONFIDENTIALITY)) {
+    const r = structuredClone(recordsA);
+    r.datasets.find((d) => d.kind === 'training').projectDataSensitivity = v;
+    const ds = spdxOf(r)['@graph'].find((x) => x.spdxId?.endsWith('#dataset-ds-train-01'));
+    assert.equal(ds.dataset_confidentialityLevel, level, v);
+    allValid(r);
+  }
+  const bad = structuredClone(recordsA);
+  bad.datasets.find((d) => d.kind === 'training').projectDataSensitivity = 'restricted';
+  assert.throws(() => renderAll(bad), /unknown data sensitivity/);
+});
+
+test('review: a stdio MCP server has no endpoint (its url is the stdio:<name> sentinel)', () => {
+  const r = structuredClone(recordsA);
+  r.mcpServers[0].transport = 'stdio';
+  r.mcpServers[0].name = 'Local Files ü';
+  r.mcpServers[0].url = 'stdio:Local Files ü';
+  const svc = cdxOf(r).services.find((s) => s['bom-ref'] === 'service:mcp:mcp-9');
+  assert.equal('endpoints' in svc, false);
+  allValid(r);
+  // non-vacuity: the sentinel as an endpoint fails the strict uri-reference check
+  const forced = mutate(cdxOf(r), (d) => { d.services.find((s) => s['bom-ref'] === 'service:mcp:mcp-9').endpoints = ['stdio:Local Files ü']; });
+  assert.equal(validators['cyclonedx-1.7'](forced).valid, false);
 });
