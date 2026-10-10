@@ -390,6 +390,8 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
 - **Honesty.** A pre-identity decision shows `actors: not_recorded`; a pre-facts decision shows its sections
   `not_recorded`; no section is filled from current state; an AI BOM with an unknown licence or training source says
   `unknown` and its composition is `incomplete`; a test fails if any `complete` aggregate has an unrecorded member.
+  Loader and renderers run on rows shaped by the `packages/db` schema (nulls and defaults included), and a test fails
+  on any rendered value with no source column or stated derivation (R30, R32); one snapshot per subject kind (R31).
 - **No content.** Seeded prompts, arguments and outputs containing canary strings never appear in any BOM, rendering or
   bundle; an email address in any input field fails validation.
 - **Finality.** Before the anchor flushes → 409 `bom_anchor_pending`; flushed to a destination not observed
@@ -606,7 +608,7 @@ A third review of PRs #253 and #265 raised further findings. Each was checked ag
 `main` (`apps/gateway/src/decision-receipts.ts`, `apps/gateway/src/org-settings.ts` `runAuditPruneOnce`,
 `apps/gateway/src/export-bundle.ts`, `packages/shared/src/audit-scrub.ts`, migrations 0168 and 0170, and the
 `usage_events`, `model_cards` and `eval_datasets` tables in `packages/db/src/schema.ts`). All were real; none needed an
-owner choice. They bind B1 to B8 like R1 to R14. R25 to R28 answer four further comments from the same round.
+owner choice. They bind B1 to B8 like R1 to R14. R25 to R28 answer four further comments from the same round, and R29 to R32 the spike's comments on real-table mapping.
 
 R15. **Late facts survive a signing-key outage.** With no receipt key the sweep returns `no_key` while governed calls
     go on (`decision-receipts.ts`, `runDecisionReceiptSignSweep`), so R5's "signed when written" would force an
@@ -736,6 +738,35 @@ R27. **Data flows are keyed to each use case, never collapsed.** §3's service `
 R28. **B7 waits for the renderer release.** B7's install-scope AI BOM is a snapshot, so it is subject to R2 and R17.
     B7 now depends on B3, B4 and B5; it may be developed in parallel, but its release job stays inactive (it produces
     no snapshot and publishes nothing) until the R17 switch has flipped.
+
+R29. **Artifact-to-agent edges are many-to-many.** `model_artifacts` has no agent column, and one `artifact_scans`
+    row may be cited by model cards of several agents (`model_card_evidence` is unique only on card and scan). B3
+    derives each edge through `model_card_evidence.artifact_scan_id` → the card → the card's subject (agent or custom
+    provider), and keeps every edge it finds. An artifact with no such path is listed with no dependency edge and
+    is in the `incomplete` composition; no association is picked or invented.
+
+R30. **No fabricated value, from any real table.** B3 maps only what a column records, and states the rest as
+    unknown:
+    - `model_card_evidence` and `artifact_scans` persist no digest of the evidence itself (the scan row holds the
+      scanned artifact's SHA-256). An evidence entry carries the kind-specific reference (eval run id, artifact scan
+      id, external reference) and a digest only where one is persisted or canonically derived under a rule B1 writes
+      down; otherwise it says `digest: not_recorded`. A value such as `sha256:undefined` is a build failure.
+    - `standard_refs` are display-only identifiers or prose: they render as `regulait:standardRef` properties, never
+      as `externalReferences` URLs. A URL reference needs its own validated field.
+    - A service's `authenticated` comes from the provider's or connector's credential record (for example a custom
+      model provider with no key is `false`); with no recorded state it is omitted, never defaulted to `true`.
+
+R31. **Every subject kind is built, from its own root.** The spike rendered only use-case subjects. B3 branches on
+    `subject_kind`: a use case roots at the use case; an agent or builder agent roots at that agent (its flows per R27);
+    the install roots at the install (the R20 key, ADR-0116 identity or none). No subject is rendered through a
+    synthetic use case. B3's tests render and validate one snapshot of each of the four kinds.
+
+R32. **B3's loader is tested against real row shapes, not the spike fixtures.** The B0 fixtures were invented shapes,
+    and this round found several fields that no table has (a singular artifact agent, evidence digests, URL standard
+    references, a model card's task and architecture columns, eval dataset metadata). B3 and B5 test the loader and
+    renderers with rows built from the `packages/db` schema types (through the real migrations in the integration
+    tests), including nulls and column defaults, and a test fails if any rendered value has no source column or
+    stated derivation. The spike's fixtures are not a contract.
 
 ### Owner items from the review (not decided here)
 
