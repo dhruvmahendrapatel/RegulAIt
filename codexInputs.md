@@ -1307,3 +1307,100 @@ or claimed B4I-03 closed without their integration/CI verification.
 The proposed CI filter was dry-checked:18 remaining workspace projects, with
 both shared and the recursive root script explicitly excluded. The first
 negative-only filter included the root; the reviewed proposal now excludes it.
+
+### X53 independent B9 declarations review — 2026-10-10 UTC
+
+Frozen owner PR #322 `ed49eaabbda3cec96633964d91c67a7894a78c14`, normally
+merged into main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7` as `afcb66ac`
+for execution in the existing review checkout. Merge was pushed immediately;
+Codex changed no owner implementation. B5 dependency source is carried by the
+frozen owner ancestry. Board assignment and entry condition are pinned to
+`c8d941a2729a9041e2602de786f79ccf46d2ba2a` (17:30 UTC). Findings were recorded
+independently before exchange with the separate X52 UI author.
+
+**B9D-01 — MEDIUM, pending newer entry condition: undeclared or withdrawn model
+fields still render from legacy data_claims.** The newer X53 board requires
+`ai_bom_spdx_declarations` as the only source and says the `data_claims` fallback
+is being retired. Frozen ADR-0189 R51 Rendering expressly permits that fallback,
+and the implementation follows that older contract. This finding is therefore
+an outstanding announced acceptance requirement, not an assertion that the
+frozen code violates its frozen ADR or permits an unauthenticated write.
+
+Independent actual PostgreSQL / HTTP / gateway-loader counterexamples:
+
+1. A model card has a pinned version, a licence and legacy `data_claims`
+   releaseTime/downloadLocation, with zero declarations. The actual loader and
+   builder produce a schema-valid SPDX document, rather than `not_producible`
+   listing `ai_AIPackage.releaseTime` and
+   `ai_AIPackage.software_downloadLocation`.
+2. Declare new values through both admin PUT routes, then withdraw them through
+   both POST routes. GET correctly reports both fields undeclared and the current
+   declaration list empty. The next actual capture nevertheless renders SPDX
+   with the OLD time and old origin restored from `data_claims`.
+
+Source: `packages/shared/src/bom/ai-bom-spdx.ts:249` and `:250` use declaration
+`?? claimText(...)`; `currentSpdxDeclarations` intentionally excludes withdrawn
+rows, so a withdrawal becomes indistinguishable from never declared to the
+renderer. This undermines withdrawal effectiveness and the new provenance entry
+condition. Parent-card pin precedence remains accepted: R51 explicitly keeps a
+recorded pinned version first; it is not part of B9D-01.
+
+Acceptance for Claude's owned files: remove the legacy releaseTime and download
+location fallback, update R51's older source-precedence wording and affected B5
+fixtures/tests, and prove both cases return precisely the two missing property
+names with no SPDX bytes. Declaring both values must still render; correction
+and withdrawal retain their immutable, audited history. The root routed this
+finding before publication; no product fix is made in this review branch.
+
+**Other reviewed controls: no additional defect reproduced.** Anonymous requests
+return401 and member requests403 on GET/PUT/withdraw; admin validation rejects
+non-HTTPS, private path/query, fragment, userinfo, trailing slash, Unicode host,
+invalid port, bad source/property and fractional-second time without echoing
+values or persisting rows. Valid writes use database timestamps and the stated
+source, with exactly one audit row each. A scratch-only trigger intentionally
+fails the audit insert; the route returns500 and the declaration rolls back in
+the same transaction. The trigger/function are removed immediately. All three
+parent kinds refuse UPDATE/DELETE/TRUNCATE, admit only their own parent's
+cascade, and ignore a supplied future declared_at. Both new functions pin
+`search_path=pg_catalog, public, pg_temp`; a temp parent-table shadow cannot
+admit a direct delete. CHECK controls reject invalid direct URL/time/parent and
+column shapes. Existing tests also cover complete/partial dataset declarations,
+exact missing property names, schema/cardinality and withdrawal.
+
+Durable `apps/web/review/x53-spdx-declarations.probe.ts` contains18 independent
+cases. Run with `EXPECT_FIXED=1` to enforce the new entry condition:
+`EXPECT_FIXED=1 DATABASE_URL=<own scratch> node apps/web/review/x53-spdx-declarations.probe.ts`
+returned **16 PASS / 2 genuine RED**, expected exit1, both reds B9D-01. Its default
+diagnostic mode observes both reproductions and exits0; that diagnostic status
+is NOT a claim that the declaration-only acceptance passed. Initial harness
+setup used a model card without its required subject; the database rejected it
+before any case executed. Corrected the synthetic fixture, recreated only the
+owned database, then ran diagnostics and the strict assertions.
+
+Fresh bounded validation on the reviewed composition:
+
+- `pnpm install --frozen-lockfile` PASS.
+- `pnpm --filter @regulait/gateway... build` PASS, full dependency closure.
+- `pnpm --filter @regulait/shared exec vitest run src/bom/ai-bom-spdx-fields.test.ts src/bom/ai-bom-spdx.test.ts --maxWorkers=1`:
+  **55/55 PASS**.
+- `DATABASE_URL=<own scratch> pnpm --filter @regulait/gateway exec vitest run src/zz-adr0189-b9-spdx-fields.test.ts --maxWorkers=1`:
+  **20/20 PASS**, suite's own freshly migrated disposable DB removed by teardown.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and
+  `pnpm --filter @regulait/web build`: PASS.
+
+**91 positive checks PASS / 2 acceptance RED**, across93 distinct selected
+checks; no skipped cases. Repeated diagnostic/strict observations are not added
+to the distinct count. This is not a wholly green acceptance result and not a
+full gateway/shared or SHACL-driver claim. Logs:
+`/tmp/x53-{install,closure,independent,independent-final,independent-strict,shared,gateway,web-tsc,web-build}.log`.
+Owned `regulait_review_x53_oct10b` was dropped; temporary audit-failure fixture
+removed, no review processes remain and CPU lane released before publication.
+
+Limits: database review migrated this frozen journal's0182/0183/0186 sequence on
+a fresh scratch database. S4's0184 and guard hardening0185 are not yet present in
+that owner journal; ordered0184/0185/0186 composition and a deployed upgrade
+remain unmeasured. Do not apply this sequence to a shared database: the declared
+HOLD after #297/#285 remains an integration prerequisite. This review used actual
+Fastify injection and the real database/loader, with the existing test identity
+posture helper disabling MFA only inside its disposable fixture; it does not
+claim a live transport, browser, released snapshot or deploy verification.
