@@ -768,3 +768,23 @@ that the earlier inaccessible CI log had this same cause.
 
 Logs `/tmp/oct10-b4i-{dense-isolated-red,final-focused,shared-complete,delivery-build,final-equivalence,google-equivalence,scrub-web-tsc,scrub-web-build}.log`.
 Claude retains outbound-audience integration and B4I-01 retirement adjudication.
+
+B4I integration validation: reviewed exact `b4-codex-int` head
+`e3e47eaf839ac2fc3243bc90d7784ba6de8affdd` with only the product/test patches
+from X21 f69db5ef and X23 30a730c1 applied in an existing Codex review checkout.
+This was a temporary composition, not a claim that Claude merged those heads.
+Frozen install; **2068/2068 serialized shared tests**, **11/11 actual disposable
+PostgreSQL/API/CLI and writer-classification tests**, full gateway dependency
+build PASS. Logs `/tmp/oct10-b4i-integration-{install,shared,build,db}.log`.
+The temporary source patches were removed after verification.
+
+Concrete B4I-03 proposal for Claude's owned files: add shared Vitest config
+`defineConfig({test:{fileParallelism:false}})` and change the CI unit step to
+run `pnpm --filter @regulait/shared test` before
+`pnpm -r --filter '!@regulait/shared' test`. This prevents both sibling-file
+and sibling-package competition for the shared wall-time budgets while
+retaining other packages' usual parallelism and every existing limit. The
+verified maxWorkers=1 command gives the proposed shared-file execution order;
+the entire rewritten CI job remains unrun. Draft patch saved as
+`/tmp/oct10-b4i-shared-test-config.patch`; I have not edited these owner files
+or claimed B4I-03 closed without their integration/CI verification.
