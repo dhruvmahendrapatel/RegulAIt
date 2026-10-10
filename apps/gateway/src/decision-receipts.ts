@@ -1,4 +1,3 @@
-/** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
 import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
@@ -7,6 +6,7 @@ import { auditContentHash, auditRowHash, isDecisionReceiptPayload, isReceiptBund
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
+/** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
 export const DECISION_RECEIPT_SIGN_JOB_NAME = "decision-receipt-sign-sweep";
 export const RECEIPT_SIGN_LOCK_KEY = 6_000_000_186;
 const SWEEP_LIMIT = 500;
@@ -35,10 +35,9 @@ const samePublicKey = (a: ReceiptPublicKey["jwk"], b: ReceiptPublicKey["jwk"]) =
 const envelope = (row: typeof decisionReceipts.$inferSelect): SignedDecisionReceipt => ({ receiptSeq: row.receiptSeq, payload: row.payload as DecisionReceiptPayload, signature: row.signature, keyId: row.keyId });
 const publicKeys = async (db: Db): Promise<ReceiptPublicKey[]> => (await db.select().from(receiptSigningKeys).orderBy(asc(receiptSigningKeys.createdAt))).map((key) => ({ keyId: key.keyId, jwk: key.publicJwk, firstUsedAt: key.firstUsedAt?.toISOString() ?? null, retiredAt: key.retiredAt?.toISOString() ?? null }));
 
-// Explicit configuration event ids are outside the decisions/approvals stream.
-// A newly added config writer must extend this list rather than receipt itself.
-const CONFIG_RULE_IDS=["agent-owner-set","agent-owner-cleared","fallback-chain-configured","mcp-tool-price-set", "agent-created","agent-updated","agent-deleted","connector-created","connector-updated","connector-deleted","mcp-server-registered","mcp-server-updated","mcp-server-deleted","agent-lifecycle-changed"];
-const eligibleAfter=(seq:number)=>and(isNotNull(auditLog.seq),gt(auditLog.seq,seq),inArray(auditLog.objectType,[...RECEIPT_OBJECT_TYPES]),sql`(${auditLog.ruleId} IS NULL OR ${auditLog.ruleId} NOT IN (${sql.join(CONFIG_RULE_IDS.map(value=>sql`${value}`),sql`, `)}))`);
+// Receipt eligibility is classified at the writer and is fail-closed. Unknown
+// or historical unclassified rows remain in the audit chain, not this stream.
+const eligibleAfter=(seq:number)=>and(isNotNull(auditLog.seq),gt(auditLog.seq,seq),inArray(auditLog.objectType,[...RECEIPT_OBJECT_TYPES]),sql`${auditLog.detail}->>'receiptClass' = 'decision'`);
 function boundedDecisionField(value:string|null){return value===null||value.length<=4096?{value}:{value:null,hash:createHash("sha256").update(value,"utf8").digest("hex")};}
 export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = { now: new Date() }): Promise<DecisionReceiptSweepResult> {
   if ((await loadOrgSettings(db)).decisionReceiptsMode === "off") return { signed: 0, state: "off" };
@@ -140,13 +139,13 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
   app.post("/v1/receipts/verify", { bodyLimit: 5 * 1024 * 1024 }, async (req, reply) => {
     if (!isReceiptBundle(req.body)) return reply.status(400).send({ error: "invalid_receipt_bundle" });
     const trusted=await publicKeys(db);
-    const mismatched=new Set(req.body.keys.filter(supplied=>trusted.some(key=>key.keyId===supplied.keyId&&!samePublicKey(key.jwk,supplied.jwk))).map(key=>key.keyId));
-    return {...verifyReceiptBundle({...req.body,keys:trusted.filter(key=>!mismatched.has(key.keyId))}),trust:"deployment_registry"};
+    return {...verifyReceiptBundle({...req.body,keys:trusted}),trust:"deployment_registry"};
   });
   app.get("/v1/receipts/:auditId", async (req, reply) => {
     const { auditId } = req.params as { auditId: string };
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(auditId)) return reply.status(400).send({ error: "invalid_audit_id" });
     const rows = await db.select().from(decisionReceipts).where(eq(decisionReceipts.auditId, auditId));
+    await db.insert(auditLog).values({userId:req.authCtx.userId??"00000000-0000-0000-0000-000000000000",objectType:"decision_receipt",objectId:auditId,effect:"allow",ruleId:"decision-receipt-read",ruleChain:[],reason:"Decision receipt envelope read",detail:{rows:rows.length}});
     return { receipts: rows.map(envelope) };
   });
 }

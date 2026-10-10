@@ -40,7 +40,7 @@ function useKey(id: string, pair = firstKey) {
 }
 const clearKey = () => { delete process.env.REGULAIT_RECEIPT_SIGNING_KEY; delete process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID; };
 async function decision(objectType: typeof auditLog.$inferInsert.objectType = "mcp_tool") {
-  const [row] = await db.insert(auditLog).values({ userId: decisionUserId, objectType, effect: "deny", ruleId: "x21-policy", ruleChain: [], reason: "synthetic private reason", detail: { excluded: "synthetic private detail" } }).returning();
+  const [row] = await db.insert(auditLog).values({ userId: decisionUserId, objectType, effect: "deny", ruleId: "x21-policy", ruleChain: [], reason: "synthetic private reason", detail: { excluded: "synthetic private detail", receiptClass:"decision" } }).returning();
   return row!;
 }
 const get = (url: string, headers: Record<string, string> = admin) => app.inject({ method: "GET", url, headers });
@@ -165,17 +165,25 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     forged.keys=forged.keys.map(key=>({...key,jwk:pair.publicKey.export({format:"jwk"}) as typeof key.jwk}));
     for(const row of forged.receipts)row.signature=sign(null,Buffer.from(receiptCanonicalBytes(row.payload)),pair.privateKey).toString("base64url");
     const result=await app.inject({method:"POST",url:"/v1/receipts/verify",headers:admin,payload:forged});expect(result.statusCode).toBe(200);expect(result.json().results.every((row:{status:string})=>row.status!=="valid")).toBe(true);
+    const suppliedWrongKeys={...value,keys:forged.keys};
+    const pinned=await app.inject({method:"POST",url:"/v1/receipts/verify",headers:admin,payload:suppliedWrongKeys});
+    expect(pinned.json().results.every((row:{status:string})=>row.status==="valid")).toBe(true);
+    const read=await get(`/v1/receipts/${value.receipts[0]!.payload.audit.id}`);expect(read.statusCode).toBe(200);
+    expect((await db.select().from(auditLog).where(eq(auditLog.ruleId,"decision-receipt-read"))).length).toBeGreaterThan(0);
     expect(offline(value).status).toBe(2);
   });
   it("R21-04/05: same-object admin changes remain unsigned and listing envelopes is audited",async()=>{
     for(const [objectType,ruleId] of [["agent","agent-owner-set"],["agent","fallback-chain-configured"],["mcp_tool","mcp-tool-price-set"]] as const)await db.insert(auditLog).values({userId:decisionUserId,objectType,ruleId,effect:"allow",ruleChain:[],reason:"Synthetic config"});
+    // Unknown future writers and historical unclassified rows also fail closed.
+    await db.insert(auditLog).values({userId:decisionUserId,objectType:"agent",ruleId:"new-config-writer",effect:"allow",ruleChain:[],reason:"Synthetic unknown"});
+    await db.insert(auditLog).values({userId:decisionUserId,objectType:"agent",ruleId:"agent-enabled",effect:"allow",ruleChain:[],reason:"Synthetic classified config",detail:{receiptClass:"configuration"}});
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(0);
     await get("/v1/receipts?limit=500");expect((await db.select().from(auditLog).where(eq(auditLog.ruleId,"decision-receipts-listed"))).length).toBeGreaterThan(0);
   });
   it("R21-02: empty/large tool names sign and failures are visible in status",async()=>{
     const before=(await db.select().from(decisionReceipts)).length;
     const long="Z".repeat(5000);
-    for(const toolName of ["",long])await db.insert(auditLog).values({userId:decisionUserId,objectType:"mcp_tool",toolName,effect:"deny",ruleId:"synthetic-call-refused",ruleChain:[],reason:"synthetic"});
+    for(const toolName of ["",long])await db.insert(auditLog).values({userId:decisionUserId,objectType:"mcp_tool",toolName,effect:"deny",ruleId:"synthetic-call-refused",ruleChain:[],reason:"synthetic",detail:{receiptClass:"decision"}});
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(2);
     const value=await bundle();expect(value.receipts[before]!.payload.decision.toolName).toBe("");
     expect(value.receipts[before+1]!.payload.decision).toMatchObject({toolName:null,toolNameHash:createHash("sha256").update(long).digest("hex")});

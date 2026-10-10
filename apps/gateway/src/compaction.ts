@@ -189,6 +189,7 @@ export async function prepareConversationContext(
           conversationId: conversation.id,
           ...(failClosedMode ? { failClosed: true } : { failOpen: true }),
           error,
+          receiptClass: "decision",
         },
         effect: "allow",
         ruleId: failClosedMode ? "context-compaction-failed-closed" : "context-compaction-failed-open",
@@ -253,6 +254,7 @@ export async function prepareConversationContext(
             ...(args.skippedCandidates?.length
               ? { skippedCandidates: args.skippedCandidates }
               : {}),
+            receiptClass: "decision",
           },
           effect: "allow",
           ruleId: "context-compaction",
