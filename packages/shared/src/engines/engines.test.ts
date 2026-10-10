@@ -258,7 +258,8 @@ describe("review round 1", () => {
     const base = {
       imageDigest: m.imageDigest,
       engineVersion: m.version,
-      usageDataEnv: { HF_HUB_OFFLINE: true, TRANSFORMERS_OFFLINE: true, HF_HUB_DISABLE_TELEMETRY: true },
+      // B5-G: every switch the garak manifest names (derived, so the list cannot drift from the manifest)
+      usageDataEnv: Object.fromEntries(Object.keys(m.usageDataEnv).map((k) => [k, true])),
       at: new Date().toISOString(),
     };
     const egress = { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false };

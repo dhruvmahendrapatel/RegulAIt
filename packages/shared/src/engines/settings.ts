@@ -23,6 +23,16 @@ export const BATCH5_SETTING_LIMITS = {
   engineRawReportRetentionDays: { min: 1, max: 3650 },
   /** B5-M (migration 0175): the largest model artifact an upload may carry, in MiB */
   modelArtifactMaxMegabytes: { min: 1, max: 8192 },
+  /** decision 127 (migration 0176): what one uploader may keep stored, in MiB (1 TiB ceiling) */
+  modelArtifactUploaderQuotaMegabytes: { min: 1, max: 1_048_576 },
+  /** decision 127: how many artifacts one uploader may keep stored */
+  modelArtifactUploaderQuotaCount: { min: 1, max: 100_000 },
+  /** decision 127: what the whole deployment may keep stored, in MiB (10 TiB ceiling) */
+  modelArtifactOrgQuotaMegabytes: { min: 1, max: 10_485_760 },
+  /** decision 127: how many artifacts the whole deployment may keep stored */
+  modelArtifactOrgQuotaCount: { min: 1, max: 1_000_000 },
+  /** decision 127: an artifact nothing cites or is scanning is deleted this many days after upload */
+  modelArtifactRetentionDays: { min: 1, max: 3650 },
 } as const;
 
 /** THE STRICT DEFAULTS. The column defaults of migration 0173 are these values. */
@@ -33,6 +43,11 @@ export const BATCH5_STRICT_DEFAULTS = Object.freeze({
   engineRawReportRetentionDays: 90 as number,
   engineSensitiveSetApproval: true as boolean,
   modelArtifactMaxMegabytes: 512 as number,
+  modelArtifactUploaderQuotaMegabytes: 2048 as number,
+  modelArtifactUploaderQuotaCount: 20 as number,
+  modelArtifactOrgQuotaMegabytes: 20480 as number,
+  modelArtifactOrgQuotaCount: 200 as number,
+  modelArtifactRetentionDays: 30 as number,
 });
 export type Batch5Settings = {
   -readonly [K in keyof typeof BATCH5_STRICT_DEFAULTS]: (typeof BATCH5_STRICT_DEFAULTS)[K];
@@ -48,6 +63,11 @@ export const BATCH5_SETTING_COLUMNS: Readonly<Record<Batch5SettingKey, string>> 
   engineRawReportRetentionDays: "engine_raw_report_retention_days",
   engineSensitiveSetApproval: "engine_sensitive_set_approval",
   modelArtifactMaxMegabytes: "model_artifact_max_megabytes",
+  modelArtifactUploaderQuotaMegabytes: "model_artifact_uploader_quota_megabytes",
+  modelArtifactUploaderQuotaCount: "model_artifact_uploader_quota_count",
+  modelArtifactOrgQuotaMegabytes: "model_artifact_org_quota_megabytes",
+  modelArtifactOrgQuotaCount: "model_artifact_org_quota_count",
+  modelArtifactRetentionDays: "model_artifact_retention_days",
 };
 
 /** What the strict default does, and what an admin gives up by relaxing it. */
@@ -83,6 +103,33 @@ export const BATCH5_SETTING_COPY: Readonly<Record<Batch5SettingKey, { label: str
     label: "Largest model artifact upload (MiB)",
     strict: "512 MiB: a larger upload is refused before it is stored, and nothing of it is kept.",
     relaxed: "A larger limit (up to 8192 MiB) lets bigger hostile files into the artifact store and the scanner.",
+  },
+  modelArtifactUploaderQuotaMegabytes: {
+    label: "Model artifact storage per uploader (MiB)",
+    strict: "2048 MiB: an upload that would take one person's stored artifacts past this is refused, and nothing of it is kept.",
+    relaxed: "A larger quota lets one person keep more untrusted model files on the gateway's storage.",
+  },
+  modelArtifactUploaderQuotaCount: {
+    label: "Model artifacts per uploader",
+    strict: "20: a person who already keeps 20 artifacts must delete one before uploading another.",
+    relaxed: "A larger count lets one person keep more untrusted model files on the gateway's storage.",
+  },
+  modelArtifactOrgQuotaMegabytes: {
+    label: "Model artifact storage in total (MiB)",
+    strict: "20480 MiB: an upload that would take everyone's stored artifacts past this is refused, and nothing of it is kept.",
+    relaxed: "A larger quota lets the artifact store grow further before uploads stop.",
+  },
+  modelArtifactOrgQuotaCount: {
+    label: "Model artifacts in total",
+    strict: "200: once 200 artifacts are stored, an artifact must be deleted before another is uploaded.",
+    relaxed: "A larger count lets the artifact store hold more files before uploads stop.",
+  },
+  modelArtifactRetentionDays: {
+    label: "Unused model artifact retention (days)",
+    strict:
+      "30 days: an artifact no model card cites and no unfinished scan targets is deleted 30 days after upload, " +
+      "with its uncited scans; the audit trail keeps its sha256.",
+    relaxed: "A longer period keeps untrusted model files that nothing uses on the gateway's storage for longer.",
   },
 };
 
@@ -123,4 +170,10 @@ export const batch5OrgSettingsFields = {
   engineSensitiveSetApproval: z.boolean().optional(),
   /** strict 512; larger relaxes it (B5-M) */
   modelArtifactMaxMegabytes: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactMaxMegabytes).optional(),
+  /** decision 127: strict 2048 / 20 / 20480 / 200 / 30; larger relaxes each */
+  modelArtifactUploaderQuotaMegabytes: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactUploaderQuotaMegabytes).optional(),
+  modelArtifactUploaderQuotaCount: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactUploaderQuotaCount).optional(),
+  modelArtifactOrgQuotaMegabytes: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactOrgQuotaMegabytes).optional(),
+  modelArtifactOrgQuotaCount: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactOrgQuotaCount).optional(),
+  modelArtifactRetentionDays: boundedInt(BATCH5_SETTING_LIMITS.modelArtifactRetentionDays).optional(),
 } as const;

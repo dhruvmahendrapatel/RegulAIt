@@ -728,6 +728,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // B5-M: the caller's own uploads (an admin sees all), checked in-handler
   "GET /v1/model-artifacts",
   "GET /v1/model-artifacts/:artifactId",
+  // ADR-0187 decision 127: the uploader deletes their own (an admin any), with a step-up, checked in-handler
+  "DELETE /v1/model-artifacts/:artifactId",
 ]);
 
 /**

@@ -85,6 +85,7 @@ import {
   evaluateRunnerSelfTest,
   isTerminalEngineRunStatus,
   normaliseEngineResult,
+  garakConfigProblem,
   promptfooConfigProblem,
   updateEngineScheduleSchema,
   type CreateEngineRunInput,
@@ -305,7 +306,9 @@ export async function validateEngineRunRequest(
   if (engineManifestOutdated(engine, manifest)) return { ok: false, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) };
   // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
   // plugin's test cases, so a plan of strategies alone would run nothing)
-  const configProblem = input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : null;
+  // B5-G (decision 149): garak takes no run params, so nothing can reach its config unseen
+  const configProblem =
+    input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : input.engineId === "garak" ? garakConfigProblem(input.config) : null;
   if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };

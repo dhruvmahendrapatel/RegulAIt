@@ -384,6 +384,12 @@ describe("secure by default", () => {
       engineSensitiveSetApproval: org!.engineSensitiveSetApproval,
       // B5-M (migration 0175)
       modelArtifactMaxMegabytes: org!.modelArtifactMaxMegabytes,
+      // ADR-0187 decision 127 (migration 0176)
+      modelArtifactUploaderQuotaMegabytes: org!.modelArtifactUploaderQuotaMegabytes,
+      modelArtifactUploaderQuotaCount: org!.modelArtifactUploaderQuotaCount,
+      modelArtifactOrgQuotaMegabytes: org!.modelArtifactOrgQuotaMegabytes,
+      modelArtifactOrgQuotaCount: org!.modelArtifactOrgQuotaCount,
+      modelArtifactRetentionDays: org!.modelArtifactRetentionDays,
     }).toEqual(BATCH5_STRICT_DEFAULTS);
   });
 

@@ -5156,7 +5156,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // construction would slow every one of them and make some flaky — which is
   // why "constructing the app starts no timer" is itself asserted in
   // scheduler.test.ts rather than left as an intention.
-  registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey }) });
+  registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey, ...(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }) }) });
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
   // after-the-response work (a resumed builder turn, a channel reply) finishes first
