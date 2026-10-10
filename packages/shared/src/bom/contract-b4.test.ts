@@ -105,7 +105,7 @@ function document(finality: DecisionBomFinalityState = "anchored", version = 1):
       anchor: anchored
         ? {
             id: U(40),
-            record: { seq: 42, rowHash: H("4"), headAt: T, algorithm: "sha256", payloadVersion: 1, capturedAt: T },
+            record: { seq: 42, rowHash: H("4"), headAt: T, algorithm: "sha256", payloadVersion: "regulait.audit.v1", capturedAt: T },
             destination: finality === "anchored_unverified_destination" ? "local_worm" : "s3_object_lock",
             status: "flushed", externalRef: "s3://anchors/a/anchor-42.json", flushedAt: T,
             tamperResistant: finality !== "anchored_unverified_destination",

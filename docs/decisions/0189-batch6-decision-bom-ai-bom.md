@@ -958,7 +958,8 @@ The request and response bodies of the five B4 routes of §9 (`GET /v1/decisions
 download headers, the capability fields and the refusal envelope are frozen in
 `packages/shared/src/bom/contract-b4.ts` (`BOM_B4_ROUTE_CONTRACT`) so that B6 can be built against them. B4 must
 implement exactly these shapes; a change to them is a contract change reviewed with B6. This records the freeze only and
-changes no decision above.
+changes no decision above. Amended 2026-10-10 (B4.7-1, master): `proof.anchor.record.payloadVersion` is the stored string, not an
+integer.
 
 ### B4 bundle and signature specification (pre-build, 2026-10-10)
 
@@ -969,7 +970,7 @@ vectors. It changes no decision above. Where B1 (`packages/shared/src/bom/contra
 (`apps/gateway/src/decision-receipts.ts`, `packages/shared/src/receipts/verify.ts`) or the frozen B4 contract (#307,
 `packages/shared/src/bom/contract-b4.ts`) already fixes a detail, it is cited by file and line and followed. Every
 other choice is marked **decided here** and is the strict option (ADR-0180). Contradictions found while writing it are
-listed in B4.7, not resolved. The worked example (B4.6) is rebuilt and compared byte for byte with this text by
+listed in B4.7; the master decided them on 2026-10-10. The worked example (B4.6) is rebuilt and compared byte for byte with this text by
 `apps/gateway/src/adr0189-b4-spec-example.test.ts`, so the two cannot drift apart.
 
 Conventions. "Canonical" means the RFC 8785 bytes `bomCanonicalBytes` writes (`contract.ts:180-184`, the pinned
@@ -1163,10 +1164,10 @@ below means `facts.rows`, then each addendum's `rows`, in `n` order.
 | `actors` | `facts.actors`, verbatim | no facts: `pre_facts` or `capture_off`; `facts.actors` null: `not_recorded` `pre_identity` |
 | `action`, `policy`, `model` | `facts.action`, `facts.policy`, `facts.model`, verbatim | no facts: `pre_facts` or `capture_off`; the field null: `not_recorded` `not_captured_by_path` |
 | `approval` | the bound rows whose `table` is `approvals` or `approval_decisions`, verbatim `{table, id, projection, digest}`, stable-sorted by `table` then `id`; every binding is kept (an approval re-bound by an addendum after its status changed appears twice) | no facts: as above; no such row: `not_recorded` `no_bound_row` |
-| `outcome` | `facts.outcome`, verbatim | no facts: as above |
+| `outcome` | `facts.outcome`, verbatim; a post-action verification is not projected here, it travels only in the addenda (B4.7-2) | no facts: as above |
 | `cost` | the bound `usage_events` rows, sorted by `id`: `usageEventIds`; `inputTokens` and `outputTokens` as integer sums of the projections; `costUsd` is, for one row, its projection's `costUsd` string verbatim (R23), for several the exact decimal sum of those strings (no binary floating point; plain notation with no exponent and no trailing fractional zeros), and null when any row's `costUsd` is null; `costSource: "usage_events.cost_usd"` | no facts: as above; no row: `no_bound_row` |
 | `trace` | the bound `trace_spans` rows: `spanIds`, their ids sorted; `traceIds`, their distinct `traceId` values sorted | as `cost` |
-| `proof` | `chain`: the chain rows from the decision row to the covering anchor's `record.seq` inclusive (for `chain_signed`, the decision row alone), each `{seq, contentHash, prevHash, rowHash}`; `anchor`: the R1, R4, R33 and R44 fields exactly as stored (`contract.ts:581-617`), null for `chain_signed` | `recorded` with an anchor; `not_recorded` `anchor_absent` for `chain_signed` |
+| `proof` | `chain`: the chain rows from the decision row to the covering anchor's `record.seq` inclusive (for `chain_signed`, the decision row alone), each `{seq, contentHash, prevHash, rowHash}`; `anchor`: the R1, R4, R33 and R44 fields exactly as stored (`contract.ts:581-619`; `record.payloadVersion` is the stored string, contract amended 2026-10-10, B4.7-1), null for `chain_signed` | `recorded` with an anchor; `not_recorded` `anchor_absent` for `chain_signed` |
 | `facts` | `payload`: the canonical bytes of `decision_facts.facts`, or null; `addenda[i]`: `{n, prevHash, payload, signature, keyId}` of addendum `n = i + 1` with its `decision_fact_addendum_signatures` row | — |
 | `basis` | `auditSeq`: the last `proof.chain` seq; `anchorId`: `proof.anchor.id` or null; `receiptSeq`; `aiBomSnapshotId`: `facts.model.aiBomSnapshotId` (equal to `decision_facts.ai_bom_snapshot_id`), else null | — |
 
@@ -1241,8 +1242,8 @@ The verifier's `finality` check (**decided here**) is structural, because the re
 A minimal valid Decision BOM bundle: one allowed MCP tool call (`search`), facts captured, a v2 receipt (so the facts
 binding can be checked; the verifier needs a recorded v2 boundary at or below seq 42 in its trust root), one usage
 event and one span bound, no approval, no model, no addenda, and finality `chain_signed`. Such a BOM freezes only under
-the audited relaxation `decision_bom_finality = chain_signed`; it is used here because an anchored example would have
-to pick a side of B4.7 item 1. It is built by `apps/gateway/src/testing/bom-b4-spec-example.ts`, written to disk by
+the audited relaxation `decision_bom_finality = chain_signed`; it is kept minimal on purpose (an anchored example is
+left to B4's own vectors, now that B4.7 item 1 is decided). It is built by `apps/gateway/src/testing/bom-b4-spec-example.ts`, written to disk by
 `node scripts/bom-b4-spec-example.mjs <dir>` (after `pnpm -r build`), and compared with every block below by
 `apps/gateway/src/adr0189-b4-spec-example.test.ts`.
 
@@ -1375,30 +1376,40 @@ and `cannotProve` is the five fixed Decision BOM entries (`contract-b4.ts:515-52
 completeness is as in the body (`model` `not_recorded` `not_captured_by_path`, `approval` `not_recorded`
 `no_bound_row`, `proof` `not_recorded` `anchor_absent`, the rest `recorded`).
 
-#### B4.7 Open questions found while specifying (not resolved here)
+#### B4.7 Questions found while specifying: decided (master, 2026-10-10)
 
-1. **The anchor record's `payloadVersion` type.** R1 and the code that builds the RFC 3161 imprint store a string
-   (`AnchorRecord.payloadVersion: string`, `apps/gateway/src/audit-chain.ts:89-96`; `anchorRecordFromRow` writes the stored timestamp's
-   version or `"regulait.audit.v1"`, `audit-timestamp.ts:64-66`), but the frozen body types
-   `proof.anchor.record.payloadVersion` as an integer (`contract.ts:590`; fixtures `bom.test.ts:120`,
-   `contract-b4.test.ts:108`). As frozen, no real anchor fits the body, or the imprint cannot be recomputed from it.
-   This needs a contract change, reviewed with B6, before B4 freezes an anchored BOM.
-2. **Post-action verification has no slot in the body.** §2 lists it under `outcome`, and the addendum carries
-   `postActionVerification` (`contract.ts:561`), but `body.outcome` is `decisionOutcomeFactsSchema`
-   (`contract.ts:526-532`), which has no such field. Today it reaches the BOM only inside `facts.addenda[].payload`.
-3. **Cost over several usage events.** R23 is written for one stored double; B4.4 decides an exact decimal sum. Confirm
-   it, or carry a cost per event (a contract change).
-4. **The export key has no registry.** After an export-key rotation, online verification cannot check an older
-   bundle's manifest and, under B4.2, reports `invalid` `unknown_key`. A registry like `receipt_signing_keys`, or an
-   `unverifiable` reason for a retired export key, would fix that; both are outside this specification.
-5. **The stock bundle verifier refuses `/3`.** §6 says `scripts/verify-export-bundle.sh` still checks a `/3` bundle's
-   file manifest, but the script accepts only `/1` and `/2` (`verify-export-bundle.sh:199-201`) and expects ADR-0116's
-   chain fields (head, genesis). B4 must extend it to `/3` (`payloadScope: none`, no `audit/rows/`, no head).
-6. **PR #315 is not on this specification's base.** On `b6-bom-b4-contract`, `finality.ts` still emits
-   `anchored_finite_lock` under `refuse` when the floor is relaxed. B4.5 specifies #315's behaviour; B4 must build on
-   it.
-7. **Addendum signing bytes.** R15 fixes the key and the `v` but not the bytes. B4.2 decides the exact canonical
-   addendum payload; the sweep that will sign addenda (not built yet) must sign those same bytes.
+Each item was open when this specification was first written (`195ccae`); the master decided all seven on
+2026-10-10. They bind B4 like the rest of this section.
+
+1. **The anchor record's `payloadVersion` is the stored string. Contract amended 2026-10-10 (B4.7-1).** R1 and the
+   code that builds the RFC 3161 imprint store a string (`AnchorRecord.payloadVersion: string`,
+   `apps/gateway/src/audit-chain.ts:89-96`; `anchorRecordFromRow` writes the stored timestamp's version or
+   `"regulait.audit.v1"`, `audit-timestamp.ts:64-66`), and the frozen body typed it as an integer. The stored and
+   signed value wins: `proof.anchor.record.payloadVersion` is now `bomIdentifierSchema` (`contract.ts:590-592`),
+   holding exactly the string the anchor stores and imprints, so the verifier rebuilds the imprint from the body's
+   six fields unchanged. The B1 and #307 fixtures (`bom.test.ts`, `contract-b4.test.ts`) now use
+   `"regulait.audit.v1"`, and `bom.test.ts` refuses an integer. This is a contract change, to be reviewed with B6. The
+   worked example stays `chain_signed`; an anchored example is left to B4's own vectors.
+2. **Post-action verification travels in the addenda only (v1).** §2 lists it under `outcome`, but `body.outcome` is
+   `decisionOutcomeFactsSchema` (`contract.ts:526-532`), which has no such field. In `regulait.decision-bom.v1` a
+   post-action verification is carried only as `postActionVerification` inside the signed addendum payloads
+   (`facts.addenda[].payload`, `contract.ts:561`); `body.outcome` does not project it, and the verifier checks it only
+   as part of the addendum chain and signatures.
+3. **Cost over several usage events is the exact decimal sum.** Confirmed: with one bound usage event `costUsd` is that
+   row's R23 string verbatim; with several it is the exact decimal sum of their R23 strings (no binary floating point;
+   plain notation with no exponent and no trailing fractional zeros), as B4.4 states; null when any is null.
+4. **No export-key registry in v1.** After an export-key rotation, online verification cannot check an older bundle's
+   manifest and reports `invalid` `unknown_key` (B4.2). That is a v1 limitation: older bundles are verified offline
+   against the pinned export-key fingerprints the operator published (ADR-0116 `--fingerprint` or `--keyring`). An
+   export-key registry like `receipt_signing_keys` is an **open follow-up**, not built in B4.
+5. **B4 build requirement: extend `scripts/verify-export-bundle.sh` to `/3`.** The script accepts only `/1` and `/2`
+   (`verify-export-bundle.sh:199-201`) and expects ADR-0116's chain fields (head, genesis). B4 extends it to accept
+   `regulait.export-bundle/3`: `payloadScope: "none"`, no `audit/rows/`, no manifest head, the B4.1 file table, so
+   §6's "the stock script still checks the file manifest" holds.
+6. **B4 builds on PR #315.** On `b6-bom-b4-contract`, `finality.ts` still emits `anchored_finite_lock` under `refuse`
+   when the floor is relaxed; B4.5 specifies #315's behaviour, and B4 is built on #315.
+7. **Addendum signing bytes.** B4.2's decision stands: an addendum signature covers exactly the addendum's canonical
+   payload bytes (`facts.addenda[i].payload`). The future sweep that signs addenda must sign exactly those bytes.
 
 ### Owner items from the review (not decided here)
 
