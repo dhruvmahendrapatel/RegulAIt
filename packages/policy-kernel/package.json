@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./actor": {
+      "types": "./dist/actor.d.ts",
+      "default": "./dist/actor.js"
+    },
     "./abac": {
       "types": "./dist/abac.d.ts",
       "default": "./dist/abac.js"

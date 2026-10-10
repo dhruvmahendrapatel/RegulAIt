@@ -1,3 +1,6 @@
+// ADR-0188 S2 — the actor chain types and scope algebra (dependency-free; see actor.ts)
+export * from "./actor.js";
+
 export type ToolKind = "read" | "write";
 export type DecisionEffect = "allow" | "deny" | "require_approval";
 
