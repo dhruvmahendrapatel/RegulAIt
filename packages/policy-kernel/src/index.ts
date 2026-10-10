@@ -1,5 +1,13 @@
 // ADR-0188 S2 — the actor chain types and scope algebra (dependency-free; see actor.ts)
 export * from "./actor.js";
+import {
+  checkActorChain,
+  scopeCovers,
+  type ActorEntitlements,
+  type ActorLinkFacts,
+  type GovernedActor,
+  type ScopeCall,
+} from "./actor.js";
 
 export type ToolKind = "read" | "write";
 export type DecisionEffect = "allow" | "deny" | "require_approval";
@@ -556,6 +564,15 @@ export interface EvaluationInput {
    * guarantees every call site supplies it.
    */
   execution: ExecutionPosture;
+  /**
+   * ADR-0188 S2 — REQUIRED, like `execution` (ADR-0124), so the compiler
+   * enumerates every call site. `null` = a human acting directly: every
+   * decision is then byte-identical to the pre-ADR-0188 kernel. A
+   * `GovernedActor` = an agent acting for the sponsor `userId`; the decision is
+   * the intersection of decision 3 (see `composeActorDecision`). Built by
+   * S3/S4 from the stored grant path, never from anything a caller asserts.
+   */
+  actor: GovernedActor | null;
   /** optional display names for reason prose; ids stay authoritative */
   userName?: string | null;
   serverName?: string | null;
@@ -661,6 +678,12 @@ export type RuleName =
   | "lead-ceiling"
   /** ADR-0040: an attribute-conditional Cedar policy forbade (or paused) the call */
   | "abac-forbid"
+  /** ADR-0188 S2 — the actor-chain terms (decision 3, rule ids of decision 28) */
+  | "actor-chain-invalid"
+  | "delegation-depth"
+  | "delegation-scope"
+  | "delegation-budget"
+  | "actor-allow-list"
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
@@ -817,7 +840,7 @@ export function executionApprovalHold(
  * signed off) and approval rules before the final allow.
  */
 export function evaluate(input: EvaluationInput): Decision {
-  const decision = evaluateTool(input);
+  const decision = input.actor === null ? evaluateTool(input) : evaluateToolForActor(input, input.actor);
   // ADR-0182 A14 — `warn` or a break-glass exemption: decided exactly as without the gate, traced first
   const t = literacyTrace(input.execution);
   return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
@@ -1244,6 +1267,8 @@ export function visibleTools(
          * refuses to run it, naming the halt in the refusal.
          */
         execution: { mode: "normal" },
+        // ADR-0188 S2: visibility is the USER's entitlement; an agent's narrowing applies at execution
+        actor: null,
       }).effect !== "deny",
   );
 }
@@ -1331,6 +1356,15 @@ export interface EvaluateAgentInput {
    * guarantees every call site supplies it.
    */
   execution: ExecutionPosture;
+  /**
+   * ADR-0188 S2 — REQUIRED, like `execution` (ADR-0124), so the compiler
+   * enumerates every call site. `null` = a human acting directly: every
+   * decision is then byte-identical to the pre-ADR-0188 kernel. A
+   * `GovernedActor` = an agent acting for the sponsor `userId`; the decision is
+   * the intersection of decision 3 (see `composeActorDecision`). Built by
+   * S3/S4 from the stored grant path, never from anything a caller asserts.
+   */
+  actor: GovernedActor | null;
   /** optional display name for the user — reason prose only */
   userName?: string | null;
   agent: AgentRef;
@@ -1378,6 +1412,14 @@ export type AgentRuleName =
    * kernel allowed (by the gateway's shared model-access decision); it can
    * only turn an allow into a deny */
   | "model-feature-policy"
+  /** ADR-0188 S2 — the actor-chain terms (decision 3, rule ids of decision 28) */
+  | "actor-chain-invalid"
+  | "delegation-depth"
+  | "delegation-scope"
+  | "delegation-budget"
+  | "actor-allow-list"
+  /** ADR-0188 S2 — an actor's own Cedar verdict (as `Agent`); never supplied on this path today */
+  | "abac-forbid"
   | "default-deny";
 
 export interface AgentRuleTrace {
@@ -1399,7 +1441,7 @@ export interface AgentDecision {
  * allow. Deny-by-default: no grant, no access, regardless of the registry.
  */
 export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
-  const decision = evaluateAgentInner(input);
+  const decision = input.actor === null ? evaluateAgentInner(input) : evaluateAgentForActor(input, input.actor);
   // ADR-0182 A14 — the same literacy trace as the tool path
   const t = literacyTrace(input.execution);
   return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
@@ -1595,6 +1637,15 @@ export interface EvaluateConnectorInput {
    * guarantees every call site supplies it.
    */
   execution: ExecutionPosture;
+  /**
+   * ADR-0188 S2 — REQUIRED, like `execution` (ADR-0124), so the compiler
+   * enumerates every call site. `null` = a human acting directly: every
+   * decision is then byte-identical to the pre-ADR-0188 kernel. A
+   * `GovernedActor` = an agent acting for the sponsor `userId`; the decision is
+   * the intersection of decision 3 (see `composeActorDecision`). Built by
+   * S3/S4 from the stored grant path, never from anything a caller asserts.
+   */
+  actor: GovernedActor | null;
   /** optional display names — reason prose only */
   userName?: string | null;
   connectorName?: string | null;
@@ -1638,6 +1689,14 @@ export type ConnectorRuleName =
   | "connector-revoked"
   | "connector-mode"
   | "connector-object-scope"
+  /** ADR-0188 S2 — the actor-chain terms (decision 3, rule ids of decision 28) */
+  | "actor-chain-invalid"
+  | "delegation-depth"
+  | "delegation-scope"
+  | "delegation-budget"
+  | "actor-allow-list"
+  /** ADR-0188 S2 — an actor's own Cedar verdict (as `Agent`); never supplied on this path today */
+  | "abac-forbid"
   | "default-deny";
 
 export interface ConnectorRuleTrace {
@@ -1663,7 +1722,8 @@ export interface ConnectorDecision {
  * (fail closed when scoped and no object is named) → allow.
  */
 export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecision {
-  const decision = evaluateConnectorInner(input);
+  const decision =
+    input.actor === null ? evaluateConnectorInner(input) : evaluateConnectorForActor(input, input.actor);
   // ADR-0182 A14 — the same literacy trace as the tool path
   const t = literacyTrace(input.execution);
   return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
@@ -1872,4 +1932,318 @@ function evaluateConnectorInner(input: EvaluateConnectorInput): ConnectorDecisio
         `${refLabel(winner.role.roleId, winner.role.roleName)}`
       : `${operation} on connector ${connectorRef} allowed by user's connector grant`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0188 S2 — THE ACTOR INTERSECTION (decisions 3, 16, 17, 18, 26–28)
+// ---------------------------------------------------------------------------
+//
+// An agent call is decided as the INTERSECTION of every link, never the union:
+//
+//   1. the execution gate (ADR-0124) — first, exactly as for a human;
+//   2. `actor-chain-invalid` — the chain is consistent, live and this sponsor's;
+//   3. `delegation-depth`    — the leaf grant's stored depth ≤ `maxDepth`;
+//   4. `delegation-scope`    — EVERY link's scope covers the call, root first;
+//   5. `delegation-budget`   — no capped link is spent, and the cost is known;
+//   6. the sponsor           — the existing per-user evaluation, unchanged;
+//   7. `actor-allow-list`    — each actor's OWN grants cover the call
+//                              (skipped under `sponsor_only`);
+//   8. `abac-forbid`         — each actor's own Cedar verdict, as `Agent`.
+//
+// Combination: the FIRST deny in that order wins; otherwise the first
+// require_approval (the sponsor's first); otherwise allow, carrying the
+// sponsor's grant as `ruleId`. Every term can only subtract: terms 2–5 run
+// before the sponsor so a forged or exhausted chain never even reaches the
+// grant lookup, and terms 7–8 run after it so the sponsor's own reason stays
+// the one an operator reads when the human is not entitled at all.
+//
+// `actor: null` never enters this section, which is what keeps every human
+// decision byte-identical to the pre-ADR-0188 kernel.
+
+/** a trace entry produced by the actor terms (a subset of all three paths' rule names) */
+interface ActorTrace {
+  rule: "actor-chain-invalid" | "delegation-depth" | "delegation-scope" | "delegation-budget" | "actor-allow-list" | "abac-forbid";
+  outcome: "allow" | "deny" | "require-approval" | "satisfied-by-approval";
+  grantId?: string;
+}
+
+interface ActorRefusal {
+  ruleId: string;
+  reason: string;
+}
+
+/** terms 2–5. `traces` is what passed (and the refusing term last, on a refusal). */
+function actorPrechecks(
+  actor: GovernedActor,
+  sponsorUserId: string,
+  call: ScopeCall,
+  subjectLabel: string,
+): { traces: ActorTrace[]; refusal: ActorRefusal | null } {
+  const traces: ActorTrace[] = [];
+  const refuse = (rule: ActorTrace["rule"], reason: string, grantId?: string) => {
+    traces.push({ rule, outcome: "deny", ...(grantId ? { grantId } : {}) });
+    return { traces, refusal: { ruleId: rule, reason } };
+  };
+
+  const checked = checkActorChain(actor, sponsorUserId);
+  if (!checked.ok) {
+    return refuse(
+      "actor-chain-invalid",
+      `${subjectLabel} was refused: the delegation chain it was called under is not valid — ${checked.reason}. ` +
+        "Nothing was executed.",
+      actor.chain.delegationGrantId,
+    );
+  }
+  traces.push({ rule: "actor-chain-invalid", outcome: "allow", grantId: actor.chain.delegationGrantId });
+
+  // decision 26: the leaf grant's stored depth is depth − 1, capped by the setting
+  const storedDepth = actor.chain.depth - 1;
+  if (storedDepth > actor.maxDepth) {
+    return refuse(
+      "delegation-depth",
+      `${subjectLabel} was refused: it is ${actor.chain.depth} agent hops from the person it runs for, and ` +
+        `the organisation allows delegation to depth ${actor.maxDepth} (${actor.maxDepth + 1} hops).`,
+      actor.chain.delegationGrantId,
+    );
+  }
+  traces.push({ rule: "delegation-depth", outcome: "allow" });
+
+  // decision 3/4: EVERY link, root first — a leaf whose own scope covers the call
+  // is still refused when any ancestor's does not
+  for (let i = 0; i < actor.links.length; i++) {
+    const link = actor.links[i]!;
+    if (!scopeCovers(link.scope, call)) {
+      return refuse(
+        "delegation-scope",
+        `${subjectLabel} is outside the delegation scope given to agent ${actor.chain.actors[i]!.identifier} ` +
+          `(grant ${link.grantId.slice(0, 8)}…). A delegation covers exactly what it names: no kind, mode or ` +
+          "tool implies another.",
+        link.grantId,
+      );
+    }
+  }
+  traces.push({ rule: "delegation-scope", outcome: "allow", grantId: actor.chain.delegationGrantId });
+
+  // decisions 16 and 22: the leaf must have budget left; an ancestor that went
+  // NEGATIVE (a first crossing below it) refuses everything under it; an
+  // unpriced call under any capped grant is refused
+  const leaf = actor.links.length - 1;
+  for (let i = 0; i < actor.links.length; i++) {
+    const link = actor.links[i]!;
+    if (link.budget === null) continue;
+    const who = `agent ${actor.chain.actors[i]!.identifier}`;
+    if (!actor.costKnown) {
+      return refuse(
+        "delegation-budget",
+        `${subjectLabel} has no known price, and the delegation to ${who} carries a budget cap: an unknown ` +
+          "cost never buys free authority. Nothing was executed.",
+        link.grantId,
+      );
+    }
+    const remaining = link.budget.remainingMicros;
+    if (!Number.isFinite(remaining) || (i === leaf ? remaining <= 0 : remaining < 0)) {
+      return refuse(
+        "delegation-budget",
+        `${subjectLabel} was refused: the delegation budget of ${who} is spent ` +
+          `(${Number.isFinite(remaining) ? remaining : "unknown"} micro-dollars remaining). Nothing was executed.`,
+        link.grantId,
+      );
+    }
+  }
+  traces.push({ rule: "delegation-budget", outcome: "allow" });
+  return { traces, refusal: null };
+}
+
+type ActorApproval = { ruleId: string; reason: string; approverUserId: string; approverName?: string | null };
+
+/**
+ * Terms 7–8: each actor's own grants, then each actor's own Cedar verdict.
+ * `covers` is the path's own-grant check; `queue` says whether this path can
+ * queue an approval and with which consent.
+ */
+function actorPostchecks(
+  actor: GovernedActor,
+  subjectLabel: string,
+  covers: (e: ActorEntitlements) => boolean,
+  queue: { canQueue: boolean; approvedApprovalId: string | null },
+): { traces: ActorTrace[]; refusal: ActorRefusal | null; approval: ActorApproval | null } {
+  const traces: ActorTrace[] = [];
+  const refuse = (rule: ActorTrace["rule"], reason: string, grantId: string, ruleId: string = rule) => {
+    traces.push({ rule, outcome: "deny", grantId });
+    return { traces, refusal: { ruleId, reason }, approval: null };
+  };
+  const label = (i: number) => `agent ${actor.chain.actors[i]!.identifier}`;
+
+  if (actor.entitlementMode === "own_grants") {
+    for (let i = 0; i < actor.links.length; i++) {
+      const link: ActorLinkFacts = actor.links[i]!;
+      if (!covers(link.entitlements)) {
+        return refuse(
+          "actor-allow-list",
+          `${subjectLabel} is not covered by the own grants of ${label(i)}. An agent may do only what its own ` +
+            "grants AND the person it works for allow — never the union.",
+          link.identityId,
+        );
+      }
+      traces.push({ rule: "actor-allow-list", outcome: "allow", grantId: link.identityId });
+    }
+  }
+
+  let approval: ActorApproval | null = null;
+  for (let i = 0; i < actor.links.length; i++) {
+    const abac = actor.links[i]!.abacDecision ?? null;
+    if (!abac || abac.effect === "permit") continue;
+    const policyId = abac.policyId ?? "abac-forbid";
+    const policyRef = refLabel(policyId, abac.policyName);
+    const version = abac.policyVersion != null ? ` (v${abac.policyVersion})` : "";
+    const why = abac.reason ? ` — ${abac.reason}` : "";
+    if (abac.effect === "forbid") {
+      return refuse(
+        "abac-forbid",
+        `${subjectLabel} is forbidden for ${label(i)} by ABAC policy ${policyRef}${version}${why}`,
+        policyId,
+        policyId,
+      );
+    }
+    // require_approval: the same fail-closed reading as the sponsor's ABAC hold
+    if (!queue.canQueue || !abac.approverUserId) {
+      return refuse(
+        "abac-forbid",
+        `ABAC policy ${policyRef} requires approval for ${subjectLabel} by ${label(i)}, but ` +
+          (abac.approverUserId ? "this path cannot queue an approval" : "names no approver") +
+          " — failing closed",
+        policyId,
+        policyId,
+      );
+    }
+    if (queue.approvedApprovalId) {
+      // one human sign-off per call satisfies whichever hold is checked first (the existing contract)
+      traces.push({ rule: "abac-forbid", outcome: "satisfied-by-approval", grantId: queue.approvedApprovalId });
+      continue;
+    }
+    if (!approval) {
+      traces.push({ rule: "abac-forbid", outcome: "require-approval", grantId: policyId });
+      approval = {
+        ruleId: policyId,
+        reason:
+          `${subjectLabel} by ${label(i)} requires sign-off by approver ` +
+          `${refLabel(abac.approverUserId, abac.approverName)} under ABAC policy ${policyRef}${version}${why}`,
+        approverUserId: abac.approverUserId,
+        ...(abac.approverName ? { approverName: abac.approverName } : {}),
+      };
+    }
+  }
+  return { traces, refusal: null, approval };
+}
+
+function evaluateToolForActor(input: EvaluationInput, actor: GovernedActor): Decision {
+  const label = `tool '${input.tool.name}'`;
+  // term 1: the gate, with exactly the arguments `evaluateTool` passes it, so a
+  // gated agent call is refused with the decision a gated human call gets
+  if (executionGate(input.execution, input.tool.kind === "write", label, true, true)) return evaluateTool(input);
+
+  const { tool, serverId } = input;
+  const call: ScopeCall = { type: "mcp_tool", serverId, toolName: tool.name, kind: tool.kind };
+  const pre = actorPrechecks(actor, input.userId, call, label);
+  if (pre.refusal) return { effect: "deny", ruleId: pre.refusal.ruleId, ruleChain: pre.traces, reason: pre.refusal.reason };
+
+  const sponsor = evaluateTool(input);
+  if (sponsor.effect === "deny") return { ...sponsor, ruleChain: [...pre.traces, ...sponsor.ruleChain] };
+
+  const post = actorPostchecks(
+    actor,
+    label,
+    // the same two grant shapes as a user's (decision 24), with the ADR-0185 G3 protocol-surface exclusion
+    (e) =>
+      e.tools.some((g) => g.serverId === serverId && g.toolName === tool.name) ||
+      (readOnlyAllCovers(tool) && e.servers.some((g) => g.serverId === serverId && g.readOnlyAll)),
+    { canQueue: true, approvedApprovalId: input.approvedApprovalId ?? null },
+  );
+  const ruleChain: RuleTrace[] = [...pre.traces, ...sponsor.ruleChain, ...post.traces];
+  if (post.refusal) return { effect: "deny", ruleId: post.refusal.ruleId, ruleChain, reason: post.refusal.reason };
+  if (sponsor.effect === "require_approval") return { ...sponsor, ruleChain };
+  if (post.approval) {
+    return {
+      effect: "require_approval",
+      ruleId: post.approval.ruleId,
+      ruleChain,
+      reason: post.approval.reason,
+      approverUserId: post.approval.approverUserId,
+      ...(post.approval.approverName ? { approverName: post.approval.approverName } : {}),
+    };
+  }
+  return { ...sponsor, ruleChain };
+}
+
+function evaluateAgentForActor(input: EvaluateAgentInput, actor: GovernedActor): AgentDecision {
+  const agentRef = refLabel(input.agent.id, input.agent.name);
+  const isWrite = !isPlanSafeMode(input.mode);
+  // the same arguments `evaluateAgentInner` passes the gate
+  if (executionGate(input.execution, isWrite, `agent ${agentRef}`, false)) return evaluateAgentInner(input);
+
+  const label = `agent ${agentRef} mode '${input.mode}'`;
+  // decision 27 with ADR-0124's one definition of a write: a plan-safe mode is a `read`, every other mode a `write`
+  const call: ScopeCall = { type: "agent", agentId: input.agent.id, mode: input.mode, kind: isWrite ? "write" : "read" };
+  const pre = actorPrechecks(actor, input.userId, call, label);
+  if (pre.refusal) {
+    return { effect: "deny", ruleId: pre.refusal.ruleId, ruleChain: pre.traces as AgentRuleTrace[], reason: pre.refusal.reason };
+  }
+  const sponsor = evaluateAgentInner(input);
+  if (sponsor.effect === "deny") return { ...sponsor, ruleChain: [...(pre.traces as AgentRuleTrace[]), ...sponsor.ruleChain] };
+  const post = actorPostchecks(
+    actor,
+    label,
+    (e) => e.agents.some((g) => g.agentId === input.agent.id && g.allowedModes.includes(input.mode)),
+    // model dispatch has no per-call approval queue (ADR-0124), so an actor's approval hold refuses here
+    { canQueue: false, approvedApprovalId: null },
+  );
+  const ruleChain = [...pre.traces, ...sponsor.ruleChain, ...post.traces] as AgentRuleTrace[];
+  if (post.refusal) return { effect: "deny", ruleId: post.refusal.ruleId, ruleChain, reason: post.refusal.reason };
+  return { ...sponsor, ruleChain };
+}
+
+function evaluateConnectorForActor(input: EvaluateConnectorInput, actor: GovernedActor): ConnectorDecision {
+  const queueable = !!input.writeApprovalQueue && input.operation === "write";
+  const label = `connector ${refLabel(input.connectorId, input.connectorName)} (${input.operation})`;
+  // the same arguments `evaluateConnectorInner` passes the gate
+  if (executionGate(input.execution, input.operation === "write", label, queueable, queueable)) {
+    return evaluateConnectorInner(input);
+  }
+  const call: ScopeCall = { type: "connector", connectorId: input.connectorId, kind: input.operation };
+  const pre = actorPrechecks(actor, input.userId, call, label);
+  if (pre.refusal) {
+    return { effect: "deny", ruleId: pre.refusal.ruleId, ruleChain: pre.traces as ConnectorRuleTrace[], reason: pre.refusal.reason };
+  }
+  const sponsor = evaluateConnectorInner(input);
+  if (sponsor.effect === "deny") {
+    return { ...sponsor, ruleChain: [...(pre.traces as ConnectorRuleTrace[]), ...sponsor.ruleChain] };
+  }
+  const object = input.object ?? null;
+  const post = actorPostchecks(
+    actor,
+    label,
+    // decision 27: an agent's connector grant always names its objects, so a call naming none is not covered
+    (e) =>
+      e.connectors.some(
+        (g) =>
+          g.connectorId === input.connectorId &&
+          (input.operation === "read" || g.mode === "readwrite") &&
+          object !== null &&
+          g.allowedObjects.includes(object),
+      ),
+    { canQueue: queueable, approvedApprovalId: input.writeApprovalQueue?.approvedApprovalId ?? null },
+  );
+  const ruleChain = [...pre.traces, ...sponsor.ruleChain, ...post.traces] as ConnectorRuleTrace[];
+  if (post.refusal) return { effect: "deny", ruleId: post.refusal.ruleId, ruleChain, reason: post.refusal.reason };
+  if (sponsor.effect === "require_approval") return { ...sponsor, ruleChain };
+  if (post.approval) {
+    return {
+      effect: "require_approval",
+      ruleId: post.approval.ruleId,
+      ruleChain,
+      reason: post.approval.reason,
+      approverUserId: post.approval.approverUserId,
+    };
+  }
+  return { ...sponsor, ruleChain };
 }
