@@ -1500,3 +1500,24 @@ constraint "never kill processes by pattern" exists.
 
 Rule: stop only processes you started, by the PID you recorded when you started them. Every agent prompt repeats the
 constraint, and a run that needs stopping is stopped through its own task handle.
+
+### M-074 (2026-10-10) - Agent-written regexes failed the CodeQL ReDoS gate three times
+
+B1 shipped two regexes on caller input with overlapping repeated groups (`js/polynomial-redos`), and I1 shipped one
+with exponential backtracking (`js/redos`). Each was caught only by CI's SAST gate, costing a fix round per slice. The
+agent briefs did not mention the rule, although the gate already existed.
+
+Rule: every agent brief that may add input validation states the rule up front: regexes on caller or record input
+must be linear (anchored, no nested or overlapping quantifiers, or a length cap plus a non-regex check), and the CodeQL
+alert is never allowlisted. Prefer a parser (URL, the library) or existing helpers over a new regex.
+
+### M-075 (2026-10-10) - S3 mixed the process clock with the database clock and spread liveness checks
+
+ADR-0188 S3 needed four Codex review rounds. Most findings were the same two faults: timestamps written or compared
+with the gateway's clock against rows stamped by the database's clock (revocation rolled back under skew, sweeps
+aborted, fresh tokens rejected), and "is this live" checks that each tested a different subset of conditions (disabled
+agents, credential windows, current entitlements).
+
+Rule: any timestamp written to, or compared with, a database row uses the database clock (`now()`), and each "is it
+live" question has one shared predicate used by every path. Ask for a sweep of both classes after the first such
+finding, not after the fourth.
