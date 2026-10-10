@@ -95,6 +95,7 @@ import {
   type CycloneDxSpecVersion,
 } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
+import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
 
 /**
@@ -338,6 +339,14 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   const nameOf = (id: string | null) => (id ? names.get(id) ?? null : null);
   const identityOf = (k: "agentId" | "builderAgentId", id: string) => identities.find((i) => i[k] === id)?.identifier ?? null;
 
+  // ---- B9 (R51): the current supplier-declared SPDX properties of the loaded cards and dataset versions,
+  // read in this same snapshot, so the signed body and the SPDX rendering agree with what was declared
+  const spdxFields = [
+    ...(await loadSpdxFieldsRecords(tx, "model_card", cardIds)),
+    ...(await loadSpdxFieldsRecords(tx, "training_dataset", dsRows.map((d) => d.id))),
+    ...(await loadSpdxFieldsRecords(tx, "eval_dataset", evalDatasetRows.map((d) => d.id))),
+  ];
+
   return {
     subject: { kind: subject.kind, id: subject.id },
     install: install ? { installId: opts.installId } : null,
@@ -368,6 +377,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
     builderAgents: builderRows.map((b) => ({ ...b, ownerDisplayName: nameOf(b.ownerUserId), workloadIdentity: identityOf("builderAgentId", b.id) })),
     builderSkills: skillRows,
     memoryStores,
+    spdxFields,
   } as AiBomRecordSet;
 }
 
