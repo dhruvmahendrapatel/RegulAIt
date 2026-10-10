@@ -243,6 +243,7 @@ async function governedCall(
     ? { type: "json_schema", name: "playground_output", schema: body.outputSchema! }
     : undefined;
   const tools: ModelToolDef[] = body.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+  // ADR-0188 S4: the person's own playground call (tool calls are returned to the person, never executed here) — decided as the person (no delegation grant).
   const outcome = await executeGovernedDispatch(db, dataKey, {
     userId: caller.userId,
     served: agent,

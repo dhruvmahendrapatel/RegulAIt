@@ -22,7 +22,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { asSteppedUpAdmin } from "./admin-api";
+import { asSteppedUpAdmin, grantBuilderAgentAsAdmin } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -270,6 +270,13 @@ test("a non-admin creates an agent from a template and configures it", async ({ 
 
 test("chat answers through the governed core with its cost, and the thread is in Agent inbox", async ({ browser }) => {
   const { page, track } = await danaSession(browser);
+  // ADR-0188 S4: the agent acts only within grants of its own (the strict default) — Ada grants it the model
+  // Dana chose, as an admin does, through the identity grants route (stepped up)
+  const configured = await readAgent(page);
+  expect(configured.modelAgent?.id, "the agent has a model").toBeTruthy();
+  await grantBuilderAgentAsAdmin(state.baseUrl, state.passwords.admin, agentId, {
+    agents: [{ agentId: configured.modelAgent.id as string, allowedModes: ["chat"] }],
+  });
   await page.goto(`/ui/builder/agents/${agentId}`);
   await expect(page.getByRole("heading", { level: 1, name: AGENT })).toBeVisible();
 

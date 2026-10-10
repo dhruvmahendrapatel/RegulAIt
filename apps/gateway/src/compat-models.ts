@@ -41,7 +41,7 @@ import {
   loadAgentRevocations,
   loadRoleAgentGrants,
 } from "./entitlements.js";
-import { COMPAT_FEATURE, COMPAT_MODE } from "./compat-core.js";
+import { COMPAT_FEATURE, COMPAT_MODE, liveEngineRunGrant, NO_DELEGATION_GRANT } from "./compat-core.js";
 import { loadModelPolicy, withModelPolicy } from "./model-policy.js";
 import {
   loadVirtualKeyContext,
@@ -194,7 +194,13 @@ export function registerModelsDiscovery(app: FastifyInstance, db: Db) {
       db,
       userId,
       vk,
-      req.authCtx.via === "workload" ? (req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000") : undefined,
+      // ADR-0188 S4: a workload caller lists its chain's intersection; so does an ENGINE run's key, under the
+      // run's live grant (review L1) — the same grant its dispatches are decided with (no live grant = nothing)
+      req.authCtx.via === "workload"
+        ? (req.authCtx.delegationGrantId ?? NO_DELEGATION_GRANT)
+        : vk?.purpose === "engine"
+          ? ((vk.engineRunId ? await liveEngineRunGrant(db, vk.engineRunId) : null) ?? NO_DELEGATION_GRANT)
+          : undefined,
     );
 
     // One audit row per listing. A discovery call is a read of the caller's own

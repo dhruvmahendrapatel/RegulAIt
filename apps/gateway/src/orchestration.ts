@@ -842,10 +842,15 @@ async function dispatchRunNodeInner(
   // written inside is stamped with the actor (decision 9).
   const nodeCeilingUsd = computeNodeBudgetCeiling(graph, nodeId);
   const delegation = await openNodeDelegation(db, run, graph, state, node, ownerId, toolDefs, serverByTool, ceiling, {
-    capMicros:
-      budget && nodeCeilingUsd !== null && !budget.overageApproved
-        ? usdToMicros(Math.max(0, nodeCeilingUsd - (budget.measuredPerNodeUsd?.[nodeId] ?? 0)))
-        : null,
+    // the chain is capped by what the run's own budget has left (ADR-0180; master decision on the S4 review):
+    // the node's §5.2 ceiling and the run cap, whichever is lower; no run budget = no cap (recorded in ADR-0188)
+    capMicros: (() => {
+      if (!budget || budget.overageApproved) return null;
+      const caps: number[] = [];
+      if (nodeCeilingUsd !== null) caps.push(Math.max(0, nodeCeilingUsd - (budget.measuredPerNodeUsd?.[nodeId] ?? 0)));
+      if (budget.capUsd !== null) caps.push(Math.max(0, budget.capUsd - (budget.measuredSpentUsd ?? 0)));
+      return caps.length ? usdToMicros(Math.min(...caps)) : null;
+    })(),
   });
   if (!delegation.ok) {
     await db.insert(auditLog).values({

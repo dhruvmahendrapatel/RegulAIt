@@ -1437,6 +1437,7 @@ export class ModelBackedNarrator implements CopilotNarrator {
   }
 
   async narrate(req: CopilotNarrationRequest): Promise<CopilotNarration> {
+    // ADR-0188 S4: the copilot's narration of one question the person asked: one model call made for that person directly, no agent principal acts — decided as the person (no delegation grant).
     const outcome = await executeGovernedDispatch(this.db, this.dataKey, {
       userId: this.ctx.userId,
       served: this.ctx.agent,

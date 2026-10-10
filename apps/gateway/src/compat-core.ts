@@ -129,10 +129,10 @@ export const AGENT_HEADER = "x-regulait-agent-id";
 export const COMPAT_MODE = "execute";
 
 /** the nil grant id: resolves to no grant, so a delegated call without one is refused (`grant_not_found`) */
-const NO_DELEGATION_GRANT = "00000000-0000-0000-0000-000000000000";
+export const NO_DELEGATION_GRANT = "00000000-0000-0000-0000-000000000000";
 
 /** ADR-0188 S4: the live root grant made for an engine run at lease, if any */
-async function liveEngineRunGrant(db: Db, engineRunId: string): Promise<string | null> {
+export async function liveEngineRunGrant(db: Db, engineRunId: string): Promise<string | null> {
   const [g] = await db
     .select({ id: delegationGrants.id })
     .from(delegationGrants)

@@ -564,7 +564,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     const relayLogs =
       relaying &&
       (method === "logging/setLevel" ||
-        (await loggingRelayAllowed(db, { userId, serverId, serverRow, projectId, forMethod: method, principal: args.principal })));
+        (await loggingRelayAllowed(db, { userId, serverId, serverRow, projectId, forMethod: method, principal: args.principal, delegationGrantId: args.delegationGrantId })));
     if (relayLogs) {
       upstream.setNotificationHandler(LoggingMessageNotificationSchema, async (n) => {
         const params = await scanForRelay(n.params, { projectId, piiIntl, piiMode, guardrails });
@@ -704,9 +704,20 @@ async function loggingRelayAllowed(
     projectId: string | null;
     forMethod: string;
     principal: AbacPrincipalContext | undefined;
+    /** ADR-0188 S4 (review M2): a workload caller's relay is decided with its chain; unreadable = no relay */
+    delegationGrantId?: string | undefined;
   },
 ): Promise<boolean> {
   const { grant, kind } = MCP_PROTOCOL_METHOD_GRANTS["logging/setLevel"];
+  let relayActor: GovernedActor | null = null;
+  if (a.delegationGrantId) {
+    try {
+      relayActor = await actorForGrant(db, a.delegationGrantId, { costKnown: true });
+    } catch (err) {
+      if (err instanceof DelegationRefusedError) return false;
+      throw err;
+    }
+  }
   const ref = { serverId: a.serverId, name: grant, kind, surface: "protocol" as const };
   const { decision, argumentsDigest, contextDigest } = await governedEvaluate(
     db,
@@ -720,7 +731,7 @@ async function loggingRelayAllowed(
     undefined,
     undefined,
     approvalTargetForServer(a.serverId, a.serverRow),
-    { actor: null }, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
+    { actor: relayActor },
   );
   await db.insert(auditLog).values({
     userId: a.userId,

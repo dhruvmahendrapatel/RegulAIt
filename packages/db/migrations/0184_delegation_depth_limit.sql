@@ -7,18 +7,21 @@
 --
 -- Existing rows: nothing is grandfathered (ADR-0180). The product is not live; any row already present gets the
 -- org limit (never less than its own depth), which is exactly what admission enforced before this column existed.
+-- Re-runnable (S4 review L4): every statement is IF NOT EXISTS / DROP ... IF EXISTS first / CREATE OR REPLACE.
 -- The column has no column DEFAULT (it depends on the org row and the parent): the guard trigger fills a missing
 -- value with the org limit for a root, or min(parent.depth_limit, org limit) for a child. Product code always states
 -- it (`delegation.ts`); the fill exists so no path can create an unlimited grant by omission.
-ALTER TABLE "delegation_grants" ADD COLUMN "depth_limit" integer;
+ALTER TABLE "delegation_grants" ADD COLUMN IF NOT EXISTS "depth_limit" integer;
 --> statement-breakpoint
 ALTER TABLE "delegation_grants" DISABLE TRIGGER "delegation_grants_guard";
 --> statement-breakpoint
-UPDATE "delegation_grants" SET "depth_limit" = GREATEST("depth", LEAST(8, COALESCE((SELECT "delegation_max_depth" FROM "org_settings" LIMIT 1), 3)));
+UPDATE "delegation_grants" SET "depth_limit" = GREATEST("depth", LEAST(8, COALESCE((SELECT "delegation_max_depth" FROM "org_settings" LIMIT 1), 3))) WHERE "depth_limit" IS NULL;
 --> statement-breakpoint
 ALTER TABLE "delegation_grants" ENABLE TRIGGER "delegation_grants_guard";
 --> statement-breakpoint
 ALTER TABLE "delegation_grants" ALTER COLUMN "depth_limit" SET NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "delegation_grants" DROP CONSTRAINT IF EXISTS "delegation_grants_depth_limit_check";
 --> statement-breakpoint
 ALTER TABLE "delegation_grants" ADD CONSTRAINT "delegation_grants_depth_limit_check" CHECK ("depth_limit" BETWEEN "depth" AND 8);
 --> statement-breakpoint
@@ -46,10 +49,13 @@ BEGIN
   -- INSERT
   -- migration 0184: an insert that names no depth limit gets the org limit (a root) or inherits its parent's,
   -- narrowed by the org limit (a child). It is never widened; the checks below still bind a stated one.
+  -- A root's limit is never above the org's (S4 review): a stated one is clamped, a missing one is the org's.
   IF NEW."parent_grant_id" IS NULL THEN
-    IF NEW."depth_limit" IS NULL THEN
-      NEW."depth_limit" := LEAST(8, COALESCE((SELECT "delegation_max_depth" FROM "org_settings" LIMIT 1), 3));
-    END IF;
+    NEW."depth_limit" := LEAST(
+      COALESCE(NEW."depth_limit", 8),
+      8,
+      COALESCE((SELECT "delegation_max_depth" FROM "org_settings" LIMIT 1), 3)
+    );
     RETURN NEW;
   END IF;
   SELECT * INTO p FROM "delegation_grants" WHERE "id" = NEW."parent_grant_id";
@@ -110,6 +116,8 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS "audit_log_v2_floor" ON "audit_log";
 --> statement-breakpoint
 CREATE TRIGGER "audit_log_v2_floor"
   BEFORE INSERT ON "audit_log"

@@ -949,6 +949,46 @@ Open questions carried to S5 and S6:
 - The S6 admin screens for grants (list, revoke, tree) have no backend routes yet. S5 or S6 must add them with the
   `identity_manage` step-up.
 
+### Amendments from the S4 build and its review (2026-10-10)
+
+S4 (in-process wiring) is PR #326. These record what S4 built where the decisions left a choice. None changes an
+owner decision.
+
+1. **First load gives identities, never grants.** `ensureInternalIdentities` (boot) and `ensureIdentityFor` (first use)
+   give every `agents`, `builder_agents` and `engine_runners` row its one identity: `active`, allowed only in this
+   deployment's mode (`hosted | byoc | air_gapped`), steward = the subject's owner or the system principal, no grants
+   (OWNER DECISION 1, ADR-0180). An admin grants through `PUT /v1/workload-identities/:id/grants` (built in S4 with
+   the list, detail and grant-set read; `identity_manage` step-up). The demo seed grants each demo agent itself that
+   way. Identities and delegation grants are never deleted, so an agent, person or project they name can no longer be
+   hard-deleted (tests skip them in cleanup).
+2. **One chain per piece of work.** A pillar-7 node dispatch gets a root grant from the initiating user to the top
+   lead's agent and one child per lead down to the worker (consecutive same-agent hops collapse); a builder turn or
+   resumed segment, and each schedule firing, gets a root to the builder agent (context: the turn, or the schedule); an
+   engine run gets a root to its runner at lease, ended with the run. Each hop carries exactly the work's needs (the
+   agent in its mode, the tools and connectors the person holds and, under `own_grants`, every holder holds itself);
+   the §5.1 ceiling is each child's `ceiling` input. The chain is revoked (`run_ended`) when the work returns.
+3. **Lifetime and caps.** Lifetime = min(1 h, the run's own deadline), turned into an expiry inside each grant's
+   transaction from `clock_timestamp()` after the locks (review M1; I7S3-01). Caps: a node's chain is capped by
+   min(its §5.2 ceiling left, the run cap left); a builder chain by the agent's monthly limit left; an engine chain by
+   the run's budget. **Open:** a run, builder agent or schedule with no budget gets an uncapped chain; no number is
+   invented.
+4. **The person first.** Where the person alone would be refused, the person's reason is shown (decision 30): the
+   orchestration owner check and the builder step gate run before the chain is made, and on the tool path a
+   `delegation-scope` refusal the person would also get reports the person's rule (a ceiling exclusion keeps
+   `lead-ceiling`).
+5. **Stamping.** Audit rows written while an agent acts are stamped through one async context in the chained writer:
+   before the v2 boundary in `detail.delegation`, from it in the actor columns. Usage rows and trace spans carry the
+   actor columns; usage is settled along the chain in the usage row's transaction. Receipts carry the chain through
+   ADR-0189's v2 payload once B1's v2 emission lands (its source is these columns).
+6. **The audit v2 cutover** is `REGULAIT_AUDIT_V2_CUTOVER=run` on one boot after a drained deploy; every boot refuses
+   a boundary it cannot write; trigger `audit_log_v2_floor` (0184) refuses a v1 row past the boundary from any writer.
+7. **Calls still decided as the person (`actor: null`).** Each is one call the person made directly, with no agent
+   principal acting: the copilot narration, the eval harness and red-team dispatches, the playground, intake assist,
+   the access-recommendation judge, decomposition (a draft plan; the run's workers act under grants), plan-time
+   envelopes, policy simulation, routing and model listings for a person, and the MCP and compat routes for a person's
+   own key. A workload caller (S5's delegated token) is decided with its grant on `/mcp` tools/call, tools/list, every
+   protocol method and the logging relay, and on the compat dispatch and model listing.
+
 ## Spike S0 result (2026-10-10)
 
 S0 ([R11](../research/R11-identity-s0-spike.md), Codex X32, PR #250) returned **GO** for owner decision 2:

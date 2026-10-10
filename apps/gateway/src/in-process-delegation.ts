@@ -130,21 +130,23 @@ export async function ensureIdentityFor(db: Db, subject: InternalSubject): Promi
   const [existing] = await db.select(pick).from(workloadIdentities).where(eq(col, subject.id));
   if (existing) return existing;
   const steward = await stewardFor(db, subject);
-  const inserted = await db
-    .insert(workloadIdentities)
-    .values({
-      kind: subject.kind,
-      agentId: subject.kind === "agent" ? subject.id : null,
-      builderAgentId: subject.kind === "builder_agent" ? subject.id : null,
-      engineRunnerId: subject.kind === "engine_runner" ? subject.id : null,
-      identifier: defaultWorkloadIdentifier(resolveTrustDomain(), subject.kind, subject.id),
-      sponsorUserIds: [steward],
-      environments: [inProcessEnvironment()],
-    })
-    .onConflictDoNothing()
-    .returning(pick);
-  if (inserted[0]) {
-    await db.insert(auditLog).values({
+  // the identity and its audit row in ONE transaction (S4 review L2): never an identity without its record
+  const created = await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(workloadIdentities)
+      .values({
+        kind: subject.kind,
+        agentId: subject.kind === "agent" ? subject.id : null,
+        builderAgentId: subject.kind === "builder_agent" ? subject.id : null,
+        engineRunnerId: subject.kind === "engine_runner" ? subject.id : null,
+        identifier: defaultWorkloadIdentifier(resolveTrustDomain(), subject.kind, subject.id),
+        sponsorUserIds: [steward],
+        environments: [inProcessEnvironment()],
+      })
+      .onConflictDoNothing()
+      .returning(pick);
+    if (!inserted[0]) return null;
+    await tx.insert(auditLog).values({
       userId: SYSTEM_USER_ID,
       objectType: "workload_identity",
       objectId: inserted[0].id,
@@ -155,7 +157,8 @@ export async function ensureIdentityFor(db: Db, subject: InternalSubject): Promi
       reason: `internal workload identity created for ${subject.kind} ${subject.id}, with no grants of its own (ADR-0188 OWNER DECISION 1)`,
     });
     return inserted[0];
-  }
+  });
+  if (created) return created;
   const [row] = await db.select(pick).from(workloadIdentities).where(eq(col, subject.id));
   if (!row) throw new Error(`workload identity for ${subject.kind} ${subject.id} could not be created`);
   return row;
@@ -261,12 +264,20 @@ export async function startInProcessChain(
     projectId: string | null;
     context: GrantContext;
     hops: readonly InProcessHop[];
+    /** the chain's lifetime (default `IN_PROCESS_GRANT_TTL_MS`), turned into an expiry by the DATABASE clock */
     ttlMs?: number;
+    /** the expiry is at most this (the run's own stored deadline, where it has one) */
+    notAfter?: Date | null;
     now?: Date;
   },
 ): Promise<InProcessChain> {
-  const now = input.now ?? new Date();
-  const expiresAt = new Date(now.getTime() + (input.ttlMs ?? IN_PROCESS_GRANT_TTL_MS));
+  // S4 review M1 (M-075): no gateway clock. The lifetime is resolved inside each grant's transaction from
+  // the database's wall clock; `now` is forwarded only when a test pins it
+  const lifetime = {
+    ttlMs: input.ttlMs ?? IN_PROCESS_GRANT_TTL_MS,
+    ...(input.notAfter ? { notAfter: input.notAfter } : {}),
+    ...(input.now ? { now: input.now } : {}),
+  };
   const env = inProcessEnvironment();
   const hops: InProcessHop[] = [];
   for (const h of input.hops) {
@@ -289,10 +300,9 @@ export async function startInProcessChain(
       actorIdentityId: hops[0]!.identityId,
       scope: hops[0]!.scope,
       capMicros: hops[0]!.capMicros,
-      expiresAt,
+      ...lifetime,
       binding: { kind: "in_process" },
       ceiling: hops[0]!.ceiling ?? null,
-      now,
     });
     grantIds.push(root.id);
     let parentId = root.id;
@@ -305,11 +315,10 @@ export async function startInProcessChain(
         actorIdentityId: h.identityId,
         scope: h.scope,
         capMicros: h.capMicros,
-        expiresAt,
+        ...lifetime,
         binding: { kind: "in_process" },
         ceiling: h.ceiling ?? null,
         idempotencyKey: `in-process:${randomUUID()}`,
-        now,
       });
       grantIds.push(grant.id);
       parentId = grant.id;
@@ -324,7 +333,13 @@ export async function startInProcessChain(
 /** the work ended: revoke the root (cascades to every hop) and return unspent allocation. Idempotent. */
 export async function endInProcessChain(db: Db, chain: Pick<InProcessChain, "rootGrantId"> | null): Promise<void> {
   if (!chain) return;
-  await revokeDelegationGrant(db, { grantId: chain.rootGrantId, reason: "run_ended" });
+  try {
+    await revokeDelegationGrant(db, { grantId: chain.rootGrantId, reason: "run_ended" });
+  } catch (err) {
+    // called from `finally`: a failed revoke must never replace the work's real result. The grant still
+    // expires on its own (at most `IN_PROCESS_GRANT_TTL_MS`) and the allocation sweep closes its edges.
+    console.error(`[regulait] in-process delegation chain ${chain.rootGrantId} not revoked at end of work: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**

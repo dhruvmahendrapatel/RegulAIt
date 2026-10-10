@@ -20,6 +20,7 @@
  *    content digest and version. A held skill cannot be attached; widening a
  *    skill's visibility beyond private waits for an admin.
  */
+import { ensureIdentityFor } from "./in-process-delegation.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -644,6 +645,7 @@ async function applySeed(db: Db, agent: BuilderAgentRow, seed: Seed, trigger: "t
         projectId: agent.projectId,
       })
       .returning();
+    await ensureIdentityFor(db, { kind: "builder_agent", id: child!.id });
     await db.insert(builderAgentSubagents).values({
       parentId: agent.id,
       childId: child!.id,
@@ -766,6 +768,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         projectId: body.projectId!,
       })
       .returning();
+    // ADR-0188 S4: the builder agent's workload identity exists from creation (no grants: an admin grants it)
+    await ensureIdentityFor(db, { kind: "builder_agent", id: agent!.id });
     if (template) await applySeed(db, agent!, template);
     await audit(db, viewer.userId, "builder_agent", agent!.id, "builder-agent-created", `builder agent '${agent!.name}' created`, {
       templateId: template?.id ?? null,
@@ -1530,6 +1534,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         projectId: projectId!,
       })
       .returning();
+    // ADR-0188 S4: the builder agent's workload identity exists from creation (no grants: an admin grants it)
+    await ensureIdentityFor(db, { kind: "builder_agent", id: agent!.id });
     const uniqKeep = [...new Map(keep.map((k) => [`${k.kind}:${k.refId}`, k])).values()];
     if (uniqKeep.length) await db.insert(builderAgentTools).values(uniqKeep.map((k) => ({ ...k, agentId: agent!.id })));
     await applySeed(db, agent!, {

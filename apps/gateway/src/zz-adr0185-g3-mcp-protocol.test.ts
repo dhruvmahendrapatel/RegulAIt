@@ -23,6 +23,9 @@ import { auditLog, and, asc, createDb, eq, mcpServers, orgSettings, ORG_SETTINGS
 import { MCP_PROTOCOL_METHODS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { executeGovernedProtocolCall } from "./mcp-protocol.js";
+import { randomUUID } from "node:crypto";
+import { startInProcessChain, toolScopeItems } from "./in-process-delegation.js";
+import { grantOwnGrantsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
@@ -605,6 +608,54 @@ describe("ADR-0185 G3 — notifications", () => {
       (r) => r.toolName === "mcp:logging" && (r.detail as { phase?: string }).phase === "protocol-relay",
     );
     expect(relayAllow.map((r) => r.effect)).toEqual(["deny", "allow"]);
+  });
+
+  it("ADR-0188 S4 review M2: a WORKLOAD caller's log relay is decided with its delegation chain, not as the person", async () => {
+    const u = await newUser();
+    await grant(u, fullId, "mcp:resources");
+    await grant(u, fullId, "mcp:logging"); // the PERSON may receive logs
+    const ag = await app.inject({ method: "POST", headers: AUTH, url: "/v1/agents", payload: { name: `g3-s4-${Date.now()}`, provider: "mock", tier: 0, model: "mock-1" } });
+    expect(ag.statusCode).toBe(201);
+    const identityId = await grantOwnGrantsForTest(db, { kind: "agent", id: ag.json().id }, {
+      tools: [{ serverId: fullId, toolName: "mcp:resources" }, { serverId: fullId, toolName: "mcp:logging" }],
+    });
+    const chainFor = (withLogging: boolean) =>
+      startInProcessChain(db, {
+        sponsorUserId: u, projectId: null, context: { runId: randomUUID() },
+        hops: [{
+          identityId,
+          scope: toolScopeItems([
+            { serverId: fullId, toolName: "mcp:resources", kind: "read" },
+            ...(withLogging ? [{ serverId: fullId, toolName: "mcp:logging", kind: "write" as const }] : []),
+          ]),
+          capMicros: null,
+        }],
+      });
+    await setMethods(["resources/read", "logging/setLevel"]);
+    const read = async (delegationGrantId?: string) => {
+      const relayed: unknown[] = [];
+      const out = await executeGovernedProtocolCall(db, {
+        userId: u, serverId: fullId, method: "resources/read", params: { uri: "file:///public/readme.md" },
+        relay: async (n) => void relayed.push(n),
+        ...(delegationGrantId ? { delegationGrantId } : {}),
+      });
+      return { out, logs: relayed.filter((n) => (n as { method?: string }).method === "notifications/message") };
+    };
+    // control: the person alone receives the upstream's log line
+    const person = await read();
+    expect(person.out.kind).toBe("allowed");
+    expect(person.logs).toHaveLength(1);
+    // the chain covers the read but not mcp:logging: the read is served, the log is NOT relayed
+    const narrow = await read((await chainFor(false)).leafGrantId);
+    expect(narrow.out.kind).toBe("allowed");
+    expect(narrow.logs, "a log relayed past the delegation's scope").toHaveLength(0);
+    // a chain that covers logging relays it
+    const wide = await read((await chainFor(true)).leafGrantId);
+    expect(wide.logs).toHaveLength(1);
+    // an unreadable chain: the call is refused and nothing is relayed
+    const none = await read("00000000-0000-0000-0000-000000000000");
+    expect(none.out.kind).toBe("denied");
+    expect(none.logs).toHaveLength(0);
   });
 
   it("logging/setLevel is a WRITE decision on mcp:logging", async () => {

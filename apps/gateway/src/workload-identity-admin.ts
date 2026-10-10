@@ -156,7 +156,7 @@ export async function putIdentityGrants(db: Db, identityId: string, body: PutAge
     }
     if (set.roleIds.length) await tx.insert(identityRoleAssignments).values(set.roleIds.map((roleId) => ({ identityId, roleId, createdBy: by })));
     const revision = ident.grantsRevision + 1;
-    await tx.update(workloadIdentities).set({ grantsRevision: revision, updatedAt: new Date() }).where(eq(workloadIdentities.id, identityId));
+    await tx.update(workloadIdentities).set({ grantsRevision: revision, updatedAt: sql`now()` }).where(eq(workloadIdentities.id, identityId));
     await tx.insert(auditLog).values({
       userId: actorUserId ?? SYSTEM_USER_ID,
       objectType: "workload_identity",
@@ -201,16 +201,16 @@ export async function listWorkloadIdentities(db: Db, q: z.infer<typeof listWorkl
 export async function getWorkloadIdentity(db: Db, identityId: string): Promise<WorkloadIdentityDetailView | null> {
   const [r] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId));
   if (!r) return null;
-  const now = new Date();
+  // the database clock (S4 review L3), never the gateway's
   const [[creds], [live]] = await Promise.all([
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(workloadCredentials)
-      .where(and(eq(workloadCredentials.identityId, identityId), isNull(workloadCredentials.revokedAt), gt(workloadCredentials.notAfter, now))),
+      .where(and(eq(workloadCredentials.identityId, identityId), isNull(workloadCredentials.revokedAt), sql`${workloadCredentials.notAfter} > now()`)),
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(delegationGrants)
-      .where(and(eq(delegationGrants.actorIdentityId, identityId), isNull(delegationGrants.revokedAt), gt(delegationGrants.expiresAt, now))),
+      .where(and(eq(delegationGrants.actorIdentityId, identityId), isNull(delegationGrants.revokedAt), sql`${delegationGrants.expiresAt} > now()`)),
   ]);
   return { ...view(r), activeCredentialCount: creds?.n ?? 0, liveDelegationGrantCount: live?.n ?? 0 };
 }

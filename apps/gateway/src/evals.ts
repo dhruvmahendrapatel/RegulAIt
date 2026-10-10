@@ -208,6 +208,7 @@ export class ModelBackedJudge implements EvalJudge {
           this.ctx.threshold,
         )
       : buildJudgePrompt(req, this.ctx.threshold);
+    // ADR-0188 S4: an evaluation harness dispatch: the platform measures the agent under test for the person who started the run, one call per case, no agent principal delegates — decided as the person (no delegation grant).
     const outcome = await executeGovernedDispatch(this.db, this.dataKey, {
       userId: this.ctx.userId,
       served: this.ctx.judgeAgent,
@@ -1172,6 +1173,7 @@ export async function runEvalSuite(
     // should, which means it passes through the same §8.4 PII classifier and
     // ADR-0042 guardrails as any other prompt — context is content, never a
     // storage or a policy bypass.
+    // ADR-0188 S4: an evaluation harness dispatch: the platform measures the agent under test for the person who started the run, one call per case, no agent principal delegates — decided as the person (no delegation grant).
     const outcome = await executeGovernedDispatch(db, dataKey, {
       userId: opts.userId,
       served: agent as AgentRow,

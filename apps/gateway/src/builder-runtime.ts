@@ -108,6 +108,7 @@ import {
   runAsActor,
   startInProcessChain,
   toolScopeItems,
+  usdToMicros,
   type InProcessChain,
 } from "./in-process-delegation.js";
 import { assertProjectAttribution, piiInternationalCategories, projectPiiMode } from "./projects.js";
@@ -940,7 +941,9 @@ async function runDelegatedLoop(seg: Segment, state: LoopState): Promise<TurnOut
       sponsorUserId: seg.userId,
       projectId: seg.agent.projectId ?? null,
       context: seg.source === "schedule" && seg.thread.scheduleId ? { scheduleId: seg.thread.scheduleId } : { builderTurnId: randomUUID() },
-      hops: [{ identityId: ident.id, scope, capMicros: null }],
+      // capped by what the agent's own monthly limit has left (ADR-0180; master decision on the S4 review);
+      // an agent with no limit has no cap (recorded in ADR-0188 as open)
+      hops: [{ identityId: ident.id, scope, capMicros: await builderChainCap(db, seg.agent) }],
     });
   } catch (err) {
     if (!(err instanceof DelegationRefusedError)) throw err;
@@ -963,6 +966,14 @@ async function runDelegatedLoop(seg: Segment, state: LoopState): Promise<TurnOut
   } finally {
     await endInProcessChain(db, chain);
   }
+}
+
+/** the remaining monthly limit of a limited builder agent, in micro-dollars; null = no limit, no cap */
+async function builderChainCap(db: Db, agent: BuilderAgentRow): Promise<number | null> {
+  const [fresh] = await db.select({ monthlyLimitUsd: builderAgents.monthlyLimitUsd }).from(builderAgents).where(eq(builderAgents.id, agent.id));
+  const limit = fresh?.monthlyLimitUsd ?? null;
+  if (limit == null) return null;
+  return usdToMicros(Math.max(0, limit - (await builderAgentSpend(db, agent.id, monthStartUtc()))));
 }
 
 /** the toolbox as this segment's chain was granted it: anything else is unavailable to the model */

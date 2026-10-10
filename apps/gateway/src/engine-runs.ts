@@ -113,7 +113,7 @@ import { encryptSecret } from "./secrets.js";
 import { engineKeyName, generateVirtualKeyToken } from "./virtual-keys.js";
 import { AGENT_HEADER, COMPAT_MODE, PROJECT_HEADER } from "./compat-core.js";
 import { DelegationRefusedError, revokeDelegationGrant } from "./delegation.js";
-import { agentScopeItem, ensureIdentityFor, startInProcessChain } from "./in-process-delegation.js";
+import { agentScopeItem, ensureIdentityFor, startInProcessChain, usdToMicros } from "./in-process-delegation.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -1736,11 +1736,13 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
               {
                 identityId: ident.id,
                 scope: [...new Set([target!.id, ...(judge ? [judge.id] : [])])].map((id) => agentScopeItem(id, COMPAT_MODE)),
-                capMicros: null,
+                // the run's own budget caps the chain (ADR-0180, master decision on the S4 review)
+                capMicros: usdToMicros(run.budgetUsd),
               },
             ],
-            ttlMs: Math.max(60_000, deadlineAt.getTime() - now.getTime()),
-            now,
+            // min(1 h, the run's deadline — the value stored on the run below); the expiry itself is taken
+            // from the database clock inside the grant's transaction (S4 review M1), no gateway `now`
+            notAfter: deadlineAt,
           });
         } catch (err) {
           if (!(err instanceof DelegationRefusedError)) throw err;

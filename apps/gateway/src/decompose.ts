@@ -453,6 +453,7 @@ export function registerDecomposeRoutes(
     const system = planningPrompt(roster, toolServerInfo);
     const totals = { costUsd: 0 as number, costKnown: true, tokensIn: 0, tokensOut: 0 };
     const attempt = async (retryErrors: string[] | null) =>
+      // ADR-0188 S4: the person's request for a draft plan: one lead dispatch, no run or agent chain exists yet (the run's workers act under grants) — decided as the person (no delegation grant).
       executeGovernedDispatch(db, opts.dataKey, {
         userId,
         served: lead,

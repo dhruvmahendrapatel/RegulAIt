@@ -15,7 +15,7 @@
  *    ride in `detail.delegation`, from it in the columns; the cutover is idempotent, verifies, and the
  *    database refuses a v1 row past it.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -77,6 +77,9 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
         const server = new McpServer({ name: "s4-upstream", version: "0.0.1" });
         server.registerTool("get_time", { description: "fixed time", inputSchema: {}, annotations: { readOnlyHint: true } }, async () => ({
           content: [{ type: "text", text: "12:00" }],
+        }));
+        server.registerTool("write_note", { description: "writes a note", inputSchema: {} }, async () => ({
+          content: [{ type: "text", text: "noted" }],
         }));
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         await server.connect(transport);
@@ -339,6 +342,40 @@ describe("S4 / migration 0184: the decision 23 max_depth is stored and binds eve
   });
 });
 
+describe("S4 review M1: in-process grants take their times from the DATABASE clock, never the gateway's", () => {
+  it("with the gateway clock two hours ahead or behind, created_at and the expiry follow the database", async () => {
+    const ivy = await mkUser("m1");
+    const target = await mkAgent("m1-target");
+    await grantUserAgent(ivy.id, target);
+    const lead = await grantAgentOwnGrantsForTest(db, await mkAgent("m1-lead"), { agents: [{ agentId: target, allowedModes: ["execute"] }] });
+    const worker = await grantAgentOwnGrantsForTest(db, await mkAgent("m1-worker"), { agents: [{ agentId: target, allowedModes: ["execute"] }] });
+    const scope = [agentScopeItem(target, "execute")];
+    const TWO_H = 2 * 3600_000;
+    for (const skew of [TWO_H, -TWO_H]) {
+      const realNow = Date.now();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(realNow + skew);
+      let chain: Awaited<ReturnType<typeof startInProcessChain>>;
+      try {
+        chain = await startInProcessChain(db, {
+          sponsorUserId: ivy.id, projectId: null, context: { runId: randomUUID() }, ttlMs: 600_000,
+          hops: [{ identityId: lead, scope, capMicros: null }, { identityId: worker, scope, capMicros: null }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      const [dbNow] = (await db.execute<{ ms: string }>(sql`select (extract(epoch from clock_timestamp()) * 1000)::text as ms`)).rows;
+      const dbMs = Number(dbNow!.ms);
+      for (const id of chain.grantIds) {
+        const [g] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, id));
+        // the gateway clock is 2 h off; the rows are within a minute of the database's own clock
+        expect(Math.abs(g!.createdAt.getTime() - dbMs), `created_at with skew ${skew}`).toBeLessThan(60_000);
+        expect(Math.abs(g!.expiresAt.getTime() - (g!.createdAt.getTime() + 600_000)), `expiry with skew ${skew}`).toBeLessThan(5_000);
+      }
+    }
+  });
+});
+
 describe("X43 I7S3-01: admission judges expiry by the clock AFTER the parent's lock is held", () => {
   it("a child admitted after waiting on the parent's lock past its expiry is refused, and nothing is reserved", async () => {
     const ivy = await mkUser("clock");
@@ -410,7 +447,7 @@ describe("S4: a call with no grant, or under a grant revoked a moment ago, never
     await grantOwnGrantsForTest(db, { kind: "agent", id: agent }, { tools: [{ serverId, toolName: "write_note" }] });
     const narrow = await startInProcessChain(db, { sponsorUserId: ivy.id, projectId: null, context: { runId: randomUUID() }, hops: [{ identityId, scope, capMicros: null }] });
     const outside = await executeGovernedToolCall(db, undefined, { userId: ivy.id, serverId, toolName: "write_note", arguments: {}, delegationGrantId: narrow.leafGrantId });
-    expect(outside.kind === "denied" ? outside.decision.ruleId : outside.kind).toMatch(/delegation-scope|unknown_tool/);
+    expect(outside.kind === "denied" ? outside.decision.ruleId : outside.kind).toBe("delegation-scope");
     expect(upstreamCalls).toBe(before + 1);
   });
 

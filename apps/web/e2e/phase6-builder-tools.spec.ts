@@ -18,7 +18,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { asSteppedUpAdmin, signedInContext } from "./admin-api";
+import { asSteppedUpAdmin, grantBuilderAgentAsAdmin, signedInContext } from "./admin-api";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -105,6 +105,8 @@ let modelId = "";
 let projectId = "";
 let averyId = "";
 const toolIds = { branches: "", schemas: "" };
+/** ADR-0188 S4: which server and tool name each tool id is, for the admin's grant to the builder agent */
+const toolRefs = new Map<string, { serverId: string; toolName: string }>();
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
   test.setTimeout(240_000);
@@ -186,6 +188,8 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   expect(modelId).toBeTruthy();
   toolIds.branches = branches.id as string;
   toolIds.schemas = schemas.id as string;
+  toolRefs.set(toolIds.branches, { serverId: repo.id as string, toolName: "list_branches" });
+  toolRefs.set(toolIds.schemas, { serverId: wh.id as string, toolName: "list_schemas" });
 });
 
 test.afterAll(async () => {
@@ -209,6 +213,12 @@ async function agentWith(toolId: string, askFirst: boolean): Promise<{ id: strin
     data: { tools: [{ kind: "mcp_tool", refId: toolId, requiresApproval: askFirst }] },
   });
   expect(put.status(), await put.text()).toBe(200);
+  // ADR-0188 S4: the agent acts only within grants of its own (strict default) — Ada grants it its model and
+  // its tool, as an admin does, through the identity grants route (stepped up)
+  await grantBuilderAgentAsAdmin(state.baseUrl, state.passwords.admin, id, {
+    agents: [{ agentId: modelId, allowedModes: ["chat"] }],
+    tools: [toolRefs.get(toolId)!],
+  });
   return { id, name };
 }
 
