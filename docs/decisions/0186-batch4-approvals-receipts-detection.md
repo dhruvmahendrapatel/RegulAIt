@@ -597,8 +597,9 @@ unless stated.
       418,700 characters) still takes 290-360 ms on the development box (CPU 290-300 ms), against 100 ms: 17 rules
       pass their gates and each runs one RE2 scan of the remainder. Measured alternatives in re2js 2.8.6: a combined
       `RE2Set` of the 17 rules 440-590 ms (whatever the DFA memory), one alternation 440 ms, per-gate windows with a
-      result cache 120 ms (single-letter gates give 116,600 hits) and still inexact for unbounded rules. B4I-03: the nine
-      files that bound wall time (eight budgets, plus `pii-conformance` under the 5 s test timeout) form a Vitest `timing` project
+      result cache 120 ms (single-letter gates give 116,600 hits) and still inexact for unbounded rules. B4I-03: the files
+      that bound wall time (eight budgets, plus `pii-conformance` under the 5 s test timeout and, from decision 31, the
+      scan-plan differential) form a Vitest `timing` project
       (`fileParallelism: false`, run after the parallel `unit` project by `sequence.groupOrder`), CI runs
       `@regulait/shared` alone before the other packages, and `timing-isolation.test.ts` keeps the list complete.
       No budget or timeout changed.

@@ -20,21 +20,26 @@ import type { VendoredSecretRule } from "./types.js";
 const RULES: readonly VendoredSecretRule[] = GENERATED_SECRET_RULES;
 
 const identifier = (code: number) => (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 95 || code === 45;
-/** the reference: every rule, full text, RE2 only, no plan, no candidate selection */
+/** the reference: every rule, full text, RE2 only, no plan, no candidate selection. One pass per rule yields
+ * both the redaction spans and whether RE2 matches the rule anywhere (before the provider boundary check). */
 function fullScan(text: string) {
-  const out: Array<{ start: number; end: number; rule: string }> = [];
+  const spans: Array<{ start: number; end: number; rule: string }> = [];
+  const matched: string[] = [];
   for (const rule of RULES) {
+    let any = false;
     for (const [start, end] of spansOf(compileVendored(rule.id, rule.pattern, rule.caseInsensitive)!, text)) {
+      any = true;
       if (rule.leftBoundary === "ascii_identifier" && start > 0 && identifier(text.charCodeAt(start - 1))) continue;
-      out.push({ start, end, rule: rule.id });
+      spans.push({ start, end, rule: rule.id });
     }
+    if (any) matched.push(rule.id);
   }
-  return out;
+  return { spans, matched };
 }
-const rawMatches = (text: string) => RULES.filter((rule) => compileVendored(rule.id, rule.pattern, rule.caseInsensitive)!.test(text)).map((rule) => rule.id);
 function expectExact(text: string, label: string) {
-  expect(vendoredSecretSpans(text), label).toEqual(fullScan(text));
-  expect(secretCandidateRules(text).map((rule) => rule.id), label).toEqual(rawMatches(text));
+  const reference = fullScan(text);
+  expect(vendoredSecretSpans(text), label).toEqual(reference.spans);
+  expect(secretCandidateRules(text).map((rule) => rule.id), label).toEqual(reference.matched);
 }
 
 describe("planned vendored-secret scan", () => {
@@ -51,7 +56,7 @@ describe("planned vendored-secret scan", () => {
 
   it("equals a full RE2 scan of every rule on the dense 400k inputs", () => {
     for (const [name, text] of Object.entries(DENSE_INPUTS)) expectExact(text, name);
-  }, 120_000);
+  }, 600_000);
 
   it("equals a full RE2 scan on the corpus: forged markers, tokens, random fragments, near misses", () => {
     for (const { group, inputs } of scrubEquivalenceCorpus()) {

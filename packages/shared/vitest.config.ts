@@ -22,6 +22,9 @@ export const TIMING_FILES = [
   // no explicit budget, but 40k-string measurements bounded by the default 5 s test timeout: under a parallel
   // run on a loaded 4-core host it took 8.3 s and timed out (2026-10-10)
   "src/pii-conformance.test.ts",
+  // no budget, but a full RE2 scan of all 61 rules over seven 400k inputs: serialized so it neither starves nor
+  // is starved by the parallel project (ADR-0186 decision 31)
+  "src/detection-content/scan-plans.test.ts",
 ];
 
 export default defineConfig({

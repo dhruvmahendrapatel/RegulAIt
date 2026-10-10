@@ -124,6 +124,12 @@ const scanPlans = new Map<VendoredSecretRule, ScanPlan>();
     try { scanPlans.set(rule, { prefilter: new RegExp(plan.prefilter, "gu"), maxLength: plan.maxLength }); } catch { /* full scan */ }
   }
 }
+// Compile every rule and prefilter at import/boot, not on the first ledger write (as the combined set was).
+for (const rule of GENERATED_SECRET_RULES) {
+  compileVendored(rule.id, rule.pattern, rule.caseInsensitive)?.test(" ");
+  const plan = scanPlans.get(rule);
+  if (plan) { plan.prefilter.lastIndex = 0; plan.prefilter.exec(" abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 ----- "); }
+}
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
 /** the first prefilter hit at or after `from` on a code-point boundary (where RE2 can start a match), or -1 */
