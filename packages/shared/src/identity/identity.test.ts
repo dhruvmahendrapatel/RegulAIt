@@ -206,10 +206,14 @@ describe("ADR-0188 the token-exchange form (decisions 15, 23)", () => {
     expect(tokenExchangeRequestSchema.safeParse({ ...root, actor_token: "a", actor_token_type: TOKEN_TYPE_DELEGATION_AUTHZ }).success).toBe(false);
     const child = { ...root, subject_token_type: TOKEN_TYPE_ACCESS_TOKEN };
     expect(tokenExchangeRequestSchema.safeParse(child).success).toBe(false);
-    expect(tokenExchangeRequestSchema.safeParse({ ...child, actor_token: "a", actor_token_type: TOKEN_TYPE_DELEGATION_AUTHZ }).success).toBe(true);
+    // S5: a child restates the body its parent signed (decision 23); a root takes it from the proof
+    const restated = { project_id: "null", env: "hosted", cap_micros: "null", max_depth: "0", expires_at: "1900000000", idempotency_key: "k" };
+    expect(tokenExchangeRequestSchema.safeParse({ ...child, actor_token: "a", actor_token_type: TOKEN_TYPE_DELEGATION_AUTHZ }).success).toBe(false);
+    expect(tokenExchangeRequestSchema.safeParse({ ...child, ...restated, actor_token: "a", actor_token_type: TOKEN_TYPE_DELEGATION_AUTHZ }).success).toBe(true);
+    expect(tokenExchangeRequestSchema.safeParse({ ...root, ...restated }).success).toBe(false);
     // a plain DPoP proof is not the actor token any more (decision 23)
     expect(
-      tokenExchangeRequestSchema.safeParse({ ...child, actor_token: "a", actor_token_type: "urn:regulait:params:oauth:token-type:dpop-proof" }).success,
+      tokenExchangeRequestSchema.safeParse({ ...child, ...restated, actor_token: "a", actor_token_type: "urn:regulait:params:oauth:token-type:dpop-proof" }).success,
     ).toBe(false);
   });
 
