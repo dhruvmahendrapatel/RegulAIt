@@ -1119,7 +1119,9 @@ the SHA-256 of `content/ai-bom.json`). A body never carries its own signature.
   or in the file named by `REGULAIT_EXPORT_VERIFY_PUBLIC_KEYS_FILE` (air-gapped installs). When an export signing key
   is configured, its derived public key is trusted as well, so a deployment verifies its own current bundles without
   listing it; a deployment with no export private key verifies against the list alone. A `signingKeyId` in neither is
-  `bundle_manifest_signature` `invalid` `unknown_key`. B4 implements the loader.
+  `bundle_manifest_signature` `invalid` `unknown_key`. That configured list plus the deployment's own configured
+  export key are the whole online export trust root (accepted by the master, 2026-10-10): a key read from the bundle
+  (`signing-key.pub`, or a fingerprint in `manifest.json`) is never trusted. B4 implements the loader.
 - Offline (`scripts/verify-bom.mjs`): the receipt trust root is an out-of-band keyring in the shape
   `GET /v1/receipts/keys` returns (`{"keys":[{"keyId","jwk",…}]}`, `decision-receipts.ts:168`), or a list of pinned
   receipt-key fingerprints, each matched against the `receipt-keys.json` entry of that id. A receipt-key fingerprint is
