@@ -167,3 +167,10 @@ condition = "AND"
 paths = ['''^apps/gateway/src/zz-b4s-approver-eligibility\.test\.ts$''']
 regexTarget = "secret"
 regexes = ['''^b4s1-synthetic$''']
+
+[[allowlists]]
+description = "ADR-0189 spike B0 evidence: an Ed25519 signature (not a key) over synthetic records, made with a fixed public test seed to prove deterministic output"
+condition = "AND"
+paths = ['''^spikes/bom-b0/evidence/sample\.sha256\.json$''']
+regexTarget = "secret"
+regexes = ['''^n9ZXFfLcsSpY5GYt/cD6Bfx9YIAL5a4gDsKXIZ6ArhWy7/8LEAT\+5\+SK8dmm\+HqDjewnMSNA8T\+G6iRXS6kcBA==$''']
