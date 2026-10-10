@@ -293,7 +293,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 
   Status: TODO (assigned 10-10 03:30)
 - **X38 — Real-stack sweep of Model artifacts delete and retention** (after #240), in the X36 style on a fresh `demo:prepare` stack, findings `B5W-NN`. Covers: delete refused while a scan is cited or a run is unfinished; retention shown as unknown when the setting can't be read; quota refusals; axe in both themes. Branch `codex/x38`, ledger-only.
-  Status: IN-PROGRESS (Codex, 10-10 15:55 UTC) — independent parallel review on frozen main94fffb65; owner dependencies retained, tests and evidence underway
+  Status: READY-FOR-REVIEW (f787543a, draft #300) — fresh isolated demo19/19, real gateway four browser journeys/20theme axe PASS; cited/unfinished409, actual TOTPdelete200, four quotas409/413, unread retention unknown; no new defect; builds/tsc PASS, owned stack cleaned
 - **X39 — ADR-0189 slice B6: Decision BOM and AI BOM web UI** (accepted ADR, PR #253; B0 spike #265). Build it with mocks from the ADR's API and route section:
   Status: IN-PROGRESS (Codex, 10-10 16:04 UTC) — parallel B6 UI implementation against published B3 list/drift; B4 response/capability contract requested; no invented production envelope
   - the Decision BOM view from a receipt, with offline verify instructions;
