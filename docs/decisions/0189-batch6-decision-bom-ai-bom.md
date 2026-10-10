@@ -290,7 +290,7 @@ needs the ADR-0102 scrub (M-055 check done at B1 anyway).
 | `decision_facts_capture` | `on` for every receipt-eligible decision | `off` | audited, `settings_relax` step-up; the posture page shows "Decision BOM: not captured" while off; decisions made while off have `not_recorded` sections forever |
 | `decision_bom_finality` | `anchored`: flushed to a destination **observed** tamper-resistant (and timestamped when `audit_anchor_timestamp_mode = required`) | `anchored_unverified_destination` (flushed to a destination not observed tamper-resistant; the BOM and the verifier say so), then `chain_signed` (freeze once the receipt is signed, before the anchor; the BOM records `proof.anchor: absent`) | audited; amendment R4 |
 | `bom_export_roles` | admins only | admins plus an explicit auditor grant | granting is an admin act, audited |
-| `bom_person_identifiers` | `id_only` (user and workload ids) | `display_name` | audited; emails are never included (see invariants) |
+| `bom_person_identifiers` | `id_only` (user and workload ids) | `display_name`, **AI BOMs only** (Decision BOMs are always `id_only`, R45) | audited; emails are never included (see invariants) |
 | `ai_bom_snapshot_triggers` | on sign-off events (OWNER DECISION 8; queued durably when no key, R25) | on demand only | audited |
 | `cyclonedx_export_versions` | `1.7` | add `1.6` | audited |
 | BOM export rate limit | 30 per minute per user | admin may raise | audited |
@@ -704,7 +704,8 @@ R24. **Evaluation datasets map only what is recorded.** `eval_datasets` has no c
     `checksum` (the column default) means no hash, not a hash of nothing. Each such gap puts the dataset in the
     `incomplete` composition.
 
-R25. **Automatic snapshots survive a signing-key outage.** With no receipt key, an OWNER DECISION 8 trigger
+R25. **Automatic snapshots survive a signing-key outage** (open: owner item 3 may replace this queue with a fail-closed
+    trigger or a recorded skip; B3 does not build the queue until the owner decides). With no receipt key, an OWNER DECISION 8 trigger
     (use-case approval, model card approval, prompt promotion, evidence attached, config promotion, admission) could
     neither sign its snapshot nor be retried later without reading state that has since changed. The triggering
     operation does not fail; instead, in its own transaction, B3 writes an append-only
@@ -897,6 +898,25 @@ R44. **`anchored` requires an Object Lock that covers the retention period.** `S
       `anchored` as `anchored_lapsed` once it has passed, and `cannotProve` gains "that the external commitment
       exists after its retain-until date". A frozen body is never edited; only the reported finality changes.
 
+### Ninth review round (2026-10-10)
+
+Two findings contradicted accepted text and are fixed here; the rest are entry conditions or owner item 3.
+
+R45. **Decision BOMs are id-only; no display-name relaxation.** `principal` and `actors` are projected only from
+    decision-time payloads that hold no free text (R18, R37), so a display name could only come from a live read and
+    would sign today's name as if it were historical. `bom_person_identifiers = display_name` therefore no longer
+    applies to Decision BOMs, which are `id_only` without exception. For AI BOMs the relaxation remains, and only for
+    a name read inside the snapshot's own R22 capture (and held in a queued request's capture, if owner item 3 keeps
+    the queue), length-capped and email-scanned like every string.
+
+R46. **Facts captured under v1 receipts are shown but not claimed as receipt-bound.** Between B2 and the R42 cutover,
+    decisions get `decision_facts` while their receipts are still v1, with no `factsHash`. Their Decision BOM still
+    carries the exact facts payloads (R37), and the verifier still checks the addendum chain from `facts_hash` and
+    recomputes the sections from the payloads. It reports the receipt binding as `unverifiable` with reason
+    `receipt_v1_no_factsHash`, never `valid`. `cannotProve` gains, for such a BOM, "that these facts are the ones
+    recorded at decision time: the receipt does not commit to them". From the boundary on, a missing or mismatched
+    `factsHash` is `invalid` as before.
+
 ### Owner items from the review (not decided here)
 
 1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
@@ -907,6 +927,17 @@ R44. **`anchored` requires an Object Lock that covers the retention period.** `S
 2. **Trust root for the release's SBOM identity file in air-gapped installs** (R9): verify the release's existing
    keyless signature offline against a trusted-root file shipped with the release, or an owner-held release key.
    Recommended: the existing signature with the shipped trusted root, so no new key needs custody.
+3. **Automatic AI BOM snapshots while no signing key is configured** (R25; seven findings across review rounds 7–9:
+   ordering, fulfilment after pruning, full-field capture, terminal failures, binding outage-time decisions, lock
+   scope, writable capture). Options:
+   (a) keep the R25 queue, with the B3 queue entry conditions listed under "Entry conditions from review rounds 8–9";
+   (b) fail closed: an automatic snapshot trigger (use-case approval, model card approval, prompt promotion and the
+   other OWNER DECISION 8 events) is refused while no signing key is configured. Strict by default under ADR-0180,
+   relaxable by an admin with an audit row, and it removes the queue entirely;
+   (c) skip and record: no snapshot is taken, and an audited `snapshot_skipped_no_key` gap is recorded for the
+   subject. Recommended: (b), because it removes the whole class of queue findings and keeps every snapshot taken
+   from live state at sign-off. The B3 queue entry conditions apply only if the owner chooses (a). Until the owner
+   decides, B3 does not build the queue.
 
 ## Further design review happens at slice level
 
@@ -916,6 +947,9 @@ gets its own review against this ADR and those conditions. An amendment is added
 an accepted decision or needs an owner choice.
 
 ### Entry conditions from review rounds 8–9
+
+In this list, the B3 queue conditions apply only if owner item 3 chooses (a).
+
 
 - **B3, B5** (4237322631): request fulfilment is idempotent; `ai_bom_snapshots` carries the `request_id` of the
   `ai_bom_snapshot_requests` row it fulfils, UNIQUE, so a retried sweep cannot freeze one request twice.
@@ -937,6 +971,18 @@ an accepted decision or needs an owner choice.
 - **B3** (4237344238): `model_cards.data_claims` is an arbitrary record, so the loader projects it to a typed safe
   shape before signing: allowlisted keys only, scalar strings (length-capped), numbers and booleans; any nested
   object or array, or unknown key, is refused, never copied.
+- **B2** (4237346656): fact and capture-status capture sit behind one shared, transaction-aware audit writer, used by
+  every `receiptClass: "decision"` writer. B2 lists them all: at least the governed paths above plus
+  `mcp-protocol.ts`, `workbench.ts`, `playground.ts`, `compiled-egress.ts`, `connection-egress.ts`, `engine-runs.ts`,
+  `redteam.ts` and `compat-core.ts`, and any others a grep finds. A test fails on any decision writer that bypasses
+  the shared writer.
+- **B3** (4237346650): the per-subject lock is taken before the repeatable-read capture and held through the snapshot
+  insert, so an older capture can never take the next version after a newer one.
+- **B3, queued path only if owner item 3 chooses (a)**: an immutable fulfilment tombstone per request that survives
+  snapshot pruning (4237346647); a full immutable field projection for queued snapshots, including the mapped
+  free-text model-card fields, length-capped and email-scanned (4237346653); a terminal `failed` or `cancelled`
+  outcome that removes a request from the pending queue (4237346644); and binding outage-time decisions to the
+  request (4237346659, with 4237344250 above).
 
 ## Open questions
 
