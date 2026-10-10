@@ -8,16 +8,17 @@ export const DIGEST = /^[0-9a-f]{64}$/;
 export interface BomSnapshot { id: string; version: number; serialNumber: string; trigger: string; bodySha256: string; keyId: string; createdAt: string; formats: string[] }
 export interface SnapshotList { subject: BomSubject; released: boolean; snapshots: BomSnapshot[] }
 export interface BomDrift { evidence: false; subject: BomSubject; baseline: { snapshotId: string; version: number; createdAt: string; serialNumber: string }; changes: Array<{ reference: string; change: "added" | "removed" | "changed_hash" | "changed_version"; beforeHashes: string[]; afterHashes: string[] }> }
-export interface BomInspection { digest: string | null; state: "ready" | "pending" | "not_recorded"; finality: string | null; completeness: Array<{ section: string; status: "recorded" | "not_recorded" | "not_applicable"; reason: string | null }>; cannotProve: string[] }
+export interface BomCapabilities { canExport: boolean; canVerify: boolean; canViewDrift: boolean }
+export interface BomInspection { capabilities?: BomCapabilities; checks?: BomVerification["sections"]; decisionMetadata?: {version:number;versions:number[];auditId?:string;bomId?:string}; digest: string | null; state: "ready" | "pending" | "not_recorded"; finality: string | null; completeness: Array<{ section: string; status: "recorded" | "not_recorded" | "not_applicable"; reason: string | null }>; cannotProve: string[] }
 export interface BomVerification { trust: "deployment_keys" | "independently_pinned"; sections: Array<{ section: string; status: "valid" | "invalid" | "unverifiable" }>; cannotProve: string[] }
 /** A display port, not an assumed B4 HTTP response envelope. */
 export interface BomEvidencePort {
   /** Supplied by the trusted adapter; absent B4 contract means no export permission is inferred. */
   exportAllowed: boolean;
-  inspectSnapshot(id: string): Promise<BomInspection>;
-  exportSnapshot(id: string, format: BomFormat): Promise<Blob>;
-  decision(auditId: string): Promise<BomInspection>;
-  exportDecision(auditId: string): Promise<Blob>;
+  inspectSnapshot(id: string, snapshot?: BomSnapshot, subject?: BomSubject): Promise<BomInspection>;
+  exportSnapshot(id: string, format: BomFormat, snapshot?: BomSnapshot, subject?: BomSubject): Promise<Blob>;
+  decision(auditId: string, version?: number): Promise<BomInspection>;
+  exportDecision(auditId: string, inspection?: BomInspection): Promise<Blob>;
   verify(bundle: Blob): Promise<BomVerification>;
 }
 const object = (v: unknown): Record<string, unknown> | null => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
@@ -75,7 +76,7 @@ export function formatLabel(format: string): string { return ownLabel({ native: 
 export function readInspection(value: unknown): BomInspection {
   const v = object(value);
   if (!v || !(typeof v.state === "string" && ["ready", "pending", "not_recorded"].includes(v.state)) || !(v.digest === null || typeof v.digest === "string" && DIGEST.test(v.digest)) || !(v.finality === null || typeof v.finality === "string") || !Array.isArray(v.completeness) || v.completeness.length > 64 || !Array.isArray(v.cannotProve) || v.cannotProve.length > 64) throw new Error("BOM assurance could not be read.");
-  return { state: v.state as BomInspection["state"], digest: v.digest as string | null, finality: v.finality as string | null, completeness: v.completeness.map(value => { const r = object(value); if (!r || typeof r.section !== "string" || !(typeof r.status === "string" && ["recorded", "not_recorded", "not_applicable"].includes(r.status)) || !(r.reason === null || typeof r.reason === "string")) throw new Error("BOM assurance could not be read."); return {section:r.section,status:r.status as BomInspection["completeness"][number]["status"],reason:r.reason as string|null}; }), cannotProve: v.cannotProve.map(value=> {if(typeof value!=="string")throw new Error("BOM assurance could not be read.");return value;}) };
+  return { ...(v.capabilities ? {capabilities:readCapabilitiesDisplay(v.capabilities)} : {}), ...(v.checks ? {checks:readVerification({trust:"deployment_keys",sections:v.checks,cannotProve:[]}).sections} : {}), ...(v.decisionMetadata ? {decisionMetadata:readDecisionMetadata(v.decisionMetadata)} : {}), state: v.state as BomInspection["state"], digest: v.digest as string | null, finality: v.finality as string | null, completeness: v.completeness.map(value => { const r = object(value); if (!r || typeof r.section !== "string" || !(typeof r.status === "string" && ["recorded", "not_recorded", "not_applicable"].includes(r.status)) || !(r.reason === null || typeof r.reason === "string")) throw new Error("BOM assurance could not be read."); return {section:r.section,status:r.status as BomInspection["completeness"][number]["status"],reason:r.reason as string|null}; }), cannotProve: v.cannotProve.map(value=> {if(typeof value!=="string")throw new Error("BOM assurance could not be read.");return value;}) };
 }
 export function readVerification(value: unknown): BomVerification {
   const v=object(value); if(!v || !(typeof v.trust === "string" && ["deployment_keys","independently_pinned"].includes(v.trust)) || !Array.isArray(v.sections) || v.sections.length>64 || !Array.isArray(v.cannotProve) || v.cannotProve.length>64) throw new Error("BOM verification could not be read.");
@@ -85,9 +86,15 @@ export function finalityLabel(value: string | null): string { return value === n
 
 const portIds = new WeakMap<object, number>();
 let nextPortId = 0;
-export function bomPortKey(port: object | undefined): string { if (!port) return "unavailable"; let id = portIds.get(port); if (id === undefined) {id=++nextPortId;portIds.set(port,id);} return `port-${id}`; }
+export function bomPortKey(port: object | null | undefined): string { if (!port) return "unavailable"; let id = portIds.get(port); if (id === undefined) {id=++nextPortId;portIds.set(port,id);} return `port-${id}`; }
 
 export function readCreatedSnapshot(value: unknown): Pick<BomSnapshot, "id" | "version" | "serialNumber" | "bodySha256"> {
   const v=object(value); if(!v || typeof v.id!=="string" || !UUID.test(v.id) || !integer(v.version) || typeof v.serialNumber!=="string" || !v.serialNumber.startsWith("urn:uuid:") || !UUID.test(v.serialNumber.slice(9)) || typeof v.bodySha256!=="string" || !DIGEST.test(v.bodySha256)) throw new Error("Signed snapshot metadata could not be read.");
   return {id:v.id,version:v.version as number,serialNumber:v.serialNumber,bodySha256:v.bodySha256};
 }
+
+function readCapabilitiesDisplay(value:unknown):BomCapabilities { const v=object(value);if(!v || typeof v.canExport!=="boolean" || typeof v.canVerify!=="boolean" || typeof v.canViewDrift!=="boolean")throw new Error("Capabilities unavailable.");return {canExport:v.canExport,canVerify:v.canVerify,canViewDrift:v.canViewDrift}; }
+function readDecisionMetadata(value:unknown):{version:number;versions:number[];auditId?:string;bomId?:string} {const v=object(value);if(!v || !integer(v.version) || !Array.isArray(v.versions) || !v.versions.length || v.versions.some(n=>!integer(n)) || !v.versions.includes(v.version) || v.versions.some((n,i)=>i>0 && n<=Number((v.versions as number[])[i-1])))throw new Error("Versions unavailable.");if(v.auditId!==undefined && (typeof v.auditId!=="string"||!UUID.test(v.auditId)) || v.bomId!==undefined && (typeof v.bomId!=="string"||!UUID.test(v.bomId)))throw new Error("Identity unavailable.");return {version:v.version as number,versions:v.versions as number[],...(v.auditId ? {auditId:v.auditId as string}:{}),...(v.bomId ? {bomId:v.bomId as string}:{})};}
+
+Object.assign(SECTION_LABELS,{bundle_manifest_signature:"Bundle manifest signature",bundle_manifest_files:"Bundle file digests",bundle_subject:"Bundle subject",bundle_email_scan:"Bundle privacy scan",body_version:"Native body version",body_schema:"Native body schema",body_signature:"Native body signature",receipt_signature:"Receipt signature",receipt_payload_hash:"Receipt payload digest",receipt_facts_binding:"Receipt fact binding",facts_addenda_chain:"Fact addendum chain",facts_addenda_signatures:"Fact addendum signatures",sections_projection:"Section projection",chain_links:"Audit chain links",decision_content_binding:"Decision content binding",anchor_record:"Anchor record",anchor_imprint:"Anchor imprint",tsa_token:"Timestamp token",finality:"Finality",ai_bom_link:"AI BOM link",rendering_hashes:"Rendering digests",serial_number:"Serial number",supersedes:"Earlier snapshot linkage"});
+Object.assign(LIMIT_LABELS,{nothing_omitted_after_anchor:"That nothing was omitted after the anchor",facts_true:"That the facts were true: only that they were recorded and signed",signing_time_beyond_anchor:"The signing time beyond the anchor timestamp",destination_tamper_resistant:"That the anchor destination is tamper-resistant",decision_row_content:"That the audit row content is the decision described: its preimage is not disclosed",commitment_after_retain_until:"That the external commitment exists after its retain-until date",facts_recorded_at_decision_time:"That older receipts commit to facts recorded at decision time",finite_lock_under_unbounded_retention:"That a finite anchor lock lasts for retention with no end"});
