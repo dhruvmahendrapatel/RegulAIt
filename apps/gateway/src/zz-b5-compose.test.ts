@@ -62,7 +62,57 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(env.match(/\n {4}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_GATEWAY_URL:", "REGULAIT_ENGINE_ENROLLMENT_TOKEN:"]);
   });
 
-  it("B5-P: the promptfoo runner merges the template and overrides only its image, platform, state volume and four variables", () => {
+  it("B5-P2: the promptfoo worker runs promptfoo with no runner credential in reach: no state volume, no enrolment token, its own namespaces, the job volume read-only", () => {
+    const REF = "${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const esc = (s: string) => s.replace(/[\\^$.*+?()[\]{}|<]/g, "\\$&");
+    const line = (svc: string, k: string) => svc.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
+    const worker = block("engine-promptfoo-worker");
+    // the same image, by digest only, with its own entrypoint
+    expect(line(worker, "image")).toBe(REF);
+    expect(worker).toMatch(/\n {4}command: \["node", "\/app\/dist\/worker-main\.js"\]\n/);
+    // it does NOT merge the runner template (the template carries the enrolment token)
+    expect(worker).not.toMatch(/<<: \*engine-runner/);
+    // nothing that would share the runner's process, IPC or network namespace, its filesystem, or widen anything
+    for (const key of ["<<", "pid", "ipc", "network_mode", "volumes_from", "ports", "privileged", "cap_add", "extra_hosts", "dns", "devices", "userns_mode", "secrets", "env_file"]) {
+      expect(worker, key).not.toMatch(new RegExp(`\\n {4}${esc(key)}:`));
+    }
+    // it reaches the gateway's compat routes (model calls on the run's virtual key) over the
+    // internal-only engines network, and nothing else
+    expect(worker).toMatch(/\n {4}networks: \[engines\]\n/);
+    expect(worker).toMatch(/\n {4}read_only: true\n/);
+    expect(worker).toMatch(/\n {4}cap_drop: \[ALL\]\n/);
+    expect(worker).toMatch(/\n {4}security_opt: \["no-new-privileges:true"\]\n/);
+    expect(worker).toMatch(/\n {4}user: "10001:10001"\n/);
+    expect(worker).toMatch(/\n {4}pull_policy: \$\{REGULAIT_ENGINE_PULL_POLICY:-never\}\n/);
+    expect(worker).toMatch(/\n {4}profiles: \["engines"\]\n/);
+    expect(worker).toMatch(/\n {4}platform: linux\/amd64\n/);
+    expect(line(worker, "mem_limit")).toBe("2g");
+    expect(line(worker, "pids_limit")).toBe("256");
+    // THE ISOLATION: the job volume read-only, its one shared writable volume is /out; no state
+    // volume, no token, no enrolment token, no gateway URL of the runner's
+    const wvols = worker.slice(worker.indexOf("    volumes:\n") + 13, worker.indexOf("    environment:"));
+    expect(wvols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-promptfoo-jobs:/jobs:ro", "- engine-promptfoo-results:/out"]);
+    expect(worker).not.toMatch(/engine-promptfoo-state|ENROLLMENT_TOKEN|RUNNER_STATE|\/state|GATEWAY_URL|IMAGE_REF|IMAGE_DIGEST/);
+    const wenv = worker.slice(worker.indexOf("    environment:"));
+    expect(wenv.match(/\n {6}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_PROMPTFOO_JOBS_DIR:", "REGULAIT_PROMPTFOO_RESULTS_DIR:"]);
+    // the runner side of the exchange: jobs read-write, results READ-ONLY (the runner never runs promptfoo)
+    const runner = block("engine-promptfoo");
+    const rvols = runner.slice(runner.indexOf("    volumes:\n") + 13, runner.indexOf("    environment:"));
+    expect(rvols.trim().split("\n").map((l) => l.trim())).toEqual([
+      "- engine-promptfoo-state:/state",
+      "- engine-promptfoo-jobs:/jobs",
+      "- engine-promptfoo-results:/results:ro",
+    ]);
+    // both exchange volumes are tmpfs-backed (the run key in a job never reaches a disk)
+    const vols = block("volumes", "");
+    for (const v of ["engine-promptfoo-jobs", "engine-promptfoo-results"]) {
+      const at = vols.indexOf(`\n  ${v}:\n`);
+      expect(at, v).toBeGreaterThan(-1);
+      expect(vols.slice(at, at + 200), v).toMatch(/type: tmpfs\n\s+device: tmpfs\n/);
+    }
+  });
+
+  it("B5-P: the promptfoo runner merges the template and overrides only its image, platform, volumes and six variables", () => {
     const svc = block("engine-promptfoo");
     expect(svc).toMatch(/\n {4}<<: \*engine-runner\n/);
     // nothing that would widen the template: no ports, networks, privileges, profiles or user
@@ -80,9 +130,10 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(svc).not.toMatch(/:latest|engine-promptfoo:0\.123/);
     // PR #205 review [51]: amd64 only (libsql's native x64 binding)
     expect(svc).toMatch(/\n {4}platform: linux\/amd64\n/);
-    // PR #205 review [49]: exactly one volume, the runner's own state, a named volume (no host path)
+    // PR #205 review [49]: the runner's own state is a named volume (no host path); B5-P2 adds the
+    // two exchange volumes with the worker (pinned in the worker's test above)
     const vols = svc.slice(svc.indexOf("    volumes:\n") + 13, svc.indexOf("    environment:"));
-    expect(vols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-promptfoo-state:/state"]);
+    expect(vols.trim().split("\n").map((l) => l.trim())[0]).toBe("- engine-promptfoo-state:/state");
     expect(block("volumes", "")).toMatch(/\n {2}engine-promptfoo-state:\n/);
     const env = svc.slice(svc.indexOf("    environment:"));
     expect(env.match(/\n {6}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual([
@@ -90,6 +141,8 @@ describe("ADR-0187: the engines network and the runner template", () => {
       "REGULAIT_ENGINE_ENROLLMENT_TOKEN:",
       "REGULAIT_ENGINE_IMAGE_REF:",
       "REGULAIT_ENGINE_IMAGE_DIGEST:",
+      "REGULAIT_PROMPTFOO_JOBS_DIR:",
+      "REGULAIT_PROMPTFOO_RESULTS_DIR:",
     ]);
   });
   it("B5-M: the modelscan runner merges the template; the scanner has no network, no token, no state, the artifact read-only and one writable tmpfs", () => {

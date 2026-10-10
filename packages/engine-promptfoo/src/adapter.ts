@@ -3,20 +3,26 @@
  * → `promptfoo eval` → mapped envelope body. Each promptfoo step is a child process group under the
  * run's abort signal and deadline (the runner core kills the whole group on cancel or deadline).
  *
+ * B5-P2 (ADR-0187 decisions 170 on): the adapter runs in the RUNNER container and never runs
+ * promptfoo there. It hands a job (job.ts: the config, the gateway URL, the run key, the deadline)
+ * to an executor; in the image that is the exchange to the worker container (exchange.ts), which
+ * holds no runner credential. The runner token is not an input of this adapter at all.
+ *
  * Fail closed:
  *   - nothing runnable (every requested set is cloud-only, excluded, not pre-seeded or unknown)
  *     → `not_run` and the engine is never started;
- *   - a config the invariant refuses (`assertGatewayOnly`) → `not_run`, the engine never started;
+ *   - a config the invariant refuses (`assertGatewayOnly`, here and again in the worker) → `not_run`,
+ *     the engine never started;
  *   - generation that fails or writes nothing → `failed` (`engine_generate_failed`), no items;
  *   - an abort (cancel, deadline) → throws, and the runner core reports it (cancelled posts
  *     nothing; a deadline posts `timeout`);
+ *   - a results file that is not the one the worker hashed → `failed` (`results_inconsistent`);
  *   - everything else is decided by the mapper (an `eval` exit other than 0/100 is `failed`).
  */
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { runProcessGroup, type EngineAdapter, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
+import { readFile, stat } from "node:fs/promises";
+import { type EngineAdapter, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
 import { PROMPTFOO_STRATEGY_SET_PREFIX } from "@regulait/shared";
 import {
   assertGatewayOnly,
@@ -26,6 +32,7 @@ import {
   PromptfooConfigRefused,
   type PromptfooPlan,
 } from "./config.js";
+import { LocalPromptfooExecutor, type PromptfooExecutor, type PromptfooJob } from "./job.js";
 import { mapPromptfooResults, notRunPairs, plannedPairs, type PromptfooEnvelopeBody } from "./mapper.js";
 
 /**
@@ -54,6 +61,13 @@ export interface PromptfooAdapterOptions {
   path?: string;
   /** seam for tests: the results-file bound (default PROMPTFOO_MAX_RESULTS_BYTES) */
   maxResultsBytes?: number;
+  /**
+   * B5-P2: where promptfoo runs. The image's runner passes the exchange to the worker container
+   * (exchange.ts), so promptfoo never runs where the runner token is. Default: this process's
+   * container (`LocalPromptfooExecutor`, from `entrypoint`, `nodeBin`, `run` and `path`), for tests
+   * and the opt-in real-engine test only.
+   */
+  executor?: PromptfooExecutor;
 }
 
 class Aborted extends Error {}
@@ -70,45 +84,51 @@ function notRunAll(plan: PromptfooPlan, errorCode: string, status: "not_run" | "
 }
 
 export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
-  const run = opts.run ?? runProcessGroup;
-  const node = opts.nodeBin ?? process.execPath;
+  const executor =
+    opts.executor ??
+    new LocalPromptfooExecutor({
+      entrypoint: opts.entrypoint,
+      ...(opts.nodeBin ? { nodeBin: opts.nodeBin } : {}),
+      ...(opts.run ? { run: opts.run } : {}),
+      ...(opts.path ? { path: opts.path } : {}),
+    });
   return async (lease, ctx) => {
     const plan = planPromptfooRun(lease.spec.config.sets);
     if (plan.plugins.length === 0) return notRunAll(plan, plan.strategies.length > 0 ? "no_runnable_plugin" : "nothing_runnable");
     let config: Record<string, unknown>;
-    let env: Record<string, string>;
     try {
       config = buildPromptfooConfig(lease, plan);
-      env = buildPromptfooEnv(lease, ctx.workDir, { PATH: opts.path ?? process.env.PATH });
+      const env = buildPromptfooEnv(lease, ctx.workDir, { PATH: opts.path ?? process.env.PATH });
       assertGatewayOnly(config, env, lease.target!.baseUrl);
     } catch (e) {
       if (e instanceof PromptfooConfigRefused) return notRunAll(plan, e.code);
       throw e;
     }
-    const cfgPath = path.join(ctx.workDir, "redteam-config.json");
-    const genPath = path.join(ctx.workDir, "redteam.yaml");
-    const outPath = path.join(ctx.workDir, "results.json");
-    await writeFile(cfgPath, JSON.stringify(config, null, 2), { mode: 0o600 });
-    const remaining = () => Math.max(1000, Date.parse(lease.deadlineAt) - Date.now());
-    const step = async (args: string[]) => {
+    // B5-P2: the job carries the config, the gateway URL, the RUN key and the deadline, nothing of
+    // the runner's own
+    const job: PromptfooJob = { runId: lease.runId, baseUrl: lease.target!.baseUrl, apiKey: lease.target!.apiKey, config, deadlineAt: lease.deadlineAt };
+    try {
       if (ctx.signal.aborted) throw new Aborted("aborted");
-      const r = await run(node, [opts.entrypoint, ...args], { cwd: ctx.workDir, env, signal: ctx.signal, timeoutMs: remaining() });
-      if (ctx.signal.aborted || r.killed) throw new Aborted("aborted");
-      return r;
-    };
-    const gen = await step(["redteam", "generate", "-c", cfgPath, "-o", genPath, "--no-cache", "--force", "--no-progress-bar", "-j", "1"]);
-    if (gen.exitCode !== 0 || !existsSync(genPath)) {
-      return notRunAll(plan, "engine_generate_failed", "failed");
+      const outcome = await executor.execute(job, ctx);
+      if (ctx.signal.aborted || outcome.aborted) throw new Aborted("aborted");
+      // the worker re-checked the invariant and refused: promptfoo never started
+      if (outcome.refused !== null) return notRunAll(plan, outcome.refused);
+      if (!outcome.generated) return notRunAll(plan, "engine_generate_failed", "failed");
+      ctx.progress(0.9);
+      const outPath = outcome.results?.path ?? null;
+      // [63] bounded BEFORE it is read: a file over the bound is hashed by streaming and never parsed
+      const size = outPath !== null && existsSync(outPath) ? (await stat(outPath)).size : null;
+      if (size !== null && size > (opts.maxResultsBytes ?? PROMPTFOO_MAX_RESULTS_BYTES)) {
+        return { ...notRunAll(plan, "results_too_large", "failed"), rawReport: { sha256: await sha256OfFile(outPath!), bytes: 0 } };
+      }
+      const raw = size !== null ? await readFile(outPath!) : null;
+      // B5-P2: a file that crossed the exchange must be the one the worker hashed (no torn or swapped write)
+      if (raw !== null && outcome.results?.sha256 && createHash("sha256").update(raw).digest("hex") !== outcome.results.sha256) {
+        return notRunAll(plan, "results_inconsistent", "failed");
+      }
+      return mapPromptfooResults({ raw, exitCode: outcome.evalExitCode, plan, gatewayBaseUrl: lease.target!.baseUrl });
+    } finally {
+      await executor.release(lease.runId);
     }
-    ctx.progress(0.3);
-    const evaluated = await step(["eval", "-c", genPath, "-o", outPath, "--no-cache", "--no-share", "--no-table", "--no-progress-bar", "-j", "1"]);
-    ctx.progress(0.9);
-    // [63] bounded BEFORE it is read: a file over the bound is hashed by streaming and never parsed
-    const size = existsSync(outPath) ? (await stat(outPath)).size : null;
-    if (size !== null && size > (opts.maxResultsBytes ?? PROMPTFOO_MAX_RESULTS_BYTES)) {
-      return { ...notRunAll(plan, "results_too_large", "failed"), rawReport: { sha256: await sha256OfFile(outPath), bytes: 0 } };
-    }
-    const raw = size !== null ? await readFile(outPath) : null;
-    return mapPromptfooResults({ raw, exitCode: evaluated.exitCode, plan, gatewayBaseUrl: lease.target!.baseUrl });
   };
 }

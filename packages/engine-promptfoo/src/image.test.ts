@@ -56,7 +56,10 @@ describe("the promptfoo image's inputs", () => {
     expect(isPublicAddress(env["REGULAIT_EGRESS_PROBE_ADDRESS"])).toBe(true);
     // PR #205 review [49]: the runner's state dir exists, owned by the runner uid, 0700
     expect(env["REGULAIT_RUNNER_STATE_DIR"]).toBe("/state");
-    expect(dockerfile).toMatch(/\nRUN mkdir -p \/state && chown 10001:10001 \/state && chmod 0700 \/state\n/);
+    // B5-P2: and the exchange mount points of both containers, owned by the same uid
+    expect(dockerfile).toMatch(/\nRUN mkdir -p \/state \/jobs \/results \/out && chown 10001:10001 \/state \/jobs \/results \/out && chmod 0700 \/state\n/);
+    // the default command is the runner; the worker's entrypoint ships beside it (compose names it)
+    expect(dockerfile).toMatch(/\nCMD \["node", "\/app\/dist\/main\.js"\]\n?$/);
     expect(dockerfile).toMatch(/\nUSER 10001:10001\n/);
     expect(dockerfile).toMatch(/rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     expect(dockerfile).toMatch(/npm ci --omit=optional --ignore-scripts/);
