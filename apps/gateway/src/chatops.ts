@@ -64,6 +64,7 @@
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import {
   and,
   approvals,
@@ -85,6 +86,7 @@ import {
   users,
   workflowInstances,
   type Db,
+  sql,
 } from "@regulait/db";
 import {
   CHATOPS_PROVIDERS,
@@ -1090,6 +1092,18 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         return reply.status(400).send({ error: problem.error, detail: problem.detail, ...(problem.invalid ? { invalid: problem.invalid } : {}) });
       }
       recipients = problem.value;
+      // ADR-0186 A: ADDING a recipient widens where approval cards may be mailed:
+      // a settings_relax step-up bound to this workspace and the added mailboxes
+      // (removing one narrows it and needs none)
+      const from = before.outlookRecipientAllowList ?? [];
+      const added = recipients.filter((m) => !from.includes(m)).sort();
+      if (added.length > 0) {
+        const su = await requireStepUp(db, req, reply, {
+          kind: "settings_relax",
+          facts: { connectionId, values: { outlookRecipientsAdded: added } },
+        });
+        if (!su.ok) return reply;
+      }
     }
     const botChange = body.botAppId !== undefined || body.botTenantId !== undefined || body.botOpenidMetadataUrl !== undefined;
     const bot = {
@@ -1116,8 +1130,17 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         ...(body.slackTeamId !== undefined ? { slackTeamId: body.slackTeamId } : {}),
         ...(recipients !== undefined ? { outlookRecipientAllowList: recipients } : {}),
       })
-      .where(eq(chatopsConnections.id, connectionId))
+      // ADR-0186 A (Class A): compare-and-set on the recipient list the step-up was decided on
+      .where(
+        and(
+          eq(chatopsConnections.id, connectionId),
+          ...(recipients !== undefined
+            ? [sql`${chatopsConnections.outlookRecipientAllowList} = ${JSON.stringify(before.outlookRecipientAllowList ?? [])}::jsonb`]
+            : []),
+        ),
+      )
       .returning();
+    if (!after) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     if (recipients !== undefined) {
       const from = before.outlookRecipientAllowList ?? [];
       const added = recipients.filter((m) => !from.includes(m));

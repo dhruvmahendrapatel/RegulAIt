@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { putOrgSettings } from "../../../stepup/stepUp";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
@@ -110,8 +111,10 @@ function RetentionSettings({ settings }: { settings: Record<string, unknown> }) 
   // the dialog keeps this admin's INTENT (the typed values); confirming re-reads
   const [pending, setPending] = useState<{ ttl: string; days: string; body: RetentionBody; relaxed: string[]; changedWhileOpen: boolean } | null>(null);
   const unavailable = typeof settings.semanticCacheTtlSeconds !== "number" || typeof settings.conversationRetentionDays !== "number";
+  // ADR-0186 A (B4S-04): lengthening a retention is a relaxation the gateway refuses with step_up_required; the
+  // step-up dialog opens inside the held flight, and a cancelled step-up writes nothing and frees the form
   const save = async (body: RetentionBody) => {
-    if (await act.run(() => api.put("/v1/org/settings", body), "Retention settings saved")) await baseline.settle();
+    if (await act.run(() => putOrgSettings(body), "Retention settings saved")) await baseline.settle();
   };
   const submit = async () => {
     // busy BEFORE the re-read: a second submit meanwhile is ignored

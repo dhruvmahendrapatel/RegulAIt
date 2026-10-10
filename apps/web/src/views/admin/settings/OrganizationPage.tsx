@@ -14,6 +14,7 @@ import { Button, Card, ConfirmModal, Field, Input, Select, Textarea } from "../.
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
+import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
 
@@ -93,7 +94,7 @@ const ON_OFF = (
 function Loaded(props: { settings: Record<string, unknown> }) {
   const s = props.settings;
   const agents = useAgents();
-  const put = (body: Record<string, unknown>) => api.put("/v1/org/settings", body);
+  const put = (body: Record<string, unknown>) => putOrgSettings(body);
   const asBool = (val: string) => val === "true";
 
   // --- 1. Optimization -----------------------------------------------------
@@ -610,9 +611,9 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           onSubmit={() =>
             void assuranceGate.act.run(
               () =>
-                api.put("/v1/org/settings/assurance-gate-mode", {
+                withStepUp((h) => stepUpApi.put("/v1/org/settings/assurance-gate-mode", {
                   mode: assuranceGate.f.assuranceGateMode as "off" | "warn" | "enforce",
-                }),
+                }, h)),
               "Assurance gate saved (audited)",
             )
           }

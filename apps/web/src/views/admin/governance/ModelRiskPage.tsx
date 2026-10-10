@@ -37,6 +37,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 type CardState = "unsigned" | "pending" | "approved" | "expiring" | "expired" | "revoked";
 
@@ -283,7 +284,7 @@ export default function ModelRiskPage() {
                     value={status.data?.enforced ? "on" : "off"}
                     onChange={(e) =>
                       void act.run(async () => {
-                        await api.post("/v1/mrm/enforcement", { enforced: e.target.value === "on" });
+                        await withStepUp((h) => stepUpApi.post("/v1/mrm/enforcement", { enforced: e.target.value === "on" }, h));
                         await refreshAll();
                       }, "Model-risk enforcement updated")
                     }
@@ -319,10 +320,10 @@ export default function ModelRiskPage() {
                     value={status.data?.stalenessRecertEnabled ? "on" : "off"}
                     onChange={(e) =>
                       void act.run(async () => {
-                        await api.post("/v1/mrm/enforcement", {
+                        await withStepUp((h) => stepUpApi.post("/v1/mrm/enforcement", {
                           enforced: status.data?.enforced ?? true,
                           stalenessRecertEnabled: e.target.value === "on",
-                        });
+                        }, h));
                         await refreshAll();
                       }, "Staleness-recertification setting updated")
                     }
@@ -346,10 +347,10 @@ export default function ModelRiskPage() {
                     disabled={act.busy || stalenessThreshold === null}
                     onClick={() =>
                       void act.run(async () => {
-                        await api.post("/v1/mrm/enforcement", {
+                        await withStepUp((h) => stepUpApi.post("/v1/mrm/enforcement", {
                           enforced: status.data?.enforced ?? true,
                           stalenessRecertThreshold: Number(stalenessThreshold),
-                        });
+                        }, h));
                         setStalenessThreshold(null);
                         await refreshAll();
                       }, "Drift threshold saved")

@@ -174,11 +174,51 @@ export const PASSKEY_REFUSALS = {
 } as const;
 export type PasskeyRefusalCode = keyof typeof PASSKEY_REFUSALS;
 
+/** A2+B: the dual-control and signed-approval refusals slice A2+B added, with
+ * the HTTP status each is sent with. `caller_cannot_approve`: the caller (or
+ * someone delegation-linked to them) decides their own tool call;
+ * `approval_not_signable`: signing options for an approval that is not a
+ * passkey-mode tool-call approval; `unknown_role`: a rule names an approver role
+ * that does not exist; `approval_quorum_unsatisfiable`: a connector write denied
+ * at queue time because no pool can approve it; `approval_signature_recheck_failed`:
+ * a connector write whose approval failed the execution-time signature recheck. */
+export const APPROVAL_REFUSALS = {
+  caller_cannot_approve: 403,
+  approval_not_signable: 409,
+  unknown_role: 422,
+  approval_quorum_unsatisfiable: 403,
+  approval_signature_recheck_failed: 403,
+  // B4S-02: the decider is not an active account that already existed when the call was queued
+  approver_not_eligible: 403,
+} as const;
+export type ApprovalRefusalCode = keyof typeof APPROVAL_REFUSALS;
+
+/** A (slice A1): the passkey-enrolment and step-up ceremony refusals, with the
+ * HTTP status each is sent with. `passkey_attestation_refused`: a registration
+ * whose attestation format is not `none`; `passkey_already_registered`: that
+ * credential id is enrolled already; `fresh_sign_in_required`: a first passkey
+ * from a session that is not a fresh human sign-in; `browser_session_required`:
+ * a passkey or step-up ceremony from an API key or the bootstrap credential;
+ * `unknown_challenge` / `unknown_step_up`: a ceremony id this session does not
+ * hold; `step_up_action_too_large`: action facts over the size any action has. */
+export const CEREMONY_REFUSALS = {
+  passkey_attestation_refused: 422,
+  passkey_already_registered: 409,
+  fresh_sign_in_required: 403,
+  browser_session_required: 403,
+  unknown_challenge: 404,
+  unknown_step_up: 404,
+  step_up_action_too_large: 413,
+} as const;
+export type CeremonyRefusalCode = keyof typeof CEREMONY_REFUSALS;
+
 export const BATCH4_REFUSAL_CODES = [
   ...(Object.keys(STEP_UP_REFUSALS) as StepUpRefusalCode[]),
   ...(Object.keys(PASSKEY_REFUSALS) as PasskeyRefusalCode[]),
+  ...(Object.keys(APPROVAL_REFUSALS) as ApprovalRefusalCode[]),
+  ...(Object.keys(CEREMONY_REFUSALS) as CeremonyRefusalCode[]),
 ] as const;
-export type Batch4RefusalCode = StepUpRefusalCode | PasskeyRefusalCode;
+export type Batch4RefusalCode = StepUpRefusalCode | PasskeyRefusalCode | ApprovalRefusalCode | CeremonyRefusalCode;
 
 /** the `step_up_required` body: what the client must prove, and for which action */
 export interface StepUpRequiredBody {

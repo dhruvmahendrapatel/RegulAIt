@@ -131,11 +131,11 @@ async function inRolledBackTx(body: (tx: Tx) => Promise<void>): Promise<void> {
 }
 const inSavepoint = (tx: Tx, stmt: ReturnType<typeof sql>) => tx.transaction((sp) => sp.execute(stmt));
 
-async function lastSettingsAudit() {
+async function lastSettingsAudit(userId: string = users.admin.id) {
   const [row] = await db
     .select()
     .from(auditLog)
-    .where(and(eq(auditLog.ruleId, "org-settings-updated"), eq(auditLog.userId, users.admin.id)))
+    .where(and(eq(auditLog.ruleId, "org-settings-updated"), eq(auditLog.userId, userId)))
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row!;
@@ -224,24 +224,27 @@ describe("ADR-0186 secure by default: the batch-4 org settings", () => {
   });
 
   it("each relaxation round-trips, is audited with detail.transitions and named as relaxed; strict comes back", async () => {
+    // slice A: a relaxation needs a `settings_relax` step-up, which an API key can never give; the deploy-time
+    // bootstrap credential is no person and is not asked (zz-b4a-step-up.test.ts proves the step-up itself)
+    const BOOT_USER = "00000000-0000-0000-0000-000000000000";
     try {
       for (const [key, value] of Object.entries(RELAXED)) {
-        const put = await inject("PUT", "/v1/org/settings", users.admin.auth, { [key]: value });
+        const put = await inject("PUT", "/v1/org/settings", AUTH, { [key]: value });
         expect(put.statusCode, `${key}: ${put.body}`).toBe(200);
         expect(put.json().settings[key], key).toEqual(value);
         const read = await inject("GET", "/v1/org/settings", users.admin.auth);
         expect(read.json().settings[key], `${key} read back`).toEqual(value);
-        const row = await lastSettingsAudit();
+        const row = await lastSettingsAudit(BOOT_USER);
         const detail = row.detail as { transitions: Record<string, { from: unknown; to: unknown }>; relaxed?: string[] };
         expect(detail.transitions[key], key).toEqual({ from: BATCH4_STRICT_DEFAULTS[key as Batch4SettingKey], to: value });
         expect(detail.relaxed, key).toEqual([key]);
         expect(row.reason, key).toContain("RELAXED from the strict default");
       }
     } finally {
-      const back = await inject("PUT", "/v1/org/settings", users.admin.auth, { ...BATCH4_STRICT_DEFAULTS });
+      const back = await inject("PUT", "/v1/org/settings", AUTH, { ...BATCH4_STRICT_DEFAULTS });
       expect(back.statusCode, back.body).toBe(200);
     }
-    const detail = (await lastSettingsAudit()).detail as { transitions: Record<string, unknown>; relaxed?: string[] };
+    const detail = (await lastSettingsAudit(BOOT_USER)).detail as { transitions: Record<string, unknown>; relaxed?: string[] };
     expect(Object.keys(detail.transitions).sort()).toEqual(Object.keys(BATCH4_STRICT_DEFAULTS).sort());
     expect(detail.relaxed).toBeUndefined();
   });
@@ -690,7 +693,10 @@ describe("ADR-0186 consumeWebauthnChallenge — single use, by the database cloc
 });
 
 describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the monitor", () => {
-  const SELF: Array<[Method, string]> = [
+  // slice A (passkeys and step-up) has landed: its self routes are built
+  // (zz-b4a-step-up.test.ts proves them); what stays here is that they are
+  // NOT admin-gated, and that an API key — admin or not — can never use them
+  const SELF_BUILT_A: Array<[Method, string]> = [
     ["POST", "/v1/auth/passkeys/registration-options"],
     ["POST", "/v1/auth/passkeys"],
     ["GET", "/v1/auth/passkeys"],
@@ -699,11 +705,14 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
     ["POST", "/v1/auth/step-up/options"],
     ["POST", "/v1/auth/step-up/verify"],
     ["GET", "/v1/auth/step-up/00000000-0000-4000-a000-000000000001"],
+  ];
+  // slice B (signed approvals) has landed too: its signing options are proved
+  // in zz-b4ab-dual-control-signed-approvals.test.ts; what stays here is that
+  // the route is NOT admin-gated and an API key can never sign
+  const SELF_BUILT_B: Array<[Method, string]> = [
     ["POST", "/v1/approvals/00000000-0000-4000-a000-000000000001/signing-options"],
   ];
   const ADMIN: Array<[Method, string]> = [
-    ["GET", "/v1/users/00000000-0000-4000-a000-000000000001/passkeys"],
-    ["DELETE", "/v1/users/00000000-0000-4000-a000-000000000001/passkeys/00000000-0000-4000-a000-000000000002"],
     ["GET", "/v1/receipts?fromSeq=1&limit=10"],
     ["GET", "/v1/receipts/status"],
     ["GET", "/v1/receipts/keys"],
@@ -715,12 +724,29 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
     ["GET", "/v1/detection-content"],
   ];
 
-  it("every self route answers 501 not_built to a non-admin (it is not admin-gated)", async () => {
-    for (const [m, url] of SELF) {
-      const r = await inject(m, url, users.member.auth, m === "GET" || m === "DELETE" ? undefined : {});
-      expect(r.statusCode, `${m} ${url}: ${r.body}`).toBe(501);
-      expect(r.json()).toEqual({ error: "not_built" });
+  it("slice B's signing options are not admin-gated and refuse any API key (only a browser session can sign)", async () => {
+    for (const [m, url] of SELF_BUILT_B) {
+      for (const who of [users.member, users.admin]) {
+        const r = await inject(m, url, who.auth, { decision: "approved" });
+        expect(r.statusCode, `${m} ${url}: ${r.body}`).toBe(403);
+        expect(r.json().error).toBe("passkey_signature_required");
+      }
     }
+  });
+
+  it("slice A's self routes are not admin-gated and refuse any API key (a browser session is required)", async () => {
+    for (const [m, url] of SELF_BUILT_A) {
+      for (const who of [users.member, users.admin]) {
+        const r = await inject(m, url, who.auth, m === "GET" || m === "DELETE" ? undefined : {});
+        expect(r.statusCode, `${m} ${url}: ${r.body}`).toBe(403);
+        expect(r.json().error).toBe("browser_session_required");
+      }
+    }
+    // slice A's admin passkey routes stay admin-only
+    const member = await inject("GET", "/v1/users/00000000-0000-4000-a000-000000000001/passkeys", users.member.auth);
+    expect(member.statusCode).toBe(403);
+    const admin = await inject("GET", "/v1/users/00000000-0000-4000-a000-000000000001/passkeys", users.admin.auth);
+    expect(admin.statusCode, admin.body).toBe(200);
   });
 
   it("every admin route refuses a non-admin (403) and answers 501 not_built to an admin", async () => {

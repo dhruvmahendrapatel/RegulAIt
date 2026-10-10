@@ -91,6 +91,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "prompt_promotion",
   // ADR-0173 batch 2b: a connector WRITE held by the execution dial
   "connector_call",
+  // ADR-0187: an engine run that uses an agentic or offensive set, or whose budget is over the org threshold
+  "engine_run",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -109,6 +111,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   remediation: "governance remediation",
   prompt_promotion: "prompt promotion to prod",
   connector_call: "connector write",
+  engine_run: "engine run (sensitive set or large budget)",
 };
 
 /**
@@ -306,6 +309,12 @@ export function effectiveApprovalScope(
 //   * the APPROVAL SCOPE ('action' | 'tool'). Flipping a rule from action to
 //     tool scope changes what a signature MEANS; a consent granted under one
 //     meaning is not consent under the other.
+//   * ADR-0186 A: the ORG-WIDE dual control a tool-call consent is judged under
+//     (approval signature mode, sensitive-call quorum), when the caller names it.
+//   * ADR-0186 A: an UNVERSIONED rule's dual control (quorum, approver role).
+//     A versioned rule's is in its version id; an unversioned rule's is edited
+//     by a plain row write, so it is named here or raising it would move
+//     nothing.
 //
 // WHAT IS DELIBERATELY NOT IN IT: everything else. The compatibility rule is
 // exactly "what is in the digest invalidates, what is not does not", and it is
@@ -326,6 +335,15 @@ export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v3";
 export interface ApprovalRuleVersionRef {
   ruleId: string;
   activeVersionId: string | null;
+  /**
+   * ADR-0186 A: an UNVERSIONED rule's dual control (`activeVersionId` null). A
+   * plain row write of `quorum` / `approverRoleId` mints no version, so without
+   * these the context would not move when dual control is raised and a consent
+   * given under the weaker snapshot would still satisfy the call. A versioned
+   * rule's are already identified by its version. Absent = not part of the
+   * digest (the pre-ADR-0186 shape, byte-identical).
+   */
+  dualControl?: { quorum: number; approverRoleId: string | null } | null;
 }
 
 /**
@@ -372,6 +390,16 @@ export interface ApprovalContextRef {
   approvalScope: ApprovalScope;
   /** AER-039 — the upstream the call executes against (v3) */
   target?: ApprovalTargetRef | null;
+  /**
+   * ADR-0186 A — the ORG-WIDE dual-control settings a tool-call consent is
+   * judged under: how each approval must be proven (`approval_signature_mode`)
+   * and the quorum a sensitive call needs (`tool_approval_sensitive_quorum`).
+   * Both are snapshotted on the approval at queue time, so without them here
+   * tightening either (off/step_up -> passkey, a higher sensitive quorum) would
+   * leave a consent given under the weaker setting spendable. Absent = not part
+   * of the digest (the pre-ADR-0186 shape, byte-identical).
+   */
+  orgDualControl?: { signatureMode: string; sensitiveQuorum: number } | null;
 }
 
 /**
@@ -410,12 +438,18 @@ export function approvalContextDigest(ref: ApprovalContextRef): string {
       ruleVersions: sortApprovalRuleVersions(ref.ruleVersions).map((p) => ({
         ruleId: p.ruleId,
         activeVersionId: p.activeVersionId ?? null,
+        ...(p.dualControl && (p.activeVersionId ?? null) === null
+          ? { dualControl: { quorum: p.dualControl.quorum, approverRoleId: p.dualControl.approverRoleId ?? null } }
+          : {}),
       })),
       abacPolicies: [...(ref.abacPolicies ?? [])]
         .sort((a, b) => a.policyId.localeCompare(b.policyId))
         .map((p) => ({ policyId: p.policyId, version: p.version, source: p.source })),
       requiredApproverUserId: ref.requiredApproverUserId ?? null,
       approvalScope: ref.approvalScope,
+      ...(ref.orgDualControl
+        ? { orgDualControl: { signatureMode: ref.orgDualControl.signatureMode, sensitiveQuorum: ref.orgDualControl.sensitiveQuorum } }
+        : {}),
       target: !ref.target
         ? null
         : ref.target.kind === "connector"

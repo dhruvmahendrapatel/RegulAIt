@@ -188,7 +188,7 @@ export async function openAssuranceGuardrailWindow(
   const config = (await call("GET", "/v1/guardrails/config", undefined, auth)).body;
   const orgModes = (config.orgModes ?? {}) as Record<string, Mode>;
   const overrides = new Map(
-    ((config.overrides ?? []) as Array<{ scope: string; scopeId: string; createdBy?: string }>)
+    ((config.overrides ?? []) as Array<{ scope: string; scopeId: string; createdBy?: string; expired?: boolean; modes?: Record<string, Mode> }>)
       .filter((o) => o.scope === "agent")
       .map((o) => [o.scopeId, o]),
   );
@@ -201,6 +201,9 @@ export async function openAssuranceGuardrailWindow(
   const opened: string[] = [];
   const notes: string[] = [];
   let reclaimed = 0;
+  let kept = 0;
+  const sameModes = (a: Record<string, Mode>, b: Record<string, Mode>) =>
+    CONFIGURABLE_LAYERS.every((l) => (a[l] ?? null) === (b[l] ?? null));
   for (const id of new Set(agentIds)) {
     const existing = overrides.get(id);
     const leftover = existing?.createdBy === ASSURANCE_WINDOW_CREATED_BY;
@@ -218,7 +221,23 @@ export async function openAssuranceGuardrailWindow(
     if (r.status === 200) {
       opened.push(id);
       if (leftover) reclaimed++;
+    } else if (
+      // B4S-06: once an admin can step up, the bootstrap credential cannot write
+      // the window again. A LIVE window with exactly these modes, opened during
+      // first-admin setup (by `seed --open-assurance-window`, or by demo:intake
+      // before it enrolled Ada), is kept as it is and closed by restore()
+      r.status === 403 &&
+      r.body.error === "step_up_required" &&
+      leftover &&
+      existing?.expired === false &&
+      sameModes(existing.modes ?? {}, modes)
+    ) {
+      opened.push(id);
+      kept++;
     } else notes.push(`assurance guardrail window: could not open for agent ${id} (${r.status} ${String(r.body.error ?? "")})`);
+  }
+  if (kept > 0) {
+    notes.push(`assurance guardrail window: kept the ${kept} window(s) opened during first-admin setup`);
   }
   if (reclaimed > 0) {
     notes.push(`assurance guardrail window: reclaimed ${reclaimed} leftover window override(s) from an earlier run`);

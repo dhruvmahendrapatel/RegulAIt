@@ -36,6 +36,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, aiIncidentLinks, aiIncidents, aiUseCases, and, auditLog, desc, eq, inArray, ne, sql } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { EVIDENCE_HOLD_OVERRIDE_HEADER, incidentsHoldingAgent } from "./incidents.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 /** the advisory-lock key hold creators and protected writes serialise on
  * (`EVIDENCE_HOLD_LOCK_KEY` in agent-evidence-hold.ts); a literal here so this
@@ -132,12 +133,16 @@ function parked(body: (tx: Parameters<Parameters<BuilderKit["db"]["transaction"]
 const priceOf = async (id: string) =>
   Number((await k.db.select({ p: agents.costPerMTokIn }).from(agents).where(eq(agents.id, id)))[0]!.p);
 
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("x15h01");
+  restoreStepUp = await relaxStepUpForTest(k.db);
   admin = await k.person("admin", { admin: true });
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   // migration 0168 (DFX1): an incident that is not closed is never deleted, so the fixtures are closed first
   // (a test-only shortcut past the API's close rules), then deleted (their events, links and clocks cascade)
   if (created.incidents.length) {

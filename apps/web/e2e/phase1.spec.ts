@@ -18,6 +18,7 @@
  * probe, which JS cannot suppress) and screenshots into E2E_SHOTS_DIR.
  */
 import { expect, test, type Page } from "@playwright/test";
+import { asSteppedUpAdmin } from "./admin-api";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -297,14 +298,13 @@ test("spend & savings: a non-admin sees their OWN spend and the optimizer's savi
 });
 
 /** ADR-0181: key custody is ON by default; this test is about the BYO-key card
- * itself, so it relaxes custody through the real admin route and restores it */
+ * itself, so it relaxes custody through the real admin route and restores it.
+ * B4S-06: relaxing it is a settings_relax step-up, which the bootstrap
+ * credential no longer gives once an admin can step up — Ada makes it, stepped
+ * up with her authenticator */
 async function setKeyCustody(enforced: boolean) {
-  const res = await fetch(`${state.baseUrl}/v1/interception/settings`, {
-    method: "PUT",
-    headers: { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" },
-    body: JSON.stringify({ keyCustodyEnforced: enforced }),
-  });
-  expect(res.status, await res.text()).toBe(200);
+  const res = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "PUT", "/v1/interception/settings", { keyCustodyEnforced: enforced });
+  expect(res.status(), res.bodyText).toBe(200);
 }
 
 test("my model keys: add, listed as present-but-never-revealed, remove", async () => {

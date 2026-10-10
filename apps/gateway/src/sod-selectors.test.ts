@@ -32,6 +32,11 @@
  */
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+// ADR-0186 A (Class C, PR #198 round 4): this suite drives SoD / skill-admission writes through API keys and is
+// not about step-up; disabling a SoD rule or admitting a held skill now needs one, so step-up is relaxed for its run
+// and the strict policy restored after (M-068). The step-up itself is proved in zz-b4c4-review-fixes.
+let restoreStepUpPosture: (() => Promise<void>) | undefined;
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentGrants, and, count, createDb, eq, roleAgentGrants, runMigrations, type Db } from "@regulait/db";
@@ -142,6 +147,7 @@ let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
+  restoreStepUpPosture = await relaxStepUpForTest(db);
   // ADR-0181 (FX2): an admin's API key now answers to mfaRequired. This suite
   // drives admins through keys and is not about MFA, so it relaxes the dial
   // explicitly and hands the shared database back strict in afterAll (M-068).
@@ -181,6 +187,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStepUpPosture?.();
   await restoreAdminKeyMfa?.();
   await app.close();
   await db.$client.end();

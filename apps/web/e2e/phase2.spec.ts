@@ -22,6 +22,8 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { ADMIN_EMAIL, asSteppedUpAdmin, settleWithStepUp } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +93,10 @@ async function nav(label: string, heading: string) {
 }
 
 test("admin login: one-time password → forced change → dashboard shows admin nav", async () => {
+  // B4S-06: Ada's API sign-in, her TOTP challenge and the UI's each spend a TOTP
+  // step; the gateway refuses a step already used, so the harness may wait for
+  // the next 30 s window
+  test.setTimeout(180_000);
   // MINT A FRESH one-time password rather than spending the seeded one.
   // The seeded password is single-use and this suite shares ONE database, so
   // whichever spec signs in first consumes it — this test used to depend on
@@ -102,13 +108,12 @@ test("admin login: one-time password → forced change → dashboard shows admin
     users: Array<{ id: string; email: string }>;
   };
   const adminId = users.users.find((u) => u.email === "admin@regulait.local")!.id;
-  const minted = (await (
-    await fetch(`${state.baseUrl}/v1/users/${adminId}/set-initial-password`, {
-      method: "POST",
-      headers: boot,
-      body: JSON.stringify({ force: true }),
-    })
-  ).json()) as { password: string; mustChangePassword: boolean };
+  // B4S-06: the bootstrap credential no longer issues passwords once an admin
+  // (Ada, enrolled by the seed) can step up; Ada issues her own fresh one-time
+  // password (a self-service write, no step-up)
+  const issued = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "POST", `/v1/users/${adminId}/set-initial-password`, { force: true });
+  expect(issued.status(), issued.bodyText).toBe(200);
+  const minted = JSON.parse(issued.bodyText) as { password: string; mustChangePassword: boolean };
   expect(minted.mustChangePassword).toBe(true);
 
   await page.goto("/ui");
@@ -171,6 +176,7 @@ test("admin login: one-time password → forced change → dashboard shows admin
 });
 
 test("users: create a user, issue a one-time password and an API key (one-time reveals)", async () => {
+  test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("Users", "Users");
   await page.getByLabel("Email").fill("e2e-user@example.com");
   await page.getByLabel("Display name").first().fill("E2E User");
@@ -182,6 +188,8 @@ test("users: create a user, issue a one-time password and an API key (one-time r
   // open the detail panel and issue a one-time password
   await page.getByRole("link", { name: "Manage E2E User" }).click();
   await page.getByRole("button", { name: "Set one-time password" }).click();
+  // B4S-02: issuing someone else's password is a settings_relax step-up — Ada confirms with her authenticator
+  await settleWithStepUp(page, page.getByTestId("revealed-secret"));
   await expect(page.getByTestId("revealed-secret")).toBeVisible();
   await expect(page.getByText("shown once")).toBeVisible();
   await shot(page, "phase2-03-users-otp-reveal");
@@ -252,10 +260,13 @@ test("client access: posture form, effective preview, config generator with copy
 });
 
 test("sso & sessions: OIDC list + sessions policy save", async () => {
+  test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("SSO & sessions", "SSO & sessions");
   await expect(page.getByText("Single sign-on — OIDC providers")).toBeVisible();
   await page.getByRole("button", { name: "Save sign-in policy" }).click();
-  await expect(page.getByText("Sign-in policy saved", { exact: false }).first()).toBeVisible();
+  const policySaved = page.getByText("Sign-in policy saved", { exact: false }).first();
+  await settleWithStepUp(page, policySaved);
+  await expect(policySaved).toBeVisible();
   await shot(page, "phase2-09-sso-sessions");
   track.assertClean("sso & sessions");
 });
@@ -278,7 +289,8 @@ test("rules engine: build a fleet-wide rate limit", async () => {
     rules: Array<{ id: string; scope: string; serverScope: string; maxCalls: number; windowSeconds: number }>;
   };
   for (const r of list.rules.filter((x) => x.scope === "fleet" && x.serverScope === "all" && x.maxCalls === 50 && x.windowSeconds === 60)) {
-    const del = await page.request.delete(`/v1/rules/rate-limits/${r.id}`, { headers: { "x-regulait-csrf": "1" } });
+    // B4S-05: removing a rule is a settings_relax step-up — Ada gives it with her authenticator
+    const del = await steppedUpAs(page.request, ADMIN_EMAIL, "DELETE", `/v1/rules/rate-limits/${r.id}`, undefined);
     expect(del.status(), await del.text()).toBe(200);
   }
 });
@@ -620,13 +632,17 @@ test("compliance profiles: upsert a profile + live cascade preview", async () =>
 });
 
 test("infrastructure: posture, set approver, propose a governed remediation", async () => {
+  test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("Infrastructure", "Infrastructure");
   await expect(page.getByText("monitored resources", { exact: true })).toBeVisible();
 
   // persist the org default remediation approver
   await page.getByLabel("Remediation approver (persisted org default)").selectOption({ index: 1 });
   await page.getByRole("button", { name: "Set approver" }).click();
-  await expect(page.getByText("Default remediation approver saved", { exact: false }).first()).toBeVisible();
+  // B4S-04: naming the default remediation approver decides who is offered those approvals (settings_relax)
+  const saved = page.getByText("Default remediation approver saved", { exact: false }).first();
+  await settleWithStepUp(page, saved);
+  await expect(saved).toBeVisible();
 
   // propose remediation on the first open finding via the owned confirm modal
   const proposeBtn = page.getByRole("button", { name: "propose remediation" }).first();

@@ -263,6 +263,11 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // what was said. `conversation_messages.content` and `eval_results.output_text`
   // are, and ADR-0111 deliberately leaves both untouched.
   [s.traceSpans, ["statusReason", "inputPreview", "outputPreview"]],
+  // ADR-0187: an engine item's reason and the server's verdict note (engine text,
+  // also scrubbed at ingest through the engine detection-scrub interface), and
+  // an admin's runner-revocation reason.
+  [s.engineRunItems, ["reason", "verdictNote"]],
+  [s.engineRunners, ["revokeReason"]],
 ];
 
 /**
@@ -288,6 +293,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  *   declared STRING columns only (the ADR-0115 `eval_results.detail`
  *   answer). The one writer, the risk-acceptance route, scrubs each
  *   `description` with `PROSE_SCRUB` before the insert.
+ * - `engine_run_items.not_run_reason` — ADR-0187: a DB CHECK limits it to the
+ *   six not-run codes (`cloud_only`, `egress_denied`, …). A credential cannot
+ *   appear in a six-member enum.
  * - `migration_audit_outbox.reason` — ADR-0181 FX2 (migration 0160): written
  *   only by migration SQL (no application writer, so nothing an operator
  *   typed), and held only until `runMigrations` drains it into
@@ -295,6 +303,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
+  "engine_run_items.not_run_reason",
   "mcp_registry_entries.conflict_reason",
   "migration_audit_outbox.reason",
   "risk_acceptances.compensating_controls",

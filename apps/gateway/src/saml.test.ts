@@ -45,6 +45,7 @@ import {
   users,
   type Db,
   type OrgSettingsRow,
+  approvalRules,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
@@ -793,6 +794,29 @@ describe("ADR-0036 — identity mapping, JIT and the domain backstop", () => {
     const audit = await latestAudit("saml-user-provisioned");
     expect(audit!.effect).toBe("allow");
     expect((audit!.detail as Record<string, unknown>).defaultRoleId).toBe(roleId);
+  });
+
+  it("JIT with an approver role as the default: the provisioning audit says the role was WITHHELD (PR #198 round 7)", async () => {
+    const roleRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/roles",
+      payload: { name: "saml-jit-approvers-" + randomBytes(3).toString("hex"), description: "PR #198 round 7" },
+    });
+    const roleId = roleRes.json().id as string;
+    const p = await mkProvider({ jitProvisioning: true, allowedEmailDomains: ["corp.example"], defaultRoleId: roleId });
+    const namer = await mkUser(`namer.${randomBytes(4).toString("hex")}@corp.example`, "r7 namer");
+    const [rule] = await db.insert(approvalRules).values({ userId: namer, serverScope: "all", approverUserId: namer, approverRoleId: roleId }).returning({ id: approvalRules.id });
+    try {
+      const email = `jit-approver.${randomBytes(4).toString("hex")}@corp.example`;
+      const { res } = await roundTrip(p.id, { email, displayName: "JIT Withheld" });
+      expect(res.statusCode).toBe(302);
+      const [created] = await db.select().from(users).where(eq(users.email, email));
+      expect(await db.select().from(roleAssignments).where(and(eq(roleAssignments.userId, created!.id), eq(roleAssignments.roleId, roleId)))).toHaveLength(0);
+      const audit = await latestAudit("saml-user-provisioned");
+      expect(audit!.reason).not.toMatch(/with the provider's default role/);
+      expect(audit!.detail).toMatchObject({ defaultRoleGrant: "withheld", defaultRoleId: null, withheldRoleId: roleId });
+    } finally {
+      await db.delete(approvalRules).where(eq(approvalRules.id, rule!.id));
+    }
   });
 
   it("REFUSES an email outside allowed_email_domains, even with JIT on", async () => {

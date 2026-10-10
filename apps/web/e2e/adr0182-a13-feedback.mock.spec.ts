@@ -17,6 +17,7 @@
 import { activate, escapeToTrigger, expectDialogTrap, selectAt, tabTo, typeAt } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const UC = "11111111-1111-4111-8111-111111111111";
 const INST = "44444444-4444-4444-8444-444444444444";
@@ -384,4 +385,17 @@ test("X14 keyboard: public feedback radio group, failed submission and receipt a
   expect(state.feedbackPosts).toHaveLength(1);
   await expectAxeClean(page, "keyboard public feedback receipt");
   await page.screenshot({ path: testInfo.outputPath("x14-public-feedback.png") });
+});
+
+// ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: relaxing a feedback setting asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const state = await mockGateway(page, { me: RILEY });
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/feedback");
+  const card = page.locator("section", { has: page.getByText("Feedback settings (admin)", { exact: true }) });
+  await card.getByLabel("Feedback acknowledgement time (hours)").fill("96");
+  await card.getByRole("button", { name: "Save feedback settings" }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(state.settingsPuts).toEqual([{ feedbackAckSlaHours: 96 }]);
 });

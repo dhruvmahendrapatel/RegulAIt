@@ -23,7 +23,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as semconv from "@opentelemetry/semantic-conventions/incubating";
 import * as oiConventions from "@arizeai/openinference-semantic-conventions";
-import { TRACE_STANDARDS_PINS, buildOtlpPayload, type SpanRecord, type TraceExportProfile, type TraceRecord } from "./tracing.js";
+import {
+  OTEL_SCHEMA_URL,
+  OTLP_EXPORT_LIMITS,
+  TRACE_STANDARDS_PINS,
+  buildOtlpPayload,
+  type SpanRecord,
+  type TraceExportProfile,
+  type TraceRecord,
+} from "./tracing.js";
 
 const exported = (prefix: string) =>
   new Set(
@@ -188,6 +196,42 @@ describe("OTLP conformance against the pinned conventions", () => {
       expect(unknown).toEqual([]);
     });
   }
+
+  /**
+   * ADR-0186 T: `schemaUrl` on every ResourceSpans and every ScopeSpans, and it
+   * names the INSTALLED semconv version (read from the package itself, not
+   * from our pin), so the URL cannot drift from the keys we emit.
+   */
+  for (const profile of ["otel_genai", "openinference"] as const) {
+    it(`${profile}: every exported ResourceSpans and ScopeSpans carries the pinned schemaUrl`, () => {
+      const entry = createRequire(import.meta.url).resolve("@opentelemetry/semantic-conventions");
+      const installed = JSON.parse(readFileSync(join(entry.slice(0, entry.lastIndexOf("/build/")), "package.json"), "utf8")).version;
+      expect(OTEL_SCHEMA_URL).toBe(`https://opentelemetry.io/schemas/${installed}`);
+      const { body } = buildOtlpPayload({
+        serviceName: "svc",
+        includeContent: false,
+        profile,
+        traces: [{ trace: TRACE, spans: SPANS }],
+      });
+      // through the bytes, as a receiver reads them
+      const wire = JSON.parse(JSON.stringify(body)) as { resourceSpans: Array<{ schemaUrl?: unknown; scopeSpans: Array<{ schemaUrl?: unknown; spans: unknown[] }> }> };
+      expect(wire.resourceSpans.length).toBeGreaterThan(0);
+      for (const rs of wire.resourceSpans) {
+        expect(rs.schemaUrl, "ResourceSpans.schemaUrl").toBe(OTEL_SCHEMA_URL);
+        expect(rs.scopeSpans.length).toBeGreaterThan(0);
+        for (const ss of rs.scopeSpans) {
+          expect(ss.schemaUrl, "ScopeSpans.schemaUrl").toBe(OTEL_SCHEMA_URL);
+          expect(ss.spans.length).toBe(SPANS.length);
+        }
+      }
+    });
+  }
+
+  it("the export limits state the schema URL, the gen_ai.system end date and the JSON-only transport", () => {
+    expect(OTLP_EXPORT_LIMITS).toContain(OTEL_SCHEMA_URL);
+    expect(OTLP_EXPORT_LIMITS).toContain("2027-01-01");
+    expect(OTLP_EXPORT_LIMITS).toContain("OpenTelemetry Collector");
+  });
 
   it("the default profile emits no OpenInference-only key", () => {
     const { spanKeys } = collect("otel_genai");

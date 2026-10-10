@@ -631,3 +631,57 @@ and both builds remain recorded above. No full unrelated gateway-suite claim.
 ### X21 cross-review corrections — 2026-10-08
 R21-01 fixed: online verifier replaces bundle keys with deployment receipt_signing_keys; submitted same-ID x mismatches are untrusted and cannot verify as valid. Real registry substitution attack is a genuine red. Offline CLI always prints UNPINNED and exits2 without a trusted-keys file; pinned valid prefixes exit0, invalid signatures exit1. UI explains registry pinning. R21-02 fixed: empty audit strings allowed; oversized tool names/rule IDs carry SHA256 in optional typed fields with raw fields null. Real empty/5k signing/verifying succeeds; status surfaces failed/disabled scheduled sweeps or pending rows older than120s as stalled, without exposing error text. R21-03 authorized receipt-only foundation route/sweep expectations updated to real200/400/no_key. R21-04 configuration rule IDs (including agent-owner-set, fallback-chain-configured and mcp-tool-price-set) excluded from signing AND lag counts. Future configuration writers must extend that explicit classification. R21-05 listing receipt envelopes writes only range/count audit metadata. R21-06 payload/envelope/bundle/public-key validators now use strict zod schemas with existing bounds/date/sequence checks. No private JWKs or free reason/detail accepted.
 Validation: actual PostgreSQL/app/CLI9/9 plus21 foundation=30/30; verifier7/7, complete shared1944/1944, receipt browser6/6 with stalled-state screenshot in testInfo output. Shared build and fresh DB/gateway build plus web build/typecheck PASS. Four baseline failures captured (three independent review regressions plus downstream signing blockage); `/tmp/x21-review-red.log`, `/tmp/x21-reviewed-*`, `/tmp/x21-review-fresh-*`. No full gateway-suite claim.
+## X24 — measured detection monitor rules and R13-20/21 (2026-10-07)
+
+Implemented the four assigned rules in the actual loader. MCP drift compares
+attributed MCP decision records in the last 24 hours with the separate preceding
+`monitorMcpBaselineDays` window. Sharing widening observes scope increases or
+added recipients over 24 hours; recipient edits without a prior snapshot hold
+the subject. Prompt changes compare current active version IDs with activation
+history at the latest actual approving workflow decision; absent or ambiguous
+history holds existing episodes. Jailbreak correlation requires the configured
+finding count before an allowed MCP decision by the same user within the
+configured hours; same-time records require ledger sequences proving order.
+These are observations over retained records, not proof of causal attack
+success, successful upstream execution or complete history.
+
+Queries use one repeatable-read snapshot, return IDs/counts/version references,
+and refuse over 10,000 rows rather than resolving subjects from a truncated
+result. A load failure makes all four rules unevaluated via the existing monitor
+integration. No new route, setting, schema or detector library was added.
+The Alerts page shows measured threshold settings, accepts bounded integers,
+and saves changed fields through the existing audited settings route.
+
+R13-20/21: on an account change, resubmission now shows only the ownership
+notice and Discard-and-leave. It hides prior sections, Back/Continue, the draft
+saving line and Refresh. Hooks retain the original owner's editing state; only
+that account can recover it. Discard abandons locally without deleting either
+account's server draft. Four genuine red browser cases precede this fix.
+
+Evidence at b940342e plus the current-main merge 62385555:
+- Actual migrated disposable PostgreSQL loader and real repeated
+  `runGovernanceMonitor` passes: 8/8 (`x24-gateway-final.log`); the seven original
+  acceptance cases all fail against the unchanged foundation stub
+  (`x24-gateway-red.log`). Covers baseline, widening/recipients, approval/reapproval,
+  missing/tied history, ordered same-user correlation, stable episode IDs and
+  preserving episodes when the loader rejects malformed input.
+- Browser 17/17 (`x24-browser-final.log`): five monitor cases, four R13-20/21
+  cases across two steps/HTTP200+403, three R13-12, two R13-13 and three existing
+  review-policy checks. Owner red proof 4/4 fail (`x24-owner-red.log`). Screenshot
+  `/workspace/.regulait-onboarding/x24-monitor.png`.
+- Shared/gateway builds, web `tsc --noEmit`, final web build and 336 web units
+  PASS (`x24-{shared-build,gateway-final-build,web-final-tsc,web-final-build,web-final-units}.log`).
+
+Full unrelated gateway suites are not claimed green: foundation seam assertions
+still assume unimplemented slices and require the coordinating owner's updates.
+
+
+### X24 cross-review corrections — 2026-10-08
+R24-01 fixed: latest use-case decision record supplies approval time, tested through the real workflow approval decide route (genuine old-loader red). R24-02/04 fixed: correlation counts/running threshold/order in SQL, only breaching users cross into the process; each rule has a savepoint and omits only its key on failure. A 10,001-call flood leaves all rules measured; malformed findings omit only correlation. R24-03 fixed: subjects without earlier attributed history have no baseline drift. R24-05 fixed: a current owner ref and send-time change latch stop subsequent writes and success/draft cleanup after a change during PATCH or artifact POST; copy reports a prior request rather than promising nothing was sent. R24-06 screenshots use testInfo.outputPath. R24-07 measured Strict/Relaxed badges, Restore strict and step-up/audit copy mirror the shared contract with a parity test.
+Validation: actual PostgreSQL/app/monitor `vitest run src/monitor-detection-rules.test.ts` 11/11; old loader red five regressions plus independent real-decide red; owner-race browser tests 2 genuine reds, restored browser selection 15/15; complete detection-monitor mock 6/6 including refused save and strict restore. Web units366/366; web build/typecheck PASS. The initial gateway build/typecheck failed on the savepoint callback parameter (Db required a Pool); its passing claim was premature and is corrected by the follow-up below. Screenshot emitted under Playwright test output. Logs `/tmp/x24-review-*`, `/tmp/x24-real-approval-red.log`, `/tmp/x24-owner-review-red.log`.
+
+X24 CI correction: use the QueryDb execute capability for the savepoint loader rather than requiring Db.$client. The actual initial local typecheck also failed; its asynchronous log had not been inspected before the evidence was published. Fresh database build, gateway build and gateway tsc --noEmit now PASS after the callback fix. CI annotation113113651603 identifies the exact line27 error; browser jobs stopped before executing tests for that same compiler failure. Trivy failure is separate and its detailed logs remain inaccessible (signed log URL403), so no claim that all CI failures share this cause.
+
+R24-05 refusal follow-up: retain the send-time owner-change latch in the notice condition and copy after a refused PATCH/artifact response, not only after successful replies. Two additional genuine red browser cases reproduced the false "nothing was sent" copy. Final affected browser selection 9/9 (four held-request success/refusal cases, four previous owner-change cases, successful draft cleanup), web build/typecheck PASS (`/tmp/x24-refused-send-{red,final}.log`, `/tmp/x24-refused-web-build.log`).
+
+X24 CI UXJ-02 follow-up: shard 3 failed the immediate detail bounding-box assertion at y=-69.9375; the unchanged test reproduced 3/3 locally. Visibility precedes smooth-scroll completion. Polling the same original 0 <= top < 768 bounds passes 3/3; no timeout increase, forced scroll or product change (`/tmp/x24-scroll-{reproduce,settled}.log`). Fresh web tsc --noEmit PASS; web build already passed after the only product change above. Full CI remains pending.

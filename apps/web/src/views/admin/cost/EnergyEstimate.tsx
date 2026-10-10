@@ -14,6 +14,7 @@ import { api } from "../../../api/client";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { RemoveButton, useAction } from "../adminKit";
 import v from "../../views.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 interface FactorRef {
   sourceNote: string;
@@ -295,7 +296,7 @@ export function EnergyFactorsCard() {
             disabled={act.busy || regionValue === (q.data?.region ?? "")}
             onClick={() =>
               void act
-                .run(() => api.put("/v1/org/settings", { energyRegion: regionValue || null }), "Deployment region saved")
+                .run(() => putOrgSettings({ energyRegion: regionValue || null }), "Deployment region saved")
                 .then(() => setRegion(null))
             }
           >

@@ -14,6 +14,8 @@ import {
   inArray,
   mcpServers,
   or,
+  orgSettings,
+  ORG_SETTINGS_ID,
   rateLimits,
   users,
   workflowInstances,
@@ -27,6 +29,7 @@ import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
 import {
+  BATCH4_STRICT_DEFAULTS,
   NOT_ADVISORY_SQL,
   approvalArgumentsDigest,
   approvalContextDigest,
@@ -113,6 +116,13 @@ export interface GovernedEvaluation {
   contextDigest: string;
   /** DB policy generation read before the evaluation's policy snapshot. */
   policyEpoch: number;
+  /**
+   * ADR-0186 A — the ids of the approval rules that MATCHED this call (the
+   * kernel's own predicate, the same set `approvalScope` and `contextDigest`
+   * are computed over). The queue writer snapshots the required quorum as the
+   * max of these rules' quorums. Absent on the indeterminate-config refusal.
+   */
+  matchedApprovalRuleIds?: string[];
   /**
    * ADR-0105: approved rows that WOULD have satisfied this call on ADR-0104's
    * payload test but were refused on the new ones — an expired consent, or one
@@ -725,11 +735,30 @@ export async function governedEvaluate(
   // states: activate a new version of a rule that binds this call and the
   // consent granted under the old one stops satisfying it; edit a rule that
   // does not bind this call and nothing moves.
+  const servedById = new Map(servedARules.map((r) => [r.id, r]));
+  // read straight off the singleton (governed-evaluate sits under org-settings in the import graph);
+  // a missing row is the strict default, as on a first load
+  const [dualControlRow] = await db
+    .select({ approvalSignatureMode: orgSettings.approvalSignatureMode, toolApprovalSensitiveQuorum: orgSettings.toolApprovalSensitiveQuorum })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const dualControlOrg = dualControlRow ?? {
+    approvalSignatureMode: BATCH4_STRICT_DEFAULTS.approvalSignatureMode,
+    toolApprovalSensitiveQuorum: BATCH4_STRICT_DEFAULTS.toolApprovalSensitiveQuorum,
+  };
   const contextDigest = approvalContextDigest({
-    ruleVersions: matchedARules.map((r) => ({
-      ruleId: r.id,
-      activeVersionId: aResolved.activeVersionByArtifact.get(r.id) ?? null,
-    })),
+    ruleVersions: matchedARules.map((r) => {
+      const activeVersionId = aResolved.activeVersionByArtifact.get(r.id) ?? null;
+      const served = servedById.get(r.id);
+      return {
+        ruleId: r.id,
+        activeVersionId,
+        // ADR-0186 A: an unversioned rule's dual control is part of the context
+        ...(activeVersionId === null && served
+          ? { dualControl: { quorum: served.quorum, approverRoleId: served.approverRoleId ?? null } }
+          : {}),
+      };
+    }),
     abacPolicies: abacPolicies.map((p) => ({
       policyId: p.id,
       version: p.version ?? null,
@@ -739,6 +768,11 @@ export async function governedEvaluate(
     approvalScope,
     // AER-039: the consent names WHERE the bytes go, not only what they are
     target: target ?? approvalTargetForServer(serverId, serverRows[0]),
+    // ADR-0186 A: tightening the org's signing or sensitive quorum retires consents given under the looser one
+    orgDualControl: {
+      signatureMode: dualControlOrg.approvalSignatureMode,
+      sensitiveQuorum: dualControlOrg.toolApprovalSensitiveQuorum,
+    },
   });
 
   // WHICH approved row satisfies this call.
@@ -951,6 +985,7 @@ export async function governedEvaluate(
     contextDigest,
     policyEpoch,
     retiredApprovals,
+    matchedApprovalRuleIds: matchedARules.map((r) => r.id),
     ...(candidateDecision ? { candidateDecision } : {}),
     ...(replayIndeterminate ? { replayIndeterminate } : {}),
   };

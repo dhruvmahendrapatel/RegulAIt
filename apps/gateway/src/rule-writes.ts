@@ -112,6 +112,12 @@ import {
   type DbOrTxDeep,
 } from "./config-versions.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { assertRuleLooseningStepUp, ruleLooseningCovers } from "./rule-loosening.js";
+import {
+  approvalRuleShape,
+  assertApprovalRuleWritable,
+  type ApprovalRuleStepUp,
+} from "./approval-pool.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -199,6 +205,10 @@ export async function applyRuleEdit<T = Record<string, unknown>>(
      * `beforeBody`, `afterBody`, `mintedVersion`); a route that already wrote a
      * meaningful detail shape keeps it rather than having it replaced. */
     auditDetail?: Record<string, unknown>;
+    /** ADR-0180: the route's `settings_relax` step-up for an approval-rule
+     * edit that loosens dual control (absent → such an edit is refused while
+     * the policy asks for one) */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleEditResult<T>> {
   const table = ruleTableFor(args.artifactType);
@@ -246,6 +256,7 @@ async function applyRuleEditLocked<T>(
     auditObjectType: AuditObjectType;
     auditRuleId: string;
     auditDetail?: Record<string, unknown>;
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleEditResult<T>> {
   // FIRST STATEMENT. Both reads below happen under it.
@@ -287,6 +298,29 @@ async function applyRuleEditLocked<T>(
     return { ok: false, status: 409, error: "config_version_unresolvable", detail: plan.reason };
   }
 
+  // ADR-0186 A — THE ONE GUARD on a plain row write of an approval rule (a minted
+  // version is guarded where every version is: `newVersion` / `activateVersion`)
+  if (args.artifactType === "approval_rule" && plan.kind === "row") {
+    await assertApprovalRuleWritable(db, approvalRuleShape({ ...row, ...plan.rowPatch }));
+  }
+  // ADR-0186 decision 28 (finding 47) — THE RULE-EDIT LOOSENING GUARD, over every
+  // field of the rule kind, judged against the rule as enforced now (the active
+  // body over the row). What this write itself stores is `rowPatch` (on a `row`
+  // plan, every patched field; on `mint`/`no_change`, the non-enforcing columns);
+  // the enforcing half of a mint is guarded by `activateVersion`, like every
+  // activation
+  if (ruleLooseningCovers(args.artifactType) && Object.keys(plan.rowPatch).length > 0) {
+    const active = versions.find((v) => v.status === "active");
+    const before = { ...(row as Record<string, unknown>), ...((active?.body ?? {}) as Record<string, unknown>) };
+    await assertRuleLooseningStepUp(db, {
+      artifactType: args.artifactType,
+      ruleId: args.artifactId,
+      before,
+      after: { ...before, ...plan.rowPatch },
+      stepUp: args.stepUp,
+    });
+  }
+
   if (plan.kind === "mint") {
     // A body that cannot legally BE a version cannot legally be an edit either.
     // Storing it would move a bad edit onto the SERVED path as an outage — the
@@ -309,6 +343,7 @@ async function applyRuleEditLocked<T>(
       authorUserId: args.actorUserId,
       activate: true,
       reason: args.reason ?? plan.reason,
+      stepUp: args.stepUp,
     });
     mintedVersion = res.version.version;
     // `activateVersion` wrote the enforcing columns as the read-model, inside

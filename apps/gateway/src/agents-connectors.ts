@@ -34,7 +34,7 @@ import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocati
 // ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
 import { refuseSodMint } from "./sod.js";
-import { refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
+import { agentUnsuspendStepUp, refuseLifecycleChangedConcurrently, registerAgentStewardshipRoutes, withStewardship } from "./agent-stewardship.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
@@ -147,7 +147,8 @@ import {
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
-import { resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -199,6 +200,7 @@ import {
 // inherits both without a check of its own.
 import {
   loadVirtualKeyContext,
+  engineUsageDetail,
   recordVirtualKeySpend,
   virtualKeyAllowListRefusal,
   virtualKeyBudgetRefusal,
@@ -2309,6 +2311,8 @@ async function dispatchAttempt(
     virtualKeyId: vk?.id ?? null,
     detail: {
       credentialSource,
+      // ADR-0187 pillar 5: an engine run's calls carry the engine and the run
+      ...(vk ? engineUsageDetail(vk) : {}),
       ...(promptVersion
         ? {
             promptVersion: {
@@ -3340,12 +3344,18 @@ export function registerAgentConnectorRoutes(
     const [before] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!before) return reply.status(404).send({ error: "unknown_agent" });
     if (before.enabled === body.enabled) return before;
+    // ADR-0186 A (Class C): re-enabling lifts a platform-wide stop — a settings_relax step-up
+    if (body.enabled && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { agentId, values: { enabled: true } } })).ok) {
+      return reply;
+    }
 
     const [row] = await db
       .update(agents)
       .set({ enabled: body.enabled })
-      .where(eq(agents.id, agentId))
+      // Class A: compare-and-set on the state the step-up was decided on
+      .where(and(eq(agents.id, agentId), eq(agents.enabled, before.enabled)))
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
 
     /**
      * THIS WRITE USED TO BE SILENT, three lines above a comment promising
@@ -3409,14 +3419,30 @@ export function registerAgentConnectorRoutes(
       }
       ownerEmail = owner.email;
     }
+    // ADR-0186 A: changing who is accountable needs an `owner_change` step-up,
+    // bound to this agent and the new owner (after every refusal above, so a
+    // refused request spends no grant)
+    if (agent.ownerUserId !== body.ownerUserId) {
+      const refused = await ownerChangeGate(db, req, "agent", agentId)({ from: agent.ownerUserId, to: body.ownerUserId });
+      if (refused) return reply.status(refused.status).send(refused.body);
+    }
     // ADR-0168 item 6: the successor stepping up leaves the successor slot
     // empty (the DB CHECK keeps steward and successor two different people)
     const promotesSuccessor = !!body.ownerUserId && body.ownerUserId === agent.successorUserId;
     const [row] = await db
       .update(agents)
       .set({ ownerUserId: body.ownerUserId, ...(promotesSuccessor ? { successorUserId: null } : {}) })
-      .where(eq(agents.id, agentId))
+      // ADR-0186 A (Class A): compare-and-set on the owner the owner_change step-up was
+      // decided on (and the successor the promotion was) — a concurrent change is never reverted
+      .where(
+        and(
+          eq(agents.id, agentId),
+          sql`${agents.ownerUserId} IS NOT DISTINCT FROM ${agent.ownerUserId}`,
+          sql`${agents.successorUserId} IS NOT DISTINCT FROM ${agent.successorUserId}`,
+        ),
+      )
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "agent",
@@ -3465,6 +3491,10 @@ export function registerAgentConnectorRoutes(
         detail: `moving an agent to '${body.status}' requires a reason — it becomes part of the governance record`,
       });
     }
+    // ADR-0186 A (B4S-01): lifting a suspension (to any status that dispatches
+    // again) is a relaxation and needs a settings_relax step-up
+    const unsuspend = agentUnsuspendStepUp(agentId, agent.lifecycleStatus, body.status);
+    if (unsuspend && !(await requireStepUp(db, req, reply, unsuspend)).ok) return reply;
     const [row] = await db
       .update(agents)
       .set({

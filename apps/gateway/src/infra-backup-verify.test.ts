@@ -100,8 +100,17 @@ describe("org toggle + scheduler shape", () => {
     const s = await app.inject({ method: "GET", url: "/v1/org/settings", headers: adminAuth });
     expect(s.json().settings.backupVerifyEnabled).toBe(true); // ADR-0181: on by default
     expect(s.json().settings.backupVerifyIntervalHours).toBe(24);
-    const put = await app.inject({
+    // B4S-04: turning backup verification off relaxes a strict default — a
+    // settings_relax step-up, which an admin's API key can never give
+    const byKey = await app.inject({
       method: "PUT", url: "/v1/org/settings", headers: adminAuth,
+      payload: { backupVerifyEnabled: false, backupVerifyIntervalHours: 6 },
+    });
+    expect(byKey.statusCode).toBe(403);
+    expect(byKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    // no admin here can step up, so the deployment's bootstrap credential (first-admin setup) makes it
+    const put = await app.inject({
+      method: "PUT", url: "/v1/org/settings", headers: AUTH,
       payload: { backupVerifyEnabled: false, backupVerifyIntervalHours: 6 },
     });
     expect(put.statusCode).toBe(200);

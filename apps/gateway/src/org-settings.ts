@@ -21,6 +21,9 @@ import type { FastifyInstance } from "fastify";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   and,
+  approvalDelegations,
+  gt,
+  lte,
   auditLog,
   complianceProfiles,
   connectorRevocations,
@@ -44,15 +47,12 @@ import {
   type OrgSettingsRow,
   type SQL,
 } from "@regulait/db";
+import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
   ACCOUNTABILITY_SETTING_KEYS,
   accountabilitySettingRelaxed,
   alertTicketSettingsProblem,
   type AccountabilitySettingKey,
-  type Batch3SettingKey,
-  relaxedBatch3Keys,
-  type Batch4SettingKey,
-  relaxedBatch4Keys,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
   revocationKindParamSchema,
@@ -69,12 +69,21 @@ import { checkCredentialBaseUrl } from "./credential-egress.js";
 // types, so this PATCH may not write the row directly — it goes through the one
 // choke point, which mints and activates a version when the rule is versioned.
 import { applyRuleEdit, currentEffectiveBody, isRuleEditRefusal } from "./rule-writes.js";
+import { lockRuleArtifact } from "./config-versions.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { settingsRelaxStepUpRefusal } from "./step-up.js";
+import {
+  breakGlassChange,
+  CHANGED_CONCURRENTLY,
+  breakGlassStepUpRefusal,
+  requireStepUp,
+  revocationScopeStepUp,
+  settingsRelaxStepUpRefusal,
+  stepUpRefusal,
+} from "./step-up.js";
 
 export type { OrgSettingsRow };
 
@@ -664,11 +673,27 @@ async function signInModeRefusal(
 
 /** ADR-0182 / ADR-0185 / ADR-0186: every changed key now looser than its
  * strict default — named in the audit row's `detail.relaxed`, and the facts
- * the `settings_relax` step-up is bound to */
+ * the `settings_relax` step-up is bound to. B4S-04: derived from the ONE
+ * registry over every writable key (`ORG_SETTING_STRICTNESS`), so the identity
+ * defaults, the approval TTL, the API-key lifetimes and every other strict
+ * default are covered, not only the three batch registries. */
 export function relaxedSettingKeys(
   changed: Record<string, unknown>,
-): Array<AccountabilitySettingKey | Batch3SettingKey | Batch4SettingKey> {
-  return [...relaxedAccountabilityKeys(changed), ...relaxedBatch3Keys(changed), ...relaxedBatch4Keys(changed)];
+  stored?: Record<string, unknown>,
+  facts: RelaxationFacts = {},
+): WritableOrgSettingKey[] {
+  return relaxedOrgSettingKeys(changed, stored, facts);
+}
+
+/** is any approval delegation live now (finding 37)? Read on the caller's transaction */
+export async function liveDelegationExists(q: Pick<Db, "select">): Promise<boolean> {
+  const now = new Date();
+  const [hit] = await q
+    .select({ id: approvalDelegations.id })
+    .from(approvalDelegations)
+    .where(and(lte(approvalDelegations.startsAt, now), gt(approvalDelegations.endsAt, now)))
+    .limit(1);
+  return Boolean(hit);
 }
 
 /** ADR-0182 (D4): which of the changed keys are accountability settings now
@@ -809,18 +834,41 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // `settingsRelaxStepUpRefusal` decides whether the request carries a
     // step-up bound to exactly that relaxation. The foundation's hook admits
     // every write.
-    {
+    // the step-ups this write needs against a given stored row (decided here on
+    // the unlocked read, and AGAIN on the locked row inside the transaction)
+    // ADR-0186 decision 26: judged against the strict default AND the stored value,
+    // plus the live-delegation fact for turning delegation off (finding 37)
+    const stepUpsAgainst = (stored: Record<string, unknown>, facts: RelaxationFacts) => {
       const differs = Object.fromEntries(
-        Object.entries(body).filter(
-          ([k, v]) => JSON.stringify((before as Record<string, unknown>)[k]) !== JSON.stringify(v),
-        ),
+        Object.entries(body).filter(([k, v]) => JSON.stringify(stored[k]) !== JSON.stringify(v)),
       );
-      const relaxedKeys = relaxedSettingKeys(differs);
+      const relaxedKeys = relaxedSettingKeys(differs, stored, facts);
+      return {
+        breakGlass: breakGlassChange(differs, stored as { localSignIn?: unknown; breakGlassUserIds?: unknown }),
+        relaxedKeys,
+        relaxedValues: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
+      };
+    };
+    const disablesDelegation = body.approvalDelegationEnabled === false;
+    const decided = stepUpsAgainst(before as Record<string, unknown>, {
+      liveDelegation: disablesDelegation && (await liveDelegationExists(db)),
+    });
+    {
+      const { relaxedKeys, breakGlass } = decided;
+      // ADR-0186 A: changing the break-glass key holders or the local sign-in
+      // mode needs its own `break_glass` step-up. Looked at first WITHOUT
+      // spending it and spent last, so a write that needs both step-ups never
+      // burns one grant on the other's refusal.
+      if (breakGlass) {
+        const refusal = await breakGlassStepUpRefusal(db, req, breakGlass, { spend: false });
+        if (refusal) return reply.status(refusal.status).send(refusal.body);
+      }
       if (relaxedKeys.length > 0) {
-        const refusal = await settingsRelaxStepUpRefusal(db, req, {
-          relaxedKeys,
-          values: Object.fromEntries(relaxedKeys.map((k) => [k, differs[k]])),
-        });
+        const refusal = await settingsRelaxStepUpRefusal(db, req, { relaxedKeys, values: decided.relaxedValues });
+        if (refusal) return reply.status(refusal.status).send(refusal.body);
+      }
+      if (breakGlass) {
+        const refusal = await breakGlassStepUpRefusal(db, req, breakGlass, { spend: true });
         if (refusal) return reply.status(refusal.status).send(refusal.body);
       }
     }
@@ -836,7 +884,30 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // transaction under the sign-in invariant lock, so engaging (or
     // re-pointing) break-glass / sso_only cannot race a provider disable, a
     // demotion or a SCIM deactivation that each passed their own count.
-    const out = await withSignInInvariant(db, async (tx, locked) => {
+    const out = await withSignInInvariant(db, async (tx, unlockedOrg) => {
+      // the org row itself, locked: every org-settings writer serialises on it
+      const [locked = unlockedOrg] = await tx
+        .select()
+        .from(orgSettings)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID))
+        .for("update");
+      // ADR-0186 A (Class A): the step-ups were decided on an unlocked read. When
+      // the row moved since, so that this write now changes break-glass or relaxes
+      // a setting it did not before, that step-up is decided (and spent) here, on
+      // the row the write replaces — a stale request never reverts a change
+      // without the proof the change back needs
+      // the delegation fact is read on this transaction, after the org row lock: a
+      // delegation create holds that row FOR SHARE while it inserts (app.ts)
+      const lockedFacts = { liveDelegation: disablesDelegation && (await liveDelegationExists(tx as unknown as Db)) };
+      const now = stepUpsAgainst(locked as Record<string, unknown>, lockedFacts);
+      if (now.breakGlass && JSON.stringify(now.breakGlass) !== JSON.stringify(decided.breakGlass)) {
+        const again = await breakGlassStepUpRefusal(db, req, now.breakGlass, { spend: true });
+        if (again) return again;
+      }
+      if (now.relaxedKeys.length > 0 && JSON.stringify(now.relaxedValues) !== JSON.stringify(decided.relaxedValues)) {
+        const again = await settingsRelaxStepUpRefusal(db, req, { relaxedKeys: now.relaxedKeys, values: now.relaxedValues });
+        if (again) return again;
+      }
       const refusal = await signInModeRefusal(tx, locked, body);
       if (refusal) return refusal;
       if (touchesSignIn(body)) await signInInvariantChecked("org-settings");
@@ -869,7 +940,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // ADR-0182 (D4): the accountability settings this write leaves RELAXED
       // from their strict default, named in the detail and the reason;
       // ADR-0185 (batch 3) and ADR-0186 (batch 4) settings the same way
-      const relaxed = relaxedSettingKeys(changed);
+      const relaxed = relaxedSettingKeys(changed, locked as Record<string, unknown>, lockedFacts);
       await tx.insert(auditLog).values({
         // bootstrap has no user identity; the nil uuid marks a non-user actor,
         // as elsewhere in the codebase, and `via` records which it was.
@@ -935,7 +1006,30 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     // rather than replacing a record somebody already reads
     const beforeMode =
       ((await currentEffectiveBody(db, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
-    const res = await applyRuleEdit<{ id: string; deployMode: string | null }>(db, {
+    // ADR-0186 A: NARROWING where a rule applies (from every deploy mode to one,
+    // or from one to another) stops it applying somewhere it applied: a
+    // settings_relax step-up bound to the rule and its new scope. Widening it
+    // to every mode (null) needs none.
+    const nextMode = body.deployMode ?? null;
+    if (nextMode !== null && nextMode !== beforeMode) {
+      const refusal = await stepUpRefusal(db, req, {
+        kind: "settings_relax",
+        facts: { ruleKind: kind, ruleId, values: { deployMode: nextMode } },
+      });
+      if (refusal) return reply.status(refusal.status).send(refusal.body);
+    }
+    // ADR-0186 A (Class A): the step-up was decided on `beforeMode`; under the rule's own
+    // row lock a scope that moved since is refused, never overwritten
+    const res = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      await lockRuleArtifact(tx, RULE_ARTIFACT_TYPES[kind], ruleId);
+      const lockedMode = ((await currentEffectiveBody(tx, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
+      if (lockedMode !== beforeMode) return null;
+      return applyRuleEdit<{ id: string; deployMode: string | null }>(tx, {
+      // this route asked its own settings_relax step-up for a narrowing above (the
+      // same rule as the edit guard's deploy-mode comparator), decided again on the
+      // locked scope just now — the guard inside the writer is satisfied by it
+      stepUp: async () => {},
       artifactType: RULE_ARTIFACT_TYPES[kind],
       artifactId: ruleId,
       patch: { deployMode: body.deployMode ?? null },
@@ -953,7 +1047,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         before: beforeMode,
         after: body.deployMode ?? null,
       },
+      });
     });
+    if (res === null) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     if (isRuleEditRefusal(res)) {
       return reply.status(res.status).send({ error: res.error, detail: res.detail });
     }
@@ -977,11 +1073,17 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     const table = REVOCATION_TABLES[kind];
     const [before] = await db.select().from(table).where(eq(table.id, revocationId));
     if (!before) return reply.status(404).send({ error: "unknown_revocation" });
+    // B4S-05: narrowing a total revocation to read_only gives reads back — settings_relax
+    if (before.scope === "full" && body.scope === "read_only") {
+      if (!(await requireStepUp(db, req, reply, revocationScopeStepUp(kind, revocationId, body.scope))).ok) return reply;
+    }
     const [row] = await db
       .update(table)
       .set({ scope: body.scope })
-      .where(eq(table.id, revocationId))
+      // ADR-0186 A (Class A): compare-and-set on the scope the step-up was decided on
+      .where(and(eq(table.id, revocationId), eq(table.scope, before.scope)))
       .returning();
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
       objectType: "revocation",

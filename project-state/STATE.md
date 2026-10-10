@@ -1,6 +1,6 @@
 ---
-phase: adr0183-batch-4-next
-last_updated: 2026-10-07
+phase: adr0187-batch-5-modelscan
+last_updated: 2026-10-09
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,80 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-09 - B5-P promptfoo merged (PR #205) with its follow-up (PR #210); G19 research merged (PR #208); B5-M started.**
+- Owner: "merge #205 once round 15 is green". Fifteen rounds of automated review produced ADR-0187 decisions 39-100.
+  The round-15 findings and a flaky test went to the follow-up, #210, which added decisions 101-103. Migration 0174 is
+  used (lease request id, manifest generation). Next migration 0175, next ADR 0188.
+- Decision 79, a residual risk: the engine process shares its runner's OS user, so it can read the runner credential.
+  Enabling an engine whose build has `credentialIsolation: false` (every build today) is therefore refused unless an
+  admin accepts the risk through an audited step-up. The fix is follow-up slice B5-P2, which splits each engine into a
+  runner container and a worker container (open question 13). Owner confirmation pending.
+- G19 (docs/research/R10-engine-admission.md, #208) now covers modelscan 0.8.8 and garak 0.17.0 with CyberSecEval.
+  Claude took the research over because Codex had been inactive. Its OWNER DECISION items:
+  - what a clean modelscan result means (strict default while pending: pickle-family formats can never pass);
+  - numpy's GPL-with-runtime-exception and LGPL libraries, and garak's licences outside our list;
+  - the 2023 to 2025 OWASP crosswalk;
+  - use-restricted garak assets.
+- Next: B5-M modelscan (branch `b5-modelscan`, in progress), then B5-G garak, then B5-P2. Codex X26-X29 and
+  #182/#184/#185 still wait on Codex.
+
+**2026-10-08 - Batch 5 foundation merged (PR #203, 0ad1990); review round 2 in its own PR; engine slices next.**
+- Owner: "merge #203 once round 1 is green". B5-F + B5-E landed with migration 0173 (engines, runners, runs, items,
+  schedules, artifacts, engine virtual keys) and ADR-0187 implementation decisions 1-31; review round 1 fixed 16 findings.
+- Follow-up PR (`b5-followup`, decisions 32-38): runner revocation serialised with lease; result delivery retried;
+  inconsistent fail items read `unknown`; expired leases never renewed by heartbeat; workflow termination cancels its
+  engine runs and supersedes their approvals; abort listener cleanup; audited skip when a scheduled run cannot be created.
+- Requirements carried into B5-P/M/G: each engine image sets `REGULAIT_EGRESS_PROBE_ADDRESS` (public literal address);
+  runners re-register at least every 24h; no engine can be enabled until the manifest carries image digests.
+- Interim detection scrub: engine output goes through `engine-scrub.ts` (default: the scrub on main), failing closed;
+  Codex's vendored ruleset (X23, #185) plugs in when it lands.
+- Migration 0173 was edited in place during review: dev databases that applied it from `b5-foundation` must be rebuilt.
+  Next migration 0174, next ADR 0188.
+- Next: B5-P promptfoo (G19 research questions recorded as open), then B5-M modelscan, B5-G garak. Codex X26-X29 and
+  #182/#184/#185 wait on Codex (no activity since 2026-10-08 02:40 UTC). Owner decisions from Batch 4 still open.
+
+**2026-10-08 - Batch 4 merged (PR #198, 1628248); review follow-up in its own PR; Batch 5 foundation next.**
+- Owner: "merge #198 once round 8 is green". Eight rounds of automated review fixes landed first (ADR-0186 decisions
+  21-28); Codex's X25 cross-review no longer gates the merge and now runs against `main`.
+- Follow-up PR (`b4-followup`, decision 29): IdP group sync never adds anyone to an approver role (withheld and audited,
+  **pending owner confirmation**); linked SSO counts as a step-up method on any transport (plain HTTP refuses rather than
+  admitting a first method); passkey grants die with their credential; tool-scoped consent signs a fixed
+  any-arguments digest; compliance-profile and onboarding-pack loosening needs a step-up.
+- Migrations 0171 and 0172 were edited in place during review: dev databases built from `b4-int` before 2026-10-08
+  16:30 UTC must be rebuilt.
+- Open owner decisions: group-sync approver confirmation (above), SCIM reactivation (recommend hold for admin), SoD
+  override needing an approver-role step-up, a separate step-up rate-limit setting, link-confirm for passkey holders
+  going to admin approval.
+- Next: Batch 5 foundation (B5-F + B5-E) on migration 0173, after the follow-up merges. Codex PRs #182/#184/#185 await
+  Codex's fixes (no Codex activity since 02:40 UTC).
+
+**2026-10-08 - Batch 5 designed (ADR-0187); owner decisions taken 2026-10-08. The foundation is next now that Batch 4 has merged.**
+- Owner decisions: one pinned runner container per engine pulling work from the gateway over an internal-only `engines`
+  network (no Docker socket); model calls only through the gateway on a run-scoped virtual key (project pinned, revoked
+  at end/cancel/timeout); every engine off until an admin enables it after the runner self-test passes (audited,
+  step-up); all three triggers (on demand, workflow `automated_check`, scheduled — scheduled runs as the person who
+  configured them; agentic/offensive sets and over-threshold budgets go to the approvals queue).
+- Defaults taken, owner may revisit: raw engine reports encrypted 90 days (sha256 kept, normalised results follow the
+  audit-retention cascade); we build and sign our own engine images and may carry a minimal promptfoo telemetry patch.
+- Split: Claude B5-F foundation + B5-E runner core (one PR), then B5-P promptfoo, B5-M modelscan, B5-G garak; Codex X26
+  Engines page, X27 run/result views, X28 Model artifacts, X29 cross-review; research G19 (`R10-engine-admission.md`).
+- Batch 5 code starts only after `b4-int` lands on `main` (shared hot files, ADR-0183; needs Batch 4 step-up and the
+  vendored detection scrub). Next migration 0173 (journal when 1785108000000; 0171 and 0172 = Batch 4 review fixes: approver-role snapshot; persisted named approver + first-passkey flag), next ADR 0188.
+
+**2026-10-08 - Batch 4: Claude's half integrated and security-reviewed on `b4-int` (e315845); Codex's half in review.**
+- A (step-up incl. fresh SSO login), A2+B (dual control, passkey-signed approvals) and T (trace residual) are merged
+  on `b4-int`. Security review B4S-01..09 plus G1/G2 fixed with red proofs: approver eligibility fixed at queue time and
+  rechecked at execution; the sensitive quorum decided by the server; one strictness registry for org settings; rule
+  deletes and revocation lifts need a step-up; the bootstrap credential passes step-up only before any admin has a
+  method (posture finding `bootstrap_token_configured`); SSO step-up only over https.
+- ADR-0186 now records the implementation decisions and residuals (no NeMo rules eligible; no TSA revocation checking;
+  drift monitor sees builder-agent calls only; no server/connector-to-project binding; outbound credential-audience
+  check not wired yet).
+- Round 3 landed (b08f291): admin creation via `POST /v1/users` needs a step-up; non-CI e2e specs step up the real way;
+  shared refusal list complete (27 codes). Batch 4 PR (A+B+T) opened for Codex's X25 cross-review.
+- Codex slices in review: R (X21 #182, merge after fixes), S (X22 #184, changes requested), V (X23 #185, changes
+  requested), M (X24 #187). The Batch 4 PR to `main` is pending these. Next migration 0171, next ADR 0187.
 
 **2026-10-07 - Batch 4 decided (ADR-0186), built as equal halves by Claude and Codex with cross-review.**
 - Owner decisions: passkey-signed tool-call approvals re-verified at execution; two approvers for sensitive projects;

@@ -27,6 +27,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { withStepUp } from "../../../stepup/stepUp";
 import { humanize } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, Meter, Select, Textarea } from "../../../ui/kit";
@@ -108,7 +109,8 @@ export default function FirstRunPage() {
     onSuccess: invalidate,
   });
   const applyPack = useMutation({
-    mutationFn: () => api.post("/v1/onboarding/compliance-pack", { pack, mode: "apply" }),
+    // ADR-0186 decision 29: re-applying a pack over a tightened profile needs a settings_relax step-up
+    mutationFn: () => withStepUp((h) => api.postWithHeaders("/v1/onboarding/compliance-pack", { pack, mode: "apply" }, h)),
     onSuccess: invalidate,
   });
   const runImport = useMutation({

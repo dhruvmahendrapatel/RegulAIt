@@ -18,6 +18,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Meter, Mod
 import { QueryGate, ReasonModal, useAction, useRoles, useTeams } from "../adminKit";
 import { KIND_TEXT, STATE_TEXT, policyHref, type LiteracyState } from "../../account/AcknowledgeGate";
 import v from "../../views.module.css";
+import { putOrgSettings } from "../../../stepup/stepUp";
 
 interface AiPolicyDoc {
   id: string;
@@ -687,7 +688,7 @@ function LiteracySettingsCard() {
   const save = () =>
     void act
       .run(async () => {
-        await api.put("/v1/org/settings", { literacyGateMode: nextMode, literacyDefaultValidityDays: daysNum });
+        await putOrgSettings({ literacyGateMode: nextMode, literacyDefaultValidityDays: daysNum });
         setMode(null);
         setDays(null);
         await q.refetch();

@@ -9,17 +9,20 @@
  *   · the button is disabled while the reason is empty (no doomed request);
  *   · typing a reason enables it, the override lands, the instance advances.
  *
- * Setup is API-side (bootstrap token + the initiator's own key), because the
+ * Setup is API-side (bootstrap token, Ada stepped up for the one-time password,
+ * and the initiator's own key), because the
  * subject under test is the deploy-hold card, not the workflow authoring UI.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { asSteppedUpAdmin } from "./admin-api";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
   baseUrl: string;
+  passwords: { admin: string };
 };
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
@@ -52,6 +55,8 @@ let page: Page;
 const consoleErrors: string[] = [];
 
 test.beforeAll(async ({ browser }) => {
+  // Ada's API sign-in and the step-up each spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(120_000);
   // --- the initiator persona ---
   const user = await api<{ id: string }>("POST", "/v1/users", {
     email: IDA_EMAIL,
@@ -59,9 +64,12 @@ test.beforeAll(async ({ browser }) => {
   });
   expect(user.status).toBe(201);
   const idaId = user.json.id;
-  const otp = await api<{ password: string }>("POST", `/v1/users/${idaId}/set-initial-password`, {});
-  expect(otp.status).toBe(200);
-  oneTimePassword = otp.json.password;
+  // B4S-06: issuing someone else's one-time password is a settings_relax
+  // step-up, which the bootstrap credential no longer gives once Ada can step
+  // up — Ada issues it, stepped up with her authenticator
+  const otp = await asSteppedUpAdmin(state.baseUrl, state.passwords.admin, "POST", `/v1/users/${idaId}/set-initial-password`, {});
+  expect(otp.status(), otp.bodyText).toBe(200);
+  oneTimePassword = (JSON.parse(otp.bodyText) as { password: string }).password;
   const key = await api<{ token: string }>("POST", `/v1/users/${idaId}/keys`, { name: "ovr" });
   const idaAuth = { authorization: `Bearer ${key.json.token}`, "content-type": "application/json" };
 

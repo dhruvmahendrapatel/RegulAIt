@@ -1,0 +1,1895 @@
+/**
+ * ADR-0187 B5-E — THE RUNNER CORE: engine runs from request to result.
+ *
+ *   create   POST /v1/engine-runs, a schedule, or a workflow `automated_check`
+ *            binding. The person the run executes as must be entitled to the
+ *            target (and judge) exactly as for POST /v1/redteam/runs; the run
+ *            starts `queued`, or `awaiting_approval` when it uses an agentic,
+ *            offensive or unclassified set, or its budget is over the org's
+ *            threshold (owner decision 4).
+ *   lease    a runner of the engine takes the oldest queued run. Only now is the
+ *            run-scoped virtual key minted (owner decision 2): owner = the
+ *            run-as person, allowed models = target + judge, the run's budget,
+ *            expiry = the run deadline, purpose `engine`, pinned to the run's
+ *            project. Entitlement is re-checked; a person gone or no longer
+ *            entitled ends the run `not_run` with a stated reason.
+ *   heartbeat extends the lease; answers `{cancel}`.
+ *   result   the envelope is normalised by the shared, pure normaliser
+ *            (not-clean semantics), each engine string through the one
+ *            detection-scrub interface, the items stored, a completed agent run
+ *            written into the red-team / eval ledgers, the raw report kept
+ *            encrypted for the retention window, and the key revoked.
+ *   cancel   ends the run at once and revokes its key: later calls get 401
+ *            whether or not the runner stops; the runner learns on its next
+ *            heartbeat.
+ *   sweep    a passed deadline or an expired lease ends the run `timeout` and
+ *            revokes its key; a queued run nobody leased in 24 hours ends
+ *            `not_run`; raw reports past retention are deleted.
+ *
+ * The runner is never trusted to stop itself, to total its own results, or to
+ * say what its items map to.
+ *
+ * Open-source check (ADR-0176): pg-boss and graphile-worker (MIT) are
+ * Postgres job queues; neither fits, because the queue here IS the governed
+ * evidence record (`engine_runs`, audited, linked to a key and an approval),
+ * the consumer is an external container on an HTTP lease rather than a worker
+ * in this process, and adopting one would keep a second copy of each run's
+ * state. A lease is one `FOR UPDATE SKIP LOCKED` statement.
+ */
+import { createHash } from "node:crypto";
+import type { FastifyInstance } from "fastify";
+import {
+  agents,
+  and,
+  approvals,
+  asc,
+  auditLog,
+  desc,
+  engineRunItems,
+  engineRunners,
+  engineRuns,
+  engineSchedules,
+  engines,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  modelArtifacts,
+  or,
+  ORG_SETTINGS_ID,
+  orgSettings,
+  sql,
+  usageEvents,
+  users,
+  virtualKeys,
+  type Db,
+  type EngineRunRow,
+} from "@regulait/db";
+import {
+  ENGINE_IDS,
+  ENGINE_LEASE_TTL_SECONDS,
+  ENGINE_QUEUE_TTL_SECONDS,
+  ENGINE_RESULT_LIMITS,
+  ENGINE_RUN_STATUSES,
+  ENGINE_VIRTUAL_KEY_PURPOSE,
+  cancelEngineRunSchema,
+  canonicalJson,
+  createEngineRunSchema,
+  createEngineScheduleSchema,
+  engineConfigNeedsApproval,
+  engineHeartbeatSchema,
+  engineRunnerLeaseSchema,
+  type EngineRunnerNext,
+  engineResultEnvelopeSchema,
+  evaluateRunnerSelfTest,
+  isTerminalEngineRunStatus,
+  normaliseEngineResult,
+  promptfooConfigProblem,
+  updateEngineScheduleSchema,
+  type CreateEngineRunInput,
+  type EngineId,
+  type EngineLease,
+  type EngineManifestEntry,
+  type EngineResultEnvelope,
+  type EngineRunNormalised,
+  type EngineTaxonomy,
+  type EngineTerminalRunStatus,
+  type RunnerSelfTest,
+} from "@regulait/shared";
+import { z } from "zod";
+import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
+import { engineDetectionScrub } from "./engine-scrub.js";
+import { artifactAccessible, recordArtifactScanTx } from "./model-artifacts.js";
+import { writeEngineRunLedgers } from "./engine-ledger.js";
+import { agentConfigHash, buildAgentDecider } from "./evals.js";
+import { assertProjectAttribution } from "./projects.js";
+import { loadOrgSettings } from "./org-settings.js";
+import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
+import { encryptSecret } from "./secrets.js";
+import { engineKeyName, generateVirtualKeyToken } from "./virtual-keys.js";
+import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
+import type { SchedulerJobDefinition } from "./scheduler.js";
+
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type AgentRow = typeof agents.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Process-wide runtime (set once by registerEngineRunRoutes, like the retry
+// policy): the schedule sweep and the workflow executor create runs too.
+// ---------------------------------------------------------------------------
+
+let runtime: EngineOptions = {};
+export function setEngineRuntime(opts: EngineOptions): void {
+  runtime = opts;
+}
+export function engineRuntime(): EngineOptions {
+  return runtime;
+}
+
+export const ENGINE_SWEEP_JOB_NAME = "engine-run-sweep";
+export const ENGINE_SCHEDULE_JOB_NAME = "engine-schedule-sweep";
+
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+/** revoke a run's key now (idempotent), audited with the cause */
+export async function revokeRunKey(
+  db: Db | Tx,
+  run: Pick<EngineRunRow, "id" | "virtualKeyId" | "engineId" | "runAsUserId">,
+  cause: string,
+  actorUserId: string,
+): Promise<boolean> {
+  if (!run.virtualKeyId) return false;
+  const revoked = await db
+    .update(virtualKeys)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(virtualKeys.id, run.virtualKeyId), isNull(virtualKeys.revokedAt)))
+    .returning({ id: virtualKeys.id });
+  if (revoked.length === 0) return false;
+  await db.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "virtual_key",
+    objectId: run.virtualKeyId,
+    detail: { phase: "revoke", cause, engineRunId: run.id, engineId: run.engineId, ownerUserId: run.runAsUserId },
+    effect: "allow",
+    ruleId: "engine-run-key-revoked",
+    ruleChain: [],
+    reason: `engine run ${run.id} key revoked (${cause}): it authenticates nothing from this moment on`,
+  });
+  return true;
+}
+
+/**
+ * the spend of a run, read off the one ledger by EVERY key the run has held: a re-issued lease
+ * rotates the key (round 13 [94]), so the run's cost is the sum over all of them
+ */
+async function runCostUsd(db: Db | Tx, run: Pick<EngineRunRow, "id" | "virtualKeyId">): Promise<number> {
+  const [row] = await db
+    .select({ total: sql<number>`COALESCE(SUM(${usageEvents.costUsd}), 0)::float8` })
+    .from(usageEvents)
+    .where(
+      sql`${usageEvents.virtualKeyId} IN (SELECT ${virtualKeys.id} FROM ${virtualKeys} WHERE ${virtualKeys.engineRunId} = ${run.id}${
+        run.virtualKeyId ? sql` OR ${virtualKeys.id} = ${run.virtualKeyId}` : sql``
+      })`,
+    );
+  return Number(row?.total ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Create
+// ---------------------------------------------------------------------------
+
+export type CreateRunOutcome =
+  | { ok: true; run: EngineRunRow; approvalId: string | null }
+  | { ok: false; status: number; error: string; detail?: string };
+
+export interface CreateRunContext {
+  runAsUserId: string;
+  isAdmin: boolean;
+  trigger: "manual" | "workflow" | "scheduled";
+  scheduleId?: string | null;
+  workflow?: { instanceId: string; stageId: string; check: string; round: number } | null;
+}
+
+export function engineRunConfigHash(req: CreateEngineRunInput): string {
+  return createHash("sha256")
+    .update(canonicalJson({ engineId: req.engineId, target: req.target, config: req.config, trials: req.trials }))
+    .digest("hex");
+}
+
+type RunRefusal = Extract<CreateRunOutcome, { ok: false }>;
+async function entitlementRefusal(db: Db, userId: string, agentId: string, role: "target" | "judge"): Promise<RunRefusal | AgentRow> {
+  const [a] = await db.select().from(agents).where(eq(agents.id, agentId));
+  if (!a) return { ok: false, status: 404, error: role === "target" ? "unknown_agent" : "unknown_judge_agent" };
+  const decide = await buildAgentDecider(db, userId);
+  const decision = decide(a as AgentRow, "execute");
+  if (decision.effect !== "allow") {
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "agent",
+      objectId: a.id,
+      detail: { phase: "engine-run-entitlement", role },
+      effect: "deny",
+      ruleId: decision.ruleId,
+      ruleChain: decision.ruleChain,
+      reason: decision.reason,
+    });
+    return { ok: false, status: 403, error: role === "target" ? "agent_not_entitled" : "judge_not_entitled", detail: decision.reason };
+  }
+  return a as AgentRow;
+}
+
+export interface PreparedEngineRun {
+  manifest: EngineManifestEntry;
+  targetAgent: AgentRow | null;
+  judgeAgent: AgentRow | null;
+  budgetUsd: number;
+  timeoutSeconds: number;
+  sensitive: boolean;
+  overBudget: boolean;
+  needsApproval: boolean;
+  approverUserId: string | null;
+}
+
+/**
+ * PR #205 review round 14 [97]: THE run-policy decision — the budget (the org default when none is
+ * asked), the engine's budget ceiling, the timeout clamp, and whether the run waits for approval
+ * (an agentic, offensive or unclassified set while sensitive-set approval is on, or a budget over the
+ * org's threshold) with a valid approver. Validation calls it on unlocked reads; run creation calls
+ * it AGAIN inside its insert transaction on the org settings row (FOR SHARE) and the engine row (FOR
+ * SHARE), and acts only on that second decision. Every org-settings writer UPDATEs that row (the PUT
+ * route takes it FOR UPDATE first), so a tightening either commits before the creation reads it, or
+ * waits for the creation to commit.
+ */
+async function runPolicyDecision(
+  db: Db | Tx,
+  input: CreateEngineRunInput,
+  manifest: EngineManifestEntry,
+  engine: typeof engines.$inferSelect,
+  org: Awaited<ReturnType<typeof loadOrgSettings>>,
+  runAsUserId: string,
+): Promise<RunRefusal | { ok: true; decided: Pick<PreparedEngineRun, "budgetUsd" | "timeoutSeconds" | "sensitive" | "overBudget" | "needsApproval" | "approverUserId"> }> {
+  const budgetUsd = input.budgetUsd ?? org.engineDefaultRunBudgetUsd;
+  if (budgetUsd > engine.maxBudgetUsd) {
+    return {
+      ok: false,
+      status: 422,
+      error: "engine_budget_exceeds_ceiling",
+      detail: `a ${input.engineId} run may spend at most $${engine.maxBudgetUsd.toFixed(2)}; asked for $${budgetUsd.toFixed(2)}`,
+    };
+  }
+  const timeoutSeconds = Math.max(60, Math.min(engine.timeoutSeconds, org.engineMaxRunTimeoutMinutes * 60));
+  const sensitive = org.engineSensitiveSetApproval && engineConfigNeedsApproval(manifest, input.config.sets);
+  const overBudget = budgetUsd > org.engineRunApprovalThresholdUsd;
+  const needsApproval = sensitive || overBudget;
+  const approverUserId = needsApproval ? (input.approverUserId ?? org.infraApproverUserId ?? null) : null;
+  if (needsApproval) {
+    if (!approverUserId) {
+      return {
+        ok: false,
+        status: 422,
+        error: "engine_approver_required",
+        detail:
+          (sensitive ? "this run uses an agentic, offensive or unclassified set" : `this run's $${budgetUsd.toFixed(2)} budget is over the $${org.engineRunApprovalThresholdUsd.toFixed(2)} approval threshold`) +
+          ", so it waits for approval: name approverUserId, or set a default approver in org settings",
+      };
+    }
+    if (approverUserId === runAsUserId) {
+      return { ok: false, status: 403, error: "caller_cannot_approve", detail: "the person a run executes as cannot approve it" };
+    }
+    const [approver] = await db.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, approverUserId));
+    if (!approver || approver.disabledAt) return { ok: false, status: 404, error: "unknown_approver" };
+  }
+  return { ok: true, decided: { budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } };
+}
+
+/**
+ * Every check a run request gets, with nothing written (PR #203 review [13]:
+ * a schedule is validated by exactly this before it is stored): the engine on,
+ * the target kind, the project, entitlement to target AND judge, attribution,
+ * the budget ceiling, and an approver when one is needed.
+ */
+export async function validateEngineRunRequest(
+  db: Db,
+  input: CreateEngineRunInput,
+  ctx: Pick<CreateRunContext, "runAsUserId" | "isAdmin">,
+): Promise<RunRefusal | { ok: true; prepared: PreparedEngineRun }> {
+  const opts = runtime;
+  const manifest = manifestOf(opts)[input.engineId as EngineId];
+  await syncEngineManifest(db, manifestOf(opts));
+  const [engine] = await db.select().from(engines).where(eq(engines.id, input.engineId));
+  if (!engine) return { ok: false, status: 404, error: "engine_not_found" };
+  // PR #205 review round 13 [95]: an outdated replica creates (and validates) nothing for this engine
+  if (engineManifestOutdated(engine, manifest)) return { ok: false, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) };
+  // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
+  // plugin's test cases, so a plan of strategies alone would run nothing)
+  const configProblem = input.engineId === "promptfoo" ? promptfooConfigProblem(input.config.sets) : null;
+  if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
+  if (!engine.enabled) {
+    return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };
+  }
+  const wantsArtifact = "artifactId" in input.target;
+  if ((manifest.kind === "model_scan") !== wantsArtifact) {
+    return {
+      ok: false,
+      status: 422,
+      error: "engine_target_mismatch",
+      detail: manifest.kind === "model_scan" ? "this engine scans an uploaded model artifact" : "this engine runs against an agent",
+    };
+  }
+  let targetAgent: AgentRow | null = null;
+  let judgeAgent: AgentRow | null = null;
+  if ("agentId" in input.target) {
+    if (!input.projectId) {
+      return { ok: false, status: 422, error: "project_required", detail: "an engine run's model calls are pinned to a project; name the project to bill" };
+    }
+    // PR #205 review round 6 [73]: an engine that grades with a judge (the manifest says so) is never
+    // queued without one — it would only fail at the runner (`judge_required`)
+    if (manifest.requiresJudge && !input.target.judgeAgentId) {
+      return { ok: false, status: 422, error: "judge_required", detail: `a ${input.engineId} run grades with a judge agent behind the gateway: name judgeAgentId` };
+    }
+    const t = await entitlementRefusal(db, ctx.runAsUserId, input.target.agentId, "target");
+    if ("ok" in t) return t;
+    targetAgent = t;
+    if (input.target.judgeAgentId) {
+      const j = await entitlementRefusal(db, ctx.runAsUserId, input.target.judgeAgentId, "judge");
+      if ("ok" in j) return j;
+      judgeAgent = j;
+    }
+    // PR #205 review round 5 [70]: an engine calls the agent's provider model through the gateway;
+    // an agent with none set cannot be dispatched (its display name is not a model)
+    for (const [role, a] of [["target", targetAgent], ["judge", judgeAgent]] as const) {
+      if (a && !a.model) {
+        return {
+          ok: false,
+          status: 422,
+          error: "agent_not_dispatchable",
+          detail: `the ${role} agent '${a.name}' has no provider model set, so an engine cannot call it: set its model first`,
+        };
+      }
+    }
+  } else {
+    const [art] = await db.select({ id: modelArtifacts.id, uploadedByUserId: modelArtifacts.uploadedByUserId }).from(modelArtifacts).where(eq(modelArtifacts.id, input.target.artifactId));
+    if (!art) return { ok: false, status: 404, error: "unknown_artifact" };
+    // B5-M: an artifact is scanned by the person who uploaded it, or an admin (it is hostile input,
+    // and its scans become evidence)
+    if (!artifactAccessible(art, { userId: ctx.runAsUserId, isAdmin: ctx.isAdmin })) {
+      return { ok: false, status: 403, error: "artifact_not_accessible", detail: "only the person who uploaded this artifact, or an admin, can scan it" };
+    }
+  }
+  if (input.projectId) {
+    const attribution = await assertProjectAttribution(db, input.projectId, ctx.runAsUserId, ctx.isAdmin);
+    if (!attribution.ok) return { ok: false, status: attribution.status, error: attribution.error };
+  }
+  const policy = await runPolicyDecision(db, input, manifest, engine, await loadOrgSettings(db), ctx.runAsUserId);
+  if (!policy.ok) return policy;
+  const { budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } = policy.decided;
+  return {
+    ok: true,
+    prepared: { manifest, targetAgent, judgeAgent, budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId },
+  };
+}
+
+/** create a run (every trigger comes through here) */
+export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: CreateRunContext): Promise<CreateRunOutcome> {
+  const checked = await validateEngineRunRequest(db, input, ctx);
+  if (!checked.ok) return checked;
+  const { manifest, targetAgent, judgeAgent } = checked.prepared;
+  const now = new Date();
+  const configHash = engineRunConfigHash(input);
+  await engineRunTestHooks.beforeCreateTx?.();
+  const created = await db.transaction(async (tx) => {
+    // PR #205 review round 11 [87]: the engine row is taken FOR SHARE (every switch-off takes it FOR
+    // UPDATE, decision 84) and the engine's state is decided again HERE: on, its self-test admitting
+    // it, and the budget and timeout ceilings as they are now. A concurrent disable or ceiling drop
+    // either commits first (and this run is refused) or waits for this insert (and then ends the run).
+    // PR #205 review round 14 [97]: the org settings row FOR SHARE, then the engine row FOR SHARE (the
+    // lock order: org settings, then engine; no path locks them the other way round) — the approval
+    // decision, the default budget and the timeout clamp are decided again HERE, from the rows as they
+    // are now, and only this decision is acted on
+    const [orgRow] = await tx.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID)).for("share");
+    const [engine] = await tx.select().from(engines).where(eq(engines.id, input.engineId)).for("share");
+    if (engine && engineManifestOutdated(engine, manifest)) {
+      return { kind: "refused" as const, refusal: { ok: false as const, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) } };
+    }
+    if (!engine || !engine.enabled) {
+      return { kind: "refused" as const, refusal: { ok: false as const, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` } };
+    }
+    if (!selfTestAdmitsEnable(engine, manifest, now).ok) {
+      return { kind: "refused" as const, refusal: { ok: false as const, status: 409, error: "engine_self_test_required", detail: `engine ${input.engineId}'s self-test no longer admits it: an admin runs it again` } };
+    }
+    // the org row exists: validation (loadOrgSettings) created it if it was missing
+    const policy = await runPolicyDecision(tx, input, manifest, engine, orgRow ?? (await loadOrgSettings(tx as unknown as Db)), ctx.runAsUserId);
+    if (!policy.ok) return { kind: "refused" as const, refusal: policy };
+    const { budgetUsd, timeoutSeconds, sensitive, overBudget, needsApproval, approverUserId } = policy.decided;
+    const [run] = await tx
+      .insert(engineRuns)
+      .values({
+        engineId: input.engineId,
+        engineVersion: manifest.version,
+        status: needsApproval ? "awaiting_approval" : "queued",
+        trigger: ctx.trigger,
+        runAsUserId: ctx.runAsUserId,
+        projectId: input.projectId ?? null,
+        targetKind: targetAgent ? "agent" : "artifact",
+        targetAgentId: targetAgent?.id ?? null,
+        judgeAgentId: judgeAgent?.id ?? null,
+        targetArtifactId: "artifactId" in input.target ? input.target.artifactId : null,
+        config: input.config,
+        configHash,
+        trials: input.trials,
+        budgetUsd,
+        timeoutSeconds,
+        scheduleId: ctx.scheduleId ?? null,
+        workflowInstanceId: ctx.workflow?.instanceId ?? null,
+        workflowStageId: ctx.workflow?.stageId ?? null,
+        workflowCheckName: ctx.workflow?.check ?? null,
+        workflowRound: ctx.workflow?.round ?? null,
+        createdAt: now,
+        queueExpiresAt: new Date(now.getTime() + ENGINE_QUEUE_TTL_SECONDS * 1000),
+      })
+      .returning();
+    let approvalId: string | null = null;
+    if (needsApproval) {
+      const [a] = await tx
+        .insert(approvals)
+        .values({
+          userId: ctx.runAsUserId,
+          objectType: "engine_run",
+          approverUserId: approverUserId!,
+          projectId: input.projectId ?? null,
+          // PR #203 review round 2 [21]: linked to its workflow instance, so ending
+          // the instance supersedes it with the instance's other gates
+          instanceId: ctx.workflow?.instanceId ?? null,
+          stageId: `__engine_run__:${run!.id}`,
+          status: "pending",
+        })
+        .returning({ id: approvals.id });
+      approvalId = a!.id;
+      await tx.update(engineRuns).set({ approvalId }).where(eq(engineRuns.id, run!.id));
+    }
+    // round 11 (sweep): the creation's audit commits with the run
+    await auditEngine(tx as unknown as Db, {
+      userId: ctx.runAsUserId,
+      objectType: "engine_run",
+      objectId: run!.id,
+      ruleId: needsApproval ? "engine-run-queued-for-approval" : "engine-run-created",
+      effect: needsApproval ? "require_approval" : "allow",
+      detail: {
+        engineId: input.engineId,
+        trigger: ctx.trigger,
+        target: input.target,
+        sets: input.config.sets,
+        budgetUsd,
+        timeoutSeconds,
+        configHash,
+        approvalId,
+        sensitiveSet: sensitive,
+        overBudget,
+        ...(ctx.workflow ? { workflow: ctx.workflow } : {}),
+        ...(ctx.scheduleId ? { scheduleId: ctx.scheduleId } : {}),
+      },
+      reason: needsApproval
+        ? `${input.engineId} run queued for approval (${sensitive ? "sensitive set" : "budget over threshold"}); nothing runs until it is approved`
+        : `${input.engineId} run queued (${ctx.trigger})`,
+    });
+    return { kind: "created" as const, run: { ...run!, approvalId }, approvalId };
+  });
+  if (created.kind === "refused") return created.refusal;
+  return { ok: true, run: created.run, approvalId: created.approvalId };
+}
+
+// ---------------------------------------------------------------------------
+// End a run (every terminal path comes through here)
+// ---------------------------------------------------------------------------
+
+export interface FinishArgs {
+  status: EngineTerminalRunStatus;
+  errorCode: string | null;
+  normalised: EngineRunNormalised;
+  cause: string;
+  actorUserId: string;
+  envelope?: EngineResultEnvelope | null;
+  rawReport?: { sha256: string; bytes: number; ciphertext: string | null; expiresAt: Date | null } | null;
+  /** a runner's result: refused (the run times out) when the deadline or lease has passed */
+  requireLive?: boolean;
+}
+
+/**
+ * Move a run from one of `from` to a terminal status, revoke its key, store
+ * the normalised items and (completed agent runs) the ledgers — one
+ * transaction, compare-and-set on the status. Returns null when the run was
+ * no longer in `from` (someone else ended it first).
+ */
+/** THE summary every terminal path stores (PR #203 review [15]: one shape, whatever ended the run) */
+export function runSummary(n: EngineRunNormalised, cause: string, envelope: EngineResultEnvelope | null = null): Record<string, unknown> {
+  return {
+    verdict: n.verdict,
+    counts: n.counts,
+    // PR #205 review round 3 [61]: not-run items that are not declared planning-time exclusions
+    runtimeNotRun: n.runtimeNotRun,
+    mappedItems: n.mappedItems,
+    unmappedItems: n.unmappedItems,
+    asr: n.asr,
+    asrInterval: n.asrInterval,
+    asrTrials: n.asrTrials,
+    measurementQuality: n.measurementQuality,
+    classes: n.classes,
+    taxonomyVersion: n.taxonomyVersion,
+    explanation: n.explanation,
+    engineReportedStatus: envelope?.status ?? null,
+    engineErrorCode: n.engineErrorCode,
+    cause,
+  };
+}
+
+export async function finishEngineRun(
+  db: Db,
+  runId: string,
+  from: readonly string[],
+  given: FinishArgs,
+  /**
+   * PR #205 review round 11 (sweep): the condition the caller decided on, re-checked on the LOCKED
+   * row (a sweep's "the lease expired" or "the queue expired" read without a lock may no longer hold)
+   */
+  stillApplies?: (locked: EngineRunRow) => boolean,
+): Promise<EngineRunRow | null> {
+  const now = new Date();
+  const out = await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
+    if (!locked || !from.includes(locked.status)) return null;
+    if (stillApplies && !stillApplies(locked)) return null;
+    return endLockedRun(tx, locked, given, now);
+  });
+  if (out && out.workflowInstanceId) await notifyWorkflowOfEngineRun(db, out);
+  return out;
+}
+
+/** the terminal write itself, for a run the caller holds locked (`FOR UPDATE`) in `tx` */
+async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now: Date) {
+  const opts = runtime;
+  const runId = locked.id;
+  let args = given;
+  // PR #203 review [8]: a result is accepted only while the run is live, decided
+  // under the row lock — after the deadline or the lease the run is timed out
+  // even when the sweep has not run yet; a late envelope never counts
+  if (given.requireLive && locked.status === "leased") {
+    const deadline = locked.deadlineAt !== null && locked.deadlineAt.getTime() <= now.getTime();
+    const leaseGone = locked.leaseExpiresAt !== null && locked.leaseExpiresAt.getTime() <= now.getTime();
+    if (deadline || leaseGone) {
+      const cause = deadline ? "deadline_passed" : "lease_expired";
+      args = { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
+    }
+  }
+  const costUsd = await runCostUsd(tx, locked);
+  const summary = runSummary(args.normalised, args.cause, args.envelope ?? null);
+  const [updated] = await tx
+    .update(engineRuns)
+    .set({
+      status: args.status,
+      errorCode: args.errorCode,
+      finishedAt: now,
+      costUsd,
+      summary,
+      ...(args.rawReport
+        ? {
+            rawReportSha256: args.rawReport.sha256,
+            rawReportBytes: args.rawReport.bytes,
+            rawReportCiphertext: args.rawReport.ciphertext,
+            rawReportExpiresAt: args.rawReport.expiresAt,
+          }
+        : {}),
+    })
+    .where(eq(engineRuns.id, runId))
+    .returning();
+  await revokeRunKey(tx, locked, args.cause, args.actorUserId);
+  const itemRows = args.normalised.items.map((it) => ({
+      runId,
+      key: it.key,
+      sourceSystem: it.sourceSystem,
+      sourceId: it.sourceId,
+      attackClass: it.attackClass,
+      scorerKind: it.scorerKind,
+      claimedClass: it.claimedClass,
+      severity: it.severity,
+      attempts: it.attempts,
+      defeated: it.defeated,
+      claimedVerdict: it.claimedVerdict,
+      verdict: it.verdict,
+      reason: it.reason,
+      verdictNote: it.verdictNote,
+      notRunReason: it.notRunReason,
+      dispatchAuditIds: it.dispatchAuditIds,
+    }));
+  for (let i = 0; i < itemRows.length; i += 500) await tx.insert(engineRunItems).values(itemRows.slice(i, i + 500));
+  // B5-M: an artifact run's scan record is written in this same transaction, whatever ended the run
+  // (the verdict is the gateway's, from the format it detected at upload)
+  await recordArtifactScanTx(tx, locked, args.status, args.normalised);
+  let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
+  if (args.status === "completed") {
+    const kind = manifestOf(opts)[locked.engineId as EngineId].kind;
+    ledgers = await writeEngineRunLedgers(tx, { run: { ...updated!, costUsd }, kind, normalised: args.normalised, finishedAt: now });
+    if (ledgers.evalRunId || ledgers.redteamRunId) {
+      await tx.update(engineRuns).set({ evalRunId: ledgers.evalRunId, redteamRunId: ledgers.redteamRunId }).where(eq(engineRuns.id, runId));
+    }
+  }
+  await tx.insert(auditLog).values({
+    userId: args.actorUserId,
+    objectType: "engine_run",
+    objectId: runId,
+    detail: {
+      engineId: locked.engineId,
+      status: args.status,
+      errorCode: args.errorCode,
+      cause: args.cause,
+      verdict: args.normalised.verdict,
+      counts: args.normalised.counts,
+      costUsd,
+      rawReportSha256: args.rawReport?.sha256 ?? null,
+      ...ledgers,
+    },
+    effect: args.status === "completed" ? "allow" : "deny",
+    ruleId: args.envelope ? "engine-run-result-ingested" : `engine-run-${args.status.replace(/_/g, "-")}`,
+    ruleChain: [],
+    reason: `engine run ${runId} (${locked.engineId}) ended ${args.status}: ${args.normalised.explanation}`,
+  });
+  return { ...updated!, ...ledgers };
+}
+
+/**
+ * PR #203 review round 2 [21]: a workflow that ends (aborted, denied,
+ * completed, rolled back) or re-opens into a new round takes its live engine
+ * runs with it — each is cancelled, its key revoked and its pending approval
+ * superseded, in the caller's transaction (the one that holds the instance
+ * row). `beforeRound` limits it to runs of earlier rounds (a re-open). The
+ * workflow is not notified: it has already moved on.
+ */
+export async function cancelEngineRunsOfInstance(
+  tx: Tx,
+  instanceId: string,
+  actorUserId: string | null,
+  opts: { beforeRound?: number; cause: string },
+): Promise<number> {
+  const live = await tx
+    .select()
+    .from(engineRuns)
+    .where(
+      and(
+        eq(engineRuns.workflowInstanceId, instanceId),
+        inArray(engineRuns.status, ["awaiting_approval", "queued", "leased"]),
+        ...(opts.beforeRound !== undefined ? [lt(engineRuns.workflowRound, opts.beforeRound)] : []),
+      ),
+    )
+    .orderBy(asc(engineRuns.id))
+    .for("update");
+  const now = new Date();
+  const actor = actorUserId ?? NO_IDENTITY;
+  for (const run of live) {
+    await tx.update(engineRuns).set({ cancelRequestedAt: now, cancelRequestedByUserId: actorUserId }).where(eq(engineRuns.id, run.id));
+    await endLockedRun(tx, run, { status: "cancelled", errorCode: "workflow_ended", normalised: noResult("cancelled"), cause: opts.cause, actorUserId: actor }, now);
+    await tx.update(engineRuns).set({ workflowNotifiedAt: now }).where(eq(engineRuns.id, run.id));
+    if (run.approvalId) {
+      await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, run.approvalId), eq(approvals.status, "pending")));
+    }
+  }
+  return live.length;
+}
+
+/** an empty normalisation (no result): every reading is unknown or not run */
+function noResult(status: EngineTerminalRunStatus): EngineRunNormalised {
+  return normaliseEngineResult({ envelope: null, status, taxonomy: taxonomyOf(runtime), scrub: engineDetectionScrub });
+}
+
+/**
+ * PR #205 review round 7 [76]: end, IN THE CALLER'S TRANSACTION, every run still leased by a revoked
+ * runner of `engineId` (or by the one runner named) — cancelled, its key revoked, audited — so a
+ * revocation and the end of what it held commit together. Idempotent: a run already ended is not
+ * matched. Returns the ended runs, whose workflows the caller notifies after its commit.
+ */
+export async function endRunsHeldByRevokedRunnersTx(tx: Tx, engineId: EngineId, actorUserId: string, onlyRunnerId?: string): Promise<EngineRunRow[]> {
+  const held = await tx
+    .select()
+    .from(engineRuns)
+    .where(
+      and(
+        eq(engineRuns.engineId, engineId),
+        eq(engineRuns.status, "leased"),
+        onlyRunnerId
+          ? eq(engineRuns.runnerId, onlyRunnerId)
+          : inArray(
+              engineRuns.runnerId,
+              tx.select({ id: engineRunners.id }).from(engineRunners).where(and(eq(engineRunners.engineId, engineId), isNotNull(engineRunners.revokedAt))),
+            ),
+      ),
+    )
+    .orderBy(asc(engineRuns.id))
+    .for("update");
+  const now = new Date();
+  const ended: EngineRunRow[] = [];
+  for (const run of held) {
+    ended.push(
+      await endLockedRun(tx, run, { status: "cancelled", errorCode: "runner_revoked", normalised: noResult("cancelled"), cause: "runner_revoked", actorUserId }, now),
+    );
+  }
+  return ended;
+}
+
+/**
+ * PR #205 review round 7 [75]: a manifest build change ends, in the caller's transaction (which
+ * holds the engine row), every run of the engine still waiting — queued or awaiting approval. It was
+ * requested (and approved) against the old build; the requester re-runs it. Cancelled with
+ * `engine_build_changed`, its pending approval superseded, audited.
+ * PR #205 review round 9 [82]: and every run still LEASED (in flight on the old build) — its key is
+ * revoked and a later result is refused as late, so no result is ever normalised against a catalogue
+ * other than the one it ran under, on any replica.
+ * PR #205 review round 10 [84]: the same for EVERY path that switches an engine off — a failing
+ * runner or admin self-test (`engine_self_test_failed`), an admin's disable (`engine_disabled`), a
+ * build change (`engine_build_changed`) — in the transaction that holds the engine row FOR UPDATE:
+ * no run keeps a live key (or keeps calling models) on an engine that is off.
+ */
+export async function endActiveRunsOfEngineTx(tx: Tx, engineId: EngineId, reason: "engine_build_changed" | "engine_self_test_failed" | "engine_disabled"): Promise<EngineRunRow[]> {
+  const waiting = await tx
+    .select()
+    .from(engineRuns)
+    .where(and(eq(engineRuns.engineId, engineId), inArray(engineRuns.status, ["queued", "awaiting_approval", "leased"])))
+    .orderBy(asc(engineRuns.id))
+    .for("update");
+  const now = new Date();
+  const ended: EngineRunRow[] = [];
+  for (const run of waiting) {
+    ended.push(
+      await endLockedRun(
+        tx,
+        run,
+        { status: "cancelled", errorCode: reason, normalised: noResult("cancelled"), cause: reason, actorUserId: NO_IDENTITY },
+        now,
+      ),
+    );
+    if (run.approvalId) {
+      await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, run.approvalId), eq(approvals.status, "pending")));
+    }
+  }
+  return ended;
+}
+
+/** after a commit: tell the workflows of runs ended in it (a failure is retried by the workflow sweep) */
+export async function notifyWorkflowsOfEndedRuns(db: Db, runs: ReadonlyArray<Pick<EngineRunRow, "id" | "workflowInstanceId" | "workflowStageId">>): Promise<void> {
+  for (const r of runs) if (r.workflowInstanceId) await notifyWorkflowOfEngineRun(db, r);
+}
+
+
+/**
+ * PR #205 review round 15 [100]: THE LOCK ORDER for engine state is engine (where taken) → run →
+ * approval. Every path that ends or releases a run holds the run row before it touches the run's
+ * approval (cancel, a workflow ending, a switch-off, the lease's ended paths). The decide route is the
+ * one that starts from the approval: it calls this FIRST, inside its transaction and before it writes
+ * the approval, so it takes the run row before the approval row like every other path.
+ */
+export async function lockEngineRunOfApprovalTx(tx: Tx, approvalId: string): Promise<void> {
+  await tx.select({ id: engineRuns.id }).from(engineRuns).where(eq(engineRuns.approvalId, approvalId)).for("update");
+}
+
+/** the decide path's hook for an `engine_run` approval (inside its transaction) */
+export async function applyEngineRunApprovalDecision(
+  tx: Tx,
+  approval: { id: string },
+  decision: "approved" | "denied",
+  deciderUserId: string,
+): Promise<((db: Db) => Promise<void>) | null> {
+  const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.approvalId, approval.id)).for("update");
+  if (!run || run.status !== "awaiting_approval") return null;
+  const now = new Date();
+  if (decision === "approved") {
+    await tx
+      .update(engineRuns)
+      .set({ status: "queued", queueExpiresAt: new Date(now.getTime() + ENGINE_QUEUE_TTL_SECONDS * 1000) })
+      .where(eq(engineRuns.id, run.id));
+    await tx.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "engine_run",
+      objectId: run.id,
+      detail: { phase: "approval", approvalId: approval.id, decision },
+      effect: "allow",
+      ruleId: "engine-run-approved",
+      ruleChain: [],
+      reason: `engine run ${run.id} approved; it is queued for a runner`,
+    });
+    return null;
+  }
+  const n = noResult("not_run");
+  await tx
+    .update(engineRuns)
+    .set({ status: "not_run", errorCode: "approval_denied", finishedAt: now, summary: runSummary(n, "approval_denied") })
+    .where(eq(engineRuns.id, run.id));
+  await tx.insert(auditLog).values({
+    userId: deciderUserId,
+    objectType: "engine_run",
+    objectId: run.id,
+    detail: { phase: "approval", approvalId: approval.id, decision },
+    effect: "deny",
+    ruleId: "engine-run-approval-denied",
+    ruleChain: [],
+    reason: `engine run ${run.id} was refused in the Approvals Queue and never ran`,
+  });
+  if (!run.workflowInstanceId) return null;
+  return async (db: Db) => {
+    await notifyWorkflowOfEngineRun(db, run);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Workflow binding (owner decision 4)
+// ---------------------------------------------------------------------------
+
+/** test seams (code only): a hook that runs before a workflow stage is told a run ended */
+export const engineRunTestHooks: {
+  beforeWorkflowNotify?: (runId: string) => void;
+  /** runs after the lease route's pre-checks, before its transaction (PR #203 review round 2 [17]) */
+  beforeLeaseTx?: (runnerId: string) => Promise<void> | void;
+  /** runs after the self-test route's pre-checks, before its transaction (PR #205 review round 4 [65]) */
+  beforeSelfTestTx?: (runnerId: string) => Promise<void> | void;
+  /** runs just before a due schedule creates its run (PR #203 review round 2 [23]) */
+  beforeScheduledCreate?: () => void;
+  /** runs right after a registration's transaction committed, before anything else (PR #205 review round 7 [76]) */
+  afterRegisterTx?: () => Promise<void> | void;
+  /** runs after the manifest sync's unlocked read, before its transaction (PR #205 review round 8 [78]) */
+  beforeSyncTx?: (engineId: string) => Promise<void> | void;
+  /** round 11: after the schedule sweep's read, before its claim [88] */
+  beforeScheduleClaim?: (scheduleId: string) => Promise<void> | void;
+  /** round 11: after a run's creation was validated, before its transaction [87] */
+  beforeCreateTx?: () => Promise<void> | void;
+  /** round 11 (sweep): after the run sweep read an overdue run, before it ends it */
+  beforeSweepEnd?: (runId: string) => Promise<void> | void;
+  /** round 11: inside the cancel transaction, after the marker is written [86] (a throw here is a crash mid-cancel) */
+  afterCancelMarked?: (runId: string) => Promise<void> | void;
+} = {};
+
+/**
+ * A workflow-bound run ended: re-evaluate its check stage (lazy import:
+ * workflows.ts imports this module). PR #203 review [5]: the hand-off is
+ * DURABLE — `workflow_notified_at` is stamped only once the stage evaluated
+ * (or is no longer the current one); a failure, or another executor holding
+ * the stage, leaves it unset and the engine sweep tries again, so an ended run
+ * can never leave its workflow waiting for ever.
+ */
+async function notifyWorkflowOfEngineRun(db: Db, run: Pick<EngineRunRow, "id" | "workflowInstanceId" | "workflowStageId">): Promise<boolean> {
+  if (!run.workflowInstanceId || !run.workflowStageId) return true;
+  try {
+    engineRunTestHooks.beforeWorkflowNotify?.(run.id);
+    const wf = await import("./workflows.js");
+    await wf.reevaluateCheckStage(db, run.workflowInstanceId, run.workflowStageId, runtime.dataKey);
+  } catch {
+    return false; // retried by the sweep
+  }
+  await db.update(engineRuns).set({ workflowNotifiedAt: new Date() }).where(eq(engineRuns.id, run.id));
+  return true;
+}
+
+export interface EngineCheckOutcome {
+  check: string;
+  status: "passed" | "failed" | "pending";
+  severity: string | null;
+  detail: string;
+  engine: { runId: string | null; engineId: string; status: string; verdict: string | null };
+}
+
+/**
+ * The outcome of every engine-bound check of a stage, starting each run on
+ * first sight (as the instance initiator, on the instance's project, like an
+ * eval binding). PENDING until the run ends; PASSED only when it completed
+ * with verdict pass; FAILED when it failed, timed out, was cancelled, did not
+ * run, could not be started, or completed with any failed or unknown item.
+ */
+export async function stageEngineCheckOutcomes(
+  db: Db,
+  instance: { id: string; initiatorUserId: string; projectId: string | null; round: number },
+  stage: { id: string; checks?: string[]; engines?: Array<{ check: string; engine: string; agent: string; judgeAgent?: string; sets: string[]; params?: Record<string, string | number | boolean>; trials?: number; budgetUsd?: number }> },
+): Promise<Map<string, EngineCheckOutcome>> {
+  const out = new Map<string, EngineCheckOutcome>();
+  const declared = new Set(stage.checks ?? []);
+  for (const b of stage.engines ?? []) {
+    if (!declared.has(b.check)) continue;
+    const fail = (detail: string, runId: string | null, status: string): void => {
+      out.set(b.check, { check: b.check, status: "failed", severity: "high", detail, engine: { runId, engineId: b.engine, status, verdict: null } });
+    };
+    let [run] = await db
+      .select()
+      .from(engineRuns)
+      .where(
+        and(
+          eq(engineRuns.workflowInstanceId, instance.id),
+          eq(engineRuns.workflowStageId, stage.id),
+          eq(engineRuns.workflowCheckName, b.check),
+          eq(engineRuns.workflowRound, instance.round),
+        ),
+      );
+    if (!run) {
+      const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.name, b.agent));
+      const [judge] = b.judgeAgent ? await db.select({ id: agents.id }).from(agents).where(eq(agents.name, b.judgeAgent)) : [null];
+      if (!agent || (b.judgeAgent && !judge)) {
+        fail(`the engine check could not start: agent '${!agent ? b.agent : b.judgeAgent}' is not registered`, null, "not_run");
+        continue;
+      }
+      const parsed = createEngineRunSchema.safeParse({
+        engineId: b.engine,
+        target: { agentId: agent.id, ...(judge ? { judgeAgentId: judge.id } : {}) },
+        config: { sets: b.sets, params: b.params ?? {} },
+        ...(instance.projectId ? { projectId: instance.projectId } : {}),
+        ...(b.budgetUsd !== undefined ? { budgetUsd: b.budgetUsd } : {}),
+        trials: b.trials ?? 3,
+      });
+      if (!parsed.success) {
+        fail("the engine check could not start: its binding is not a valid run request", null, "not_run");
+        continue;
+      }
+      // PR #203 review [9]: the initiator's CURRENT standing (an admin attributes
+      // to any project, as on POST /v1/engine-runs); a person gone stays refused
+      const [initiator] = await db.select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt }).from(users).where(eq(users.id, instance.initiatorUserId));
+      if (!initiator || initiator.disabledAt) {
+        fail("the engine check could not start: the person who started this workflow is gone or deactivated", null, "not_run");
+        continue;
+      }
+      const created = await createEngineRun(db, parsed.data, {
+        runAsUserId: instance.initiatorUserId,
+        isAdmin: initiator.isAdmin,
+        trigger: "workflow",
+        workflow: { instanceId: instance.id, stageId: stage.id, check: b.check, round: instance.round },
+      }).catch((e: unknown) => {
+        const code = (e as { code?: string; cause?: { code?: string } })?.code ?? (e as { cause?: { code?: string } })?.cause?.code;
+        if (code === "23505") return null; // another executor created it first
+        throw e;
+      });
+      if (created === null) {
+        [run] = await db
+          .select()
+          .from(engineRuns)
+          .where(
+            and(
+              eq(engineRuns.workflowInstanceId, instance.id),
+              eq(engineRuns.workflowStageId, stage.id),
+              eq(engineRuns.workflowCheckName, b.check),
+              eq(engineRuns.workflowRound, instance.round),
+            ),
+          );
+      } else if (!created.ok) {
+        fail(`the engine check could not start: ${created.error}${created.detail ? ` — ${created.detail}` : ""}`, null, "not_run");
+        continue;
+      } else {
+        run = created.run;
+      }
+    }
+    if (!run) {
+      fail("the engine check could not start", null, "not_run");
+      continue;
+    }
+    const verdict = (run.summary as { verdict?: string } | null)?.verdict ?? null;
+    const engine = { runId: run.id, engineId: run.engineId, status: run.status, verdict };
+    if (!isTerminalEngineRunStatus(run.status)) {
+      out.set(b.check, { check: b.check, status: "pending", severity: null, detail: `engine run ${run.id} is ${run.status}`, engine });
+    } else if (run.status === "completed" && verdict === "pass") {
+      out.set(b.check, { check: b.check, status: "passed", severity: null, detail: `engine run ${run.id} completed with no failed or unknown item`, engine });
+    } else {
+      out.set(b.check, {
+        check: b.check,
+        status: "failed",
+        severity: "high",
+        detail: `engine run ${run.id} ended ${run.status}${verdict ? ` (verdict ${verdict})` : ""}${run.errorCode ? `, ${run.errorCode}` : ""}: it does not pass`,
+        engine,
+      });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Sweeps (the runner is never trusted to stop itself)
+// ---------------------------------------------------------------------------
+
+export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?: string | null } = {}) {
+  const now = opts.now ?? new Date();
+  const actor = opts.actorUserId ?? NO_IDENTITY;
+  const out = { timedOut: 0, leaseExpired: 0, queueExpired: 0, rawReportsPurged: 0, workflowsNotified: 0 };
+  const overdue = await db
+    .select({ id: engineRuns.id, deadlineAt: engineRuns.deadlineAt, leaseExpiresAt: engineRuns.leaseExpiresAt })
+    .from(engineRuns)
+    .where(and(eq(engineRuns.status, "leased"), or(lt(engineRuns.deadlineAt, now), lt(engineRuns.leaseExpiresAt, now))))
+    .limit(500);
+  for (const r of overdue) {
+    await engineRunTestHooks.beforeSweepEnd?.(r.id);
+    const deadline = r.deadlineAt !== null && r.deadlineAt < now;
+    // round 11 (sweep): still overdue on the locked row (a heartbeat may have renewed the lease since)
+    const done = await finishEngineRun(
+      db,
+      r.id,
+      ["leased"],
+      {
+        status: "timeout",
+        errorCode: deadline ? "deadline_passed" : "lease_expired",
+        normalised: noResult("timeout"),
+        cause: deadline ? "deadline_passed" : "lease_expired",
+        actorUserId: actor,
+      },
+      (locked) =>
+        (deadline && locked.deadlineAt !== null && locked.deadlineAt < now) || (!deadline && locked.leaseExpiresAt !== null && locked.leaseExpiresAt < now),
+    );
+    if (done) {
+      if (deadline) out.timedOut += 1;
+      else out.leaseExpired += 1;
+    }
+  }
+  const stale = await db
+    .select({ id: engineRuns.id })
+    .from(engineRuns)
+    .where(and(eq(engineRuns.status, "queued"), lt(engineRuns.queueExpiresAt, now)))
+    .limit(500);
+  for (const r of stale) {
+    const done = await finishEngineRun(
+      db,
+      r.id,
+      ["queued"],
+      {
+        status: "not_run",
+        errorCode: "no_runner",
+        normalised: noResult("not_run"),
+        cause: "no_runner",
+        actorUserId: actor,
+      },
+      (locked) => locked.queueExpiresAt !== null && locked.queueExpiresAt < now,
+    );
+    if (done) out.queueExpired += 1;
+  }
+  // PR #203 review [5]: workflow hand-offs that did not land are retried
+  const unnotified = await db
+    .select({ id: engineRuns.id, workflowInstanceId: engineRuns.workflowInstanceId, workflowStageId: engineRuns.workflowStageId })
+    .from(engineRuns)
+    .where(and(isNotNull(engineRuns.workflowInstanceId), isNotNull(engineRuns.finishedAt), isNull(engineRuns.workflowNotifiedAt)))
+    .orderBy(asc(engineRuns.finishedAt))
+    .limit(100);
+  for (const r of unnotified) if (await notifyWorkflowOfEngineRun(db, r)) out.workflowsNotified += 1;
+  // PR #203 review [6]: retention is the setting NOW, applied from when the run
+  // ended — lowering it shortens reports already stored (the stored expiry can
+  // only ever end one sooner, never keep one longer)
+  const org = await loadOrgSettings(db);
+  const purged = await db
+    .update(engineRuns)
+    .set({ rawReportCiphertext: null })
+    .where(
+      and(
+        isNotNull(engineRuns.rawReportCiphertext),
+        or(
+          lt(engineRuns.rawReportExpiresAt, now),
+          sql`COALESCE(${engineRuns.finishedAt}, ${engineRuns.createdAt}) + make_interval(days => ${org.engineRawReportRetentionDays}) < ${now.toISOString()}::timestamptz`,
+        ),
+      ),
+    )
+    .returning({ id: engineRuns.id });
+  out.rawReportsPurged = purged.length;
+  return out;
+}
+
+/** due schedules: each run executes as the person who configured it, or is skipped with a stated reason */
+export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) {
+  const now = opts.now ?? new Date();
+  const out = { started: 0, skipped: 0 };
+  const due = await db
+    .select()
+    .from(engineSchedules)
+    .where(and(eq(engineSchedules.enabled, true), lt(engineSchedules.nextRunAt, now)))
+    .orderBy(asc(engineSchedules.nextRunAt))
+    .limit(100);
+  for (const s of due) {
+    const next = new Date(now.getTime() + s.intervalHours * 3_600_000);
+    await engineRunTestHooks.beforeScheduleClaim?.(s.id);
+    const [claimed] = await db
+      .update(engineSchedules)
+      .set({ nextRunAt: next, updatedAt: now })
+      // PR #205 review round 11 [88]: the claim also requires the schedule to be ON now — one switched
+      // off after the read above is not claimed and starts nothing
+      .where(and(eq(engineSchedules.id, s.id), eq(engineSchedules.nextRunAt, s.nextRunAt), eq(engineSchedules.enabled, true)))
+      .returning();
+    if (!claimed) continue; // another sweep took it, or it was switched off
+    let skip: string | null = null;
+    let runId: string | null = null;
+    const [person] = s.runAsUserId
+      ? await db.select({ id: users.id, disabledAt: users.disabledAt, isAdmin: users.isAdmin }).from(users).where(eq(users.id, s.runAsUserId))
+      : [];
+    const parsed = createEngineRunSchema.safeParse(s.request);
+    if (!person || person.disabledAt) skip = "the person this schedule runs as is gone or deactivated";
+    else if (!parsed.success) skip = "the stored run request is no longer valid";
+    else if (engineRunConfigHash(parsed.data) !== s.configHash) skip = "the stored run request does not match its configuration hash";
+    else {
+      // PR #203 review round 2 [23]: the claim above is already committed, so a
+      // creation that throws is recorded as an audited skip — a due run is
+      // never lost silently
+      try {
+        engineRunTestHooks.beforeScheduledCreate?.();
+        const created = await createEngineRun(db, parsed.data, { runAsUserId: person.id, isAdmin: person.isAdmin, trigger: "scheduled", scheduleId: s.id });
+        if (created.ok) runId = created.run.id;
+        else skip = `${created.error}${created.detail ? `: ${created.detail}` : ""}`;
+      } catch (err) {
+        skip = `the run could not be created: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // round 11 (sweep): the schedule's outcome and its skip audit commit together
+    await db.transaction(async (tx) => {
+      await tx.update(engineSchedules).set({ lastRunId: runId ?? s.lastRunId, lastSkip: skip }).where(eq(engineSchedules.id, s.id));
+      if (skip) {
+        await auditEngine(tx as unknown as Db, {
+          userId: s.runAsUserId ?? NO_IDENTITY,
+          objectType: "engine_schedule",
+          objectId: s.id,
+          ruleId: "engine-schedule-skipped",
+          effect: "deny",
+          detail: { engineId: s.engineId, skip },
+          reason: `scheduled ${s.engineId} run skipped: ${skip}`,
+        });
+      }
+    });
+    if (skip) out.skipped += 1;
+    else out.started += 1;
+  }
+  return out;
+}
+
+export function engineJobDefinitions(): SchedulerJobDefinition[] {
+  return [
+    {
+      name: ENGINE_SWEEP_JOB_NAME,
+      description:
+        "End engine runs whose deadline passed or whose lease expired (status timeout) and revoke their keys; end queued " +
+        "runs no runner took in 24 hours (not_run); delete raw engine reports past their retention. The kill switch does " +
+        "not depend on it: a cancel revokes the key at once, and a key expires at the run deadline anyway.",
+      adr: "ADR-0187",
+      defaultIntervalSeconds: 60,
+      run: async (ctx) => {
+        const out = await runEngineRunSweep(ctx.db, { now: ctx.now, actorUserId: ctx.actorUserId });
+        return { itemsProcessed: out.timedOut + out.leaseExpired + out.queueExpired, detail: { ...out } };
+      },
+    },
+    {
+      name: ENGINE_SCHEDULE_JOB_NAME,
+      description:
+        "Start due scheduled engine runs, each as the person who configured it; skip, with a stated and audited reason, " +
+        "when that person is gone, no longer entitled, or the engine is off. Sensitive or over-threshold runs still wait " +
+        "for approval.",
+      adr: "ADR-0187",
+      defaultIntervalSeconds: 300,
+      run: async (ctx) => {
+        const out = await runEngineScheduleSweep(ctx.db, { now: ctx.now });
+        return { itemsProcessed: out.started, detail: { ...out } };
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+const runParam = z.object({ runId: z.string().uuid() });
+const scheduleParam = z.object({ scheduleId: z.string().uuid() });
+const listQuery = z.object({
+  engineId: z.enum(ENGINE_IDS).optional(),
+  status: z.enum(ENGINE_RUN_STATUSES).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+function publicRun(run: EngineRunRow) {
+  const { rawReportCiphertext, ...rest } = run;
+  return { ...rest, rawReportStored: rawReportCiphertext !== null };
+}
+
+interface LeaseRefusal {
+  error: string;
+  /** absent only for `engine_manifest_outdated` (round 13 [95]): a transient refusal the runner waits out */
+  next?: EngineRunnerNext;
+  detail: string;
+}
+
+/**
+ * Mint a run's scoped key (the run-as person's ceiling: the run's budget, the run's target and judge,
+ * until the deadline), audited. `carriedSpentUsd` is what the run's earlier keys already spent (a
+ * rotation carries it, so the run's ceiling holds across keys; round 13 [94]).
+ */
+async function mintRunKeyTx(
+  tx: Tx,
+  run: EngineRunRow,
+  engineId: EngineId,
+  target: AgentRow,
+  judge: AgentRow | null,
+  deadlineAt: Date,
+  carriedSpentUsd: number,
+): Promise<{ token: string; keyId: string }> {
+  const { token, tokenHash } = generateVirtualKeyToken();
+  const allowedModels = [target.id, ...(judge ? [judge.id] : [])];
+  const [key] = await tx
+    .insert(virtualKeys)
+    .values({
+      name: engineKeyName(engineId, run.id),
+      userId: run.runAsUserId!,
+      tokenHash,
+      purpose: ENGINE_VIRTUAL_KEY_PURPOSE,
+      allowedModels,
+      budgetUsd: run.budgetUsd,
+      spentUsd: carriedSpentUsd,
+      expiresAt: deadlineAt,
+      projectId: run.projectId,
+      engineRunId: run.id,
+      createdBy: null,
+    })
+    .returning({ id: virtualKeys.id });
+  await tx.insert(auditLog).values({
+    userId: run.runAsUserId!,
+    objectType: "virtual_key",
+    objectId: key!.id,
+    detail: {
+      phase: "issue",
+      purpose: ENGINE_VIRTUAL_KEY_PURPOSE,
+      engineRunId: run.id,
+      engineId,
+      ownerUserId: run.runAsUserId,
+      allowedModels,
+      budgetUsd: run.budgetUsd,
+      carriedSpentUsd,
+      expiresAt: deadlineAt.toISOString(),
+      projectId: run.projectId,
+    },
+    effect: "allow",
+    ruleId: "engine-run-key-minted",
+    ruleChain: [],
+    reason: `run-scoped key minted for ${engineId} run ${run.id}: the run-as person's ceiling, $${run.budgetUsd.toFixed(2)}, until ${deadlineAt.toISOString()}`,
+  });
+  return { token, keyId: key!.id };
+}
+
+/**
+ * PR #205 review round 13 [94]: re-issue a still-live lease to the runner that holds it (a retry
+ * with the attempt's request id). The run, its deadline and its spec are unchanged; the lease is
+ * renewed like a heartbeat; the key is ROTATED — the old one revoked and a new one minted in this
+ * transaction, carrying what the run already spent — so at most one key of the run ever works.
+ */
+async function reissueLeaseTx(tx: Tx, run: EngineRunRow, engineId: EngineId, m: EngineManifestEntry, runnerId: string, now: Date) {
+  const [t] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
+  const [j] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
+  const target = (t as AgentRow | undefined) ?? null;
+  const judge = (j as AgentRow | undefined) ?? null;
+  let apiKey: string | null = null;
+  let keyId: string | null = run.virtualKeyId;
+  if (run.virtualKeyId && run.targetKind === "agent" && m.needsModelAccess && target) {
+    await revokeRunKey(tx, run, "lease_reissued", NO_IDENTITY);
+    // PR #205 follow-up [102]: what the run has ACTUALLY spent, read off the usage ledger by every key
+    // it has held (the same figure `runCostUsd` reports). Never the sum of the keys' `spent_usd`: each
+    // replacement key starts at the amount carried into it, so from the second re-issue on that sum
+    // counts the carried amount again, and retries alone could exhaust the budget.
+    const minted = await mintRunKeyTx(tx, run, engineId, target, judge, run.deadlineAt!, await runCostUsd(tx, run));
+    apiKey = minted.token;
+    keyId = minted.keyId;
+  }
+  const [updated] = await tx
+    .update(engineRuns)
+    .set({ virtualKeyId: keyId, leaseExpiresAt: new Date(now.getTime() + ENGINE_LEASE_TTL_SECONDS * 1000), heartbeatAt: now })
+    .where(eq(engineRuns.id, run.id))
+    .returning();
+  await tx.insert(auditLog).values({
+    userId: run.runAsUserId ?? NO_IDENTITY,
+    objectType: "engine_run",
+    objectId: run.id,
+    detail: { phase: "lease_reissue", engineId, runnerId, leaseRequestId: run.leaseRequestId, previousVirtualKeyId: run.virtualKeyId, virtualKeyId: keyId },
+    effect: "allow",
+    ruleId: "engine-run-lease-reissued",
+    ruleChain: [],
+    reason: `${engineId} run ${run.id} re-issued to runner ${runnerId} on a retried lease (same request id)` + (apiKey ? "; its key was rotated, the old one revoked" : ""),
+  });
+  return { run: updated!, apiKey, target, judge };
+}
+
+/**
+ * PR #205 review round 14 [98]: the HARD gates a retried lease (same runner, same request id) must
+ * still pass to get its run back — the build this credential registered, and the engine on. Freshness
+ * (the runner's and the engine's self-test age) is NOT among them: a report that went stale between
+ * the attempt and its retry does not orphan the run the attempt leased. The runner being live and the
+ * manifest not outdated are checked by the caller.
+ */
+function leaseHardGate(
+  runner: typeof engineRunners.$inferSelect,
+  engine: typeof engines.$inferSelect | null,
+  build: { imageDigest: string; engineVersion: string },
+  m: EngineManifestEntry,
+): LeaseRefusal | null {
+  if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
+    return {
+      next: "reenrol_required",
+      error: "engine_runner_reenrol_required",
+      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+    };
+  }
+  if (!engine || !engine.enabled) {
+    return { next: "admin_disabled", error: "engine_disabled", detail: `engine ${m.id} is off: the run this retry leased was ended, and no work is leased until an admin enables it` };
+  }
+  return null;
+}
+
+/**
+ * PR #205 review round 5 (ADR-0187 decision 67) and round 6 [71]: THE lease admission, decided
+ * from the rows passed in (the lease calls it once as a fast path and again inside its transaction
+ * on locked rows). Every refusal carries the ONE signal the runner's state machine acts on, in order:
+ *   1. a build other than the one this credential registered → `reenrol_required` [67];
+ *   2. this runner's own report does not pass NOW (stale after 24 h, failing, or for a build the
+ *      manifest no longer names) → `self_test_required`, WHATEVER the engine's state [69];
+ *   3. the engine is off (an admin's switch, or a failed report switched it off) → `admin_disabled`;
+ *   4. the engine's recorded self-test no longer admits it → `self_test_required`.
+ * PR #203 review [3] stands: decided now, never from a stored boolean. null = admitted.
+ */
+function leaseAdmission(
+  runner: typeof engineRunners.$inferSelect,
+  engine: typeof engines.$inferSelect | null,
+  build: { imageDigest: string; engineVersion: string },
+  m: EngineManifestEntry,
+  now: Date,
+): LeaseRefusal | null {
+  // PR #205 review round 13 [95]: a replica whose manifest is older than the engine row decides
+  // nothing about this engine (an old replica during a rolling upgrade). No `next` signal: the runner
+  // keeps its state and retries, and reaches a current replica.
+  if (engine && engineManifestOutdated(engine, m)) return engineManifestOutdatedRefusal(m.id, engine, m);
+  if (build.imageDigest !== runner.reportedDigest || build.engineVersion !== runner.reportedVersion) {
+    return {
+      next: "reenrol_required",
+      error: "engine_runner_reenrol_required",
+      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+    };
+  }
+  // PR #205 review round 10 [85]: a runner whose registered build is not the CURRENT manifest build
+  // (an old runner during a rolling upgrade) re-enrols from the current image; it is never asked for a
+  // self-test, which (of an obsolete build) could otherwise switch the upgraded engine off
+  if (!runnerCountsForCurrentBuild(m, runner)) {
+    return {
+      next: "reenrol_required",
+      error: "engine_runner_reenrol_required",
+      detail: "this runner runs a build that is not the current one: deploy the current image and re-enrol it with a new enrolment token",
+    };
+  }
+  const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);
+  if (!runnerVerdict.passed) {
+    return {
+      next: "self_test_required",
+      error: "engine_self_test_required",
+      detail: `this runner's self-test does not pass now (${runnerVerdict.failures.join(", ")}): run it again and submit it`,
+    };
+  }
+  if (!engine || !engine.enabled) {
+    return { next: "admin_disabled", error: "engine_disabled", detail: `engine ${m.id} is off: no work is leased until an admin enables it` };
+  }
+  const engineAdmits = selfTestAdmitsEnable(engine, m, now);
+  if (!engineAdmits.ok) {
+    return {
+      next: "self_test_required",
+      error: "engine_self_test_required",
+      detail: `the engine's self-test no longer admits it (${engineAdmits.why ?? "build changed"}): submit a fresh runner self-test`,
+    };
+  }
+  return null;
+}
+
+export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: EngineOptions = {}): void {
+  setEngineRuntime(opts);
+  const manifest = manifestOf(opts);
+
+  const visible = (req: { authCtx: { isAdmin: boolean; userId: string | null } }, run: EngineRunRow) =>
+    req.authCtx.isAdmin || (req.authCtx.userId !== null && run.runAsUserId === req.authCtx.userId);
+
+  // ---- POST /v1/engine-runs ---------------------------------------------------
+  app.post("/v1/engine-runs", async (req, reply) => {
+    const body = createEngineRunSchema.parse(req.body);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_run_engine" });
+    if ("agentId" in body.target) {
+      const literacy = await refuseRunStartWithoutLiteracy(db, req, { kind: "red-team", subjectId: body.target.agentId });
+      if (literacy) return reply.status(literacy.status).send(literacy.body);
+    }
+    const out = await createEngineRun(db, body, { runAsUserId: userId, isAdmin: req.authCtx.isAdmin, trigger: "manual" });
+    if (!out.ok) return reply.status(out.status).send({ error: out.error, ...(out.detail ? { detail: out.detail } : {}) });
+    return reply.status(202).send({ run: publicRun(out.run), approvalId: out.approvalId });
+  });
+
+  app.get("/v1/engine-runs", async (req) => {
+    const q = listQuery.parse(req.query ?? {});
+    const conds = [];
+    if (!req.authCtx.isAdmin) conds.push(eq(engineRuns.runAsUserId, req.authCtx.userId ?? NO_IDENTITY));
+    if (q.engineId) conds.push(eq(engineRuns.engineId, q.engineId));
+    if (q.status) conds.push(eq(engineRuns.status, q.status));
+    const rows = await db
+      .select()
+      .from(engineRuns)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(engineRuns.createdAt))
+      .limit(q.limit);
+    return { runs: rows.map(publicRun) };
+  });
+
+  app.get("/v1/engine-runs/:runId", async (req, reply) => {
+    const { runId } = runParam.parse(req.params);
+    const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
+    if (!run || !visible(req, run)) return reply.status(404).send({ error: "engine_run_not_found" });
+    const items = await db.select().from(engineRunItems).where(eq(engineRunItems.runId, runId)).orderBy(asc(engineRunItems.createdAt));
+    return { run: publicRun(run), items };
+  });
+
+  // ---- POST /v1/engine-runs/:runId/cancel (the kill switch) -------------------
+  app.post("/v1/engine-runs/:runId/cancel", async (req, reply) => {
+    const { runId } = runParam.parse(req.params);
+    const body = cancelEngineRunSchema.parse(req.body ?? {});
+    const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
+    if (!run || !visible(req, run)) return reply.status(404).send({ error: "engine_run_not_found" });
+    if (isTerminalEngineRunStatus(run.status)) return reply.status(409).send({ error: "engine_run_finished", status: run.status });
+    const actor = req.authCtx.userId ?? NO_IDENTITY;
+    // PR #205 review round 11 [86]: ONE transaction — the cancel marker, the terminal transition, the
+    // key's revocation and the approval's supersession commit together or not at all, so a crash can
+    // never leave a run marked cancelled but still live with its key
+    const out = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
+      if (!locked || !["awaiting_approval", "queued", "leased"].includes(locked.status)) return { kind: "finished" as const, status: locked?.status ?? "unknown" };
+      const now = new Date();
+      await tx
+        .update(engineRuns)
+        .set({ cancelRequestedAt: locked.cancelRequestedAt ?? now, cancelRequestedByUserId: locked.cancelRequestedByUserId ?? req.authCtx.userId })
+        .where(eq(engineRuns.id, runId));
+      await engineRunTestHooks.afterCancelMarked?.(runId);
+      const done = await endLockedRun(
+        tx,
+        locked,
+        { status: "cancelled", errorCode: "cancelled", normalised: noResult("cancelled"), cause: body.reason ? `cancelled: ${body.reason}` : "cancelled", actorUserId: actor },
+        now,
+      );
+      // the approval has nothing left to release
+      if (locked.approvalId) await tx.update(approvals).set({ status: "superseded" }).where(and(eq(approvals.id, locked.approvalId), eq(approvals.status, "pending")));
+      return { kind: "done" as const, done };
+    });
+    if (out.kind === "finished") return reply.status(409).send({ error: "engine_run_finished", status: out.status });
+    await notifyWorkflowsOfEndedRuns(db, [out.done]);
+    return reply.send({ run: publicRun(out.done) });
+  });
+
+  // ---- schedules -----------------------------------------------------------------
+  app.post("/v1/engine-schedules", async (req, reply) => {
+    const body = createEngineScheduleSchema.parse(req.body);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_schedule_engine" });
+    // PR #203 review [13]: validated now, as the person it will run as, by the SAME
+    // checks a run gets (engine on, target kind, project, target and judge
+    // entitlement, attribution, budget ceiling, approver); nothing is started
+    const checked = await validateEngineRunRequest(db, body.request, { runAsUserId: userId, isAdmin: req.authCtx.isAdmin });
+    if (!checked.ok) return reply.status(checked.status).send({ error: checked.error, ...(checked.detail ? { detail: checked.detail } : {}) });
+    const now = new Date();
+    // round 11 (sweep): the schedule and its audit commit together (every run it starts is validated
+    // again, in its own creation transaction, decision 87)
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .insert(engineSchedules)
+        .values({
+          engineId: body.request.engineId,
+          request: body.request as unknown as Record<string, unknown>,
+          configHash: engineRunConfigHash(body.request),
+          runAsUserId: userId,
+          intervalHours: body.intervalHours,
+          nextRunAt: new Date(now.getTime() + body.intervalHours * 3_600_000),
+        })
+        .returning();
+      await auditEngine(tx as unknown as Db, {
+        userId,
+        objectType: "engine_schedule",
+        objectId: r!.id,
+        ruleId: "engine-schedule-created",
+        detail: { engineId: body.request.engineId, intervalHours: body.intervalHours, configHash: r!.configHash },
+        reason: `scheduled ${body.request.engineId} run every ${body.intervalHours}h, executing as its creator`,
+      });
+      return r!;
+    });
+    return reply.status(201).send({ schedule: row });
+  });
+
+  app.get("/v1/engine-schedules", async (req) => {
+    const rows = await db
+      .select()
+      .from(engineSchedules)
+      .where(req.authCtx.isAdmin ? undefined : eq(engineSchedules.runAsUserId, req.authCtx.userId ?? NO_IDENTITY))
+      .orderBy(desc(engineSchedules.createdAt))
+      .limit(200);
+    return { schedules: rows };
+  });
+
+  app.patch("/v1/engine-schedules/:scheduleId", async (req, reply) => {
+    const { scheduleId } = scheduleParam.parse(req.params);
+    const body = updateEngineScheduleSchema.parse(req.body);
+    // round 11 (sweep): decided and written under the schedule's row lock, with its audit
+    const out = await db.transaction(async (tx) => {
+      const [row] = await tx.select().from(engineSchedules).where(eq(engineSchedules.id, scheduleId)).for("update");
+      if (!row || (!req.authCtx.isAdmin && row.runAsUserId !== req.authCtx.userId)) return { kind: "missing" as const };
+      // re-enabling a schedule restarts runs as its creator: only the creator may do that
+      if (body.enabled && row.runAsUserId !== req.authCtx.userId) return { kind: "owner_only" as const };
+      const [after] = await tx.update(engineSchedules).set({ enabled: body.enabled, updatedAt: new Date() }).where(eq(engineSchedules.id, scheduleId)).returning();
+      await auditEngine(tx as unknown as Db, {
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "engine_schedule",
+        objectId: scheduleId,
+        ruleId: body.enabled ? "engine-schedule-enabled" : "engine-schedule-disabled",
+        detail: { engineId: row.engineId, transitions: { enabled: { from: row.enabled, to: body.enabled } } },
+        reason: `scheduled ${row.engineId} run switched ${body.enabled ? "on" : "off"}`,
+      });
+      return { kind: "ok" as const, after: after! };
+    });
+    if (out.kind === "missing") return reply.status(404).send({ error: "engine_schedule_not_found" });
+    if (out.kind === "owner_only") return reply.status(403).send({ error: "schedule_owner_only", detail: "only the person a schedule runs as can switch it back on" });
+    return { schedule: out.after };
+  });
+
+  // POST /v1/model-artifacts and the runner's GET /v1/engine-runner/artifacts/:artifactId are B5-M's
+  // (model-artifacts.ts)
+
+  // ===== runner routes (runner token only; the scope hook enforces it) ==========
+
+  app.post("/v1/engine-runner/lease", async (req, reply) => {
+    const runnerId = req.authCtx.engineRunnerId!;
+    const engineId = req.authCtx.engineId as EngineId;
+    // round 5 [67]: the runner says which build it is running now
+    const build = engineRunnerLeaseSchema.parse(req.body);
+    await syncEngineManifest(db, manifest);
+    const [runner] = await db.select().from(engineRunners).where(eq(engineRunners.id, runnerId));
+    if (!runner) return reply.status(401).send({ error: "engine_runner_token_required", next: "revoked" satisfies EngineRunnerNext });
+    const [engine] = await db.select().from(engines).where(eq(engines.id, engineId));
+    const m = manifest[engineId];
+    const now = new Date();
+    // the order and meaning of each refusal: `leaseAdmission` (ADR-0187 decisions 67, 69 and 71)
+    const refuse = (r: LeaseRefusal) => reply.status(409).send(r);
+    // PR #205 review round 6 [71]: this first pass is only a FAST PATH (no transaction for a runner
+    // that will be refused anyway); the decision that hands out work is taken again below, under locks
+    // PR #205 review round 14 [98]: a retry of an attempt that leased a run (same runner, same request
+    // id) is RESOLVED before any freshness admission — a report that went stale between the attempt and
+    // its retry must not orphan the run the attempt leased. The decision is taken under locks below.
+    const [retried] = build.requestId
+      ? await db
+          .select({ id: engineRuns.id })
+          .from(engineRuns)
+          .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
+      : [];
+    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now);
+    if (early) return refuse(early);
+    await engineRunTestHooks.beforeLeaseTx?.(runnerId);
+    const leased = await db.transaction(async (tx) => {
+      // PR #203 review round 2 [17]: the runner row is locked and its revocation re-read inside the
+      // transaction that hands out the work. Revocation UPDATEs that row, so it waits for this lease
+      // to commit (and then ends the run it leased), or this lease waits for the revocation and sees
+      // it — a runner revoked concurrently never walks away with a key.
+      // PR #205 review round 6 [71]: and the WHOLE admission is decided again here — the runner row
+      // FOR UPDATE (its report and build), then the engine row FOR SHARE (enabled, its recorded
+      // self-test). Every path that switches the engine off or fails a report UPDATEs, or locks FOR
+      // UPDATE, the engine row, so an admin's disable or a concurrent failing self-test either
+      // commits first (and is seen here) or waits for this lease to commit. Lock order: runner, then
+      // engine, as on the self-test route.
+      const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
+      if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
+      const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
+      // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
+      // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
+      // leased — to THIS runner only: the lookup is by (runner, request id), and the unique index is
+      // too — is returned again instead of a second run being leased. Its credentials are re-issued by
+      // ROTATION: only the key's hash is stored, so the old key cannot be shown again; the old key is
+      // revoked and a new one minted in this one transaction (ADR-0187 decision 94).
+      // PR #205 review round 14 [98]: resolved BEFORE the freshness admission (the runner's and the
+      // engine's self-test age), on the rows this transaction holds. Only the HARD gates apply: the
+      // runner live (checked above), the build it registered, the engine on, the manifest not outdated,
+      // the run still leased. A run whose hard gate fails is ended here (cancelled, key revoked,
+      // audited), never left leased; an outdated replica ends nothing (decision 95) and refuses.
+      if (build.requestId) {
+        const [prior] = await tx
+          .select()
+          .from(engineRuns)
+          .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
+          .for("update");
+        if (prior) {
+          const at = new Date();
+          // the run already ended (cancelled, disabled, timed out): nothing to re-issue. The runner is told
+          // why, if the lease would be refused now, else there is no work (its next attempt is a new one)
+          if (prior.status !== "leased") {
+            const why = leaseAdmission(live, lockedEngine ?? null, build, m, at);
+            return why ? { kind: "not_admitted" as const, refusal: why } : { kind: "none" as const };
+          }
+          if (lockedEngine && engineManifestOutdated(lockedEngine, m)) {
+            return { kind: "not_admitted" as const, refusal: engineManifestOutdatedRefusal(m.id, lockedEngine, m) };
+          }
+          const hard = leaseHardGate(live, lockedEngine ?? null, build, m);
+          if (hard) {
+            const ended = await endLockedRun(
+              tx,
+              prior,
+              { status: "cancelled", errorCode: "lease_retry_refused", normalised: noResult("cancelled"), cause: `lease retry refused: ${hard.error}`, actorUserId: NO_IDENTITY },
+              at,
+            );
+            return { kind: "not_admitted" as const, refusal: hard, ended };
+          }
+          const deadlinePassed = prior.deadlineAt !== null && prior.deadlineAt <= at;
+          if (deadlinePassed || (prior.leaseExpiresAt !== null && prior.leaseExpiresAt <= at)) {
+            const cause = deadlinePassed ? "deadline_passed" : "lease_expired";
+            const ended = await endLockedRun(tx, prior, { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: NO_IDENTITY }, at);
+            return { kind: "refused" as const, ended };
+          }
+          return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
+        }
+      }
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
+      if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
+      const engine = lockedEngine!;
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
+      const [{ n } = { n: 0 }] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(engineRuns)
+        .where(and(eq(engineRuns.engineId, engineId), eq(engineRuns.status, "leased")));
+      if (Number(n) >= engine.maxConcurrent) return { kind: "busy" as const };
+      const [run] = await tx
+        .select()
+        .from(engineRuns)
+        // PR #205 review round 7 [75]: only a run requested for the build this runner runs (a run of
+        // another engine version would always end `result_mismatch`)
+        .where(
+          and(
+            eq(engineRuns.engineId, engineId),
+            eq(engineRuns.status, "queued"),
+            eq(engineRuns.engineVersion, build.engineVersion),
+            sql`${engineRuns.queueExpiresAt} > now()`,
+          ),
+        )
+        .orderBy(asc(engineRuns.createdAt))
+        .limit(1)
+        .for("update", { skipLocked: true });
+      if (!run) return { kind: "none" as const };
+      // the person it runs as, re-checked now: gone or no longer entitled ends it, with the reason stated
+      const [person] = run.runAsUserId
+        ? await tx.select({ id: users.id, disabledAt: users.disabledAt, isAdmin: users.isAdmin }).from(users).where(eq(users.id, run.runAsUserId))
+        : [];
+      let refusal: string | null = null;
+      let target: AgentRow | null = null;
+      let judge: AgentRow | null = null;
+      if (!person || person.disabledAt) refusal = "run_as_gone";
+      else if (run.targetKind === "agent") {
+        const decide = await buildAgentDecider(tx as unknown as Db, person.id);
+        const [t] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
+        const [j] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
+        if (!t || decide(t as AgentRow, "execute").effect !== "allow") refusal = "run_as_not_entitled";
+        else if (run.judgeAgentId && (!j || decide(j as AgentRow, "execute").effect !== "allow")) refusal = "run_as_not_entitled";
+        // PR #205 review round 9 [81]: the manifest's required judge is checked again here — a judge
+        // agent deleted after queueing nulls `judge_agent_id`, and such a run must never be dispatched
+        // with no judge: it ends `not_run` (audited), before any key is minted
+        else if (m.requiresJudge && !run.judgeAgentId) refusal = "judge_required";
+        // PR #205 review round 5 [70]: an agent with no provider model is never dispatched under
+        // another name (the display name is not a model): the run ends closed
+        else if (!t.model || (run.judgeAgentId && !j!.model)) refusal = "agent_not_dispatchable";
+        else if (!run.projectId) refusal = "project_gone";
+        else {
+          // PR #203 review [10]: attribution is re-checked here too (a member removed
+          // since the run was queued no longer bills to the project)
+          const attribution = await assertProjectAttribution(tx as unknown as Db, run.projectId, person.id, person.isAdmin);
+          if (!attribution.ok) refusal = "project_not_attributable";
+        }
+        target = (t as AgentRow | undefined) ?? null;
+        judge = (j as AgentRow | undefined) ?? null;
+      } else {
+        // B5-M: an artifact run is re-checked here too: the artifact still exists and the run-as person
+        // may still use it (its uploader, or an admin)
+        const [art] = run.targetArtifactId ? await tx.select({ uploadedByUserId: modelArtifacts.uploadedByUserId }).from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId)) : [];
+        if (!art) refusal = "artifact_gone";
+        else if (!artifactAccessible(art, { userId: person.id, isAdmin: person.isAdmin })) refusal = "artifact_not_accessible";
+      }
+      // round 11 (sweep): a run refused here ends HERE, on the row this transaction holds, rather than
+      // in a second transaction after the decision was made
+      if (refusal) {
+        const ended = await endLockedRun(
+          tx,
+          run,
+          { status: "not_run", errorCode: refusal, normalised: noResult("not_run"), cause: refusal, actorUserId: NO_IDENTITY },
+          now,
+        );
+        return { kind: "refused" as const, ended };
+      }
+      const deadlineAt = new Date(now.getTime() + run.timeoutSeconds * 1000);
+      let apiKey: string | null = null;
+      let keyId: string | null = null;
+      if (run.targetKind === "agent" && m.needsModelAccess) {
+        const minted = await mintRunKeyTx(tx, run, engineId, target!, judge, deadlineAt, 0);
+        apiKey = minted.token;
+        keyId = minted.keyId;
+      }
+      const agentHash = target ? await agentConfigHash(tx as unknown as Db, target) : null;
+      const [updated] = await tx
+        .update(engineRuns)
+        .set({
+          status: "leased",
+          runnerId,
+          leasedAt: now,
+          leaseExpiresAt: new Date(now.getTime() + ENGINE_LEASE_TTL_SECONDS * 1000),
+          heartbeatAt: now,
+          deadlineAt,
+          virtualKeyId: keyId,
+          agentConfigHash: agentHash,
+          // round 13 [94]: the attempt's request id, so a retry of it finds this run again
+          leaseRequestId: build.requestId ?? null,
+        })
+        .where(eq(engineRuns.id, run.id))
+        .returning();
+      await tx.insert(auditLog).values({
+        userId: run.runAsUserId ?? NO_IDENTITY,
+        objectType: "engine_run",
+        objectId: run.id,
+        detail: { phase: "lease", engineId, runnerId, deadlineAt: deadlineAt.toISOString(), virtualKeyId: keyId },
+        effect: "allow",
+        ruleId: "engine-run-leased",
+        ruleChain: [],
+        reason: `${engineId} run ${run.id} leased by runner ${runnerId} until ${deadlineAt.toISOString()}`,
+      });
+      return { kind: "leased" as const, run: updated!, apiKey, target, judge };
+    });
+    if (leased.kind === "revoked") {
+      return reply.status(401).send({ error: "engine_runner_revoked", next: "revoked" satisfies EngineRunnerNext, detail: "this runner was revoked: its token authenticates nothing" });
+    }
+    if (leased.kind === "not_admitted") {
+      if ("ended" in leased && leased.ended) await notifyWorkflowsOfEndedRuns(db, [leased.ended]);
+      return refuse(leased.refusal);
+    }
+    if (leased.kind === "busy" || leased.kind === "none") return reply.status(204).send();
+    if (leased.kind === "refused") {
+      await notifyWorkflowsOfEndedRuns(db, [leased.ended]);
+      return reply.status(204).send();
+    }
+    const run = leased.run;
+    const [artifact] = run.targetArtifactId ? await db.select().from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId)) : [];
+    const headers = (agentId: string): Record<string, string> => ({ [AGENT_HEADER]: agentId, [PROJECT_HEADER]: run.projectId! });
+    // round 5 [70]: the lease transaction refused an agent with no provider model (`agent_not_dispatchable`),
+    // so `model` is the agent's own provider model here, never its display name
+    const body: EngineLease = {
+      runId: run.id,
+      engineId,
+      engineVersion: run.engineVersion,
+      spec: { config: run.config, trials: run.trials },
+      target:
+        leased.apiKey && leased.target
+          ? { baseUrl: gatewayBaseUrlOf(opts), model: leased.target.model!, apiKey: leased.apiKey, headers: headers(leased.target.id) }
+          : null,
+      judge: leased.apiKey && leased.judge ? { model: leased.judge.model!, headers: headers(leased.judge.id) } : null,
+      artifacts: artifact ? [{ id: artifact.id, sha256: artifact.sha256, size: artifact.sizeBytes }] : [],
+      deadlineAt: run.deadlineAt!.toISOString(),
+      budgetUsd: leased.apiKey ? run.budgetUsd : null,
+    };
+    return reply.send(body);
+  });
+
+  app.post("/v1/engine-runner/runs/:runId/heartbeat", async (req, reply) => {
+    const { runId } = runParam.parse(req.params);
+    const body = engineHeartbeatSchema.parse(req.body);
+    const runnerId = req.authCtx.engineRunnerId!;
+    // PR #203 review round 2 [20]: decided under the run's row lock — a lease
+    // that has expired (or a deadline that has passed) is never renewed; the
+    // run ends as a timeout, its key is revoked, and the runner is told 409
+    const now = new Date();
+    const beat = await db.transaction(async (tx) => {
+      const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
+      if (!run || run.runnerId !== runnerId) return { kind: "not_leased" as const };
+      // an ended run (cancelled, timed out) tells its runner to stop
+      if (run.status !== "leased") return { kind: "ended" as const, status: run.status };
+      const deadlinePassed = run.deadlineAt !== null && run.deadlineAt.getTime() <= now.getTime();
+      const leaseGone = run.leaseExpiresAt !== null && run.leaseExpiresAt.getTime() <= now.getTime();
+      // round 11 (sweep): an expired lease ends HERE, under this row lock, not in a second transaction
+      if (deadlinePassed || leaseGone) {
+        const cause = deadlinePassed ? "deadline_passed" : "lease_expired";
+        const ended = await endLockedRun(tx, run, { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: NO_IDENTITY }, now);
+        return { kind: "expired" as const, cause, ended };
+      }
+      const lease = new Date(Math.min(now.getTime() + ENGINE_LEASE_TTL_SECONDS * 1000, run.deadlineAt?.getTime() ?? now.getTime()));
+      await tx
+        .update(engineRuns)
+        .set({ heartbeatAt: now, phase: body.phase, progress: body.progress, leaseExpiresAt: lease })
+        .where(eq(engineRuns.id, runId));
+      return { kind: "renewed" as const, cancel: run.cancelRequestedAt !== null, status: run.status };
+    });
+    if (beat.kind === "not_leased") return reply.status(409).send({ error: "engine_run_not_leased" });
+    if (beat.kind === "ended") return reply.send({ cancel: true, status: beat.status });
+    if (beat.kind === "expired") {
+      await notifyWorkflowsOfEndedRuns(db, [beat.ended]);
+      return reply.status(409).send({ error: "engine_run_timed_out", detail: `the run's ${beat.cause === "lease_expired" ? "lease expired" : "deadline passed"}; it ended as a timeout` });
+    }
+    return reply.send({ cancel: beat.cancel, status: beat.status });
+  });
+
+  app.post(
+    "/v1/engine-runner/runs/:runId/result",
+    { bodyLimit: ENGINE_RESULT_LIMITS.maxBodyBytes },
+    async (req, reply) => {
+      const { runId } = runParam.parse(req.params);
+      const runnerId = req.authCtx.engineRunnerId!;
+      const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
+      if (!run || run.runnerId !== runnerId) return reply.status(409).send({ error: "engine_run_not_leased" });
+      if (run.status !== "leased") {
+        // LATE: the run already ended (cancelled, timed out). A late envelope never upgrades it.
+        await auditEngine(db, {
+          userId: run.runAsUserId ?? NO_IDENTITY,
+          objectType: "engine_run",
+          objectId: run.id,
+          ruleId: "engine-run-result-late",
+          effect: "deny",
+          detail: { engineId: run.engineId, status: run.status, runnerId },
+          reason: `a result for ${run.engineId} run ${run.id} arrived after it ended ${run.status}; it was not ingested`,
+        });
+        return reply.status(409).send({ error: "engine_run_finished", status: run.status });
+      }
+      const parsed = engineResultEnvelopeSchema.safeParse(req.body);
+      let problem: string | null = null;
+      let envelope: EngineResultEnvelope | null = null;
+      if (!parsed.success) problem = "result_invalid";
+      // PR #203 review [12]: the envelope must be for this run, this engine AND the version it was leased at
+      else if (parsed.data.runId !== run.id || parsed.data.engineId !== run.engineId || parsed.data.engineVersion !== run.engineVersion) {
+        problem = "result_mismatch";
+      }
+      else envelope = parsed.data;
+      let rawReport: FinishArgs["rawReport"] = null;
+      if (envelope?.rawReport) {
+        const r = envelope.rawReport;
+        if (r.contentBase64 !== undefined) {
+          const bytes = Buffer.from(r.contentBase64, "base64");
+          const sha = createHash("sha256").update(bytes).digest("hex");
+          if (bytes.length !== r.bytes || sha !== r.sha256) problem = "raw_report_mismatch";
+        }
+        if (!problem) {
+          const org = await loadOrgSettings(db);
+          const store = r.contentBase64 !== undefined && opts.dataKey;
+          rawReport = {
+            sha256: r.sha256,
+            bytes: r.bytes,
+            ciphertext: store ? encryptSecret(opts.dataKey!, r.contentBase64!) : null,
+            expiresAt: store ? new Date(Date.now() + org.engineRawReportRetentionDays * 86_400_000) : null,
+          };
+        }
+      }
+      if (problem) {
+        // an invalid or mismatched result: the run failed and every reading is unknown
+        const failed = await finishEngineRun(db, run.id, ["leased"], {
+          status: "failed",
+          errorCode: problem,
+          normalised: noResult("failed"),
+          cause: problem,
+          actorUserId: run.runAsUserId ?? NO_IDENTITY,
+          requireLive: true,
+        });
+        if (failed?.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
+        return reply.status(422).send({
+          error: "engine_result_invalid",
+          detail: problem,
+          ...(parsed.success ? {} : { issues: parsed.error.issues.slice(0, 20) }),
+        });
+      }
+      // PR #205 review round 3 [61]: only the manifest's declared reduced set may be not-run without
+      // making the run incomplete; every other not-run item happened at run time
+      const declaredNotRun = new Set(manifestOf(opts)[run.engineId as EngineId].airGappedReducedSet.map((e) => e.key));
+      const normalised = normaliseEngineResult({ envelope: envelope!, status: envelope!.status, taxonomy: taxonomyOf(opts), scrub: engineDetectionScrub, declaredNotRun });
+      const done = await finishEngineRun(db, run.id, ["leased"], {
+        status: envelope!.status,
+        errorCode: envelope!.status === "completed" ? null : (normalised.engineErrorCode ?? "engine_error"),
+        normalised,
+        cause: "result",
+        actorUserId: run.runAsUserId ?? NO_IDENTITY,
+        envelope,
+        rawReport,
+        requireLive: true,
+      });
+      if (!done) return reply.status(409).send({ error: "engine_run_finished" });
+      if (done.status === "timeout" && envelope!.status !== "timeout") {
+        return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout", detail: "the result arrived after the run's deadline or lease; it was not ingested" });
+      }
+      return reply.send({ runId: run.id, status: done.status, verdict: normalised.verdict, counts: normalised.counts });
+    },
+  );
+}
+
+/** read-only helpers for tests and views */
+export async function engineRunItemsOf(db: Db, runIds: string[]) {
+  if (runIds.length === 0) return [];
+  return db.select().from(engineRunItems).where(inArray(engineRunItems.runId, runIds));
+}

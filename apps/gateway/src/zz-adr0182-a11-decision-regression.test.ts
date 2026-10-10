@@ -71,6 +71,7 @@ import { aiUseCaseIntakeDefinition } from "./template-gallery.js";
 import { activeIntakeTemplate } from "./decision-regression.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { previewedRetire, regressionAcceptance, setDecisionRegressionGateForTest } from "./testing/decision-regression.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -151,10 +152,13 @@ const pendingSignoff = async (instanceId: string) =>
   (await db.select().from(approvals).where(and(eq(approvals.instanceId, instanceId), eq(approvals.stageId, "signoff"), eq(approvals.status, "pending"))))[0]!;
 const recordsOf = (useCaseId: string) => db.select().from(useCaseDecisionRecords).where(eq(useCaseDecisionRecords.useCaseId, useCaseId));
 
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   originalPolicy = await livePolicy();
   for (const [k, isAdmin] of [["admin", true], ["owner", false], ["priv", false], ["stranger", false]] as const) {
@@ -170,6 +174,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await db.update(orgSettings).set({ decisionRegressionGate: "enforce", decisionRegressionMaxAgeMinutes: 60 });
   await db.delete(governanceReviewPolicy);
   if (originalPolicy) await db.insert(governanceReviewPolicy).values(originalPolicy);

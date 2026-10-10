@@ -74,6 +74,8 @@ import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-vers
 // goes through the one choke point rather than straight at the read-model.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { isApprovalTeam } from "./approval-pool.js";
+import { approvalRuleStepUp, requireStepUp } from "./step-up.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -1432,6 +1434,13 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/teams/:teamId/members", async (req, reply) => {
     const { teamId } = z.object({ teamId: z.string().uuid() }).parse(req.params);
     const body = addTeamMemberSchema.parse(req.body);
+    // G2 (B4S-02 owner principle): a team that routes or can claim approvals is
+    // an approver pool — adding someone to it needs a settings_relax step-up
+    // bound to the team and the new member (a team nobody routes to needs none)
+    if (await isApprovalTeam(db, teamId)) {
+      const facts = { values: { approverTeamMember: { teamId, userId: body.userId } } };
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    }
     const [row] = await db.insert(teamMembers).values({ teamId, userId: body.userId }).returning();
     return reply.status(201).send(row);
   });
@@ -2143,6 +2152,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // a version keeps it visible and rollback-able instead of changing it.
     const { tag: _tag, ...versioned } = values;
     const res = await applyRuleEdit<ComplianceProfileRow>(db, {
+      // ADR-0186 decision 29 (finding 52): an edit that loosens what the framework forces
+      // (rule-loosening.ts) needs the settings_relax step-up
+      stepUp: approvalRuleStepUp(db, req),
       artifactType: "compliance_profile",
       artifactId: existing.id,
       patch: versioned,

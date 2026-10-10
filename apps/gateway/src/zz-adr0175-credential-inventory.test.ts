@@ -20,6 +20,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -119,6 +120,7 @@ const mine = (body: { credentials: Array<{ id: string }> }) => {
 const row = (body: { credentials: Array<{ id: string }> }, id: string) => body.credentials.find((c) => c.id === id) as any;
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -126,6 +128,10 @@ beforeAll(async () => {
   // drives admins through keys and is not about MFA, so it relaxes the dial
   // explicitly and hands the shared database back strict in afterAll (M-068).
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  // B4S-04: turning staleCredentialAlerts off is a settings_relax step-up, which
+  // an API key can never give; this suite is about the inventory, not step-up
+  // (proved in zz-b4s-round2), so it turns step-up off for its run and back on below
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: KEY });
   const mkUser = async (tag: string, isAdmin: boolean) => {
     const r = await call("POST", "/v1/users", AUTH, { email: `g175c-${tag}-${RUN}@example.com`, displayName: `Cred ${tag} ${RUN}`, isAdmin });
@@ -240,6 +246,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreAdminKeyMfa?.();
+  await restoreStepUp?.();
   if (orgBefore) {
     await db.update(orgSettings).set({
       tracingOtlpHeadersCiphertext: orgBefore.ciphertext,

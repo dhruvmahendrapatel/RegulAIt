@@ -38,6 +38,7 @@ import { ASSURANCE_MONITOR_RULE_IDS, MONITOR_RULES } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import { routeAuthClass } from "./route-classes.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -55,6 +56,8 @@ const inject = (method: "GET" | "PUT" | "POST", url: string, headers: Record<str
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -62,6 +65,7 @@ beforeAll(async () => {
   // drives admins through keys and is not about MFA, so it relaxes the dial
   // explicitly and hands the shared database back strict in afterAll (M-068).
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreStepUp = await relaxStepUpForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   for (const [k, isAdmin] of [["admin", true], ["member", false]] as const) {
     const u = await inject("POST", "/v1/users", AUTH, {
@@ -77,6 +81,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await restoreAdminKeyMfa?.();
   // M-068: leave the org at its strict default whatever happened above
   await db.execute(sql`UPDATE org_settings SET assurance_gate_mode = 'enforce'`);

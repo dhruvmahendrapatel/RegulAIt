@@ -28,6 +28,7 @@ import { ProviderMark, ProviderTiles } from "../../../ui/ModelPicker";
 import { providerLabel } from "../../models/modelBindings";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
 
@@ -140,7 +141,7 @@ export default function AgentsPage() {
                     size="sm"
                     onClick={() =>
                       void act.run(
-                        () => api.post(`/v1/agents/${x.id}/enabled`, { enabled: !x.enabled }),
+                        () => withStepUp((h) => stepUpApi.post(`/v1/agents/${x.id}/enabled`, { enabled: !x.enabled }, h)),
                         x.enabled ? "Agent disabled" : "Agent enabled",
                       )
                     }
