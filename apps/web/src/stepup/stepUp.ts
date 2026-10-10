@@ -192,6 +192,7 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   break_glass: "changing break-glass access",
   passkey_manage: "changing your passkeys",
   owner_change: "changing who owns this",
+  identity_manage: "changing an agent identity",
 };
 
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {

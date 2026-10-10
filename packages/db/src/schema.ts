@@ -77,6 +77,21 @@ import {
   type McpProtocolMethod,
   type McpUpstreamTransport,
   type SeriousIncidentCriterion,
+  AGENT_ENTITLEMENT_MODES,
+  CONNECTOR_GRANT_MODES,
+  IDENTITY_PROPAGATION_MODES,
+  WORKLOAD_CLIENT_AUTH_METHODS,
+  WORKLOAD_IDENTITY_KINDS,
+  WORKLOAD_IDENTITY_STATUSES,
+  WORKLOAD_CREDENTIAL_KINDS,
+  DELEGATION_BINDING_KINDS,
+  DELEGATION_ALLOCATION_STATUSES,
+  DELEGATION_REVOKE_REASONS,
+  TOKEN_BINDING_KINDS,
+  REPLAY_NAMESPACES,
+  type DelegationScope,
+  type WorkloadClientAuthMethod,
+  type WorkloadPublicJwk,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -91,6 +106,7 @@ import {
   numeric,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -689,6 +705,11 @@ export const mcpServers = pgTable("mcp_servers", {
   // never invented (agents' costPerMTok null-safety). A tool call is a discrete
   // governed unit of work, so it is priced per call rather than per token.
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  /** ADR-0188 decision 8 (migration 0180; OWNER DECISION 6): what identity the
+   * gateway sends this upstream on each call. `none` (the default) sends
+   * nothing; `signed_assertion` sends a 60 s gateway-signed JWT with a pairwise
+   * subject and the actor chain (slice S8). Turning it on is audited. */
+  identityPropagation: text("identity_propagation", { enum: IDENTITY_PROPAGATION_MODES }).notNull().default("none"),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
    * default (org_settings.mcpPrivateRangesDefault, false by default since
@@ -1452,9 +1473,31 @@ export const auditLog = pgTable(
      * WORM anchor pins. Stored so the next append can link without recomputing,
      * and so editing it directly is itself detectable. */
     rowHash: text("row_hash"),
+    // --- ADR-0188 (migration 0180): who DID it, when an agent acted ---------
+    // `userId` stays the SPONSOR (the human the work is for). These name the
+    // agent principal, the delegation grant it acted under and the ordered
+    // chain (identity ids). All NULL on a human's own row, all set together
+    // (CHECK). Covered by `content_hash` only from the v2 boundary on
+    // (`audit_chain_versions`, decision 19); `chainVersion` is 2 on those rows
+    // and NULL on every v1 row. FK-free, like the rest of this table.
+    actorIdentityId: uuid("actor_identity_id"),
+    delegationGrantId: uuid("delegation_grant_id"),
+    actorChain: jsonb("actor_chain").$type<string[]>(),
+    chainVersion: smallint("chain_version"),
   },
   (t) => [
     index("audit_log_user_at_idx").on(t.userId, t.at),
+    check("audit_log_chain_version_check", sql`${t.chainVersion} IS NULL OR ${t.chainVersion} IN (1, 2)`),
+    check(
+      "audit_log_actor_chain_check",
+      sql`${t.actorChain} IS NULL OR (jsonb_typeof(${t.actorChain}) = 'array' AND jsonb_array_length(${t.actorChain}) BETWEEN 1 AND 9)`,
+    ),
+    check(
+      "audit_log_actor_fields_check",
+      sql`(${t.actorIdentityId} IS NULL AND ${t.delegationGrantId} IS NULL AND ${t.actorChain} IS NULL) OR (${t.actorIdentityId} IS NOT NULL AND ${t.delegationGrantId} IS NOT NULL AND ${t.actorChain} IS NOT NULL)`,
+    ),
+    index("audit_log_delegation_grant_idx").on(t.delegationGrantId).where(sql`${t.delegationGrantId} IS NOT NULL`),
+    index("audit_log_actor_identity_idx").on(t.actorIdentityId).where(sql`${t.actorIdentityId} IS NOT NULL`),
     uniqueIndex("audit_log_seq_uq").on(t.seq),
     // migration 0154: the retention prune's meta rows only, so the replay's
     // lookback horizon (`loadAuditLookbackHorizon`) never scans the trail
@@ -2933,8 +2976,12 @@ export const usageEvents = pgTable(
     agentConfigVersionId: uuid("agent_config_version_id"),
     agentConfigVersion: integer("agent_config_version"),
     detail: jsonb("detail"),
+    /** ADR-0188 (migration 0180): the agent principal and delegation grant this spend was made under (NULL = a human's own call) */
+    actorIdentityId: uuid("actor_identity_id"),
+    delegationGrantId: uuid("delegation_grant_id"),
   },
   (t) => [
+    index("usage_events_delegation_grant_idx").on(t.delegationGrantId).where(sql`${t.delegationGrantId} IS NOT NULL`),
     index("usage_events_user_idx").on(t.userId, t.at),
     index("usage_events_config_version_idx").on(t.configVersionId),
     index("usage_events_agent_config_version_idx").on(t.agentConfigVersionId),
@@ -3815,6 +3862,23 @@ export const orgSettings = pgTable(
     /** an artifact nothing cites or is scanning is deleted this many days after upload; longer relaxes it */
     modelArtifactRetentionDays: integer("model_artifact_retention_days").notNull().default(30),
 
+    // --- ADR-0188 (batch 6 item 1, migration 0180): all strict ------------------
+    /** own_grants = the agent's own grants ∩ the sponsor's; sponsor_only relaxes it (I7 off) */
+    agentEntitlementMode: text("agent_entitlement_mode", { enum: AGENT_ENTITLEMENT_MODES }).notNull().default("own_grants"),
+    /** a delegated access token's lifetime, 60–3600 s; longer relaxes it */
+    delegatedTokenTtlSeconds: integer("delegated_token_ttl_seconds").notNull().default(300),
+    /** how deep a delegation chain may go, 0–8; deeper relaxes it */
+    delegationMaxDepth: integer("delegation_max_depth").notNull().default(3),
+    /** how a workload may authenticate; removing one tightens it; client_secret_* is never a member */
+    workloadClientAuthMethods: jsonb("workload_client_auth_methods")
+      .$type<WorkloadClientAuthMethod[]>()
+      .notNull()
+      .default([...WORKLOAD_CLIENT_AUTH_METHODS]),
+    /** every DPoP proof carries a gateway nonce; off relaxes it */
+    dpopNonceRequired: boolean("dpop_nonce_required").notNull().default(true),
+    /** the longest a registered workload key is accepted, 1–90 days */
+    workloadKeyMaxAgeDays: integer("workload_key_max_age_days").notNull().default(90),
+
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
       .notNull()
@@ -4406,7 +4470,7 @@ export const orgSettings = pgTable(
     check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
     check(
       "org_settings_step_up_actions_check",
-      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change"]'::jsonb`,
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb`,
     ),
     check(
       "org_settings_tool_approval_sensitive_quorum_check",
@@ -4447,6 +4511,15 @@ export const orgSettings = pgTable(
     check("org_settings_model_artifact_org_quota_megabytes_check", sql`${t.modelArtifactOrgQuotaMegabytes} BETWEEN 1 AND 10485760`),
     check("org_settings_model_artifact_org_quota_count_check", sql`${t.modelArtifactOrgQuotaCount} BETWEEN 1 AND 1000000`),
     check("org_settings_model_artifact_retention_days_check", sql`${t.modelArtifactRetentionDays} BETWEEN 1 AND 3650`),
+    // ADR-0188 (migration 0180)
+    check("org_settings_agent_entitlement_mode_check", sql`${t.agentEntitlementMode} IN ('own_grants', 'sponsor_only')`),
+    check("org_settings_delegated_token_ttl_seconds_check", sql`${t.delegatedTokenTtlSeconds} BETWEEN 60 AND 3600`),
+    check("org_settings_delegation_max_depth_check", sql`${t.delegationMaxDepth} BETWEEN 0 AND 8`),
+    check(
+      "org_settings_workload_client_auth_methods_check",
+      sql`jsonb_typeof(${t.workloadClientAuthMethods}) = 'array' AND ${t.workloadClientAuthMethods} <@ '["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"]'::jsonb`,
+    ),
+    check("org_settings_workload_key_max_age_days_check", sql`${t.workloadKeyMaxAgeDays} BETWEEN 1 AND 90`),
   ],
 );
 
@@ -8666,6 +8739,9 @@ export const traceSpans = pgTable(
 
     attributes: jsonb("attributes"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0188 (migration 0180): the agent principal and delegation grant behind this span (NULL = a human's own call) */
+    actorIdentityId: uuid("actor_identity_id"),
+    delegationGrantId: uuid("delegation_grant_id"),
   },
   (t) => [
     index("trace_spans_trace_idx").on(t.traceId, t.seq),
@@ -11523,7 +11599,7 @@ export const webauthnChallenges = pgTable(
     check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
     check(
       "webauthn_challenges_action_kind_check",
-      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change')`,
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
     ),
     check(
       "webauthn_challenges_action_digest_check",
@@ -11568,7 +11644,7 @@ export const stepUpGrants = pgTable(
     check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
     check(
       "step_up_grants_action_kind_check",
-      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change')`,
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
     ),
     check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
     check(
@@ -12057,3 +12133,526 @@ export const artifactScans = pgTable(
     uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );
+
+// ===========================================================================
+// ADR-0188 (batch 6 item 1, migration 0180) — per-agent and workload identity,
+// and constrained delegation. S1 creates the tables and their invariants
+// (CHECKs and guard triggers in the migration); nothing writes them yet.
+// ===========================================================================
+
+/**
+ * An agent principal (decision 2): one per subject, exactly the subject FK its
+ * kind names (none for an external `worker_runtime`/`pdp`), a SPIFFE ID as its
+ * identifier, one or more stewards. Kind, subject and identifier are immutable
+ * and `revoked` is terminal (trigger); a row is never deleted.
+ */
+export const workloadIdentities = pgTable(
+  "workload_identities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: WORKLOAD_IDENTITY_KINDS }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "restrict" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "restrict" }),
+    engineRunnerId: uuid("engine_runner_id").references(() => engineRunners.id, { onDelete: "restrict" }),
+    /** `spiffe://<trust-domain>/regulait/<kind>/<id>` by default, or an exact SPIFFE ID the customer's SPIRE issues */
+    identifier: text("identifier").notNull(),
+    /** the human stewards (one to ten); a delegation's sponsor is a separate, per-grant fact */
+    sponsorUserIds: uuid("sponsor_user_ids").array().notNull(),
+    /** the target environments and deploy modes it may act in (empty = none) */
+    environments: text("environments").array().notNull().default(sql`'{}'::text[]`),
+    status: text("status", { enum: WORKLOAD_IDENTITY_STATUSES }).notNull().default("active"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("workload_identities_identifier_uq").on(t.identifier),
+    unique("workload_identities_agent_uq").on(t.agentId),
+    unique("workload_identities_builder_agent_uq").on(t.builderAgentId),
+    unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
+    check(
+      "workload_identities_kind_check",
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp')`,
+    ),
+    check(
+      "workload_identities_subject_check",
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+    ),
+    check(
+      "workload_identities_identifier_check",
+      sql`length(${t.identifier}) <= 2048 AND ${t.identifier} ~ '^spiffe://[a-z0-9._-]{1,255}(/[A-Za-z0-9._-]+)+$' AND ${t.identifier} !~ '/\\.\\.?(/|$)'`,
+    ),
+    check(
+      "workload_identities_sponsors_check",
+      sql`cardinality(${t.sponsorUserIds}) BETWEEN 1 AND 10 AND array_position(${t.sponsorUserIds}, NULL) IS NULL`,
+    ),
+    check(
+      "workload_identities_environments_check",
+      sql`cardinality(${t.environments}) <= 20 AND array_position(${t.environments}, NULL) IS NULL AND "regulait_text_array_matches"(${t.environments}, '^[a-z0-9][a-z0-9_.-]{0,63}$')`,
+    ),
+    check("workload_identities_status_check", sql`${t.status} IN ('active', 'suspended', 'revoked')`),
+    index("workload_identities_status_idx").on(t.status),
+    index("workload_identities_sponsors_gin").using("gin", t.sponsorUserIds),
+  ],
+);
+export type WorkloadIdentityRow = typeof workloadIdentities.$inferSelect;
+
+/**
+ * ADR-0188 decisions 3 and 24 (migration 0180) — an agent principal's OWN
+ * grants: the parallel twins of a user's `tool_grants`, `server_grants`,
+ * `agent_grants`, `connector_grants` and `role_assignments`, keyed by
+ * identity. Default-deny and empty at start (OWNER DECISION 1). Unlike a
+ * user's, `allowedModes` / `allowedObjects` are required lists (decision 27).
+ */
+export const identityToolGrants = pgTable(
+  "identity_tool_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_tool_grants_identity_server_tool_uq").on(t.identityId, t.serverId, t.toolName),
+    check("identity_tool_grants_tool_name_check", sql`length(${t.toolName}) BETWEEN 1 AND 200`),
+  ],
+);
+
+export const identityServerGrants = pgTable(
+  "identity_server_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    readOnlyAll: boolean("read_only_all").notNull().default(false),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("identity_server_grants_identity_server_uq").on(t.identityId, t.serverId)],
+);
+
+export const identityAgentGrants = pgTable(
+  "identity_agent_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** REQUIRED (an empty list allows no mode); never "every mode" */
+    allowedModes: jsonb("allowed_modes").$type<string[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_agent_grants_identity_agent_uq").on(t.identityId, t.agentId),
+    check(
+      "identity_agent_grants_allowed_modes_check",
+      sql`jsonb_typeof(${t.allowedModes}) = 'array' AND jsonb_array_length(${t.allowedModes}) <= 20`,
+    ),
+  ],
+);
+
+export const identityConnectorGrants = pgTable(
+  "identity_connector_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => connectors.id, { onDelete: "cascade" }),
+    mode: text("mode", { enum: CONNECTOR_GRANT_MODES }).notNull(),
+    /** REQUIRED (an empty list allows no object); never "every object" */
+    allowedObjects: jsonb("allowed_objects").$type<string[]>().notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_connector_grants_identity_connector_uq").on(t.identityId, t.connectorId),
+    check("identity_connector_grants_mode_check", sql`${t.mode} IN ('read', 'readwrite')`),
+    check(
+      "identity_connector_grants_allowed_objects_check",
+      sql`jsonb_typeof(${t.allowedObjects}) = 'array' AND jsonb_array_length(${t.allowedObjects}) <= 500`,
+    ),
+  ],
+);
+
+/** an agent role assignment: the identity holds the role's grants */
+export const identityRoleAssignments = pgTable(
+  "identity_role_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("identity_role_assignments_identity_role_uq").on(t.identityId, t.roleId)],
+);
+
+/**
+ * A workload's PUBLIC credential (decision 2): an Ed25519/P-256 JWK and its RFC
+ * 7638 thumbprint, an X.509 certificate's `x5t#S256` (plus SAN URI / subject),
+ * or a SPIFFE ID under a configured trust bundle. There is no secret column.
+ * At most 90 days; only `revoked_at` (once) and an earlier `not_after`
+ * (rotation) may change (trigger); never deleted.
+ */
+export const workloadCredentials = pgTable(
+  "workload_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    kind: text("kind", { enum: WORKLOAD_CREDENTIAL_KINDS }).notNull(),
+    publicJwk: jsonb("public_jwk").$type<WorkloadPublicJwk>(),
+    jwkThumbprint: text("jwk_thumbprint"),
+    x5tS256: text("x5t_s256"),
+    sanUri: text("san_uri"),
+    subjectDn: text("subject_dn"),
+    spiffeId: text("spiffe_id"),
+    /** `self_signed_tls_client_auth`: matched by thumbprint, no chain (decision 21) */
+    selfSigned: boolean("self_signed").notNull().default(false),
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull().defaultNow(),
+    notAfter: timestamp("not_after", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("workload_credentials_kind_check", sql`${t.kind} IN ('jwk', 'x509', 'spiffe_id')`),
+    check(
+      "workload_credentials_shape_check",
+      sql`(${t.kind} = 'jwk' AND ${t.publicJwk} IS NOT NULL AND ${t.jwkThumbprint} IS NOT NULL AND ${t.x5tS256} IS NULL AND ${t.sanUri} IS NULL AND ${t.subjectDn} IS NULL AND ${t.spiffeId} IS NULL AND NOT ${t.selfSigned}) OR (${t.kind} = 'x509' AND ${t.publicJwk} IS NULL AND ${t.jwkThumbprint} IS NULL AND ${t.x5tS256} IS NOT NULL AND ${t.spiffeId} IS NULL) OR (${t.kind} = 'spiffe_id' AND ${t.publicJwk} IS NULL AND ${t.jwkThumbprint} IS NULL AND ${t.x5tS256} IS NULL AND ${t.sanUri} IS NULL AND ${t.subjectDn} IS NULL AND ${t.spiffeId} IS NOT NULL AND NOT ${t.selfSigned})`,
+    ),
+    check(
+      "workload_credentials_public_only_check",
+      sql`${t.publicJwk} IS NULL OR COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ((${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string') OR (${t.publicJwk} ->> 'kty' = 'EC' AND ${t.publicJwk} ->> 'crv' = 'P-256' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND jsonb_typeof(${t.publicJwk} -> 'y') = 'string')) AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+    ),
+    check("workload_credentials_jwk_thumbprint_check", sql`${t.jwkThumbprint} IS NULL OR ${t.jwkThumbprint} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("workload_credentials_x5t_check", sql`${t.x5tS256} IS NULL OR ${t.x5tS256} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("workload_credentials_san_uri_check", sql`${t.sanUri} IS NULL OR length(${t.sanUri}) BETWEEN 1 AND 2048`),
+    check("workload_credentials_subject_dn_check", sql`${t.subjectDn} IS NULL OR length(${t.subjectDn}) BETWEEN 1 AND 1024`),
+    check(
+      "workload_credentials_spiffe_id_check",
+      sql`${t.spiffeId} IS NULL OR (length(${t.spiffeId}) <= 2048 AND ${t.spiffeId} ~ '^spiffe://[a-z0-9._-]{1,255}(/[A-Za-z0-9._-]+)+$' AND ${t.spiffeId} !~ '/\\.\\.?(/|$)')`,
+    ),
+    check(
+      "workload_credentials_window_check",
+      sql`${t.notAfter} > ${t.notBefore} AND ${t.notAfter} <= ${t.notBefore} + interval '90 days'`,
+    ),
+    check("workload_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    uniqueIndex("workload_credentials_jwk_thumbprint_uq").on(t.jwkThumbprint).where(sql`${t.jwkThumbprint} IS NOT NULL`),
+    uniqueIndex("workload_credentials_x5t_uq").on(t.x5tS256).where(sql`${t.x5tS256} IS NOT NULL`),
+    uniqueIndex("workload_credentials_spiffe_id_live_uq")
+      .on(t.spiffeId)
+      .where(sql`${t.spiffeId} IS NOT NULL AND ${t.revokedAt} IS NULL`),
+    index("workload_credentials_identity_idx").on(t.identityId),
+  ],
+);
+export type WorkloadCredentialRow = typeof workloadCredentials.$inferSelect;
+
+/**
+ * The gateway issuer's Ed25519 signing keys (decision 5): PUBLIC halves only
+ * (served as the JWKS); the private key is a deploy-time secret. At most one
+ * active signer; retired keys stay for verification; each lifecycle stamp is
+ * written once; never deleted (trigger).
+ */
+export const identitySigningKeys = pgTable(
+  "identity_signing_keys",
+  {
+    kid: text("kid").primaryKey(),
+    algorithm: text("algorithm", { enum: ["Ed25519"] }).notNull().default("Ed25519"),
+    publicJwk: jsonb("public_jwk").$type<{ kty: "OKP"; crv: "Ed25519"; x: string; kid?: string }>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("identity_signing_keys_kid_check", sql`${t.kid} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
+    check("identity_signing_keys_algorithm_check", sql`${t.algorithm} = 'Ed25519'`),
+    check(
+      "identity_signing_keys_public_only_check",
+      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ${t.publicJwk} ->> 'kty' = 'OKP' AND ${t.publicJwk} ->> 'crv' = 'Ed25519' AND jsonb_typeof(${t.publicJwk} -> 'x') = 'string' AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+    ),
+    check(
+      "identity_signing_keys_order_check",
+      sql`(${t.activatedAt} IS NULL OR ${t.activatedAt} >= ${t.createdAt}) AND (${t.retiredAt} IS NULL OR (${t.activatedAt} IS NOT NULL AND ${t.retiredAt} >= ${t.activatedAt})) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
+    ),
+    uniqueIndex("identity_signing_keys_one_active_uq")
+      .on(sql`(true)`)
+      .where(sql`${t.activatedAt} IS NOT NULL AND ${t.retiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
+  ],
+);
+export type IdentitySigningKeyRow = typeof identitySigningKeys.$inferSelect;
+
+/**
+ * THE UNIT OF AUTHORITY (decisions 4, 12, 17, 22): one row per delegation.
+ * `path` = ancestor grant ids, root first; `depth` = cardinality(path). A
+ * child's path, depth, root, sponsor, project, environment and run context
+ * follow its parent row, its lifetime is inside the parent's, and its cap is
+ * no larger (trigger). Balances are integer micro-dollars, never negative.
+ * Changes only by revocation (once) or spend; never deleted.
+ */
+export const delegationGrants = pgTable(
+  "delegation_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    rootGrantId: uuid("root_grant_id")
+      .notNull()
+      .references((): AnyPgColumn => delegationGrants.id, { onDelete: "restrict" }),
+    parentGrantId: uuid("parent_grant_id").references((): AnyPgColumn => delegationGrants.id, { onDelete: "restrict" }),
+    path: uuid("path").array().notNull().default(sql`'{}'::uuid[]`),
+    depth: integer("depth").notNull(),
+    sponsorUserId: uuid("sponsor_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    actorIdentityId: uuid("actor_identity_id")
+      .notNull()
+      .references(() => workloadIdentities.id, { onDelete: "restrict" }),
+    /** the context it was made for: at most one (none = an external root from a human's delegation proof) */
+    runId: uuid("run_id"),
+    builderTurnId: uuid("builder_turn_id"),
+    engineRunId: uuid("engine_run_id"),
+    scheduleId: uuid("schedule_id"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "restrict" }),
+    /** RFC 9396-style scope entries (`DelegationScopeItem`) */
+    scope: jsonb("scope").$type<DelegationScope>().notNull(),
+    /** this grant's allocation; NULL = uncapped (decision 16: an unpriced call under a CAPPED grant is refused) */
+    capMicros: bigint("cap_micros", { mode: "number" }),
+    /** measured spend by this grant and its whole subtree */
+    settledMicros: bigint("settled_micros", { mode: "number" }).notNull().default(0),
+    /** allocation held by its direct children and not yet spent */
+    reservedMicros: bigint("reserved_micros", { mode: "number" }).notNull().default(0),
+    environment: text("environment").notNull(),
+    /** RFC 8707 resource; required for an externally bound grant */
+    audience: text("audience"),
+    /** decision 12: the credential that authenticated the token request (NULL for in-process) */
+    authCredentialId: uuid("auth_credential_id").references(() => workloadCredentials.id, { onDelete: "restrict" }),
+    /** decision 12: for a child, the credential behind the parent's proof; for a root, the human delegation proof */
+    subjectCredentialId: uuid("subject_credential_id"),
+    bindingKind: text("binding_kind", { enum: DELEGATION_BINDING_KINDS }).notNull(),
+    /** `jkt` (DPoP) or `x5t#S256` (mTLS); NULL for in-process */
+    bindingThumbprint: text("binding_thumbprint"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /** a CODE from `DELEGATION_REVOKE_REASONS`, never prose */
+    revokedReason: text("revoked_reason", { enum: DELEGATION_REVOKE_REASONS }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
+    check(
+      "delegation_grants_parent_check",
+      sql`(${t.depth} = 0 AND ${t.parentGrantId} IS NULL AND ${t.rootGrantId} = ${t.id}) OR (${t.depth} > 0 AND ${t.parentGrantId} IS NOT NULL AND ${t.path}[cardinality(${t.path})] = ${t.parentGrantId} AND ${t.path}[1] = ${t.rootGrantId})`,
+    ),
+    check(
+      "delegation_grants_acyclic_check",
+      sql`NOT (${t.id} = ANY (${t.path})) AND array_position(${t.path}, NULL) IS NULL`,
+    ),
+    check(
+      "delegation_grants_context_check",
+      sql`num_nonnulls(${t.runId}, ${t.builderTurnId}, ${t.engineRunId}, ${t.scheduleId}) <= 1`,
+    ),
+    check("delegation_grants_scope_check", sql`jsonb_typeof(${t.scope}) = 'array' AND jsonb_array_length(${t.scope}) <= 100`),
+    check(
+      "delegation_grants_balances_check",
+      sql`(${t.capMicros} IS NULL OR ${t.capMicros} >= 0) AND ${t.settledMicros} >= 0 AND ${t.reservedMicros} >= 0 AND (${t.capMicros} IS NOT NULL OR ${t.reservedMicros} = 0) AND (${t.capMicros} IS NULL OR ${t.reservedMicros} <= ${t.capMicros})`,
+    ),
+    check("delegation_grants_environment_check", sql`${t.environment} ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'`),
+    check("delegation_grants_audience_check", sql`${t.audience} IS NULL OR length(${t.audience}) BETWEEN 1 AND 2048`),
+    check(
+      "delegation_grants_binding_check",
+      sql`(${t.bindingKind} = 'in_process' AND ${t.bindingThumbprint} IS NULL AND ${t.authCredentialId} IS NULL) OR (${t.bindingKind} IN ('dpop', 'mtls') AND ${t.bindingThumbprint} IS NOT NULL AND ${t.bindingThumbprint} ~ '^[A-Za-z0-9_-]{43}$' AND ${t.authCredentialId} IS NOT NULL AND ${t.audience} IS NOT NULL)`,
+    ),
+    check("delegation_grants_expiry_check", sql`${t.expiresAt} > ${t.createdAt}`),
+    check(
+      "delegation_grants_revoked_check",
+      sql`(${t.revokedAt} IS NULL AND ${t.revokedReason} IS NULL) OR (${t.revokedAt} IS NOT NULL AND ${t.revokedReason} IS NOT NULL AND ${t.revokedReason} IN ('admin', 'cascade', 'identity_revoked', 'credential_revoked', 'sponsor_disabled', 'agent_halted', 'run_ended'))`,
+    ),
+    index("delegation_grants_path_gin").using("gin", t.path),
+    index("delegation_grants_root_idx").on(t.rootGrantId),
+    index("delegation_grants_parent_idx").on(t.parentGrantId),
+    index("delegation_grants_actor_idx").on(t.actorIdentityId),
+    index("delegation_grants_sponsor_idx").on(t.sponsorUserId),
+    index("delegation_grants_auth_credential_idx").on(t.authCredentialId).where(sql`${t.authCredentialId} IS NOT NULL`),
+    index("delegation_grants_expires_idx").on(t.expiresAt).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+export type DelegationGrantRow = typeof delegationGrants.$inferSelect;
+
+/**
+ * Decision 22: the allocation on one parent→child edge. `amount` = the child's
+ * cap; `drawn` only grows; closing releases exactly `max(0, amount − drawn)`,
+ * once. Parties, amount and key are immutable; never deleted (trigger).
+ */
+export const delegationAllocations = pgTable(
+  "delegation_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    parentGrantId: uuid("parent_grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    childGrantId: uuid("child_grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    drawnMicros: bigint("drawn_micros", { mode: "number" }).notNull().default(0),
+    releasedMicros: bigint("released_micros", { mode: "number" }).notNull().default(0),
+    status: text("status", { enum: DELEGATION_ALLOCATION_STATUSES }).notNull().default("open"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("delegation_allocations_child_uq").on(t.childGrantId),
+    unique("delegation_allocations_idempotency_uq").on(t.parentGrantId, t.idempotencyKey),
+    check("delegation_allocations_edge_check", sql`${t.parentGrantId} <> ${t.childGrantId}`),
+    check("delegation_allocations_status_check", sql`${t.status} IN ('open', 'closed')`),
+    check(
+      "delegation_allocations_amounts_check",
+      sql`${t.amountMicros} >= 0 AND ${t.drawnMicros} >= 0 AND ${t.releasedMicros} >= 0 AND ${t.releasedMicros} <= ${t.amountMicros}`,
+    ),
+    check(
+      "delegation_allocations_close_check",
+      sql`(${t.status} = 'open' AND ${t.closedAt} IS NULL AND ${t.releasedMicros} = 0) OR (${t.status} = 'closed' AND ${t.closedAt} IS NOT NULL AND ${t.releasedMicros} = GREATEST(0, ${t.amountMicros} - ${t.drawnMicros}))`,
+    ),
+    check("delegation_allocations_idempotency_key_check", sql`length(${t.idempotencyKey}) BETWEEN 1 AND 200`),
+    index("delegation_allocations_open_idx").on(t.parentGrantId).where(sql`${t.status} = 'open'`),
+  ],
+);
+export type DelegationAllocationRow = typeof delegationAllocations.$inferSelect;
+
+/** Decision 22: one usage row settled along its path, exactly once (append-only). */
+export const delegationCharges = pgTable(
+  "delegation_charges",
+  {
+    usageEventId: uuid("usage_event_id").primaryKey(),
+    leafGrantId: uuid("leaf_grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("delegation_charges_amount_check", sql`${t.amountMicros} >= 0`),
+    index("delegation_charges_leaf_idx").on(t.leafGrantId, t.at),
+  ],
+);
+export type DelegationChargeRow = typeof delegationCharges.$inferSelect;
+
+/**
+ * Decision 12: one row per external token. The resource check finds it by
+ * `jti` and refuses when the presented binding differs from the stored one.
+ * Always sender-bound (no bearer kind exists), at most an hour long; only
+ * `revoked_at` changes (once); deleted only after expiry (trigger).
+ */
+export const issuedTokens = pgTable(
+  "issued_tokens",
+  {
+    jti: text("jti").primaryKey(),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    authCredentialId: uuid("auth_credential_id")
+      .notNull()
+      .references(() => workloadCredentials.id, { onDelete: "restrict" }),
+    /** the issuer key that signed it (revoking a key refuses its tokens, decision 12) */
+    signingKid: text("signing_kid")
+      .notNull()
+      .references(() => identitySigningKeys.kid, { onDelete: "restrict" }),
+    bindingKind: text("binding_kind", { enum: TOKEN_BINDING_KINDS }).notNull(),
+    bindingThumbprint: text("binding_thumbprint").notNull(),
+    audience: text("audience").notNull(),
+    env: text("env").notNull(),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("issued_tokens_jti_check", sql`${t.jti} ~ '^[A-Za-z0-9_-]{16,128}$'`),
+    check(
+      "issued_tokens_binding_check",
+      sql`${t.bindingKind} IN ('dpop', 'mtls') AND ${t.bindingThumbprint} ~ '^[A-Za-z0-9_-]{43}$'`,
+    ),
+    check("issued_tokens_audience_check", sql`length(${t.audience}) BETWEEN 1 AND 2048`),
+    check("issued_tokens_env_check", sql`${t.env} ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'`),
+    check(
+      "issued_tokens_lifetime_check",
+      sql`${t.expiresAt} > ${t.issuedAt} AND ${t.expiresAt} <= ${t.issuedAt} + interval '3600 seconds'`,
+    ),
+    check("issued_tokens_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.issuedAt}`),
+    index("issued_tokens_grant_idx").on(t.grantId),
+    index("issued_tokens_binding_idx").on(t.bindingThumbprint),
+    index("issued_tokens_credential_idx").on(t.authCredentialId),
+    index("issued_tokens_expires_idx").on(t.expiresAt),
+  ],
+);
+export type IssuedTokenRow = typeof issuedTokens.$inferSelect;
+
+/**
+ * Decision 14: an atomic, namespaced replay claim — `INSERT … ON CONFLICT DO
+ * NOTHING RETURNING 1` (one row back = accepted). Never updated; removed only
+ * after `expires_at` (trigger).
+ */
+export const replayClaims = pgTable(
+  "replay_claims",
+  {
+    namespace: text("namespace", { enum: REPLAY_NAMESPACES }).notNull(),
+    key: text("key").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "replay_claims_pk", columns: [t.namespace, t.key] }),
+    check(
+      "replay_claims_namespace_check",
+      sql`${t.namespace} IN ('client_assertion', 'as_dpop', 'rs_dpop', 'human_delegation_proof', 'delegation_authz')`,
+    ),
+    check("replay_claims_key_check", sql`length(${t.key}) BETWEEN 1 AND 256`),
+    check("replay_claims_expiry_check", sql`${t.expiresAt} > ${t.claimedAt}`),
+    index("replay_claims_expires_idx").on(t.expiresAt),
+  ],
+);
+export type ReplayClaimRow = typeof replayClaims.$inferSelect;
+
+/**
+ * Decision 19: the audit canonical-serialisation boundary, APPEND-ONLY and
+ * trusted by the verifier (never a per-row flag alone). The cutover (S4)
+ * inserts the v2 row under the audit chain's append lock; the writer reads it
+ * under the same lock.
+ */
+export const auditChainVersions = pgTable(
+  "audit_chain_versions",
+  {
+    version: smallint("version").primaryKey(),
+    fromSeq: bigint("from_seq", { mode: "number" }).notNull(),
+    setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+    setBy: uuid("set_by"),
+  },
+  (t) => [
+    unique("audit_chain_versions_from_seq_uq").on(t.fromSeq),
+    check("audit_chain_versions_version_check", sql`${t.version} = 2`),
+    check("audit_chain_versions_from_seq_check", sql`${t.fromSeq} > 1`),
+  ],
+);
+export type AuditChainVersionRow = typeof auditChainVersions.$inferSelect;

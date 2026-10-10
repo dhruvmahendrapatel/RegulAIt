@@ -59,6 +59,7 @@ describe("ADR-0186 strict defaults and relaxations", () => {
         "break_glass",
         "passkey_manage",
         "owner_change",
+        "identity_manage",
       ],
       toolApprovalSensitiveQuorum: 2,
       decisionReceiptsMode: "on",
@@ -151,7 +152,7 @@ describe("ADR-0186 vocabularies", () => {
     for (const id of DETECTION_MONITOR_RULE_IDS) expect(MONITOR_RULES[id].label.length).toBeGreaterThan(0);
     expect(RECEIPT_OBJECT_TYPES).toEqual(["mcp_tool", "agent", "connector", "approval"]);
     expect(VENDORED_DETECTION_PACKS).toHaveLength(4);
-    expect(STEP_UP_ACTION_KINDS).toHaveLength(6);
+    expect(STEP_UP_ACTION_KINDS).toHaveLength(7); // ADR-0188 added identity_manage
   });
   it("the receipt's signed bytes are the canonical payload", () => {
     const p: DecisionReceiptPayload = {

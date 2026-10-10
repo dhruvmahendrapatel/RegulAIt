@@ -3,7 +3,8 @@
 - **Status:** Accepted 2026-10-10. The owner accepted all nine OWNER DECISION items with their recommended answers
   ("accept all on ADR-0188"). Design only until the build slices land. Amended
   2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table; amended again
-  after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23.
+  after Codex's recheck (I7R-10, I7R-11): decisions 22 and 23. Amended again during S1 (main-session rulings from
+  the S2 planning pass): decisions 24 to 28 (agent grant storage, actor order, depth, strict scope, rule ids).
 - **Date:** 2026-10-10
 - **Deciders:** owner (accepted all nine recommendations, 2026-10-10); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
@@ -688,6 +689,58 @@ consumes nothing, so a substituted request cannot burn A's authorization either.
 is refused with `invalid_grant` and `error_code` `mtls_parent_handoff_unsupported`. Signing the authorization with a
 certificate-bound key distinct from the child's client certificate is left to a later ADR. In-process hand-offs
 (decision 6) are unaffected.
+
+### Amendments from the S1 foundation and the S2 planning pass (2026-10-10)
+
+The main session's S2 planning pass read the S1 contract while it was being written and ruled on five gaps before
+S1 froze the schema. Decisions 24 to 28 record those rulings; where they change earlier text, **the later decision
+wins**. They change no owner decision.
+
+#### 24. Agent principals' own grants: parallel tables keyed by identity (decision 3)
+
+Decision 3 gives an agent "grants of its own, in the same shape as users'", and the slice table did not name their
+storage. Migration 0180 adds five parallel tables, the twins of a user's: `identity_tool_grants`,
+`identity_server_grants`, `identity_agent_grants`, `identity_connector_grants` and `identity_role_assignments`, each
+with `identity_id` → `workload_identities` (`ON DELETE RESTRICT`; identities are never deleted) and the same object
+FKs and uniques as the user tables (the governed object's deletion removes the grant, as for users). Parallel tables
+were chosen over a principal-kind column on the existing grant tables because those tables' `user_id NOT NULL`, their
+indexes and every existing reader (kernel loaders, certification campaigns, the ADR-0074 rule-write guard,
+inventory) assume a person; widening them would put every existing query one missed `WHERE` away from treating an
+agent as a user. Default-deny: no row, no right; every identity starts with none (OWNER DECISION 1, no
+grandfathering). The contract types are `actorEntitlementsSchema` / `putAgentGrantsSchema` in
+`packages/shared/src/identity/contract.ts`; S2 fills one `ActorEntitlements` per actor from these tables, with role
+grants expanded.
+
+#### 25. One canonical actor order: root first, leaf last
+
+`ActorChain.actors`, `delegation_grants.path` (+ the leaf grant) and `audit_log.actor_chain` all run root first, leaf
+(the caller) last. This supersedes the leaf-first wording of decision 1. The RFC 8693 nested `act` claim is only a wire
+encoding derived from that order at mint and verify time (S3/S5): the outermost `act` is the last element
+(`actClaimFromChain`).
+
+#### 26. Depth is the hop count
+
+`ActorChain.depth = actors.length`: a human acting directly is 0 (and is `actor: null`, never an empty chain), a first
+agent 1, its sub-agent 2. Cedar's `context.delegationDepth` is the same number. The stored `delegation_grants.depth`
+counts ancestor grants (`cardinality(path)`, 0 for a root grant), so for the leaf grant of a chain
+`ActorChain.depth = delegation_grants.depth + 1` (`actorChainDepthForGrantDepth`). `delegation_max_depth` caps the
+stored grant depth (0 to 8), so a chain has at most 9 hops.
+
+#### 27. Scope semantics are strict: absence is denial
+
+Nothing implies anything else. `write` does not include `read`; one mode never implies another; a scope entry with no
+`modes` allows no mode; an `mcp_tool` entry with no `toolNames` covers no tool. For an agent's own grants (decision 24)
+`allowed_modes` and `allowed_objects` are `NOT NULL` lists: a user's `NULL` there means "every mode / every object",
+and an agent never gets that implicitly.
+
+#### 28. Rule ids
+
+A refusal because an actor's own grants (decision 24) do not cover the call is `actor-allow-list`. The existing
+`agent-allow-list` keeps its current meaning (the per-user agent allow-list). A stored chain that is inconsistent, or
+an actor in it that is not live (decision 17), is refused `actor-chain-invalid`. Both are in `DELEGATION_RULE_IDS`.
+
+Also ruled, for S2's planning (nothing in S1): new ABAC policies default to Cedar schema v4; and S2 may make the
+one-token `actor: null` edits in S4-owned files and in `app.ts`.
 
 #### X31 review dispositions
 

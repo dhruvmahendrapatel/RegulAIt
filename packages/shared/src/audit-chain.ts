@@ -187,6 +187,13 @@ export interface AuditChainFields {
   ruleChain: unknown;
   reason: string;
   deployMode?: string | null | undefined;
+  /** ADR-0188 decision 19: the canonical serialisation the row was written
+   * under (NULL on every v1 row), and the three actor fields v2 covers. A v1
+   * row's hash does not cover any of these four. */
+  chainVersion?: number | null | undefined;
+  actorIdentityId?: string | null | undefined;
+  delegationGrantId?: string | null | undefined;
+  actorChain?: unknown;
 }
 
 /**
@@ -240,6 +247,55 @@ export function canonicalAuditPayload(row: AuditChainFields): string {
 /** `content_hash` — SHA-256 over this row's immutable facts alone. */
 export function auditContentHash(row: AuditChainFields): string {
   return sha256Hex(canonicalAuditPayload(row));
+}
+
+// --- ADR-0188 decision 19: canonical serialisation version 2 -----------------
+//
+// v2 adds the actor fields (who an agent action was FOR is `userId`, the
+// sponsor; who DID it is the actor identity, the delegation grant and the
+// ordered chain) INSIDE `content_hash`, plus the version itself, so a v2 row
+// that is re-hashed as v1, or whose version is edited, no longer verifies.
+// Null-valued fields are serialised explicitly, never omitted. v1 hashes are
+// never recomputed: rows below the boundary (`audit_chain_versions.from_seq`,
+// set under the append lock by the cutover, S4) stay v1 forever.
+
+/** Version tag of the v2 canonical payload. */
+export const AUDIT_PAYLOAD_VERSION_V2 = "regulait.audit.v2" as const;
+/** The canonical serialisation versions this build reads and writes. */
+export type AuditChainVersion = 1 | 2;
+
+/** The v2 canonical payload: every v1 fact, `chainVersion: 2`, and the three actor fields. */
+export function canonicalAuditPayloadV2(row: AuditChainFields): string {
+  return `${AUDIT_PAYLOAD_VERSION_V2}\n${canonicalJson({
+    id: row.id,
+    at: normalizeAt(row.at),
+    userId: row.userId,
+    objectType: row.objectType,
+    objectId: nullable(row.objectId),
+    detail: row.detail === undefined ? null : row.detail,
+    serverId: nullable(row.serverId),
+    toolName: nullable(row.toolName),
+    effect: row.effect,
+    ruleId: row.ruleId,
+    ruleChain: row.ruleChain === undefined ? null : row.ruleChain,
+    reason: row.reason,
+    deployMode: nullable(row.deployMode),
+    // the version is part of the hashed data: a v2 row claiming anything else does not hash to itself
+    chainVersion: 2,
+    actorIdentityId: nullable(row.actorIdentityId),
+    delegationGrantId: nullable(row.delegationGrantId),
+    actorChain: row.actorChain === undefined ? null : row.actorChain,
+  })}`;
+}
+
+/** `content_hash` under an explicit serialisation version. */
+export function auditContentHashFor(row: AuditChainFields, version: AuditChainVersion): string {
+  return sha256Hex(version === 2 ? canonicalAuditPayloadV2(row) : canonicalAuditPayload(row));
+}
+
+/** Which version a row at `seq` must be hashed under, given the recorded v2 boundary (null = none yet). */
+export function auditChainVersionAt(seq: number, v2FromSeq: number | null | undefined): AuditChainVersion {
+  return v2FromSeq != null && seq >= v2FromSeq ? 2 : 1;
 }
 
 /**
@@ -357,7 +413,11 @@ export type ChainBreakKind =
    * them — the stored linked value was edited directly. */
   | "row_hash_mismatch"
   /** a chained row is missing one of the three hash columns entirely. */
-  | "missing_hash";
+  | "missing_hash"
+  /** ADR-0188 decision 19: the row's stored serialisation version is not the
+   * one the recorded boundary requires at its `seq` (a v2 row claiming v1 or no
+   * version, or a v1 row claiming v2). */
+  | "version_mismatch";
 
 export interface ChainBreak {
   seq: number;
@@ -377,9 +437,17 @@ export interface ChainBreak {
  */
 export function verifyChainBatch(
   rows: ChainedAuditRow[],
-  state: { expectedSeq: number; prevRowHash: string },
+  state: {
+    expectedSeq: number;
+    prevRowHash: string;
+    /** ADR-0188 decision 19: the first `seq` written as v2, read from the
+     * verifier-trusted `audit_chain_versions` table (never inferred from a row
+     * flag). Absent or null: every row is v1. */
+    v2FromSeq?: number | null;
+  },
 ): { break: ChainBreak | null; expectedSeq: number; prevRowHash: string } {
   let { expectedSeq, prevRowHash } = state;
+  const v2FromSeq = state.v2FromSeq ?? null;
 
   for (const row of rows) {
     if (row.contentHash === null || row.prevHash === null || row.rowHash === null) {
@@ -431,7 +499,27 @@ export function verifyChainBatch(
 
     // 3. CONTENT. An in-place UPDATE of reason/detail/effect lands here, at
     //    exactly the seq that was edited.
-    const recomputedContent = auditContentHash(row);
+    // 3a. VERSION (ADR-0188 decision 19): the boundary decides, and the row's
+    //     own stored version must agree with it — v2 rows carry 2, v1 rows none.
+    const version = auditChainVersionAt(row.seq, v2FromSeq);
+    const stored = row.chainVersion ?? null;
+    if (version === 2 ? stored !== 2 : stored !== null) {
+      return {
+        break: {
+          seq: row.seq,
+          kind: "version_mismatch",
+          expected: version === 2 ? "2" : "null",
+          actual: stored === null ? "null" : String(stored),
+          detail:
+            version === 2
+              ? "this row is at or past the recorded v2 boundary but does not carry chain version 2"
+              : "this row is before any recorded v2 boundary but claims a chain version",
+        },
+        expectedSeq,
+        prevRowHash,
+      };
+    }
+    const recomputedContent = auditContentHashFor(row, version);
     if (recomputedContent !== row.contentHash) {
       return {
         break: {
