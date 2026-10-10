@@ -1,3 +1,85 @@
+## X36 real Batch 5 browser sweep — 2026-10-10 UTC
+
+**READY-FOR-REVIEW for states reachable on the shipped unbuilt-engine install.**
+Reviewed main `20e11eeb` with a real PostgreSQL scratch database
+`regulait_review_x36_oct10`, gateway on127.0.0.1:3147, built SPA and filesystem
+artifact store `/tmp/oct10-x36-model-artifacts`. No HTTP mocks and no external
+model calls. Frozen install, gateway dependency closure and production web build
+PASS. `demo:prepare` created its fixtures and reached demo:check; that check first
+reported18 PASS/1 FAIL because this scratch environment had no deployment export
+signing key. After the documented demo-only key generation in
+`/tmp/oct10-x36-export-keys`, the same database's final `demo:check` passed19/19.
+This is not a claim that the initial command exited successfully.
+
+**3/3 Chromium journeys PASS in the final combined run (1.8 minutes).**
+All three engines are off with no image digest and the page says Off — not built.
+Actual enable returns409 `engine_self_test_required`; actual self-test states that
+no live runner exists. Confirmation and keyboard focus trapping/return are checked.
+Red-teaming and Evaluations show no enabled engine and no runs, with no verdict
+badge; a real404 selected run is unavailable, never passed. Actual synthetic-file
+upload returns201 `format:unrecognised`; it stays Not scanned / Not admissible,
+modelscan's start button is disabled, a direct start request is409 `engine_disabled`
+and the recorded scans remain empty. Raw synthetic file bytes never enter the DOM.
+The execution kill switch confirms an audited reason; restoring normal mode opens
+the real identity step-up dialog and the gateway stays halted until an actual TOTP
+verification authorizes the retried change. The final mode is normal.
+
+**14 axe analyses PASS** (seven surfaces in light/dark) and keyboard actions cover
+enabling/refusal, self-test, opening artifact detail/upload and halt/resume. Choosing
+the local file uses Playwright's native file input fixture. No page exception or
+unexpected console error after sign-in. Chromium's deliberately generated
+403/404/409/501 resource refusals are separately asserted; the unauthenticated
+sign-in401 precedes the reviewed pages and is outside the page error collection.
+
+Limits: an unbuilt/off install cannot admit a runner, a successful enabled run,
+runner revocation or an approval-waiting engine run. Thus no actual runner-revoke,
+not_run/unknown **completed run**, approval or kill-during-live-run claim is made.
+Unrecognised format and a never-scanned artifact are distinct from a measured
+unknown scan. The existing mock/unit tests pin those remaining rendering branches;
+a real runner acceptance sweep remains a gate when its image is enabled. PR#240's
+artifact delete/retention changes were not merged at this main SHA, so those belong
+to the separately assigned returned-fix review. No new production defect found in
+the reachable states; Claude retains VERIFIED and merge authority.
+
+Initial harness corrections: collect console errors after the real login's expected
+401; use the gateway's actual unrecognised vocabulary; avoid toggling closed an
+artifact that upload already selected. Final unchanged-file combined run passed
+all3; these are not waived product failures. Read-only inspection and own disposable
+fixture mutations only. Commands are captured by the dedicated
+`playwright.x36-real.config.ts`; it requires an already-running prepared gateway
+and `E2E_DEMO_PREPARE_LOG`, and is not silently collected into the normal reset suite.
+
+Evidence logs: `/tmp/oct10-x36-{install,gateway-build,web-build,demo-prepare,demo-check-final,browser-final}.log`.
+Screenshots (local evidence only):
+
+[artifact-unknown-not-scanned-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-dark.png)
+
+[artifact-unknown-not-scanned-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-light.png)
+
+[execution-halted-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-dark.png)
+
+[execution-halted-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-light.png)
+
+[execution-restored-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-dark.png)
+
+[execution-restored-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-light.png)
+
+[engines-off-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-dark.png)
+
+[engines-off-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-light.png)
+
+[engines-refused-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-dark.png)
+
+[engines-refused-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-light.png)
+
+[evals-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-dark.png)
+
+[evals-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-light.png)
+
+[redteam-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-dark.png)
+
+[redteam-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-light.png)
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.
