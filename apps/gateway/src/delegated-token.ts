@@ -46,7 +46,7 @@ import {
   type JWTPayload,
 } from "jose";
 import * as oauth from "oauth4webapi";
-import { and, eq, isNotNull, issuedTokens, lte, or, replayClaims, workloadCredentials, type Db, type IdentitySigningKeyRow } from "@regulait/db";
+import { and, eq, isNotNull, issuedTokens, or, replayClaims, sql, workloadCredentials, type Db, type IdentitySigningKeyRow } from "@regulait/db";
 import {
   actClaimFromChain,
   canonicalDelegationBody,
@@ -134,9 +134,13 @@ export async function claimReplay(db: Db, namespace: ReplayNamespace, key: strin
   return rows.length === 1;
 }
 
-/** remove claims past their window (the guard trigger refuses removing a live one) */
-export async function sweepReplayClaims(db: Db, now: Date = new Date()): Promise<number> {
-  return (await db.delete(replayClaims).where(lte(replayClaims.expiresAt, now)).returning({ key: replayClaims.key })).length;
+/**
+ * remove claims past their window. The guard trigger refuses removing a live one
+ * by the database clock, so the selection uses the same clock: a gateway clock
+ * ahead of the database would otherwise pick a live row and abort the whole sweep.
+ */
+export async function sweepReplayClaims(db: Db): Promise<number> {
+  return (await db.delete(replayClaims).where(sql`${replayClaims.expiresAt} <= now()`).returning({ key: replayClaims.key })).length;
 }
 
 // ---------------------------------------------------------------------------

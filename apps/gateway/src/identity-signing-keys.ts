@@ -34,7 +34,7 @@
 import { createPrivateKey, createPublicKey, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { calculateJwkThumbprint } from "jose";
-import { and, auditLog, desc, eq, gt, identitySigningKeys, isNull, issuedTokens, sql, type Db, type IdentitySigningKeyRow } from "@regulait/db";
+import { and, auditLog, desc, eq, identitySigningKeys, isNull, issuedTokens, sql, type Db, type IdentitySigningKeyRow } from "@regulait/db";
 import {
   IDENTITY_SETTING_LIMITS,
   IDENTITY_SIGNING_KEY_ENV,
@@ -290,7 +290,9 @@ export async function rotateIdentitySigningKey(
     const now = new Date();
     const [previous] = await tx
       .update(identitySigningKeys)
-      .set({ retiredAt: now })
+      // database clock, never earlier than activation: a replica whose clock trails
+      // the one that activated the key must not trip the lifecycle check
+      .set({ retiredAt: sql`GREATEST(now(), ${identitySigningKeys.activatedAt})` })
       .where(and(sql`${identitySigningKeys.activatedAt} IS NOT NULL`, isNull(identitySigningKeys.retiredAt), isNull(identitySigningKeys.revokedAt)))
       .returning({ kid: identitySigningKeys.kid });
     await tx.insert(identitySigningKeys).values({ kid: target.kid, publicJwk: target.publicJwk, createdAt: now, activatedAt: now });
@@ -316,12 +318,17 @@ export async function revokeIdentitySigningKey(db: Db, opts: { kid: string; acto
     const [row] = await tx.select().from(identitySigningKeys).where(eq(identitySigningKeys.kid, opts.kid)).for("update");
     if (!row) throw new IdentitySigningKeyError("signing_key_not_found", "no such issuer signing key");
     if (row.revokedAt) throw new IdentitySigningKeyError("signing_key_already_revoked", "that issuer signing key is already revoked");
-    const now = new Date();
-    await tx.update(identitySigningKeys).set({ revokedAt: now }).where(eq(identitySigningKeys.kid, opts.kid));
+    // Timestamps come from the database clock, clamped to each row's own start, so
+    // a replica whose clock trails the one that made the key or minted a token can
+    // never trip the lifecycle checks and roll the revocation back.
+    await tx
+      .update(identitySigningKeys)
+      .set({ revokedAt: sql`GREATEST(now(), ${identitySigningKeys.createdAt})` })
+      .where(eq(identitySigningKeys.kid, opts.kid));
     const revoked = await tx
       .update(issuedTokens)
-      .set({ revokedAt: now })
-      .where(and(eq(issuedTokens.signingKid, opts.kid), isNull(issuedTokens.revokedAt), gt(issuedTokens.expiresAt, now)))
+      .set({ revokedAt: sql`GREATEST(now(), ${issuedTokens.issuedAt})` })
+      .where(and(eq(issuedTokens.signingKid, opts.kid), isNull(issuedTokens.revokedAt), sql`${issuedTokens.expiresAt} > now()`))
       .returning({ jti: issuedTokens.jti });
     await auditSigningKey(
       tx,
