@@ -286,7 +286,7 @@ export default function ModelKeysCard() {
             precedence over the organisation&apos;s for your requests — unless your organisation
             enforces key custody, in which case stored keys stay inert. Which credential actually
             served any given call is recorded per call: see the <em>Key used</em> column on{" "}
-            <Link to="/spend">Spend &amp; savings</Link>.
+            <Link to="/spend" style={{ textDecoration: "underline" }}>Spend &amp; savings</Link>.
           </div>
         </>
       )}

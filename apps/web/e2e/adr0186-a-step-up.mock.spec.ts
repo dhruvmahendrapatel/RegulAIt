@@ -250,3 +250,16 @@ test.describe("ADR-0186 A: passkeys and step-up", () => {
     expect(cap.deletes[1]).toEqual({ path: "/v1/users/u-ana/passkeys/pk-ana", header: "rgsu_1" });
   });
 });
+
+ test("Account model keys: Spend link has a non-colour cue in both themes",async({page},testInfo)=>{
+ await mockApi(page,{admin:false,methods:["passkey"]});
+ await page.route("**/v1/users/u-ben/model-credentials",route=>json(route,{credentials:[]}));
+ await page.goto("/ui/account?section=keys");
+ const link=page.getByRole("main").getByRole("link",{name:"Spend & savings",exact:true});await expect(link).toBeVisible();
+ for(const theme of ["light","dark"]){
+ await page.evaluate(theme=>document.documentElement.setAttribute("data-theme",theme),theme);
+ await expect(link).toHaveCSS("text-decoration-line","underline");
+ const result=await new AxeBuilder({page}).withRules(["link-in-text-block"]).analyze();expect(result.violations).toEqual([]);
+ }
+ await page.screenshot({path:testInfo.outputPath("account-model-keys.png")});
+ });

@@ -32,6 +32,7 @@ describe.skipIf(!base)("X24 measured detection monitor inputs",()=>{
  afterAll(async()=>{await db?.$client.end();if(control){await dropScratchDatabase(control,name);await control.$client.end();}});
  it("detects recent attributed servers absent from the separate baseline window",async()=>{
   const agent=randomUUID(),known=randomUUID(),fresh=randomUUID();
+  await entry({serverId:known,toolName:"fixture",at:at(-480),detail:{builderAgentId:agent}});
   await entry({serverId:known,toolName:"fixture",at:at(-48),detail:{builderAgentId:agent}});
   await entry({serverId:known,toolName:"fixture",detail:{builderAgentId:agent}});
   await entry({serverId:fresh,toolName:"fixture",detail:{builderAgentId:agent}});
@@ -123,9 +124,17 @@ describe.skipIf(!base)("X24 measured detection monitor inputs",()=>{
   await runGovernanceMonitor(db,{now:new Date(now.getTime()+2000),actorUserId:userId});
   expect((await db.select().from(governanceAlerts).where(eq(governanceAlerts.subjectKey,key)))[0]!.status).toBe("open");
  });
- it("R24-03: a new agent has no drift until attributed baseline history exists",async()=>{
-  const agent=randomUUID();await entry({serverId:randomUUID(),toolName:"new",detail:{builderAgentId:agent}});
-  expect((await detectionMonitorInput(db,now)).mcp_server_baseline_drift!.breaches.some(row=>row.subjectKey.startsWith(`builder_agent:${agent}>`))).toBe(false);
+ it("R24-03: incomplete baseline histories hold subjects until pre-baseline evidence exists",async()=>{
+  const agent=randomUUID(),fresh=randomUUID(),key=`builder_agent:${agent}>mcp_server:${fresh}`;
+  await entry({serverId:randomUUID(),toolName:"new",at:at(-48),detail:{builderAgentId:agent}});
+  await entry({serverId:fresh,toolName:"new",detail:{builderAgentId:agent}});
+  const incomplete=(await detectionMonitorInput(db,now)).mcp_server_baseline_drift!;
+  expect(incomplete.breaches.some(row=>row.subjectKey===key)).toBe(false);
+  expect(incomplete.heldSubjectKeys).toContain(key);
+  await entry({serverId:randomUUID(),toolName:"old",at:at(-480),detail:{builderAgentId:agent}});
+  const complete=(await detectionMonitorInput(db,now)).mcp_server_baseline_drift!;
+  expect(complete.breaches.some(row=>row.subjectKey===key)).toBe(true);
+  expect(complete.heldSubjectKeys).not.toContain(key);
  });
  it("R24-02: fleet-wide allowed-call floods do not blind any monitor rule",async()=>{
   await db.execute(sql`INSERT INTO audit_log(user_id,at,object_type,effect,rule_id,rule_chain,reason,tool_name)

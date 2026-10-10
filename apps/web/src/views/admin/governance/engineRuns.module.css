@@ -1,0 +1,7 @@
+/* ADR-0187 (X27) engine-run views (tokens only). */
+
+/* a link inside a sentence is underlined, never told apart by colour alone */
+.inlineLink {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

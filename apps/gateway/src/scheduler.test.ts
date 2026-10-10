@@ -786,6 +786,9 @@ describe("every sweep is registered", () => {
         // in zz-b5-engines.test.ts
         SCHEDULER_JOB_NAMES.engineRunSweep,
         SCHEDULER_JOB_NAMES.engineScheduleSweep,
+        // decision 127: unused artifacts past retention, and queued object deletes;
+        // driven end-to-end in zz-b5-modelscan-storage.test.ts
+        SCHEDULER_JOB_NAMES.modelArtifactRetentionSweep,
         // ===== end ADR-0187 =====
       ].sort(),
     );
