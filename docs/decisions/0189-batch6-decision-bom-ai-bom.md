@@ -213,10 +213,10 @@ Built from a signed native snapshot (`regulait.ai-bom.v1`, the authority) and re
 |---|---|
 | Use case / agent / install | `metadata.component` (type `application`), with owner, `data_sensitivity`, compliance tags and EU AI Act tier as properties |
 | `agents` + `model_cards` | component type `machine-learning-model`: supplier = provider, version = `pinned_model_version`, `modelCard` (`considerations.useCases` ← `intended_use`, `technicalLimitations` ← `limitations`, `fairnessAssessments`/`ethicalConsiderations` ← `bias_fairness`, `modelParameters.datasets` ← dataset refs, `quantitativeAnalysis` ← evaluation results), external references ← `standard_refs` |
-| Provider API endpoint | `service` with `endpoints`, `trustZone`, and **`data` flows** (direction and classification: what the model receives and returns, by the project's sensitivity). This is PF-09's "per-model data flow" |
+| Provider API endpoint | `service` with `endpoints`, `trustZone`, and **`data` flows** (direction and classification: what the model receives and returns, by the project's sensitivity; one pair per use case for agent and install snapshots, amendment R27). This is PF-09's "per-model data flow" |
 | `model_artifacts` | component (type `machine-learning-model` or `file`) with SHA-256 hash and format |
 | `artifact_scans`, `model_card_evidence` (`engine_scan`, `eval_run`, `external`) | `declarations` (attestations: the claim, the scanner and version, the verdict, evidence references); the engine is a `container` component with its `image_digest` |
-| `training_datasets`, `eval_datasets` | component type `data` with `data[].type = dataset`, hash from `checksum`, classification, `governance` (owner), sensitive-data flag from `pii_verdict`; evaluation datasets map only what is recorded (amendment R24) |
+| `training_datasets`, `eval_datasets` | component type `data` with `data[].type = dataset`, hash from `checksum`, classification, `governance` (owner), sensitive-data flag from `pii_verdict`; evaluation datasets map only what is recorded (amendment R24); hashes parsed per R26 |
 | Training-data sources of third-party models | from `model_cards.data_claims`, marked **supplier-declared**; when absent, `unknown` (OWNER DECISION 10) |
 | `prompt_commits` (the promoted commit) | component type `data`, `data[].type = configuration`, hash = commit `hash` |
 | `builder_skills` | component type `data` (`configuration`) with `admitted_digest` |
@@ -290,7 +290,7 @@ needs the ADR-0102 scrub (M-055 check done at B1 anyway).
 | `decision_bom_finality` | `anchored`: flushed to a destination **observed** tamper-resistant (and timestamped when `audit_anchor_timestamp_mode = required`) | `anchored_unverified_destination` (flushed to a destination not observed tamper-resistant; the BOM and the verifier say so), then `chain_signed` (freeze once the receipt is signed, before the anchor; the BOM records `proof.anchor: absent`) | audited; amendment R4 |
 | `bom_export_roles` | admins only | admins plus an explicit auditor grant | granting is an admin act, audited |
 | `bom_person_identifiers` | `id_only` (user and workload ids) | `display_name` | audited; emails are never included (see invariants) |
-| `ai_bom_snapshot_triggers` | on sign-off events (OWNER DECISION 8) | on demand only | audited |
+| `ai_bom_snapshot_triggers` | on sign-off events (OWNER DECISION 8; queued durably when no key, R25) | on demand only | audited |
 | `cyclonedx_export_versions` | `1.7` | add `1.6` | audited |
 | BOM export rate limit | 30 per minute per user | admin may raise | audited |
 | Unsigned BOM | **never** | not relaxable | invariant, like ADR-0116 "no key means no bundle" |
@@ -372,7 +372,7 @@ against the specification rather than against itself.
 | **B4 Decision BOM assembler, signer, bundle and verifier** | Claude | Assembly from facts and stored rows, freezing rules, signing with the receipt key, `export-bundle/3`, pure verifier and `scripts/verify-bom.mjs` (both subjects, R19), whole-bundle email scan (R21), `POST /v1/boms/verify` | B2, B3 (BOM-Link) | serial after B2 |
 | **B5 SPDX 3.0.1 renderer** | Claude | `ai_AIPackage`, `dataset_DatasetPackage`, licence relationships; schema validation in the product, `spdx3-validate` in CI | B3 (the snapshot-route switch flips in the second of B4 and B5 to merge, R17) | **Yes**, with B4 |
 | **B6 web UI** | Codex | Decision 9's tabs, actions and verify panel; drift view; posture rows | B1 stubs | **Yes** (web only); merges after B4's real routes |
-| **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs through release-published, signed SBOM identity metadata (amendment R9); PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3 | **Yes**, with B4–B6 |
+| **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs through release-published, signed SBOM identity metadata (amendment R9); PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3, B4 and B5 (inactive until the R17 switch flips, R28) | **Yes** (developed in parallel), with B4–B6 |
 | **B8 runbooks** | Claude, reviewed by Codex | Air-gapped and BYOC verification runbooks; every command executed before it is written down (M-041) | B4, B5 | **Yes**, with B6, B7 |
 
 ## Test strategy
@@ -606,7 +606,7 @@ A third review of PRs #253 and #265 raised further findings. Each was checked ag
 `main` (`apps/gateway/src/decision-receipts.ts`, `apps/gateway/src/org-settings.ts` `runAuditPruneOnce`,
 `apps/gateway/src/export-bundle.ts`, `packages/shared/src/audit-scrub.ts`, migrations 0168 and 0170, and the
 `usage_events`, `model_cards` and `eval_datasets` tables in `packages/db/src/schema.ts`). All were real; none needed an
-owner choice. They bind B1 to B8 like R1 to R14.
+owner choice. They bind B1 to B8 like R1 to R14. R25 to R28 answer four further comments from the same round.
 
 R15. **Late facts survive a signing-key outage.** With no receipt key the sweep returns `no_key` while governed calls
     go on (`decision-receipts.ts`, `runDecisionReceiptSignSweep`), so R5's "signed when written" would force an
@@ -699,6 +699,43 @@ R24. **Evaluation datasets map only what is recorded.** `eval_datasets` has no c
     `data_sensitivity` when `project_id` is set and absent otherwise, it has no governance owner, and an empty
     `checksum` (the column default) means no hash, not a hash of nothing. Each such gap puts the dataset in the
     `incomplete` composition.
+
+R25. **Automatic snapshots survive a signing-key outage.** With no receipt key, an OWNER DECISION 8 trigger
+    (use-case approval, model card approval, prompt promotion, evidence attached, config promotion, admission) could
+    neither sign its snapshot nor be retried later without reading state that has since changed. The triggering
+    operation does not fail; instead, in its own transaction, B3 writes an append-only
+    `ai_bom_snapshot_requests` row (subject, trigger, the triggering record's id, `created_at`) together with the
+    loaded record set captured under R22's repeatable-read rules (the R18 projections and the row-level basis), with
+    no key involved. A sweep freezes and signs pending requests in order once a key is present, from the captured
+    record set only, never by reloading live tables; each snapshot's `created_at` and `trigger` are the request's.
+    The posture page shows the count of pending requests. Requests are written only after the R17 switch has flipped;
+    before that a trigger records nothing, as R2 says.
+
+R26. **Every dataset hash is a valid, honest digest.** CycloneDX hashes carry an algorithm and a bare digest.
+    - `training_datasets.checksum` is self-describing (`datasetChecksum`, `packages/training-provider`):
+      `sha256:<64 hex>:<row count>` is parsed into a `SHA-256` hash of the hex part plus a
+      `regulait:dataset:rowCount` property; a value of any other form fails the parse.
+    - A retained pre-0176 `fnv1a32:` value is not a standard hash and is never relabelled as SHA-256: it is emitted
+      only as the property `regulait:dataset:legacyChecksum`, with no `hashes` entry, and the dataset is in the
+      `incomplete` composition. An empty checksum (the column default) gives no hash and the same composition.
+    - An evaluation dataset's hash (R24) is SHA-256 over the RFC 8785 bytes of the array of its version's
+      `eval_cases` projections (a fixed column list in the B1 shared zod), ordered by case id, labelled
+      `regulait:dataset:digestOf = eval_cases`. The verifier can recompute it only from the cases, which never leave
+      the boundary; the BOM says so.
+    - SPDX `verifiedUsing` follows the same rules.
+
+R27. **Data flows are keyed to each use case, never collapsed.** §3's service `data` flows take the classification
+    from one project's sensitivity, which an agent-scoped or install-scoped snapshot does not have: an agent can serve
+    several use cases with different `data_sensitivity`. For those snapshots each provider endpoint carries one
+    outbound and one inbound flow **per use case that references the agent**, each with that use case's
+    classification and a `regulait:dataFlow:useCase` property naming the use case id. An agent that no use case
+    references gets flows with no classification and `regulait:dataFlow:classification = unknown`, and is listed in
+    the `incomplete` composition. Distinct classifications are never merged into one, and no project is picked
+    arbitrarily. A use-case-scoped snapshot keeps §3's single flow pair.
+
+R28. **B7 waits for the renderer release.** B7's install-scope AI BOM is a snapshot, so it is subject to R2 and R17.
+    B7 now depends on B3, B4 and B5; it may be developed in parallel, but its release job stays inactive (it produces
+    no snapshot and publishes nothing) until the R17 switch has flipped.
 
 ### Owner items from the review (not decided here)
 
