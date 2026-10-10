@@ -132,7 +132,7 @@ One search tool failed for lack of account credits; another was used. Nothing bl
 | `pkijs` 3.4.1, `asn1js` 3.0.10 | BSD-3-Clause | already pinned (ADR-0186 S) | Yes | Re-verify the RFC 3161 token inside an exported Decision BOM offline |
 | `@spdx/tools` 0.1.0 | MIT | 2023-12-18 | — | **Fails "maintained"**; not admitted. No maintained JS/TS SPDX 3 model was found on npm (searched "spdx 3", "spdx3", "spdx-3", "spdx model", "shacl2code", "spdx 3.0 jsonld") |
 | `rdf-validate-shacl` 0.6.5 | MIT | 2025-05-30 | Yes | **Fails "maintained"** (16 months); not admitted for runtime SHACL validation |
-| `spdx3-validate` 0.0.7 (PyPI) | MIT | 2026-08-10 | Yes (pyshacl, rdflib, jsonschema) | **CI only, not shipped:** full SHACL conformance of our SPDX output against the official model, pinned in a CI job like ADR-0184's tools |
+| `spdx3-validate` 0.0.7 (PyPI) | MIT | 2026-08-10 | **No as shipped** (its CLI fetches the schema, model and context; amendment 4 after spike B0). Yes through the offline driver with vendored files | **CI only, not shipped:** full SHACL conformance of our SPDX output against the official model, pinned in a CI job like ADR-0184's tools, run only through the offline driver (amendments 4 and R13) |
 | Two npm packages published in 2026 under AI-BOM names | Apache-2.0 | 2026-03 and 2026-09 | — | Single maintainer each; both scan source repositories for AI usage, which is not our problem (we already hold the inventory). Not admitted |
 | `@cyclonedx/cdxgen` 12.8.5 | Apache-2.0 | 2026-09-29 | — | A repository/SBOM generator CLI; it does not read our database. Not needed: ADR-0184's Trivy already produces our software SBOMs |
 
@@ -194,11 +194,11 @@ Sections, each built from stored facts only:
 | `action` | the ADR-0104 `argumentsDigest` and `contextDigest`; target (server, tool, connector, model); **inputs by digest and classification only** (prompt commit hash, dataset version and checksum, project `data_sensitivity`, compliance profile), never content | `decision_facts` (decision 4) |
 | `policy` | governance policy epoch; ABAC policy version ids with their schema version; config version ids and canary bucket; guardrail config; model policy rule ids; the kill-switch dial state | `decision_facts` |
 | `model` | agent id, provider, requested model, served model, `pinned_model_version`, model card id and the approval in force, the AI BOM snapshot reference | `decision_facts`, `usage_events` |
-| `approval` | approval id, quorum, each decider id, step-up method, passkey `signed_digest` and credential id | `approvals`, `approval_decisions` |
-| `outcome` | result status, refusal code, upstream status class, post-action verification result where a workflow stage recorded one | `audit_log`, `trace_spans`, workflow records |
-| `cost` | usage event ids, tokens, cost in integer **micro-dollars** (never floating point in a signed body) | `usage_events` |
-| `trace` | trace id and span ids (no previews) | `trace_spans` |
-| `proof` | the audit-chain segment from the decision row to the anchor that covers it (`seq`, `contentHash`, `prevHash`, `rowHash` per row, as ADR-0116's `chain.tsv`), the anchor (`row_hash`, destination, `external_ref`, `flushed_at`), and the RFC 3161 token where one exists | `audit_log`, `audit_anchors` |
+| `approval` | approval id, quorum, each decider id, step-up method, passkey `signed_digest` and credential id | `approvals`, `approval_decisions`, **bound by row digest in `decision_facts`** (amendment R5) |
+| `outcome` | result status, refusal code, upstream status class, post-action verification result where a workflow stage recorded one | `audit_log` and `trace_spans` rows bound by digest in `decision_facts`; later facts only from signed addenda (amendment R5) |
+| `cost` | usage event ids, tokens, cost in integer **micro-dollars** (never floating point in a signed body) | `usage_events` rows bound by digest in `decision_facts` or a signed addendum (amendment R5) |
+| `trace` | trace id and span ids (no previews) | `trace_spans` rows bound by digest in `decision_facts` or a signed addendum (amendment R5) |
+| `proof` | the audit-chain segment from the decision row to the anchor that covers it (`seq`, `contentHash`, `prevHash`, `rowHash` per row, as ADR-0116's `chain.tsv`), the **complete canonical anchor record** (`seq`, `rowHash`, `headAt`, `algorithm`, `payloadVersion`, `capturedAt`) plus destination, status, `external_ref`, `flushed_at` and the recorded tamper-resistance observation, the finality state, and the RFC 3161 token where one exists (amendments R1 and R4) | `audit_log`, `audit_anchors` |
 | `completeness` | for every section: `recorded`, `not_applicable`, or `not_recorded` with a reason (for example, a decision made before ADR-0188's audit v2 boundary has `actors: not_recorded, reason: pre_identity`) | builder |
 | `basis` | the exact watermarks the document was built from (audit `seq`, anchor id, receipt seq, AI BOM snapshot id) and `supersedes` | builder |
 
@@ -229,29 +229,32 @@ Built from a signed native snapshot (`regulait.ai-bom.v1`, the authority) and re
 
 SPDX 3.0.1 (slice B5): `ai_AIPackage` for models, `dataset_DatasetPackage` for datasets, `Relationship` for
 dependencies; `hasDeclaredLicense` and `hasConcludedLicense` always present, pointing to `NoAssertionLicense` where
-unknown.
+unknown. The mandatory `AIPackage` properties follow amendment R3.
 
 ### 4. Decision facts are captured in the decision's transaction
 
 New append-only table `decision_facts`, one row per receipt-eligible audit row, written in the same transaction as the
 audit row by the governed paths (`mcp-proxy.ts`, `connector-call.ts`, `governed-evaluate.ts`, the approvals and
-agent-dispatch writers): the versions, digests and classifications of the `action`, `policy` and `model` sections.
-Its canonical bytes hash to `facts_hash`. The receipt payload carries `factsHash`, so the receipt signature covers the
-facts (open question 1: one receipt payload v2 shared with ADR-0188 decision 9). Free text never enters
-`decision_facts` (ids, digests, enums and integers only), so no new prose column needs the ADR-0102 scrub (M-055 check
-done at B1 anyway).
+agent-dispatch writers): the versions, digests and classifications of the `action`, `policy` and `model` sections,
+and the immutable row digests of the approval, outcome, cost and trace rows that exist at that point (amendment R5;
+later facts go in signed addenda). Its canonical bytes hash to `facts_hash`. The receipt payload carries
+`factsHash`, so the receipt signature covers the facts (open question 1: one receipt payload v2 shared with ADR-0188
+decision 9). Free text never enters `decision_facts` (ids, digests, enums and integers only), so no new prose column
+needs the ADR-0102 scrub (M-055 check done at B1 anyway).
 
 ### 5. Signing, freezing and exact-byte reproducibility
 
 - **Signer:** the ADR-0186 receipt key (`REGULAIT_RECEIPT_SIGNING_KEY`, `receipt_signing_keys`), Ed25519 over the
   RFC 8785 bytes of the BOM body. Domain separation is by the body's `v` field (`regulait.decision-bom.v1`,
   `regulait.ai-bom.v1`), which is inside the signed bytes; every verifier rejects an unknown `v`, so a receipt
-  signature can never verify as a BOM or the reverse (OWNER DECISION 2). No key, no BOM: 409 `bom_signing_unavailable`;
-  there is no unsigned fallback and no key generated on the box (the ADR-0116 rule).
+  signature can never verify as a BOM or the reverse (OWNER DECISION 2). No key, no new BOM: 409
+  `bom_signing_unavailable` on the routes that create or sign; there is no unsigned fallback and no key generated on
+  the box (the ADR-0116 rule). Verification and reading already-frozen bytes never need the private key (amendment R6).
 - **Freezing:** a Decision BOM is assembled on first request and **frozen** (stored bytes, hash, signature) only once
-  the decision's receipt is signed and an anchor covering its audit row has flushed (with an RFC 3161 token when
-  `audit_anchor_timestamp_mode` is `required`); before that the route answers 409 `bom_anchor_pending` with a
-  `Retry-After` (OWNER DECISION 4). An AI BOM snapshot is frozen when it is taken.
+  the decision's receipt is signed and an anchor covering its audit row has flushed **to a destination observed as
+  tamper-resistant** (with an RFC 3161 token when `audit_anchor_timestamp_mode` is `required`); before that the route
+  answers 409 `bom_anchor_pending` with a `Retry-After` (OWNER DECISION 4; the weaker states are in amendment R4). An AI
+  BOM snapshot is frozen when it is taken, and only once every v1 renderer has shipped (amendment R2).
 - **Exact bytes:** an export always returns the stored bytes; nothing is re-rendered after freezing. The builder is a
   pure function of the `basis` watermarks and stored rows, with no clock reads (times come from rows), no random
   values (the CycloneDX `serialNumber` is a UUID derived from the snapshot id, fixed at freeze), sorted lists, and
@@ -284,7 +287,7 @@ done at B1 anyway).
 | Setting | Default (strict) | Relaxable to | Notes |
 |---|---|---|---|
 | `decision_facts_capture` | `on` for every receipt-eligible decision | `off` | audited, `settings_relax` step-up; the posture page shows "Decision BOM: not captured" while off; decisions made while off have `not_recorded` sections forever |
-| `decision_bom_finality` | `anchored` (and timestamped when `audit_anchor_timestamp_mode = required`) | `chain_signed` (freeze once the receipt is signed, before the anchor; the BOM records `proof.anchor: absent`) | audited |
+| `decision_bom_finality` | `anchored`: flushed to a destination **observed** tamper-resistant (and timestamped when `audit_anchor_timestamp_mode = required`) | `anchored_unverified_destination` (flushed to a destination not observed tamper-resistant; the BOM and the verifier say so), then `chain_signed` (freeze once the receipt is signed, before the anchor; the BOM records `proof.anchor: absent`) | audited; amendment R4 |
 | `bom_export_roles` | admins only | admins plus an explicit auditor grant | granting is an admin act, audited |
 | `bom_person_identifiers` | `id_only` (user and workload ids) | `display_name` | audited; emails are never included (see invariants) |
 | `ai_bom_snapshot_triggers` | on sign-off events (OWNER DECISION 8) | on demand only | audited |
@@ -318,15 +321,20 @@ Build as for a first load: no grandfathering. Decisions made before B2 ships hav
 
 Every route is audited (who exported what), rate-limited, and refuses anyone outside `bom_export_roles`.
 
-- `GET /v1/ai-bom/:subjectKind/:subjectId` — the live, **unsigned draft**, labelled as such, for review.
-- `POST /v1/ai-bom/:subjectKind/:subjectId/snapshots` — freeze and sign a snapshot.
-- `GET /v1/ai-bom/snapshots/:id?format=native|cyclonedx-1.7|cyclonedx-1.6|spdx-3.0.1` and `…/:id/bundle`.
-- `GET /v1/ai-bom/:subjectKind/:subjectId/drift` — the live draft against the last signed snapshot (added, removed,
-  changed hash, changed version).
+- ~~`GET /v1/ai-bom/:subjectKind/:subjectId` — the live, unsigned draft~~ — **removed** (amendment R8). Review uses
+  a signed snapshot taken on demand.
+- `POST /v1/ai-bom/:subjectKind/:subjectId/snapshots` — freeze and sign a snapshot (disabled until B5 ships,
+  amendment R2).
+- `GET /v1/ai-bom/snapshots/:id?format=native|cyclonedx-1.7|cyclonedx-1.6|spdx-3.0.1` and `…/:id/bundle`. Every format
+  is delivered inside a verifiable `export-bundle/3` with the signed native body, never as bare rendering bytes
+  (amendment R7).
+- `GET /v1/ai-bom/:subjectKind/:subjectId/drift` — a change list (added, removed, changed hash, changed version) of the
+  live state against the last signed snapshot. Admins only, audited, `evidence: false` in the response, no download
+  and no format parameter; it is never a BOM document (amendment R8).
 - `GET /v1/decisions/:auditId/bom` (signed document; 409 `bom_anchor_pending`, 409 `bom_signing_unavailable`) and
   `…/bom/bundle`.
 - `POST /v1/boms/verify` — the same pure verifier, run online for convenience; it uses the server's recorded keys as
-  the trust root and says so in the result.
+  the trust root and says so in the result. It works with no private key configured (amendment R6).
 - Keys: the existing `GET /v1/receipts/keys`.
 - **UI (Codex):** an "AI BOM" tab on the use-case overview and on the agent inventory and model-risk pages (snapshot
   list, download per format, drift chips, the `incomplete` reasons); a "Decision BOM" action on an audit-log row and
@@ -342,7 +350,8 @@ Every route is audited (who exported what), rate-limited, and refuses anyone out
   ADR-0188 identities and grant ids (a remote worker's SPIFFE identifier appears in `actors`), never as content, so the
   documents respect the ADR-0015 data boundary and can be exported across it. The signing key is the customer's
   deploy-time receipt key; no private key leaves its plane.
-- **Hosted fast-start:** identical; the posture page shows "Decision BOM: unsigned" until a receipt key is set.
+- **Hosted fast-start:** identical; the posture page shows "Decision BOM: unavailable (no signing key)" until a receipt
+  key is set.
 
 ## Rollout: slices (one PR each)
 
@@ -358,11 +367,11 @@ against the specification rather than against itself.
 | **B0 spike** (research, no product code) | Claude | Confirm at runtime that `@cyclonedx/cyclonedx-library` 10.3.0's model lacks `modelCard`/`data`/`declarations`; compile its bundled 1.7 and 1.6 schemas and the SPDX 3.0.1 schema with our pinned Ajv offline, with the reject-all `idn-email` format; extend the `canonicalize` byte-identity corpus to BOM shapes; render a sample AI BOM twice and on two Node versions and compare bytes; run `spdx3-validate` pinned in a CI container; read the OWASP AIBOM field guidance. Output: a research note and go/no-go on decision 3's exception | none | **Yes**, now, with ADR-0188 S1–S4 |
 | **B1 foundation** | Claude | Migration `0181+` (decision 8 tables, settings, immutability triggers), `schema.ts`, shared zod for `regulait.decision-bom.v1` and `regulait.ai-bom.v1`, strict settings with audited relaxation, every route as a 501 stub, receipt payload v2 `factsHash` as agreed under open question 1 | B0 go; ADR-0188 S1 merged (shared migration journal) | serial (hot files) |
 | **B2 fact capture** | Claude | `decision_facts` written in the decision transaction on every governed path; `factsHash` in receipts; the `actors` facts read from ADR-0188's columns | B1; **ADR-0188 S4 merged** (same files, and the actor chain must exist) | serial |
-| **B3 AI BOM builder and CycloneDX renderer** | Claude | `packages/shared/src/bom/` pure builder from a loaded record set, CycloneDX 1.7 and 1.6 renderers, validation, compositions; gateway loader, snapshot, drift and draft routes | B1 | **Yes**, with B2 (no shared files) |
+| **B3 AI BOM builder and CycloneDX renderer** | Claude | `packages/shared/src/bom/` pure builder from a loaded record set, CycloneDX 1.7 and 1.6 renderers, validation, compositions; gateway loader, snapshot and drift routes (no draft route; snapshot routes and triggers ship disabled until B5 merges, amendment R2) | B1 | **Yes**, with B2 (no shared files) |
 | **B4 Decision BOM assembler, signer, bundle and verifier** | Claude | Assembly from facts and stored rows, freezing rules, signing with the receipt key, `export-bundle/3`, pure verifier and `scripts/verify-decision-bom.mjs`, `POST /v1/boms/verify` | B2, B3 (BOM-Link) | serial after B2 |
 | **B5 SPDX 3.0.1 renderer** | Claude | `ai_AIPackage`, `dataset_DatasetPackage`, licence relationships; schema validation in the product, `spdx3-validate` in CI | B3 | **Yes**, with B4 |
 | **B6 web UI** | Codex | Decision 9's tabs, actions and verify panel; drift view; posture rows | B1 stubs | **Yes** (web only); merges after B4's real routes |
-| **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs in `security.yml`; PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3 | **Yes**, with B4–B6 |
+| **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs through release-published, signed SBOM identity metadata (amendment R9); PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3 | **Yes**, with B4–B6 |
 | **B8 runbooks** | Claude, reviewed by Codex | Air-gapped and BYOC verification runbooks; every command executed before it is written down (M-041) | B4, B5 | **Yes**, with B6, B7 |
 
 ## Test strategy
@@ -382,9 +391,12 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
   `unknown` and its composition is `incomplete`; a test fails if any `complete` aggregate has an unrecorded member.
 - **No content.** Seeded prompts, arguments and outputs containing canary strings never appear in any BOM, rendering or
   bundle; an email address in any input field fails validation.
-- **Finality.** Before the anchor flushes → 409 `bom_anchor_pending`; after → frozen; with the relaxed setting →
-  frozen with `proof.anchor: absent`, and the relaxation is audited.
-- **No key.** Unset receipt key → 409 on every BOM route; no key is generated.
+- **Finality.** Before the anchor flushes → 409 `bom_anchor_pending`; flushed to a destination not observed
+  tamper-resistant → still 409 under the default; after a tamper-resistant flush → frozen as `anchored`; with each
+  relaxed setting → frozen as `anchored_unverified_destination` or with `proof.anchor: absent`, the verifier reports
+  the state, and the relaxation is audited (amendment R4).
+- **No key.** Unset receipt key → 409 `bom_signing_unavailable` on every route that creates or signs; verify and reads
+  of frozen bytes still work; no key is generated (amendment R6).
 - **Standards.** Every rendering validates against the bundled official schema offline (network disabled in the test);
   SPDX output passes `spdx3-validate` in CI; Codex's specification-only verifier vectors pass.
 - **Access.** Non-admins without the auditor grant → 403; every export writes an audit row.
@@ -427,6 +439,176 @@ for ADR-0188 S1 and S4, as the slice plan says.
 11. **OWNER DECISION — retention.** *Recommended:* Decision BOMs and AI BOM snapshots follow the compliance profile's
     audit retention and are kept under evidence holds; renderings are deleted with their parent.
 
+## Amendments after spike B0 (2026-10-10)
+
+Spike B0 (`docs/research/R12-bom-b0-spike.md`, PR #265) returned GO on the ADR-0176 §4 exception. These amendments
+bind slices B1 to B8.
+
+1. **The CycloneDX library is used for its schema files only.** At runtime, 10.3.0's model also lacks `compositions`,
+   `definitions`, `annotations`, top-level `externalReferences`, and `Service.endpoints/data/trustZone/authenticated`.
+   Its 1.7 serializer silently drops fields forced onto the objects. B3 never uses the library's model or serializer.
+2. **`iri-reference` maps to the ajv-formats `uri-reference` check (ASCII only).** The library's accept-all behaviour
+   is an insecure default under ADR-0180.
+3. **Ajv settings:** `strict: true` and `strictRequired: false`; `meta:enum` registered as an annotation-only keyword;
+   schemas compiled once at boot or precompiled, because compiling takes 2-3 s.
+4. **`spdx3-validate` is "No as shipped" for air-gapped use.** It fetches the schema, the SHACL model and the
+   JSON-LD context. The CI job uses the vendored files, the offline driver, a hash-locked install and no network.
+5. **Exact-bytes rules:**
+   - SPDX `created` is truncated to whole seconds; the native body keeps the full time.
+   - `serialNumber` is an RFC 9562 v8 UUID derived from SHA-256 of `regulait:ai-bom:<snapshot id>`.
+   - Sorting is by code unit, never `localeCompare`.
+   - Integers must not exceed 2^53.
+   - Metric values are strings.
+6. **CI-only Python closure (owner, 2026-10-10):** PSF-2.0 (`typing_extensions`) and W3C-20150513 (`owlrl`) are
+   allowed for CI tooling that never ships; see the ADR-0176 amendment of the same date.
+7. **Vendored SPDX 3.0.1 schema, model and context (owner, 2026-10-10):** admitted as standards-body specification
+   data under Community-Spec-1.0 / CC-BY-3.0, with attribution in THIRD_PARTY.md; see ADR-0176.
+8. **CycloneDX mapping additions,** from the OWASP AIBOM field registry:
+   - `modelCard.modelParameters.task` and `modelArchitecture`;
+   - `licenses` on model components, with an unknown licence stated as unknown and the composition marked
+     `incomplete`;
+   - `purl` or a distribution reference, only when the provider supplies one;
+   - the SPDX AI-profile fields as `regulait:` properties, marked unknown or supplier-declared.
+
+   Open question 6 is updated accordingly.
+9. **B0's "CI container" was met only as a hash-locked, network-isolated venv.** B5 builds the real CI job.
+
+## Amendments after review (2026-10-10)
+
+A review of PRs #253 and #265 raised findings against this ADR and the B0 spike. Each was checked against the ADR text
+and the code it cites on `main` @ 3119813. The real ones are resolved below, each with the secure-by-default choice
+(ADR-0180). These amendments bind B1 to B8 and take precedence over any earlier text they contradict; the rows and
+rules that would have contradicted them were updated in place. The B0 evidence (R12) is on branch `b6-bom-b0` and
+reaches `main` with PR #265.
+
+R1. **The proof carries the complete canonical anchor record.** The RFC 3161 imprint is SHA-256 over
+    `canonicalJson({seq, rowHash, headAt, algorithm, payloadVersion, capturedAt})` (`anchorRecordFromRow`,
+    `apps/gateway/src/audit-timestamp.ts:51`; `payloadVersion` is read from the versioned `tsa_token` storage and
+    `capturedAt` is the row's `created_at`). The `proof.anchor` object carries those six fields exactly as stored,
+    plus the anchor id, destination, status, `external_ref`, `flushed_at` and the tamper-resistance observation (R4).
+    The offline verifier rebuilds the canonical bytes, checks their SHA-256 against both the stored
+    `tsa_message_imprint` and the imprint inside the token, and checks that `seq` and `rowHash` match the last row of
+    the chain segment. A proof without all six fields is `invalid`, not `unverifiable`.
+
+R2. **No AI BOM snapshot is frozen until every v1 renderer has shipped.** Renderings are produced only at freeze and
+    their hashes sit inside the signed native body, so a snapshot frozen before B5 could never gain SPDX. B3 ships its
+    snapshot route and the automatic triggers **disabled in code** (501 `bom_snapshots_not_released`, not an admin
+    setting); B5 enables them in the same PR that adds the SPDX renderer. B3 and B5 may still merge as separate PRs.
+    A renderer added after v1 (for example in-toto) applies only to snapshots taken after it ships; an older snapshot
+    answers that format with 404 `format_not_rendered_for_snapshot` and the list it has. Nothing is back-filled; a new
+    format for an old subject means a new snapshot version with `supersedes`.
+
+R3. **Mandatory SPDX `AIPackage` properties are never invented.** SPDX 3.0.1 sets `releaseTime`, `suppliedBy`,
+    `downloadLocation`, `packageVersion` and `primaryPurpose` to minCount 1 on `AIPackage` (the class page's "External
+    properties cardinality updates", read 2026-10-10). The official SHACL model does **not** enforce these (the B0
+    sample passes `spdx3-validate` without `releaseTime` or `downloadLocation`), so B5 adds its own cardinality check
+    for every mandatory property and runs it beside schema and SHACL validation. Sources: `primaryPurpose` is `model`;
+    `suppliedBy` is the provider `Organization`; `packageVersion` is `pinned_model_version`, else the recorded served
+    model; `releaseTime` and `downloadLocation` only from a supplier-declared value recorded on the model card. Where
+    the standard defines a no-assertion form for a property (element-valued properties, licences), B5 uses it and
+    marks the snapshot `incomplete`. For a literal-valued property with no such form (`releaseTime` is a DateTime,
+    `downloadLocation` an anyURI, `packageVersion` a string), the standard gives no unknown value. Until the owner
+    decides (owner item 1 below), the strict default applies: that model's snapshot gets **no SPDX rendering**; the
+    signed native body records `spdx-3.0.1: not_producible` with the missing property names, the snapshot is
+    `incomplete`, and the CycloneDX renderings are unaffected. No placeholder date, URL or version is ever emitted.
+
+R4. **`anchored` finality requires an observed tamper-resistant destination.** A flush to `local_worm`, or to an S3
+    bucket whose observation is not compliance-mode Object Lock, still sets `audit_anchors.status = flushed`, while the
+    sink reports `tamperResistant: false` (`apps/gateway/src/audit-chain.ts`, `LocalWormSink`, `S3ObjectLockSink`), and
+    the observation is not persisted. So:
+    - B1 adds to `audit_anchors` the observation made at flush time (`tamper_resistant` boolean, observation mode and
+      time), written in the flush; an unobserved flush records `false`.
+    - Finality states, strictest first: `anchored` (flushed, observation `true`, and timestamped when timestamps are
+      required); `anchored_unverified_destination` (flushed, observation `false`); `chain_signed` (no anchor).
+    - The default `decision_bom_finality = anchored` freezes only the first; otherwise the route answers 409
+      `bom_anchor_pending` with reason `destination_not_tamper_resistant`. Each weaker state is an audited
+      relaxation.
+    - The state and the observation are inside the signed body; the verifier reports the state, and its `cannotProve`
+      list gains "that the anchor destination is tamper-resistant: this is the server's recorded observation".
+    - Consequence: an install without compliance-mode Object Lock (every `local_worm` install, including air-gapped
+      ones until they have an S3-compatible WORM store) gets no Decision BOM until an admin relaxes the setting. The
+      posture page says so.
+
+R5. **Every historical section is bound to the receipt.** `decision_facts` covered only `action`, `policy` and `model`,
+    so approval, outcome, cost, trace and post-action verification were read from live tables (Option A's problem).
+    Now:
+    - At decision time, in the same transaction, `decision_facts` also carries the immutable digests of the approval,
+      approval-decision, usage-event and trace-span rows that exist then, and the outcome fields of the audit row. A row
+      digest is SHA-256 over the `canonicalJson` of a fixed column list per table, defined once in the B1 shared zod.
+    - Facts that arrive later (a usage event written after the upstream call, late spans, a post-action verification)
+      go in a new append-only table `decision_fact_addenda` (`audit_id`, `n`, `prev_hash`, `facts`, `facts_hash`,
+      `signature`, `key_id`, `created_at`), hash-chained from the decision's `facts_hash` and signed with the receipt
+      key under its own `v` (`regulait.decision-facts-addendum.v1`) when written. Immutability trigger, as for
+      `decision_facts`.
+    - The assembler takes approval, outcome, cost and trace only from rows whose digest is in the facts or an addendum,
+      and re-checks each digest when it assembles; a mismatch fails assembly. A section with no bound row is
+      `not_recorded`. Live tables are never a source without a bound digest.
+    - The verifier checks each addendum's signature and its chain back to the receipt's `factsHash`.
+
+R6. **Verification never needs the private key.** 409 `bom_signing_unavailable` applies only to routes that create or
+    sign: `POST …/snapshots`, the first assembly and freeze of a Decision BOM, and building a new bundle (which also
+    needs the ADR-0116 export key). `POST /v1/boms/verify` uses the recorded public keys (`receipt_signing_keys`, as
+    `/v1/receipts/verify` does today), and reading already-frozen bytes needs no key. A retired or removed key never
+    stops verification of BOMs it signed.
+
+R7. **Renderings ship only inside a verifiable bundle.** A CycloneDX or SPDX rendering is authenticated only by its hash
+    in the signed native body. Every `format=` download is therefore an `export-bundle/3` holding the rendering, the
+    signed native body, its signature and the BOM-Link data; bare rendering bytes are never served. A detached
+    manifest was rejected because the rendering file can then travel without it. Recipients who need a lone file
+    extract it from the bundle after verifying.
+
+R8. **The unsigned draft route is removed.** The stricter of the two options, because an unsigned document in BOM shape
+    can leave the boundary and be taken for evidence, whatever its label, and the review need is met by a signed
+    snapshot taken on demand. The drift route stays as a change list only (admins only, audited, `evidence: false`,
+    no download), and like the snapshot routes it needs a signing key to have a snapshot to compare with.
+
+R9. **B7 reads signed SBOM identities from the release.** The ADR-0184 SBOMs exist only as CI artifacts, so the
+    deployed gateway has no trusted source for their serials, versions and hashes. B7 makes `security.yml` publish, per
+    release, an SBOM identity file (`serialNumber`, `version`, SHA-256 and kind for the workspace and image SBOMs, and
+    the image digest), signed by the CI step that already signs the scanned image (ADR-0184 `sign` job) and
+    shipped with the release. The install-scope
+    AI BOM is built only from a file whose signature verified at install time against a trust root shipped with the
+    release; without one, the `externalReferences` are omitted and the composition is `incomplete`. The trust root for
+    air-gapped installs is owner item 2.
+
+R10. **Emails are rejected by a whole-document scan.** The `idn-email` reject-all format covers only fields that the
+    schema types as email. B3 runs, before freeze, a scan of every string (object keys and values) of the native body
+    and every rendering, and refuses the snapshot (no redaction) when any token matches an email shape. Fail closed:
+    a false positive refuses the snapshot and names the JSON path. B4 runs the same scan on Decision BOMs. The B0
+    spike now has this scan and a test that puts an email into a use-case name, a model-card limitation, a
+    `properties[].value` and an object key (PR #265).
+
+R11. **PII verdicts map from the persisted vocabulary.** `training_datasets.pii_verdict` is `clean | flagged | blocked`
+    (`TRAINING_SCAN_VERDICTS`). `flagged` and `blocked` render as CycloneDX `sensitiveData: ["pii"]` and SPDX
+    `hasSensitivePersonalInformation: yes`. `clean` renders as no `sensitiveData` entry and SPDX `noAssertion`, with
+    the verdict as a `regulait:` property, because a clean scan is not proof of absence. Any other value fails the
+    build.
+
+R12. **Evidence is complete and its scanners are exact.** Declarations include every `model_card_evidence` row
+    (`eval_run`, `external`, `engine_scan`) that supports an approved model card, each as a claim with its evidence,
+    not only `artifact_scans`. Each engine is a `container` component keyed by engine, version and image digest
+    (`artifact_scans` allows repeated runs, so one engine name can have several versions in one snapshot), and every
+    attestation names the exact scanner component that produced it.
+
+R13. **The SPDX offline driver fails on no input.** Amendment 4's offline driver exits non-zero when it is given no
+    document, so a misconfigured CI command cannot pass without validating anything.
+
+R14. **Not reproduced or already covered.** The finding that the ADR still calls `spdx3-validate` air-gapped and that
+    B5 lacks the offline path was already resolved by amendment 4 (commit `cb52d25`, after the reviewed spike commit);
+    the libraries-table row is now updated to match. The finding that the B0 evidence is missing is answered above:
+    it is on `b6-bom-b0` (PR #265), not on this branch, by design.
+
+### Owner items from the review (not decided here)
+
+1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
+   rendering for that snapshot, with the reason recorded; (b) emit the SPDX document without those properties, marked
+   `incomplete`, knowing it does not meet the AI profile's cardinality; (c) require the supplier's release time and
+   download location as mandatory model-card fields before a model can be approved. Recommended: (a) now, with (c)
+   added for models that will be exported as SPDX. Until the owner decides, (a) applies.
+2. **Trust root for the release's SBOM identity file in air-gapped installs** (R9): verify the release's existing
+   keyless signature offline against a trusted-root file shipped with the release, or an owner-held release key.
+   Recommended: the existing signature with the shipped trusted root, so no new key needs custody.
+
 ## Open questions
 
 1. **Receipt payload v2.** ADR-0188 decision 9 adds sponsor, actor chain and grant id to receipts; this ADR adds
@@ -443,8 +625,9 @@ for ADR-0188 S1 and S4, as the slice plan says.
    taxonomy so consumers can rely on them. Proposed: register once B3's names are stable.
 5. **EU AI Act Annex IV mapping.** Whether an AI BOM snapshot should be offered as part of the technical documentation
    export of a high-risk use case. Not decided here.
-6. **OWASP AIBOM field guidance** was not read (decision table above); B0 reads it and reports any field we should
-   add.
+6. **OWASP AIBOM field guidance.** Resolved by spike B0 (R12 §6, on PR #265, branch `b6-bom-b0`): the field registry
+   was read and its additions are amendment 8 above. The OWASP project page returned 404 and was not read; B3
+   re-checks it if it comes back. Nothing further is open here.
 7. **The argument digest coverage** (Context): if B2 finds receipt-eligible paths that never compute
    `argumentsDigest`, those paths record `not_recorded` until a follow-up computes it.
 
