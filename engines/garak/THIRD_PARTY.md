@@ -10,7 +10,8 @@ worker shim (`packages/engine-garak`) is pinned by `pnpm-lock.yaml`. Facts were 
 **Admission status: NOT ADMISSIBLE YET.** The image has not been built where its digest could be recorded (no Docker
 daemon where B5-G was built; `security.yml` builds, scans and signs every `engines/*/Dockerfile`, decision 120), the
 image-level scan (OS layer, vulnerabilities, licences, and the native libraries inside the torch wheel) has not run,
-the closure's advisories have not been checked (pip-audit or OSV at the first build), and 20 licence entries outside
+one fixable HIGH advisory is allow-listed with an expiry (fsspec CVE-2026-104851: garak 0.17.0's `datasets<4.0` holds
+fsspec at 2025.3.0; not reachable in this build; ADR-0187 decision 160; `security/image-allowlist.engine-garak.json`), and 20 licence entries outside
 the ADR-0176 list await an owner decision (below). The shipped manifest carries no digest, so the engine cannot be
 enabled (ADR-0187 decision 3).
 

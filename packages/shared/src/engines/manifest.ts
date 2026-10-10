@@ -179,7 +179,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
       "image digest and signature (the image is not built yet)",
       "maintainer count (the repository's merge rights could not be read)",
       "transitive licences: MPL-2.0 (certifi, mikeshardmind-base2048, parts of tqdm and orjson), ZPL-2.1 (DateTime, zope.interface), and the Python runtime (PSF-2.0) are outside the ADR-0176 list and await an owner decision; the native libraries inside the CPU torch wheel and the base image OS layer are not yet scanned",
-      "advisories of the Python closure (pip-audit or OSV at the first image build)",
+      "one fixable HIGH advisory is allow-listed until 2026-12-09: fsspec CVE-2026-104851, held at 2025.3.0 by garak 0.17.0's datasets<4.0 pin and not reachable in this build (ADR-0187 decision 160)",
       "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
       "nothing is pre-seeded: probes that need a Hugging Face model or dataset are not run",
     ],

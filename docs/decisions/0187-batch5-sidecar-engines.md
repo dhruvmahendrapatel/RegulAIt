@@ -1668,6 +1668,21 @@ guard was shown red by breaking it (the mutation is named with each decision).
      JSON Lines; `JSON.parse` per line with our consistency checks is the whole parser. `uv` (MIT/Apache-2.0, a
      developer tool, not shipped) resolved the lockfile. `pip-licenses` was not taken for the gate, as for modelscan (it
      does not see bundled native libraries).
+160. **One image finding allow-listed: fsspec CVE-2026-104851 (PR #228, CI run 38014936852, the engine-image gate).**
+     Reproduced locally with the pinned Trivy 0.74.0 and the job's flags (`--scanners vuln --severity HIGH,CRITICAL`,
+     the gate counting only findings with a fixed version) over the venv rebuilt exactly as the Dockerfile builds it
+     (both lockfiles, the prune, pip removed), the shim's production node closure and the pinned base image. The ONLY
+     fixable HIGH or CRITICAL is fsspec 2025.3.0 (fixed in 2026.6.0); the base image's OS findings (util-linux, ncurses,
+     systemd libraries, perl-base, acl) and nltk's CVE-2026-81726 have no fix, so the gate does not count them. **The
+     bump is impossible without breaking declared constraints:** garak 0.17.0 requires `datasets<4.0`, and every
+     datasets 3.x release caps fsspec at or below 2025.3.0 (3.6.0, the last 3.x, at `<=2025.3.0`); the build's
+     `pip check` would fail. So it is a dated entry in `security/image-allowlist.engine-garak.json` (reviewed
+     2026-10-10, expires 2026-12-09, the shortest window that covers about two garak releases), with the reachability
+     argument: fsspec is reached only through datasets and the hub client, which garak calls only from
+     packagehallucination, sysprompt_extraction, audio and goat, none of which this build plans; both libraries run
+     offline; the worker reaches only the gateway; no run-supplied file reaches fsspec. The repository's gate passes on
+     the local report with the entry and fails without it. **Fix path:** the first garak release that allows datasets 4.x
+     (or drops it) is pinned and the entry removed in that PR.
 
 ## Consequences
 

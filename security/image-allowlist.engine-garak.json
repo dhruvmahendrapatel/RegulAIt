@@ -1,0 +1,11 @@
+{
+  "entries": [
+    {
+      "id": "CVE-2026-104851",
+      "package": "fsspec",
+      "reason": "Fix blocked by upstream pins, not reachable here (ADR-0187 decision 160). fsspec 2025.3.0 is held by datasets 3.6.0 (fsspec<=2025.3.0, and every datasets 3.x caps it at or below that), which garak 0.17.0 requires (datasets<4.0); installing 2026.6.0 breaks the declared constraints and the build's pip check. The flaw is code execution when fsspec loads a crafted reference document. In this image fsspec is reached only through datasets and the Hugging Face hub client, and garak calls them only from packagehallucination, sysprompt_extraction, audio and goat, none of which this build ever plans (missing_preseed, excluded_licence, cloud_only). The hub and datasets libraries run with HF_HUB_OFFLINE/HF_DATASETS_OFFLINE, the worker reaches only the gateway, and no file a run supplies reaches fsspec (garak reads its bundled data by path, our config names no URL but the gateway). Re-check at each garak release (about monthly).",
+      "reviewedOn": "2026-10-10",
+      "expires": "2026-12-09"
+    }
+  ]
+}
