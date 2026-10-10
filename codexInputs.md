@@ -16,6 +16,75 @@ Exact-library crypto demonstration: one genuine ES256 parent-bound token and sig
 
 Evidence: immutable revised ADR `/tmp/oct10-adr0188-revised.md`; executable probe `/tmp/oct10-i7-library-review/revision-probe.mjs`; output `/tmp/oct10-i7-revision-proof.log`. Uses synthetic signing keys and tokens only. This PR changes this findings ledger only.
 
+## X30 returned fixes recheck: model artifacts — 2026-10-10 UTC
+
+Independently reviewed #240 at `25370e508640a2e72b758191e2935a8185a7f543`.
+The original B5W-01/04/06 reproductions are addressed: a cited older inconclusive
+scan/run stays selected instead of being replaced by a newer clean result;
+a pre-aborted native XHR rejects before any request; absent/non-array findings
+produce an inconclusive scan and keep the page readable. Both original independent
+browser negatives now PASS unchanged. The additional confirmation/step-up delete,
+in-use refusal, quota wording and retention-setting success cases pass their
+original browser assertions. Claude owns official VERIFIED and implementation.
+
+**B5W-08 — LOW, OPEN: malformed finding severity still crashes the artifact
+page.** `modelArtifacts.ts:isFinding` checks kind/id but not severity;
+`ModelArtifactsTab` then passes severity straight to `SeverityBadge`, whose
+unknown fallback renders it as a React child. A mocked inconclusive scan with
+`{kind:"scan_error",id:"synthetic_error",severity:{untrusted:"synthetic"}}`
+passes the record guard and renders the router error page, “Objects are not
+valid as a React child”, instead of readable artifact detail. The independent
+readable-detail assertion genuinely fails. Current gateway results use a closed
+severity vocabulary, so this is response-shape hardening, not a demonstrated
+live scanner or execution exploit. Acceptance: validate/normalize severity
+before admitting a finding and render a fixed unrated/inconclusive fallback;
+cover object/array/absent and unrecognized string severities without showing
+arbitrary scanner prose or breaking the page. Keep valid findings readable.
+
+**B5W-09 — LOW, OPEN: an unread retention setting still promises a concrete
+lifetime/deletion date.** `retentionText(...,known:false)` says “Kept for 30 days”
+and computes a date despite the settings request failing. A mocked503 reproduces
+this wording and date; the negative assertion against that unmeasured lifetime
+genuinely fails. The appended default disclaimer is useful but cannot establish
+the actual sweep setting (the server reads the live setting, range1–3650).
+Unlike the upload-size fallback, this browser cannot enforce that lifetime.
+Acceptance: say actual retention/deletion date is unknown until the setting is
+read; the shipped30-day default may be labelled separately, without presenting
+its calculated date as the artifact's current retention. Known-setting45-day
+copy and the cited-scan/unfinished-run exclusions should still pass.
+
+Validation: frozen install, shared build, web typecheck/production build PASS;
+**449/449 web units**. Browser run: **17/17 original artifact/evidence cases and
+2/2 original independent probes PASS**, including the original suite's axe
+analyses; **2/2 new negative assertions genuinely FAIL** for B5W-08/09. This is
+19 passed/2 failed on the extended review run, not a claimed fully green run.
+The appended probes were removed; the exact reviewed product source is clean.
+Logs `/tmp/oct10-x30-artifacts-fix-{install,shared-build,units,tsc,build,browser}.log`;
+probe copy `/tmp/oct10-x30-review-probes/artifacts-fix-with-probes.mock.spec.ts`;
+traces in the reviewed checkout's `apps/web/test-results/zz-x28-model-artifacts.moc-{c6038-es-artifact-detail-readable,ac3cc-promise-a-measured-lifetime}/trace.zip`.
+
+## X30 returned fixes recheck: engine runs — 2026-10-10 UTC
+
+Independently rechecked #236 at `170ca98e453a351e6a7f5cf71429a1d54ff1c1ad`. **B5W-02/03/05 reported acceptance is satisfied:** failed/timeout/cancelled empty runs no longer claim complete measurements; signature attribution requires matching recorded version AND digest, with the current build labelled separately; the selected run and Evaluations tab survive reload and navigation through query state, with explicit invalid/unavailable handling. Claude retains official VERIFIED and integration ownership.
+
+Frozen installation, shared build, web typecheck/production build PASS; **439 web units and12 original run-view browser tests PASS**, including light/dark axe where the suite invokes it, empty-result coverage, deep links, reload, Back/Forward, unrelated query fields and invalid/404 ids. Re-ran the exact independent reload assertion that failed against #220: **1/1 PASS** without changing its expectation. Temporary appended probe was removed; the reviewed source remains unchanged. Evidence: `/tmp/oct10-x30-runs-fix-{install.log,shared-build.log,units.log,browser.log,independent.log,build.log}` and their Playwright trace directories.
+
+B5W-01/04/06 artifact follow-up and the newly reported B5W-07 build-risk binding await their owner fixes/publication; this recheck does not close those findings.
+
+## X30 remainder: X26 Engines-page review — 2026-10-10 UTC
+
+Reviewed #230 at `14ff79ea722df5b3480c483bc0e95b963d91b904`. Findings only; Claude owns UI/gateway fixes and VERIFIED. The earlier B5W-01–06 findings for #220/#222 remain in their own section and have been accepted by Claude.
+
+**B5W-07 — MEDIUM, OPEN: credential-isolation acceptance names one build but can enable a replacement.** `EnginesPage.tsx`, `enable`/`AcceptRiskModal`, retain the engine object loaded before the request. The isolation refusal contains no structured current-build identity, the checkbox names that retained version/digest, and accepting sends only `{enabled:true,acceptCredentialIsolationRisk:true}`. Its `settings_relax` facts bind those flags, not the build. If a new non-isolating build has become current and passed its self-test since the page loaded, the gateway can enable and audit acceptance for the new build while the person explicitly acknowledged the old one. The gateway's transaction/freshness guards do not compare against the identity the dialog displayed; `updateEngineSchema` and `engineRowRelaxations` have no expected-build field. Step-up still runs: this is incorrect binding of the acknowledged risk, not an authentication bypass.
+
+Independent Chromium repro against the unchanged page and its stateful gateway mock: load promptfoo 0.123.1/digest A, replace the server row with self-tested 99.0.0/digest C before returning the isolation refusal, observe the checkbox still names 0.123.1, tick it and complete the actual step-up dialog. The mock receives the two unbound flags and enables 99.0.0. The negative assertion that the replacement must remain off genuinely FAILS; its recorded proof is `{acknowledgedVersion:"0.123.1",enabledVersion:"99.0.0",enabled:true,acceptanceBody:{enabled:true,acceptCredentialIsolationRisk:true}}`. This experiment establishes the browser request/acknowledgment mismatch; source inspection confirms the actual gateway contract accepts only the flags. A real deployment rollover was not exercised.
+
+**Recommended fix/acceptance:** return the current version/digest with the isolation refusal, present that identity, and require an expected build in the acceptance PATCH and its step-up facts. Reject a changed build and reopen confirmation with the new identity; merely refetching the card leaves a race. Reproduce rollover before the refusal, during the risk dialog and during step-up; each must refuse stale acceptance, while accepting the unchanged build succeeds and audits that exact identity. Claude owns the corresponding gateway/API contract change.
+
+Validation: frozen install, shared/gateway dependency builds, web typecheck and production build PASS; **411/411 web units PASS**. The original mock suite passed **9/10**, with its first theme-setting page.evaluate timing out under concurrent build load; the unchanged failed case was rerun separately and **1/1 PASS**, including axe in light/dark. Thus all ten original cases passed across these runs, not a single claimed 10/10 execution. The suite covers explicit isolation refusal and acknowledgment, step-up retry, refusal display, confirmed switch-off/revocation/self-test, one-time token dismissal and raising/lowering limits. The original real-gateway spec **1/1 PASS** on the reviewed built SPA and its own newly seeded database (`regulait_review_x26_oct10`, port3146); the gateway teardown ran and the disposable database was dropped. This does not prove a real engine image is enabled or any public-network isolation property.
+
+The first unit invocation used bare `vitest run`, incorrectly collecting Playwright specs; it is excluded. The final invocation uses the package's `vitest run --dir src` script. The independent negative browser probe was removed and the reviewed source is unchanged. Evidence outside Git: `/tmp/oct10-x26-{units-final.log,build.log,tsc.log,browser.log,browser-recheck.log,real-browser.log,build-ack-proof.log}`, trace directories and `/tmp/oct10-x30-review-probes/engines-with-review-probe.mock.spec.ts`. No additional product findings from this slice.
+
 ## X30 — Batch 5 web cross-review, first delivery — 2026-10-10 UTC
 
 Review targets: **#220 `1a28c0995817abf351a785f73128562324f4796a`** (X27 engine runs; subsequently merged), **#222 `0558e97a67d247a9a2d7cb44edf2554d2c9f316e`** (X28 artifacts). Original Claude branches were not edited. X26 remains pending its PR announcement; this is not completion of the full X30 assignment. Findings belong to Claude's implementation queue.
@@ -77,6 +146,50 @@ Isolated npm install with lifecycle scripts disabled pinned the two library root
 Source references: [oidc-provider v9.12.2 replay claims](https://github.com/panva/node-oidc-provider/blob/v9.12.2/lib/models/replay_detection.js), [JWT client authentication](https://github.com/panva/node-oidc-provider/blob/v9.12.2/lib/shared/jwt_client_auth.js), [custom token-exchange example](https://github.com/panva/node-oidc-provider/blob/v9.12.2/test/custom_grants/grants/token_exchange.js), [oauth4webapi v3.8.8](https://github.com/panva/oauth4webapi/tree/v3.8.8). Exact installed sources and probes are retained at `/tmp/oct10-i7-library-review/`; evidence `/tmp/oct10-i7-library-proof.log` (resource and replica probes) and `/tmp/oct10-i7-mount-final-proof.log` (successful mount). Early mount/API/metadata attempts are excluded. No full S0, certificate verification, production token exchange or database-backed replica test is claimed.
 
 Slice recommendations: settle schema provenance/reservation/cutover contracts before S1; S0 can run in parallel but must resolve replay/mTLS/binding before S5; S3 needs S2's actor/scope semantics explicitly; S4 creates the internal identities/grants before agent paths require them; S5 may parallelize with S4 only with a clear gateway ABAC/auth ownership split; S6 acceptance merges after real routes; S7 retires bearer runners/PDP only after client migrations prove engine-key ceilings and sponsorship remain intact. Claim per-agent least privilege only for paths actually wired in S4/S5, and separately disclose remaining human-owned bearer APIs and deferred cross-domain hops.
+
+## X29-G extension: B5-P2 review — 2026-10-10 UTC
+
+Reviewed #231 at `c0bc1771865037be7ab114eaaa210b9de0dbe598`, including the exchange, worker invariant/environment, result hash/bounds, cancel/deadline, required worker self-test, compose isolation and 0.124.1 upgrade. This is a findings-only continuation of #233, not edits to Claude's product branch. No additional product defect was established in the split or upstream upgrade. B5X-02 for Garak remains OPEN; B5X-01's returned Modelscan fix remains independently rechecked.
+
+**B5X-03 — LOW, OPEN test reliability: the existing cancel-during-generation proof assumes generation has started before its heartbeat timer.** `packages/engine-promptfoo/src/promptfoo.test.ts`, `RED PROOF cancel`, uses a 20 ms heartbeat and asserts its fake engine observed abort. Under load the second heartbeat can cancel before the adapter reaches the fake engine; the runner correctly returns cancelled and posts nothing, but `aborted` is false because no child started. The unmodified source suite reproduced this failure (39 pass,1 fail,5 opt-in skips), then the isolated case passed, and an unchanged full rerun passed40/40. Adding only an 80 ms scheduling delay before calling the adapter deterministically reproduces the same failed `expect(aborted).toBe(true)` with cancellation still correct. This is a test assertion problem, not an engine continuing after cancellation. Recommended acceptance: synchronize the intended in-generation cancel on fake-engine entry; separately test an early cancel with zero starts and zero posts. Preserve the existing no-eval/no-post assertions. The diagnostic change was restored.
+
+**Actual image build PASS:** pinned Node22 base; licence gate **351 allowed,11 pending owner decisions,0 denied**; integrity-locked `npm ci --omit=optional --ignore-scripts`; promptfoo0.124.1; shipped CycloneDX SBOM; patch applies to all four telemetry copies; frozen shim build and production deploy; installer removal and UID10001. As with the Garak build, a temporary Dockerfile adds build-only trusted-CA secret/proxy exports and existing-proxy host resolution; TLS and lockfiles remain verified and product sources unchanged. Local image ID `sha256:1fcfab70273f851777593bd106640400b1b7fb4e1bfbe3d7bfa7c07f08e8d9e6`; no publication or signature claim.
+
+**5/5 real upstream tests PASS INSIDE that image**, using its Node22 and installed patched promptfoo0.124.1, the reviewed test source mounted into the container and a synthetic loopback gateway. Covers re-extracted upstream plugin/strategy lists; every generation/target/grading call carrying only the governed key and correct model/agent/project headers, no non-loopback attempts according to the diagnostic preload; the actual runner/worker exchange path; revoked-key 401 never producing a pass; cancellation killing the real process with no later gateway calls. Test isolation uses `--network none` with the gateway on container loopback, read-only root, no capabilities and no-new-privileges; UID1000 permits owner-only host fixtures. The exchange test's sides share the test container, so it is distinct from the next proof.
+
+**Separate actual-image TWO-container boundary probe PASS:** production UID10001 and root/capability hardening, separate process namespaces, runner-only state, jobs RW for runner/RO for worker and results RO for runner/RW for worker. Synthetic runner state/enrollment credential and `/proc/1/root/state/runner-token` are inaccessible to the worker; run key is readable as designed; jobs/root writes fail; worker writes its result; runner reads it but cannot write results. Containers and volumes were removed. This uses `--network none`; it measures filesystem/process credential separation, not production engines-network egress. No public-egress positive-control success or fresh signed-image attestation is claimed.
+
+**Upgrade/advisory check:** `npm audit --omit=optional --json` on the exact lockfile reports **0 info/low/moderate/high/critical**. Direct inspection inside the image confirms braces, fill-range, chokidar, picomatch, jks-js and node-forge are absent; the shipped SBOM contains360 components. This establishes their omission, not that the complete optional closure has no advisories. Pending licences remain Artistic-2.0, BlueOak-1.0.0 and Python-2.0 (11 package entries); passing the existing gate does not constitute owner approval.
+
+**Other verification:** frozen installation and engine/gateway dependency builds PASS; final default engine-promptfoo **40 PASS,5 opt-in tests initially skipped and then explicitly run5/5**; engine-runner **100 PASS**; isolated PostgreSQL gateway promptfoo/engine/Compose suites **102 PASS** (database `regulait_review_p2_oct10` dropped). An initial bare-vitest invocation also collected compiled dist tests without copied fixtures; it is excluded. Final source runs use the declared package test script. No full shared-suite run is claimed for this head. At inspection, #231's engine-image scans for promptfoo/modelscan, general Trivy/SBOM, dependency audit and docker-build had passed; keyless signing jobs were skipped on the PR and other checks remained in progress.
+
+**Garak CI follow-up:** the subsequently published #228 head `0842b20062ef8e4c67135dd301a76b8211290f12` merges main and adds an explicit fsspec CVE-2026-104851 image exception (ADR0187 decision160, expiry2026-12-09), justified by upstream datasets pins and excluded/unplanned reference-document consumers. It does not change the mapper; B5X-02 still applies. #233's actual image tests target the stated earlier head. The new image scan was queued at inspection; this review does not label the exception as a patched dependency or a completed scan.
+
+Local evidence outside Git: `/tmp/oct10-p2-{image-build.log,real-image-proof.log,runtime-boundary-proof.log,installed-closure-proof.log,audit.json,units-final.log,units-recheck.log,cancel-isolated.log,cancel-delay-proof.log,runner-tests.log,gateway-proof.log}`; boundary script `/tmp/oct10-p2-runtime-boundary.py`; delayed-case source `/tmp/oct10-x30-review-probes/promptfoo-cancel-delayed.test.ts`. Reviewed source restored and clean; no runtime credential used.
+
+## X29-G independent review — 2026-10-10 UTC
+
+Review target: Garak #228 at `ece771b4786efcb7d2f5b0401e60b9c785667988`. This delivery changes this findings ledger only. Claude owns implementation, adjudication, VERIFIED and integration. B5-P2 and X26 remain awaiting published/announced PRs; this is not their review.
+
+**B5X-02 — MEDIUM, OPEN: incomplete detector coverage can still produce a pass.** `packages/engine-garak/src/mapper.ts`, `readGarakProbeReport`, counts only detector scores in status-2 attempts. It ignores generated status-1 attempts when deciding coverage, never correlates attempt UUIDs with their completed records, and never compares each completed attempt's output count with its detector-score count. Consequently, valid init/completion plus one zero-score completed attempt and a matching eval (`passed=1,fails=0,nones=0,total_evaluated=1,total_processed=1`) returns **pass** both when (a) another UUID has a generated output but no scored completion, and when (b) the completed attempt has two outputs but only one score. Neither absence is represented by `nones`; agreement between two partial score lists is not evidence that all outputs were evaluated. An ordinary complete one-output/one-score report passes as the control. This violates the mapper's own documented rule that every output must be scored before a pass; no finding alleges that the pinned engine normally emits these malformed reports.
+
+The format was checked against the exact garak 0.17.0 wheel, SHA256 `9a67e6298e4d7025358fecafa9d473c77ff70acdae103aa5251ad60fca3db145`: `attempt.py` defines statuses 0/1/2 and exports UUID, outputs and detector results; `probes/base.py` writes generated status-1 records; `harnesses/base.py` later writes status-2 records for the same attempt; `evaluators/base.py` iterates the detector list and itself assumes alignment with outputs. The independent fixtures therefore exercise the real report fields. The two new negative Vitest assertions genuinely FAIL against the unchanged target (2 failed, 26 existing tests intentionally deselected); a separate compiled-mapper probe returns pass for the control and both malformed cases. Temporary probes were removed from the target checkout.
+
+**Recommended fix/acceptance:** reconcile records by UUID without double-counting normal status-1/status-2 pairs; validate each terminal record's output/score cardinality, and require every generated attempt/output to have a consistent scored terminal record before pass. An unmatched generation, missing score or conflicting/duplicate terminal record must be unknown; preserve any actually observed hit as fail. Cover normal paired records as a passing control, the two failures above, null-score unknown, duplicate completion and a hit plus incomplete coverage. Count-only validation does not require copying prompt/output text into the envelope.
+
+**Verification at the reviewed Garak head:** frozen install and engine/gateway dependency builds PASS; engine-garak 30 default tests PASS (4 real tests initially skipped), shared Garak catalogue/manifest 11 PASS, isolated real-PostgreSQL Garak gateway 7 PASS plus foundation/Compose 47 PASS (54 total). Both disposable databases were dropped. The two expected independent negative assertions are findings, not included in green counts. No full gateway/shared-suite claim is made for this head.
+
+**Actual image and upstream proof:** the complete image built successfully from the pinned bases and lockfiles, including all wheel/sdist hashes, `pip check`, version 0.17.0, all 25 required excluded-data removals and the pinned catalogue hash, installer removal, production shim build/deploy and installed-closure licence gate (**197 allowed, 23 admitted, 0 denied** after removing pip). The environment requires its HTTPS proxy and trusted CA: a temporary Dockerfile adds only a build-secret CA mount and proxy/CA exports; BuildKit receives the existing proxy's resolved host mapping. TLS verification and hashes stay enabled, and repository sources/requirements are unchanged. Local image ID: `sha256:6f1d74cc3c1ae368870c286efb37c9fede46e7bc283e33d5d7d8eb0d49278ed8`; this is not a published manifest digest, signature or attestation. The licence allow file still has 20 pending owner decisions; a successful gate does not make the image admissible.
+
+**4/4 real upstream tests PASS on that built, pruned image:** LocalGarakExecutor → runGarakProbe → mapper, against the test's synthetic gateway: exit 0 with every output hit still maps fail; a refusing target maps pass; 401 on the refused run key maps unknown/failed despite exit 0; every request has the governed key, target model, agent and project headers. A temporary Python wrapper invokes the image's real `/opt/garak/venv/bin/python` with the test's configuration/environment. It uses host networking to reach the test server and UID 1000 to access its owner-only host fixtures; it proves upstream execution/report behavior, not the production network/user configuration.
+
+**Separate actual-runtime container boundary probe PASS:** two containers from the built image, UID 10001, read-only roots, no capabilities, no-new-privileges, separate process namespaces, separate runner state, jobs RW only for runner/RO for worker and results RW only for worker/RO for runner. With synthetic credentials only, the worker reads its run key and writes a result; runner state, runner enrollment environment and `/proc/1/root/state/runner-token` are inaccessible; writing jobs or root fails. The runner retains its state and reads results, but cannot write results. Containers/volumes were removed. This uses `--network none` to isolate the filesystem/process experiment; it does not establish the internal engines network's allowed gateway reachability or blocked external egress. No new public-egress assurance: the earlier external positive control could not connect either. Publication/signing, image SBOM/Trivy, a controlled production-network egress self-test and the owner's licence admissions remain outstanding owner/image work.
+
+Catalogue inspection: 189 listed entries = 90 local + 77 licence-excluded + 11 requiring missing pre-seeded data + 11 cloud-only; the pinned upstream catalogue has 191 including deliberately unlisted `test.Blank`/`test.Test`. Non-local probes are refused by planning/job validation. OWASP 2023→2025 crosswalk leaves Insecure Plugin Design and Model Theft as explicit owner decisions rather than manufacturing replacements.
+
+**Returned B5X-01 fix independently rechecked — #227 at `a895f3a4d9ee56330bc135a8db872420dafb21ed`:** the pinned momoa 3.3.13 AST rejects decoded duplicate keys recursively before JSON.parse. All four previous byte-level ambiguities return `safetensors_invalid`; a valid one-tensor control remains `safetensors`. Engine-modelscan build and **42 default tests PASS**, **5 real upstream tests explicitly skipped**; full shared suite **1977 PASS** on this separate target. The code fix satisfies the reported B5X-01 duplicate-key acceptance; Claude retains official VERIFIED status. This recheck is not a complete review of all other #227 storage/quota/deletion changes.
+
+Local reproducible evidence (outside Git): `/tmp/oct10-garak-independent-mapper.mjs`, `oct10-garak-independent-mapper.log`, `oct10-garak-mapper-red-proofs.log`, `oct10-garak-pinned.whl`, `oct10-garak-image-proxy-host-build.log`, `oct10-garak-real-image-proof.log`, `oct10-garak-runtime-boundary.py`, `oct10-garak-runtime-boundary-proof.log`, and `oct10-x29-m-independent-proof.log`. Negative test source: `/tmp/oct10-x30-review-probes/garak-with-review-probes.test.ts`. Evidence can be rerun in this workspace; no runtime secrets were used or recorded.
 
 # Codex feedback — active work and verified closures
 
@@ -690,6 +803,124 @@ Validation (Linux, pinned workspace dependencies):
 - `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: **passed**.
   `git diff --check`: **passed**. The existing large-chunk build warning remains.
 
+## X21 — signed decision receipts (2026-10-07)
+
+Implemented the ADR-0186 receipt seam: bounded, advisory-locked, audit-ordered signing; public-only key registry with same-id substitution refusal; idempotence; atomic failure on corrupt audit content; admin list/status/keys/export/verify routes; metadata-only export audit; and the audit page export/upload/verification panel. No reason or detail text is signed/exported. Missing deployment keys remain honestly unsigned. Pure/offline verification states signature, prefix, omission, identity and timing limits, with independently pinned public-key input supported by the CLI. The shared index export is explicitly authorized in Claude's 20:55 coordination message.
+
+Validation: 7/7 shared verifier tests, 6/6 real PostgreSQL signing/API/CLI cases, 5/5 browser cases and 336/336 web unit tests passed. Gateway and web TypeScript/build passed. The gateway suite creates/drops its own dedicated database when driven with DATABASE_URL; an explicit RECEIPT_TEST_DATABASE_URL is caller-owned. All keys and data are synthetic. The initial DB fixtures needed a real UUID actor and required ruleChain; the initial browser selector assumed a heading rather than the existing Card title. Those failed fixture runs are excluded from product evidence.
+
+Local evidence, not committed: /workspace/.regulait-onboarding/x21-{verifier-final,gateway-auto-db,gateway-final-tests,browser-final,gateway-final-build,web-final-build,web-unit-final}.log. Full inherited gateway foundation tests still assert receipt routes are 501/not_built; Claude has been asked to adapt receipt-only assertions at integration. The full suite is not claimed green on this implementation.
+
+### X21 latest follow-up validation — 2026-10-07
+
+The `3de6d0ac` bootstrap-export UUID and independently pinned-key validation
+follow-up is now rerun in the isolated slice checkout: actual PostgreSQL/API/CLI
+**6/6 PASS**, shared verifier **7/7 PASS**, shared build PASS
+(`x21-latest-{gateway,verifier,shared-build}.log`). No synthetic actor strings
+reach the UUID audit column on bootstrap export. Earlier 5/5 browser, 336 units
+and both builds remain recorded above. No full unrelated gateway-suite claim.
+
+
+### X21 cross-review corrections — 2026-10-08
+R21-01 fixed: online verifier replaces bundle keys with deployment receipt_signing_keys; submitted same-ID x mismatches are untrusted and cannot verify as valid. Real registry substitution attack is a genuine red. Offline CLI always prints UNPINNED and exits2 without a trusted-keys file; pinned valid prefixes exit0, invalid signatures exit1. UI explains registry pinning. R21-02 fixed: empty audit strings allowed; oversized tool names/rule IDs carry SHA256 in optional typed fields with raw fields null. Real empty/5k signing/verifying succeeds; status surfaces failed/disabled scheduled sweeps or pending rows older than120s as stalled, without exposing error text. R21-03 authorized receipt-only foundation route/sweep expectations updated to real200/400/no_key. R21-04 configuration rule IDs (including agent-owner-set, fallback-chain-configured and mcp-tool-price-set) excluded from signing AND lag counts. Future configuration writers must extend that explicit classification. R21-05 listing receipt envelopes writes only range/count audit metadata. R21-06 payload/envelope/bundle/public-key validators now use strict zod schemas with existing bounds/date/sequence checks. No private JWKs or free reason/detail accepted.
+Validation: actual PostgreSQL/app/CLI9/9 plus21 foundation=30/30; verifier7/7, complete shared1944/1944, receipt browser6/6 with stalled-state screenshot in testInfo output. Shared build and fresh DB/gateway build plus web build/typecheck PASS. Four baseline failures captured (three independent review regressions plus downstream signing blockage); `/tmp/x21-review-red.log`, `/tmp/x21-reviewed-*`, `/tmp/x21-review-fresh-*`. No full gateway-suite claim.
+## X22 — RFC 3161 anchor timestamps (2026-10-07)
+
+Replaced the timestamp seam with HTTPS-only, admin allow-listed, DNS-pinned RFC 3161 requests over canonical anchor bytes. No default TSA. Configured certificate roots and optional policy are deployment inputs; key material is neither accepted nor logged. One writer serializes capture/manual/scheduled attempts; granted tokens are not overwritten; failed attempts retry with exponential backoff, a 20-attempt automatic ceiling, a 10-anchor sweep bound and a 15-second request/body deadline. Responses/trust bundles are bounded to 1 MiB. Verification requires granted status, SHA-256 imprint, nonce, requested policy, supported signature hash, CMS signature, a chain to configured roots at generation time, critical exclusive timestamp EKU, and the ESS certificate/issuer binding. No AIA/OCSP/CRL network retrieval or certificate-revocation guarantee is claimed. Manual attempts are audited by state/count, and failure never changes a successful storage flush.
+
+The audit panel distinguishes unconfigured/pending/failed/verified-at-issuance states and offers authenticated DER reply download and retry. It states independent trust/anchor-byte verification and completeness/receipt-time limits.
+
+Focused validation: 11/11 gateway cases (6 independent OpenSSL crypto checks plus 5 real PostgreSQL cases exercising the actual egress guard with synthetic DNS/final transport), and 6/6 browser cases PASS. No live/public TSA contacted. The first capture test used the wrong CaptureResult property; corrected anchorId. Negative EKU cases re-sign fresh TSTInfo so a one-second certificate notBefore boundary does not mask the intended EKU check. Gateway/web final builds and units run separately. Local evidence, not committed: /workspace/.regulait-onboarding/x22-{gateway-final,crypto-eku-diagnosis,browser,gateway-final-build,web-final-build,web-units}.log.
+
+Integration prerequisite requested under To Claude: audit-chain.ts must create the original record before inserting the anchor and store record.capturedAt as createdAt, making retry reconstruction byte-identical; its GET mapping must add anchorTimestampSummary and omit raw tsaToken. Those hot-file edits belong to Claude and are not applied here. Full gateway foundation 501/not_built expectations also need owner adaptation. X22 is reviewable but not represented as fully integrated until these dependencies land.
+
+### X22 authorized integration follow-up — 2026-10-07
+
+Claude's 22:15 coordination message explicitly authorized the two audit-chain
+seams. Capture now constructs the canonical record before inserting the anchor
+and persists `createdAt` from that record's `capturedAt`. The list maps measured
+timestamp summaries and omits raw `tsaToken`; DER remains on the authenticated
+`.tsr` endpoint. Two genuine regression proofs fail before these changes:
+25ms simulated insert latency makes the flushed/reconstructed timestamps differ,
+and the real anchors API lacks the verified summary (`x22-seams-red.log`).
+
+Final actual PostgreSQL/guard/OpenSSL run **13/13 PASS** (seven DB cases plus six
+independent crypto cases, `x22-seams-final.log`). It includes a real capture →
+verified issuance → list summary → idempotent retry → downloaded token
+reverification from the persisted canonical record. Gateway `tsc --noEmit` PASS
+(`x22-seams-typecheck.log`). No live/public TSA or certificate-revocation check
+is claimed. Earlier 6/6 browser, 336 units and both build evidence remains in
+the initial X22 section; current-main integration follows this checkpoint.
+
+X22 post-main integration evidence (`1eebf0cf`): 13/13 gateway/crypto cases,
+6/6 browser cases and web build/typecheck PASS. Logs:
+`x22-current-main-{tests,browser,web-build}.log` in the onboarding directory.
+The authorized hot-file dependencies are complete; review and merge remain
+Claude's responsibility.
+
+
+### X22 cross-review response — 2026-10-08
+R22-01/02 already fixed at10447cbd with two genuine seam reds; anchorTimestampSummary is in the existing value import. R22-03 fixed: capture sentAt immediately before guarded fetch, reject genTime older than sentAt minus300s and later than validation plus300s; independent request-window red on a valid signed reply. R22-04 authorized own timestamp foundation assertions now expect missing-anchor404 and unconfigured sweep. R22-05 uses pkijs parsed ExtKeyUsage; narrow ESS asn1js profile exception and its checks documented in audit-timestamp-README.md, gateway THIRD_PARTY wording corrected. R22-06 original complete reply DER is retained and exported exactly, with status1 byte-equality red. R22-08 captures payloadVersion in a versioned public envelope in the existing tsa_token column before attempts (also retained after failure/unconfigured); retries use stored version; legacy rows pin historical regulait.audit.v1 rather than current build constant. R22-09 PEM certificates-only documented; fetch stays under dedicated lock/deadline pending a durable claim protocol. R22-07 local no-revocation documentation delivered; Claude must add the same line to owned §4.9/ADR.
+Validation: `vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts src/zz-adr0186-b4-foundation.test.ts`36/36 (15 slice plus21 foundation), six timestamp browser cases, gateway build/typecheck and web build/typecheck PASS. Two new genuine crypto/red-reply tests fail on old verifier. No live TSA or network revocation claim. Logs `/tmp/x22-review-*`.
+## X23 — pinned detection content (2026-10-07)
+
+Data-only snapshots: Pipelock 7014542ea14fec82dfbc2ad38caf77bd63e7ad69,
+NeMo 9f793de53e432c4c9c765975f5dd54df175fcb6e and AGT
+f68f2cf312c7e1366d6fd5654c51d8380c815222. Per-file SHA-256, permissive
+licences/notices and retrieval times are committed; no enterprise/ee source or
+upstream runtime execution. Offline converter `--check` reproduces exact bytes.
+62 secret shapes and 25 description heuristics run on RE2; unsupported content
+is named in manifests. All five NeMo rules exceed the approved condition
+grammar, so this snapshot supplies zero NeMo injection detections. See the
+owned detection-content README for exclusions and the extra pre-normalization
+Mn-removal pass that prevents quadratic ICU combining-mark reordering.
+
+Genuine red proof: `x23-boundary-red.log` demonstrated the provider pattern
+redacting its preceding delimiter. Separate left-boundary checking fixes this.
+Combined candidate matching plus converter-proved mandatory ASCII prefixes
+retain original match spans and Unicode fallback; parity checks include
+50,000-space gaps. No timing assertions were relaxed. The separate
+secret-patterns/scan run passed every performance case; its remaining 24
+failures concern older exact marker grammar and negative samples now caught by
+intentionally broader upstream rules. These owner-file tests need adjudication,
+not blanket replacement. The full shared suite is recorded separately and is
+not claimed green; foundation empty-pack/identity and truncated-PEM marker
+assertions also need updates from Claude.
+
+Validation in the existing isolated slice checkout:
+- Shared vendor/linear/audit-ReDoS: 23/23; extended native credential/scan/vendor
+  run: 114 passed, 24 failed as described above (`x23-prefix-tests.log`).
+- Real migrated disposable PostgreSQL + actual buildApp/auth/settings manifest
+  API: 3/3 (`x23-gateway.log`). Test cleanup drops only its own scratch DB.
+- Browser: 4/4 on both Guardrails and Admission review, including disabled
+  packs, zero eligible rules, errors and unreported enforcement. Screenshots
+  `/workspace/.regulait-onboarding/x23-guardrails.png` and `x23-admission.png`;
+  final post-main browser log `x23-browser-merged.log`.
+- Shared/gateway builds, web `tsc --noEmit` and web build PASS; 336 web units
+  PASS (`x23-{shared-build-final,gateway-build,web-tsc,web-build,web-units}.log`).
+
+INTEGRATION BLOCKERS: `credentialAudienceViolations` is an exported, tested
+pure helper; no real guarded-outbound consumer exists in the foundation.
+API/UI truthfully report `outboundAudienceEnforced: false`. Requested Claude's
+hot-file consumer authorization/integration and disposition of zero eligible
+NeMo rules on the coordination board. Central third-party notice rows and
+owner-file historical test adjudication are also requested. This slice remains
+BLOCKED for full ADR acceptance, despite the passing measured local checks.
+
+### X23 review disposition — 2026-10-07 22:15 UTC
+
+Claude accepts zero eligible NeMo rules as a documented ADR residual, owns the
+guarded-outbound consumer and central third-party notice rows, and is
+adjudicating the historical shared-test groups. Those expectations remain
+unchanged. Local measured coverage is preserved; X23 stays BLOCKED for outbound
+integration and the test verdict, with no pending NeMo grammar request.
+
+
+### X23 cross-review corrections — 2026-10-08
+R23-01 adjudication bcab26d9 merged as requested (trace-evaluation dotted scrub marker fix and reviewed expectations). R23-02/05 fixed: candidate gates cover all default rules, exact-pattern proofs pinned in prefix-proofs.json; Unicode long-s/Kelvin folds participate, original RE2 spans preserved. Synthetic non-ASCII benchmarks:50k1.67ms,400k5.33ms,800k10.84ms. Non-ASCII/400k budget tests remain100ms; no budget weakened. R23-03 all Unicode mark runs capped30 before ICU; genuine spacing-mark red28.75s, restored budget passes. R23-04 pinned core-only Pipelock Apache2+NOTICE, NeMo Apache2 and AGT MIT rows added to shared THIRD_PARTY. R23-06 preset-only Ethereum Address excluded:61 default shapes,13 exclusions (including7 unsupported audience exemptions). R23-07 README corrected3 checksum+2 unresolved Go constants. R23-08 genuine seeded concatenation red (case16);20,000 deterministic synthetic cases pass after bounded two-pass fixed-point handling, with whole remaining-fragment redaction when a new marker exposes credentials. This can remove benign prose only in those pathological fragments and is documented. R23-09 real runtime-DLP pack consumer tested and explained in UI; audit redaction unconditional; installed caller-content audience enforcement remains Claude's seam and API staysfalse until real wiring/test.
+Validation: full shared suite1951/1951; isolated vendor/secret/audit regressions151/151 earlier and new full fixed-point corpus green; offline converter --check/shared build/typecheck PASS; actual API/auth/settings3/3 and manifest browser4/4; gateway/web builds PASS. Logs `/tmp/x23-reviewed-*`, `/tmp/x23-review-*`, `/tmp/x23-spacing-red.log`, `/tmp/x23-idempotence-red.log`. BLOCKED only for Claude-owned outbound wiring/integration acceptance; NeMo zero-rule residual accepted.
+
+X23 CI portability follow-up: both manifest screenshots now use Playwright testInfo.outputPath; CI shard annotations proved the absolute /workspace paths failed with ENOENT. Unicode mark runs are capped before per-character invisible tables as well as after removal joins runs, reducing avoidable normalization work without changing the 100ms budgets. Full shared suite 1951/1951, shared build, web build/typecheck and manifest browser 4/4 PASS (`/tmp/x23-portable-*`). The preceding CI unit-test job failed, but its downloadable log is proxy-blocked; its cause remains unresolved rather than attributed to the screenshot failures. New CI will validate this revision.
 ## X24 — measured detection monitor rules and R13-20/21 (2026-10-07)
 
 Implemented the four assigned rules in the actual loader. MCP drift compares
@@ -770,3 +1001,14 @@ R24-03 now requires attributed history strictly before the baseline window start
 Validation: restoring main's loader fails the incomplete-baseline database regression; restoring the main web files fails all four account-return request variants and the non-colour link regression (/tmp/oct10-x24-{monitor,browser}-red.log). Corrected loader/app 11/11 PASS (/tmp/oct10-x24-monitor-final.log); nine browser tests PASS (/tmp/oct10-x24-browser-final.log), including held PATCH/artifact success/refusal and light/dark link-in-text-block axe. Portable screenshot and traces are in apps/web/test-results. Fresh gateway and web tsc --noEmit and web production build PASS (/tmp/oct10-x24-tsc.log, /tmp/oct10-x24-final-tsc.log, /tmp/oct10-x24-web-build.log). Main fde6625b retained; Claude owns review and verification.
 ### R166-21–24 calendar follow-up — 2026-10-09 CDT
 Utah now credits the original checked C13-72-S101_2026050620260506.pdf; the HTML index is an unchecked lead. SB 53 and historical C-27 retain their October 4 primary source, checked date and historical status, with the blocked October 7 recheck appended. C-27's original status was proposed, not adopted; it remains a historical proposal with no invented enactment deadline. Article/annex citation spacing is corrected. All 13 reconciliation source links now pin main fde6625b (read October 10 UTC); the current transparency controlRefs is still empty. No fresh primary-law verification claimed. Markdown table/link structure and git diff --check PASS; documentation-only follow-up.
+
+### X21 re-review R21-07–10 — 2026-10-10 UTC
+R21-07: replaced the configuration deny-list with explicit receiptClass metadata at eligible audit writers. Decisions/approvals opt in; configuration writers classify out; unknown and historical unclassified rows fail closed and remain available in the audit chain. Metadata is written after caller-controlled detail spreads. The TypeScript source check resolves every eligible gateway writer, including helpers, unions and implicit MCP defaults, and fails when classification is absent. R21-08 verifies with the registry key regardless of bundle keys (valid originals remain valid despite bogus supplied keys; attacker signatures fail). R21-09 single-envelope reads are metadata-audited. R21-10 imports precede the receipt module documentation.
+Evidence: reverting eligibility/key handling reproduces two independent DB regressions (plus the downstream signed-count failure); restored actual PostgreSQL/API/CLI 9/9 and writer coverage 1/1 PASS. Fresh gateway dependency builds, gateway tsc --noEmit and web build/typecheck PASS. Logs /tmp/oct10-x21-*. Unclassified past rows are intentionally not backfilled or signed; receipt omission limits remain explicit. No full gateway CI claim.
+### X22 second cross-review corrections — 2026-10-09 CDT
+R22-05 uses MIT @peculiar/asn1-ess 2.10.0 and its existing schema/x509 dependencies through their public APIs, with notices. A local schema subclass corrects the library's optional DEFAULT algorithm decoding for OpenSSL's omitted SHA-256 field; all other ESS fields remain library-defined. R22-10 requires sentAt, including DB verification: reverting only the lower-bound check makes the real retry return 200 instead of 502 (/tmp/oct10-x22-db-red.log). R22-11 uses per-anchor pg_try_advisory_xact_lock(hashtext(id)) with immediate 409 timestamp_in_progress; the transport deadline starts before DNS and checks again before sending. A timed-out DNS continuation cannot send later; another retry acquires the lock. README describes the transport bound accurately. R22-12 disables Retry when not_configured. Corrupt stored JSON returns 500 and flush preserves the stored payload version.
+Validation: 19/19 actual PostgreSQL/guarded transport/independent OpenSSL crypto tests PASS (DATABASE_URL=<local scratch base> pnpm --filter @regulait/gateway exec vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts; /tmp/oct10-x22-final-green.log). Gateway dependency build and fresh gateway tsc --noEmit PASS (/tmp/oct10-x22-dependencies-build.log, /tmp/oct10-x22-final-tsc.log); web build/typecheck and six mocked browser cases PASS (/tmp/oct10-x22-web-build.log, /tmp/oct10-x22-browser.log). No public TSA used. Main merge d6569fc3 retained; Claude owns integration with X21 and the shared sweep state.
+X22 publication cleanup: removed a local generated-output symlink accidentally included by the directory-wide staging command. It is environment setup only and is not part of the implementation.
+### X23 second cross-review corrections — 2026-10-09 CDT
+R23-10: caller-defined marker labels no longer make real credentials opaque. Only known rule-label combinations and field markers are protected; existing generated markers remain idempotent. Genuine old-scrubber red captured in /tmp/oct10-x23-marker-red.log. R23-02/05: remove the eight-open-gate fallback, tighten JWT/Discord/Stripe gates and emit reviewed bounded prefix context for candidate suffix scans; unbounded prefixes retain full scans. Original text still supplies exact spans. Added above-eight-gates 400k near-miss budget and Unicode UTF-16 offset regressions without weakening budgets. R23-11 portable screenshot paths were retained and verified.
+Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.

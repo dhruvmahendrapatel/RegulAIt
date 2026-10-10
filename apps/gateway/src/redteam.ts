@@ -574,6 +574,7 @@ export async function runRedTeamSuite(
           libraryName: library.name,
           libraryVersion: library.version,
           sequenceProbes: sequenceProbes.length,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: decision.ruleId,

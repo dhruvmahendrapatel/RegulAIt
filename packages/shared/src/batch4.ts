@@ -103,7 +103,7 @@ export const RECEIPT_OBJECT_TYPES = ["mcp_tool", "agent", "connector", "approval
 export type ReceiptObjectType = (typeof RECEIPT_OBJECT_TYPES)[number];
 
 /** R: the receipt sweep's state (`GET /v1/receipts/status`) */
-export const RECEIPT_SIGNING_STATES = ["signing", "no_key", "off"] as const;
+export const RECEIPT_SIGNING_STATES = ["signing", "no_key", "off", "stalled"] as const;
 export type ReceiptSigningState = (typeof RECEIPT_SIGNING_STATES)[number];
 
 /** R: one receipt's verification outcome (`POST /v1/receipts/verify`) */
@@ -251,8 +251,12 @@ export interface DecisionReceiptPayload {
     objectId: string | null;
     serverId: string | null;
     toolName: string | null;
+    /** SHA-256 of an oversized audit tool name; the raw field is null. */
+    toolNameHash?: string;
     effect: "allow" | "deny" | "require_approval";
     ruleId: string | null;
+    /** SHA-256 of an oversized audit rule id; the raw field is null. */
+    ruleIdHash?: string;
   };
   /** the previous receipt's payload hash (sha256 hex), `RECEIPT_GENESIS_PREV` for the first */
   prev: string;

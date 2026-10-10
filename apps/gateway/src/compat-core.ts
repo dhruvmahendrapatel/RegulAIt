@@ -755,6 +755,7 @@ export async function prepareCompatCall(
         requestedModel: args.requestedModel,
         resolutionMode: mode,
         ...(projectId ? { projectId } : {}),
+        receiptClass: "decision",
       },
       effect: decision.effect,
       ruleId: decision.ruleId,
@@ -1089,6 +1090,7 @@ export async function executeCompatCall(
           mode: COMPAT_MODE,
           semanticCache: "hit",
           ...(prepared.projectId ? { projectId: prepared.projectId } : {}),
+          receiptClass: "decision",
         },
         effect: "allow",
         ruleId: "compat-semantic-cache-hit",
@@ -1152,6 +1154,7 @@ export async function executeCompatCall(
             refusal: outcome.result.refusal,
           }
         : { error: outcome.error },
+      receiptClass: "decision",
     },
     effect: outcome.ok ? "allow" : "deny",
     ruleId: outcome.ok ? "compat-dispatch" : "compat-dispatch-failed",

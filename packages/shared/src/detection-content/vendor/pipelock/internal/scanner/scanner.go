@@ -1,0 +1,5536 @@
+// Copyright 2026 Josh Waldrep
+// SPDX-License-Identifier: Apache-2.0
+
+// Package scanner provides URL scanning for the Pipelock fetch proxy.
+// It checks URLs against blocklists, DLP patterns, and entropy thresholds
+// before allowing the fetch proxy to retrieve them.
+package scanner
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/base32"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
+
+	"github.com/luckyPipewrench/pipelock/internal/addressprotect"
+	"github.com/luckyPipewrench/pipelock/internal/config"
+	"github.com/luckyPipewrench/pipelock/internal/destination"
+	"github.com/luckyPipewrench/pipelock/internal/normalize"
+	"github.com/luckyPipewrench/pipelock/internal/reqpolicy"
+	"github.com/luckyPipewrench/pipelock/internal/seedprotect"
+)
+
+// Scanner label constants. These values flow into Prometheus metrics
+// (pipelock_scanner_hits_total{scanner="..."}), suppression rules, and audit
+// logs. Changing a value is a breaking change for dashboards and alerts.
+const (
+	ScannerParser           = "parser"
+	ScannerScheme           = "scheme"
+	ScannerLength           = "length"
+	ScannerSSRF             = "ssrf"
+	ScannerSSRFMetadata     = "ssrf_metadata"
+	ScannerAllowlist        = "allowlist"
+	ScannerBlocklist        = "blocklist"
+	ScannerRateLimit        = "ratelimit"
+	ScannerDLP              = "dlp"
+	ScannerEntropy          = "entropy"
+	ScannerSubdomainEntropy = "subdomain_entropy"
+	ScannerDataBudget       = "databudget"
+	ScannerPathTraversal    = "path_traversal"
+	ScannerCRLF             = "crlf_injection"
+	ScannerContext          = "context"
+	ScannerMCPToolScanning  = "mcp_tool_scanning"
+	ScannerAll              = "all"
+)
+
+// ResultClass distinguishes protective enforcement (rate limiting) from threat
+// evidence (DLP matches, injection, SSRF, data budget exhaustion). The proxy's
+// adaptive enforcement uses this to avoid penalising agents for protective blocks.
+type ResultClass int
+
+const (
+	// ClassThreat is the zero value: the block indicates a genuine threat
+	// signal (DLP match, injection, blocklist hit, etc.).
+	ClassThreat ResultClass = iota
+	// ClassProtective means the block is protective enforcement (rate
+	// limiting, data budget) - not evidence of malicious intent.
+	ClassProtective
+	// ClassConfigMismatch means the block is due to a configuration gap
+	// (e.g., domain in api_allowlist but not trusted_domains). Not a
+	// real attack - should not feed adaptive escalation.
+	ClassConfigMismatch
+	// ClassInfrastructureError means the block is due to an infrastructure
+	// failure (e.g., DNS resolver timeout, resolver unreachable) rather
+	// than adversarial behavior. Fail-closed semantics are preserved
+	// (the request is still blocked), but the block must not feed
+	// adaptive enforcement: resolver instability is not threat evidence.
+	// A burst of DNS failures would otherwise cascade into airlock lockdown
+	// via SignalBlock accumulation.
+	ClassInfrastructureError
+	// ClassStructuralExemption means the request was allowed because a
+	// would-be DLP match sits inside a structurally validated capability
+	// token (e.g., the AKIA inside a SigV4 X-Amz-Credential value of a
+	// presigned URL). The matched value is a scoped bearer for a specific
+	// resource, not a leaked long-lived credential. Adaptive-neutral: a
+	// burst of legitimate presigned-URL fetches must not poison the
+	// session score, but should also not earn clean-decay trust.
+	ClassStructuralExemption
+	// ClassHeuristicEntropy marks path, query, or subdomain entropy evidence.
+	// It remains a finding but does not contribute to adaptive enforcement.
+	ClassHeuristicEntropy
+)
+
+// WarnMatch describes a DLP pattern match from a warn-mode pattern.
+// These are informational only - they do not block or alter the request.
+type WarnMatch struct {
+	PatternName string `json:"pattern_name"`
+	Severity    string `json:"severity"`
+	span        MatchSpan
+}
+
+// Span returns retained coordinates for this warn-mode DLP match.
+func (m WarnMatch) Span() MatchSpan {
+	return m.span
+}
+
+// DNSErrorKind tags the specific DNS resolver failure mode that produced a
+// ClassInfrastructureError result. The kind drives audit-time display labels
+// and metric subdivision but never changes the verdict: every DNS failure
+// still fails closed. Empty when the Result was not produced by the DNS
+// resolution path.
+type DNSErrorKind string
+
+const (
+	// DNSErrorTimeout reports an i/o timeout from the resolver. The resolver
+	// produced no answer, so the proxy has no information about whether the
+	// target would resolve to an internal address. Classifying as ssrf would
+	// assert a finding the scanner cannot support.
+	DNSErrorTimeout DNSErrorKind = "timeout"
+	// DNSErrorNoSuchHost reports an authoritative NXDOMAIN or no-records
+	// answer. The resolver answered; the absence is informative but is not a
+	// signal of an SSRF probe.
+	DNSErrorNoSuchHost DNSErrorKind = "no_such_host"
+	// DNSErrorResolver covers other resolver-side failures (refused, format
+	// error, server failure) that produce no usable IP. Kept distinct from
+	// timeout because operator alerting may want different treatment.
+	DNSErrorResolver DNSErrorKind = "resolver_error"
+	// DNSErrorSinkhole reports an answer made only of unspecified addresses
+	// (0.0.0.0 or ::), the convention DNS filters use for a blocked name. The
+	// request is still refused; it is not counted as an SSRF probe.
+	DNSErrorSinkhole DNSErrorKind = "sinkhole"
+)
+
+// Result describes the outcome of scanning a URL.
+type Result struct {
+	Allowed         bool         `json:"allowed"`
+	Reason          string       `json:"reason,omitempty"`
+	Scanner         string       `json:"scanner,omitempty"` // which scanner triggered
+	Hint            string       `json:"hint,omitempty"`    // actionable guidance when blocked
+	Score           float64      `json:"score"`             // anomaly score 0.0-1.0
+	Class           ResultClass  `json:"-"`                 // internal: threat vs protective classification
+	DNSErrorKind    DNSErrorKind `json:"-"`                 // internal: DNS resolver failure subtype (set only when Class == ClassInfrastructureError on the DNS path)
+	SSRFResolvedIPs []string     `json:"-"`                 // internal: DNS answers observed by the SSRF scan on an allowed URL, for dial-time rebind detection
+	WarnMatches     []WarnMatch  `json:"warn_matches,omitempty"`
+	// CredentialAudienceAllows records compiled provider-key matches allowed at
+	// their declared audience. It contains no credential material and is used by
+	// proxy audit, metrics, and receipt consumers.
+	CredentialAudienceAllows []CredentialAudienceAllow `json:"credential_audience_allows,omitempty"`
+	// CredentialAudienceMismatches records the immutable audience set that
+	// caused a provider-bound DLP match to remain blocked. It is explanatory
+	// metadata only; parse failures intentionally leave this empty and block.
+	CredentialAudienceMismatches []CredentialAudienceMismatch `json:"credential_audience_mismatches,omitempty"`
+	spans                        []MatchSpan
+}
+
+// Spans returns retained scanner match coordinates for this result.
+// The returned slice is caller-owned and never includes matched bytes.
+func (r Result) Spans() []MatchSpan {
+	return copySpans(r.spans)
+}
+
+// IsProtective reports whether this result represents protective enforcement
+// (e.g., rate limiting) rather than a threat detection.
+func (r Result) IsProtective() bool {
+	return r.Class == ClassProtective
+}
+
+// IsConfigMismatch reports whether this result represents a configuration
+// gap rather than a real threat (e.g., SSRF blocking an allowlisted domain).
+func (r Result) IsConfigMismatch() bool {
+	return r.Class == ClassConfigMismatch
+}
+
+// IsInfrastructureError reports whether this result represents an
+// infrastructure failure (e.g., DNS resolver timeout, resolver unreachable)
+// rather than a threat. Blocks with this class preserve fail-closed semantics
+// but must not feed adaptive enforcement scoring.
+func (r Result) IsInfrastructureError() bool {
+	return r.Class == ClassInfrastructureError
+}
+
+// IsStructuralExemption reports whether this allow result represents a
+// structurally validated capability-token carve-out (e.g., the AKIA inside
+// a SigV4 X-Amz-Credential of a presigned URL). The match was real but
+// scoped to a single resource by the issuer; treating it as a clean signal
+// would let an attacker drive adaptive score down via legitimate fetches,
+// so it is adaptive-neutral instead.
+func (r Result) IsStructuralExemption() bool {
+	return r.Class == ClassStructuralExemption
+}
+
+// IsAdaptiveNeutral reports whether this result should be score-neutral for
+// adaptive enforcement: protective enforcement (rate limiting, data budget),
+// infrastructure failures (DNS resolver errors), and structural exemptions
+// (validated capability tokens) all skip both block-signal and clean-decay.
+// Config mismatch is NOT covered here - it produces a bounded SignalNearMiss
+// by design so repeated probing of misconfigured allowlists remains visible
+// to scoring.
+func (r Result) IsAdaptiveNeutral() bool {
+	return r.IsProtective() || r.IsInfrastructureError() || r.IsStructuralExemption() || r.IsEntropyOnly()
+}
+
+// IsEntropyOnly identifies heuristic URL findings. Structural hostname
+// exfiltration uses the subdomain scanner label but remains concrete evidence.
+func (r Result) IsEntropyOnly() bool {
+	return r.Class == ClassHeuristicEntropy
+}
+
+// IsHostnameExfilResult reports whether a URL scan result came from a
+// structural hostname-exfiltration signal rather than generic subdomain
+// entropy. Transports use this to preserve hard-block semantics in warn mode.
+func IsHostnameExfilResult(r Result) bool {
+	return r.Scanner == ScannerSubdomainEntropy &&
+		(strings.HasPrefix(r.Reason, subdomainEncodedLabelReasonPrefix) ||
+			strings.HasPrefix(r.Reason, subdomainEncodedChunksReasonPrefix))
+}
+
+// ScanURLCoreFloor runs only the core credential floor on rawURL, after the
+// same SigV4 presigned-URL carve-out the full pipeline applies. Scan stops at
+// the first failing stage, so a URL refused by an earlier stage (blocklist,
+// allowlist, traversal, CRLF, length, scheme) never reaches the core floor;
+// a caller that releases such findings, such as audit mode, asks here whether
+// the URL also carries a core credential. A URL that does not parse is checked
+// as text.
+func (s *Scanner) ScanURLCoreFloor(rawURL string) Result {
+	var decodes decodingMemo
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		if matches := s.scanCoreDLPWithDecodes(rawURL, &decodes); len(matches) > 0 {
+			return Result{
+				Allowed: false,
+				Reason:  fmt.Sprintf("core DLP match: %s (%s)", matches[0].PatternName, matches[0].Severity),
+				Scanner: ScannerCoreDLP,
+				Score:   1.0,
+			}
+		}
+		return Result{Allowed: true}
+	}
+	if sigV4 := detectValidSigV4(parsed); sigV4.Valid {
+		parsed = scrubSigV4Credential(parsed, sigV4.KeyID)
+	}
+	return s.checkCoreDLPWithDecodes(parsed, &decodes)
+}
+
+// IsCoreCriticalResult reports whether a URL scan Result came from the immutable
+// core DLP credential floor and therefore must hard-block regardless of the
+// configured action. It is the URL analog of ContainsCoreCriticalMatch on the
+// text-DLP path: the immutable-floor membership decision stays in one place
+// (config.IsCoreDLPPatternName), so a URL leaf carrying a core credential blocks
+// even when the surrounding transport is configured to warn. An allowed result
+// (including a provider credential permitted at its declared audience) is never
+// forced to block; the fail direction is that a result the predicate cannot
+// classify as core keeps following the configured action.
+func IsCoreCriticalResult(r Result) bool {
+	if r.Allowed {
+		return false
+	}
+	if r.Scanner == ScannerCoreDLP {
+		return true
+	}
+	for _, s := range r.spans {
+		if config.IsCoreDLPPatternName(s.RuleID) {
+			return true
+		}
+	}
+	return false
+}
+
+// dlpWarnCtxKey and DLPWarnContext are defined in warnctx.go.
+
+// Scanner checks URLs for suspicious content before fetching.
+type Scanner struct {
+	now                       func() time.Time
+	core                      *compiledCoreScanner // immutable safety floor - always runs, no config knobs
+	allowlist                 []string
+	blocklist                 []string
+	dlpPatterns               []*compiledPattern
+	canaryTokens              []compiledCanaryToken
+	dlpPreFilter              *dlpPreFilter
+	entropyThreshold          float64
+	subdomainEntropyThreshold float64
+	entropyMinLen             int
+	maxURLLength              int
+	internalCIDRs             []*net.IPNet
+	ipAllowlistCIDRs          []*net.IPNet // SSRF-exempt IP ranges (ssrf.ip_allowlist)
+	trustedDomains            []string     // SSRF-exempt domains (wildcard via MatchDomain)
+	destinationGrants         destination.GrantSet
+	rawAPIAllowlist           []string // full api_allowlist for SSRF hint generation (all modes)
+	rateLimiter               *RateLimiter
+	dataBudget                *DataBudget
+	envSecrets                []string // filtered high-entropy env var values
+	fileSecrets               []string // loaded from secrets_file config
+	// knownSecretWindows holds the partial-match windows for every configured
+	// env and file secret, keyed by the secret. It is built once here because
+	// the lists are fixed for a scanner's lifetime (a reload builds a new
+	// scanner), and rebuilding it per scan cost more than the scan itself once
+	// a host had a realistic number of high-entropy environment values.
+	knownSecretWindows knownValueWindowSet
+	// knownSecretEncodings holds each secret's encoded forms, built once for
+	// the same reason. A secret missing from it is encoded per scan.
+	knownSecretEncodings       map[string]*knownSecretEncodings
+	minEnvSecretLen            int // minimum env var length for leak detection
+	responsePatterns           []*compiledPattern
+	responseOptSpacePatterns   []*compiledPattern // \s+ → \s* variants for ZW-stripped pass
+	responseVowelFoldPatterns  []*compiledPattern // vowel-folded variants for confusable vowel attacks
+	responsePreFilter          *responsePreFilter // keyword candidate gate for primary regex passes
+	responseOptSpacePreFilter  *responsePreFilter // keyword candidate gate for opt-space pass
+	responseVowelFoldPreFilter *responsePreFilter // keyword candidate gate for vowel-fold pass
+	responseVerdicts           responseVerdictCache
+	responseAction             string
+	responseEnabled            bool
+	// coreObserveExceptions are the operator's declared, expiring per-host
+	// observe entries for a single immutable core response pattern. They are
+	// populated regardless of response_scanning.enabled, because the core
+	// floor they modify also runs regardless of it.
+	coreObserveExceptions  []config.CoreObserveException
+	subdomainExclusions    []string // domains excluded from subdomain entropy checks
+	queryExclusions        []string // domains excluded from query parameter entropy checks (S3 pre-signed URLs, etc.)
+	queryParamExclusions   map[queryEntropyParamExclusionKey]struct{}
+	pathEntropyExclusions  []pathEntropyExclusion // host+path-prefix exemptions for the PATH entropy gate only
+	scanNestedURLs         bool                   // fetch_proxy.monitoring.scan_nested_urls; nil/true = enabled
+	nestedURLResolveBudget time.Duration          // shared deadline for all nested lookups in one request
+	// pathEntropyExempt suppresses the path-entropy gate on paths the operator
+	// already governs with a request_policy route (explicit host + path
+	// constraints). A nil or disabled matcher keeps path entropy fully active.
+	// Path-only: subdomain and query entropy are never affected by this.
+	pathEntropyExempt  *reqpolicy.Matcher
+	addressChecker     *addressprotect.Checker
+	seedEnabled        bool
+	seedMinWords       int
+	seedVerifyChecksum bool
+	dlpWarnHookMu      sync.RWMutex
+	dlpWarnHook        func(ctx context.Context, patternName, severity string)
+
+	// Lifecycle: BeginUse / Close coordination. Once Close starts, BeginUse
+	// returns ok=false and callers must re-Load the proxy's scannerPtr to
+	// obtain the swapped-in scanner. Close blocks until inUse drains so an
+	// in-flight Scan never sees a half-torn-down scanner. Today only ticker
+	// goroutines are stopped, but future additions (sqlite handles, file
+	// descriptors) make this drain a hard prerequisite for safe reload.
+	//
+	// drained transitions false→true exactly once at the end of Close,
+	// after the rateLimiter and dataBudget have been torn down. closed is
+	// set BEFORE drain begins, so Closed() and Drained() are distinct
+	// signals: Closed reports "Close was initiated", Drained reports
+	// "Close has completed teardown".
+	closeMu sync.RWMutex
+	closed  bool
+	inUse   sync.WaitGroup
+	drained atomic.Bool
+
+	// heartbeat is invoked at the end of every Scan() to feed the
+	// wedge-detection watchdog. atomic.Pointer keeps SetHeartbeat
+	// race-safe even though production wires it before Start.
+	heartbeat atomic.Pointer[heartbeatFn]
+
+	// resolver answers SSRF DNS lookups and the proxy dial path. Default is
+	// net.DefaultResolver; populated from cfg.DNS.HostOverrides in New().
+	// Hostname-only overrides; IP literals bypass via the upstream resolver.
+	resolver Resolver
+}
+
+// heartbeatFn wraps a func() so it can live behind atomic.Pointer (which
+// requires a concrete pointer-to-struct, not a pointer-to-function).
+type heartbeatFn struct{ fn func() }
+
+// SetHeartbeat installs a callback invoked after every successful Scan.
+// Pass nil to detach. Cheap; safe to call concurrently with Scan because
+// the holder is read via atomic.Pointer.
+func (s *Scanner) SetHeartbeat(fn func()) {
+	if fn == nil {
+		s.heartbeat.Store(nil)
+		return
+	}
+	s.heartbeat.Store(&heartbeatFn{fn: fn})
+}
+
+// scannerCloseDrainTimeout caps how long Close() waits for in-flight scans
+// to drain before forcing teardown of internal resources. Prevents a hung
+// upstream from leaking the scanner indefinitely on a hot reload. Override
+// only in tests via SetCloseDrainTimeoutForTest.
+var scannerCloseDrainTimeout = 30 * time.Second
+
+// SetCloseDrainTimeoutForTest overrides scannerCloseDrainTimeout for the
+// duration of a test and returns a restore function. Tests use a short
+// timeout to assert the drain-timeout fail-safe without slowing the suite.
+// Not safe for parallel tests touching this knob.
+func SetCloseDrainTimeoutForTest(d time.Duration) func() {
+	prev := scannerCloseDrainTimeout
+	scannerCloseDrainTimeout = d
+	return func() { scannerCloseDrainTimeout = prev }
+}
+
+// SetDLPWarnHook sets the callback for warn-mode DLP matches.
+// The hook receives the request context (which may carry DLPWarnContext
+// metadata), pattern name, and severity. Called once per scanner instance
+// from runtime startup and on config reload.
+func (s *Scanner) SetDLPWarnHook(hook func(ctx context.Context, patternName, severity string)) {
+	s.dlpWarnHookMu.Lock()
+	defer s.dlpWarnHookMu.Unlock()
+	s.dlpWarnHook = hook
+}
+
+func (s *Scanner) getDLPWarnHook() func(ctx context.Context, patternName, severity string) {
+	s.dlpWarnHookMu.RLock()
+	defer s.dlpWarnHookMu.RUnlock()
+	return s.dlpWarnHook
+}
+
+type compiledPattern struct {
+	name                string
+	re                  *regexp.Regexp
+	withoutLeftBoundary *regexp.Regexp
+	providerKeyPrefix   string
+	severity            string
+	validate            func(string) bool // post-match checksum (nil = regex-only)
+	// validateAt judges a candidate in the view it was found in, with the view
+	// around it. It is set only in scanners built for tool-command text.
+	validateAt func(view string, start, end int) bool
+	// validateJoined judges a candidate found in the whitespace-joined view,
+	// where source is the view before joining and offsets maps each joined byte
+	// to its source offset. It only ever narrows: it runs after validate.
+	validateJoined                      func(joined string, start, end int, source string, offsets []int) bool
+	exemptDomains                       []string // domains where this pattern is skipped (wildcard supported)
+	core                                bool     // name belongs to the immutable floor: exemptDomains is never honored
+	credentialAudienceHosts             []string // compiled built-ins only; empty means no audience exception
+	credentialAudienceAuthorizationOnly bool     // compiled built-ins only; limits the allow to Authorization headers
+	credentialAudienceCarrierMask       uint16   // compiled built-ins only; which headers may carry the credential
+	credentialAudienceGitHosts          []string // compiled built-ins only; hosts of the git-over-HTTPS Basic rule
+	credentialAudienceRegistryHosts     []string // compiled built-ins only; hosts of the package-registry rule
+	bundle                              string   // empty for built-in/config patterns
+	bundleVersion                       string
+	warn                                bool // true when pattern action is "warn" - matches are informational only
+	credentialURLWhitespaceGrammar      bool // built-in-only runtime provenance; never configured by operators
+	requiredLiteralsAny                 []string
+	requiresEquals                      bool            // every effective regex branch requires a literal '='
+	minASCIIDigits                      uint8           // conservative digit floor shared by every effective regex branch
+	shapeGate                           *regexShapeGate // necessary byte-shape condition; nil runs the regex unconditionally
+	// responseMemoRegexp marks the original regexp.Compile response expression.
+	// Arbitrary/replaced regex objects (including CompilePOSIX) are not reusable.
+	responseMemoRegexp *regexp.Regexp
+}
+
+// matches returns true if text matches the regex AND passes the post-match
+// validator (if any). For patterns without a validator, this uses the faster
+// MatchString (no string extraction). For validated patterns (credit cards,
+// IBANs), FindAllString extracts ALL matches and returns true if any pass
+// checksum - prevents a checksum-failing decoy from suppressing a later
+// valid match in the same text blob.
+func (p *compiledPattern) matches(text string) bool {
+	if p.validate == nil && p.validateAt == nil {
+		return p.re.MatchString(text)
+	}
+	// Check all regex hits, not just the first. An attacker could front-load
+	// BIN-matching decoys that fail checksum before the real card/IBAN.
+	// No cap: regex specificity (BIN prefixes, IBAN format) and data budget
+	// limits already bound the match count in practice.
+	for _, loc := range p.re.FindAllStringIndex(text, -1) {
+		if p.accepts(text, loc[0], loc[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// accepts reports whether a regex candidate counts as a finding after every
+// post-match check this pattern carries.
+func (p *compiledPattern) accepts(view string, start, end int) bool {
+	if p.validate != nil && !p.validate(view[start:end]) {
+		return false
+	}
+	return p.validateAt == nil || p.validateAt(view, start, end)
+}
+
+// New creates a Scanner from config. Config should be validated first via
+// config.Validate(), but scanner construction is also a runtime activation
+// boundary: invalid config-derived compile inputs and unavailable runtime
+// files are returned as errors so callers can fail closed without panicking.
+type Options struct {
+	// Now supplies the URL grant clock. Nil uses time.Now. Set at construction.
+	Now               func() time.Time
+	DestinationGrants destination.GrantSet
+	// ToolCommandEnvLookups builds a scanner for text that is a local tool
+	// command, result or agent message, never bytes on the wire. In such a
+	// scanner the built-in Credential in URL pattern does not count an
+	// assignment whose whole statement is one environment-variable lookup.
+	// Proxy, body, header, WebSocket and MCP upstream scanners never set it.
+	ToolCommandEnvLookups bool
+}
+
+func New(cfg *config.Config) (*Scanner, error) {
+	return NewWithOptions(cfg, Options{})
+}
+
+// NewWithOptions creates a scanner with runtime-only policy overlays. These
+// overlays never mutate Config, so a Guard invocation cannot widen another
+// runtime built from the same configuration.
+func NewWithOptions(cfg *config.Config, opts Options) (*Scanner, error) {
+	return newWithOptionsAndWindowBudget(cfg, opts, maxKnownValueWindowEntries)
+}
+
+func newWithOptionsAndWindowBudget(cfg *config.Config, opts Options, windowBudgetEntries int) (*Scanner, error) {
+	// Construction is an ingest boundary: this signature accepts any *Config
+	// and nothing here can tell whether it passed through config.Validate.
+	// Every production caller today does arrive validated, by loading a config
+	// or by deriving one from a loaded config, so this is defense in depth
+	// rather than a live bypass. It is what keeps the host-pattern rules
+	// binding when a caller arrives that does not.
+	//
+	// Re-check every host-pattern list against the SAME rules validation
+	// applies, and refuse rather than installing a pattern that would match
+	// something the operator never wrote. Dropping the entry instead would
+	// move the enforced posture while the operator still reads their
+	// configuration as accepted.
+	if err := cfg.ValidateHostPatterns(); err != nil {
+		return nil, fmt.Errorf("invalid host pattern: %w", err)
+	}
+
+	// Only enforce the allowlist in strict mode. In balanced/audit modes,
+	// the allowlist is a config field but not enforced at the scanner level.
+	var allowlist []string
+	if cfg.Mode == config.ModeStrict {
+		allowlist = cfg.APIAllowlist
+	}
+
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	s := &Scanner{
+		now:                       now,
+		core:                      initCoreScanner(cfg),
+		allowlist:                 allowlist,
+		blocklist:                 cfg.FetchProxy.Monitoring.Blocklist,
+		entropyThreshold:          cfg.FetchProxy.Monitoring.EntropyThreshold,
+		subdomainEntropyThreshold: cfg.FetchProxy.Monitoring.SubdomainEntropyThreshold,
+		entropyMinLen:             20,
+		maxURLLength:              cfg.FetchProxy.Monitoring.MaxURLLength,
+		subdomainExclusions:       cfg.FetchProxy.Monitoring.SubdomainEntropyExclusions,
+		queryExclusions:           cfg.FetchProxy.Monitoring.QueryEntropyExclusions,
+		queryParamExclusions:      buildQueryEntropyParamExclusions(cfg.FetchProxy.Monitoring.QueryEntropyParamExclusions),
+		pathEntropyExclusions:     buildPathEntropyExclusions(effectivePathEntropyExclusions(cfg.FetchProxy.Monitoring.PathEntropyExclusions)),
+		scanNestedURLs:            cfg.FetchProxy.Monitoring.ScanNestedURLsEnabled(),
+		nestedURLResolveBudget:    defaultNestedURLResolveBudget,
+		pathEntropyExempt:         buildPathEntropyExempt(cfg),
+		destinationGrants:         opts.DestinationGrants,
+	}
+
+	// Initialize rate limiter if enabled
+	if cfg.FetchProxy.Monitoring.MaxReqPerMinute > 0 {
+		s.rateLimiter = NewRateLimiter(cfg.FetchProxy.Monitoring.MaxReqPerMinute)
+	}
+
+	// Compile DLP patterns - must succeed since config.Validate checks these.
+	// Force case-insensitive matching: agents can trivially .toUpperCase() a
+	// secret before exfiltration, so DLP patterns must match regardless of case.
+	for _, p := range cfg.DLP.Patterns {
+		pattern := p.Regex
+		if !strings.HasPrefix(pattern, "(?i)") {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compile DLP pattern %q: %w", p.Name, err)
+		}
+		cp := &compiledPattern{
+			name:          p.Name,
+			re:            re,
+			severity:      p.Severity,
+			exemptDomains: p.ExemptDomains,
+			core:          config.IsCoreDLPPatternName(p.Name),
+			bundle:        p.Bundle,
+			bundleVersion: p.BundleVersion,
+			// Gate on the pattern's OWN compiled audience, not its name. A
+			// customized pattern that merely reuses a built-in name carries no
+			// audience, and validation accepts a warn action for it, so gating by
+			// name here would accept the config and then ignore it at runtime.
+			warn:                           p.Action == config.ActionWarn && len(p.CredentialAudienceHosts) == 0,
+			credentialURLWhitespaceGrammar: p.CredentialURLWhitespaceGrammar,
+		}
+		// Audience hosts are populated only from the compiled built-in registry:
+		// the field is yaml:"-", and normalize re-derives it solely from an exact
+		// built-in match, so a custom pattern reusing a built-in name carries
+		// none. A core-floor pattern may carry a compiled audience; it narrows
+		// where that immutable credential is enforced (its own issuing authority
+		// over an encrypted scheme) without letting operator YAML reach it.
+		cp.credentialAudienceHosts = append([]string(nil), config.AppendDeclaredCredentialAudienceHosts(p.Name, p.CredentialAudienceHosts, cfg.DLP.GitHubEnterpriseHosts, cfg.DLP.GitLabHosts)...)
+		cp.credentialAudienceAuthorizationOnly = p.CredentialAudienceAuthorizationOnly
+		cp.credentialAudienceCarrierMask = p.CredentialAudienceCarrierMask
+		cp.credentialAudienceGitHosts = config.AppendDeclaredCredentialAudienceHosts(p.Name, p.CredentialAudienceGitHosts, cfg.DLP.GitHubEnterpriseHosts, cfg.DLP.GitLabHosts)
+		cp.credentialAudienceRegistryHosts = append([]string(nil), p.CredentialAudienceRegistryHosts...)
+		body, hasProviderBoundary := strings.CutPrefix(p.Regex, config.ProviderKeyLeftBoundaryRegex)
+		if hasProviderBoundary {
+			switch body {
+			case config.AnthropicKeyBodyRegex:
+				cp.providerKeyPrefix = "sk-ant-"
+			case config.OpenAIKeyBodyRegex:
+				cp.providerKeyPrefix = "sk-proj-"
+			case config.OpenAIServiceKeyBodyRegex:
+				cp.providerKeyPrefix = "sk-svcacct-"
+			}
+		}
+		if cp.providerKeyPrefix != "" {
+			if !strings.HasPrefix(body, "(?i)") {
+				body = "(?i)" + body
+			}
+			cp.withoutLeftBoundary, err = regexp.Compile(body)
+			if err != nil {
+				return nil, fmt.Errorf("compile DLP pattern %q without left boundary: %w", p.Name, err)
+			}
+		}
+		requirements := analyzePatternMatchRequirements(cp.re, cp.withoutLeftBoundary)
+		cp.requiresEquals = requirements.requiresEquals
+		cp.minASCIIDigits = requirements.minASCIIDigits
+		cp.shapeGate = requirements.shape
+		if p.Validator != "" {
+			fn, ok := DLPValidators[p.Validator]
+			if !ok {
+				return nil, fmt.Errorf("unknown DLP validator %q for pattern %q", p.Validator, p.Name)
+			}
+			cp.validate = fn
+		}
+		if cp.validate == nil {
+			cp.validate = builtinDLPValidatorForRegex(p.Regex)
+		}
+		cp.validateJoined = builtinDLPJoinedValidatorForRegex(p.Regex)
+		if opts.ToolCommandEnvLookups && p.Regex == config.URLKeywordAssignmentRegex {
+			cp.validateAt = toolCommandCredentialInURLCandidate
+		}
+		s.dlpPatterns = append(s.dlpPatterns, cp)
+	}
+
+	// Build prefix pre-filter for fast DLP short-circuiting on clean input.
+	s.dlpPreFilter = newDLPPreFilter(s.dlpPatterns)
+	windowBudget := newKnownValueWindowBudget(windowBudgetEntries)
+	canaryTokens, err := compileCanaryTokens(cfg.CanaryTokens, windowBudget)
+	if err != nil {
+		return nil, fmt.Errorf("compile canary tokens (reduce canary_tokens entries): %w", err)
+	}
+	s.canaryTokens = canaryTokens
+
+	// Seed phrase detection config - stateless, reads from config.
+	s.seedEnabled = cfg.SeedPhraseDetection.Enabled == nil || *cfg.SeedPhraseDetection.Enabled
+	s.seedMinWords = cfg.SeedPhraseDetection.MinWords
+	if s.seedMinWords == 0 {
+		s.seedMinWords = 12
+	}
+	s.seedVerifyChecksum = cfg.SeedPhraseDetection.VerifyChecksum == nil || *cfg.SeedPhraseDetection.VerifyChecksum
+
+	// Parse internal CIDRs - must succeed since config.Validate checks these
+	for _, cidr := range cfg.Internal {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("parse internal CIDR %q: %w", cidr, err)
+		}
+		s.internalCIDRs = append(s.internalCIDRs, ipNet)
+	}
+
+	// Parse SSRF IP allowlist CIDRs - must succeed since config.Validate checks these
+	for _, cidr := range cfg.SSRF.IPAllowlist {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("parse SSRF IP allowlist CIDR %q: %w", cidr, err)
+		}
+		s.ipAllowlistCIDRs = append(s.ipAllowlistCIDRs, ipNet)
+	}
+
+	s.trustedDomains = cfg.TrustedDomains
+	s.rawAPIAllowlist = cfg.APIAllowlist
+
+	// Install the DNS resolver. When dns.host_overrides is empty the wrapper
+	// degrades to a plain delegation to net.DefaultResolver - this keeps a
+	// single code path through the rest of the scanner and proxy regardless
+	// of whether overrides are configured.
+	s.resolver = NewStaticOverrideResolver(cfg.DNS.HostOverrides, nil)
+
+	// Initialize data budget if configured
+	if cfg.FetchProxy.Monitoring.MaxDataPerMinute > 0 {
+		s.dataBudget = NewDataBudget(cfg.FetchProxy.Monitoring.MaxDataPerMinute)
+	}
+
+	// Set minimum env secret length from config (default 16)
+	s.minEnvSecretLen = cfg.DLP.MinEnvSecretLength
+	if s.minEnvSecretLen <= 0 {
+		s.minEnvSecretLen = 16
+	}
+
+	// Extract high-entropy environment variables for leak detection
+	if cfg.DLP.ScanEnv {
+		s.envSecrets = extractEnvSecrets(s.minEnvSecretLen)
+	}
+
+	// Load explicit secrets from secrets file
+	if cfg.DLP.SecretsFile != "" {
+		fileSecrets, err := LoadSecretsFile(cfg.DLP.SecretsFile, s.minEnvSecretLen)
+		if err != nil {
+			return nil, fmt.Errorf("load DLP secrets file %q: %w", cfg.DLP.SecretsFile, err)
+		}
+		s.fileSecrets = dedupSecrets(fileSecrets, s.envSecrets)
+		if len(s.fileSecrets) == 0 {
+			fmt.Fprintf(os.Stderr, "pipelock: warning: secrets_file %q yielded zero usable secrets\n",
+				cfg.DLP.SecretsFile)
+		}
+	}
+
+	// Build partial-match windows across both known-value lists together, so a
+	// stem shared by an env secret and a file secret is excluded from both.
+	knownSecretWindows, err := buildKnownValueWindows(windowBudget, s.envSecrets, s.fileSecrets)
+	if err != nil {
+		return nil, fmt.Errorf("build known-secret window index (reduce canary_tokens or dlp.secrets_file entries, or disable dlp.scan_env and remove oversized environment values): %w", err)
+	}
+	s.knownSecretWindows = knownSecretWindows
+	s.knownSecretEncodings = buildKnownSecretEncodings(knownSecretEncodingBudgetBytes, s.envSecrets, s.fileSecrets)
+
+	// Declared core-floor observe exceptions are read OUTSIDE the
+	// response_scanning.enabled branch on purpose: the core response floor runs
+	// even when response scanning is disabled, so an exception that only loaded
+	// with the optional layer would silently stop applying.
+	if len(cfg.ResponseScanning.CoreObserveExceptions) > 0 {
+		s.coreObserveExceptions = append([]config.CoreObserveException(nil), cfg.ResponseScanning.CoreObserveExceptions...)
+	}
+
+	// Compile response scanning patterns - must succeed since config.Validate checks these
+	if cfg.ResponseScanning.Enabled {
+		s.responseEnabled = true
+		s.responseAction = cfg.ResponseScanning.Action
+		for _, p := range cfg.ResponseScanning.Patterns {
+			re, err := regexp.Compile(p.Regex)
+			if err != nil {
+				return nil, fmt.Errorf("compile response pattern %q: %w", p.Name, err)
+			}
+			requiredLiteralsAny := responsePatternRequiredLiterals(p.Regex)
+			s.responsePatterns = append(s.responsePatterns, &compiledPattern{
+				name:                p.Name,
+				re:                  re,
+				responseMemoRegexp:  re,
+				bundle:              p.Bundle,
+				bundleVersion:       p.BundleVersion,
+				requiredLiteralsAny: requiredLiteralsAny,
+			})
+
+			// Compile optional-whitespace variant: \s+ → \s* so that
+			// "ignoreallpreviousinstructions" (ZW-stripped with no spaces)
+			// still matches injection patterns. Handles the combined attack
+			// where ZW chars split keywords AND replace word separators.
+			optRegex := strings.ReplaceAll(p.Regex, `\s+`, `\s*`)
+			optRegex = strings.ReplaceAll(optRegex, `[-,;:.\s]+`, `[-,;:.\s]*`)
+			if optRegex != p.Regex {
+				optRe, optErr := regexp.Compile(optRegex)
+				if optErr == nil {
+					s.responseOptSpacePatterns = append(s.responseOptSpacePatterns, &compiledPattern{
+						name:                p.Name,
+						re:                  optRe,
+						responseMemoRegexp:  optRe,
+						bundle:              p.Bundle,
+						bundleVersion:       p.BundleVersion,
+						requiredLiteralsAny: requiredLiteralsAny,
+					})
+				}
+			}
+
+			// Compile vowel-folded variant: fold all vowels (e,i,o,u -> a) in the
+			// regex so that confusable-vowel attacks are caught. An attacker using
+			// o-stroke (maps to o) to replace both 'o' and 'u' produces "instroctions"
+			// after confusable mapping. Standard patterns fail. Vowel-folding both
+			// the pattern and the content makes them match.
+			// Extract any leading (?flags) group before folding. FoldVowels would
+			// corrupt flag chars (e.g. i->a turning (?im) into (?am), which is invalid).
+			vfRegex := p.Regex
+			vfPrefix := ""
+			if strings.HasPrefix(vfRegex, "(?") {
+				if end := strings.Index(vfRegex, ")"); end > 1 {
+					flags := vfRegex[2:end]
+					allFlags := true
+					for _, r := range flags {
+						if !strings.ContainsRune("imsU-", r) {
+							allFlags = false
+							break
+						}
+					}
+					if allFlags {
+						vfPrefix = vfRegex[:end+1]
+						vfRegex = vfRegex[end+1:]
+					}
+				}
+			}
+			vfRegex = vfPrefix + normalize.FoldVowels(vfRegex)
+			if vfRegex != p.Regex {
+				vfRe, vfErr := regexp.Compile(vfRegex)
+				if vfErr == nil {
+					s.responseVowelFoldPatterns = append(s.responseVowelFoldPatterns, &compiledPattern{
+						name:                p.Name,
+						re:                  vfRe,
+						responseMemoRegexp:  vfRe,
+						bundle:              p.Bundle,
+						bundleVersion:       p.BundleVersion,
+						requiredLiteralsAny: requiredLiteralsAny,
+					})
+				}
+			}
+		}
+	}
+
+	// Build response pre-filters for keyword-gated regex skipping.
+	// Each pattern set gets its own pre-filter because opt-space and
+	// vowel-fold transforms change which keywords appear in content.
+	if len(s.responsePatterns) > 0 {
+		s.responsePreFilter = newResponsePreFilter(s.responsePatterns)
+	}
+	if len(s.responseOptSpacePatterns) > 0 {
+		s.responseOptSpacePreFilter = newResponsePreFilter(s.responseOptSpacePatterns)
+	}
+	if len(s.responseVowelFoldPatterns) > 0 {
+		s.responseVowelFoldPreFilter = newResponsePreFilter(s.responseVowelFoldPatterns)
+	}
+
+	// Build address protection checker if enabled.
+	if cfg.AddressProtection.Enabled {
+		agentAddrs := make(map[string][]string)
+		for name, agent := range cfg.Agents {
+			if name != "_default" && !cfg.LicenseAgentsFeature {
+				continue
+			}
+			if len(agent.AllowedAddresses) > 0 {
+				agentAddrs[name] = agent.AllowedAddresses
+			}
+		}
+		s.addressChecker = addressprotect.NewChecker(&cfg.AddressProtection, agentAddrs)
+	}
+
+	s.responseVerdicts.revision = s.responsePatternRevision()
+	return s, nil
+}
+
+// IsDestinationGranted reports whether Guard authorized this exact
+// network/host/port tuple. Malformed destinations fail closed as no match.
+func (s *Scanner) IsDestinationGranted(network destination.Network, host string, port uint16) bool {
+	dest, err := destination.New(network, host, port)
+	return err == nil && s.destinationGrants.Contains(dest)
+}
+
+func urlDestination(parsed *url.URL, hostname string) (destination.Destination, bool) {
+	if parsed == nil {
+		return destination.Destination{}, false
+	}
+	port := parsed.Port()
+	if port == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return destination.Destination{}, false
+		}
+	}
+	value, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || value == 0 {
+		return destination.Destination{}, false
+	}
+	dest, err := destination.New(destination.NetworkTCP, hostname, uint16(value))
+	return dest, err == nil
+}
+
+// MustNew creates a Scanner and panics if construction fails.
+// It is intended for tests and benchmarks with in-process fixture configs.
+func MustNew(cfg *config.Config) *Scanner {
+	s, err := New(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// AddressChecker returns the address protection checker, or nil if disabled.
+func (s *Scanner) AddressChecker() *addressprotect.Checker {
+	return s.addressChecker
+}
+
+// IsInternalIP checks whether the given IP falls within immutable core CIDRs
+// or any configured internal CIDR.
+func (s *Scanner) IsInternalIP(ip net.IP) bool {
+	// Normalize IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1) to
+	// their 4-byte IPv4 form so they match IPv4 CIDRs like 127.0.0.0/8.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if s.isCoreCIDRBlocked(ip) {
+		return true
+	}
+	for _, cidr := range s.internalCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsTrustedDomain checks if a hostname matches any trusted domain pattern.
+// Trusted domains allow connections to internal IPs with advisory logging
+// instead of blocking. IP literals are always rejected - trusted domains
+// only match hostnames to prevent SSRF bypass via raw IP addresses.
+func (s *Scanner) IsTrustedDomain(hostname string) bool {
+	hostname = strings.TrimSpace(hostname)
+	// MatchDomain applies IDNA lookup mapping. Check the same spelling here
+	// so a mapped numeric hostname cannot turn an IP entry into an exemption.
+	if ascii, err := destination.LookupASCII(hostname); err == nil {
+		hostname = ascii
+	}
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	// Reject IP literals: trusted domains match hostnames only.
+	// Without this, an attacker could add a raw IP to trusted_domains
+	// and bypass SSRF protection entirely.
+	// MatchDomain also trims a root dot; extra dots must not hide an IP
+	// from this guard even when the request-side parser rejects that input.
+	if net.ParseIP(strings.TrimRight(hostname, ".")) != nil {
+		return false
+	}
+	for _, pattern := range s.trustedDomains {
+		if MatchDomain(hostname, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// HostResolver returns the resolver used for SSRF DNS lookups and the proxy
+// dial path. It honors dns.host_overrides if configured and falls back to
+// net.DefaultResolver otherwise. Always non-nil for a Scanner built via New().
+func (s *Scanner) HostResolver() Resolver {
+	return s.resolver
+}
+
+// IsIPAllowlisted checks if an IP is in the SSRF IP allowlist (ssrf.ip_allowlist).
+// Used by checkSSRF and the dial-level SSRF check to exempt specific IP ranges.
+//
+// Cloud-metadata, link-local, multicast, and unspecified addresses are a
+// non-overridable SSRF deny: no ssrf.ip_allowlist entry can exempt them, even
+// if a range that covers one is somehow configured. This is the runtime floor
+// behind the config-load rejection in validateSSRF; both exist so a metadata
+// endpoint (credential-theft target) can never be allowlisted into reach. This
+// is the single chokepoint consulted by every allowlist site (core literal
+// floor, resolved SSRF, and the proxy dial guard), so hardening it here covers
+// all of them at once.
+func (s *Scanner) IsIPAllowlisted(ip net.IP) bool {
+	if IsNonOverridableSSRFTarget(ip) {
+		return false
+	}
+	for _, cidr := range s.ipAllowlistCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsNonOverridableSSRFTarget reports whether an IP belongs to a class that
+// ssrf.ip_allowlist must never be able to exempt: cloud instance-metadata
+// endpoints, link-local ranges (which contain the IPv4 metadata IP), multicast,
+// and the unspecified address. Loopback and ordinary private (RFC1918 /
+// unique-local) ranges are deliberately NOT in this set — exempting a specific
+// loopback or internal service IP is the allowlist's intended use.
+func IsNonOverridableSSRFTarget(ip net.IP) bool {
+	return destination.IsNonOverridableSSRFTarget(ip)
+}
+
+// IsInAPIAllowlist checks if a hostname matches any entry in api_allowlist.
+// Unlike the scanner's allowlist field (which is mode-gated to strict), this
+// checks the raw config allowlist regardless of mode - used for SSRF hint
+// generation and config-mismatch classification.
+func (s *Scanner) IsInAPIAllowlist(hostname string) bool {
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	for _, pattern := range s.rawAPIAllowlist {
+		if MatchDomain(hostname, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// Close marks the scanner unusable for new BeginUse callers and tears
+// down internal resources once every active BeginUse has invoked release.
+// Idempotent; further calls are no-ops.
+//
+// Drain semantics: the call site (typically Proxy.Reload's `go old.Close()`)
+// gets scannerCloseDrainTimeout to wait for in-flight users. If drain
+// completes inside that window, teardown runs synchronously and Close
+// returns once Drained is true. If the timeout fires (a hung scan, an
+// adversarial slow-loris client), Close hands teardown off to a detached
+// goroutine that waits indefinitely for inUse to reach zero before
+// releasing the rateLimiter lifecycle and stopping the dataBudget ticker. The forced-teardown
+// path is gone: a hung user can no longer end up calling Scan on a
+// scanner whose background resources have been torn down underneath it.
+//
+// Trade-off: a permanently-hung scan retains the prior scanner forever.
+// That is preferable to fail-open enforcement; the proxy's reload-mu
+// guard plus the maxBaselineTools cap bound exposure, and the new
+// scanner already serves all post-swap traffic so the orphan affects
+// only the single hung request.
+func (s *Scanner) Close() {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return
+	}
+	s.closed = true
+	s.closeMu.Unlock()
+
+	drainDone := make(chan struct{})
+	go func() {
+		s.inUse.Wait()
+		close(drainDone)
+	}()
+	select {
+	case <-drainDone:
+		s.tearDown()
+	case <-time.After(scannerCloseDrainTimeout):
+		// Drain timed out. Do NOT tear down background resources mid-scan;
+		// hand off to a detached goroutine that waits indefinitely for
+		// the hung user to release. Drained() flips only once that
+		// goroutine actually completes teardown.
+		go func() {
+			s.inUse.Wait()
+			s.tearDown()
+		}()
+	}
+}
+
+// tearDown releases scanner lifecycle state and flips drained=true. Safe to
+// call exactly once per Close transition.
+func (s *Scanner) tearDown() {
+	if s.rateLimiter != nil {
+		s.rateLimiter.Close()
+	}
+	if s.dataBudget != nil {
+		s.dataBudget.Close()
+	}
+	s.drained.Store(true)
+}
+
+// BeginUse registers an in-flight scanner user. Callers MUST invoke the
+// returned release func when finished (defer is the canonical idiom).
+// Returns ok=false if Close has already been initiated; callers in that
+// case must re-Load the proxy's scanner pointer to acquire the freshly
+// swapped-in instance and retry. Cheap: two atomics + a WaitGroup Add on
+// the happy path.
+func (s *Scanner) BeginUse() (release func(), ok bool) {
+	s.closeMu.RLock()
+	if s.closed {
+		s.closeMu.RUnlock()
+		return nil, false
+	}
+	s.inUse.Add(1)
+	s.closeMu.RUnlock()
+	return s.inUse.Done, true
+}
+
+// Closed reports whether Close has been initiated. Used by tests to assert
+// hot-reload drained the prior scanner. Production callers should rely on
+// BeginUse's ok return instead.
+func (s *Scanner) Closed() bool {
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	return s.closed
+}
+
+// Drained reports whether Close has finished its teardown - drain wait
+// returned (or timed out), and the rateLimiter / dataBudget cleanup
+// goroutines have been signaled to stop. Distinct from Closed, which
+// flips at the start of Close before drain runs. Tests use Drained to
+// assert the close goroutine actually completed; production code has no
+// reason to read this.
+func (s *Scanner) Drained() bool {
+	return s.drained.Load()
+}
+
+// RecordRequest records response data for per-domain data budget tracking.
+// Call this AFTER Scan() returns Allowed=true and the response is fetched.
+// Rate limiting is handled atomically inside Scan() via CheckAndRecord.
+// dataBytes is the response size; pass 0 if unknown or not yet fetched.
+// Uses baseDomain normalization to match checkDataBudget's tracking.
+func (s *Scanner) RecordRequest(hostname string, dataBytes int) {
+	if s.dataBudget != nil && dataBytes > 0 {
+		s.dataBudget.Record(baseDomain(hostname), dataBytes)
+	}
+}
+
+// HintForScanner returns the terse, agent-facing block reason for a scanner
+// label (the AgentReason from the central remediation table). It deliberately
+// carries NO config knob or containment-mechanism name: this value reaches the
+// blocked agent via the X-Pipelock-Hint response header and the block response
+// body, so naming the remediation knob here would teach the agent to unblock
+// itself (confused deputy). Operators get the exact allow-path from
+// `pipelock explain` and the audit remediation_hint, not the agent response.
+// Returns "" for an unknown label (fail-safe).
+func HintForScanner(label string) string {
+	g, _ := GuidanceFor(label)
+	return g.AgentReason
+}
+
+// HintForBlock returns the terse, agent-facing block reason for a blocked scan
+// result, using the scan Reason to disambiguate same-label variants. Returns ""
+// for an allowed or nil result, or an unknown label (fail-safe).
+func HintForBlock(r *Result) string {
+	if r == nil || r.Allowed {
+		return ""
+	}
+	g, _ := GuidanceForResult(r.Scanner, r.Reason)
+	return g.AgentReason
+}
+
+// Scan checks a URL against all scanners and returns the result.
+// Allowed requests atomically consume one per-domain rate-limit slot.
+// Blocked results include a Hint field with actionable guidance.
+// Fail-closed: nil or already-cancelled contexts are rejected before scanning.
+//
+// Heartbeat fires on EVERY return (including the early fail-closed path
+// for nil/cancelled contexts) via defer. The watchdog interprets the
+// heartbeat as "Scan is making progress, not wedged in a regex"; a fast
+// reject is still progress and must register so a flood of cancelled-
+// context probes does not falsely trip the wedge detector.
+func (s *Scanner) Scan(ctx context.Context, rawURL string) Result {
+	return s.scanWithRateRecording(ctx, rawURL, true)
+}
+
+// ScanPreflight runs the same URL checks as Scan, including the current rate
+// limit, without recording a request against that limit. It is for a redirect
+// target that the forward proxy returns to its client without dispatching.
+// The actual request must still call Scan to atomically check and consume its
+// rate-limit slot; this result neither reserves a slot nor authorizes dispatch.
+func (s *Scanner) ScanPreflight(ctx context.Context, rawURL string) Result {
+	return s.scanWithRateRecording(ctx, rawURL, false)
+}
+
+func (s *Scanner) scanWithRateRecording(ctx context.Context, rawURL string, recordRate bool) Result {
+	defer func() {
+		if h := s.heartbeat.Load(); h != nil {
+			h.fn()
+		}
+	}()
+	if ctx == nil || ctx.Err() != nil {
+		return Result{
+			Allowed: false,
+			Reason:  "request context unavailable",
+			Scanner: ScannerContext,
+			Score:   1.0,
+			Hint:    HintForScanner(ScannerContext),
+		}
+	}
+	r := s.scan(ctx, rawURL, recordRate)
+	if !r.Allowed && r.Hint == "" {
+		if r.Scanner == ScannerLength {
+			// The length gate formats only byte counts into its reason. It
+			// cannot produce nested-destination or other reason-specific hints.
+			r.Hint = HintForScanner(ScannerLength)
+		} else {
+			r.Hint = HintForBlock(&r)
+		}
+	}
+	return r
+}
+
+// scan checks a URL against all scanners and returns the result.
+// DLP runs on the hostname BEFORE DNS resolution to prevent secret exfiltration
+// via DNS queries (e.g., "sk-ant-xxx.evil.com" leaks the key during resolution).
+func (s *Scanner) scan(ctx context.Context, rawURL string, recordRate bool) (result Result) {
+	now := s.currentTime()
+	if s.maxURLLength > 0 && len(rawURL) > s.maxURLLength {
+		return Result{
+			Allowed: false,
+			Reason:  fmt.Sprintf("URL length %d exceeds maximum %d", len(rawURL), s.maxURLLength),
+			Scanner: ScannerLength,
+			Score:   0.8,
+		}
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return Result{Allowed: false, Reason: "invalid URL", Scanner: ScannerParser, Score: 1.0}
+	}
+
+	// Normalize hostname for consistent matching
+	hostname := strings.ToLower(parsed.Hostname())
+
+	// Canonicalize non-standard IP notations (hex, octal, decimal integer)
+	// so that allowlist/blocklist/DLP checks all see the same dotted-decimal
+	// form. Without this, 0x7f000001 bypasses a blocklist entry for 127.0.0.1.
+	// Also update parsed.Host so downstream consumers (checkDLP, checkEntropy,
+	// exempt_domains matching) all see the canonical form.
+	if altIP := destination.ParseIPLiteral(hostname); altIP != nil && altIP.To4() != nil && net.ParseIP(hostname) == nil {
+		hostname = altIP.String()
+		port := parsed.Port()
+		if port != "" {
+			parsed.Host = hostname + ":" + port
+		} else {
+			parsed.Host = hostname
+		}
+	}
+
+	// Scheme check -
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return Result{
+			Allowed: false,
+			Reason:  fmt.Sprintf("scheme %q not allowed: only http and https", parsed.Scheme),
+			Scanner: ScannerScheme,
+			Score:   1.0,
+		}
+	}
+	dest, destinationOK := urlDestination(parsed, hostname)
+	if !destinationOK {
+		return Result{Allowed: false, Reason: "invalid destination host or port", Scanner: ScannerParser, Score: 1.0}
+	}
+
+	// CRLF injection check - %0D%0A in URLs enables header injection.
+	// Runs early because CRLF is never legitimate in a URL.
+	if result := checkCRLF(rawURL); !result.Allowed {
+		return result
+	}
+
+	// Path traversal check - /../ sequences are defense-in-depth.
+	if result := checkPathTraversal(parsed); !result.Allowed {
+		return result
+	}
+
+	// Allowlist check - if configured, only allowlisted domains are permitted.
+	// Runs before DNS to reject disallowed domains without any network I/O.
+	if result := s.checkAllowlist(dest); !result.Allowed {
+		return result
+	}
+
+	// Blocklist check - before DNS to avoid resolving known-bad domains.
+	if result := s.checkBlocklist(hostname); !result.Allowed {
+		return result
+	}
+
+	// Core SSRF literal - immutable safety floor for IP literals. Runs ALWAYS,
+	// even when cfg.Internal is nil (SSRF disabled). Blocks direct requests
+	// to private IPs (127.0.0.1, 169.254.169.254, 10.x, etc.). Respects
+	// ssrf.ip_allowlist for operator overrides.
+	if result := s.checkCoreSSRFLiteral(dest); !result.Allowed {
+		return result
+	}
+
+	// SigV4 presigned URL carve-out. Detect once before content-scanning
+	// stages so core DLP, main DLP, and query-entropy all see the same
+	// scrubbed URL. The scrub replaces ONLY the AKIA component of a
+	// structurally validated X-Amz-Credential value with a same-length
+	// lowercase placeholder; the AKIA appearing in any other URL component
+	// (path, hostname, other query params) is left untouched and still
+	// triggers core/main DLP blocks. Query entropy on the credential value
+	// drops below threshold once the AKIA is normalised, so legitimate
+	// presigned URLs stop tripping on the issuer's deliberately diverse
+	// scope string. See sigv4.go.
+	sigV4 := detectValidSigV4(parsed)
+	scanURL := parsed
+	if sigV4.Valid {
+		scanURL = scrubSigV4Credential(parsed, sigV4.KeyID)
+	}
+
+	// Core DLP - immutable safety floor. Runs BEFORE main DLP, BEFORE DNS.
+	// Core findings are FINAL; the main scanner cannot override a core block.
+	var decodes decodingMemo
+	if result := s.checkCoreDLPWithDecodes(scanURL, &decodes); !result.Allowed {
+		return result
+	}
+
+	// DLP + entropy on hostname BEFORE DNS resolution.
+	// Prevents secret exfiltration via DNS queries for domains like
+	// "sk-ant-xxxx.evil.com" where the subdomain encodes a secret.
+	dlpResult, dlpWarns := s.checkDLPWithDecodesAt(scanURL, &decodes, now)
+	dlpWarns = deduplicateWarnMatches(dlpWarns)
+	if !dlpResult.Allowed {
+		if note := s.queryGrantValidityNote(scanURL, now); note != "" {
+			dlpResult.Reason += "; " + note
+		}
+		dlpResult.WarnMatches = dlpWarns
+		s.emitDLPWarns(ctx, dlpWarns)
+		return dlpResult
+	}
+	credentialAudienceAllows := dlpResult.CredentialAudienceAllows
+	// Attach DLP warn matches to whatever result is returned from here on.
+	// The defer fires on every return path, including blocks by later scanners.
+	// When SigV4 detection validated the URL, also mark the allow result as
+	// adaptive-neutral and attach a long-expiry warn for audit visibility.
+	defer func() {
+		result.CredentialAudienceAllows = append([]CredentialAudienceAllow(nil), credentialAudienceAllows...)
+		if sigV4.Valid && result.Allowed && result.Class == ClassThreat {
+			result.Class = ClassStructuralExemption
+		}
+		if sigV4.Valid && result.Allowed && sigV4.Expires > sigV4LongExpiryThreshold {
+			dlpWarns = append(dlpWarns, WarnMatch{
+				PatternName: WarnPatternSigV4LongExpiry,
+				Severity:    "info",
+			})
+		}
+		result.WarnMatches = dlpWarns
+		s.emitDLPWarns(ctx, dlpWarns)
+	}()
+	if result := s.checkEntropyWithContextAt(ctx, scanURL, now); !result.Allowed {
+		return result
+	}
+
+	// Subdomain entropy check - catches base64/hex encoded data in subdomains
+	// (e.g., "aGVsbG8.evil.com" exfiltrating data via DNS queries).
+	if result := s.checkSubdomainEntropy(hostname); !result.Allowed {
+		return result
+	}
+
+	// Nested URL destinations in query parameters. Deliberately placed AFTER the
+	// no-I/O content scanners (core DLP, DLP, entropy) and immediately before
+	// DNS-based SSRF on the outer host. An earlier revision ran this before DLP,
+	// which let a request carrying both a credential and several slow nested
+	// hostnames return a nested-resolution timeout before DLP ever ran: the
+	// secret was still refused, but the DLP finding never reached audit and the
+	// timeout is adaptive-neutral, so nothing was recorded. Content findings that
+	// need no network must be established before any check that can time out.
+	if result := s.checkNestedURLs(ctx, parsed); !result.Allowed {
+		return result
+	}
+
+	// SSRF protection - DNS resolution happens here, safe after DLP.
+	// When active, core CIDRs are always included via mergedSSRFCIDRs()
+	// so private ranges (10.x, 172.16.x, 192.168.x, loopback, link-local)
+	// cannot be removed from the check set via config alone.
+	ssrfResult := s.checkSSRF(ctx, dest)
+	if !ssrfResult.Allowed {
+		return ssrfResult
+	}
+
+	// Rate limit check (per-domain)
+	if result := s.checkRateLimit(hostname, recordRate); !result.Allowed {
+		return result
+	}
+
+	// Data budget check (per-domain sliding window)
+	if result := s.checkDataBudget(hostname); !result.Allowed {
+		return result
+	}
+
+	// Final context check: catch cancellations that arrived during in-memory
+	// scanning (blocklist, DLP, entropy) before returning an allow verdict.
+	if ctx.Err() != nil {
+		return Result{
+			Allowed: false,
+			Reason:  "request context cancelled",
+			Scanner: ScannerContext,
+			Score:   1.0,
+		}
+	}
+
+	return Result{Allowed: true, Scanner: ScannerAll, Score: 0.0, SSRFResolvedIPs: ssrfResult.SSRFResolvedIPs}
+}
+
+// ParseIPLiteral parses a standard or alternative IP literal into the scanner's
+// canonical net.IP. It strips a single trailing DNS root dot and any trailing
+// zone ID, decodes alternative IPv4 forms, and normalizes IPv4-mapped IPv6 to
+// four-byte IPv4. It returns nil for an ordinary hostname.
+// The implementation lives in internal/destination, which owns destination
+// vocabulary. Delegating keeps a single parser rather than two copies that
+// must be held in sync: a spelling recognized by one and not the other is a
+// fail-open, because a host classified as a DNS name skips the literal floor.
+func ParseIPLiteral(hostname string) net.IP {
+	return destination.ParseIPLiteral(hostname)
+}
+
+// The cloud-metadata address tables moved to internal/destination alongside the
+// predicate that reads them. Keeping a second copy here would be a set of
+// addresses that must stay in sync with the enforcing one, and a provider
+// address present in one copy but not the other is a metadata endpoint that
+// reaches an agent.
+
+// IsCloudMetadataIP returns true when the resolved IP belongs to a recognised
+// cloud-provider metadata service. The caller uses this to upgrade a generic
+// SSRF block into the more specific metadata classification, matching the
+// dedicated blockreason.SSRFMetadata code.
+func IsCloudMetadataIP(ip net.IP) bool {
+	return destination.IsCloudMetadataIP(ip)
+}
+
+func isCloudMetadataIP(ip net.IP) bool {
+	return IsCloudMetadataIP(ip)
+}
+
+// checkSSRF blocks requests to internal/private IP ranges.
+// When no internal CIDRs are configured (nil slice), SSRF protection is disabled.
+// To block loopback, link-local, etc., include those CIDRs in config.Internal.
+// When SSRF IS active, core CIDRs are always included in the check set.
+func (s *Scanner) checkSSRF(ctx context.Context, dest destination.Destination) Result {
+	hostname := dest.Host
+	// Check context before the SSRF-disabled fast path so cancelled requests
+	// don't slip through when internalCIDRs is empty.
+	if ctx.Err() != nil {
+		return Result{
+			Allowed: false,
+			Reason:  "request context cancelled",
+			Scanner: ScannerContext,
+			Score:   1.0,
+		}
+	}
+	if len(s.internalCIDRs) == 0 && s.destinationGrants.Len() == 0 {
+		return Result{Allowed: true}
+	}
+
+	// When SSRF is active, merge core CIDRs so private ranges can never
+	// be removed from the check set via config alone.
+	allCIDRs := s.mergedSSRFCIDRs()
+
+	// scan canonicalizes alternative IPv4 forms before reaching this function,
+	// so use the shared standard-or-alternative parser here. Literal targets are
+	// enforced directly against the same non-overridable floor, CIDRs, and IP
+	// allowlist as resolved addresses; DNS must not influence a literal verdict.
+	if literalIP := ParseIPLiteral(hostname); literalIP != nil {
+		if IsNonOverridableSSRFTarget(literalIP) {
+			scannerLabel := ScannerSSRF
+			blockReason := fmt.Sprintf("SSRF blocked: %s is a non-overridable internal IP", hostname)
+			if isCloudMetadataIP(literalIP) {
+				scannerLabel = ScannerSSRFMetadata
+				blockReason = fmt.Sprintf("SSRF blocked: %s is a cloud metadata endpoint", hostname)
+			}
+			return Result{
+				Allowed: false,
+				Reason:  blockReason,
+				Scanner: scannerLabel,
+				Score:   1.0,
+			}
+		}
+		for _, cidr := range allCIDRs {
+			if cidr.Contains(literalIP) && !s.IsIPAllowlisted(literalIP) && !s.destinationGrants.Contains(dest) {
+				result := Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf("SSRF blocked: %s is an internal IP", hostname),
+					Scanner: ScannerSSRF,
+					Score:   1.0,
+				}
+				if s.IsInAPIAllowlist(hostname) {
+					result.Hint = HintForScanner(ScannerSSRF)
+					result.Class = ClassConfigMismatch
+				}
+				return result
+			}
+		}
+		return Result{Allowed: true}
+	}
+
+	// Resolve hostname to IP for SSRF check.
+	// Fail closed: if we can't resolve DNS, we can't verify the IP is safe.
+	dnsCtx, dnsCancel := context.WithTimeout(ctx, ssrfLookupCeiling) // inherits caller cancellation
+	defer dnsCancel()
+	ips, err := s.resolver.LookupHost(dnsCtx, hostname)
+	if err != nil {
+		// Caller cancellation or deadline must route through the normal
+		// fail-closed ScannerContext path. dnsCtx inherits ctx, so a
+		// client abort or request deadline surfaces here as
+		// context.Canceled / DeadlineExceeded. Classifying those as
+		// infrastructure errors would make cancelled SSRF probes
+		// adaptive-neutral, contradicting the CLAUDE.md rule that
+		// context cancellation always defaults to block.
+		if ctx.Err() != nil {
+			return Result{
+				Allowed: false,
+				Reason:  "request context cancelled",
+				Scanner: ScannerContext,
+				Score:   1.0,
+				Hint:    HintForScanner(ScannerContext),
+			}
+		}
+		// Genuine resolver failure. Classify as infrastructure error,
+		// not a threat. Fail-closed is preserved (Allowed=false, request
+		// still blocked), but adaptive enforcement must not treat
+		// resolver wobble as evidence of an adversary. Without this
+		// classification, a burst of DNS timeouts accumulates
+		// SignalBlock points until the session is pushed into airlock
+		// lockdown.
+		//
+		// Split the resolver failure mode into a DNSErrorKind so the
+		// audit emit path can drop the misleading mitre_technique=T1046
+		// tag (and the "SSRF check failed" reason text) on
+		// non-adversarial DNS errors. The label fix is presentational;
+		// Scanner stays ScannerSSRF so existing suppression rules, layer
+		// header values, and metrics keyed on the canonical label keep
+		// working for operators that already consume them.
+		kind, reason := classifyDNSError(hostname, err)
+		return Result{
+			Allowed:      false,
+			Reason:       reason,
+			Scanner:      ScannerSSRF,
+			Score:        1.0,
+			Class:        ClassInfrastructureError,
+			DNSErrorKind: kind,
+		}
+	}
+
+	// Parse the resolved set once and reuse it for every pass, so the floor pass
+	// and the CIDR pass cannot disagree about what an address is. Zone-ID strip,
+	// IPv4-mapped normalization and dropping undialable entries all live in
+	// destination.ParseResolved.
+	parsed := destination.ParseResolved(ips)
+
+	// Non-overridable floor: cloud-metadata, link-local, multicast, and
+	// unspecified targets can never be exempted, so this pass runs BEFORE the
+	// trusted-domain allow below and wins over it.
+	if hit, found := destination.FirstFloorHit(parsed); found {
+		// A DNS filter answers a blocked name with the unspecified address.
+		// When that is the whole answer, the resolver refused the name, so
+		// the request is refused as an infrastructure result rather than
+		// scored as a probe of an internal host. Any other floor address in
+		// the answer, including cloud metadata, keeps the threat verdict.
+		if destination.AllUnspecified(parsed) {
+			return Result{
+				Allowed:      false,
+				Reason:       fmt.Sprintf("DNS for %s answered %s, the address DNS filters use for a blocked name", hostname, hit.Display),
+				Scanner:      ScannerSSRF,
+				Score:        1.0,
+				Class:        ClassInfrastructureError,
+				DNSErrorKind: DNSErrorSinkhole,
+			}
+		}
+		scannerLabel := ScannerSSRF
+		blockReason := fmt.Sprintf("SSRF blocked: %s resolves to non-overridable internal IP %s", hostname, hit.Display)
+		if isCloudMetadataIP(hit.IP) {
+			scannerLabel = ScannerSSRFMetadata
+			blockReason = fmt.Sprintf("SSRF blocked: %s resolves to cloud metadata endpoint %s", hostname, hit.Display)
+		}
+		return Result{
+			Allowed: false,
+			Reason:  blockReason,
+			Scanner: scannerLabel,
+			Score:   1.0,
+		}
+	}
+
+	// Trusted domains bypass the ordinary internal-IP CIDR check. All other
+	// scanners (DLP, blocklist, entropy) still apply, and the non-overridable
+	// floor above always wins.
+	if s.IsTrustedDomain(hostname) {
+		return Result{Allowed: true}
+	}
+	if s.destinationGrants.Contains(dest) {
+		return Result{Allowed: true, SSRFResolvedIPs: append([]string(nil), ips...)}
+	}
+
+	// Internal CIDRs (core + config). Cloud-metadata addresses never reach here:
+	// they are non-overridable and already returned above, so this pass only
+	// ever emits the generic internal-IP classification.
+	if hit, found := destination.FirstInternalHit(parsed, allCIDRs, s.IsIPAllowlisted); found {
+		result := Result{
+			Allowed: false,
+			Reason:  fmt.Sprintf("SSRF blocked: %s resolves to internal IP %s", hostname, hit.Display),
+			Scanner: ScannerSSRF,
+			Score:   1.0,
+		}
+		// If the domain is in api_allowlist, this is a config mismatch (not a
+		// real attack): classify it so adaptive enforcement doesn't escalate.
+		// The agent-facing hint stays terse (no knob); the operator gets the
+		// exact allow-path (ssrf.ip_allowlist for an IP literal,
+		// trusted_domains for a hostname) from `pipelock explain` and the
+		// audit hint.
+		if s.IsInAPIAllowlist(hostname) {
+			result.Hint = HintForScanner(ScannerSSRF)
+			result.Class = ClassConfigMismatch
+		}
+		return result
+	}
+
+	return Result{Allowed: true, SSRFResolvedIPs: append([]string(nil), ips...)}
+}
+
+// checkAllowlist rejects requests to domains not in the allowlist.
+// When the allowlist is empty, all domains are permitted (allowlist is opt-in).
+// Uses MatchDomain for consistent wildcard matching with the blocklist.
+func (s *Scanner) checkAllowlist(dest destination.Destination) Result {
+	hostname := dest.Host
+	if s.destinationGrants.Contains(dest) {
+		return Result{Allowed: true}
+	}
+	if len(s.allowlist) == 0 {
+		return Result{Allowed: true}
+	}
+	for _, pattern := range s.allowlist {
+		if MatchDomain(hostname, pattern) {
+			return Result{Allowed: true}
+		}
+	}
+	return Result{
+		Allowed: false,
+		Reason:  fmt.Sprintf("domain not in allowlist: %s", hostname),
+		Scanner: ScannerAllowlist,
+		Score:   1.0,
+	}
+}
+
+// checkBlocklist checks the hostname against the domain blocklist.
+func (s *Scanner) checkBlocklist(hostname string) Result {
+	for _, pattern := range s.blocklist {
+		if MatchDomain(hostname, pattern) {
+			return Result{
+				Allowed: false,
+				Reason:  fmt.Sprintf("domain blocked: %s matches %s", hostname, pattern),
+				Scanner: ScannerBlocklist,
+				Score:   1.0,
+			}
+		}
+	}
+	return Result{Allowed: true}
+}
+
+// ssrfLookupCeiling is the deadline one SSRF hostname resolution may take. The
+// outer host and the nested-destination budget share it so the two cannot drift.
+const ssrfLookupCeiling = 5 * time.Second
+
+// nestedURLResolveBudget bounds the total resolver time one request may spend on
+// nested destinations. It equals one lookup ceiling, so a request carrying nested
+// hostnames cannot hold more resolver time than one ordinary outer lookup. What
+// makes one ceiling sufficient in practice is that distinct destinations are
+// resolved once per request (see the seen set in checkNestedURLs): the common
+// shape, one callback URL repeated, costs a single lookup. A request naming many
+// DISTINCT slow hostnames can still exhaust it, which is why exhaustion is
+// classified as an infrastructure error rather than a threat.
+//
+// Exhausting the budget fails CLOSED: a nested destination that could not be
+// resolved in time is refused, never forwarded. Parsing and literal-IP checks
+// need no I/O and are bounded by the outer URL length, so there is deliberately
+// no cap on how many query values are examined; a count cap was a fail-open
+// (pad past it, then relay).
+// The value lives on the Scanner rather than in a package variable. A mutable
+// global would be shared by every concurrent scan, and a test that shortened it
+// would race every other test in the package.
+const defaultNestedURLResolveBudget = ssrfLookupCeiling
+
+const nestedURLReasonPrefix = "nested URL in query parameter"
+
+// nestedURLCandidate is one query component text that may be a nested URL, with
+// the parameter key it came from for the block reason.
+type nestedURLCandidate struct {
+	key  string
+	text string
+}
+
+// nestedURLCandidates enumerates every query component that could hide a nested
+// destination. It reads RawQuery directly rather than url.URL.Query(): Query()
+// percent-decodes and folds '+' to space, which destroys IPv6 zone ids (%25) and
+// hides the encodings the DLP query loop already sees. Both keys and values are
+// candidates, in raw form, iteratively percent-decoded, and through the same
+// hex/base64/base32 layers DLP applies. A scheme-relative "//host/..." is
+// completed with https so the host is evaluated like any other destination.
+func nestedURLCandidates(rawQuery string, maxLen int) []nestedURLCandidate {
+	var out []nestedURLCandidate
+	add := func(key, text string) {
+		text = strings.TrimSpace(text)
+		if text == "" || (maxLen > 0 && len(text) > maxLen) {
+			return
+		}
+		if strings.HasPrefix(text, "//") {
+			// A network-path reference names an authority (RFC 3986 4.2), so
+			// complete it and let the same parser the destination checks use
+			// decide whether a host is present. An earlier revision gated this
+			// on "contains an ASCII dot or parses as an IP literal", which read
+			// as caution and was a detection hole: it skipped every single-label
+			// internal name (localhost, consul, vault) and every host spelled
+			// with a non-ASCII dot. Deciding what is NOT a destination is an
+			// allow gate, and an invented shape rule for one is a bypass.
+			text = "https:" + text
+		}
+		out = append(out, nestedURLCandidate{key: key, text: text})
+	}
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(pair, "=")
+		decodedKey := IterativeDecode(key)
+		for _, component := range []string{key, value} {
+			if component == "" {
+				continue
+			}
+			add(decodedKey, component)
+			decoded := IterativeDecode(component)
+			if decoded != component {
+				add(decodedKey, decoded)
+			}
+			for _, d := range decodeEncodingsRecursive(decoded) {
+				add(decodedKey, d.text)
+			}
+		}
+	}
+	return out
+}
+
+// checkNestedURLs evaluates URL-shaped query components as destinations in
+// their own right, running the same allowlist, blocklist, and SSRF checks the
+// outer host receives. Decode is at most one level of nesting: a nested URL that
+// itself carries a nested URL is not expanded. Non-URL text, relative paths, and
+// non-http(s) schemes are ignored. All nested DNS lookups share one deadline.
+func (s *Scanner) checkNestedURLs(ctx context.Context, parsed *url.URL) Result {
+	if !s.scanNestedURLs || parsed == nil || parsed.RawQuery == "" {
+		return Result{Allowed: true}
+	}
+	candidates := nestedURLCandidates(parsed.RawQuery, s.maxURLLength)
+	if len(candidates) == 0 {
+		return Result{Allowed: true}
+	}
+	runDNSSSRF := len(s.internalCIDRs) > 0 || s.destinationGrants.Len() > 0
+	nestedCtx, cancel := context.WithTimeout(ctx, s.nestedURLResolveBudget)
+	defer cancel()
+	// One verdict per distinct destination. The same callback URL repeated
+	// across parameters, or reached through several encodings, is one
+	// destination and must cost one resolution, not one per occurrence.
+	seen := make(map[string]struct{}, len(candidates))
+	for _, c := range candidates {
+		result := s.checkNestedURLValue(nestedCtx, c.key, c.text, runDNSSSRF, seen)
+		if result.Allowed {
+			continue
+		}
+		if nestedCtx.Err() != nil && ctx.Err() == nil {
+			// The shared budget ran out before every nested destination was
+			// resolved. Refuse the request, because an unverified nested
+			// destination is exactly what this step exists to stop. Classify it
+			// as an infrastructure error, not a threat: nothing was resolved, so
+			// there is no evidence of an adversary, and adaptive enforcement must
+			// not accumulate lockdown signal from resolver wobble. This matches
+			// how checkSSRF already classifies an outer-host resolver failure.
+			return Result{
+				Allowed: false,
+				Reason:  fmt.Sprintf("nested URL destinations exceeded the shared resolution budget (%s)", s.nestedURLResolveBudget),
+				Scanner: ScannerSSRF,
+				Score:   1.0,
+				Class:   ClassInfrastructureError,
+			}
+		}
+		return result
+	}
+	return Result{Allowed: true}
+}
+
+func (s *Scanner) checkNestedURLValue(ctx context.Context, key, text string, runDNSSSRF bool, seen map[string]struct{}) Result {
+	nestedParsed, err := url.Parse(text)
+	if err != nil {
+		return Result{Allowed: true}
+	}
+	scheme := strings.ToLower(nestedParsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return Result{Allowed: true}
+	}
+	nestedHost := strings.ToLower(nestedParsed.Hostname())
+	if nestedHost == "" {
+		return Result{Allowed: true}
+	}
+	// Canonicalize alternative IPv4 forms the same way scan does for the outer host.
+	if altIP := destination.ParseIPLiteral(nestedHost); altIP != nil && altIP.To4() != nil && net.ParseIP(nestedHost) == nil {
+		nestedHost = altIP.String()
+		port := nestedParsed.Port()
+		if port != "" {
+			nestedParsed.Host = nestedHost + ":" + port
+		} else {
+			nestedParsed.Host = nestedHost
+		}
+	}
+	nestedDest, ok := urlDestination(nestedParsed, nestedHost)
+	if !ok {
+		// Bad port: treat as not a URL rather than blocking.
+		return Result{Allowed: true}
+	}
+	// Key on host and port: the same name on a different port is a different
+	// destination for allowlist and grant purposes.
+	dedupKey := fmt.Sprintf("%s:%d", nestedDest.Host, nestedDest.Port)
+	if seen != nil {
+		if _, done := seen[dedupKey]; done {
+			return Result{Allowed: true}
+		}
+		seen[dedupKey] = struct{}{}
+	}
+	if result := s.checkAllowlist(nestedDest); !result.Allowed {
+		return prefixNestedURLResult(key, result)
+	}
+	if result := s.checkBlocklist(nestedHost); !result.Allowed {
+		return prefixNestedURLResult(key, result)
+	}
+	if result := s.checkCoreSSRFLiteral(nestedDest); !result.Allowed {
+		return prefixNestedURLResult(key, result)
+	}
+	if runDNSSSRF {
+		if result := s.checkSSRF(ctx, nestedDest); !result.Allowed {
+			return prefixNestedURLResult(key, result)
+		}
+	}
+	return Result{Allowed: true}
+}
+
+func prefixNestedURLResult(key string, result Result) Result {
+	result.Reason = fmt.Sprintf(nestedURLReasonPrefix+" %q: %s", key, result.Reason)
+	return result
+}
+
+// checkCRLF detects CRLF injection sequences in URLs. CR+LF bytes in a URL
+// enable HTTP header injection at the target server. Go's http library rejects
+// raw \r\n in requests, but we detect encoded variants (%0d%0a, double-encoded)
+// for defense-in-depth visibility.
+//
+// Fragments are excluded: they are never sent to the upstream server, so CRLF
+// in a fragment cannot inject headers.
+func checkCRLF(rawURL string) Result {
+	// Strip fragment - it never reaches the server.
+	if idx := strings.IndexByte(rawURL, '#'); idx != -1 {
+		rawURL = rawURL[:idx]
+	}
+	lower := strings.ToLower(rawURL)
+
+	// Check for encoded CRLF pair: %0d%0a (the primary attack vector).
+	if strings.Contains(lower, "%0d%0a") {
+		return Result{
+			Allowed: false,
+			Reason:  "CRLF injection sequence in URL",
+			Scanner: ScannerCRLF,
+			Score:   0.9,
+		}
+	}
+
+	// Check for double-encoded CRLF pair: %250d%250a.
+	if strings.Contains(lower, "%250d%250a") {
+		return Result{
+			Allowed: false,
+			Reason:  "double-encoded CRLF injection sequence in URL",
+			Scanner: ScannerCRLF,
+			Score:   0.9,
+		}
+	}
+
+	// Check for bare encoded LF or CR. Some servers (e.g., Node.js HTTP
+	// parsers) accept a bare LF as a header terminator, so %0a alone is
+	// enough to inject headers without a preceding %0d.
+	if strings.Contains(lower, "%0a") || strings.Contains(lower, "%0d") {
+		return Result{
+			Allowed: false,
+			Reason:  "encoded CR or LF in URL",
+			Scanner: ScannerCRLF,
+			Score:   0.9,
+		}
+	}
+
+	// Check for double-encoded bare LF or CR: %250a, %250d.
+	if strings.Contains(lower, "%250a") || strings.Contains(lower, "%250d") {
+		return Result{
+			Allowed: false,
+			Reason:  "double-encoded CR or LF in URL",
+			Scanner: ScannerCRLF,
+			Score:   0.9,
+		}
+	}
+
+	// Check for raw CR or LF bytes (should not appear in URLs).
+	if strings.ContainsAny(rawURL, "\r\n") {
+		return Result{
+			Allowed: false,
+			Reason:  "raw CRLF bytes in URL",
+			Scanner: ScannerCRLF,
+			Score:   0.9,
+		}
+	}
+
+	return Result{Allowed: true}
+}
+
+// checkPathTraversal detects directory traversal sequences in URL paths.
+// Target servers are responsible for path safety, but detecting traversal
+// provides defense-in-depth and visibility into potential attacks.
+func checkPathTraversal(parsed *url.URL) Result {
+	// Check the raw path to catch encoded variants. url.Parse decodes %2e
+	// to '.' in Path but preserves encoding in RawPath (when it differs).
+	rawPath := parsed.RawPath
+	if rawPath == "" {
+		rawPath = parsed.Path
+	}
+	lowerPath := strings.ToLower(rawPath)
+
+	// Detect ".." as a path segment in raw and encoded forms.
+	// Match segment-bounded traversal: /<dotdot><sep> or trailing /<dotdot>,
+	// where sep is / \ %2f %5c and dots may be encoded as %2e.
+	dotdots := []string{"..", "%2e.", ".%2e", "%2e%2e"}
+	seps := []string{"/", "\\", "%2f", "%5c"}
+
+	for _, dd := range dotdots {
+		for _, left := range seps {
+			for _, right := range seps {
+				// <left><dd><right>  e.g. /../, %2f..%5c, \..%2f
+				if strings.Contains(lowerPath, left+dd+right) {
+					return Result{Allowed: false, Reason: "path traversal sequence in URL", Scanner: ScannerPathTraversal, Score: 0.7}
+				}
+			}
+			// <left><dd> at end of path - no trailing separator
+			if strings.HasSuffix(lowerPath, left+dd) {
+				return Result{Allowed: false, Reason: "path traversal sequence in URL", Scanner: ScannerPathTraversal, Score: 0.7}
+			}
+		}
+	}
+
+	// Double-encoded variants: %252e%252e bounded by separators.
+	if strings.Contains(lowerPath, "/%252e%252e/") ||
+		strings.Contains(lowerPath, "/%252e%252e%252f") ||
+		strings.HasSuffix(lowerPath, "/%252e%252e") {
+		return Result{
+			Allowed: false,
+			Reason:  "double-encoded path traversal in URL",
+			Scanner: ScannerPathTraversal,
+			Score:   0.7,
+		}
+	}
+
+	return Result{Allowed: true}
+}
+
+// checkRateLimit enforces per-domain rate limiting using a sliding window.
+// Uses atomic CheckAndRecord to prevent TOCTOU races where concurrent
+// requests could both pass the check before either records. Redirect preflight
+// uses the same limit without recording; actual requests must check and record.
+// Uses baseDomain normalization to prevent subdomain rotation bypass
+// (e.g., a.evil.com, b.evil.com each getting separate rate limit windows).
+func (s *Scanner) checkRateLimit(hostname string, recordRate bool) Result {
+	if s.rateLimiter == nil {
+		return Result{Allowed: true}
+	}
+
+	domain := baseDomain(hostname)
+	var allowed bool
+	if recordRate {
+		allowed = s.rateLimiter.CheckAndRecord(domain)
+	} else {
+		allowed = s.rateLimiter.IsAllowed(domain)
+	}
+	if !allowed {
+		return Result{
+			Allowed: false,
+			Reason:  domainCeilingReason("rate limit", hostname),
+			Scanner: ScannerRateLimit,
+			Score:   0.7,
+			Class:   ClassProtective,
+		}
+	}
+
+	return Result{Allowed: true}
+}
+
+// maxDecodeRounds is a safety ceiling for iterative URL decoding.
+// The loop exits early when decoding produces no change (decoded == s),
+// so this limit only matters for pathological inputs. URL decoding is
+// microsecond-cheap per round, so a generous ceiling has no real cost.
+const maxDecodeRounds = normalize.ScannerQueryUnescapeMaxRounds
+
+// IterativeDecode applies URL decoding until the string stops changing
+// or the safety ceiling is reached. Catches multi-layer encoding (e.g., %252D → %2D → -).
+// Exported for use by the fetch proxy to normalize display URLs.
+//
+//pipelock:provenance-transform query_unescape
+func IterativeDecode(s string) string {
+	for range maxDecodeRounds {
+		decoded, err := url.QueryUnescape(s)
+		if err != nil || decoded == s {
+			break
+		}
+		s = decoded
+	}
+	return s
+}
+
+// stripURLNoise removes every byte that cannot legitimately appear as DATA in
+// one of pipelock's DLP credential alphabets, so an attacker-chosen delimiter
+// inserted between fragments of a split secret does not survive to break
+// contiguous-string matching.
+//
+// This is a DENY-list, not an allow-list. The KEPT set is deliberately
+// narrow: ASCII letters and digits, plus '-', '_', '=' -- the punctuation
+// pipelock's hyphen/underscore token formats ("sk-ant-...", "ghp_...",
+// "glpat-...") use as key data, plus base64 padding. Everything outside it
+// -- not just the handful of characters previously enumerated by name
+// (whitespace, '.', '+', ',', ';', '|') -- is noise and is stripped. An
+// allow-list of "known" separator characters is inherently incomplete: an
+// attacker who notices a delimiter is absent from the list (this codebase's
+// own reproduction used '!', which was never in the list) simply splits on
+// that instead. Keeping only the credential alphabet has no such gap,
+// because there is no byte outside it that a real secret can ever need
+// preserved.
+//
+// '+' and '/' are DELIBERATELY excluded even though they are legitimate
+// base64-standard data (AWS Secret Key, Azure Storage Account Key both use
+// them). A decoded path or query value routinely contains a literal '/' or
+// '+' as ordinary URL STRUCTURE -- an encoded path separator (%2f), a
+// space encoded as '+' -- not as credential data, and those two patterns are
+// config/env-var values that get exfiltrated whole far more often than
+// fragmented across query params. Preserving them regressed a real,
+// previously-passing case (see TestScan_DLP_PathMixedSeparatorBypass): a
+// dash/underscore-only secret like "sk-ant-..." split across a decoded path
+// by an encoded '/' stopped reconstructing, because the '/' survived instead
+// of bridging the gap. stripToAlphanumeric (below) is the layer that closes
+// decoys built from base64 punctuation against a PURE-alphanumeric target;
+// it does not have this same false-negative risk because it strips '+'/'/'
+// unconditionally rather than trying to decide when they are data.
+//
+//pipelock:provenance-transform url_noise_strip
+func stripURLNoise(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_' || r == '=':
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// stripToAlphanumeric is a STRICTER companion to stripURLNoise: it keeps only
+// ASCII letters and digits, stripping '-', '_', '+', '/', '=' as well. Those
+// five characters are legitimate DATA for some DLP patterns (the hyphen in
+// "sk-ant-...", the underscore in "ghp_...", base64's '+/='), so
+// stripURLNoise must preserve them -- but that is exactly what an attacker
+// can exploit: a decoy query VALUE built entirely from one of those five
+// characters (e.g. "----") survives stripURLNoise unchanged and sits inside
+// the reconstructed concatenation, breaking the contiguous alphanumeric run
+// that patterns like the AWS access key ID ("AKIA[A-Z0-9]{16,}") require.
+// Patterns whose entire matched span is pure alphanumeric (AWS keys, hex
+// tokens, Ethereum addresses, credit card numbers, ...) don't need those five
+// characters preserved at all, so running a second, stricter pass alongside
+// stripURLNoise closes that gap without weakening stripURLNoise's own
+// coverage of hyphen/underscore-bearing formats: the two targets are
+// additive, and a pattern only needs ONE of them to still see its secret
+// reconstructed. What stripToAlphanumeric does NOT close: a decoy built from
+// one of these five characters can still defeat reconstruction of a pattern
+// that itself requires that same character as data (e.g. dash-only decoys
+// against "sk-ant-..."), because stripping it there would also destroy the
+// real secret. That narrower case -- the decoy alphabet must match the
+// target credential's OWN separator -- is left to the bounded subsequence
+// search (querySubsequenceDLP / querySubsequenceCoreDLP).
+//
+// Only wired into the full ordered query-value CONCATENATION, not into the
+// URL path or an individual query key/value. A single value or a path
+// segment is ordinary content far more often than it is a decoy: a region
+// slug like "asia-pacific-southeast" or a product name like
+// "aida-assistant" is exactly AWS-prefix-shaped once its dashes are gone
+// (verified false positive, closed by scoping this to the concatenation
+// where the multi-value decoy-stripping is actually needed -- see
+// TestScan_DLPFalsePositiveRegression). The concatenation is where a
+// decoy VALUE sitting between two real fragments is the thing being
+// defended against; a lone value has no adjacent fragment to reconstruct.
+//
+// Replayed by the v2-only ascii_alphanumeric_strip operation. url_noise_strip
+// cannot stand in for it: that one keeps '-', '_' and '=', so reusing it would
+// claim this function removed less than it did. The operation is v2-only
+// because v1's frozen vocabulary does not contain it, and a v1 receipt that
+// named it would be replaying a rule its own profile never described.
+//
+//pipelock:provenance-transform ascii_alphanumeric_strip
+func stripToAlphanumeric(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		}
+		return -1
+	}, s)
+}
+
+//pipelock:provenance-transform hostname_dot_remove
+func removeHostnameDots(value string) string {
+	return strings.ReplaceAll(value, ".", "")
+}
+
+// orderedQueryConcat concatenates all query parameter values in their original URL
+// order and returns the result. Catches secrets split across multiple query params
+// (e.g., "?part1=sk-ant-api03-&part2=AAAA..." → "sk-ant-api03-AAAA...").
+// Uses RawQuery instead of url.Values to preserve parameter order.
+//
+// dlpTarget is one view of a request that DLP patterns are matched against.
+// proseSource retains the pre-transform separators for contextual false-positive
+// classification; an empty value means text itself is the source. viewLabel
+// tells an operator which exact view the retained byte span indexes.
+// Package level rather than local to each scan function so the views can be
+// built in one place: two identical local types were what forced the ordered
+// query-concatenation block to be duplicated between the core floor and the
+// configured scanner.
+type dlpTarget struct {
+	text        string
+	viewLabel   string
+	proseSource string
+}
+
+// appendQueryConcatTargets adds the ordered query-value concatenation views a
+// credential split across parameters is reconstructed from: the concatenation
+// itself, its recursive decodings, and two strip views.
+//
+// Shared because the core floor and the configured scanner both need exactly
+// these views. They were duplicated byte for byte, so a view added to one and
+// not the other would have left the two paths disagreeing about what they
+// looked at, which is the failure this concatenation exists to prevent.
+//
+//pipelock:provenance-transform ordered_query_concat
+func appendQueryConcatTargets(targets []dlpTarget, path, rawQuery string) []dlpTarget {
+	targets = appendPathQueryConcatTargets(targets, path, rawQuery)
+	if rawQuery == "" || !strings.Contains(rawQuery, "&") {
+		return targets
+	}
+	concat := orderedQueryConcat(rawQuery)
+	proseSource := orderedQueryProseSource(rawQuery)
+	targets = append(targets, dlpTarget{concat, dlpViewLabel("query_concat"), proseSource})
+	for _, d := range decodeEncodingsRecursive(concat) {
+		targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), proseSource})
+	}
+	if stripped := stripURLNoise(concat); stripped != concat {
+		targets = append(targets, dlpTarget{stripped, dlpViewLabel("query_concat_noise_stripped"), proseSource})
+	}
+	if stripped := stripToAlphanumeric(concat); stripped != concat {
+		targets = append(targets, dlpTarget{stripped, dlpViewLabel("query_concat_noise_stripped_alnum"), proseSource})
+	}
+	return targets
+}
+
+// appendPathQueryConcatTargets adds the view a credential split across the
+// path-to-query seam is reconstructed from: the noise-stripped path joined
+// directly to the ordered query values.
+//
+// Without it, every target is one side of the '?' or the other. A secret whose
+// prefix sits in the path and whose remainder sits in a query value therefore
+// matches nothing: the path holds too few characters after the prefix to satisfy
+// the pattern's minimum length, the value carries no prefix, and the full-URL
+// view fails because '?' and '=' are not in any credential pattern's character
+// class, so the match terminates at the seam.
+//
+// Deliberately NOT gated on '&' or on a parameter count, unlike the
+// query-values-only concatenation above. Those gates are correct there, because
+// reconstructing a secret from several PARAMETERS requires several parameters to
+// exist. They are wrong here: this seam needs only one parameter, so gating on a
+// second one is what left a single-parameter URL unexamined.
+//
+// Composes two transforms that are already registered in the provenance profile
+// (url_noise_strip and ordered_query_concat), so it introduces no new operation
+// kind and needs no profile version bump.
+func appendPathQueryConcatTargets(targets []dlpTarget, path, rawQuery string) []dlpTarget {
+	if path == "" || path == "/" || rawQuery == "" {
+		return targets
+	}
+
+	// The path is decoded ONCE by url.Parse, while orderedQueryConcat already
+	// runs IterativeDecode over every query value. That asymmetry was itself a
+	// bypass: a doubly-escaped prefix such as %2573 survives Go's single decode
+	// as %73, so the seam view never saw the credential while the receiving
+	// server, decoding as many times as it likes, reassembled it. Decoding the
+	// path to a fixpoint the same way the query side already does removes the
+	// asymmetry rather than special-casing one more encoding depth.
+	decodedPath := IterativeDecode(path)
+
+	queryConcat := orderedQueryConcat(rawQuery)
+
+	// Both path views are kept. The raw one preserves the previous behavior for
+	// a path whose escapes are meaningful, and the decoded one covers the
+	// multi-escaped case; they are identical for an ordinary URL and the second
+	// is then skipped.
+	seen := make(map[string]struct{}, 2)
+	for _, p := range []string{path, decodedPath} {
+		concat := stripURLNoise(p) + queryConcat
+		if concat == "" {
+			continue
+		}
+		if _, dup := seen[concat]; dup {
+			continue
+		}
+		seen[concat] = struct{}{}
+		targets = appendPathQueryConcatViews(targets, concat, p+"\x00"+orderedQueryProseSource(rawQuery))
+	}
+	return targets
+}
+
+// appendPathQueryConcatViews adds one seam concatenation and its derived views.
+//
+// Derived views are skipped for an oversized concatenation. The recursive
+// decoder already refuses an input past maxDecodeTotalBytes, so this only makes
+// the same ceiling explicit one step earlier and keeps the strip views from
+// allocating another copy of a very large URL. The plain concatenation is still
+// scanned, so the bound trims amplification without creating a length above
+// which detection quietly stops.
+func appendPathQueryConcatViews(targets []dlpTarget, concat, proseSource string) []dlpTarget {
+	targets = append(targets, dlpTarget{concat, dlpViewLabel("path_query_concat"), proseSource})
+	if len(concat) > maxDecodeTotalBytes {
+		return targets
+	}
+	for _, d := range decodeEncodingsRecursive(concat) {
+		targets = append(targets, dlpTarget{d.text, dlpViewLabel("path_query_concat_" + d.encoding), proseSource})
+	}
+	if stripped := stripToAlphanumeric(concat); stripped != concat {
+		targets = append(targets, dlpTarget{stripped, dlpViewLabel("path_query_concat_noise_stripped_alnum"), proseSource})
+	}
+	return targets
+}
+
+func orderedQueryConcat(rawQuery string) string {
+	return orderedQueryJoin(rawQuery, "")
+}
+
+func orderedQueryProseSource(rawQuery string) string {
+	return orderedQueryJoin(rawQuery, "\x00")
+}
+
+func orderedQueryJoin(rawQuery, separator string) string {
+	var b strings.Builder
+	for _, pair := range strings.Split(rawQuery, "&") {
+		_, value, _ := strings.Cut(pair, "=")
+		if value != "" {
+			if separator != "" && b.Len() > 0 {
+				b.WriteString(separator)
+			}
+			b.WriteString(IterativeDecode(value))
+		}
+	}
+	return b.String()
+}
+
+// decodedResult pairs decoded text with the encoding that produced it.
+type decodedResult struct {
+	text     string
+	encoding string
+}
+
+// Encoding labels for decoded results.
+const (
+	encodingHex         = "hex"
+	encodingBase64      = "base64"
+	encodingBase32      = "base32"
+	encodingURL         = "url"
+	encodingHTML        = "html_entity"
+	encodingDecimal     = "decimal_character_codes"
+	encodingJSONUnicode = "json_unicode"
+)
+
+const (
+	maxDecodeCandidates = 4096
+	// maxDecodeTotalBytes bounds the SUM of decoded-candidate bytes processed in
+	// one fixpoint walk. It is the real work ceiling (decode + DLP match cost),
+	// and it replaces a per-candidate ceiling: a low per-candidate cap is itself
+	// a bypass, because an attacker can pad a stacked-encoded secret past it. The
+	// budget sits above the 5MB request-body scan limit so a secret encoded
+	// inside a large body is still fully decoded, while a bushy decode tree
+	// cannot amplify into unbounded CPU/memory. Standard decodes (base64, hex,
+	// base32, URL) only shrink their input, so no single candidate exceeds the
+	// entry size, which is itself bounded by this budget.
+	maxDecodeTotalBytes = 8 * 1024 * 1024
+)
+
+// maxReassembledTokenLen bounds the separator-stripped reassembly views. The
+// widened separator set is what catches a credential split on punctuation, and
+// it is also what lets ordinary prose collapse into one enormous "token": 74 KB
+// of English separated by "!" reassembled into a 72 KB base64 candidate that
+// decoded to 54 KB and was rescanned by every DLP pattern. Real credentials are
+// bounded -- the longest are JWTs at a few KB -- so a reassembly larger than
+// this is prose, not a split secret.
+//
+// Tradeoff, stated rather than hidden: a secret deliberately split across an
+// alphabet run longer than this evades THIS view. It remains subject to every
+// other pass, including the raw and contiguous-decode passes.
+const maxReassembledTokenLen = 4096
+
+// Package-level to avoid repeated construction on every normalizeHex call.
+
+// normalizeHex strips common hex-notation delimiters so that delimiter-separated
+// hex strings can be decoded by hex.DecodeString. Handles:
+//   - \x / \X prefix notation: \x73\x6b → 736b
+//   - 0x / 0X prefix notation: 0x73 0x6b → 736b
+//   - Colon-separated:         73:6b     → 736b
+//   - Space-separated:         73 6b     → 736b
+//   - Hyphen-separated:        73-6b     → 736b
+//   - Comma-separated:         73,6b     → 736b
+//
+// Returns "" if the result is not valid hex (odd length or non-hex chars).
+//
+//pipelock:provenance-transform encoded_token_normalize
+func normalizeHex(s string) string {
+	if len(s) < 4 {
+		return ""
+	}
+	// Prefix removal only consumes x/X. Every other non-hex ASCII letter
+	// survives it and makes the normalized value unusable, so reject those
+	// inputs before allocating the two normalization buffers.
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'g' && c <= 'z' && c != 'x') || (c >= 'G' && c <= 'Z' && c != 'X') {
+			return ""
+		}
+	}
+
+	// Consume a radix or escape prefix only when two hex digits follow it.
+	// An unconditional replace ate the zero in a value such as "000x", which
+	// both hid needle bytes from the matcher and reconstructed a different
+	// view than the receipt replay builds from the same recipe.
+	out := stripHexPrefixes(s)
+
+	// Strip separator bytes, but reject on an out-of-alphabet LETTER. A
+	// separator an attacker can insert is punctuation or whitespace; it is
+	// never a letter. That distinction is what keeps ordinary prose out:
+	// stripping every non-hex byte turns "abcdefghijklmnopqrstuvwxyz0123456789!"
+	// into a long run of a-f digits that is valid, even-length hex, so 74 KB of
+	// English collapsed into a 32 KB token that decoded and rescanned for
+	// seconds. Rejecting at the first g-z keeps the widened separator coverage
+	// while prose fails immediately.
+	var b strings.Builder
+	b.Grow(len(out))
+	for i := 0; i < len(out); i++ {
+		switch c := out[i]; {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+			b.WriteByte(c)
+		case c == 'x', c == 'X':
+			// the radix/escape marker itself. A stray one is noise
+			// rather than data, and rejecting it would reopen the swallow case
+			// this profile exists to fix ("0a0xb" must still yield "0a0b").
+		case c >= 'g' && c <= 'z', c >= 'G' && c <= 'Z':
+			return ""
+		}
+	}
+	out = b.String()
+
+	// Validate: must be even-length, non-empty, and credential-sized.
+	if len(out) == 0 || len(out)%2 != 0 || len(out) > maxReassembledTokenLen {
+		return ""
+	}
+	return out
+}
+
+// stripHexPrefixes removes a hex radix or escape prefix only when the two
+// bytes that follow it are hex digits. internal/normalize must keep the same
+// rule byte for byte: TestHexReplayMatchesScannerNormalizer proves it does.
+func stripHexPrefixes(s string) string {
+	first := -1
+	for i := 0; i+3 < len(s); i++ {
+		if (s[i] == '0' || s[i] == '\\') &&
+			(s[i+1] == 'x' || s[i+1] == 'X') &&
+			isHexDigitByte(s[i+2]) && isHexDigitByte(s[i+3]) {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:first])
+	for i := first; i < len(s); {
+		if i+3 < len(s) &&
+			(s[i] == '0' || s[i] == '\\') &&
+			(s[i+1] == 'x' || s[i+1] == 'X') &&
+			isHexDigitByte(s[i+2]) && isHexDigitByte(s[i+3]) {
+			i += 2
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+func isHexDigitByte(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+type encodedTokenKind int
+
+const (
+	encodedTokenBase64Std encodedTokenKind = iota
+	encodedTokenBase64URL
+	encodedTokenBase32
+)
+
+func isEncodedTokenByte(c byte, kind encodedTokenKind) bool {
+	switch {
+	case c >= 'A' && c <= 'Z':
+		return true
+	case c >= 'a' && c <= 'z':
+		return kind != encodedTokenBase32
+	case c >= '0' && c <= '9':
+		return kind != encodedTokenBase32 || c == '2' || c == '3' || c == '4' || c == '5' || c == '6' || c == '7'
+	case c == '=':
+		return true
+	case c == '+' || c == '/':
+		return kind == encodedTokenBase64Std
+	case c == '-' || c == '_':
+		return kind == encodedTokenBase64URL
+	default:
+		return false
+	}
+}
+
+// isEncodedTokenSeparator reports whether c is a delimiter an attacker may
+// interleave between encoded-token characters to evade contiguous-string
+// matching.
+//
+// This is a DENY-list, not an allow-list: any byte that is not part of the
+// target encoding's own alphabet (isEncodedTokenByte) is treated as
+// attacker-insertable noise and stripped. A legitimate, contiguous encoded
+// token can only ever contain alphabet bytes by construction, so nothing
+// outside that alphabet can ever be real token data -- it is always safe to
+// strip it. This used to be an enumerated allow-list (ASCII whitespace, '.',
+// and the cross-encoding characters), and the list was incomplete by
+// construction: an attacker who noticed a byte was missing (comma, colon,
+// semicolon, pipe, or any other unlisted delimiter such as '!' or '~') simply
+// split on that instead, aborting normalization entirely (normalizeEncodedToken
+// returned "" the moment it hit an unrecognized byte) and hiding the whole
+// token from decoding. A deny-list keyed to the alphabet has no such gap:
+// there is no byte outside the alphabet that stripping could ever be wrong
+// about, so there is nothing left for an attacker to pick.
+func isEncodedTokenSeparator(c byte, kind encodedTokenKind) bool {
+	return !isEncodedTokenByte(c, kind)
+}
+
+// normalizeEncodedToken strips every byte that is not part of the target
+// encoding's own alphabet (isEncodedTokenByte). It preserves URL-safe base64
+// '-' and '_' for URL-safe decode and preserves standard base64 '/' for
+// standard decode, so data bytes are never treated as delimiters -- only
+// bytes that could not possibly be data for this encoding are. Because
+// isEncodedTokenSeparator is defined as the complement of isEncodedTokenByte,
+// every byte is either alphabet or separator; normalization never aborts
+// partway through, it only strips.
+//
+//pipelock:provenance-transform encoded_token_normalize
+func normalizeEncodedToken(s string, kind encodedTokenKind) string {
+	if len(s) < 4 {
+		return ""
+	}
+	first := 0
+	for first < len(s) && isEncodedTokenByte(s[first], kind) {
+		first++
+	}
+	if first == len(s) {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:first])
+	for i := first + 1; i < len(s); i++ {
+		c := s[i]
+		if isEncodedTokenByte(c, kind) {
+			b.WriteByte(c)
+		}
+	}
+	out := b.String()
+	if len(out) < 4 || len(out) > maxReassembledTokenLen {
+		return ""
+	}
+	return out
+}
+
+// hexByteSep formats a contiguous hex string with a separator between each byte
+// pair. Used by matchSecretEncodingSpan to generate delimiter-separated
+// variants of known secrets for substring matching.
+// Example: hexByteSep("736b2d", ":") returns "73:6b:2d".
+func hexByteSep(hexStr, sep string) string {
+	if len(hexStr) < 4 || len(hexStr)%2 != 0 {
+		return hexStr
+	}
+	var b strings.Builder
+	b.Grow(len(hexStr) + (len(hexStr)/2-1)*len(sep))
+	for i := 0; i < len(hexStr); i += 2 {
+		if i > 0 {
+			b.WriteString(sep)
+		}
+		b.WriteString(hexStr[i : i+2])
+	}
+	return b.String()
+}
+
+// hexBytePrefix formats a contiguous hex string with a prefix before each byte pair.
+// Example: hexBytePrefix("736b2d", `\x`) returns `\x73\x6b\x2d`.
+func hexBytePrefix(hexStr, prefix string) string {
+	if len(hexStr) < 2 || len(hexStr)%2 != 0 {
+		return hexStr
+	}
+	var b strings.Builder
+	b.Grow(len(hexStr) + (len(hexStr)/2)*len(prefix))
+	for i := 0; i < len(hexStr); i += 2 {
+		b.WriteString(prefix)
+		b.WriteString(hexStr[i : i+2])
+	}
+	return b.String()
+}
+
+// decodeEncodings tries hex, base64, and base32 decoding on a string and returns
+// any successfully decoded variants with encoding labels. Used by checkDLP to
+// catch encoded secrets in query parameters (e.g. ?key=736b2d616e742d... is
+// hex-encoded sk-ant-...). Mirrors the encoding checks in ScanTextForDLP.
+//
+//pipelock:provenance-transform hex_decode_liberal
+//pipelock:provenance-transform base32_decode_liberal
+//pipelock:provenance-transform base64_decode_liberal
+func decodeEncodings(s string) []decodedResult {
+	var out []decodedResult
+	if decoded, err := hex.DecodeString(s); err == nil && len(decoded) > 0 {
+		out = append(out, decodedResult{string(decoded), encodingHex})
+	} else if normalized := normalizeHex(s); normalized != "" {
+		// Delimiter-separated hex (e.g., 73:6b:2d, \x73\x6b, 0x736b).
+		if decoded, err := hex.DecodeString(normalized); err == nil && len(decoded) > 0 {
+			out = append(out, decodedResult{string(decoded), encodingHex})
+		}
+	}
+	// Every base64 variant below is no longer than s. One raw-size scratch
+	// buffer therefore covers all attempts without retaining mutable output.
+	var smallBase64Buffer [256]byte
+	decodedSize := base64.RawStdEncoding.DecodedLen(len(s))
+	base64Buffer := smallBase64Buffer[:]
+	if decodedSize > len(base64Buffer) {
+		base64Buffer = make([]byte, decodedSize)
+	} else {
+		base64Buffer = base64Buffer[:decodedSize]
+	}
+	standard := decodeBase64PaddingVariants(s, base64.StdEncoding, base64.RawStdEncoding, base64Buffer)
+	urlSafe := standard
+	sharedBase64Alphabet := !strings.ContainsAny(s, "+/-_")
+	if !sharedBase64Alphabet {
+		urlSafe = decodeBase64PaddingVariants(s, base64.URLEncoding, base64.RawURLEncoding, base64Buffer)
+	}
+	// Preserve every view and its position, including duplicate decodings.
+	for i := range standard {
+		out = appendBase64View(out, standard[i])
+		out = appendBase64View(out, urlSafe[i])
+	}
+	normalizedStandard := normalizeEncodedToken(s, encodedTokenBase64Std)
+	normalizedURL := normalizedStandard
+	if !sharedBase64Alphabet {
+		normalizedURL = normalizeEncodedToken(s, encodedTokenBase64URL)
+	}
+	var normalizedViews [2]string
+	if normalizedStandard != "" {
+		normalizedViews = decodeBase64PaddingVariants(normalizedStandard, base64.StdEncoding, base64.RawStdEncoding, base64Buffer)
+		for _, decoded := range normalizedViews {
+			out = appendBase64View(out, decoded)
+		}
+	}
+	if normalizedURL != "" {
+		if normalizedURL != normalizedStandard {
+			normalizedViews = decodeBase64PaddingVariants(normalizedURL, base64.URLEncoding, base64.RawURLEncoding, base64Buffer)
+		}
+		for _, decoded := range normalizedViews {
+			out = appendBase64View(out, decoded)
+		}
+	}
+	// RFC 4648 base32 and base32hex are case-insensitive. Folding to ASCII
+	// uppercase before decode accepts lower and mixed case without treating
+	// that fold as a separate base32 alphabet. Canonical recipe replay keeps
+	// the fold as its own operation so older profiles stay case-sensitive.
+	foldedBase32 := normalize.ASCIIUpper(s)
+	out = appendBase32Decodes(out, foldedBase32)
+	if normalized := normalizeEncodedToken(foldedBase32, encodedTokenBase32); normalized != "" && normalized != foldedBase32 {
+		out = appendBase32Decodes(out, normalized)
+	}
+	if decoded := normalize.DecodeJSONUnicodeEscapes(s); decoded != s && decoded != "" {
+		out = append(out, decodedResult{decoded, encodingJSONUnicode})
+	}
+	return out
+}
+
+// decodeBase64PaddingVariants retains padded and unpadded decoding separately.
+// A successful padded decode with no padding bytes is also a complete raw
+// decode. Reuse that immutable string; ambiguous inputs still use both decoders.
+// buffer must hold the raw decoded length of value; callers size it from the
+// original input, which is at least as long as every normalized variant.
+func decodeBase64PaddingVariants(value string, padded, raw *base64.Encoding, buffer []byte) [2]string {
+	var out [2]string
+	// Reuse only scratch storage: successful results are copied to strings
+	// before another decoding attempt can overwrite the buffer.
+	if n, err := padded.Decode(buffer, []byte(value)); err == nil && n > 0 {
+		out[0] = string(buffer[:n])
+		if !strings.Contains(value, "=") {
+			out[1] = out[0]
+			return out
+		}
+	}
+	if n, err := raw.Decode(buffer, []byte(value)); err == nil && n > 0 {
+		out[1] = string(buffer[:n])
+	}
+	return out
+}
+
+func appendBase64View(out []decodedResult, text string) []decodedResult {
+	if text != "" {
+		out = append(out, decodedResult{text, encodingBase64})
+	}
+	return out
+}
+
+// decodeBase32Strings returns the distinct RFC 4648 base32 and base32hex
+// decodings of s after ASCII uppercase folding.
+func decodeBase32Strings(s string) []string {
+	folded := normalize.ASCIIUpper(strings.TrimSpace(s))
+	var out []string
+	seen := make(map[string]struct{})
+	for _, decoded := range appendBase32Decodes(nil, folded) {
+		if _, ok := seen[decoded.text]; ok {
+			continue
+		}
+		seen[decoded.text] = struct{}{}
+		out = append(out, decoded.text)
+	}
+	return out
+}
+
+// appendBase32Decodes appends every RFC 4648 base32 and base32hex decoding of
+// value. value is already ASCII-uppercased. Padding and no-padding are both
+// retained, including equal results from the two padding modes.
+func appendBase32Decodes(out []decodedResult, value string) []decodedResult {
+	for _, alphabet := range []struct {
+		padded *base32.Encoding
+		raw    *base32.Encoding
+		hex    bool
+	}{
+		{base32.StdEncoding, rawBase32Standard, false},
+		{base32.HexEncoding, rawBase32Hex, true},
+	} {
+		if !base32PrefixPossible(value, alphabet.hex) {
+			continue
+		}
+		paddedText := ""
+		if decoded, err := alphabet.padded.DecodeString(value); err == nil && len(decoded) > 0 {
+			paddedText = string(decoded)
+			out = append(out, decodedResult{paddedText, encodingBase32})
+		}
+		if paddedText != "" && strings.IndexByte(value, '=') < 0 && strings.IndexByte(value, 0xff) < 0 {
+			// A complete padded decode with neither padding sentinel is
+			// also the same raw decode. Retain its duplicate view in order.
+			out = append(out, decodedResult{paddedText, encodingBase32})
+		} else if decoded, err := alphabet.raw.DecodeString(value); err == nil && len(decoded) > 0 {
+			out = append(out, decodedResult{string(decoded), encodingBase32})
+		}
+	}
+	return out
+}
+
+var (
+	rawBase32Standard = base32.StdEncoding.WithPadding(base32.NoPadding)
+	rawBase32Hex      = base32.HexEncoding.WithPadding(base32.NoPadding)
+)
+
+// base32PrefixPossible only rules out bytes the decoder must reject before
+// padding. After either the ordinary padding byte or the library's raw-mode
+// sentinel, the original decoder owns validation, including accepted suffixes.
+func base32PrefixPossible(value string, hexAlphabet bool) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == '=' || c == 0xff {
+			return true
+		}
+		if c == '\r' || c == '\n' {
+			continue
+		}
+		if hexAlphabet {
+			if c >= '0' && c <= '9' || c >= 'A' && c <= 'V' {
+				continue
+			}
+		} else if c >= 'A' && c <= 'Z' || c >= '2' && c <= '7' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// decodeEncodingsRecursive returns all bounded fixpoint decoding candidates for
+// a possibly stacked-encoded string.
+func decodeEncodingsRecursive(s string) []decodedResult {
+	return decodeEncodingsFixpoint(s, false)
+}
+
+func decodeEncodingsFixpoint(s string, includeURL bool) []decodedResult {
+	if s == "" || len(s) > maxDecodeTotalBytes {
+		return nil
+	}
+
+	seen := map[string]struct{}{s: {}}
+	var out []decodedResult
+	queue := []string{s}
+	consumed := 0
+	for head := 0; head < len(queue) && len(out) < maxDecodeCandidates && consumed < maxDecodeTotalBytes; head++ {
+		text := queue[head]
+		for _, d := range decodeEncodingsOnce(text, includeURL) {
+			if d.text == "" {
+				continue
+			}
+			if _, ok := seen[d.text]; ok {
+				continue
+			}
+			seen[d.text] = struct{}{}
+			out = append(out, d)
+			consumed += len(d.text)
+			if len(out) >= maxDecodeCandidates || consumed >= maxDecodeTotalBytes {
+				return out
+			}
+			queue = append(queue, d.text)
+		}
+	}
+	return out
+}
+
+func decodeEncodingsOnce(s string, includeURL bool) []decodedResult {
+	out := decodeEncodings(s)
+	if !includeURL {
+		return out
+	}
+	if decoded := IterativeDecode(s); decoded != s && decoded != "" {
+		out = append(out, decodedResult{decoded, encodingURL})
+	}
+	return out
+}
+
+// checkDLP runs DLP regex patterns against the full URL string including hostname.
+// Scanning the full URL catches secrets encoded in subdomains (e.g., sk-proj-xxx.evil.com)
+// and secrets split across query parameters. Iterative URL decoding
+// prevents multi-layer encoding bypass.
+func (s *Scanner) checkDLP(parsed *url.URL) (result Result, warnMatches []WarnMatch) {
+	var decodes decodingMemo
+	return s.checkDLPWithDecodes(parsed, &decodes)
+}
+
+func (s *Scanner) checkDLPWithDecodes(parsed *url.URL, decodes *decodingMemo) (Result, []WarnMatch) {
+	return s.checkDLPWithDecodesAt(parsed, decodes, s.currentTime())
+}
+
+func (s *Scanner) checkDLPWithDecodesAt(parsed *url.URL, decodes *decodingMemo, now time.Time) (result Result, warnMatches []WarnMatch) {
+	queryLessMemo := queryLessDLPMemo{now: now, nowSet: true}
+	// Canary check is deferred to after DLP pattern evaluation (below).
+	// DLP patterns provide more specific attribution ("aws_access_key" vs
+	// "Canary Token"). Canary is the safety net for synthetic tokens that
+	// DLP patterns don't cover. Both are evaluated - DLP wins if it matches.
+
+	var credentialAudienceAllows []CredentialAudienceAllow
+	defer func() {
+		result.CredentialAudienceAllows = deduplicateCredentialAudienceAllows(credentialAudienceAllows)
+	}()
+
+	// parsed.Path is already URL-decoded by Go's url.Parse.
+	// For query strings, iteratively decode to catch multi-layer encoding.
+	decodedQuery := IterativeDecode(parsed.RawQuery)
+
+	targets := []dlpTarget{
+		{parsed.Path, dlpViewLabel("url_path"), ""},
+		{decodedQuery, dlpViewLabel("url_query"), ""},
+	}
+
+	// Also check decoded query keys and values individually.
+	// Noise-strip each value to catch dot-separated keys (e.g. "s.k.-.a.n.t.-..." → "sk-ant-...").
+	// Try hex/base64/base32 decoding to catch encoded secrets
+	// (e.g. ?key=736b2d616e742d... is hex-encoded sk-ant-...).
+	for key, values := range parsed.Query() {
+		decodedKey := IterativeDecode(key)
+		targets = append(targets, dlpTarget{decodedKey, dlpViewLabel("url_query_key"), ""})
+		for _, d := range decodes.decode(decodedKey, false) {
+			targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+		}
+		if stripped := stripURLNoise(decodedKey); stripped != decodedKey {
+			targets = append(targets, dlpTarget{stripped, dlpViewLabel("url_noise_stripped"), decodedKey})
+		}
+		for _, v := range values {
+			decoded := IterativeDecode(v)
+			targets = append(targets, dlpTarget{decoded, dlpViewLabel("url_query_value"), ""})
+			targets = append(targets, queryValueDecodedTargetsWithDecodes(decoded, decodes)...)
+			if stripped := stripURLNoise(decoded); stripped != decoded {
+				targets = append(targets, dlpTarget{stripped, dlpViewLabel("url_noise_stripped"), decoded})
+			}
+		}
+	}
+
+	// Also apply iterative decode to the escaped path for double-encoded path segments.
+	rawPath := parsed.RawPath
+	if rawPath == "" {
+		rawPath = parsed.EscapedPath()
+	}
+	decodedPath := IterativeDecode(rawPath)
+	if decodedPath != "" && decodedPath != parsed.Path {
+		targets = append(targets, dlpTarget{decodedPath, dlpViewLabel("url_path_decoded"), ""})
+	}
+
+	// Try hex/base64/base32 decoding on path segments to catch encoded secrets
+	// in URL paths (e.g. /73732d616e742d... is hex-encoded sk-ant-...).
+	// Path is already URL-decoded by Go's url.Parse, so we decode the segments directly.
+	for _, segment := range strings.Split(parsed.Path, "/") {
+		if len(segment) >= 10 { // minimum viable encoded secret length
+			for _, d := range decodes.decode(segment, false) {
+				targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+			}
+		}
+	}
+
+	// Dot-collapse the hostname to catch secrets split across DNS subdomains
+	// (e.g. "sk-ant-api03-.AABBCCDD.EEFFGGHH.evil.com" → "sk-ant-api03-AABBCCDDEEFFGGHHevilcom").
+	// Dots break regex character classes, so individual labels pass DLP checks.
+	if hostname := parsed.Hostname(); strings.Contains(hostname, ".") {
+		targets = append(targets, dlpTarget{removeHostnameDots(hostname), dlpViewLabel("subdomain"), hostname})
+	}
+
+	// Strip URL noise from path to catch secrets split by dots, slashes, and
+	// other separators (e.g., "/sk-ant-api03-AAAA.AAAA/AAAA" → "sk-ant-api03-AAAAAAAAAAAA").
+	// Covers both dot-split and encoded-slash attacks (%2f splitting path segments).
+	if stripped := stripURLNoise(parsed.Path); stripped != parsed.Path {
+		targets = append(targets, dlpTarget{stripped, dlpViewLabel("url_noise_stripped"), parsed.Path})
+	}
+
+	// Concatenate all query values in URL order to catch secrets split across
+	// query parameters (e.g. "?part1=sk-ant-api03-&part2=AAAA..." → "sk-ant-api03-AAAA...").
+	// Uses RawQuery to preserve parameter order (url.Values is a map with random iteration).
+	// Also noise-strip the concatenation to defeat inserted garbage params
+	// (e.g., "?part1=sk-ant-&mid=%20&part2=AAAA" → "sk-ant-AAAA...").
+	targets = appendQueryConcatTargets(targets, parsed.Path, parsed.RawQuery)
+	for _, text := range dnsQueryDLPTexts(parsed.RawQuery) {
+		targets = append(targets, dlpTarget{text, dlpViewLabel("doh"), ""})
+		for _, d := range decodes.decode(text, false) {
+			targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+		}
+	}
+
+	// Coarse full-URL fallback runs after component targets so path/query spans
+	// keep their more precise view labels when both views match.
+	targets = append(targets, dlpTarget{parsed.String(), dlpViewLabel("url"), ""})
+
+	for _, target := range targets {
+		if target.text == "" {
+			continue
+		}
+		// Full normalization before DLP pattern matching: strip control chars,
+		// NFKC, cross-script confusable mapping, and combining mark removal.
+		// Must match response scanning depth - otherwise attackers use homoglyphs
+		// in key prefixes (e.g., sk-օnt-... with Armenian օ U+0585 for 'a').
+		cleaned := decodes.normalize(target.text)
+		proseSource := target.proseSource
+		if proseSource == "" {
+			proseSource = target.text
+		}
+		for _, idx := range s.dlpPreFilter.patternsToCheck(cleaned) {
+			p := s.dlpPatterns[idx]
+			if start, end, ok := p.matchSpanInView(cleaned, proseSource); ok {
+				if allow, allowed := s.credentialAudienceAllowsAt(p, parsed.String(), s.urlDLPAudienceSurface(p, parsed, &queryLessMemo), now); allowed {
+					credentialAudienceAllows = append(credentialAudienceAllows, allow)
+					continue
+				}
+				mismatch, audienceMismatch := s.credentialAudienceMismatch(p, parsed.String(), "url")
+				// Skip pattern if the destination domain is explicitly exempted.
+				// A pattern carrying a core floor name never honors an exemption,
+				// matching the body and response filters, so a custom pattern
+				// cannot exempt a core credential class by reusing its name.
+				if p.exemptsHost(parsed.Hostname()) {
+					continue
+				}
+				span := newMatchSpan(start, end, target.viewLabel, p.name, p.bundle, p.bundleVersion)
+				if p.warn {
+					warnMatches = append(warnMatches, WarnMatch{
+						PatternName: p.name,
+						Severity:    p.severity,
+						span:        span,
+					})
+					continue
+				}
+				blocked := Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf("DLP match: %s (%s)", p.name, p.severity),
+					Scanner: ScannerDLP,
+					Score:   1.0,
+					spans:   []MatchSpan{span},
+				}
+				if audienceMismatch {
+					blocked.CredentialAudienceMismatches = []CredentialAudienceMismatch{mismatch}
+				}
+				return blocked, warnMatches
+			}
+		}
+	}
+
+	// Subsequence scan: try ordered combinations of query values (size 2-4)
+	// to catch secrets split across params with junk values interleaved.
+	// E.g., "?a=sk-&x=junk&b=ant-&y=junk&c=api03-&z=junk&d=AAAA..." -
+	// combination (0,2,4,6) reconstructs "sk-ant-api03-AAAA...".
+	subResult, subWarns := s.querySubsequenceDLP(parsed.RawQuery, parsed.Hostname(), parsed.String(), &queryLessMemo)
+	warnMatches = append(warnMatches, subWarns...)
+	credentialAudienceAllows = append(credentialAudienceAllows, subResult.CredentialAudienceAllows...)
+	if !subResult.Allowed {
+		return subResult, warnMatches
+	}
+
+	// Seed phrase detection on seed-safe candidates only.
+	// NOT on dot-collapsed or noise-stripped text (creates synthetic word runs).
+	// Covers: query values, path, hostname labels (pre-DNS exfil), path segments.
+	if s.seedEnabled {
+		seedTargets := []dlpTarget{
+			{parsed.Path, "url_path", ""},
+		}
+		// Individual query values: raw decoded + encoding variants (base64/hex/base32).
+		for _, values := range parsed.Query() {
+			for _, v := range values {
+				decoded := IterativeDecode(v)
+				seedTargets = append(seedTargets, dlpTarget{decoded, spanViewLabel("url_decoded", "url_query_value"), ""})
+				for _, d := range decodes.decode(decoded, false) {
+					seedTargets = append(seedTargets, dlpTarget{d.text, spanViewLabel(d.encoding+"_decoded", "url_query_value"), ""})
+				}
+			}
+		}
+		// The whole decoded query follows the per-value targets. "=" and "&"
+		// are seed separators, so a phrase inside one value also matches here;
+		// trying values first reports the narrower value-level span.
+		seedTargets = append(seedTargets, dlpTarget{decodedQuery, spanViewLabel("url_decoded", "url_query"), ""})
+		// Ordered query-value concatenation with spaces: catches seed phrases
+		// split across params (e.g., ?w1=abandon&w2=abandon&...&w12=about).
+		// orderedQueryConcat joins without separators (for regex DLP), so we
+		// build a space-separated version for seed word tokenization.
+		if parsed.RawQuery != "" && strings.Contains(parsed.RawQuery, "&") {
+			var seedConcat strings.Builder
+			for i, pair := range strings.Split(parsed.RawQuery, "&") {
+				_, value, _ := strings.Cut(pair, "=")
+				if value != "" {
+					if i > 0 {
+						seedConcat.WriteByte(' ')
+					}
+					seedConcat.WriteString(IterativeDecode(value))
+				}
+			}
+			seedTargets = append(seedTargets, dlpTarget{seedConcat.String(), "query_concat:url_decoded", ""})
+		}
+		// Decoded path segments: base64/hex/base32 encoded seed phrases in path.
+		for _, seg := range strings.Split(parsed.Path, "/") {
+			if len(seg) < 20 {
+				continue
+			}
+			for _, d := range decodes.decode(IterativeDecode(seg), false) {
+				seedTargets = append(seedTargets, dlpTarget{d.text, spanViewLabel(d.encoding+"_decoded", "url_path_segment"), ""})
+			}
+		}
+		// Hostname labels: catch seed words as subdomain labels
+		// (e.g., "abandon.abandon.abandon...evil.com" exfils via DNS).
+		// Join labels with spaces so the tokenizer sees them as words.
+		hostname := parsed.Hostname()
+		if strings.Contains(hostname, ".") {
+			seedTargets = append(seedTargets, dlpTarget{strings.ReplaceAll(hostname, ".", " "), "hostname_labels_joined", ""})
+		}
+		// Path segments: catch seed words as path components
+		// (e.g., "/abandon/abandon/abandon/.../about").
+		if strings.Contains(parsed.Path, "/") {
+			seedTargets = append(seedTargets, dlpTarget{strings.ReplaceAll(parsed.Path, "/", " "), spanViewLabel("slash_joined", "url_path"), ""})
+		}
+		for _, target := range seedTargets {
+			if target.text == "" {
+				continue
+			}
+			if matches := seedprotect.DetectSpans(target.text, s.seedMinWords, s.seedVerifyChecksum); len(matches) > 0 {
+				match := matches[0]
+				patternName := "BIP-39 Seed Phrase"
+				return Result{
+					Allowed: false,
+					Reason:  "DLP match: " + patternName + " (critical)",
+					Scanner: ScannerDLP,
+					Score:   1.0,
+					spans: []MatchSpan{
+						newMatchSpan(match.Start, match.End, target.viewLabel, patternName, "", ""),
+					},
+				}, warnMatches
+			}
+		}
+	}
+
+	// Check for environment variable leaks
+	if result := s.checkSecretsInURL(s.envSecrets, parsed, "environment variable leak detected"); !result.Allowed {
+		return result, warnMatches
+	}
+
+	// Check for known file secret leaks
+	if result := s.checkSecretsInURL(s.fileSecrets, parsed, "known secret leak detected"); !result.Allowed {
+		return result, warnMatches
+	}
+	// Both helpers return early for an empty secret list. Configured canaries
+	// must still run in a hermetic process with no ambient/file secrets. Keep
+	// the existing helper calls above so their attribution priority is unchanged.
+	if len(s.envSecrets) == 0 && len(s.fileSecrets) == 0 {
+		if result := s.checkCanaryInURL(parsed); !result.Allowed {
+			return result, warnMatches
+		}
+	}
+
+	return Result{Allowed: true}, deduplicateWarnMatches(warnMatches)
+}
+
+// querySubsequenceDLP checks ordered subsequences (combinations) of query
+// parameter values for DLP pattern matches. Catches secrets split across
+// multiple parameters with arbitrary junk values interleaved between fragments.
+// Tries subsequences of size 2-4 for URLs with 3-20 query params.
+// Cost: O(n^4) worst case, bounded at ~6k combinations for n=20.
+//
+// The size-4 / value-20 caps are a KNOWN, deliberately bounded (evadable)
+// defense, not the primary one: they are also part of the cross-language
+// receipt-replay protocol (see the QuerySubsequence index bounds validated
+// in sdk/verifiers/{rust,ts}/src/provenance*.{rs,ts}), so widening them here
+// alone would break replay parity, on top of the raw combinatorial cost
+// (~3.5x combinations at size 5 vs size 4 for n=20; see
+// TestScan_DLP_QuerySubsequence_ManyPunctuatedParams_CleanNoFalsePositive
+// for the false-positive budget this has to stay under). The PRIMARY,
+// UNBOUNDED-in-query-value-count defense against decoy-interleaved secret
+// fragmentation is stripURLNoise / stripToAlphanumeric applied to the full
+// ordered query concatenation below (orderedQueryConcat) -- a single O(n)
+// pass that reconstructs the secret regardless of how many decoy values
+// separate the real fragments, as long as the decoy bytes fall outside the
+// pattern's own character class. This bounded subsequence search only
+// matters for the narrower residual where a decoy is built from exactly the
+// same punctuation ('-','_','=') the target pattern's own class uses (see
+// TestScan_DLP_QuerySubsequence_PunctuatedTargetForeignCharDecoy_KnownLimitation
+// for the specific case this still cannot close).
+//
+//pipelock:provenance-transform query_subsequence
+func (s *Scanner) querySubsequenceDLP(rawQuery, hostname, target string, memo *queryLessDLPMemo) (result Result, warnMatches []WarnMatch) {
+	if rawQuery == "" || !strings.Contains(rawQuery, "&") {
+		return Result{Allowed: true}, nil
+	}
+
+	values := querySubsequenceValues(rawQuery)
+	n := len(values)
+	if n < 3 {
+		return Result{Allowed: true}, nil
+	}
+	var credentialAudienceAllows []CredentialAudienceAllow
+	defer func() {
+		result.CredentialAudienceAllows = deduplicateCredentialAudienceAllows(credentialAudienceAllows)
+	}()
+	for size := 2; size <= 4 && size <= n; size++ {
+		result, warns := s.checkDLPCombinations(values, n, size, hostname, target, memo)
+		warnMatches = append(warnMatches, warns...)
+		credentialAudienceAllows = append(credentialAudienceAllows, result.CredentialAudienceAllows...)
+		if !result.Allowed {
+			return result, warnMatches
+		}
+	}
+
+	return Result{Allowed: true}, warnMatches
+}
+
+// querySubsequenceValues extracts the production query-value view shared by
+// core DLP, configured DLP, and the provenance parity test.
+func querySubsequenceValues(rawQuery string) []string {
+	const maxValues = 20
+	values := make([]string, 0, maxValues)
+	for _, pair := range strings.Split(rawQuery, "&") {
+		_, value, _ := strings.Cut(pair, "=")
+		if value == "" {
+			continue
+		}
+		values = append(values, IterativeDecode(value))
+		if len(values) == maxValues {
+			break
+		}
+	}
+	return values
+}
+
+// checkDLPCombinations generates all ordered combinations of the given size
+// from the values slice and checks each concatenation against DLP patterns.
+func (s *Scanner) checkDLPCombinations(values []string, n, size int, hostname, target string, memo *queryLessDLPMemo) (result Result, warnMatches []WarnMatch) {
+	var credentialAudienceAllows []CredentialAudienceAllow
+	defer func() {
+		result.CredentialAudienceAllows = deduplicateCredentialAudienceAllows(credentialAudienceAllows)
+	}()
+	indices := make([]int, size)
+	for i := range indices {
+		indices[i] = i
+	}
+
+	for {
+		var b strings.Builder
+		var proseSource strings.Builder
+		for i, idx := range indices {
+			b.WriteString(values[idx])
+			if i > 0 {
+				proseSource.WriteByte(0)
+			}
+			proseSource.WriteString(values[idx])
+		}
+		concat := b.String()
+		source := proseSource.String()
+
+		candidates := []dlpTarget{
+			{concat, dlpViewLabel("query_subsequence"), source},
+		}
+		for _, d := range decodeEncodingsRecursive(concat) {
+			candidates = append(candidates, dlpTarget{d.text, dlpViewLabel(d.encoding), source})
+		}
+
+		for _, candidate := range candidates {
+			cleaned := normalize.ForDLP(candidate.text)
+
+			for _, idx := range s.dlpPreFilter.patternsToCheck(cleaned) {
+				p := s.dlpPatterns[idx]
+				if start, end, ok := p.matchSpanInView(cleaned, candidate.proseSource); ok {
+					// The reassembled candidate is a token the URL-wide check never
+					// saw, so it must itself be a grant for this host.
+					surface := s.urlDLPAudienceSurfaceForTarget(p, target, memo)
+					if surface == credentialAudienceURLQuerySurface && !candidateTokensAreGrants(p, cleaned, target, s.queryScanTime(memo)) {
+						surface = "url"
+					}
+					if allow, allowed := s.credentialAudienceAllowsAt(p, target, surface, s.queryScanTime(memo)); allowed {
+						credentialAudienceAllows = append(credentialAudienceAllows, allow)
+						continue
+					}
+					mismatch, audienceMismatch := s.credentialAudienceMismatch(p, target, "url")
+					if p.exemptsHost(hostname) {
+						continue
+					}
+					span := newMatchSpan(start, end, candidate.viewLabel, p.name, p.bundle, p.bundleVersion)
+					if p.warn {
+						warnMatches = append(warnMatches, WarnMatch{
+							PatternName: p.name,
+							Severity:    p.severity,
+							span:        span,
+						})
+						continue
+					}
+					blocked := Result{
+						Allowed: false,
+						Reason:  fmt.Sprintf("DLP match: %s (%s)", p.name, p.severity),
+						Scanner: ScannerDLP,
+						Score:   1.0,
+						spans:   []MatchSpan{span},
+					}
+					if audienceMismatch {
+						blocked.CredentialAudienceMismatches = []CredentialAudienceMismatch{mismatch}
+					}
+					return blocked, warnMatches
+				}
+			}
+		}
+
+		if !nextCombination(indices, n) {
+			break
+		}
+	}
+
+	return Result{Allowed: true}, warnMatches
+}
+
+// nextCombination advances indices to the next lexicographic combination.
+// Returns false when all combinations have been exhausted.
+func nextCombination(indices []int, n int) bool {
+	k := len(indices)
+	for i := k - 1; i >= 0; i-- {
+		if indices[i] < n-k+i {
+			indices[i]++
+			for j := i + 1; j < k; j++ {
+				indices[j] = indices[j-1] + 1
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// emitDLPWarns calls the instance warn hook for each warn match if set.
+func (s *Scanner) emitDLPWarns(ctx context.Context, matches []WarnMatch) {
+	hook := s.getDLPWarnHook()
+	if len(matches) == 0 || hook == nil {
+		return
+	}
+	for _, m := range matches {
+		hook(ctx, m.PatternName, m.Severity)
+	}
+}
+
+// deduplicateWarnMatches removes duplicate warn matches by pattern name.
+func deduplicateWarnMatches(matches []WarnMatch) []WarnMatch {
+	if len(matches) <= 1 {
+		return matches
+	}
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]WarnMatch, 0, len(matches))
+	for _, m := range matches {
+		if _, ok := seen[m.PatternName]; !ok {
+			seen[m.PatternName] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// checkSecretsInURL scans a URL for leaked secrets (env vars or file-based).
+// It URL-decodes, strips control chars, and checks all encoded forms of each secret.
+func (s *Scanner) checkSecretsInURL(secrets []string, parsed *url.URL, reasonPrefix string) Result {
+	if len(secrets) == 0 {
+		return Result{Allowed: true}
+	}
+
+	fullURL := normalize.StripControlChars(parsed.String())
+	decodedURL := normalize.StripControlChars(IterativeDecode(fullURL))
+	texts := []spanTextView{
+		{text: fullURL, viewLabel: "control_stripped_url"},
+		{text: decodedURL, viewLabel: "control_stripped_url:url_decoded"},
+	}
+	lowerTexts := []spanTextView{
+		{text: strings.ToLower(fullURL), viewLabel: lowerViewLabel("control_stripped_url")},
+		{text: strings.ToLower(decodedURL), viewLabel: lowerViewLabel("control_stripped_url:url_decoded")},
+	}
+
+	hits := newKnownValueWindowHits(texts)
+	for _, secret := range secrets {
+		if match, start, end, viewLabel, matched := matchSecretEncodingSpanWithHits(secret, s.knownSecretWindows[secret], s.knownSecretEncodings[secret], texts, lowerTexts, hits); matched {
+			reason := reasonPrefix
+			if match.partialLen > 0 {
+				reason += fmt.Sprintf(" (partial %d)", match.partialLen)
+			} else if match.encoding != "" {
+				reason += " (" + match.encoding + "-encoded)"
+			}
+			return Result{
+				Allowed: false,
+				Reason:  reason,
+				Scanner: ScannerDLP,
+				Score:   1.0,
+				spans: []MatchSpan{
+					newMatchSpan(start, end, viewLabel, reasonPrefix, "", ""),
+				},
+			}
+		}
+	}
+	return s.checkCanaryInURL(parsed)
+}
+
+// checkCanaryInURL uses the shared canary views and preserves their span labels.
+// Callers keep the existing DLP and known-secret attribution order.
+func (s *Scanner) checkCanaryInURL(parsed *url.URL) Result {
+	if matches := s.scanCanaryText(parsed.String()); len(matches) > 0 {
+		m := matches[0]
+		reason := fmt.Sprintf("DLP match: %s (%s)", m.PatternName, m.Severity)
+		if m.Encoded != "" {
+			reason += " [" + m.Encoded + "]"
+		}
+		return Result{
+			Allowed: false,
+			Reason:  reason,
+			Scanner: ScannerDLP,
+			Score:   1.0,
+			spans:   []MatchSpan{m.Span()},
+		}
+	}
+
+	return Result{Allowed: true}
+}
+
+type spanTextView struct {
+	text      string
+	viewLabel string
+}
+
+func longestSpanTextView(viewSets ...[]spanTextView) int {
+	longest := 0
+	for _, views := range viewSets {
+		for _, view := range views {
+			longest = max(longest, len(view.text))
+		}
+	}
+	return longest
+}
+
+func indexAnyView(needle string, views []spanTextView) (int, int, string, bool) {
+	for _, view := range views {
+		if start := strings.Index(view.text, needle); start >= 0 {
+			return start, start + len(needle), view.viewLabel, true
+		}
+	}
+	return 0, 0, "", false
+}
+
+// minKnownSecretSubstringLen is long enough that, at the 3-bit/character
+// entropy floor, a contiguous match carries at least 48 bits of evidence.
+// That keeps accidental matches unlikely while detecting meaningful disclosure.
+const minKnownSecretSubstringLen = 16
+
+type knownSecretMatch struct {
+	encoding   string
+	partialLen int
+}
+
+// knownValueWindows returns the fixed-size windows of one known value that are
+// eligible for partial matching, or nil when the value gets whole-value
+// matching only. A value is skipped when it is too short or when its own
+// entropy is below the leak floor. URL-shaped values skip public scheme, host,
+// and path stems; only credential-bearing parts (password, query, fragment,
+// and a high-entropy final path segment) are windowed.
+func knownValueWindowsBounded(value string, maxEntries int) (map[string][]int, error) {
+	if len(value) < minKnownSecretSubstringLen || ShannonEntropy(value) <= envLeakMinEntropy {
+		return nil, nil
+	}
+	if strings.Contains(value, "://") {
+		return urlCredentialWindowsBounded(value, maxEntries)
+	}
+	return collectValueWindowsBounded(value, maxEntries)
+}
+
+func urlCredentialWindowsBounded(value string, maxEntries int) (map[string][]int, error) {
+	u, err := url.Parse(value)
+	if err != nil {
+		// Unparseable URL-shaped secrets still have to partial-match as a
+		// blob. Skipping them would hide a leaked token that happens to
+		// sit next to "://".
+		return collectValueWindowsBounded(value, maxEntries)
+	}
+	var parts []string
+	if u.User != nil {
+		if password, ok := u.User.Password(); ok && password != "" {
+			parts = append(parts, password)
+		}
+	}
+	for _, vs := range u.Query() {
+		parts = append(parts, vs...)
+	}
+	if u.Fragment != "" {
+		parts = append(parts, u.Fragment)
+	}
+	if path := strings.Trim(u.Path, "/"); path != "" {
+		for _, seg := range strings.Split(path, "/") {
+			if seg != "" {
+				parts = append(parts, seg)
+			}
+		}
+	}
+	// Every credential-bearing part, decoded and raw, shares one anchor budget:
+	// the per-value bound applies to the whole URL, not to each part, so a
+	// long URL with many high-entropy segments samples like any long value.
+	type urlPart struct {
+		part, raw string
+		idx       int
+	}
+	var eligible []urlPart
+	totalSpan := 0
+	for _, part := range parts {
+		if len(part) < minKnownSecretSubstringLen || ShannonEntropy(part) <= envLeakMinEntropy {
+			continue
+		}
+		idx, raw := locateURLPart(value, part)
+		if idx < 0 {
+			continue
+		}
+		eligible = append(eligible, urlPart{part: part, raw: raw, idx: idx})
+		totalSpan += len(part) - minKnownSecretSubstringLen + 1
+		if raw != part && len(raw) >= minKnownSecretSubstringLen {
+			totalSpan += len(raw) - minKnownSecretSubstringLen + 1
+		}
+	}
+	// u.Query() is a map, so eligible holds query values in a random order.
+	// Sampling follows the order the parts appear in the value, which keeps
+	// the retained anchors the same on every build of the scanner. Two parts
+	// can be located at one offset when one is a prefix of the other, so the
+	// part text breaks the tie.
+	sort.Slice(eligible, func(i, j int) bool {
+		if eligible[i].idx != eligible[j].idx {
+			return eligible[i].idx < eligible[j].idx
+		}
+		if eligible[i].part != eligible[j].part {
+			return eligible[i].part < eligible[j].part
+		}
+		return eligible[i].raw < eligible[j].raw
+	})
+	// Each part, and its raw encoded form when that differs, is one sequence
+	// of window starts.
+	type urlSeq struct {
+		text string
+		base int
+	}
+	var seqs []urlSeq
+	for _, p := range eligible {
+		seqs = append(seqs, urlSeq{text: p.part, base: p.idx})
+		if p.raw != p.part && len(p.raw) >= minKnownSecretSubstringLen {
+			seqs = append(seqs, urlSeq{text: p.raw, base: p.idx})
+		}
+	}
+	out := make(map[string][]int)
+	entryCount := 0
+	add := func(text string, base, stride, phase int) (int, error) {
+		windows, next, err := collectValueWindowsPhased(text, base, maxEntries-entryCount, stride, phase)
+		if err != nil {
+			return 0, err
+		}
+		for window, offsets := range windows {
+			out[window] = append(out[window], offsets...)
+			entryCount += len(offsets)
+		}
+		return next, nil
+	}
+	// phase carries the sampling position from one sequence into the next, so
+	// the sequences are sampled as one continuous span and yield at most
+	// maxKnownValuePartialAnchors anchors in total. Restarting at offset zero
+	// in every sequence would give each its own anchor, and thousands of short
+	// segments would exceed the bound.
+	phase := 0
+	if totalSpan <= maxKnownValuePartialAnchors || len(seqs) > maxKnownValuePartialAnchors {
+		// Either every window fits (stride 1), or there are more parts than
+		// anchors and some part cannot be given one.
+		stride := knownValueStride(totalSpan)
+		for _, q := range seqs {
+			next, err := add(q.text, q.base, stride, phase)
+			if err != nil {
+				return nil, err
+			}
+			phase = next
+		}
+		return out, nil
+	}
+	// A sampled URL keeps each part's first window, so a whole credential part
+	// copied on its own is always found even when the stride is wider than the
+	// part. The remaining anchors sample the rest of every part as one span.
+	reserve := len(seqs)
+	rest := totalSpan - reserve
+	stride := 0
+	if left := maxKnownValuePartialAnchors - reserve; left > 0 && rest > 0 {
+		stride = (rest + left - 1) / left
+	}
+	for _, q := range seqs {
+		if _, err := add(q.text[:minKnownSecretSubstringLen], q.base, 1, 0); err != nil {
+			return nil, err
+		}
+		if stride == 0 || len(q.text) == minKnownSecretSubstringLen {
+			continue
+		}
+		next, err := add(q.text[1:], q.base+1, stride, phase)
+		if err != nil {
+			return nil, err
+		}
+		phase = next
+	}
+	return out, nil
+}
+
+func locateURLPart(value, part string) (int, string) {
+	if i := strings.Index(value, part); i >= 0 {
+		return i, part
+	}
+	for _, enc := range []string{url.QueryEscape(part), url.PathEscape(part)} {
+		if enc == part {
+			continue
+		}
+		if i := strings.Index(value, enc); i >= 0 {
+			return i, enc
+		}
+	}
+	return -1, ""
+}
+
+// knownValueStride spaces window starts so that span candidate starts yield at
+// most maxKnownValuePartialAnchors anchors. A value longer than
+// maxKnownValuePartialInputBytes is sampled rather than refused: its anchors are
+// spaced evenly across the whole value, so the temporary maps built from it stay
+// within the same bound as a value at the ceiling, and a copied fragment of at
+// least stride+minKnownSecretSubstringLen-1 bytes always contains an anchor.
+// Refusing instead stopped the scanner from being built, so one long
+// environment variable (an inline certificate or JSON key) kept Pipelock from
+// starting under the default scan_env. Values at or under the ceiling keep
+// every window (stride 1).
+func knownValueStride(span int) int {
+	if span <= maxKnownValuePartialAnchors {
+		return 1
+	}
+	return (span + maxKnownValuePartialAnchors - 1) / maxKnownValuePartialAnchors
+}
+
+func collectValueWindowsBounded(value string, maxEntries int) (map[string][]int, error) {
+	windows, _, err := collectValueWindowsPhased(value, 0, maxEntries, 1, 0)
+	return windows, err
+}
+
+// collectValueWindowsPhased indexes value's windows at least minStride apart,
+// widening the stride when value alone exceeds the anchor bound. The first
+// window starts at phase, and the returned phase is where the next window
+// would fall past the end of value, so a caller sampling several parts as one
+// span passes it to the next part.
+func collectValueWindowsPhased(value string, base, maxEntries, minStride, phase int) (map[string][]int, int, error) {
+	stride := max(minStride, knownValueStride(len(value)-minKnownSecretSubstringLen+1), 1)
+	starts := len(value) - minKnownSecretSubstringLen + 1
+	phase = max(phase, 0)
+	capacity := 0
+	if starts > phase {
+		capacity = (starts - phase + stride - 1) / stride
+	}
+	if maxEntries <= 0 {
+		capacity = 0
+	} else if capacity > maxEntries {
+		capacity = maxEntries
+	}
+	windows := make(map[string][]int, capacity)
+	repeated := make(map[string]struct{})
+	start := phase
+	for ; start < starts; start += stride {
+		window := value[start : start+minKnownSecretSubstringLen]
+		// The whole-value entropy floor does not protect a low-entropy prefix
+		// or a repeated 16-byte block inside an otherwise high-entropy secret.
+		if ShannonEntropy(window) <= envLeakMinEntropy {
+			continue
+		}
+		if _, duplicate := repeated[window]; duplicate {
+			continue
+		}
+		if _, seen := windows[window]; seen {
+			delete(windows, window)
+			repeated[window] = struct{}{}
+			continue
+		}
+		windows[window] = []int{base + start}
+	}
+	if len(windows) > maxEntries {
+		return nil, 0, fmt.Errorf("%w: need %d entries (%d bytes), %d entries (%d bytes) remain",
+			errKnownValueWindowBudget,
+			len(windows), len(windows)*knownValueWindowEntryBytes,
+			maxEntries, maxEntries*knownValueWindowEntryBytes)
+	}
+	return windows, max(start-starts, 0), nil
+}
+
+// knownValueWindow is one exact partial-match candidate. Keeping its bytes and
+// source offset inline avoids retaining a string header and a separate slice
+// allocation for every sixteen-byte window.
+//
+// A secrets file accepts at most 1,000 values of at most 4,096 bytes, so the
+// file-backed worst case is 4,081,000 entries. This fixed-width layout is
+// therefore bounded by the accepted input contract rather than an operator
+// budget. Environment values use the same exact representation.
+type knownValueWindow struct {
+	value  [minKnownSecretSubstringLen]byte
+	offset int
+}
+
+// knownValueWindowIndex is sorted by window bytes. A scanner owns it for its
+// lifetime, so lookups are read-only and need no synchronization.
+type knownValueWindowIndex struct {
+	byteRanges *[257]int // exact ranges into the shared sorted window slice
+	windows    []knownValueWindowCandidate
+	prefixes   *knownValueWindowPrefixes
+	valueIndex int
+	count      int
+}
+
+// knownValueWindowPrefixes is a one-hash membership filter over the first
+// knownValueWindowPrefixLen bytes of every retained window. A text position
+// whose prefix bit is clear cannot start any window, so the binary search over
+// every window is skipped there. The filter has no false negatives: every
+// stored window sets its bit, and a collision only causes a search. A nil
+// filter reports every prefix as present, so a missing filter only costs time.
+type knownValueWindowPrefixes [1 << 16 / 64]uint64
+
+const knownValueWindowPrefixLen = 4
+
+func knownValueWindowPrefixKey(window string) uint16 {
+	prefix := uint32(window[0]) | uint32(window[1])<<8 | uint32(window[2])<<16 | uint32(window[3])<<24
+	// Fibonacci hashing spreads the four bytes across the high bits.
+	return uint16((prefix * 2654435769) >> 16)
+}
+
+func (p *knownValueWindowPrefixes) add(window string) {
+	key := knownValueWindowPrefixKey(window)
+	p[key/64] |= uint64(1) << (key % 64)
+}
+
+func (p *knownValueWindowPrefixes) mayContain(window string) bool {
+	if p == nil {
+		return true
+	}
+	key := knownValueWindowPrefixKey(window)
+	return p[key/64]&(uint64(1)<<(key%64)) != 0
+}
+
+func (i knownValueWindowIndex) len() int {
+	return i.count
+}
+
+func (i knownValueWindowIndex) offsets(window string) []knownValueWindowCandidate {
+	candidates := i.lookup(window)
+	if len(candidates) == 0 || candidates[0].valueIndex != i.valueIndex {
+		return nil
+	}
+	return candidates
+}
+
+// lookup returns every stored window equal to window, whichever value owns
+// it. The shared slice keeps only windows unique to one value, so every
+// returned candidate has the same valueIndex.
+func (i knownValueWindowIndex) lookup(window string) []knownValueWindowCandidate {
+	if len(window) != minKnownSecretSubstringLen || len(i.windows) == 0 {
+		return nil
+	}
+	if !i.prefixes.mayContain(window) {
+		return nil
+	}
+	var key [minKnownSecretSubstringLen]byte
+	copy(key[:], window)
+	lo, hi := 0, len(i.windows)
+	if i.byteRanges != nil {
+		lo, hi = i.byteRanges[int(key[0])], i.byteRanges[int(key[0])+1]
+	}
+	first := lo + sort.Search(hi-lo, func(n int) bool {
+		return bytes.Compare(i.windows[lo+n].window.value[:], key[:]) >= 0
+	})
+	if first == len(i.windows) || i.windows[first].window.value != key {
+		return nil
+	}
+	last := first + 1
+	for last < len(i.windows) && i.windows[last].window.value == key {
+		last++
+	}
+	return i.windows[first:last]
+}
+
+// knownValueWindowSet holds, per known value, the windows unique to that
+// value. The outer map is cardinality-bounded by configured values; the large
+// candidate collection is stored in compact exact records above.
+type knownValueWindowSet map[string]knownValueWindowIndex
+
+type knownValueWindowCandidate struct {
+	valueIndex int
+	window     knownValueWindow
+}
+
+const (
+	// URL-shaped values can retain both decoded credential-component windows
+	// and their exact escaped spellings. Two windows per accepted source byte
+	// is a conservative upper bound for that representation at the loader cap.
+	// Canaries and environment values share this ceiling: combined state beyond
+	// the file-only maximum is rejected rather than silently dropped or allowed
+	// to recreate the unbounded retained index this budget replaces.
+	maxKnownValueWindowEntries = maxSecretsFileEntries * maxSecretsFileLineLen * 2
+	knownValueWindowEntryBytes = 32
+	maxKnownValueWindowBytes   = maxKnownValueWindowEntries * knownValueWindowEntryBytes
+	// The secrets-file loader already enforces this per-value ceiling. Every
+	// other partial-match source samples a longer value down to the anchor
+	// count of a value at the ceiling, which bounds the temporary exact-dedup
+	// maps used during construction.
+	maxKnownValuePartialInputBytes = maxSecretsFileLineLen
+	maxKnownValuePartialAnchors    = maxKnownValuePartialInputBytes - minKnownSecretSubstringLen + 1
+)
+
+var errKnownValueWindowBudget = errors.New("known-value window index memory budget exceeded")
+
+type knownValueWindowBudget struct {
+	maxEntries int
+	used       int
+}
+
+func newKnownValueWindowBudget(maxEntries int) *knownValueWindowBudget {
+	return &knownValueWindowBudget{maxEntries: maxEntries}
+}
+
+func (b *knownValueWindowBudget) reserve(entries int) error {
+	// Per-value counting is the primary allocation guard. This check commits
+	// the bounded total and defends against count/build accounting drift.
+	if entries < 0 || entries > b.maxEntries-b.used {
+		return fmt.Errorf("%w: need %d entries (%d bytes), %d entries (%d bytes) remain",
+			errKnownValueWindowBudget,
+			entries, entries*knownValueWindowEntryBytes,
+			b.maxEntries-b.used, (b.maxEntries-b.used)*knownValueWindowEntryBytes)
+	}
+	b.used += entries
+	return nil
+}
+
+// buildKnownValueWindows computes partial-match windows for every value across
+// the given lists and drops any window that appears in more than one distinct
+// value. Two secrets that share a sixteen-byte run share a structural stem (a
+// vendor prefix, an account path, a common template), and a stem is not a
+// disclosure of either secret; matching it would attribute one secret's text
+// to the other and would block text that only contains the shared part.
+func buildKnownValueWindows(budget *knownValueWindowBudget, lists ...[]string) (knownValueWindowSet, error) {
+	values := make([]string, 0)
+	valueIndexes := make(map[string]int)
+	for _, list := range lists {
+		for _, value := range list {
+			if _, seen := valueIndexes[value]; seen {
+				continue
+			}
+			valueIndexes[value] = len(values)
+			values = append(values, value)
+		}
+	}
+
+	// Enumerate each value once into a per-value bounded map, then append its
+	// compact records only after that value fits the remaining global budget.
+	// The temporary map is bounded by maxKnownValuePartialInputBytes, while the
+	// retained candidate slice never grows beyond the repository-owned budget.
+	candidateCount := 0
+	candidates := make([]knownValueWindowCandidate, 0)
+	for valueIndex, value := range values {
+		remaining := budget.maxEntries - budget.used - candidateCount
+		windows, err := knownValueWindowsBounded(value, remaining)
+		if err != nil {
+			return nil, fmt.Errorf("count known-value window candidates: %w", err)
+		}
+		valueCount := 0
+		for _, offsets := range windows {
+			valueCount += len(offsets)
+		}
+		if valueCount > remaining {
+			return nil, fmt.Errorf("count known-value window candidates: %w", errKnownValueWindowBudget)
+		}
+		candidateCount += valueCount
+		for window, offsets := range windows {
+			var key [minKnownSecretSubstringLen]byte
+			copy(key[:], window)
+			for _, offset := range offsets {
+				candidates = append(candidates, knownValueWindowCandidate{
+					valueIndex: valueIndex,
+					window:     knownValueWindow{value: key, offset: offset},
+				})
+			}
+		}
+		if len(candidates) != candidateCount {
+			return nil, fmt.Errorf("build known-value window index: counted %d candidates, built %d", candidateCount, len(candidates))
+		}
+	}
+	if err := budget.reserve(candidateCount); err != nil {
+		return nil, err
+	}
+
+	// Sort once. The sort makes shared-window exclusion exact without retaining
+	// per-window maps for the scanner lifetime.
+	sort.Slice(candidates, func(i, j int) bool {
+		if cmp := bytes.Compare(candidates[i].window.value[:], candidates[j].window.value[:]); cmp != 0 {
+			return cmp < 0
+		}
+		if candidates[i].valueIndex != candidates[j].valueIndex {
+			return candidates[i].valueIndex < candidates[j].valueIndex
+		}
+		return candidates[i].window.offset < candidates[j].window.offset
+	})
+
+	counts := make([]int, len(values))
+	write := 0
+	for start := 0; start < len(candidates); {
+		end := start + 1
+		for end < len(candidates) && candidates[end].window.value == candidates[start].window.value {
+			end++
+		}
+		if candidates[start].valueIndex == candidates[end-1].valueIndex {
+			copy(candidates[write:], candidates[start:end])
+			counts[candidates[start].valueIndex] += end - start
+			write += end - start
+		}
+		start = end
+	}
+	candidates = candidates[:write]
+
+	var prefixes *knownValueWindowPrefixes
+	if len(candidates) > 0 {
+		prefixes = new(knownValueWindowPrefixes)
+		for _, candidate := range candidates {
+			prefixes.add(string(candidate.window.value[:knownValueWindowPrefixLen]))
+		}
+	}
+	ranges := new([257]int)
+	pos := 0
+	for firstByte := 0; firstByte <= 256; firstByte++ {
+		for pos < len(candidates) && int(candidates[pos].window.value[0]) < firstByte {
+			pos++
+		}
+		ranges[firstByte] = pos
+	}
+	set := make(knownValueWindowSet, len(values))
+	for valueIndex, value := range values {
+		set[value] = knownValueWindowIndex{windows: candidates, prefixes: prefixes, byteRanges: ranges, valueIndex: valueIndex, count: counts[valueIndex]}
+	}
+	return set, nil
+}
+
+// indexKnownValueSubstring scans each candidate view once with fixed-size
+// windows, then extends only matching windows. It avoids constructing every
+// possible substring needle while retaining the longest contiguous disclosure.
+func indexKnownValueSubstring(value string, windows knownValueWindowIndex, views []spanTextView) (int, int, int, string, bool) {
+	return indexKnownValueSubstringWithHits(value, windows, views, nil)
+}
+
+// knownValueWindowHits memoizes, for one list of views, every text position
+// whose window is in a shared knownValueWindowIndex. All values built by one
+// buildKnownValueWindows call share the sorted window slice and its prefix
+// filter, so these positions are the same for every value; only the owner of
+// each hit differs. Scanning the views once serves every value's partial
+// match instead of repeating the walk and its lookups per value.
+type knownValueWindowHits struct {
+	views    []spanTextView
+	windows  []knownValueWindowCandidate
+	prefixes *knownValueWindowPrefixes
+	built    bool
+	overflow bool
+	hits     []knownValueWindowHit
+}
+
+// maxKnownValueWindowHits bounds the memo. Past it the memo is dropped and
+// every value scans directly, which is the pre-memo behavior and costs only
+// time, so repeated secret-shaped windows cannot grow memory per input byte.
+const maxKnownValueWindowHits = 4096
+
+type knownValueWindowHit struct {
+	view       int
+	textStart  int
+	candidates []knownValueWindowCandidate
+}
+
+func newKnownValueWindowHits(views []spanTextView) *knownValueWindowHits {
+	// Keep a private copy so a caller editing its slice after the first
+	// lookup cannot make sameSpanTextViews match a stale memo.
+	return &knownValueWindowHits{views: append([]spanTextView(nil), views...)}
+}
+
+// forIndex returns the memoized hits when views and the shared index are the
+// ones this memo serves, building them on first use. ok is false otherwise,
+// and the caller scans directly.
+func (h *knownValueWindowHits) forIndex(index knownValueWindowIndex, views []spanTextView) ([]knownValueWindowHit, bool) {
+	if h == nil || len(index.windows) == 0 || !sameSpanTextViews(h.views, views) {
+		return nil, false
+	}
+	if h.built {
+		if h.overflow {
+			return nil, false
+		}
+		if len(h.windows) != len(index.windows) || &h.windows[0] != &index.windows[0] || h.prefixes != index.prefixes {
+			return nil, false
+		}
+		return h.hits, true
+	}
+	h.built = true
+	h.windows = index.windows
+	h.prefixes = index.prefixes
+	for v, view := range views {
+		for textStart := 0; textStart <= len(view.text)-minKnownSecretSubstringLen; textStart++ {
+			if candidates := index.lookup(view.text[textStart : textStart+minKnownSecretSubstringLen]); len(candidates) > 0 {
+				if len(h.hits) == maxKnownValueWindowHits {
+					h.overflow = true
+					h.hits = nil
+					return nil, false
+				}
+				h.hits = append(h.hits, knownValueWindowHit{view: v, textStart: textStart, candidates: candidates})
+			}
+		}
+	}
+	return h.hits, true
+}
+
+func sameSpanTextViews(a, b []spanTextView) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// indexKnownValueSubstringWithHits is indexKnownValueSubstring reading window
+// positions from memo when it applies. Hits arrive in the same view and
+// position order as the direct scan, and a position the memo omits is one
+// where offsets returns no candidate, so the longest match is identical.
+func indexKnownValueSubstringWithHits(value string, windows knownValueWindowIndex, views []spanTextView, memo *knownValueWindowHits) (int, int, int, string, bool) {
+	if windows.len() == 0 {
+		return 0, 0, 0, "", false
+	}
+	var best knownValueSubstringBest
+	if hits, ok := memo.forIndex(windows, views); ok {
+		for _, hit := range hits {
+			if hit.candidates[0].valueIndex != windows.valueIndex {
+				continue
+			}
+			best.extend(value, views[hit.view], hit.textStart, hit.candidates)
+		}
+	} else {
+		for _, view := range views {
+			for textStart := 0; textStart <= len(view.text)-minKnownSecretSubstringLen; textStart++ {
+				best.extend(value, view, textStart, windows.offsets(view.text[textStart:textStart+minKnownSecretSubstringLen]))
+			}
+		}
+	}
+	if best.length < minKnownSecretSubstringLen {
+		return 0, 0, 0, "", false
+	}
+	return best.start, best.end, best.length, best.view, true
+}
+
+type knownValueSubstringBest struct {
+	length, start, end int
+	view               string
+}
+
+// extend grows each candidate window at textStart to the longest common run
+// of view.text and value, keeping the first longest run seen.
+func (b *knownValueSubstringBest) extend(value string, view spanTextView, textStart int, candidates []knownValueWindowCandidate) {
+	for _, candidate := range candidates {
+		valueStart := candidate.window.offset
+		leftText, leftValue := textStart, valueStart
+		for leftText > 0 && leftValue > 0 && view.text[leftText-1] == value[leftValue-1] {
+			leftText--
+			leftValue--
+		}
+		rightText := textStart + minKnownSecretSubstringLen
+		rightValue := valueStart + minKnownSecretSubstringLen
+		for rightText < len(view.text) && rightValue < len(value) && view.text[rightText] == value[rightValue] {
+			rightText++
+			rightValue++
+		}
+		if length := rightText - leftText; length > b.length {
+			b.length, b.start, b.end, b.view = length, leftText, rightText, view.viewLabel
+		}
+	}
+}
+
+func decimalCharacterCodes(value, separator string) string {
+	var b strings.Builder
+	for i, r := range value {
+		if i > 0 {
+			b.WriteString(separator)
+		}
+		b.WriteString(strconv.Itoa(int(r)))
+	}
+	return b.String()
+}
+
+func indexEncodedTokenView(needle string, views []spanTextView, kind encodedTokenKind) (int, int, string, bool) {
+	if len(needle) == 0 {
+		return 0, 0, "", false
+	}
+	for _, view := range views {
+		text := view.text
+		for start := 0; start < len(text); start++ {
+			if text[start] != needle[0] {
+				continue
+			}
+			textIdx := start
+			needleIdx := 0
+			for textIdx < len(text) && needleIdx < len(needle) {
+				c := text[textIdx]
+				if c == needle[needleIdx] {
+					textIdx++
+					needleIdx++
+					continue
+				}
+				if isEncodedTokenSeparator(c, kind) {
+					textIdx++
+					continue
+				}
+				break
+			}
+			if needleIdx == len(needle) {
+				return start, textIdx, view.viewLabel, true
+			}
+		}
+	}
+	return 0, 0, "", false
+}
+
+// indexHexTokenView finds a known hex encoding through every separator that
+// normalizeHex removes. Prefix pairs are skipped together before treating all
+// remaining non-hex bytes as noise, so env/file-secret matching cannot retain
+// a smaller, separately maintained delimiter allow-list.
+// isHexPrefixFor reports whether text[i:] opens with a "0x" or "\\x" prefix that
+// introduces the hex pair needle[j:] expects. Requiring the pair to follow is
+// what keeps the prefix rule from eating a needle byte: without it, any 'x'
+// after a '0' in the scanned text consumed that '0'.
+func isHexPrefixFor(text string, i int, needle string, j int) bool {
+	if i+3 >= len(text) || j+1 >= len(needle) {
+		return false
+	}
+	c := text[i]
+	if (c != '\\' && c != '0') || text[i+1] != 'x' {
+		return false
+	}
+	return text[i+2] == needle[j] && text[i+3] == needle[j+1]
+}
+
+func indexHexTokenView(needle string, views []spanTextView) (int, int, string, bool) {
+	if len(needle) == 0 {
+		return 0, 0, "", false
+	}
+	for _, view := range views {
+		text := view.text
+		for start := 0; start < len(text); start++ {
+			if text[start] != needle[0] {
+				continue
+			}
+			textIdx := start
+			needleIdx := 0
+			for textIdx < len(text) && needleIdx < len(needle) {
+				c := text[textIdx]
+				// Consume a radix or escape prefix ONLY when it introduces the
+				// hex pair the needle expects next. The unconditional form
+				// swallowed a '0' the needle needed whenever an 'x' followed
+				// it, so inserting one 'x' after a zero hid the rest of an
+				// encoded secret: matching "0a0b" against "0a0xb" missed.
+				if isHexPrefixFor(text, textIdx, needle, needleIdx) {
+					textIdx += 2
+					continue
+				}
+				if c == needle[needleIdx] {
+					textIdx++
+					needleIdx++
+					continue
+				}
+				if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+					textIdx++
+					continue
+				}
+				break
+			}
+			if needleIdx == len(needle) {
+				return start, textIdx, view.viewLabel, true
+			}
+		}
+	}
+	return 0, 0, "", false
+}
+
+// matchSecretEncodingSpan finds a known secret in the candidate views as a
+// whole value, as a contiguous partial disclosure using the caller-provided
+// windows (an empty index disables partial matching), or under a supported encoding.
+// encodings carries the secret's precomputed forms; nil builds them here.
+func matchSecretEncodingSpan(secret string, windows knownValueWindowIndex, encodings *knownSecretEncodings, texts, lowerTexts []spanTextView) (knownSecretMatch, int, int, string, bool) {
+	return matchSecretEncodingSpanWithHits(secret, windows, encodings, texts, lowerTexts, nil)
+}
+
+// matchSecretEncodingSpanWithHits is matchSecretEncodingSpan with a window-hit
+// memo shared by every secret checked against the same views. A nil memo
+// scans directly.
+func matchSecretEncodingSpanWithHits(secret string, windows knownValueWindowIndex, encodings *knownSecretEncodings, texts, lowerTexts []spanTextView, hits *knownValueWindowHits) (knownSecretMatch, int, int, string, bool) {
+	// Raw match.
+	if start, end, viewLabel, ok := indexAnyView(secret, texts); ok {
+		return knownSecretMatch{}, start, end, viewLabel, true
+	}
+	if start, end, length, viewLabel, ok := indexKnownValueSubstringWithHits(secret, windows, texts, hits); ok {
+		return knownSecretMatch{partialLen: length}, start, end, viewLabel, true
+	}
+
+	// Every encoding below is at least as long as the secret (base64 4/3,
+	// base32 8/5, hex and its delimited forms 2x or more, decimal codes at
+	// least one digit per byte), and the token matchers only skip text bytes,
+	// so none can occur in a text shorter than the secret. Skipping them keeps
+	// a long known value, such as an inline certificate in the environment,
+	// from being re-encoded on every scan of a short request.
+	if len(secret) > longestSpanTextView(texts, lowerTexts) {
+		return knownSecretMatch{}, 0, 0, "", false
+	}
+	if encodings == nil {
+		encodings = newKnownSecretEncodings(secret)
+	}
+
+	// Base64 standard (padded + unpadded).
+	b64Std := encodings.base64Std
+	b64StdNoPad := encodings.base64StdNoPad
+	if start, end, viewLabel, ok := indexAnyView(b64Std, texts); ok {
+		return knownSecretMatch{encoding: encodingBase64}, start, end, viewLabel, true
+	}
+	if b64StdNoPad != b64Std {
+		if start, end, viewLabel, ok := indexAnyView(b64StdNoPad, texts); ok {
+			return knownSecretMatch{encoding: encodingBase64}, start, end, viewLabel, true
+		}
+	}
+	if start, end, viewLabel, ok := indexEncodedTokenView(b64Std, texts, encodedTokenBase64Std); ok {
+		return knownSecretMatch{encoding: encodingBase64}, start, end, viewLabel, true
+	}
+	if b64StdNoPad != b64Std {
+		if start, end, viewLabel, ok := indexEncodedTokenView(b64StdNoPad, texts, encodedTokenBase64Std); ok {
+			return knownSecretMatch{encoding: encodingBase64}, start, end, viewLabel, true
+		}
+	}
+
+	// Base64 URL-safe (padded + unpadded).
+	b64URL := encodings.base64URL
+	b64URLNoPad := encodings.base64URLNoPad
+	if b64URL != b64Std {
+		if start, end, viewLabel, ok := indexAnyView(b64URL, texts); ok {
+			return knownSecretMatch{encoding: "base64url"}, start, end, viewLabel, true
+		}
+	}
+	if b64URLNoPad != b64StdNoPad {
+		if start, end, viewLabel, ok := indexAnyView(b64URLNoPad, texts); ok {
+			return knownSecretMatch{encoding: "base64url"}, start, end, viewLabel, true
+		}
+	}
+	if b64URL != b64Std {
+		if start, end, viewLabel, ok := indexEncodedTokenView(b64URL, texts, encodedTokenBase64URL); ok {
+			return knownSecretMatch{encoding: "base64url"}, start, end, viewLabel, true
+		}
+	}
+	if b64URLNoPad != b64StdNoPad {
+		if start, end, viewLabel, ok := indexEncodedTokenView(b64URLNoPad, texts, encodedTokenBase64URL); ok {
+			return knownSecretMatch{encoding: "base64url"}, start, end, viewLabel, true
+		}
+	}
+
+	// Hex (case-insensitive via pre-lowered texts).
+	hexEnc := encodings.hex
+	if start, end, viewLabel, ok := indexAnyView(hexEnc, lowerTexts); ok {
+		return knownSecretMatch{encoding: encodingHex}, start, end, viewLabel, true
+	}
+
+	// Delimiter-separated hex variants for env/file secret detection.
+	// Matches all formats that normalizeHex can strip.
+	for _, candidate := range encodings.hexDelimited {
+		if start, end, viewLabel, ok := indexAnyView(candidate, lowerTexts); ok {
+			return knownSecretMatch{encoding: encodingHex}, start, end, viewLabel, true
+		}
+	}
+	if start, end, viewLabel, ok := indexHexTokenView(hexEnc, lowerTexts); ok {
+		return knownSecretMatch{encoding: encodingHex}, start, end, viewLabel, true
+	}
+
+	for _, candidate := range encodings.decimal {
+		if start, end, viewLabel, ok := indexAnyView(candidate, texts); ok {
+			return knownSecretMatch{encoding: encodingDecimal}, start, end, viewLabel, true
+		}
+	}
+
+	// Base32 standard (padded + unpadded).
+	b32Std := encodings.base32Std
+	b32NoPad := encodings.base32NoPad
+	if start, end, viewLabel, ok := indexAnyView(b32Std, texts); ok {
+		return knownSecretMatch{encoding: encodingBase32}, start, end, viewLabel, true
+	}
+	if b32NoPad != b32Std {
+		if start, end, viewLabel, ok := indexAnyView(b32NoPad, texts); ok {
+			return knownSecretMatch{encoding: encodingBase32}, start, end, viewLabel, true
+		}
+	}
+	if start, end, viewLabel, ok := indexEncodedTokenView(b32Std, texts, encodedTokenBase32); ok {
+		return knownSecretMatch{encoding: encodingBase32}, start, end, viewLabel, true
+	}
+	if b32NoPad != b32Std {
+		if start, end, viewLabel, ok := indexEncodedTokenView(b32NoPad, texts, encodedTokenBase32); ok {
+			return knownSecretMatch{encoding: encodingBase32}, start, end, viewLabel, true
+		}
+	}
+
+	return knownSecretMatch{}, 0, 0, "", false
+}
+
+// nonSecretEnvNames lists environment variable names that are never secrets.
+// These are well-known system/shell/runtime variables whose values (paths,
+// locale strings, color codes) routinely exceed the length and entropy
+// thresholds but carry zero secret content. Skipping them prevents false
+// positives when agents legitimately send values like $PWD in tool arguments.
+var nonSecretEnvNames = map[string]struct{}{
+	// Working directory and paths
+	"PWD": {}, "OLDPWD": {}, "HOME": {}, "PATH": {},
+	"TMPDIR": {}, "TEMP": {}, "TMP": {},
+	// POSIX "last command" variable - bash sets $_ to the absolute path
+	// of the previously executed command. High-entropy binary path leaks
+	// into scans whenever the parent shell ran something like
+	// /usr/local/bin/go test. Not a secret, never has been.
+	"_": {},
+	// User identity (public, not secret)
+	"USER": {}, "LOGNAME": {}, "USERNAME": {}, "HOSTNAME": {}, "HOST": {},
+	// Shell and terminal
+	"SHELL": {}, "SHLVL": {}, "TERM": {}, "TERM_PROGRAM": {},
+	"COLORTERM": {}, "COLORFGBG": {},
+	// Locale
+	"LANG": {}, "LANGUAGE": {},
+	// Display
+	"DISPLAY": {}, "WAYLAND_DISPLAY": {},
+	// Editor
+	"EDITOR": {}, "VISUAL": {}, "PAGER": {}, "LESS": {},
+	// Color codes (LS_COLORS is often very long and high-entropy)
+	"LS_COLORS": {}, "LSCOLORS": {},
+	// D-Bus / SSH agent (socket paths, not credentials)
+	"DBUS_SESSION_BUS_ADDRESS": {}, "SSH_AUTH_SOCK": {},
+	// Public GitHub Actions metadata URLs. These values are fixed service
+	// endpoints, not credentials, and frequently appear in legitimate traffic.
+	"GITHUB_API_URL": {}, "GITHUB_GRAPHQL_URL": {}, "GITHUB_SERVER_URL": {},
+	// Language runtimes (paths, not secrets)
+	"GOPATH": {}, "GOROOT": {}, "GOBIN": {},
+	"PYTHONPATH": {}, "PYTHONHOME": {}, "NODE_PATH": {},
+	"MANPATH": {}, "INFOPATH": {},
+	// Prompt strings
+	"PS1": {}, "PS2": {}, "PS3": {}, "PS4": {},
+	// Windows equivalents (matched case-insensitively via ToUpper)
+	"USERPROFILE": {}, "APPDATA": {}, "LOCALAPPDATA": {},
+	"PROGRAMFILES": {}, "PROGRAMDATA": {},
+	"SYSTEMROOT": {}, "WINDIR": {}, "COMSPEC": {},
+	"COMPUTERNAME": {}, "PATHEXT": {}, "SESSIONNAME": {},
+}
+
+// nonSecretEnvPrefixes lists prefixes for env var names that are never secrets.
+// Matched against the uppercased variable name (case-insensitive).
+var nonSecretEnvPrefixes = []string{
+	"LC_",  // LC_ALL, LC_CTYPE, LC_MESSAGES, etc.
+	"XDG_", // XDG_DATA_HOME, XDG_RUNTIME_DIR, etc.
+}
+
+// isNonSecretEnvName returns true if the environment variable name is a
+// well-known non-secret variable that should be excluded from leak detection.
+// Comparison is case-insensitive: on Windows, env var names like "Path" and
+// "UserProfile" are common mixed-case variants of the uppercase originals.
+func isNonSecretEnvName(name string) bool {
+	upper := strings.ToUpper(name)
+	if _, ok := nonSecretEnvNames[upper]; ok {
+		return true
+	}
+	for _, prefix := range nonSecretEnvPrefixes {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// envLeakMinEntropy is the Shannon-entropy floor (bits/char) above which an
+// env-variable value is treated as secret-shaped. Single source of truth shared
+// by extractEnvSecrets (whole-value filter) and looksLikeOpaqueToken (per-segment
+// guard) so the two stay consistent.
+const envLeakMinEntropy = 3.0
+
+// minOpaqueTokenLen is the component length at or above which a single-component,
+// slash-prefixed colon-list segment is treated as a possible opaque secret token
+// rather than a short directory name. Short PATH dirs (/bin, /sbin, /opt) fall
+// below it and stay recognised as path components.
+const minOpaqueTokenLen = 16
+
+// looksLikeOpaqueToken reports whether a colon-list segment (already known to
+// begin with "/") is shaped like an opaque secret token rather than a directory
+// component. A genuine directory entry is either multi-component (/usr/local/bin,
+// has an inner separator) or a short name (/bin, /sbin); a smuggled token is a
+// single long, high-entropy blob (/K7MDENGbPxRfiCYzQ). Used to stop a PATH-like
+// wrapper from skipping a value that the single-value branch would keep scannable.
+func looksLikeOpaqueToken(seg string) bool {
+	body := strings.TrimPrefix(seg, "/")
+	if strings.Contains(body, "/") {
+		return false // multi-component path, not a single opaque token
+	}
+	return len(body) >= minOpaqueTokenLen && ShannonEntropy(body) > envLeakMinEntropy
+}
+
+// isPathShapedValue reports whether an environment-variable value looks like a
+// multi-component filesystem path (or a colon-separated list of paths) rather
+// than a secret. extractEnvSecrets uses it to keep path-valued variables out of
+// the env-leak matcher set: a path the agent references during normal operation
+// is not an exfiltrated secret, and a deep directory path carries enough Shannon
+// entropy to slip past the entropy filter and become a spurious matcher.
+// Matching is on value SHAPE, not variable name, because the name skip-list is
+// incomplete — it misses HERMES_HOME, NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, and
+// any other path-valued variable a deployment introduces.
+//
+// Recognised shapes: a multi-component value beginning with "/" or "~/", a
+// "/"-prefixed colon list (PATH, LD_LIBRARY_PATH), or a conservative Windows
+// drive or UNC path (see isWindowsPathShapedValue). Slash-prefixed opaque tokens
+// are left in the matcher set, as are values containing '+' or '=' because those
+// are common in encoded secrets. Skipping a value is fail-open for a secret
+// shaped exactly like a qualifying path; the shapes stay narrow for that reason.
+func isPathShapedValue(value string) bool {
+	// Reject control bytes in the raw value before trimming, for every branch:
+	// trimming a leading tab or trailing newline must not turn a value that is
+	// not a clean path into an exempt one.
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return false
+	}
+	if strings.ContainsAny(v, "+=") {
+		return false
+	}
+
+	// Checked before the colon-list branch, which rejects the drive colon.
+	if isWindowsPathShapedValue(value) {
+		return true
+	}
+
+	// Colon-separated list where every element is an absolute path
+	// (PATH-style). Checked first so multi-path lists aren't missed.
+	if strings.Contains(v, ":") {
+		for _, seg := range strings.Split(v, ":") {
+			if seg == "" || !strings.HasPrefix(seg, "/") {
+				return false
+			}
+			// A slash-prefixed opaque token riding in a PATH-like wrapper
+			// (e.g. "/usr/bin:/K7MDENGbPxRfiCYzQ") must not be skipped: the
+			// single-value branch keeps such tokens scannable, so the list
+			// branch has to as well, or the wrapper becomes an exfil bypass.
+			if looksLikeOpaqueToken(seg) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Single absolute or home-relative path. Require at least one directory
+	// separator after the prefix so "/opaque-token-value" stays scannable.
+	if strings.HasPrefix(v, "~/") {
+		rest := strings.TrimPrefix(v, "~/")
+		return strings.Contains(rest, "/") || strings.HasPrefix(rest, ".")
+	}
+	if strings.HasPrefix(v, "/") {
+		return strings.Contains(strings.TrimPrefix(v, "/"), "/")
+	}
+	return false
+}
+
+// windowsPathRejectChars are rejected anywhere in a Windows path component:
+// the characters Microsoft's file-naming rules reserve (< > : " / | ? *; the
+// backslash is the separator) plus characters common in query strings and
+// encoded values but rare in an ordinary path (% & # ; + =).
+const windowsPathRejectChars = `<>:"/|?*%&#;+=`
+
+// Minimum component counts after the prefix. A shallow path ("C:\token" or
+// "\\host\share") stays scannable, matching the Unix branch's rule that a
+// single component after the root is treated as a possible token.
+const (
+	minWindowsDriveComponents = 2 // C:\dir\file
+	minWindowsUNCComponents   = 4 // \\server\share\dir\file
+)
+
+// isWindowsPathShapedValue reports whether v is an absolute Windows drive path
+// (C:\dir\file) or UNC path (\\server\share\dir\file) in a conservative
+// subset of what Windows accepts: backslash separators only, every component
+// non-empty, no "." or ".." component, no control characters, and none of
+// windowsPathRejectChars. That subset excludes drive-relative ("C:dir") and
+// root-relative ("\dir") forms, device and extended prefixes ("\\?\",
+// "\\.\"), mixed separators, extra colons, and lists. Spaces and non-ASCII
+// letters are allowed. Nothing is decoded or checked against the filesystem.
+func isWindowsPathShapedValue(v string) bool {
+	if !utf8.ValidString(v) {
+		return false
+	}
+	// Check the original value before trimming: whitespace controls must not
+	// turn a non-path secret into an exempt path.
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	v = strings.TrimSpace(v)
+	var rest string
+	minComponents := minWindowsDriveComponents
+	switch {
+	case len(v) >= 3 && v[1] == ':' && v[2] == '\\' &&
+		((v[0] >= 'A' && v[0] <= 'Z') || (v[0] >= 'a' && v[0] <= 'z')):
+		rest = v[3:]
+	case strings.HasPrefix(v, `\\`):
+		rest = v[2:]
+		minComponents = minWindowsUNCComponents
+	default:
+		return false
+	}
+	components := strings.Split(rest, `\`)
+	if len(components) < minComponents {
+		return false
+	}
+	for _, c := range components {
+		if c == "" || c == "." || c == ".." || strings.ContainsAny(c, windowsPathRejectChars) {
+			return false
+		}
+	}
+	return true
+}
+
+// extractEnvSecrets filters environment variables for likely secrets.
+// Returns values >= minLen chars with Shannon entropy >3.0.
+// Skips well-known non-secret variable names (PWD, PATH, HOME, etc.) and
+// path-shaped values (see isPathShapedValue) to avoid false positives on paths
+// and locale strings.
+func extractEnvSecrets(minLen int) []string {
+	if minLen <= 0 {
+		minLen = 16
+	}
+
+	var secrets []string
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		name := parts[0]
+		value := parts[1]
+
+		// Skip well-known non-secret variables (paths, locale, shell config).
+		if isNonSecretEnvName(name) {
+			continue
+		}
+
+		// Skip path-shaped values regardless of variable name. Deep paths
+		// carry high entropy and would otherwise become spurious matchers
+		// that flag the agent's own normal path references as leaks.
+		if isPathShapedValue(value) {
+			continue
+		}
+
+		if len(value) < minLen {
+			continue
+		}
+
+		if ShannonEntropy(value) > envLeakMinEntropy {
+			secrets = append(secrets, value)
+		}
+	}
+
+	return secrets
+}
+
+// dedupSecrets removes duplicates from fileSecrets: both against envSecrets
+// (preventing double-scanning) and within fileSecrets itself.
+func dedupSecrets(fileSecrets, envSecrets []string) []string {
+	existing := make(map[string]struct{}, len(envSecrets)+len(fileSecrets))
+	for _, s := range envSecrets {
+		existing[s] = struct{}{}
+	}
+	var result []string
+	for _, s := range fileSecrets {
+		if _, ok := existing[s]; !ok {
+			existing[s] = struct{}{}
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+const (
+	maxSecretsFileLineLen = 4096
+	maxSecretsFileEntries = 1000
+)
+
+// LoadSecretsFile reads explicit secret values from a file, one per line.
+// Lines starting with # (after optional whitespace) are comments.
+// Blank lines, null-byte lines, and lines below minLen are skipped.
+// The accepted-input bounds are maxSecretsFileLineLen bytes per line and
+// maxSecretsFileEntries entries.
+func LoadSecretsFile(path string, minLen int) ([]string, error) {
+	f, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("opening secrets file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var (
+		secrets []string
+		lineNum int
+		first   = true
+	)
+
+	sc := bufio.NewScanner(f)
+	// Buffer must exceed maxSecretsFileLineLen so bufio.ErrTooLong cannot fire
+	// for any line the explicit length guard would skip.
+	const scanBufMax = maxSecretsFileLineLen*2 + 4096
+	sc.Buffer(make([]byte, 0, scanBufMax), scanBufMax)
+
+	for sc.Scan() {
+		lineNum++
+		line := sc.Text()
+
+		// Strip UTF-8 BOM from first line.
+		if first {
+			line = strings.TrimPrefix(line, "\xef\xbb\xbf")
+			first = false
+		}
+
+		// Strip leading and trailing whitespace/tabs/CR.
+		line = strings.TrimSpace(line)
+
+		// Skip blank lines.
+		if line == "" {
+			continue
+		}
+
+		// Skip comment lines (# as first non-whitespace).
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") {
+			continue
+		}
+
+		// Reject lines with null bytes.
+		if strings.ContainsRune(line, '\x00') {
+			fmt.Fprintf(os.Stderr, "pipelock: warning: secrets_file line %d contains null byte, skipping\n", lineNum)
+			continue
+		}
+
+		// Reject lines exceeding max length.
+		if len(line) > maxSecretsFileLineLen {
+			fmt.Fprintf(os.Stderr, "pipelock: warning: secrets_file line %d exceeds %d bytes, skipping\n", lineNum, maxSecretsFileLineLen)
+			continue
+		}
+
+		// Skip values below minimum length.
+		if len(line) < minLen {
+			fmt.Fprintf(os.Stderr, "pipelock: warning: secrets_file line %d too short (%d < %d), skipping\n", lineNum, len(line), minLen)
+			continue
+		}
+
+		// Enforce max entries.
+		if len(secrets) >= maxSecretsFileEntries {
+			fmt.Fprintf(os.Stderr, "pipelock: warning: secrets_file exceeds %d entries, ignoring remainder\n", maxSecretsFileEntries)
+			break
+		}
+
+		secrets = append(secrets, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("reading secrets file: %w", err)
+	}
+
+	return secrets, nil
+}
+
+// buildPathEntropyExempt compiles a request_policy view used only to suppress
+// path entropy on operator-governed paths. Compilation errors are config errors
+// that config validation already rejects before New runs; if one slips through,
+// return nil so path entropy stays fully active (fail secure, never fail open).
+func buildPathEntropyExempt(cfg *config.Config) *reqpolicy.Matcher {
+	m, err := reqpolicy.NewMatcher(&cfg.RequestPolicy)
+	if err != nil {
+		return nil
+	}
+	return m
+}
+
+const (
+	queryEntropyKeyReasonPrefix   = "high entropy query key "
+	queryEntropyParamReasonPrefix = "high entropy query param "
+)
+
+// checkEntropy calculates Shannon entropy on URL path segments and query values.
+// Domains listed in subdomain_entropy_exclusions skip path entropy checks only
+// (APIs that use high-entropy subdomains often embed tokens in URL paths too).
+// Domains listed in query_entropy_exclusions skip query parameter entropy
+// checks only (well-known APIs whose contract embeds high-entropy material
+// in query strings by design, e.g. S3 pre-signed URLs with X-Amz-Signature
+// and response-content-disposition). The two lists are independent: a host
+// listed only in subdomain_entropy_exclusions still has its query parameters
+// scanned, and vice versa.
+func (s *Scanner) checkEntropy(parsed *url.URL) Result {
+	return s.checkEntropyWithContext(context.Background(), parsed)
+}
+
+type issuerQueryAllowanceContextKey struct{}
+
+// issuerQueryAllowed reports whether the request context carries an issuer
+// allowance for this exact decoded key and value. Only query-value entropy
+// consults it; every other scanner still runs on the value.
+func issuerQueryAllowed(ctx context.Context, key, value string) bool {
+	allows, ok := ctx.Value(issuerQueryAllowanceContextKey{}).(func(string, string) bool)
+	return ok && allows(key, value)
+}
+
+// WithIssuerQueryAllowance scopes an observed issuer value to this scan only.
+// The caller must verify the issuing origin and identity before supplying it.
+func WithIssuerQueryAllowance(ctx context.Context, allows func(key, value string) bool) context.Context {
+	return context.WithValue(ctx, issuerQueryAllowanceContextKey{}, allows)
+}
+
+// entropyQueryValues parses a raw query for the entropy heuristic. url.ParseQuery
+// silently drops any pair whose key or value carries a malformed percent
+// escape, which would let a secret skip inspection by appending "%ZZ". Pairs
+// that fail to decode are therefore kept with their raw, undecoded key and
+// value so they reach the same entropy checks and exclusions as decoded pairs.
+// Pairs containing ';' are left to scanAmbiguousRawQueryWithContext, matching
+// url.ParseQuery.
+func entropyQueryValues(rawQuery string) url.Values {
+	if values, err := url.ParseQuery(rawQuery); err == nil {
+		return values
+	}
+	values := make(url.Values)
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if pair == "" || strings.Contains(pair, ";") {
+			continue
+		}
+		rawKey, rawValue, _ := strings.Cut(pair, "=")
+		key, err := url.QueryUnescape(rawKey)
+		if err != nil {
+			key = rawKey
+		}
+		value, err := url.QueryUnescape(rawValue)
+		if err != nil {
+			value = rawValue
+		}
+		values[key] = append(values[key], value)
+	}
+	return values
+}
+
+func (s *Scanner) checkEntropyWithContext(ctx context.Context, parsed *url.URL) Result {
+	return s.checkEntropyWithContextAt(ctx, parsed, s.currentTime())
+}
+
+func (s *Scanner) checkEntropyWithContextAt(ctx context.Context, parsed *url.URL, now time.Time) Result {
+	if s.entropyThreshold <= 0 {
+		return Result{Allowed: true}
+	}
+
+	hostname := parsed.Hostname()
+	excludedPath := s.isExcludedFromSubdomainEntropy(hostname)
+	excludedQuery := s.isExcludedFromQueryEntropy(hostname)
+
+	// Path entropy is also skipped when the operator already governs this
+	// exact host+path with a request_policy route (explicit host + path
+	// constraints). The blunt entropy heuristic is redundant on paths the
+	// operator inspects by rule, and it false-positives on legitimate
+	// high-entropy REST resource ids. This is path-only: it never affects
+	// query entropy (below), subdomain entropy, DLP, or SSRF.
+	routeExemptPath := s.pathEntropyExempt.PathEntropyExempt(hostname, parsed.Path) ||
+		s.isPathEntropyExcluded(parsed)
+
+	// Check path segments (skipped for excluded domains).
+	if !excludedPath && !routeExemptPath {
+		for _, segment := range strings.Split(parsed.Path, "/") {
+			if entropy, blocked := s.pathSegmentEntropy(segment); blocked {
+				return Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf("high entropy path segment (%.2f > %.2f threshold)", entropy, s.entropyThreshold),
+					Scanner: ScannerEntropy,
+					Class:   ClassHeuristicEntropy,
+					Score:   math.Min(entropy/8.0, 1.0), // normalize to 0-1
+				}
+			}
+		}
+	}
+
+	// Check query parameter keys and values. Query entropy exclusions skip
+	// only the entropy heuristic; DB-URI SSRF guards still run because they
+	// protect a separate network-control invariant.
+	// Keys are checked too - secrets can be stuffed into parameter names.
+	if strings.Contains(parsed.RawQuery, ";") {
+		if result, blocked := s.scanAmbiguousRawQueryWithContext(ctx, parsed.RawQuery, !excludedQuery); blocked {
+			return result
+		}
+	}
+	query := entropyQueryValues(parsed.RawQuery)
+	s256 := pkceExemptionApplies(query[pkceMethodParam], query[pkceChallengeParam])
+	dohMsg, dohQuery := parseDNSQuery(parsed.RawQuery)
+	for key, values := range query {
+		if !excludedQuery && len(key) >= s.entropyMinLen {
+			entropy := ShannonEntropy(key)
+			if entropy > s.entropyThreshold {
+				return Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf(queryEntropyKeyReasonPrefix+"%q (%.2f > %.2f threshold)", key, entropy, s.entropyThreshold),
+					Scanner: ScannerEntropy,
+					Class:   ClassHeuristicEntropy,
+					Score:   math.Min(entropy/8.0, 1.0),
+				}
+			}
+		}
+		for _, v := range values {
+			if result, blocked := unsafeDatabaseURIQueryValueResult(v); blocked {
+				return result
+			}
+			if excludedQuery || isPKCES256Challenge(key, v, s256) {
+				continue
+			}
+			if dohQuery && key == dnsQueryParam {
+				if finding, blocked := s.dnsMessageEntropy(dohMsg); blocked {
+					if s.isQueryEntropyParamExcluded(parsed, key) {
+						continue
+					}
+					return s.queryEntropyParamResult(key, finding)
+				}
+				continue
+			}
+			if finding, blocked := s.queryValueEntropy(v, 0); blocked {
+				if s.isQueryEntropyParamExcluded(parsed, key) || issuerQueryAllowed(ctx, key, v) ||
+					s.queryValueIsAudienceCredentialAt(parsed.String(), v, now) || s.releaseGrantSASQueryValueAllowedAt(parsed, key, now) {
+					continue
+				}
+				return s.queryEntropyParamResult(key, finding)
+			}
+		}
+	}
+
+	return Result{Allowed: true}
+}
+
+func (s *Scanner) scanAmbiguousRawQueryWithContext(ctx context.Context, rawQuery string, scanEntropy bool) (Result, bool) {
+	pairs := splitQueryEntropyPairs(rawQuery)
+	s256 := pkceExemptionApplies(queryEntropyPairValues(pairs, pkceMethodParam), queryEntropyPairValues(pairs, pkceChallengeParam))
+	for _, p := range pairs {
+		key, value := p.key, p.value
+		if scanEntropy && len(key) >= s.entropyMinLen {
+			entropy := ShannonEntropy(key)
+			if entropy > s.entropyThreshold {
+				return Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf(queryEntropyKeyReasonPrefix+"%q (%.2f > %.2f threshold)", key, entropy, s.entropyThreshold),
+					Scanner: ScannerEntropy,
+					Class:   ClassHeuristicEntropy,
+					Score:   math.Min(entropy/8.0, 1.0),
+				}, true
+			}
+		}
+		if result, blocked := unsafeDatabaseURIQueryValueResult(value); blocked {
+			return result, true
+		}
+		if !scanEntropy || isPKCES256Challenge(key, value, s256) {
+			continue
+		}
+		if finding, blocked := s.queryValueEntropy(value, 0); blocked {
+			if issuerQueryAllowed(ctx, key, value) {
+				continue
+			}
+			return s.queryEntropyParamResult(key, finding), true
+		}
+	}
+	return Result{}, false
+}
+
+func strictQueryEntropyComponent(raw string) (string, bool) {
+	decoded, err := url.QueryUnescape(raw)
+	if err != nil {
+		return "", false
+	}
+	return decoded, true
+}
+
+type queryEntropyParamExclusionKey struct {
+	scheme string
+	host   string
+	path   string
+	param  string
+}
+
+// pathEntropyExclusion is a compiled path-entropy exemption. Kept as a slice
+// rather than a map because the path is matched as a PREFIX, not by equality,
+// and these lists are short enough that a linear scan is cheaper than any
+// index that could answer a prefix question.
+type pathEntropyExclusion struct {
+	scheme     string
+	host       string
+	pathPrefix string
+}
+
+// effectivePathEntropyExclusions adds the shipped vendor routes to an
+// operator's list. An operator list used to replace the shipped set, so
+// adding one route silently dropped every vendor route. An explicitly empty
+// list still removes them all, which is the documented opt-out.
+func effectivePathEntropyExclusions(entries []config.PathEntropyExclusion) []config.PathEntropyExclusion {
+	if len(entries) == 0 {
+		return entries
+	}
+	return append(append([]config.PathEntropyExclusion(nil), entries...), config.ShippedPathEntropyExclusions()...)
+}
+
+func buildPathEntropyExclusions(entries []config.PathEntropyExclusion) []pathEntropyExclusion {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]pathEntropyExclusion, 0, len(entries))
+	for _, entry := range entries {
+		// An entry with no host or no prefix would match every path on every
+		// host, which is a host-wide exemption wearing a scoped name. Drop it
+		// here as well as rejecting it in validation, so a config that somehow
+		// reaches the scanner cannot silently disable the gate.
+		// Normalize the host BEFORE testing it, not after. Checking the raw
+		// value first let "." survive as non-empty and then normalize to "",
+		// which the predicate now also rejects; doing both means neither the
+		// order here nor the predicate alone is load-bearing.
+		// The RAW host is gated before folding, matching validation. Without
+		// it an unvalidated Config could install an exemption for a folded
+		// ASCII host the operator never wrote, since some non-ASCII runes fold
+		// into ASCII.
+		if config.RawHostASCIIError(entry.Host) != nil {
+			continue
+		}
+		host := config.NormalizeHostPattern(entry.Host)
+		prefix := strings.TrimSpace(entry.PathPrefix)
+		if host == "" || prefix == "" {
+			continue
+		}
+		// A bare / prefix exempts every path on the host, which is the same
+		// over-broad exemption in a different spelling, so it is dropped for the
+		// same reason. Validation rejects it, but this defense exists precisely
+		// for a Config that reached the scanner without it, and it was
+		// previously incomplete: it caught the empty spellings and not this one.
+		if prefix == "/" {
+			continue
+		}
+		// The host pattern gets the SAME breadth test validation applies, from
+		// the same predicate rather than a copy of it. Without this the builder
+		// installed "*.com", which MatchDomain matches against every .com host,
+		// so a route prefix could exempt requests far outside the intended
+		// domain. Porting three of validation's four over-broad spellings and
+		// missing this one is what made a second round of this finding
+		// necessary; calling the predicate removes the chance of a third.
+		if config.HostPatternBreadthError(host) != nil {
+			continue
+		}
+		scheme := strings.ToLower(strings.TrimSpace(entry.Scheme))
+		if scheme == "" {
+			scheme = config.QueryEntropyParamDefaultScheme
+		}
+		// An exemption never covers cleartext. Validation refuses a non-https
+		// scheme; dropping it here too means an unvalidated Config cannot
+		// install one.
+		if scheme != config.QueryEntropyParamDefaultScheme {
+			continue
+		}
+		out = append(out, pathEntropyExclusion{
+			scheme:     scheme,
+			host:       host,
+			pathPrefix: prefix,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// isPathEntropyExcluded reports whether this exact scheme, host and path prefix
+// is exempt from the PATH entropy gate. It deliberately answers nothing about
+// subdomain entropy, query entropy, DLP or SSRF, which continue to run.
+//
+// The comparison uses EscapedPath rather than Path, and that choice is the
+// difference between a narrow exemption and a bypass. url.Parse DECODES
+// percent-escapes into Path, so `/document%2Fd/<blob>` arrives as the decoded
+// `/document/d/<blob>` and matches an exemption written for `/document/d/`,
+// even though the origin server sees a single `document/d` segment and a
+// route the operator never exempted. Matching the escaped spelling keeps the
+// exemption pinned to the literal route in the config. Validation refuses an
+// encoded separator in a prefix, so a configured prefix and an escaped path
+// are compared in the same alphabet.
+func (s *Scanner) isPathEntropyExcluded(parsed *url.URL) bool {
+	if len(s.pathEntropyExclusions) == 0 || parsed == nil {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	host := parsed.Hostname()
+	path := parsed.EscapedPath()
+	for _, ex := range s.pathEntropyExclusions {
+		if ex.scheme != scheme {
+			continue
+		}
+		if !MatchDomain(host, ex.host) {
+			continue
+		}
+		if strings.HasPrefix(path, ex.pathPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildQueryEntropyParamExclusions(entries []config.QueryEntropyParamExclusion) map[queryEntropyParamExclusionKey]struct{} {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[queryEntropyParamExclusionKey]struct{}, len(entries))
+	for _, entry := range entries {
+		scheme := entry.Scheme
+		if scheme == "" {
+			scheme = config.QueryEntropyParamDefaultScheme
+		}
+		out[queryEntropyParamExclusionKey{
+			scheme: strings.ToLower(scheme),
+			host:   strings.TrimSuffix(strings.ToLower(entry.Host), "."),
+			path:   entry.Path,
+			param:  entry.Param,
+		}] = struct{}{}
+	}
+	return out
+}
+
+func (s *Scanner) isQueryEntropyParamExcluded(parsed *url.URL, param string) bool {
+	if len(s.queryParamExclusions) == 0 || parsed.User != nil {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if !isDefaultEndpointPort(parsed, scheme) {
+		return false
+	}
+	host, ok := canonicalQueryEntropyRuntimeHost(parsed.Hostname())
+	if !ok {
+		return false
+	}
+	key := queryEntropyParamExclusionKey{
+		scheme: scheme,
+		host:   host,
+		path:   parsed.EscapedPath(),
+		param:  param,
+	}
+	if _, ok := s.queryParamExclusions[key]; !ok {
+		return false
+	}
+	return rawQueryHasSingleExactDecodedKey(parsed.RawQuery, param)
+}
+
+func canonicalQueryEntropyRuntimeHost(raw string) (string, bool) {
+	host := strings.TrimSuffix(raw, ".")
+	ascii, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	normalized := strings.TrimSuffix(strings.ToLower(ascii), ".")
+	if !wellFormedQueryEntropyDNSHost(normalized) {
+		return "", false
+	}
+	return normalized, true
+}
+
+func wellFormedQueryEntropyDNSHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+	}
+	return true
+}
+
+func isDefaultEndpointPort(parsed *url.URL, scheme string) bool {
+	port := parsed.Port()
+	if port == "" {
+		return true
+	}
+	switch scheme {
+	case "https":
+		return port == "443"
+	case "http":
+		return port == "80"
+	default:
+		return false
+	}
+}
+
+// rawQueryHasSingleExactDecodedKey reports whether exactly one query key
+// decodes to param. The key may arrive percent-encoded: services such as
+// OData APIs emit continuation links with "%24skiptoken" for "$skiptoken",
+// and the configured name can never contain '%', so requiring the literal
+// spelling made those exclusions unmatchable. Any other key decoding to the
+// same name, in any spelling, is a duplicate and refuses the exclusion, so a
+// second copy of the value cannot ride along unscanned.
+func rawQueryHasSingleExactDecodedKey(rawQuery, param string) bool {
+	if strings.Contains(rawQuery, ";") {
+		return false
+	}
+	count := 0
+	for rawQuery != "" {
+		pair := rawQuery
+		if i := strings.IndexByte(rawQuery, '&'); i >= 0 {
+			pair = rawQuery[:i]
+			rawQuery = rawQuery[i+1:]
+		} else {
+			rawQuery = ""
+		}
+		rawKey, _, _ := strings.Cut(pair, "=")
+		decodedKey, err := url.QueryUnescape(rawKey)
+		if err != nil {
+			return false
+		}
+		if decodedKey != param {
+			continue
+		}
+		count++
+	}
+	return count == 1
+}
+
+func isDatabaseURIScheme(scheme string) bool {
+	switch strings.ToLower(scheme) {
+	case "postgres", "postgresql", "mysql", "mongodb", "mongodb+srv", "redis", "rediss":
+		return true
+	default:
+		return false
+	}
+}
+
+func unsafeDatabaseURIQueryValueResult(value string) (Result, bool) {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return Result{}, false
+	}
+	if !isDatabaseURIScheme(u.Scheme) {
+		return Result{}, false
+	}
+
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(u.Hostname())), ".")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ip = destination.ParseIPLiteral(host)
+	}
+	if ip != nil {
+		scannerLabel := ScannerSSRF
+		reason := fmt.Sprintf("database URI query value points to IP literal host %s", host)
+		if isCloudMetadataIP(ip) {
+			scannerLabel = ScannerSSRFMetadata
+			reason = fmt.Sprintf("database URI query value points to cloud metadata endpoint %s", host)
+		}
+		return Result{Allowed: false, Reason: reason, Scanner: scannerLabel, Score: 1.0}, true
+	}
+	if host == "metadata.google.internal" {
+		return Result{
+			Allowed: false,
+			Reason:  "database URI query value points to cloud metadata hostname metadata.google.internal",
+			Scanner: ScannerSSRFMetadata,
+			Score:   1.0,
+		}, true
+	}
+	return Result{}, false
+}
+
+// payloadEntropyMinDecoded is the shortest decoded text treated as the
+// payload of a base64 value. Shorter decodes are too small to judge.
+const payloadEntropyMinDecoded = 8
+
+// payloadEntropy measures what a URL segment or query value carries rather
+// than how it is written. Applications routinely base64-encode ordinary
+// identifiers (a UUID, a typed record id) into paths, and the encoding alone
+// lifts Shannon entropy over the threshold even though the same text written
+// plainly would pass. When value is base64 or base64url that decodes to
+// printable ASCII, the decoded text is measured instead. Random bytes decode
+// to non-printable data and keep the raw measurement, and decoded text is no
+// more capable than the same text sent unencoded, so this adds no channel.
+func payloadEntropy(value string) float64 {
+	raw := ShannonEntropy(value)
+	if decoded, ok := decodePrintableBase64(value); ok {
+		if d := ShannonEntropy(decoded); d < raw {
+			return d
+		}
+	}
+	return raw
+}
+
+// isBase64AlphabetByte reports whether c belongs to the standard or URL-safe
+// base64 alphabet, including padding.
+func isBase64AlphabetByte(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		return true
+	}
+	return c == '+' || c == '/' || c == '-' || c == '_' || c == '='
+}
+
+// decodePrintableBase64 decodes value as standard or URL-safe base64, with or
+// without padding, and reports the result only when it is printable ASCII of
+// at least payloadEntropyMinDecoded bytes.
+func decodePrintableBase64(value string) (string, bool) {
+	for i := 0; i < len(value); i++ {
+		if !isBase64AlphabetByte(value[i]) {
+			return "", false
+		}
+	}
+	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.StdEncoding} {
+		b, err := enc.DecodeString(value)
+		if err != nil || len(b) < payloadEntropyMinDecoded {
+			continue
+		}
+		printable := true
+		for _, c := range b {
+			if c < 0x20 || c > 0x7e {
+				printable = false
+				break
+			}
+		}
+		if printable {
+			return string(b), true
+		}
+	}
+	return "", false
+}
+
+func shouldSkipQueryValueEntropy(value string, entropy, threshold float64) bool {
+	if entropy <= threshold || entropy > threshold+0.35 {
+		return false
+	}
+	if isCredentiallessDatabaseURI(value, threshold) {
+		return true
+	}
+	return isHumanReadableHyphenatedQueryValue(value)
+}
+
+func isCredentiallessDatabaseURI(value string, threshold float64) bool {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if !isDatabaseURIScheme(u.Scheme) {
+		return false
+	}
+	return isLowRiskDatabaseURIHost(u.Hostname(), threshold) && isLowRiskDatabaseURIPath(u.EscapedPath(), threshold)
+}
+
+func isLowRiskDatabaseURIHost(host string, threshold float64) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return false
+	}
+	if destination.ParseIPLiteral(host) != nil {
+		return false
+	}
+	switch host {
+	case "metadata.google.internal":
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		if len(label) >= 12 && ShannonEntropy(label) > threshold {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func isLowRiskDatabaseURIPath(path string, threshold float64) bool {
+	if path == "" || path == "/" {
+		return true
+	}
+	for _, segment := range strings.Split(strings.Trim(path, "/"), "/") {
+		if segment == "" || len(segment) > 32 {
+			return false
+		}
+		if len(segment) >= 12 && ShannonEntropy(segment) > threshold {
+			return false
+		}
+		for _, r := range segment {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func isHumanReadableHyphenatedQueryValue(value string) bool {
+	if len(value) > 40 || !strings.Contains(value, "-") || strings.ContainsAny(value, "_+/=") {
+		return false
+	}
+	parts := strings.Split(value, "-")
+	if len(parts) < 3 || len(parts) > 5 {
+		return false
+	}
+	wordParts := 0
+	yearParts := 0
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		if isYearLike(part) {
+			yearParts++
+			if yearParts > 1 {
+				return false
+			}
+			continue
+		}
+		if !isReadableLowerWord(part) {
+			return false
+		}
+		wordParts++
+	}
+	return wordParts >= 3 && wordParts <= 4
+}
+
+func isYearLike(part string) bool {
+	if len(part) != 4 {
+		return false
+	}
+	for _, r := range part {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isReadableLowerWord(part string) bool {
+	if len(part) < 3 || len(part) > 12 {
+		return false
+	}
+	hasVowel := false
+	consonantRun := 0
+	for _, r := range part {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+		if strings.ContainsRune("aeiouy", r) {
+			hasVowel = true
+			consonantRun = 0
+			continue
+		}
+		consonantRun++
+		if consonantRun > 4 {
+			return false
+		}
+	}
+	return hasVowel
+}
+
+// ShannonEntropy calculates the Shannon entropy of a string in bits per character.
+// English text: ~3.5-4.0, measured base64url resource identifiers: ~4.93-5.43,
+// hex: ~4.0, encrypted: ~7.5-8.0.
+func ShannonEntropy(s string) float64 {
+	if len(s) == 0 {
+		return 0
+	}
+
+	freq := make(map[rune]int)
+	total := 0
+	for _, ch := range s {
+		freq[ch]++
+		total++
+	}
+
+	entropy := 0.0
+	length := float64(total)
+	for _, count := range freq {
+		p := float64(count) / length
+		if p > 0 {
+			entropy -= p * math.Log2(p)
+		}
+	}
+
+	return entropy
+}
+
+// domainCeilingReason names the key a per-domain ceiling actually counted.
+// Both ceilings count by baseDomain so subdomain rotation cannot mint fresh
+// budgets; naming only the requested host would suggest a per-host budget
+// and hide that every sibling subdomain drew from the same one.
+func domainCeilingReason(ceiling, hostname string) string {
+	base := baseDomain(hostname)
+	if base == hostname {
+		return fmt.Sprintf("%s exceeded for %s", ceiling, hostname)
+	}
+	return fmt.Sprintf("%s exceeded for %s (shared by %s and all its subdomains; request to %s)", ceiling, base, base, hostname)
+}
+
+// checkDataBudget enforces per-domain data transfer limits.
+// Uses baseDomain normalization to prevent subdomain rotation bypass.
+func (s *Scanner) checkDataBudget(hostname string) Result {
+	if s.dataBudget == nil {
+		return Result{Allowed: true}
+	}
+	domain := baseDomain(hostname)
+	if !s.dataBudget.IsAllowed(domain) {
+		return Result{
+			Allowed: false,
+			Reason:  domainCeilingReason("data budget", hostname),
+			Scanner: ScannerDataBudget,
+			Score:   0.8,
+		}
+	}
+	return Result{Allowed: true}
+}
+
+// subdomainMinLabelLen is the minimum subdomain label length to check.
+// Short labels (www, api, cdn) are normal and should not be flagged.
+const subdomainMinLabelLen = 8
+
+// Hostname-exfiltration heuristics. These catch DNS tunneling / exfiltration
+// that the Shannon-entropy gate misses: hex labels top out at 4.0 bits/char
+// (16 symbols), so a secret hex-encoded into a subdomain measures ~3.1 and
+// never exceeds a 4.0 threshold. Two structural signals close that gap.
+const (
+	subdomainEncodedLabelReasonPrefix  = "encoded data in subdomain label"
+	subdomainEncodedChunksReasonPrefix = "subdomain payload chunked across"
+
+	// subdomainEncodedMinLen is the minimum length for a single subdomain
+	// label to be flagged as encoded data when it is entirely hex or base32.
+	// Set above typical short commit-SHA prefixes (7-12 chars) to limit false
+	// positives on preview-deploy hostnames; operators with longer encoded
+	// subdomains use subdomain_entropy_exclusions.
+	subdomainEncodedMinLen = 14
+
+	// Signal B flags DNS tunneling that chunks encoded data across several
+	// labels (each individually low-entropy). It fires on either many encoded
+	// chunks alone, or fewer chunks stacked in a deep hostname. Two short hash
+	// labels in a shallow host (deadbeef.cafebabe.preview.example.com) stay
+	// below both thresholds, and dictionary/hyphenated labels are never counted
+	// as chunks. A chunk is a hex/base32 label >= subdomainChunkMinLen chars.
+	subdomainExfilMinLabels  = 3 // outer gate: at least this many subdomain labels
+	subdomainExfilManyChunks = 3 // clause 1: this many encoded chunks, any depth
+	subdomainExfilDeepLabels = 4 // clause 2: this many subdomain labels …
+	subdomainExfilDeepChunks = 2 // … carrying at least this many encoded chunks
+	subdomainChunkMinLen     = 8
+)
+
+// isHexLabel reports whether s consists entirely of hexadecimal characters.
+func isHexLabel(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// base32MinDigits is the minimum number of base32 digit characters (2-7) a
+// label must contain to be treated as encoded data. Real base32 data is ~19%
+// digits, so a 16+ char token almost always carries several; requiring two
+// avoids flagging ordinary words that happen to contain a single digit.
+const base32MinDigits = 2
+
+// isBase32Label reports whether s is an RFC 4648 base32 token. Matching is
+// case-insensitive because hostnames are lowercased in transit (DNS is
+// case-insensitive). At least base32MinDigits digit chars (2-7) must be present
+// so ordinary words are not treated as encoded data.
+func isBase32Label(s string) bool {
+	digits := 0
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r >= '2' && r <= '7':
+			digits++
+		default:
+			return false
+		}
+	}
+	return digits >= base32MinDigits
+}
+
+// isEncodedExfilLabel reports whether a subdomain label looks like a chunk of
+// hex- or base32-encoded data long enough to carry an exfiltrated secret.
+func isEncodedExfilLabel(label string) bool {
+	if len(label) < subdomainEncodedMinLen {
+		return false
+	}
+	return isHexLabel(label) || isBase32Label(label)
+}
+
+// looksEncodedChunk reports whether a subdomain label looks like one chunk of
+// encoded data split across several labels (the DNS-tunneling shape). Shorter
+// than isEncodedExfilLabel's single-label threshold because tunneling spreads
+// the payload over many small labels.
+func looksEncodedChunk(label string) bool {
+	if len(label) < subdomainChunkMinLen {
+		return false
+	}
+	return isHexLabel(label) || isBase32Label(label)
+}
+
+// checkSubdomainEntropy flags hostnames where subdomain labels contain
+// high-entropy data, indicating base64/hex exfiltration via DNS queries.
+// Only checks hostnames with 3+ labels (at least one subdomain beyond base domain).
+// Excludes domains listed in subdomainExclusions (e.g., RunPod, cloud services
+// that use high-entropy subdomains for legitimate purposes).
+// Uses a separate threshold from query parameter entropy because subdomains
+// have different baseline entropy - hex labels at 3.5-4.0 are suspicious
+// in subdomains but common in query parameters.
+func (s *Scanner) checkSubdomainEntropy(hostname string) Result {
+	if s.subdomainEntropyThreshold <= 0 {
+		return Result{Allowed: true}
+	}
+	hostname = strings.TrimSuffix(hostname, ".")
+
+	// Skip IP addresses
+	if net.ParseIP(hostname) != nil {
+		return Result{Allowed: true}
+	}
+
+	// Skip domains on the exclusion list (exact match or wildcard suffix)
+	if s.isExcludedFromSubdomainEntropy(hostname) {
+		return Result{Allowed: true}
+	}
+
+	regDomain, err := publicsuffix.EffectiveTLDPlusOne(hostname)
+	if err != nil || regDomain == hostname {
+		return Result{Allowed: true}
+	}
+	subdomainPart := strings.TrimSuffix(hostname, "."+regDomain)
+	subdomainPart = strings.TrimSuffix(subdomainPart, ".")
+	if subdomainPart == "" {
+		return Result{Allowed: true}
+	}
+	// Subdomain labels carry the exfiltration payload; the registrable domain does not.
+	subLabels := strings.Split(subdomainPart, ".")
+
+	// Check all subdomain labels for high Shannon entropy.
+	for _, label := range subLabels {
+		if len(label) < subdomainMinLabelLen {
+			continue
+		}
+		entropy := ShannonEntropy(label)
+		if entropy > s.subdomainEntropyThreshold {
+			return Result{
+				Allowed: false,
+				Reason:  fmt.Sprintf("high entropy subdomain label %q (%.2f > %.2f threshold)", label, entropy, s.subdomainEntropyThreshold),
+				Scanner: ScannerSubdomainEntropy,
+				Class:   ClassHeuristicEntropy,
+				Score:   math.Min(entropy/8.0, 1.0),
+			}
+		}
+	}
+
+	// Signal A: a single long hex/base32 label. Encoded secrets in subdomains
+	// sit at or below the entropy threshold (hex maxes at 4.0 bits/char), so
+	// the entropy loop above misses them.
+	for _, label := range subLabels {
+		if isEncodedExfilLabel(label) {
+			return Result{
+				Allowed: false,
+				Reason:  fmt.Sprintf("%s %q (possible DNS exfiltration)", subdomainEncodedLabelReasonPrefix, label),
+				Scanner: ScannerSubdomainEntropy,
+				Score:   0.85,
+			}
+		}
+	}
+
+	// Signal B: data chunked across several subdomain labels. Each chunk may be
+	// individually low-entropy, so the entropy loop above misses them; the
+	// signal is the structure — multiple encoded-looking labels stacked in one
+	// hostname. Requiring several encoded chunks (not just length) avoids
+	// flagging benign deep hostnames with dictionary or hyphenated labels.
+	if len(subLabels) >= subdomainExfilMinLabels {
+		encoded := 0
+		for _, label := range subLabels {
+			if looksEncodedChunk(label) {
+				encoded++
+			}
+		}
+		// Either many encoded chunks at any depth, or fewer chunks stacked in a
+		// deep hostname. A shallow host with two short hash labels stays clean.
+		manyChunks := encoded >= subdomainExfilManyChunks
+		deepChunks := encoded >= subdomainExfilDeepChunks && len(subLabels) >= subdomainExfilDeepLabels
+		if manyChunks || deepChunks {
+			return Result{
+				Allowed: false,
+				Reason:  fmt.Sprintf("%s %d encoded labels of %d (possible DNS exfiltration)", subdomainEncodedChunksReasonPrefix, encoded, len(subLabels)),
+				Scanner: ScannerSubdomainEntropy,
+				Score:   0.8,
+			}
+		}
+	}
+
+	return Result{Allowed: true}
+}
+
+// matchesDomainList checks if the hostname matches any entry in a domain list.
+// Supports exact hostnames and wildcard prefixes (*.example.com matches
+// any subdomain of example.com, including example.com itself).
+// All comparisons are case-insensitive with trailing-dot normalization.
+func matchesDomainList(hostname string, domains []string) bool {
+	host := strings.ToLower(strings.TrimSuffix(hostname, "."))
+	for _, pattern := range domains {
+		// Defensive: patterns should already be normalized by config.Validate(),
+		// but we re-normalize here as defense-in-depth for security-sensitive matching.
+		p := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
+		if p == "" {
+			continue
+		}
+		// Wildcard prefix: *.example.com matches sub.example.com and example.com
+		if strings.HasPrefix(p, "*.") {
+			suffix := p[1:] // ".example.com"
+			base := p[2:]   // "example.com"
+			if host == base || strings.HasSuffix(host, suffix) {
+				return true
+			}
+			continue
+		}
+		// Exact match
+		if host == p {
+			return true
+		}
+	}
+	return false
+}
+
+// isExcludedFromSubdomainEntropy checks if the hostname matches any subdomain
+// entropy exclusion rule.
+func (s *Scanner) isExcludedFromSubdomainEntropy(hostname string) bool {
+	return matchesDomainList(hostname, s.subdomainExclusions)
+}
+
+// isExcludedFromQueryEntropy checks if the hostname matches any query entropy
+// exclusion rule. Independent from subdomain entropy exclusion; both lists can
+// be set or unset per host without affecting the other gate.
+func (s *Scanner) isExcludedFromQueryEntropy(hostname string) bool {
+	return matchesDomainList(hostname, s.queryExclusions)
+}
+
+// baseDomain returns the registrable domain (eTLD+1) for budget tracking,
+// stripping subdomains to prevent bypass via subdomain rotation.
+// Uses the Mozilla Public Suffix List via golang.org/x/net/publicsuffix,
+// which correctly handles ccTLDs (co.uk, com.au, gov.uk, etc.).
+// IP addresses and single-label hosts are returned as-is.
+func baseDomain(hostname string) string {
+	if net.ParseIP(hostname) != nil {
+		return hostname
+	}
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(hostname)
+	if err != nil {
+		// Fallback for single-label hosts (localhost, etc.)
+		return hostname
+	}
+	return etld1
+}
+
+// MatchDomain checks if a hostname matches a pattern.
+// Supports wildcard patterns like "*.example.com" which matches
+// "sub.example.com", "a.b.example.com", and "example.com" itself.
+// IP addresses only support exact match - wildcards are not applied to IPs
+// to prevent false matches like "*.168.1.1" matching "192.168.1.1".
+// The implementation now lives in internal/destination, which owns destination
+// vocabulary. This remains the name every existing call site uses, so moving it
+// does not touch the scanner, proxy, CLI, session or content-entropy consumers.
+func MatchDomain(hostname, pattern string) bool {
+	return destination.MatchDomain(hostname, pattern)
+}
+
+// queryValueDecodedTargets returns the decoded DLP views of one query value:
+// every recursive base64, hex, and base32 decoding, and the HTML-entity
+// decoding in both orders. Entities are decoded on the raw value and on each
+// decoded result, so a value that is entity-escaped and then encoded is seen
+// as well as one encoded and then entity-escaped. Configured DLP and the core
+// floor both use it so they cannot drift apart.
+func queryValueDecodedTargets(decoded string) []dlpTarget {
+	return queryValueDecodedTargetsWithDecodes(decoded, nil)
+}
+
+func queryValueDecodedTargetsWithDecodes(decoded string, decodes *decodingMemo) []dlpTarget {
+	var targets []dlpTarget
+	addDecoded := func(text string) {
+		for _, d := range decodes.decode(text, false) {
+			targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+			if h := decodeHTMLEntities(d.text); h != d.text {
+				targets = append(targets, dlpTarget{h, dlpViewLabel(encodingHTML), d.text})
+			}
+		}
+	}
+	addDecoded(decoded)
+	if htmlDecoded := decodeHTMLEntities(decoded); htmlDecoded != decoded {
+		targets = append(targets, dlpTarget{htmlDecoded, dlpViewLabel(encodingHTML), decoded})
+		addDecoded(htmlDecoded)
+	}
+	return targets
+}

@@ -4616,3 +4616,6 @@ export {
   type VendoredSpan,
 } from "./detection-content/match.js";
 export { vendoredMcpFindings } from "./detection-content/mcp.js";
+
+// ADR-0186 R: public offline receipt-verification seam.
+export * from "./receipts/verify.js";
