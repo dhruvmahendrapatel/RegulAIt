@@ -126,6 +126,28 @@ Screenshots (local evidence only):
 
 [redteam-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-light.png)
 
+## X35 — ADR-0188 S1 independent review (2026-10-10 UTC)
+
+Reviewed PR #257, `b6-identity-s1` **3feb9a35**, against the frozen ADR decisions24–28 and the 04:55 coordination announcement. Review output only; no product implementation changed. Existing checkout symlinks were preserved under `/tmp/x35-preserved-symlinks` before switching branches.
+
+**I7S-01 — MEDIUM — v1 audit rows can acquire actor attribution without failing verification.** `packages/shared/src/audit-chain.ts:504` selects the v1 hash for rows before the v2 boundary but never refuses their non-null actor fields. The writer correctly refuses those fields before cutover, yet a raw SQL UPDATE of all three actor columns on an existing valid v1 row passes the migration's together-or-null constraint and `verifyAuditChain` still returns `status:ok, firstBreak:null`. No content/row hashes were rewritten; the unchanged anchored hash therefore does not commit to the injected attribution. Actual scratch-PostgreSQL probe starts with a valid writer row, updates actor_identity_id/delegation_grant_id/actor_chain together, and genuinely fails its expected-broken assertion. Acceptance: verifier rejects actor fields on every v1 row, including bounded scans, and exposes a definite break; preserve byte-for-byte v1 hash compatibility. Existing v2 actor tampering remains detected (independent positive control passes).
+
+**I7S-02 — LOW — verifier ignores unsupported future audit boundaries.** `apps/gateway/src/audit-chain.ts:951` selects only version2; unlike `readAuditV2Boundary`, it cannot see and refuse an unsupported latest boundary. A transaction simulating a future migration (temporarily lifting the version=2 CHECK and inserting version3/from_seq2) produces `status:ok, firstBreak:null` and fails the expected-broken assertion. Current S1 SQL itself refuses version3: this is a forward-version fail-closed gap, not a current route allowing unknown-version insertion. Acceptance: load and validate boundary versions consistently in writer and verifier; unsupported boundaries fail closed with explicit disclosure. Keep ordinary v1 verification green when no boundary exists.
+
+**I7S-03 — LOW — delegation depth setting copy is one actor short.** `packages/shared/src/identity/settings.ts` describes strict depth3 as an agent plus its delegate plus its delegate (three actors). ADR decision26 explicitly caps stored grant depth: a root is0 and depth3 permits four actors/hops. Acceptance: explain root plus three descendant delegations (four actors), or label the setting as descendant grant depth; keep the existing schema bounds and semantics.
+
+Validation on the exact reviewed source:
+- Frozen install and `pnpm --filter '@regulait/gateway...' build` PASS (`/tmp/oct10-x35-{install,build}.log`).
+- Actual PostgreSQL: `DATABASE_URL=<regulait_review_x35_oct10_parallel> pnpm --filter @regulait/gateway exec vitest run src/zz-adr0188-s1-foundation.test.ts` **23/23 PASS** (`/tmp/oct10-x35-foundation.log`). Covers migration/journal, strict defaults and audited step-up relaxations, credential/status/grant/replay constraints, all route stubs and auth classes, and writer version behavior.
+- `pnpm --filter @regulait/shared exec vitest run src/identity/identity.test.ts src/audit-chain.test.ts` **62/62 PASS** (`/tmp/oct10-x35-shared.log`).
+- Actual PostgreSQL gateway `src/audit-chain.test.ts`: **60 PASS, 9 explicitly skipped** (`/tmp/oct10-x35-audit.log`); skipped external/optional cases are not live verification.
+- Web `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS (`/tmp/oct10-x35-web-{tsc,build}.log`).
+- Independent negatives: **two expected-broken assertions genuinely fail**, and v2 actor-tamper positive control **1/1 PASS** (`/tmp/oct10-x35-independent.log`). Reproduction preserved in `apps/web/review/x35-s1-independent.probe.ts`; copy temporarily to `apps/gateway/src/zz-x35-independent-review.test.ts`, run with the scratch DATABASE_URL as above, then remove the temporary copy. It is deliberately outside normal test collection. Each probe uses a rolled-back transaction; unknown-version DDL is rolled back too.
+
+The dedicated scratch database was dropped after validation; the shared base database was untouched.
+
+No additional authentication/secret-storage/replay/default-deny bypass reproduced in this slice. AuthContext.via adds a type member, with no workload authentication issuer yet; no human auth widening was introduced here. Allocation/settlement admission and live provenance remain S3/S4, SPIFFE trust bundles S9. The owner's announced missing builder_turn/root subject-credential FKs and child max_depth are deferred boundaries, not rediscovered findings. No token endpoint, live allocation, real external caller, or whole gateway/shared CI claim is made.
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.
