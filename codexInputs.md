@@ -1307,3 +1307,147 @@ or claimed B4I-03 closed without their integration/CI verification.
 The proposed CI filter was dry-checked:18 remaining workspace projects, with
 both shared and the recursive root script explicitly excluded. The first
 negative-only filter included the root; the reviewed proposal now excludes it.
+
+### X48 — consumer review of the frozen B4 contract (#307) and finite-lock fix (#315) — 2026-10-10 UTC
+
+Reviewed exact owner head `19b80068` (`b6-bom-b4-contract`) against main
+`2276739b` and the whole owner boards `698a93d4` and `2536ab4b`. This delivery changes only
+the findings ledger and independent probes under `apps/web/review`.
+All five B4 routes remain admin-only `501 not_built` stubs. These findings are
+inconsistencies in the contract frozen for B6, **not** demonstrated runtime
+signature bypasses, archive-verifier bugs or deployed authorization failures.
+The ADR's freeze expressly changes no earlier decision.
+
+**B4C-01 — MEDIUM — a positive verification outcome does not require the
+subject's evidence checks, and mandatory unverifiable bindings can be valid.**
+`packages/shared/src/bom/contract-b4.ts:596` derives the overall outcome solely
+from the statuses of whatever `checks` the producer supplied. A Decision DTO
+with just `body_schema: valid`, all sections, and the required `cannotProve`
+entries parses with `outcome: valid`: no body-signature, receipt-signature,
+facts-binding, chain or finality check is present. Repeating that one check
+also parses; it does not establish a census. Separately, a complete 20-check
+Decision DTO parses when `decision_content_binding` is changed to `valid`
+(R39 explicitly requires `unverifiable/preimage_not_exported`), or when a v1
+receipt's `receipt_facts_binding` is changed to `valid` (R46 explicitly
+requires `unverifiable/receipt_v1_no_factsHash`). Fixed limitation sentences
+remain present, so the individual claimed-valid bindings contradict them.
+
+Impact: B6 can consume a schema-valid positive result without evidence that
+the required checks ran, or display a valid binding the accepted ADR forbids.
+No attacker-controlled producer or current verifier execution is claimed.
+Acceptance: freeze a source/subject-specific minimum check census for
+non-invalid readable responses; enforce the R39 and v1 R46 status/reason
+rules. Permit repeated checks for distinct item references where needed
+(addenda/renderings), rather than banning all repeated check names. Specify
+stored-source handling of outer-bundle checks. The sparse/duplicate and both
+binding mutations must fail, while complete positive/limited controls remain
+representable. Preserve partial invalid/unreadable results.
+
+**B4C-02 — MEDIUM — an invalid section can accompany a non-invalid outcome
+and a valid section-projection check.**
+The same response refinement requires every Decision section, but ignores its
+`status`. Starting from a complete DTO that preserves the required R39/R46
+unverifiable checks, changing only the first section to `invalid` still parses
+with `sections_projection: valid` and `outcome: valid_with_unverifiable`.
+This is independent of B4C-01. A combined mutation also parses with an invalid
+section and overall `valid`. R37 requires any section-projection difference to
+be invalid, so this contradictory wire response has no defined truthful UI
+interpretation.
+
+Acceptance: make section statuses consistent with `sections_projection` and
+the aggregate outcome; an invalid section requires an invalid verification
+result. Define how genuinely unverifiable projections aggregate, keeping
+completeness (`not_recorded`/`not_applicable`) distinct from verification
+failure. Reject the existing contradictory fixtures without losing valid
+section sets or limited responses.
+
+**B4C-03 — LOW — a stored-source discriminator can identify the wrong BOM
+subject.**
+A complete Decision response still parses when its sole change is
+`source: ai_bom_snapshot`; the body version, identity, sections and checks all
+continue to identify a Decision BOM. A stored AI snapshot cannot be the source
+of that identity under the strict request union. The response already checks
+body-version/identity agreement but omits source/identity agreement.
+Acceptance: bind `decision_bom` to Decision identity and `ai_bom_snapshot` to
+AI identity for readable responses; bundle source may hold either. Retain
+unreadable invalid responses with null identity.
+
+Other reviewed obligations: capability output requires an explicit auditor
+grant plus `admins_and_auditors`, keeps drift admin-only and export reasons
+consistent, and states no step-up for reads/exports. Admission remains a
+server obligation on every request, with shared per-user rate limiting and
+auditing required by the ADR. The strict verify request rejects caller keys,
+trust roots and time; online trust is `deployment_registry`. Bundles document
+`application/gzip`, `.tar.gz`, export-bundle/3 and digest/key headers; selected
+AI formats still include signed native evidence (R7). Manifest syntax bans raw
+`audit/rows/*` payloads, uses hash-only audit scope and sorted unique paths.
+Actual archive layout, signature/header/body bindings, decoded byte ceilings,
+content scanning, recorded-key/TSA trust and current authorization require the
+future B4 implementation; a passing DTO schema is not proof of these behaviors.
+Finality transitions and the R44/v1/finite-lock limitation entries have useful
+existing structural guards. No display-name or raw invocation exception was
+introduced. OpenAPI keeps all five routes internal and explicitly unbuilt.
+The Decision response supplies `versions` (id, version, supersedes, finality,
+digest, key id and time), so B6 needs no invented list route. Per the owner's
+consumer guidance, 403 hides the action, no capability preflight exists, and
+auditor grants have no expiry field. `canVerify` and export availability are
+separate capabilities, preserving verification without a private signing key.
+
+Durable probe: `apps/web/review/x48-b4-contract-counterexamples.mjs` imports
+the target checkout's freshly built shared contract. Its four controls accept
+the complete limited DTO and reject the wrong outcome, foreign check and
+missing section; seven independent/combined mutations reproduce the findings.
+The checked-in `.receipt.json` records acceptance/status/counts only. Run
+`node apps/web/review/x48-b4-contract-counterexamples.mjs <target-checkout>`
+for the frozen regression receipt, or add `--expect-fixed` for the owner-fix
+gate. On `19b80068` the latter exits 1 at the sparse claimed-valid mutation,
+as required for a genuine red; it is not falsely reported as a passing fix.
+
+Validation: frozen install; shared build; shared `test
+src/bom/contract-b4.test.ts` **52/52 PASS**; gateway `test
+adr0189-b4-contract.test.ts` **4/4 PASS**; independent receipt **11/11 expected
+observations** (seven bad DTOs accepted, four controls correct). Gateway `pnpm --filter @regulait/gateway exec tsc --noEmit`, web
+`pnpm --filter @regulait/web exec tsc --noEmit`, and
+`pnpm --filter @regulait/web build` **PASS**. All commands use the exact
+detached owner head; owner source remained byte-for-byte unchanged. No DB,
+HTTP mock, browser, timing suite or signature execution was used. Logs and
+full frozen receipts: `/tmp/oct10-x47-307-{install,shared-build,shared-tests,
+openapi-tests,gateway-tsc,web-tsc,web-build}.log`,
+`/tmp/oct10-x47-307-counterexamples.json`, and
+`/tmp/oct10-x47-307-fix-gate-red.log`. X39's adapter owner was notified before
+publication so the source work can continue without treating schema parsing
+as complete verification evidence.
+
+**#315 finite-lock fix — independent review PASS, no additional finding.**
+Reviewed exact `f6963763fc4723426edd1fea3b403d60363ee4cc`
+(`b1-finality-fix`), whose two changed files only adjust pure finality and its
+tests. Under unbounded retention, `refuse` can no longer produce
+`anchored_finite_lock` through a weaker finality floor: strict `anchored`
+remains pending with `retention_unbounded`, and relaxed floors yield at most
+`anchored_unverified_destination`. Only explicit `accept` permits
+`anchored_finite_lock`. This preserves the R44 distinction rather than
+silently treating the separate floor relaxation as finite-lock acceptance.
+
+Durable `apps/web/review/x48-finite-lock-review.mjs` independently checks all
+three floors and both finite-lock settings across future/null/exactly-expired/
+expired locks, destination observation, timestamp-required/off behavior,
+bounded retention covered/short, unsigned receipts and absent anchors:
+**66/66 admission cases PASS**, plus **6/6 reported-finality assertions**.
+Its unchanged assertions genuinely exit 1 against the old finality compiled
+from `19b80068`: the weaker floor under `refuse` incorrectly returns
+`anchored_finite_lock`, where the oracle requires
+`anchored_unverified_destination`. Frozen old-red receipt:
+`/tmp/oct10-x48-315-before-red.log`.
+
+Exact follow-up commands on detached `f6963763`: `pnpm --filter
+@regulait/shared build`; `node apps/web/review/x48-finite-lock-review.mjs`;
+`pnpm --filter @regulait/shared test src/bom/bom.test.ts` **36/36 PASS**.
+Logs `/tmp/oct10-x48-315-{shared-build,tests}.log` and full matrix
+`/tmp/oct10-x48-315-matrix.json`; the `.receipt.json` is checked in beside
+the probe. Shared compilation covers the entire two-file fix; web/gateway
+source is unchanged, so their preceding exact-#307 passing gates were not
+unnecessarily repeated. No owner product source was edited and no database
+was created or modified. The build lane was released directly to X49 before
+publication. Findings are now `B4C-NN` under the owner's 17:05 X48 assignment,
+replacing the initial internal X47/B9C labels. Branch `codex/x47-307` was
+preserved without commits; this delivery is `codex/x48` from main `2276739b`.
