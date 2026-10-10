@@ -1,6 +1,7 @@
 # ADR-0188: Batch 6 item 1 — per-agent and workload identity, and constrained delegation
 
-- **Status:** Proposed (design only; nine OWNER DECISION items below, each with a recommended answer)
+- **Status:** Proposed (design only; nine OWNER DECISION items below, each with a recommended answer). Amended
+  2026-10-10 after Codex review X31 (I7R-01 to I7R-09): decisions 12 to 21 and the dispositions table.
 - **Date:** 2026-10-10
 - **Deciders:** owner (pending); the rest follows ADR-0180 (secure by default) and ADR-0176 (open source first)
 - **Builds on:** ADR-0183 §1 batch 6 item 1 (DELIVERY_PLAN_2026-10-06 §Batch 6), ROADMAP §7.2 **I7** and §7.3,
@@ -187,8 +188,9 @@ Each term can only narrow. A deny or require-approval from any term wins, with t
 directly", and is refused for any call that came through an agent path. The Cedar schema moves to **v4**: a new
 `Agent` entity type (attributes `kind`, `identifier`, `environments`, `stewards`, `autonomyClass`) and a context
 attribute `actorChain` (ordered agent ids) and `delegationDepth`, so a policy can say "forbid writes when
-`context.delegationDepth > 1`". The principal entity stays `User` for the sponsor; Cedar evaluates the agent as a
-second request with principal `Agent`, and both must permit. Trust or risk scores are never an input to an allow
+`context.delegationDepth > 1`". The principal entity stays `User` for the sponsor; Cedar evaluates each agent as a
+further request with principal `Agent`. *Amended by decision 18:* grants supply the authority; Cedar only narrows,
+through the existing forbid-only wrapper, for each principal under its own schema version. Trust or risk scores are never an input to an allow
 (PF-02 guardrail); they may raise `require_approval`.
 
 **OWNER DECISION 1** sets how existing agents get their first grants.
@@ -200,23 +202,28 @@ New table `delegation_grants` (one row per delegation; none is ever updated exce
 `actor_identity_id`, `run_id`/`builder_turn_id`/`engine_run_id`/`schedule_id` (the context it was made for),
 `project_id`, `scope` (an RFC 9396-style list: `{type: "mcp_tool" | "connector" | "agent", server/connector/agent id,
 tool names, modes, kind read/write}`), `budget_usd` and `spent_usd`, `environment`, `audience` (RFC 8707 resource),
-`expires_at`, `revoked_at`, `revoked_reason`, `created_at`.
+`expires_at`, `revoked_at`, `revoked_reason`, `created_at`. *Amended:* credential and binding provenance columns
+(decision 12) and micro-dollar budget and reservation columns replacing `budget_usd`/`spent_usd` (decision 16).
 
 Rules, enforced in one module (`delegation.ts`) and asserted by tests:
-- **Subset on creation.** A child's scope is computed, not requested: `requested ∩ parent.scope ∩ child-agent's own
-  grants ∩ sponsor's grants ∩ lead ceiling`. An empty result is a refusal, not an empty grant. A child's budget is at
+- **Subset on creation.** *Amended by decision 16: a request beyond any limit is refused, not narrowed.* A child's
+  scope must lie inside `parent.scope ∩ child-agent's own grants ∩ sponsor's grants ∩ lead ceiling`, or the request
+  is refused. A child's budget is at
   most the parent's remaining budget, and is reserved against the parent at creation. A child's expiry is at most the
   parent's. Depth is `parent.depth + 1`, capped by `delegation_max_depth`.
 - **Checked on every use, not only at mint.** Every governed call made under a grant reads the grant, its ancestors
   (by `path`), the actor identity and the sponsor in one indexed query, and refuses if any is revoked, expired,
   suspended, disabled or out of environment. There is no cache. This is what makes revocation immediate, and it keeps
-  pillar 7's existing execution-time re-check (the grants may have changed since the plan) for every hop.
+  pillar 7's existing execution-time re-check (the grants may have changed since the plan) for every hop. *Amended by
+  decision 17:* the check covers every ancestor's identity, credentials, own live grants and halt state, plus the
+  sponsor's current rights, and never trusts a caller-supplied chain.
 - **Revocation cascades.** Revoking a grant revokes every grant whose `path` contains it (one statement over a GIN
   index on `path`). Revoking an identity, suspending it, a sponsor being disabled (ADR-0022) or an ADR-0124 halt on the
   agent stops every grant naming it at the next use.
 - **Budget.** Spend is charged to the grant and every ancestor in the same transaction as the usage row, so a sub-agent
   cannot spend more than any ancestor has left. This replaces nothing in the run budget (MULTI_AGENT_ORCHESTRATION_SPEC §5.2, `orchestration_runs.budget`, stays); it adds
   the per-hop cap PF-02 asks for. The first-crossing rule of ADR-0103/F03 applies unchanged and is documented as such.
+  *Amended by decision 16:* remaining = cap − settled − outstanding reservations, with durable reservations.
 
 ### 5. Tokens that leave the process are short-lived, audience-bound and sender-constrained
 
@@ -233,13 +240,16 @@ issues:
   workload authenticates with a certificate. **A token with no `cnf` is never issued and never accepted**; this is an
   invariant, not a setting (decision 10). DPoP proofs are checked for `htm`, `htu`, `iat` within 60 s, `ath`, and a
   `jti` not seen before (a replay store in Postgres, so it holds across replicas). A gateway-issued DPoP nonce is
-  required (RFC 9449 §8).
+  required (RFC 9449 §8). *Amended:* the replay store is an atomic claim (decision 14) and the verifier is ours,
+  with a separate mTLS branch (decision 13).
 - **Use check:** the resource side verifies signature, `aud`, `exp`, `env` and `cnf`, then performs the decision 4
-  grant check. A valid signature on a revoked grant is refused.
+  grant check. A valid signature on a revoked grant is refused. *Amended:* plus the stored token row and binding
+  (decision 12) and the full live-chain check (decision 17).
 - **Client authentication** for a workload asking for a token: `private_key_jwt` (RFC 7523) against a registered key,
   `tls_client_auth`/`self_signed_tls_client_auth` (RFC 8705), or a SPIFFE JWT-SVID/X.509-SVID per
   `draft-ietf-oauth-spiffe-client-auth` against a configured trust bundle. Assertions are single-use (`jti` store) and
-  at most 5 minutes old.
+  at most 5 minutes old. *Amended:* X.509-SVID and mTLS chains are validated with `pkijs` plus our SPIFFE profile, not
+  `jose` (decision 21).
 
 ### 6. In-process agents use the grant directly, without a token
 
@@ -254,6 +264,8 @@ root grant is sponsored by the person who configured it, as today.
 
 ### 7. The token endpoint: RFC 8693 token exchange, built on `oidc-provider`
 
+*Amended by decision 15, which gives the exact wire requests and supersedes the two shapes below where they differ
+(the root uses a one-use delegation proof, never a session; the child token is bound to the child's key).*
 `POST /oauth/token` accepts `urn:ietf:params:oauth:grant-type:token-exchange` in two shapes:
 1. **Human to agent:** `subject_token` = a session- or key-backed proof of the human (see OWNER DECISION 4 for which
    human credentials may start a delegation), `actor_token` = the agent's client assertion. Creates a root grant.
@@ -289,7 +301,8 @@ verifier accepts v1 up to that seq and v2 after it, and a test proves a chain sp
 editing `actor_chain` on a v2 row breaks it. `trace_spans` and `usage_events` get `actor_identity_id` and
 `delegation_grant_id`. Decision receipts (ADR-0186 R) and the Decision BOM (batch 6 item 2) include sponsor, actor
 chain and grant id, which closes PF-01 delta item 2's "authenticated agent identity" field. Key rotation keeps audit
-continuity because audit rows name identity ids, not keys, and retired public keys stay in the table.
+continuity because audit rows name identity ids, not keys, and retired public keys stay in the table. *Amended by
+decision 19:* the boundary is set under the append lock in a verifier-trusted table, not inferred from a row flag.
 
 ### 10. Secure-by-default settings (ADR-0180)
 
@@ -302,6 +315,9 @@ continuity because audit rows name identity ids, not keys, and retired public ke
 | `dpop_nonce_required` | true | false | audited |
 | `spiffe_trust_bundles` | empty (SPIFFE off) | admin adds a bundle | adding is audited and needs `identity_manage` step-up; bundles are uploaded or fetched through the egress guard |
 | `mcp_servers.identity_propagation` | per OWNER DECISION 6 | per server | audited |
+| `REGULAIT_CLIENT_CERT_HEADER` (decision 21) | unset (forwarded client certificates ignored and stripped) | a header name, honoured only from an authenticated trusted proxy | deploy-time; boot log states it |
+| DPoP proof freshness (decision 13) | 60 s | not relaxable | the library's 300 s default is not used |
+| Over-scope / over-budget delegation (decision 16) | refused | not relaxable in v1 | OWNER DECISION 9 |
 | Bearer (unbound) delegated tokens | **never** | not relaxable | an invariant, like "a virtual key is never admin" |
 | Delegation with no sponsor | **never** | not relaxable | invariant |
 | A child grant wider than its parent | **never** | not relaxable | invariant |
@@ -318,24 +334,291 @@ move to workload credentials in slice S7 and are then removed (OWNER DECISION 8)
   (identifiers, public keys, grants, audit); no private key leaves the execution plane (ADR-0015 boundary).
 - **Air-gapped:** everything above is local. No JWKS or bundle is fetched from the internet; bundles are uploaded,
   remote JWKS URLs go through the egress guard and default to none. `oidc-provider`, `oauth4webapi` and `jose` make no
-  runtime network calls of their own.
+  runtime network calls of their own **when configured as decision 20 requires** (amended after X31: by default
+  `oauth4webapi` fetches issuer JWKS and `oidc-provider` can fetch a client's `jwks_uri`).
+
+### Amendments after review X31 (Codex, 2026-10-10)
+
+Codex reviewed this ADR at `691e717` (codexInputs.md, "X31 — ADR-0188 identity design review"), with probes against
+the exact library versions. It kept the core (sponsor plus actor intersection, constrained grants, no trust-score
+authority, mandatory sender binding, in-process grants without signatures) and raised nine findings, I7R-01 to I7R-09.
+Decisions 12 to 21 resolve them; where they change decisions 3 to 11, the earlier text points here and **the later
+decision wins**. The disposition table follows decision 21.
+
+#### 12. Credential provenance: revoking a key refuses what it minted (I7R-01)
+
+A token can be minted with client-authentication key A and bound to a different DPoP key B, so looking up `cnf.jkt`
+cannot find A. Provenance is therefore stored, never inferred from claims:
+- `delegation_grants` gains `auth_credential_id` (the `workload_credentials` row that authenticated the token request:
+  the `private_key_jwt` key, the mTLS certificate, or the SPIFFE bundle entry and SVID identity),
+  `subject_credential_id` (for a child: the credential that authenticated the parent's proof; for a root: the human
+  delegation proof of decision 15), and `binding_kind` (`dpop | mtls | in_process`) with `binding_thumbprint` (`jkt`
+  or `x5t#S256`).
+- New table `issued_tokens` (one row per external token: `jti`, `grant_id`, `auth_credential_id`, `binding_kind`,
+  `binding_thumbprint`, `audience`, `env`, `issued_at`, `expires_at`, `revoked_at`). The resource check (decision 13)
+  finds the row by `jti` and refuses if the presented binding differs from the stored one, whatever the token claims.
+- What each revocation refuses, at the next use:
+
+| Revoked | Refused |
+|---|---|
+| A client-authentication credential (key, certificate, SPIFFE ID binding) | every token it authenticated, every grant it authenticated, and every descendant grant (by `path`) |
+| A DPoP key or certificate used only as a binding | every token bound to that thumbprint (`issued_tokens.binding_thumbprint`); the grant survives and its holder may re-authenticate |
+| A whole SPIFFE trust bundle | every grant whose `auth_credential_id` points into that bundle, and descendants |
+| An issuer signing key (rotation) | nothing by itself: overlap keeps old tokens valid until expiry. **Revoking** an issuer key (compromise) refuses every token with that `kid` |
+
+- **Rotation is not revocation.** Rotating a workload key adds a new `workload_credentials` row and sets `not_after` on
+  the old one; tokens minted under the old key live to their own expiry. A revoked credential never comes back: a new
+  key is a new row with a new id, and audit rows keep naming the identity id, so audit continuity holds.
+
+#### 13. Our own resource-side verifier; the libraries do the cryptography only (I7R-03)
+
+`oauth4webapi` 3.8.8 `validateJwtAccessToken` checks the JWT and the DPoP proof's signature, `htm`, `htu` and `ath`.
+It does not check a nonce, does not reject a repeated proof `jti`, accepts a proof `iat` up to 300 s old, accepts an
+unbound bearer unless `requireDPoP: true` is passed, and throws "unsupported JWT Confirmation method" on
+`cnf.x5t#S256`. So the verifier is ours (`apps/gateway/src/oauth/verify.ts`), in this order, each step failing closed:
+1. Exactly one `cnf` member, `jkt` or `x5t#S256`. Anything else, or none, is 401.
+2. **DPoP branch:** `validateJwtAccessToken` with `requireDPoP: true`, a fixed algorithm list (`EdDSA`, `ES256`), our
+   issuer and the route's audience, and issuer keys from the local key table (decision 20). Then our checks: proof
+   `iat` within 60 s (and at most 5 s in the future); the proof nonce matches a current gateway nonce (decision 20);
+   the proof `jti` is claimed in the replay store (decision 14, namespace `rs_dpop`).
+3. **mTLS branch:** `jose` `jwtVerify` for the token signature only (same algorithm, issuer and key rules), then the
+   client certificate from decision 21 (path-validated), and `x5t#S256` must equal the SHA-256 thumbprint of that
+   certificate. No DPoP fallback on this branch.
+4. Then `env`, `aud`, the `issued_tokens` row and its stored binding (decision 12), and the live-chain check of
+   decision 17. A valid signature never short-cuts any of these.
+
+#### 14. Replay claims are an atomic insert, not find-then-save (I7R-02)
+
+`oidc-provider` 9.12.2 `ReplayDetection.unique` calls `find(id)` and then `save()`, which the adapter turns into an
+upsert. Two replicas can both see "absent" and both succeed; Codex's probe got `[true, true]` for one client
+assertion `jti`. Client assertions and token-endpoint DPoP proofs both go through it. Decision:
+- One table `replay_claims (namespace, key, expires_at, claimed_at, PRIMARY KEY (namespace, key))`. Namespaces:
+  `client_assertion`, `as_dpop`, `rs_dpop`, `human_delegation_proof`. A claim is
+  `INSERT … ON CONFLICT DO NOTHING RETURNING 1`: one row back means accepted, none means replay. Never an update, never
+  an overwrite. Rows are kept until `expires_at` = the end of the acceptance window plus clock skew, then swept.
+- Inside `oidc-provider`, the `ReplayDetection` model is served by our adapter so that its `find` is not trusted for
+  uniqueness: the claim happens in the adapter's `upsert` for that model, which throws on conflict, and the throw is
+  mapped to the provider's `invalid_client` / `invalid_dpop_proof` refusal. Because this depends on the provider's
+  internal call order, S0 pins the exact version, and a test fails the build if that order changes on upgrade. If the
+  hook cannot be made reliable, the token endpoint claims the assertion and proof `jti` itself before handing over
+  (the decision 7 fallback path).
+- A claim lives in its own short transaction and is never rolled back by a later failure of the same request: a replay
+  that loses must fail even if the winner's request later errors.
+
+#### 15. The token-exchange wire contract (I7R-04)
+
+Two facts are kept apart: **who may spend the parent's authority** (proved by the parent's binding) and **who holds
+the new token** (proved by the child's key). The output is always bound to the **child's** key.
+
+**Root (human → agent).** Step 1, in the portal or API: the human creates a **delegation proof**,
+`POST /v1/delegations/proofs` (session with CSRF, or an API key meeting OWNER DECISION 4; step-up when the requested
+scope includes `write` on a sensitive project). The response is a one-use signed JWT (`typ`
+`regulait-delegation-proof+jwt`, 120 s, `jti`) bound to: the human, the agent identity id, the exact
+`authorization_details`, `resource`, `project_id`, `env`, and the agent's key thumbprint if known. It is never a cookie
+or a session token. Step 2, by the agent:
+```
+POST /oauth/token
+DPoP: <proof signed by the agent's key B>
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+subject_token=<delegation proof>
+subject_token_type=urn:regulait:params:oauth:token-type:delegation-proof
+client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer   (or mTLS / SPIFFE, decision 5)
+client_assertion=<JWT signed by B's registered client key: iss=sub=client_id, aud=<token endpoint URL>, jti, exp ≤ 5 min>
+resource=<one audience>   authorization_details=<must equal the proof's>   requested_token_type=urn:ietf:params:oauth:token-type:access_token
+```
+Checks: the proof's signature, expiry, intended agent equals the authenticated client, every bound field equals the
+request, and its `jti` claimed (`human_delegation_proof`). No separate `actor_token` is accepted for a root: the
+authenticated client is the actor.
+
+**Child (agent A → agent B).**
+```
+POST /oauth/token
+DPoP: <proof signed by B's key>
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+subject_token=<A's delegated access token>
+subject_token_type=urn:ietf:params:oauth:token-type:access_token
+actor_token=<DPoP proof by A's key over this token-endpoint request, with ath = hash(subject_token)>
+actor_token_type=urn:regulait:params:oauth:token-type:dpop-proof
+client_assertion=<B's client assertion, as above>
+resource=…   authorization_details=…   requested_token_type=…access_token
+```
+Checks: B is the authenticated client; `subject_token` passes the full decision 13 check **with A's binding proved by
+`actor_token`** (namespace `as_dpop`), so a stolen parent token without A's key is useless; then decision 16 (scope,
+budget, depth) and decision 17. The issued token has `cnf` = B's key, `client_id` = B. RFC 8693 `actor_token` names the
+party acting; here it carries A's proof of possession because A is authorising the hand-off. That is a profile choice,
+recorded so S5 does not re-derive it.
+
+**Output.** `{access_token, issued_token_type: urn:ietf:params:oauth:token-type:access_token, token_type: "DPoP"
+(or "Bearer" only on the mTLS branch, where RFC 8705 keeps that name for a certificate-bound token), expires_in}`.
+The `act` claim is **rebuilt from the stored grant path**: outer `act` = the current actor, nested `act` = the previous
+actors in order. Any `act`, path or chain the caller sends is ignored. Errors: `invalid_request` (missing or duplicate
+parameter), `invalid_client` (client authentication, assertion replay), `invalid_grant` (bad, expired, replayed or
+mismatched subject or proof; revoked chain), `invalid_target` (resource), `invalid_authorization_details` (over-scope),
+`invalid_dpop_proof` / `use_dpop_nonce` (RFC 9449). Over-budget and over-depth are `invalid_grant` with a RegulAIt
+`error_code` (`delegation_budget`, `delegation_depth`).
+
+#### 16. One public contract: refuse over-scope; reservations are durable (I7R-05)
+
+Decision 4's "computed, not requested" is withdrawn. **A request for any scope, budget, depth or lifetime beyond what
+the parent allows is refused, not narrowed** (`delegation-scope`, `delegation-budget`, `delegation-depth`), consistent
+with OWNER DECISION 9. A request that fits is granted exactly as asked.
+
+Budget accounting, in integer **micro-dollars** (`bigint`), never floating point:
+- `delegation_grants`: `budget_micros` (cap), `settled_micros` (measured spend charged to this grant **and its
+  descendants**), `reserved_micros` (sum of open reservations held by its children).
+- New table `delegation_reservations (id, parent_grant_id, child_grant_id, amount_micros, status open|settled|released,
+  idempotency_key UNIQUE, created_at, closed_at)`.
+- **Remaining** = `budget_micros − settled_micros − reserved_micros`.
+- **Creating a child** locks the whole ancestor path with `SELECT … FOR UPDATE` in one order (root first, by `path`),
+  checks remaining at every ancestor, inserts the reservation and the child, and increments `reserved_micros` on every
+  ancestor, all in one transaction. The `idempotency_key` (client-supplied or derived from the request) makes a retried
+  or lost-reply request return the same child, never a second reservation.
+- **Spend** is recorded in the same transaction as the usage row: the leaf's `settled_micros` and every ancestor's
+  `settled_micros` rise by the measured cost, and the leaf's own reservation at each ancestor is drawn down by the same
+  amount (`reserved_micros` falls), so an ancestor counts each dollar once, either as reserved or as settled, never as
+  both.
+- **Release:** when a child grant ends (completes, is revoked, expires, fails, or its run is cancelled), its open
+  reservation closes; only the unspent part returns to the ancestors (`reserved_micros −= amount − drawn`). A sweep
+  closes reservations of expired grants, idempotently.
+- **Unknown cost.** A call whose price is unknown (unpriced agent or tool) is refused under any grant with a budget
+  cap: an unknown cost never buys free authority. (Today the run and per-node caps send an unpriced node to the
+  approvals queue instead, `orchestration.ts:326-330` and `:376-378`; that path stays for the run budget, but a
+  delegation grant refuses, consistent with the refuse-over-budget contract above.)
+- **First crossing.** Measured cost is known only after a call, so one call may take a grant past its cap (ADR-0103,
+  F03); the next is refused. This is stated as the contract; the ADR does not claim a zero-overrun hard cap.
+
+#### 17. The live-chain check reads every ancestor, and trusts no client-supplied chain (I7R-06)
+
+Every governed use, in-process or external, runs one fresh query (its own statement, not a snapshot carried over from
+earlier in a long-running turn) immediately before the external effect (the upstream call or the dispatch), and
+refuses if any of these fails, for **every grant on the stored path**, not only the leaf:
+- the grant: not revoked, not expired, and its `root_grant_id`, `depth` and `path` consistent with its parent row
+  (path = parent.path + parent.id, depth = parent.depth + 1, root = parent.root; checked server-side, cycles impossible
+  by construction and by a CHECK on `depth = cardinality(path)`); `sponsor_user_id`, `project_id`, `env` and run
+  context equal to the parent's (immutable down the chain);
+- the actor identity of that grant: `active`, not halted (ADR-0124 agent halt and the org dial), and its
+  `auth_credential_id` / `subject_credential_id` live (decision 12);
+- the actor's **current own grants** still cover the call (I7: a grant removed after mint narrows immediately);
+- the sponsor: not disabled, and the sponsor's **current** rights still cover the call (the existing per-user
+  evaluation, run at this moment).
+The lookup key is the grant id from our own context (in-process) or from the verified `issued_tokens` row (external).
+A caller-supplied `act`, path or depth is never used to find or validate anything. "No cache" is necessary but not
+sufficient; the rule is "a fresh read at the point of use", and a test holds a turn open across a revocation to prove
+it. A side effect already dispatched cannot be recalled; revocation governs the next use.
+
+#### 18. Cedar stays narrowing-only; each principal gets the policies of its own schema (I7R-07)
+
+Today the Cedar actions accept only `User`, the policies are forbid-only, and the gateway wrapper turns "no forbid
+matched" into a neutral permit (`abac.ts`). Raw Cedar denies when no permit matches, so decision 3's "both must
+permit" would deny everything if read literally. Restated:
+- **Authority comes from grants**, default-deny, per principal (the sponsor's grants and each actor's own grants,
+  decision 3). Cedar never grants; it can only `forbid` or require approval, through the existing wrapper, for every
+  principal.
+- The **sponsor** is evaluated as `User` against the policies stamped v1–v3 under their own schemas, exactly as today,
+  plus v4 policies whose principal is `User` (v4 adds context `actorChain` and `delegationDepth` for those).
+- **Each actor** is evaluated as `Agent` against v4 policies only. Legacy v1–v3 policies are not run for an `Agent`.
+  The `Agent` entity carries only its own attributes; the human's `isAdmin`, `mfaCompleted`, `sessionOrigin` and
+  `aiTrainingCurrent` are never copied onto it.
+- With no Agent policies, Agent evaluation is neutral (grants decide). A v4 evaluation that fails validation refuses
+  the call (fail closed) but does not stop evaluation of legacy policies for installs that have no v4 policy.
+- Ownership: S2 owns the kernel package **and** the gateway Cedar wiring (`abac.ts` request building,
+  `abac-principal.ts`), since the second request cannot be built in the package alone. S3 depends on S2's
+  `ActorChain` and scope types.
+
+#### 19. The audit v2 cutover is a recorded boundary, set under the append lock (I7R-08)
+
+- The cutover is one transaction that takes the existing chain append lock (`pg_advisory_xact_lock` on
+  `AUDIT_CHAIN_LOCK_KEY`, `packages/db/src/audit-chain.ts:158`), reads the tip `seq`, and inserts a row in a new
+  append-only table `audit_chain_versions (version, from_seq, set_at, set_by)`. The verifier trusts that table (and
+  the signed anchor that covers its first v2 row), never a per-row flag alone.
+- The v2 canonical serialisation **includes `chain_version: 2`** and the three actor fields (null-valued fields are
+  serialised explicitly, never omitted). A row at or past `from_seq` that hashes as v1, lacks the version, or claims
+  version 1 fails verification; so does editing `actor_chain`.
+- The append path refuses to write below v2 once the boundary exists: the writer reads the current version under the
+  same lock, so a v1 writer cannot append past it. **Rollout:** S1's migration only creates the table and columns;
+  the cutover runs after every replica runs v2-aware code (a rolling deploy with the old replicas drained), triggered
+  by a boot check that refuses to start a v1-only binary when a v2 boundary exists. Bounded verification (from any
+  `seq`) loads the boundary from the table.
+- v1 hashes are never recomputed. Decision receipts and anchors verify across the same boundary, and historical
+  public keys stay published.
+
+#### 20. Library configuration for air-gap and multi-replica, and notices (Codex library notes)
+
+- **No discovery, no remote fetch.** `oidc-provider`: dynamic client registration, client-id metadata documents,
+  `jwks_uri` on clients, every browser flow, refresh tokens and every unused grant are disabled; clients and their
+  public keys come only from our tables. `oauth4webapi`: given the issuer keys from `identity_signing_keys` directly,
+  never an issuer metadata or JWKS URL. An unknown `kid` refuses; there is no external fallback.
+- **Shared across replicas:** the issuer signing keys and the DPoP nonce secret (a deploy-time secret; nonces are an
+  HMAC over a 5-minute time slot, so any replica can check them), the adapter state in Postgres, and the
+  `replay_claims` table.
+- **Mounting.** Codex's probe mounted `oidc-provider` under Fastify 5.12.5 and got a refusal from an `onRequest` hook
+  before Koa and a valid `private_key_jwt` token request. Because handing the raw request to Koa bypasses later Fastify
+  hooks, the `/oauth` mount sets its own body-size limit, request timeout and rate limit, and writes its own audit row
+  for every token issue and refusal. S0 proves our real hooks (auth, route classes, CSRF where it applies, body limit,
+  audit) and RFC 8693 + DPoP across two Postgres-backed replicas; Codex's probe proved basic mounting only.
+- **Pinned internals.** The token-exchange helpers are imported from `oidc-provider/lib/helpers/grants.js`, which is not
+  a public API; the exact version is pinned and a contract test covers each imported helper.
+- **Licences and notices.** Codex's isolated install resolved 41 runtime packages (39 MIT, 2 ISC). `koa-compose` 4.1.0
+  declares MIT but ships no licence file; our `THIRD_PARTY.md` row carries its MIT notice text explicitly, and
+  `oidc-provider`'s own `THIRD-PARTY-NOTICES` file is preserved in the distribution. S0 exact-pins the approved closure
+  in the product lockfile before admission.
+
+#### 21. X.509 and SPIFFE path validation, and forwarded certificates (I7R-09)
+
+`jose` is used for JWT signatures (and JWT-SVID signature checks against keys from an uploaded bundle) only. Its
+`importX509` extracts a public key; it does not validate a chain, validity, SAN, key usage or trust domain.
+- **Path validation:** `pkijs` 3.4.1 (BSD-3-Clause, already a pinned dependency for RFC 3161 timestamps, ADR-0186 S;
+  pure JavaScript, no network) `CertificateChainValidationEngine`, against trust anchors from the locally uploaded
+  SPIFFE bundle or mTLS CA set, at the current time. Then our SPIFFE X.509-SVID profile checks: exactly one URI SAN, a
+  `spiffe://` ID in the expected trust domain and matching the registered identity, leaf not a CA, `digitalSignature`
+  key usage, no revocation by our own tables. For plain `tls_client_auth` the registered subject or SAN must match.
+  `self_signed_tls_client_auth` skips the chain but must match a registered `x5t#S256`.
+- **Direct TLS:** where the gateway terminates TLS, Node's TLS server requests the client certificate with the same CA
+  set, and the `pkijs` check above still runs on the peer chain, so both termination modes are judged by one
+  validator.
+- **Behind a proxy:** a forwarded client certificate is read only from one configured header
+  (`REGULAIT_CLIENT_CERT_HEADER`, off by default), only from a peer in `REGULAIT_TRUSTED_PROXIES` (ADR-0031), and only
+  when the proxy itself authenticates to the gateway (mTLS between proxy and gateway, or a configured shared secret
+  header compared in constant time). The header is stripped from every request that does not meet all three, before
+  any route sees it. The forwarded certificate is then validated by the same `pkijs` path, never trusted as already
+  verified.
+- Bundles are uploaded locally (air-gapped) or fetched through the egress guard; a bundle never auto-refreshes from an
+  unlisted host.
+
+#### X31 review dispositions
+
+| Finding | Severity | Disposition | Where |
+|---|---|---|---|
+| I7R-01 key revocation not linked to grants | HIGH | Accepted. Credential and binding provenance stored per grant and per token; revocation table per credential kind; rotation ≠ revocation | Decision 12; decisions 4, 5 amended; tests |
+| I7R-02 provider replay check races | HIGH | Accepted. Atomic `INSERT … ON CONFLICT DO NOTHING` claims in namespaces, wired into the provider's refusal path with a version-pinned contract test, fallback to our own claim | Decision 14; tests (two real replicas, concurrent) |
+| I7R-03 `oauth4webapi` covers part of the verifier | MEDIUM | Accepted. Our verifier adds 60 s window, nonce, `jti` claim, `requireDPoP: true`, exactly-one-`cnf`, and a separate mTLS branch | Decision 13 |
+| I7R-04 token-exchange wire unspecified | MEDIUM | Accepted. Exact requests, token types, child-key binding, parent proof as `actor_token`, one-use bound human delegation proof, `act` rebuilt from the stored path, errors | Decision 15; decision 7 amended |
+| I7R-05 reservation accounting | MEDIUM | Accepted. Refuse over-scope/over-budget (one contract); micro-dollar reservations with lock order, draw-down, idempotency, release, unknown-cost refusal, first-crossing stated | Decision 16; decision 4 amended |
+| I7R-06 ancestors not fully checked | MEDIUM | Accepted. Every ancestor's identity, credentials, own live grants and halt, plus sponsor's current rights; stored path/root/depth validated; fresh read at point of use | Decision 17 |
+| I7R-07 Cedar second evaluation | MEDIUM | Accepted. Grants authorise, Cedar only narrows via the wrapper; legacy policies for the sponsor, v4 Agent policies per actor; S2 owns gateway ABAC wiring | Decision 18; decision 3 amended; slices |
+| I7R-08 audit v2 cutover | MEDIUM | Accepted. Boundary set under the append lock in a trusted table, version in canonical data, downgrade refused, drained rollout with a boot check | Decision 19; decision 9 amended |
+| I7R-09 `jose` is not a path validator | MEDIUM | Accepted. `pkijs` (already pinned) for chains plus our SPIFFE profile; authenticated, stripped proxy header | Decision 21; S0 amended |
+| Library notes (air-gap, replicas, mounting, koa-compose notice) | note | Accepted | Decision 20; decision 11 amended |
+| Slice-order notes | note | Accepted | Slice table |
 
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches: `schema.ts`, migrations, `app.ts`, `auth.ts`, `route-classes.ts`,
 `openapi-registry.ts`, the lockfile and shared zod belong to the foundation owner; other slices ask for one-line
-changes. The kernel package is touched only by S2.
+changes. The kernel package and the gateway Cedar wiring (`abac.ts`, `abac-principal.ts`) are touched only by S2
+(decision 18). *Amended after X31:* the schema contracts for provenance (12), replay claims (14), reservations (16)
+and the audit cutover (19) are settled in this ADR before S1, so S1 freezes them once.
 
 | Slice | Content | Depends on | Parallel? |
 |---|---|---|---|
-| **S0 spike** (research, no product code) | `oidc-provider` 9.12.2 mounted under Fastify behind our hooks, with a Postgres adapter and two replicas; `oauth4webapi` RS validation with DPoP; transitive licence inventory of both (ADR-0176 list); SPIRE JWT-SVID and X.509-SVID verified with `jose` against a static bundle, offline. Output: a short research note and go/no-go for decision 7 | none | **Yes**, with S1 |
-| **S1 foundation** | Migration (`workload_identities`, `workload_credentials`, `delegation_grants`, `identity_signing_keys`, DPoP/assertion `jti` store, audit/trace/usage columns, chain serialisation v2, `org_settings` and `mcp_servers` columns), `schema.ts`, shared zod and constants, step-up kind `identity_manage`, settings with strict defaults and audited relaxation, every new route as a 501 stub, `AuthContext.via` gains `workload` | none | serial (owns hot files) |
-| **S2 kernel** | `ActorChain` required on the three kernel inputs; intersection semantics and new rule ids; Cedar schema v4 (`Agent` entity, `actorChain`, `delegationDepth`) with a second evaluation; property tests | S1 (types only) | **Yes**, with S3 and S6 |
-| **S3 issuer and grants** | `delegation.ts` (create child as intersection, budget reservation, cascade revoke, check-on-use query), signing-key management and rotation, JWKS route, token mint/verify module | S1 | **Yes**, with S2 and S6 |
-| **S4 in-process wiring** | Grants through `executeGovernedDispatch` / `ToolCall` / `ConnectorCall`; orchestration lead→worker child grants (ceiling folded in), builder turns, schedules, engine runs; audit, trace, usage and receipt stamping; agent identity per `agents`/`builder_agents` row created on first load | S2, S3 | serial (orchestration, builder, mcp-proxy) |
-| **S5 token endpoint and external callers** | `/oauth/token` token exchange, client auth (`private_key_jwt`, mTLS, SPIFFE), DPoP and nonce, revocation and introspection; delegated tokens accepted on `/mcp/:serverId` and the compat routes; RFC 9728 `authorization_servers` | S3 (+ S0 verdict) | **Yes**, with S4 (S5 owns `auth.ts` and the new `oauth/` module; S4 must not touch them) |
-| **S6 admin UI** | Agent identities page (create, bind key or SPIFFE ID, suspend, revoke, stewards), grants editor for agent principals, "proposed grants from observed usage", delegation chain in traces, audit and the agent card | S1 stubs | **Yes** (web only), merges after S4/S5 |
-| **S7 retire bearer workload secrets** | Engine runners and PDP clients move to `private_key_jwt` + DPoP; `rge_` and `pdp` virtual keys removed | S5 | serial |
+| **S0 spike** (research, no product code) | `oidc-provider` 9.12.2 under Fastify behind our real hooks (auth, route classes, body limit, timeout, rate limit, audit), Postgres adapter, two replicas; the decision 14 replay claim inside the provider, proven with concurrent requests; RFC 8693 + DPoP per decision 15; the decision 13 verifier around `oauth4webapi` (DPoP) and the mTLS branch; `pkijs` X.509-SVID and mTLS path validation offline with the decision 21 profile and the forwarded-header rules; JWT-SVID signatures with `jose` from an uploaded bundle; exact-pinned licence closure with notices (decision 20). Output: a research note and go/no-go for decision 7 | none | **Yes**, with S1; must close before S5 |
+| **S1 foundation** | Migration (`workload_identities`, `workload_credentials`, `delegation_grants` with provenance and micro-dollar columns, `delegation_reservations`, `issued_tokens`, `replay_claims`, `identity_signing_keys`, `audit_chain_versions`, audit/trace/usage columns, the v2 serialisation code path; the v2 cutover itself is not run here), `schema.ts`, shared zod and constants, step-up kind `identity_manage`, settings with strict defaults and audited relaxation, every new route as a 501 stub, `AuthContext.via` gains `workload` | none | serial (owns hot files) |
+| **S2 kernel and Cedar wiring** | `ActorChain` required on the three kernel inputs; intersection semantics and new rule ids; Cedar v4 (`Agent` entity, `actorChain`, `delegationDepth`) and the per-principal evaluation of decision 18 in the gateway ABAC wiring; property tests | S1 (types only) | **Yes**, with S6 |
+| **S3 issuer and grants** | `delegation.ts` (refuse-over-scope creation, reservations with lock order and idempotency, draw-down, release sweep, cascade revoke, the decision 17 live-chain query), signing-key management and rotation, JWKS route, token mint and the decision 13 verifier | S1, and S2's `ActorChain`/scope types | after S2's types land; then **yes**, with the rest of S2 and S6 |
+| **S4 in-process wiring** | Creates the internal identities and grants **before** any agent path requires them (one first-load step, then the paths switch on); grants through `executeGovernedDispatch` / `ToolCall` / `ConnectorCall`; orchestration lead→worker child grants (ceiling folded in), builder turns, schedules, engine runs; audit, trace, usage and receipt stamping; then the audit v2 cutover (decision 19) after all replicas run v2 code | S2, S3 | serial (orchestration, builder, mcp-proxy) |
+| **S5 token endpoint and external callers** | `/oauth/token` token exchange per decision 15, client auth (`private_key_jwt`, mTLS, SPIFFE), DPoP and nonce, revocation and introspection; delegated tokens accepted on `/mcp/:serverId` and the compat routes; RFC 9728 `authorization_servers` | S3, S0 closed | **Yes**, with S4, only with the split stated here: S5 owns `auth.ts` and `oauth/`, S2 owns the ABAC wiring, S4 owns the governed call paths; none edits another's files |
+| **S6 admin UI** | Agent identities page (create, bind key or SPIFFE ID, suspend, revoke, stewards), grants editor for agent principals, "proposed grants from observed usage", delegation chain in traces, audit and the agent card | S1 stubs | **Yes** (web only); its acceptance and merge come after S4/S5's real routes |
+| **S7 retire bearer workload secrets** | Engine runners and PDP clients move to `private_key_jwt` + DPoP; `rge_` and `pdp` virtual keys removed only after tests prove the migrated clients keep the engine-key ceilings, project pinning and sponsorship of ADR-0187 | S5 | serial |
 | **S8 outbound MCP identity** | `identity_propagation` on upstream connects (signed assertion per call) | S5 | **Yes**, with S7 and S9 |
 | **S9 SPIFFE backend and docs** | Trust-bundle management, SVID client auth end to end, BYOC and air-gapped runbooks (each command executed, M-041) | S5 | **Yes**, with S7 and S8 |
 
@@ -351,6 +634,17 @@ counter that must stay at zero for every refusal.
 - The sponsor lacks a tool the agent has → refused (the agent cannot lend its rights to a person).
 - Requested budget above the parent's remaining → refused at creation; spend in the child that would cross any
   ancestor's remaining → refused at the next call.
+- (X31, decision 16) Two siblings each asking for 60 under a parent with 100 remaining, sent concurrently → exactly
+  one granted. A descendant's spend is counted once at each ancestor (reserved or settled, never both). A retried
+  request with the same idempotency key (lost reply) reserves once. Cancelling or expiring a child returns only its
+  unspent amount. An unpriced call under a capped grant is refused. Over-scope requests are refused, never narrowed.
+- (X31, decision 17) Suspend, halt or revoke the credential of the **middle** actor without touching its grant row, or
+  remove a tool from the middle actor's own grants or from the sponsor's role → the leaf's next call is refused; a
+  sibling under the root keeps exactly its own narrowed scope. A forged or substituted `act`, path or depth in a
+  request changes nothing. A turn held open across a revocation is refused at its next effect.
+- (X31, decision 18) Legacy v1–v3 forbids still bind the sponsor; with no Agent policies an agent gains nothing beyond
+  its grants; an Agent forbid or approval rule narrows; a malformed v4 evaluation refuses without breaking installs
+  that have no v4 policy; no human attribute appears on the `Agent` entity.
 - Depth `max + 1` → refused `delegation-depth`.
 - Revoking the sponsor's grant after the child was created → the child's next call is refused (execution-time, not
   plan-time).
@@ -365,18 +659,39 @@ counter that must stay at zero for every refusal.
   workload's own key instead of the issuer's → 401 each.
 - A client assertion replayed (same `jti`) or older than 5 minutes → refused at the token endpoint.
 - Two gateway replicas share the replay store: a proof used on replica A is refused on replica B.
+- (X31, decision 14) The same client assertion, token-endpoint DPoP proof, resource DPoP proof and human delegation
+  proof each sent **concurrently** to two real replicas (forced interleaving, as Codex's probe did) → exactly one
+  accepted and exactly one grant or reservation; then sequential repeats and a restart → still refused; the loser's
+  failure never rolls back the winner's claim. A contract test fails if the pinned `oidc-provider` changes its replay
+  call order.
+- (X31, decision 13) A proof 61 s old, a proof with no or a stale nonce, a proof whose `jti` was used once, a token with
+  two `cnf` members or none, and a `x5t#S256` token on the DPoP branch → 401 each, through real routes, on both the
+  DPoP and the mTLS branch.
+- (X31, decision 15) Parent A → child B succeeds only with B's client authentication **and** A's proof, and the result
+  carries `cnf` = B's key and an `act` rebuilt from the stored path; a stolen parent token without A's proof, a wrong
+  child assertion, a swapped project, env or resource, and a reused human delegation proof → refused each.
+- (X31, decision 21) An unknown CA, an expired or not-yet-valid certificate, a wrong SAN or trust domain, a leaf with CA
+  set or without `digitalSignature`, a broken path, and a forwarded-certificate header from an untrusted or
+  unauthenticated peer → refused each; a genuine SVID validates offline with no network access.
 
 **Revocation is immediate.**
 - Revoke a root grant, then call with a child's still-unexpired token in the same second → refused; the test asserts
   no cache by doing this without any wait.
 - Suspend the agent identity, disable the sponsor (ADR-0022), halt the agent (ADR-0124), revoke a registered key → each
   refused at the next call, with its own refusal code.
+- (X31, decision 12) Mint with client key A and DPoP key B, then revoke A while identity and grant stay active → the
+  token, its grant and every descendant are refused before any upstream call. Revoke only B → tokens bound to B are
+  refused, the grant survives. Rotate A → old tokens live to expiry, audit names the same identity, and a revoked key
+  is never revived by a rotation.
 - Cascade: revoking the middle of a three-deep chain kills the leaf and leaves the root usable.
 
 **Audit and evidence.**
 - Every agent-made audit row has `user_id` = the sponsor and an `actor_chain` matching the grant path.
 - The hash chain verifies across the v1→v2 boundary; editing `actor_chain` on a v2 row fails verification.
 - Receipts and traces carry the same chain; a rotated issuer key does not break verification of older receipts.
+- (X31, decision 19) Mixed v1 and v2 rows verify; changing a v2 row's version to 1, or removing its version, fails; an
+  append racing the cutover cannot land a v1 row past the boundary; a v1-only binary refuses to boot once a boundary
+  exists; bounded verification from a mid-chain `seq` finds the boundary; receipts and anchors verify across it.
 
 **Regression.** `pillar7-inheritance.test.ts`, the ADR-0124 kill-switch suite and the ADR-0187 engine suites pass
 unchanged in behaviour; a relaxed `agent_entitlement_mode = sponsor_only` reproduces today's decisions exactly and is
@@ -386,7 +701,11 @@ to the new tables).
 ## Consequences
 
 - RegulAIt can claim "least privilege for agents" once S4 ships with `own_grants` on, and can say what each agent is
-  allowed to do on its own, which ROADMAP §7.3 currently forbids.
+  allowed to do on its own, which ROADMAP §7.3 currently forbids. *Amended (X31):* the claim covers only the paths
+  actually wired (in-process after S4, external after S5), and product text must say separately that human-owned API
+  keys and `dispatch`/`engine` virtual keys remain bearer credentials and that cross-domain hops are deferred.
+- Revocation means the **next** governed use reads committed live state and is refused; an effect already dispatched
+  cannot be recalled.
 - Pillar 7's "never exceeds" becomes a stored, per-hop, checked-on-use object instead of a property of how the
   orchestrator happens to call the kernel.
 - Remote workers, BYOC execution planes and engine runners get a standard way to prove who they are, with no
@@ -413,7 +732,10 @@ to the new tables).
    resource side, if spike S0 shows they mount under Fastify, keep state in Postgres across replicas, and have a clean
    transitive licence inventory. If S0 fails, a narrow token-exchange endpoint on `jose` with a written ADR-0176 §4
    exception naming the unmet requirement. Note: `oidc-provider` has one primary maintainer; ADR-0177 forbids that only
-   for a required **sidecar**, not a library, but the owner may want it recorded.
+   for a required **sidecar**, not a library, but the owner may want it recorded. *Amended (X31):* the libraries do
+   cryptography and protocol parsing only; replay claims (decision 14), the resource verifier's freshness, nonce and
+   replay rules and the mTLS branch (decision 13), and X.509 path validation with `pkijs` (decision 21) are ours or
+   another pinned module's. Codex's isolated install found 41 runtime packages, all MIT or ISC; S0 must still pass.
 3. **OWNER DECISION — sender constraint.** *Recommended:* DPoP by default, mTLS where the deployment offers it, and an
    unbound bearer delegated token never issued and never accepted (an invariant, not a relaxable setting). This is the
    one place this ADR deliberately departs from "an admin may relax every setting", because a relaxed binding is the
@@ -439,7 +761,8 @@ to the new tables).
    DPoP-bound is a follow-up.
 9. **OWNER DECISION — over-scope requests.** When an agent asks for more scope, depth or budget than its parent has:
    *recommended* refuse in v1 with the reason; routing it to the approvals queue as an out-of-band human approval
-   (the AIMS draft's CIBA pattern) is a later slice.
+   (the AIMS draft's CIBA pattern) is a later slice. *Amended (X31):* decision 16 makes this the single public
+   contract (refuse, never narrow); the owner's answer here can only change it in a later ADR.
 
 Not decided here: cross-trust-domain chaining for real BYOC execution (needs a named account; ADR-0183 owner-gated
 list); CAEP/RISC shared-signals revocation feeds; HSM-backed issuer keys; implementing the WIMSE proof-token and HTTP
