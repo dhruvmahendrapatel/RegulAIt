@@ -729,3 +729,42 @@ R23-10: caller-defined marker labels no longer make real credentials opaque. Onl
 Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.
 ### R166-21–24 calendar follow-up — 2026-10-09 CDT
 Utah now credits the original checked C13-72-S101_2026050620260506.pdf; the HTML index is an unchecked lead. SB 53 and historical C-27 retain their October 4 primary source, checked date and historical status, with the blocked October 7 recheck appended. C-27's original status was proposed, not adopted; it remains a historical proposal with no invented enactment deadline. Article/annex citation spacing is corrected. All 13 reconciliation source links now pin main fde6625b (read October 10 UTC); the current transparency controlRefs is still empty. No fresh primary-law verification claimed. Markdown table/link structure and git diff --check PASS; documentation-only follow-up.
+
+### B4I-02/03 dense scrub performance follow-up — 2026-10-10 UTC
+
+B4I-02: repeated short fragments and credentials no longer require one full
+fragment scan/hash per occurrence. Per-invocation caches are capped at 256
+entries/256-character strings; unseen or uncached text is always scanned, and
+nothing is retained between audit writes. The second pass uses the first
+pass's surviving fragments, preserving existing markers while avoiding a parse
+of each newly generated marker. Empty prefixless RE2 sets are no longer scanned.
+A source/flags-pinned proof restricts the native fixed-width Google key scan to
+its final possible 39 characters only when the entire input is ASCII word/dash;
+the original regex/text still enforce both boundaries. Changed patterns fall
+back to the complete scan.
+
+Genuine old dense-Slack regression: isolated best-of-three 243.7ms, exceeding
+the unchanged 400k/100ms budget. Old compiled Google prefix/dash case145.4ms.
+Both new 400k/100ms tests pass, alongside cache saturation/distinct-fingerprint,
+EOF/boundary and changed-rule fallback tests (5/5). Output equivalence against
+the pre-optimization implementation passes20,000 seeded inputs and411 additional
+Google/boundary cases. Full shared test run with one worker:2049/2049 PASS,
+including the integration branch's50 forged-marker tests temporarily copied
+for verification and removed afterward. Existing20,000 fixed-point corpus,
+near-miss and all original100ms assertions remain unchanged. Fresh shared build,
+web typecheck and web build PASS. The final new test initially used a readonly
+property assignment; compilation caught it before publication, and descriptor
+replacement/restoration now compiles and passes.
+
+B4I-03 remains an owner-config handoff, not falsely closed: default parallel
+execution passed1994 tests but timed out the unchanged5-second candidate oracle;
+the same suite serially passed1995, then1996 as tests were added. A simultaneous
+build also moved a passing dense case over100ms. A broader75-case400k wall-time
+scan had further overruns under load; it is not claimed universally green.
+Please serialize shared files (fileParallelism:false/maxWorkers:1) or isolate
+timing tests in a dedicated serialized project in the owned shared test
+configuration. No timeout or budget was increased. This does not establish
+that the earlier inaccessible CI log had this same cause.
+
+Logs `/tmp/oct10-b4i-{dense-isolated-red,final-focused,shared-complete,delivery-build,final-equivalence,google-equivalence,scrub-web-tsc,scrub-web-build}.log`.
+Claude retains outbound-audience integration and B4I-01 retirement adjudication.

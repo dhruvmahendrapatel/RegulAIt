@@ -207,36 +207,76 @@ interface Span {
 const MARKER_PATTERN=/\[redacted:([a-z0-9_.+]+):[0-9]+:[a-f0-9]{12}\]/g;
 const MARKER_LABELS=new Set([FIELD_RULE_LABEL,...CREDENTIAL_MATERIAL_RULES.map(rule=>shortRuleId(rule.id)),...GENERATED_SECRET_RULES.map(rule=>rule.id)]);
 function knownMarkers(text:string){
- return [...text.matchAll(MARKER_PATTERN)].filter(match=>match[1]!.split("+").every(label=>MARKER_LABELS.has(label)));
+ const labels=new Map<string,boolean>();
+ const matches:RegExpMatchArray[]=[];
+ for(const match of text.matchAll(MARKER_PATTERN)){
+   const label=match[1]!;
+   let known=labels.get(label);
+   if(known===undefined){
+     known=label.split("+").every(part=>MARKER_LABELS.has(part));
+     if(label.length<=256&&labels.size<256)labels.set(label,known);
+   }
+   if(known)matches.push(match);
+ }
+ return matches;
 }
 export function scrubAuditText(text:string):string{
- const once=scrubAuditTextPass(text);
+ const pieces:string[]=[];
+ const once=scrubAuditTextPass(text,pieces);
  if(once===text)return once;
  // A new marker can expose a token boundary in a concatenated fragment.
  // Scan the remaining fragments once, treating existing markers as opaque.
  // If one still contains credential material, redact that whole fragment:
  // replacing only its last token could expose another boundary indefinitely.
- const out:string[]=[];let cursor=0;
- for(const match of knownMarkers(once)){
-   const fragment=once.slice(cursor,match.index);
-   out.push(scrubAuditTextPass(fragment)===fragment?fragment:marker([FIELD_RULE_LABEL],fragment),match[0]);
-   cursor=match.index!+match[0].length;
+ // Dense credentials often leave the same short separator thousands of
+ // times. Cache only this invocation's bounded fragment decisions; never
+ // retain caller text between audit writes or skip an unseen fragment.
+ const fragmentDecisions=new Map<string,boolean>();
+ const scrubFragment=(fragment:string)=>{
+   let clean=fragmentDecisions.get(fragment);
+   if(clean===undefined){
+     clean=scrubAuditTextPass(fragment)===fragment;
+     if(fragment.length<=256&&fragmentDecisions.size<256)fragmentDecisions.set(fragment,clean);
+   }
+   return clean?fragment:marker([FIELD_RULE_LABEL],fragment);
+ };
+ const out:string[]=[];
+ // The first pass already separates surviving text from generated markers.
+ // Scan only surviving text for pre-existing markers; reparsing every new
+ // marker is unnecessary. A marker cannot straddle a generated marker's
+ // opening '[' because '[' is excluded from every marker content field.
+ for(let i=0;i<pieces.length;i+=2){
+   const surviving=pieces[i]!;let cursor=0;
+   for(const match of knownMarkers(surviving)){
+     out.push(scrubFragment(surviving.slice(cursor,match.index)),match[0]);
+     cursor=match.index!+match[0].length;
+   }
+   out.push(scrubFragment(surviving.slice(cursor)));
+   if(pieces[i+1]!==undefined)out.push(pieces[i+1]!);
  }
- const fragment=once.slice(cursor);
- out.push(scrubAuditTextPass(fragment)===fragment?fragment:marker([FIELD_RULE_LABEL],fragment));
  return out.join("");
 }
-function scrubAuditTextPass(text: string): string {
+function scrubAuditTextPass(text: string, pieces?: string[]): string {
   if (!text) return text;
 
   const protectedMarkers=knownMarkers(text).map(match=>[match.index!,match.index!+match[0].length]);
   const overlapsMarker=(start:number,end:number)=>protectedMarkers.some(([a,b])=>start>=a!&&end<=b!);
+  const onlyWordDash = /^[\w-]*$/.test(text);
   const spans: Span[] = [];
   for (const rule of CREDENTIAL_MATERIAL_RULES) {
     // The RegExp objects are module constants shared with `runRules`, and every
     // one carries /g — reset before use or a previous scan's lastIndex decides
     // where this one starts.
     rule.re.lastIndex = 0;
+    // On an uninterrupted ASCII word/dash run this EXACT fixed-width rule
+    // can satisfy its right-hand exclusion only at EOF. Start at its final
+    // possible 39-character token, using the original text/RegExp so the left
+    // boundary survives. Pin source and flags: a changed rule falls back to
+    // the full scan rather than inheriting a stale width proof.
+    if (onlyWordDash && rule.id === "dlp.secret.google_api_key" &&
+        rule.re.source === String.raw`\bAIza[\w-]{35}(?![\w-])` && rule.re.flags === "g") {
+      rule.re.lastIndex = Math.max(0, text.length - 39);
+    }
     let m: RegExpExecArray | null;
     while ((m = rule.re.exec(text)) !== null) {
       if (m[0].length === 0) {
@@ -259,7 +299,12 @@ function scrubAuditTextPass(text: string): string {
   // `assignment` and `jwt`). Merging first means ONE marker per credential
   // rather than a marker nested inside another marker's replaced text.
   spans.sort((a, b) => a.start - b.start || b.end - a.end);
-  const out: string[] = [];
+  const out: string[] = pieces ?? [];
+  // Identical short synthetic/adversarial credentials need one fingerprint,
+  // rather than one hash per occurrence. Keep rule identity in the cache key
+  // and cap retained text independently of the input size.
+  const markers = new Map<string, Map<string, string>>();
+  let cachedMarkers = 0;
   let cursor = 0;
   let i = 0;
   while (i < spans.length) {
@@ -271,7 +316,19 @@ function scrubAuditTextPass(text: string): string {
       rules.push(spans[j]!.rule);
       j += 1;
     }
-    out.push(text.slice(cursor, start), marker(rules, text.slice(start, end)));
+    const removed = text.slice(start, end);
+    const cacheKey = removed.length <= 256 ? JSON.stringify(rules) : undefined;
+    let replacement = cacheKey === undefined ? undefined : markers.get(cacheKey)?.get(removed);
+    if (replacement === undefined) {
+      replacement = marker(rules, removed);
+      if (cacheKey !== undefined && cachedMarkers < 256) {
+        let byText = markers.get(cacheKey);
+        if (!byText) { byText = new Map(); markers.set(cacheKey, byText); }
+        byText.set(removed, replacement);
+        cachedMarkers += 1;
+      }
+    }
+    out.push(text.slice(cursor, start), replacement);
     cursor = end;
     i = j;
   }

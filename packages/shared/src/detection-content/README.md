@@ -36,10 +36,16 @@ This intentional extra pass is not a byte-for-byte upstream runtime port.
 
 Audit redaction always applies irrespective of pack settings. Other detector
 and admission consumers honor the current pack selection. Results expose
-rule IDs/counts/spans, not matched secrets or descriptions. Scrubbing makes at most two linear passes. If newly introduced marker boundaries reveal another credential in an unredacted fragment, the second pass redacts that whole fragment (field marker), preventing an unbounded chain of boundary changes. Only markers whose labels are known detector rule IDs or the field label stay opaque; caller-supplied unknown labels are scanned. the pathological fragment may lose non-secret surrounding prose.
+rule IDs/counts/spans, not matched secrets or descriptions. Scrubbing makes at most two linear passes. If newly introduced marker boundaries reveal another credential in an unredacted fragment, the second pass redacts that whole fragment (field marker), preventing an unbounded chain of boundary changes. Only markers whose labels are known detector rule IDs or the field label stay opaque; caller-supplied unknown labels are scanned. The pathological fragment may lose non-secret surrounding prose.
 
 `credentialAudienceViolations` provides host/TLS matching, including wildcard
 apex/subdomains and suffix-spoof refusal. **The guarded outbound integration is
 not installed by this slice:** `outboundAudienceEnforced: false` reports that
 fact. A URL/header/body consumer and its integration test remain an owner-file
 prerequisite. Manifest exclusions and normalisation limits remain visible.
+
+Dense audit inputs reuse per-invocation fragment decisions, marker-label checks and
+short credential fingerprints (each cache admits at most 256 entries and only
+strings up to 256 characters). Nothing is retained between audit writes, and
+unseen strings still receive the full scan. The second pass uses the first
+pass's surviving fragments rather than reparsing newly generated markers.
