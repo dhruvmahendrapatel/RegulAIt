@@ -1,23 +1,21 @@
 /**
- * ADR-0187 B5-G — the garak catalogue, manifest entry, taxonomy rows and OWASP crosswalk (decisions
- * 142-149). Each guard was shown red by breaking the code it pins (recorded in the ADR).
+ * ADR-0187 B5-G — the garak catalogue, manifest entry and taxonomy rows (decisions 142-149; the OWASP
+ * table is pinned in garak-owasp-2025.test.ts). Each guard was shown red by breaking the code it pins
+ * (recorded in the ADR).
  */
 import { describe, expect, it } from "vitest";
 import { RED_TEAM_AGENTIC_ATTACK_CLASSES } from "../redteam.js";
-import { OWASP_LLM_TOP_10_MAPPING } from "../owasp-framework-mappings.js";
 import {
   ENGINE_MANIFEST,
   ENGINE_TAXONOMY,
   engineConfigNeedsApproval,
   engineRunConfigSchema,
   engineTaxonomyProblems,
-  GARAK_OWASP_CROSSWALK,
   GARAK_PROBES,
   GARAK_UPSTREAM_PROBES,
   GARAK_USAGE_DATA_ENV,
   GARAK_WORKER_SELF_TEST_SWITCH,
   garakConfigProblem,
-  garakOwasp2025,
   garakPrimaryDetector,
   garakProbeForSet,
   garakSetId,
@@ -141,26 +139,5 @@ describe("B5-G taxonomy rows", () => {
     // excluded or unmapped probes count toward nothing
     expect(lookupEngineTaxonomy(ENGINE_TAXONOMY, "garak", "leakreplay.NYTCloze")).toBeNull();
     expect(lookupEngineTaxonomy(ENGINE_TAXONOMY, "garak", "web_injection.MarkdownXSS")).toBeNull();
-  });
-});
-
-describe("B5-G OWASP crosswalk (garak's 2023 tags -> the 2025 ids)", () => {
-  it("maps only to ids our catalog knows, and leaves the contested rows to the owner", () => {
-    for (const r of GARAK_OWASP_CROSSWALK.rows) {
-      if (r.owasp2025 !== null) expect(Object.keys(OWASP_LLM_TOP_10_MAPPING), r.garak).toContain(r.owasp2025);
-      expect(r.status === "owner_decision").toBe(r.owasp2025 === null);
-    }
-    expect(GARAK_OWASP_CROSSWALK.rows.filter((r) => r.status === "owner_decision").map((r) => r.garak)).toEqual(["owasp:llm07", "owasp:llm10"]);
-    expect(GARAK_OWASP_CROSSWALK.garakVersion).toBe(ENGINE_MANIFEST.garak.version);
-  });
-
-  it("has a row for every tag an admitted probe carries; numbering is translated, not copied", () => {
-    const rows = new Set(GARAK_OWASP_CROSSWALK.rows.map((r) => r.garak));
-    for (const p of GARAK_UPSTREAM_PROBES) for (const t of p.owasp) expect(rows.has(t), `${p.probe} ${t}`).toBe(true);
-    expect(garakOwasp2025("encoding.InjectBase64")).toEqual(["owasp:llm:01"]);
-    // 2023 llm06 Sensitive Information Disclosure is 2025 LLM02, never 2025 LLM06 (Excessive Agency)
-    expect(garakOwasp2025("web_injection.MarkdownImageExfil")).toEqual(["owasp:llm:02", "owasp:llm:05"]);
-    // an owner-decision row contributes nothing
-    expect(garakOwasp2025("leakreplay.NYTCloze")).toEqual(["owasp:llm:02"]);
   });
 });
