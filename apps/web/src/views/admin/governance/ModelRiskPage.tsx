@@ -38,6 +38,8 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { EngineScanEvidenceChip } from "./EngineScanChip";
+import type { ArtifactScan } from "./modelArtifacts";
 
 type CardState = "unsigned" | "pending" | "approved" | "expiring" | "expired" | "revoked";
 
@@ -65,9 +67,12 @@ interface SignOff {
 }
 interface Evidence {
   id: string;
-  kind: "eval_run" | "external";
+  kind: "eval_run" | "external" | "engine_scan";
   evalRunId: string | null;
   externalRef: string | null;
+  /** ADR-0187 B5-M: an `engine_scan` row cites a model-artifact scan; the read carries the scan (null if it is gone) */
+  artifactScanId?: string | null;
+  artifactScan?: ArtifactScan | null;
   label: string | null;
   attachedAt: string;
 }
@@ -237,6 +242,8 @@ export default function ModelRiskPage() {
   const [approver, setApprover] = useState("");
   const [validUntil, setValidUntil] = useState("");
   const [evidenceRun, setEvidenceRun] = useState("");
+  // ADR-0187 X28: a model-artifact scan cited as evidence (its id from Admission review → Model artifacts)
+  const [evidenceScan, setEvidenceScan] = useState("");
   // ADR-0086 B3: the staleness-recert threshold edit buffer (null = untouched)
   const [stalenessThreshold, setStalenessThreshold] = useState<string | null>(null);
 
@@ -760,7 +767,7 @@ export default function ModelRiskPage() {
                   </Field>
                 </form>
                 <div className={v.faint}>
-                  The request lands in the one <Link to="/admin/approvals">Approvals Queue</Link>. There is no
+                  The request lands in the one <Link to="/admin/approvals" style={{ textDecoration: "underline" }}>Approvals Queue</Link>. There is no
                   approve button on this page, deliberately — one inbox, one decision path, one audit trail.
                 </div>
 
@@ -853,13 +860,45 @@ export default function ModelRiskPage() {
                     </Button>
                   </Field>
                 </form>
+                <form
+                  className={a.formRow}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void act.run(async () => {
+                      await api.post(`/v1/mrm/cards/${detail.id}/evidence`, {
+                        kind: "engine_scan",
+                        artifactScanId: evidenceScan.trim(),
+                      });
+                      setEvidenceScan("");
+                      await refreshAll();
+                    }, "Model-artifact scan attached as evidence");
+                  }}
+                >
+                  <Field label="Attach a model-artifact scan as evidence" grow>
+                    <Input
+                      value={evidenceScan}
+                      onChange={(e) => setEvidenceScan(e.target.value)}
+                      placeholder="scan id from Admission review → Model artifacts"
+                    />
+                  </Field>
+                  <Field label="&nbsp;">
+                    <Button type="submit" disabled={!evidenceScan.trim()}>
+                      Attach scan
+                    </Button>
+                  </Field>
+                </form>
                 {detail.evidence.length > 0 && (
                   <Table
                     rows={detail.evidence}
                     rowKey={(r) => r.id}
                     columns={[
                       { key: "k", header: "Kind", render: (r) => r.kind },
-                      { key: "ref", header: "Reference", render: (r) => r.evalRunId ?? r.externalRef },
+                      {
+                        key: "ref",
+                        header: "Reference",
+                        render: (r) =>
+                          r.kind === "engine_scan" ? <EngineScanEvidenceChip scan={r.artifactScan} /> : (r.evalRunId ?? r.externalRef),
+                      },
                       { key: "l", header: "Label", render: (r) => r.label ?? "—" },
                       { key: "at", header: "Attached", render: (r) => ago(r.attachedAt) },
                       {
@@ -872,7 +911,7 @@ export default function ModelRiskPage() {
                             label="Detach"
                             consequence={
                               <p>
-                                The citation is removed from this card. The evaluation run itself is
+                                The citation is removed from this card. The {r.kind === "engine_scan" ? "scan" : "evaluation run"} itself is
                                 untouched — this detaches the reference, it does not delete the
                                 evidence. If the card's completeness depended on it, the card
                                 becomes incomplete again, which is the honest result: a card is
