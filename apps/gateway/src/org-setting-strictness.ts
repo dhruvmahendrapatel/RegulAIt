@@ -66,6 +66,10 @@ import {
   identitySettingRelaxed,
   IDENTITY_SETTING_KEYS,
   IDENTITY_STRICT_DEFAULTS,
+  isolationSettingLooser,
+  isolationSettingRelaxed,
+  ISOLATION_SETTING_KEYS,
+  ISOLATION_STRICT_DEFAULTS,
   type UpdateOrgSettings,
 } from "@regulait/shared";
 
@@ -200,6 +204,11 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of BOM_SETTING_KEYS) {
     out[k] = rule(BOM_STRICT_DEFAULTS[k], (v) => bomSettingRelaxed(k, v as never), (v, b) => bomSettingLooser(k, v, b));
   }
+  // ADR-0190 (batch 6 item 3): warn mode, a lower class floor and a longer attestation lifetime are looser than the
+  // default; a floor an admin raised is lowered back (or a shortened lifetime lengthened) only with the step-up
+  for (const k of ISOLATION_SETTING_KEYS) {
+    out[k] = rule(ISOLATION_STRICT_DEFAULTS[k], (v) => isolationSettingRelaxed(k, v as never), (v, b) => isolationSettingLooser(k, v, b));
+  }
   return out;
 }
 
@@ -209,7 +218,8 @@ type BatchKey =
   | (typeof BATCH4_SETTING_KEYS)[number]
   | (typeof BATCH5_SETTING_KEYS)[number]
   | (typeof IDENTITY_SETTING_KEYS)[number]
-  | (typeof BOM_SETTING_KEYS)[number];
+  | (typeof BOM_SETTING_KEYS)[number]
+  | (typeof ISOLATION_SETTING_KEYS)[number];
 
 /** THE REGISTRY (see the header). Typed over every writable key. */
 export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: StrictnessEntry } = {
