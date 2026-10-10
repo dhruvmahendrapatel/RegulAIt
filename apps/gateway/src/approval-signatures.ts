@@ -610,7 +610,7 @@ async function auditSignatureFailure(db: Q, userId: string, row: ApprovalRow, wh
     userId,
     objectType: "approval",
     objectId: row.id,
-    detail: { subsystem: "approval-signature", approvalId: row.id, why, receiptClass: "decision" },
+    detail: { subsystem: "approval-signature", approvalId: row.id, why, receiptClass: "excluded" },
     effect: "deny",
     ruleId: "approval-signature-refused",
     ruleChain: [],

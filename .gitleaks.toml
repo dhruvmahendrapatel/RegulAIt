@@ -174,3 +174,17 @@ condition = "AND"
 paths = ['''^apps/gateway/src/identity-signing-keys\.ts$''']
 regexTarget = "secret"
 regexes = ['''\[\\s\\S\]\*\?-----END PRIVATE KEY-----''']
+
+[[allowlists]]
+description = "B4I-02 scrub-equivalence snapshot: a SHA-256 group digest of scrub output (not a key)"
+condition = "AND"
+paths = ['''^packages/shared/src/detection-content/scrub-equivalence\.snapshot\.json$''']
+regexTarget = "secret"
+regexes = ['''^283f4705bdec4d97544386f0aad190c9d4a7c09824b2adb8a65a25f6180e0355$''']
+
+[[allowlists]]
+description = "B4I-02 scrub-equivalence corpus: synthetic secret-shaped inputs the scrubber must redact (placeholder token and the public jwt.io example JWT)"
+condition = "AND"
+paths = ['''^packages/shared/src/__fixtures__/scrub-equivalence-corpus\.ts$''']
+regexTarget = "secret"
+regexes = ['''^abcdefgh12345678$''', '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$''']

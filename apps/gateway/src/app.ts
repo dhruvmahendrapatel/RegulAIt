@@ -3078,7 +3078,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-      detail: { ...(advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" })), receiptClass: "decision" },
+      detail: { ...(advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" })), receiptClass: "excluded" },
     });
 
     return decision;
@@ -3925,7 +3925,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ...(updated.objectType === "connector_call"
             ? { objectType: "connector" as const, objectId: updated.connectorId }
             : { objectType: "mcp_tool" as const, objectId: null, serverId: updated.serverId, toolName: updated.toolName }),
-          detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "decision" },
+          detail: { approvalId: updated.id, phase: "builder-resume", receiptClass: "excluded" },
           effect: "deny",
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],

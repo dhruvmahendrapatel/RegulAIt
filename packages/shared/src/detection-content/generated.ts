@@ -1,342 +1,250 @@
 // Generated offline by scripts/vendor/convert-detection-content.mjs; do not edit.
-export const GENERATED_REQUIRED_PREFIXES = {
-  "pipelock.secrets.anthropic_api_key": [
-    "sk-ant-"
-  ],
-  "pipelock.secrets.openai_api_key": [
-    "sk-proj-"
-  ],
-  "pipelock.secrets.openai_service_key": [
-    "sk-svcacct-"
-  ],
-  "pipelock.secrets.fireworks_api_key": [
-    "fw_"
-  ],
-  "pipelock.secrets.llm_router_api_key": [
-    "sk-or-v1-"
-  ],
-  "pipelock.secrets.answer_engine_api_key": [
-    "pplx-"
-  ],
-  "pipelock.secrets.web_research_api_key": [
-    "tvly-"
-  ],
-  "pipelock.secrets.google_api_key": [
-    "aiza"
-  ],
-  "pipelock.secrets.google_oauth_client_secret": [
-    "gocspx-"
-  ],
-  "pipelock.secrets.stripe_key": [
-    "sk-live-",
-    "sk-test-",
-    "rk-live-",
-    "rk-test-",
-    "sk_live_",
-    "sk_test_",
-    "rk_live_",
-    "rk_test_"
-  ],
-  "pipelock.secrets.stripe_webhook_secret": [
-    "whsec_"
-  ],
-  "pipelock.secrets.github_token": [
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghr_",
-    "ghs_"
-  ],
-  "pipelock.secrets.github_fine_grained_pat": [
-    "github_pat_"
-  ],
-  "pipelock.secrets.gitlab_pat": [
-    "glpat-"
-  ],
-  "pipelock.secrets.gitlab_deploy_token": [
-    "gldt-"
-  ],
-  "pipelock.secrets.gitlab_runner_token": [
-    "glrt"
-  ],
-  "pipelock.secrets.gitlab_ci_job_token": [
-    "glcbt-"
-  ],
-  "pipelock.secrets.gitlab_pipeline_trigger_token": [
-    "glptt-"
-  ],
-  "pipelock.secrets.gitlab_oauth_application_secret": [
-    "gloas-"
-  ],
-  "pipelock.secrets.gitlab_scim_token": [
-    "glsoat-"
-  ],
-  "pipelock.secrets.gitlab_service_token": [
-    "gl"
-  ],
-  "pipelock.secrets.postgresql_connection_string": [
-    "postgres"
-  ],
-  "pipelock.secrets.mysql_connection_string": [
-    "mysql:"
-  ],
-  "pipelock.secrets.mongodb_connection_string": [
-    "mongodb"
-  ],
-  "pipelock.secrets.redis_connection_string": [
-    "redis"
-  ],
-  "pipelock.secrets.aws_secret_key": [
-    "secret"
-  ],
-  "pipelock.secrets.google_oauth_token": [
-    "ya29"
-  ],
-  "pipelock.secrets.gcp_service_account_private_key_id": [
-    "\"private_key_id\""
-  ],
-  "pipelock.secrets.azure_storage_account_key": [
-    "accountkey="
-  ],
-  "pipelock.secrets.azure_sas_token": [
-    "sig="
-  ],
-  "pipelock.secrets.slack_token": [
-    "xox"
-  ],
-  "pipelock.secrets.slack_app_token": [
-    "xapp-"
-  ],
-  "pipelock.secrets.discord_bot_token": [
-    "m",
-    "n"
-  ],
-  "pipelock.secrets.twilio_api_key": [
-    "sk"
-  ],
-  "pipelock.secrets.sendgrid_api_key": [
-    "sg."
-  ],
-  "pipelock.secrets.mailgun_api_key": [
-    "key-"
-  ],
-  "pipelock.secrets.new_relic_api_key": [
-    "nrak-"
-  ],
-  "pipelock.secrets.hugging_face_token": [
-    "hf_"
-  ],
-  "pipelock.secrets.databricks_token": [
-    "dapi"
-  ],
-  "pipelock.secrets.replicate_api_token": [
-    "r8_"
-  ],
-  "pipelock.secrets.together_ai_key": [
-    "tok_"
-  ],
-  "pipelock.secrets.pinecone_api_key": [
-    "pcsk_"
-  ],
-  "pipelock.secrets.groq_api_key": [
-    "gsk_"
-  ],
-  "pipelock.secrets.xai_api_key": [
-    "xai-"
-  ],
-  "pipelock.secrets.digitalocean_token": [
-    "dop_v1_"
-  ],
-  "pipelock.secrets.hashicorp_vault_token": [
-    "hvs"
-  ],
-  "pipelock.secrets.vercel_token": [
-    "vercel_",
-    "vcp_",
-    "vci_",
-    "vca_",
-    "vcr_",
-    "vck_"
-  ],
-  "pipelock.secrets.supabase_service_key": [
-    "sb_secret_"
-  ],
-  "pipelock.secrets.npm_token": [
-    "npm_"
-  ],
-  "pipelock.secrets.pypi_token": [
-    "pypi-age"
-  ],
-  "pipelock.secrets.linear_api_key": [
-    "lin_api_"
-  ],
-  "pipelock.secrets.notion_api_key": [
-    "ntn_"
-  ],
-  "pipelock.secrets.sentry_auth_token": [
-    "sntrys_"
-  ],
-  "pipelock.secrets.private_key_header": [
-    "-----begin"
-  ],
-  "pipelock.secrets.jwt_token": [
-    "eyj",
-    "eya",
-    "ewo",
-    "ewk",
-    "ew0"
-  ],
-  "pipelock.secrets.extended_private_key": [
-    "xprv",
-    "yprv",
-    "zprv",
-    "tprv"
-  ],
-  "pipelock.secrets.ethereum_private_key": [
-    "0x"
-  ],
-  "pipelock.secrets.social_security_number": [
-    "-"
-  ],
-  "pipelock.secrets.google_oauth_client_id": [
-    ".apps.googleusercontent.com"
-  ],
-  "pipelock.secrets.environment_variable_secret": [
-    "secret",
-    "password",
-    "passwd",
-    "token",
-    "api"
-  ],
-  "pipelock.secrets.gcp_service_account_key": [
-    "\"type\""
-  ]
+export const GENERATED_SECRET_SCAN_PLANS = {
+  "pipelock.secrets.anthropic_api_key": {
+    "prefilter": "[Ss\\u{17f}][Kk\\u{212a}][\\u{2d}][Aa][Nn][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.openai_api_key": {
+    "prefilter": "[Ss\\u{17f}][Kk\\u{212a}][\\u{2d}][Pp][Rr][Oo][Jj][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.openai_service_key": {
+    "prefilter": "[Ss\\u{17f}][Kk\\u{212a}][\\u{2d}][Ss\\u{17f}][Vv][Cc][Aa][Cc][Cc][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.fireworks_api_key": {
+    "prefilter": "[Ff][Ww][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": 25
+  },
+  "pipelock.secrets.llm_router_api_key": {
+    "prefilter": "[Ss\\u{17f}][Kk\\u{212a}][\\u{2d}][Oo][Rr][\\u{2d}][Vv][1][\\u{2d}][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]",
+    "maxLength": null
+  },
+  "pipelock.secrets.answer_engine_api_key": {
+    "prefilter": "[Pp][Pp][Ll][Xx][\\u{2d}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.web_research_api_key": {
+    "prefilter": "[Tt][Vv][Ll][Yy][\\u{2d}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.google_api_key": {
+    "prefilter": "[Aa][Ii][Zz][Aa][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": 39
+  },
+  "pipelock.secrets.google_oauth_client_secret": {
+    "prefilter": "[Gg][Oo][Cc][Ss\\u{17f}][Pp][Xx][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.stripe_key": {
+    "prefilter": "[R-Sr-s\\u{17f}][Kk\\u{212a}][\\u{2d}\\u{5f}][LTlt][EIei][SVsv\\u{17f}][ETet][\\u{2d}\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.stripe_webhook_secret": {
+    "prefilter": "[Ww][Hh][Ss\\u{17f}][Ee][Cc][\\u{5f}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.github_token": {
+    "prefilter": "[Gg][Hh][O-PR-SUo-pr-su\\u{17f}][\\u{5f}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.github_fine_grained_pat": {
+    "prefilter": "[Gg][Ii][Tt][Hh][Uu][Bb][\\u{5f}][Pp][Aa][Tt][\\u{5f}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_pat": {
+    "prefilter": "[Gg][Ll][Pp][Aa][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_deploy_token": {
+    "prefilter": "[Gg][Ll][Dd][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_runner_token": {
+    "prefilter": "[Gg][Ll][Rr][Tt][\\u{2d}Rr][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_ci_job_token": {
+    "prefilter": "[Gg][Ll][Cc][Bb][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_pipeline_trigger_token": {
+    "prefilter": "[Gg][Ll][Pp][Tt][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_oauth_application_secret": {
+    "prefilter": "[Gg][Ll][Oo][Aa][Ss\\u{17f}][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_scim_token": {
+    "prefilter": "[Gg][Ll][Ss\\u{17f}][Oo][Aa][Tt][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gitlab_service_token": {
+    "prefilter": "[Gg][Ll][AFIWafiw][F-GMTf-gmt][\\u{2d}CETcet][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.postgresql_connection_string": {
+    "prefilter": "[Pp][Oo][Ss\\u{17f}][Tt][Gg][Rr][Ee][Ss\\u{17f}][\\u{3a}Qq][\\u{2f}Ll][\\u{2f}\\u{3a}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.mysql_connection_string": {
+    "prefilter": "[Mm][Yy][Ss\\u{17f}][Qq][Ll][\\u{3a}][\\u{2f}][\\u{2f}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.mongodb_connection_string": {
+    "prefilter": "[Mm][Oo][Nn][Gg][Oo][Dd][Bb][\\u{2b}\\u{3a}][\\u{2f}Ss\\u{17f}][\\u{2f}Rr][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{3e}\\u{40}-\\u{10ffff}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.redis_connection_string": {
+    "prefilter": "[Rr][Ee][Dd][Ii][Ss\\u{17f}][\\u{3a}Ss\\u{17f}][\\u{2f}\\u{3a}][\\u{2f}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}][\\u{0}-\\u{8}\\u{b}\\u{e}-\\u{1f}\\u{21}-\\u{22}\\u{24}-\\u{2e}0-\\u{3e}\\u{40}-\\u{10ffff}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.aws_secret_key": {
+    "prefilter": "[ASas\\u{17f}][EWew][CScs\\u{17f}][R\\u{5f}r][ESes\\u{17f}][ETet][\\u{0}-\\u{9}\\u{b}-\\u{10ffff}][ACRacr][CEce][CETcet][ES\\u{5f}es\\u{17f}][ASas\\u{17f}][\\u{0}-\\u{9}\\u{b}-\\u{10ffff}][\\u{0}-\\u{9}\\u{b}-\\u{10ffff}][EKYeky\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{3a}\\u{3d}ESYesy\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{27}\\u{2b}\\u{2f}-\\u{3a}\\u{3d}A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.google_oauth_token": {
+    "prefilter": "[Yy][Aa][2][9][\\u{2e}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gcp_service_account_private_key_id": {
+    "prefilter": "[\\u{22}][Pp][Rr][Ii][Vv][Aa][Tt][Ee][\\u{5f}][Kk\\u{212a}][Ee][Yy][\\u{5f}][Ii][Dd][\\u{22}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{3a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}0-\\u{3a}A-Fa-f][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}0-\\u{3a}A-Fa-f][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}0-\\u{3a}A-Fa-f][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}0-\\u{3a}A-Fa-f][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}0-\\u{3a}A-Fa-f][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}0-\\u{3a}A-Fa-f]",
+    "maxLength": null
+  },
+  "pipelock.secrets.azure_storage_account_key": {
+    "prefilter": "[Aa][Cc][Cc][Oo][Uu][Nn][Tt][Kk\\u{212a}][Ee][Yy][\\u{3d}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": 99
+  },
+  "pipelock.secrets.azure_sas_token": {
+    "prefilter": "[Ss\\u{17f}][Ii][Gg][\\u{3d}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}][\\u{25}\\u{2b}\\u{2f}-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.slack_token": {
+    "prefilter": "[Xx][Oo][Xx][A-BPR-Sa-bpr-s\\u{17f}][\\u{2d}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.slack_app_token": {
+    "prefilter": "[Xx][Aa][Pp][Pp][\\u{2d}][0-9][\\u{2d}0-9][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.discord_bot_token": {
+    "prefilter": "[M-Nm][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][\\u{2e}0-9A-Za-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.twilio_api_key": {
+    "prefilter": "[Ss\\u{17f}][Kk\\u{212a}][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]",
+    "maxLength": 34
+  },
+  "pipelock.secrets.sendgrid_api_key": {
+    "prefilter": "[S][G][\\u{2e}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": 69
+  },
+  "pipelock.secrets.mailgun_api_key": {
+    "prefilter": "[Kk\\u{212a}][Ee][Yy][\\u{2d}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": 36
+  },
+  "pipelock.secrets.new_relic_api_key": {
+    "prefilter": "[Nn][Rr][Aa][Kk\\u{212a}][\\u{2d}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.hugging_face_token": {
+    "prefilter": "[Hh][Ff][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": 40
+  },
+  "pipelock.secrets.databricks_token": {
+    "prefilter": "[Dd][Aa][Pp][Ii][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]",
+    "maxLength": null
+  },
+  "pipelock.secrets.replicate_api_token": {
+    "prefilter": "[Rr][8][\\u{5f}][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]",
+    "maxLength": 43
+  },
+  "pipelock.secrets.together_ai_key": {
+    "prefilter": "[Tt][Oo][Kk\\u{212a}][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.pinecone_api_key": {
+    "prefilter": "[Pp][Cc][Ss\\u{17f}][Kk\\u{212a}][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.groq_api_key": {
+    "prefilter": "[Gg][Ss\\u{17f}][Kk\\u{212a}][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.xai_api_key": {
+    "prefilter": "[Xx][Aa][Ii][\\u{2d}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.digitalocean_token": {
+    "prefilter": "[Dd][Oo][Pp][\\u{5f}][Vv][1][\\u{5f}][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]",
+    "maxLength": 71
+  },
+  "pipelock.secrets.hashicorp_vault_token": {
+    "prefilter": "[Hh][Vv][Ss\\u{17f}][\\u{2e}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.vercel_token": {
+    "prefilter": "[Vv][CEce][AIKPRaikpr\\u{212a}][C\\u{5f}c][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.supabase_service_key": {
+    "prefilter": "[Ss\\u{17f}][Bb][\\u{5f}][Ss\\u{17f}][Ee][Cc][Rr][Ee][Tt][\\u{5f}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": 41
+  },
+  "pipelock.secrets.npm_token": {
+    "prefilter": "[Nn][Pp][Mm][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.pypi_token": {
+    "prefilter": "[Pp][Yy][Pp][Ii][\\u{2d}][Aa][Gg][Ee][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.linear_api_key": {
+    "prefilter": "[Ll][Ii][Nn][\\u{5f}][Aa][Pp][Ii][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.notion_api_key": {
+    "prefilter": "[Nn][Tt][Nn][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.sentry_auth_token": {
+    "prefilter": "[Ss\\u{17f}][Nn][Tt][Rr][Yy][Ss\\u{17f}][\\u{5f}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}][0-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.private_key_header": {
+    "prefilter": "[\\u{2d}][\\u{2d}][\\u{2d}][\\u{2d}][\\u{2d}][Bb][Ee][Gg][Ii][Nn][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}D-EO-PRd-eo-pr][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}C-EGO-PR-Sc-ego-pr-s\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EGIO-PR-Sac-egio-pr-s\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EGIN-PR-SVac-egin-pr-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EGIN-PR-SVac-egin-pr-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EGIN-PR-TVac-egin-pr-tv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EG-IN-PR-TVac-eg-in-pr-tv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EG-IN-PR-TVac-eg-in-pr-tv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EG-IKN-PR-TVac-eg-ikn-pr-tv\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EG-IKN-PR-TVac-eg-ikn-pr-tv\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}AC-EG-IKN-PR-TVYac-eg-ikn-pr-tvy\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{2d}AC-EG-IKN-PR-TVYac-eg-ikn-pr-tvy\\u{17f}\\u{212a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{2d}A-EG-IKN-PR-TVYa-eg-ikn-pr-tvy\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.jwt_token": {
+    "prefilter": "[e][wy][0AJko][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}-\\u{2e}0-9\\u{3d}A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.extended_private_key": {
+    "prefilter": "[TX-Ztx-z][Pp][Rr][Vv][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}][1-9A-Za-z\\u{17f}\\u{212a}]",
+    "maxLength": 112
+  },
+  "pipelock.secrets.ethereum_private_key": {
+    "prefilter": "[0][Xx][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]",
+    "maxLength": 66
+  },
+  "pipelock.secrets.social_security_number": {
+    "prefilter": "[0-9][0-9][0-9][\\u{2d}][0-9][0-9][\\u{2d}][0-9][0-9][0-9][0-9]",
+    "maxLength": 11
+  },
+  "pipelock.secrets.google_oauth_client_id": {
+    "prefilter": "[0-9][0-9][0-9][0-9][0-9][0-9][\\u{2d}0-9][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}][\\u{2d}0-9A-Z\\u{5f}a-z\\u{17f}\\u{212a}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.environment_variable_secret": {
+    "prefilter": "[A-Z][\\u{2d}0-9A-Z\\u{5f}][\\u{2d}0-9A-Z\\u{5f}][\\u{2d}0-9A-Z\\u{5f}][\\u{2d}0-9A-Z\\u{5f}][\\u{2d}0-9A-Z\\u{5f}][\\u{2d}0-9A-Z\\u{5f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{2d}0-9\\u{3d}A-Z\\u{5f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{2b}\\u{2d}-9\\u{3d}A-Z\\u{5f}a-z\\u{7e}\\u{17f}\\u{212a}][\\u{0}-\\u{10ffff}][\\u{0}-\\u{10ffff}][\\u{0}-\\u{10ffff}][\\u{0}-\\u{10ffff}][\\u{0}-\\u{10ffff}][\\u{0}-\\u{10ffff}][\\u{0}-\\u{10ffff}]",
+    "maxLength": null
+  },
+  "pipelock.secrets.gcp_service_account_key": {
+    "prefilter": "[\\u{22}][Tt][Yy][Pp][Ee][\\u{22}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{3a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}Ss\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ESes\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ER-Ser-s\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ER-SVer-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}EIR-SVeir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}CEIR-SVceir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}CEIR-SVceir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}CEIR-SV\\u{5f}ceir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIR-SV\\u{5f}aceir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIR-SV\\u{5f}aceir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIR-SV\\u{5f}aceir-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIOR-SV\\u{5f}aceior-sv\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIOR-SU-V\\u{5f}aceior-su-v\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIN-OR-SU-V\\u{5f}acein-or-su-v\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIN-OR-V\\u{5f}acein-or-v\\u{17f}][\\u{9}-\\u{a}\\u{c}-\\u{d}\\u{20}\\u{22}\\u{3a}ACEIN-OR-V\\u{5f}acein-or-v\\u{17f}]",
+    "maxLength": null
+  }
 } as const;
-
-export const GENERATED_PREFIX_START_CONTEXT = {
-  "pipelock.secrets.anthropic_api_key": 0,
-  "pipelock.secrets.openai_api_key": 0,
-  "pipelock.secrets.openai_service_key": 0,
-  "pipelock.secrets.fireworks_api_key": 0,
-  "pipelock.secrets.llm_router_api_key": 0,
-  "pipelock.secrets.answer_engine_api_key": 0,
-  "pipelock.secrets.web_research_api_key": 0,
-  "pipelock.secrets.google_api_key": 0,
-  "pipelock.secrets.google_oauth_client_secret": 0,
-  "pipelock.secrets.stripe_key": 0,
-  "pipelock.secrets.stripe_webhook_secret": 0,
-  "pipelock.secrets.github_token": 0,
-  "pipelock.secrets.github_fine_grained_pat": 0,
-  "pipelock.secrets.gitlab_pat": 0,
-  "pipelock.secrets.gitlab_deploy_token": 0,
-  "pipelock.secrets.gitlab_runner_token": 0,
-  "pipelock.secrets.gitlab_ci_job_token": 0,
-  "pipelock.secrets.gitlab_pipeline_trigger_token": 0,
-  "pipelock.secrets.gitlab_oauth_application_secret": 0,
-  "pipelock.secrets.gitlab_scim_token": 0,
-  "pipelock.secrets.gitlab_service_token": 0,
-  "pipelock.secrets.postgresql_connection_string": 0,
-  "pipelock.secrets.mysql_connection_string": 0,
-  "pipelock.secrets.mongodb_connection_string": 0,
-  "pipelock.secrets.redis_connection_string": 0,
-  "pipelock.secrets.aws_secret_key": 4,
-  "pipelock.secrets.google_oauth_token": 0,
-  "pipelock.secrets.gcp_service_account_private_key_id": 0,
-  "pipelock.secrets.azure_storage_account_key": 0,
-  "pipelock.secrets.azure_sas_token": 0,
-  "pipelock.secrets.slack_token": 0,
-  "pipelock.secrets.slack_app_token": 0,
-  "pipelock.secrets.discord_bot_token": 0,
-  "pipelock.secrets.twilio_api_key": 0,
-  "pipelock.secrets.sendgrid_api_key": 0,
-  "pipelock.secrets.mailgun_api_key": 0,
-  "pipelock.secrets.new_relic_api_key": 0,
-  "pipelock.secrets.hugging_face_token": 0,
-  "pipelock.secrets.databricks_token": 0,
-  "pipelock.secrets.replicate_api_token": 0,
-  "pipelock.secrets.together_ai_key": 0,
-  "pipelock.secrets.pinecone_api_key": 0,
-  "pipelock.secrets.groq_api_key": 0,
-  "pipelock.secrets.xai_api_key": 0,
-  "pipelock.secrets.digitalocean_token": 0,
-  "pipelock.secrets.hashicorp_vault_token": 0,
-  "pipelock.secrets.vercel_token": 0,
-  "pipelock.secrets.supabase_service_key": 0,
-  "pipelock.secrets.npm_token": 0,
-  "pipelock.secrets.pypi_token": 0,
-  "pipelock.secrets.linear_api_key": 0,
-  "pipelock.secrets.notion_api_key": 0,
-  "pipelock.secrets.sentry_auth_token": 0,
-  "pipelock.secrets.private_key_header": 0,
-  "pipelock.secrets.jwt_token": 0,
-  "pipelock.secrets.extended_private_key": 0,
-  "pipelock.secrets.ethereum_private_key": 0,
-  "pipelock.secrets.social_security_number": 3,
-  "pipelock.secrets.gcp_service_account_key": 0
-} as const;
-
-export const GENERATED_SPACE_RUN_SAFE_IDS = [
-  "pipelock.secrets.anthropic_api_key",
-  "pipelock.secrets.openai_api_key",
-  "pipelock.secrets.openai_service_key",
-  "pipelock.secrets.fireworks_api_key",
-  "pipelock.secrets.llm_router_api_key",
-  "pipelock.secrets.answer_engine_api_key",
-  "pipelock.secrets.web_research_api_key",
-  "pipelock.secrets.google_api_key",
-  "pipelock.secrets.google_oauth_client_secret",
-  "pipelock.secrets.stripe_key",
-  "pipelock.secrets.stripe_webhook_secret",
-  "pipelock.secrets.github_token",
-  "pipelock.secrets.github_fine_grained_pat",
-  "pipelock.secrets.gitlab_pat",
-  "pipelock.secrets.gitlab_deploy_token",
-  "pipelock.secrets.gitlab_runner_token",
-  "pipelock.secrets.gitlab_ci_job_token",
-  "pipelock.secrets.gitlab_pipeline_trigger_token",
-  "pipelock.secrets.gitlab_oauth_application_secret",
-  "pipelock.secrets.gitlab_scim_token",
-  "pipelock.secrets.gitlab_service_token",
-  "pipelock.secrets.postgresql_connection_string",
-  "pipelock.secrets.mysql_connection_string",
-  "pipelock.secrets.mongodb_connection_string",
-  "pipelock.secrets.redis_connection_string",
-  "pipelock.secrets.google_oauth_token",
-  "pipelock.secrets.gcp_service_account_private_key_id",
-  "pipelock.secrets.azure_storage_account_key",
-  "pipelock.secrets.azure_sas_token",
-  "pipelock.secrets.slack_token",
-  "pipelock.secrets.slack_app_token",
-  "pipelock.secrets.discord_bot_token",
-  "pipelock.secrets.twilio_api_key",
-  "pipelock.secrets.sendgrid_api_key",
-  "pipelock.secrets.mailgun_api_key",
-  "pipelock.secrets.new_relic_api_key",
-  "pipelock.secrets.hugging_face_token",
-  "pipelock.secrets.databricks_token",
-  "pipelock.secrets.replicate_api_token",
-  "pipelock.secrets.together_ai_key",
-  "pipelock.secrets.pinecone_api_key",
-  "pipelock.secrets.groq_api_key",
-  "pipelock.secrets.xai_api_key",
-  "pipelock.secrets.digitalocean_token",
-  "pipelock.secrets.hashicorp_vault_token",
-  "pipelock.secrets.vercel_token",
-  "pipelock.secrets.supabase_service_key",
-  "pipelock.secrets.npm_token",
-  "pipelock.secrets.pypi_token",
-  "pipelock.secrets.linear_api_key",
-  "pipelock.secrets.notion_api_key",
-  "pipelock.secrets.sentry_auth_token",
-  "pipelock.secrets.private_key_header",
-  "pipelock.secrets.jwt_token",
-  "pipelock.secrets.extended_private_key",
-  "pipelock.secrets.ethereum_private_key",
-  "pipelock.secrets.social_security_number",
-  "pipelock.secrets.google_oauth_client_id",
-  "pipelock.secrets.environment_variable_secret",
-  "pipelock.secrets.gcp_service_account_key"
-] as const;
 
 export const GENERATED_SECRET_RULES = [
   {
