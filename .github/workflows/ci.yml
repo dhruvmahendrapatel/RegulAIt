@@ -81,6 +81,21 @@ name: CI
 #     Vitest splits by file COUNT (SHA-1 of the path), not duration, so shards
 #     are uneven (locally 241 / 322 / 323 / 444 s of test time); that is why four
 #     and not three.
+#     RE-MEASURED 2026-10-10 evening: 16 green runs on PRs built against main
+#     after #301 (debf343), 38073616802 through 38089503492, 9 branches; two
+#     cancelled runs excluded. Job min / median / max (largest test step):
+#       build-and-test-base  2:50 / 3:56 / 4:24
+#       gateway shard 1      5:18 / 8:38 /  9:11  (6:48)
+#       gateway shard 2      6:11 / 9:14 /  9:39  (7:21)
+#       gateway shard 3      6:15 / 9:14 / 10:16  (7:43)
+#       gateway shard 4      6:20 / 9:34 / 10:49  (8:26)
+#       coverage 0:15–0:24; aggregate 0:02–0:04
+#     The afternoon figures hold: no shard passed the 12-min line that would
+#     call for a fifth shard, and shard 4 is still the slowest. Each 20-min
+#     shard cap has >= 9 min of headroom, and the base job's 20-min cap is
+#     ~4.5x its slowest run. The caps stay as they are pending the master's
+#     call on tightening them; the proposal (shards 15, base 10) is in the PR
+#     that recorded these numbers.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
 # cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
