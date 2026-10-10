@@ -915,7 +915,7 @@ as further amendments. They are recorded as entry conditions on the B1–B8 slic
 gets its own review against this ADR and those conditions. An amendment is added here only when a finding contradicts
 an accepted decision or needs an owner choice.
 
-### Entry conditions from review round 8
+### Entry conditions from review rounds 8–9
 
 - **B3, B5** (4237322631): request fulfilment is idempotent; `ai_bom_snapshots` carries the `request_id` of the
   `ai_bom_snapshot_requests` row it fulfils, UNIQUE, so a retried sweep cannot freeze one request twice.
@@ -928,6 +928,15 @@ an accepted decision or needs an owner choice.
   share one `expires_at` computed from the decision's audit timestamp, and R16's prune uses it.
 - **B4** (4237322624, see R39): the decision row's content binding stays `unverifiable` unless a commitment over only
   the permitted projection is defined; no raw preimage is ever exported.
+- **B1, B4** (4237344247): Decision BOM assembly and version allocation lock a row that exists for every decision:
+  the round-8 capture-status marker row (`SELECT … FOR UPDATE`), or, for a decision older than that marker, an
+  advisory lock keyed by the audit id. Two concurrent first requests then return the same frozen BOM.
+- **B2, B3** (4237344250): a decision made while an AI BOM request is queued for its subject records that request's id
+  in its facts, and assembly links the request's unique fulfilled snapshot (by `request_id`), never the last frozen
+  one or a later pick.
+- **B3** (4237344238): `model_cards.data_claims` is an arbitrary record, so the loader projects it to a typed safe
+  shape before signing: allowlisted keys only, scalar strings (length-capped), numbers and booleans; any nested
+  object or array, or unknown key, is refused, never copied.
 
 ## Open questions
 
