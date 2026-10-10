@@ -17,7 +17,7 @@ const base = { execution: EXEC, userId: USER, serverId: SERVER, toolGrants: [], 
 
 describe("ADR-0185 G3 — protocol surface in the kernel", () => {
   it("a direct read-only-all server grant does NOT allow a protocol read", () => {
-    const d = evaluate({
+    const d = evaluate({ actor: null,
       ...base,
       tool: resources,
       serverGrants: [{ id: "sg-1", userId: USER, serverId: SERVER, readOnlyAll: true }],
@@ -28,7 +28,7 @@ describe("ADR-0185 G3 — protocol surface in the kernel", () => {
   });
 
   it("a role read-only-all server grant does NOT allow a protocol read", () => {
-    const d = evaluate({
+    const d = evaluate({ actor: null,
       ...base,
       tool: resources,
       roleServerGrants: [{ id: "rsg-1", roleId: "r", serverId: SERVER, readOnlyAll: true }],
@@ -43,12 +43,12 @@ describe("ADR-0185 G3 — protocol surface in the kernel", () => {
       { serverId: SERVER, name: "get_time", kind: "read" } as ToolRef,
       { serverId: SERVER, name: "get_time", kind: "read", surface: "tool" } as ToolRef,
     ]) {
-      expect(evaluate({ ...base, tool, serverGrants: [sg] }).effect).toBe("allow");
+      expect(evaluate({ actor: null, ...base, tool, serverGrants: [sg] }).effect).toBe("allow");
     }
   });
 
   it("a grant BY NAME allows the protocol method", () => {
-    const d = evaluate({
+    const d = evaluate({ actor: null,
       ...base,
       tool: resources,
       toolGrants: [{ id: "tg-1", userId: USER, serverId: SERVER, toolName: "mcp:resources" }],
@@ -58,7 +58,7 @@ describe("ADR-0185 G3 — protocol surface in the kernel", () => {
   });
 
   it("a grant for one protocol name does not cover another", () => {
-    const d = evaluate({
+    const d = evaluate({ actor: null,
       ...base,
       tool: logging,
       toolGrants: [{ id: "tg-1", userId: USER, serverId: SERVER, toolName: "mcp:resources" }],
@@ -77,7 +77,7 @@ describe("ADR-0185 G3 — protocol surface in the kernel", () => {
       allowedValues: ["file:///public/readme.md"],
     };
     const decide = (uri: string) =>
-      evaluate({ ...base, tool: resources, toolGrants: [grant], dataScopeRules: [rule], args: { uri } });
+      evaluate({ actor: null, ...base, tool: resources, toolGrants: [grant], dataScopeRules: [rule], args: { uri } });
     expect(decide("file:///public/readme.md").effect).toBe("allow");
     expect(decide("file:///public/readme.md.bak").effect).toBe("deny");
     expect(decide("file:///public/README.md").effect).toBe("deny");

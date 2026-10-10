@@ -58,6 +58,10 @@ import {
   batch5SettingRelaxed,
   BATCH5_SETTING_KEYS,
   BATCH5_STRICT_DEFAULTS,
+  identitySettingLooser,
+  identitySettingRelaxed,
+  IDENTITY_SETTING_KEYS,
+  IDENTITY_STRICT_DEFAULTS,
   type UpdateOrgSettings,
 } from "@regulait/shared";
 
@@ -180,6 +184,12 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of BATCH5_SETTING_KEYS) {
     out[k] = rule(BATCH5_STRICT_DEFAULTS[k], (v) => batch5SettingRelaxed(k, v as never), (v, b) => batch5SettingLooser(k, v, b));
   }
+  // ADR-0188 (batch 6 item 1): sponsor-only mode, a longer token, a deeper chain and the nonce off are looser than
+  // the default; the auth-method list and the key age are judged against the stored value (adding a method back,
+  // lengthening a shortened key age)
+  for (const k of IDENTITY_SETTING_KEYS) {
+    out[k] = rule(IDENTITY_STRICT_DEFAULTS[k], (v) => identitySettingRelaxed(k, v as never), (v, b) => identitySettingLooser(k, v, b));
+  }
   return out;
 }
 
@@ -187,7 +197,8 @@ type BatchKey =
   | (typeof ACCOUNTABILITY_SETTING_KEYS)[number]
   | (typeof BATCH3_SETTING_KEYS)[number]
   | (typeof BATCH4_SETTING_KEYS)[number]
-  | (typeof BATCH5_SETTING_KEYS)[number];
+  | (typeof BATCH5_SETTING_KEYS)[number]
+  | (typeof IDENTITY_SETTING_KEYS)[number];
 
 /** THE REGISTRY (see the header). Typed over every writable key. */
 export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: StrictnessEntry } = {

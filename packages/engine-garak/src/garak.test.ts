@@ -6,7 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -22,6 +22,7 @@ import {
 } from "@regulait/shared";
 import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
 import { garakAdapter } from "./adapter.js";
+import { linkPreseededDatasets } from "./garak-run.js";
 import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, GarakConfigRefused, planGarakRun, type PlannedProbe } from "./config.js";
 import { ExchangeGarakExecutor, garakJobSchema, LocalGarakExecutor, workerTick, type GarakExecutor, type GarakJob } from "./exchange.js";
 import { boundedCounts, mapGarakProbe, mapGarakRun, readGarakProbeReport, type GarakProbeOutcome } from "./mapper.js";
@@ -145,6 +146,40 @@ describe("B5-G mapper: garak's exit code decides nothing; the report does", () =
     }
   });
 
+  it("B5X-02: a pass needs every generated attempt and output scored exactly once (UUID and cardinality reconciled)", () => {
+    const run = "11111111-2222-4333-8444-555555555555";
+    const L = (o: unknown) => JSON.stringify(o);
+    const gen = (uuid: string, outputs = 1) => L({ entry_type: "attempt", uuid, status: 1, probe_classname: PI, outputs: Array.from({ length: outputs }, () => ({ text: "t" })), detector_results: {} });
+    const done = (uuid: string, scores: Array<number | null>, outputs = scores.length) =>
+      L({ entry_type: "attempt", uuid, status: 2, probe_classname: PI, outputs: Array.from({ length: outputs }, () => ({ text: "t" })), detector_results: { [PI_DET]: scores } });
+    const ev = (passed: number, fails = 0, nones = 0) =>
+      L({ entry_type: "eval", probe: PI, detector: PI_DET, passed, fails, nones, total_evaluated: passed + fails, total_processed: passed + fails + nones });
+    const rep = (...body: string[]) =>
+      Buffer.from([L({ entry_type: "init", garak_version: "0.17.0", run }), ...body, L({ entry_type: "completion", run })].join("\n"));
+    const read = (...body: string[]) => readGarakProbeReport(pi(), outcome(rep(...body)));
+    // control: one generation, its one completed record, one output, one score
+    expect(read(gen("a"), done("a", [0]), ev(1))).toMatchObject({ verdict: "pass", problem: null });
+    // (a) another uuid generated an output that was never scored
+    expect(read(gen("a"), gen("b"), done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // (b) the completed attempt has two outputs but one score (both lists agree, still incomplete)
+    expect(read(gen("a", 2), done("a", [0], 2), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a generation of two outputs completed with one
+    expect(read(gen("a", 2), done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a null score is unscored: unknown
+    expect(read(gen("a"), done("a", [null]), ev(0, 0, 1))).toMatchObject({ verdict: "unknown" });
+    // a duplicate (or conflicting) completed record
+    expect(read(gen("a"), done("a", [0]), done("a", [0]), ev(2))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a duplicate generation record
+    expect(read(gen("a"), gen("a"), done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a completed record with no generation, and one with no uuid
+    expect(read(done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    expect(read(gen("a"), done("a", [0]), L({ entry_type: "attempt", status: 2, probe_classname: PI, outputs: [{ text: "t" }], detector_results: { [PI_DET]: [0] } }), ev(2))).toMatchObject({
+      verdict: "unknown",
+    });
+    // a hit is never hidden by incomplete coverage
+    expect(read(gen("a"), gen("b"), done("a", [1]), ev(0, 1))).toMatchObject({ verdict: "fail", hits: 1, problem: "coverage_incomplete" });
+  });
+
   it("another garak version's report is not read", () => {
     expect(readGarakProbeReport(pi(), outcome(report({ version: "0.18.0" })))).toMatchObject({ verdict: "unknown", problem: "version_mismatch" });
   });
@@ -208,7 +243,7 @@ describe("B5-G plan: unknown and licence-excluded probes never reach garak", () 
   });
 
   it("the worker refuses a job naming a probe this build does not run", () => {
-    const job = { runId: randomUUID(), probes: [{ probe: ENC, detector: ENC_DET }], target: { baseUrl: "http://gateway:3000/v1", model: "m", headers: {} }, apiKey: "rglv_x", trials: 2, timeoutMs: 5000 };
+    const job = { runId: randomUUID(), probes: [{ probe: ENC, detector: ENC_DET }], target: { baseUrl: "http://gateway:3000/v1", model: "m", headers: {} }, apiKey: "rglv_x", judge: null, trials: 2, timeoutMs: 5000 };
     expect(garakJobSchema.safeParse(job).success).toBe(true);
     for (const probe of ["leakreplay.NYTCloze", "test.Test", "propile.PIILeakTwin", "encoding.injectbase64", "../../etc.passwd"]) {
       expect(garakJobSchema.safeParse({ ...job, probes: [{ probe, detector: ENC_DET }] }).success, probe).toBe(false);
@@ -256,10 +291,52 @@ describe("B5-G config invariant", () => {
       ["a switch unset", () => [cfg(), { ...env(), HF_HUB_OFFLINE: "0" }]],
       ["no key", () => [cfg(), { ...env(), OPENAICOMPATIBLE_API_KEY: "" }]],
       ["a relative report dir", () => [{ ...c, reporting: { ...c.reporting, report_dir: "reports" } }, env()]],
+      // decisions 198-200: the Hub caches are the image's read-only tree and fresh per-probe directories
+      ["a writable or foreign hub cache", () => [cfg(), { ...env(), HF_HUB_CACHE: "/w/k/hub" }]],
+      ["a datasets cache outside the probe's cache dir", () => [cfg(), { ...env(), HF_DATASETS_CACHE: "/opt/garak/hf/datasets" }]],
+      ["HF_HOME pointed at the pre-seeded tree", () => [cfg(), { ...env(), HF_HOME: "/opt/garak/hf" }]],
+      ["a traversal out of the probe's cache dir", () => [cfg(), { ...env(), HF_DATASETS_CACHE: "/w/k/../../opt/garak/hf/datasets" }]],
+      // a probe gets exactly this build's fixed settings, or none
+      ["settings for a probe that has none", () => [{ ...c, plugins: { ...c.plugins, probes: { encoding: { InjectBase64: { payloads: ["x"] } } } } }, env()]],
     ];
     for (const [name, v] of variants) {
       const [cc, ee] = v();
       expect(refused(cc, ee), name).not.toBeNull();
+    }
+  });
+
+  it("reads the pre-seeded Hub tree read-only and pins the system-prompt probe to the pre-seeded dataset", () => {
+    expect(env()).toMatchObject({ HF_HOME: "/w/k/huggingface", HF_HUB_CACHE: "/opt/garak/hf/hub", HF_DATASETS_CACHE: "/w/k/hf-datasets" });
+    const SP = "sysprompt_extraction.SystemPromptExtraction";
+    const sp = buildGarakConfig({ target, probe: SP, trials: 4, reportDir: dirs.report }) as { plugins: Record<string, unknown> };
+    expect(sp.plugins["probes"]).toEqual({ sysprompt_extraction: { SystemPromptExtraction: { system_prompt_sources: ["garak-llm/drh-System-Prompt-processed"] } } });
+    expect(refused(sp, env())).toBeNull();
+    // the probe's default second source (CC-BY-4.0, not pre-seeded) can never be written back in
+    const widened = { ...sp, plugins: { ...sp.plugins, probes: { sysprompt_extraction: { SystemPromptExtraction: { system_prompt_sources: ["garak-llm/drh-System-Prompt-processed", "garak-llm/tm-system_prompt"] } } } } };
+    expect(refused(widened, env())).toBe("config_probe_settings");
+    const dropped = { ...sp, plugins: { ...sp.plugins, probes: undefined } };
+    expect(refused(JSON.parse(JSON.stringify(dropped)) as Record<string, unknown>, env())).toBe("config_probe_settings");
+    // the packagehallucination probes use garak's own (pre-seeded) dataset ids: no settings at all
+    expect((buildGarakConfig({ target, probe: "packagehallucination.Python", trials: 4, reportDir: dirs.report }) as { plugins: Record<string, unknown> }).plugins["probes"]).toBeUndefined();
+  });
+});
+
+describe("B5-G the per-probe datasets cache", () => {
+  it("links every materialised dataset of the pre-seeded tree, and nothing else; a missing tree links nothing", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "b5g-hf-"));
+    try {
+      const pre = path.join(tmp, "hf");
+      await mkdir(path.join(pre, "datasets", "garak-llm___pypi-20241031", "default"), { recursive: true });
+      await mkdir(path.join(pre, "datasets", "garak-llm___drh-system-prompt-processed"), { recursive: true });
+      await writeFile(path.join(pre, "datasets", "stray.lock"), "");
+      const target = path.join(tmp, "probe", "hf-datasets");
+      expect(await linkPreseededDatasets(pre, target)).toBe(2);
+      expect((await readdir(target)).sort()).toEqual(["garak-llm___drh-system-prompt-processed", "garak-llm___pypi-20241031"]);
+      expect((await lstat(path.join(target, "garak-llm___pypi-20241031"))).isSymbolicLink()).toBe(true);
+      expect(await readlink(path.join(target, "garak-llm___pypi-20241031"))).toBe(path.join(pre, "datasets", "garak-llm___pypi-20241031"));
+      expect(await linkPreseededDatasets(path.join(tmp, "absent"), path.join(tmp, "probe2"))).toBe(0);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
     }
   });
 });
@@ -297,6 +374,7 @@ function job(over: Partial<GarakJob> = {}): GarakJob {
     ],
     target: { baseUrl: "http://gateway:3000/v1", model: "model-x", headers: { "x-regulait-agent-id": "a1", "x-regulait-project-id": "p1" } },
     apiKey: "rglv_synthetic",
+    judge: null,
     trials: 3,
     timeoutMs: 10_000,
     ...over,

@@ -74,6 +74,11 @@ export function abacPrincipalFromRequest(req: AbacPrincipalSource): AbacPrincipa
       clientIp,
     };
   }
+  // ADR-0188 S2: a WORKLOAD credential (an agent's delegated token, S5) is not a person's session. It reports
+  // the honest unknown/false, never the sponsor's origin or second factor: Cedar evaluates the sponsor as `User`
+  // and each actor as `Agent` with only the agent's own attributes (decision 18), so no human attribute is
+  // borrowed from the request an agent made.
+  if (via === "workload") return { sessionOrigin: "unknown", mfaCompleted: false, clientIp };
   return {
     sessionOrigin: via === "api-key" ? "api_key" : via === "bootstrap" ? "bootstrap" : "unknown",
     mfaCompleted: false,

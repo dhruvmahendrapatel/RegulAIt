@@ -67,10 +67,16 @@ export const ABAC_DEFAULT_TIMEZONE = "UTC";
  * arrival of v2; it simply keeps meaning what it meant. That is the entire
  * reason this field is versioned rather than global.
  */
-export type AbacSchemaVersion = "v1" | "v2" | "v3";
-export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2", "v3"];
-/** ADR-0182 A14: new policies are stamped v3, so `principal.aiTrainingCurrent` is reachable */
-export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v3";
+export type AbacSchemaVersion = "v1" | "v2" | "v3" | "v4";
+export const ABAC_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v1", "v2", "v3", "v4"];
+/**
+ * ADR-0188 S2 (decision 18; ruling of 2026-10-10): new policies are stamped v4, so an author can write about
+ * agent principals and the delegation chain. v1–v3 policies keep evaluating for the human sponsor, unchanged.
+ * (ADR-0182 A14 first stamped v3, which made `principal.aiTrainingCurrent` reachable; v4 keeps it for `User`.)
+ */
+export const ABAC_CURRENT_SCHEMA_VERSION: AbacSchemaVersion = "v4";
+/** ADR-0188 decision 18: the only schema versions an `Agent` principal is evaluated against */
+export const ABAC_AGENT_SCHEMA_VERSIONS: readonly AbacSchemaVersion[] = ["v4"];
 
 /**
  * v1 of the Cedar schema. It is code, not data, on purpose: the attributes a
@@ -234,11 +240,62 @@ const SCHEMA_V3 = (() => {
   return base;
 })();
 
-const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2, v3: SCHEMA_V3 };
+/**
+ * ADR-0188 S2 (decision 18) — v4 = v3 plus AGENT PRINCIPALS and the delegation chain.
+ *
+ *  - a new entity type `Agent` with ONLY its own attributes: `kind` (agent | builder_agent | engine_runner |
+ *    worker_runtime | pdp), `identifier` (its SPIFFE ID), `environments` (where it may act), `stewards` (the
+ *    user ids answerable for it) and an optional `autonomyClass` (a builder agent's declared ADR-0180 A8 class;
+ *    absent for every other kind, so a policy must guard it with `has`). The human's `isAdmin`, `mfaCompleted`,
+ *    `sessionOrigin`, `aiTrainingCurrent`, roles and teams are NEVER on it: an agent does not inherit a
+ *    person's attributes any more than it inherits their grants;
+ *  - `McpToolCall` accepts `User` or `Agent` as principal. The sponsor is evaluated as `User` (as under v1–v3);
+ *    each actor of a delegation chain is evaluated as `Agent`, against v4 policies only;
+ *  - two REQUIRED context attributes: `actorChain` (the identity ids of the chain; a Cedar Set, so a policy asks
+ *    membership, not position) and `delegationDepth` (the hop count, 0 for a person acting directly —
+ *    ADR-0188 decision 26). So "forbid writes when `context.delegationDepth > 1`" is one line.
+ *
+ * WHAT AN AUTHOR MUST NOW WRITE. Because `principal` may be an `Agent`, strict validation refuses a v4 policy
+ * that reads a person-only attribute (`principal.isAdmin`) without first narrowing with
+ * `principal is RegulAIt::User`, and agent-only attributes without `principal is RegulAIt::Agent`. That is
+ * deliberate: an unscoped policy applies to both, and a policy that silently never matched an agent would be
+ * the AER-036 mistake again. `validate` adds help text that says exactly this.
+ */
+const SCHEMA_V4 = (() => {
+  const base = structuredClone(SCHEMA_V3) as typeof SCHEMA_V3;
+  const ns = base[ABAC_NAMESPACE] as unknown as {
+    entityTypes: Record<string, unknown>;
+    actions: Record<string, { appliesTo: { principalTypes: string[]; context: { attributes: Record<string, unknown> } } }>;
+  };
+  ns.entityTypes.Agent = {
+    shape: {
+      type: "Record" as const,
+      attributes: {
+        kind: { type: "String" as const },
+        identifier: { type: "String" as const },
+        environments: { type: "Set" as const, element: { type: "String" as const } },
+        stewards: { type: "Set" as const, element: { type: "String" as const } },
+        autonomyClass: { type: "String" as const, required: false },
+      },
+    },
+  };
+  const action = ns.actions[ABAC_ACTION]!;
+  action.appliesTo.principalTypes = ["User", "Agent"];
+  action.appliesTo.context.attributes.actorChain = { type: "Set" as const, element: { type: "String" as const } };
+  action.appliesTo.context.attributes.delegationDepth = { type: "Long" as const };
+  return base;
+})();
+
+const SCHEMAS: Record<AbacSchemaVersion, unknown> = { v1: SCHEMA_V1, v2: SCHEMA_V2, v3: SCHEMA_V3, v4: SCHEMA_V4 };
 
 /** does this schema version carry `principal.aiTrainingCurrent`? (v3 and later) */
 function hasAiTrainingAttribute(schemaVersion: string): boolean {
   return schemaVersion !== "v1" && schemaVersion !== "v2";
+}
+
+/** does this schema version carry the `Agent` principal and the delegation context? (v4 and later) */
+export function hasAgentPrincipal(schemaVersion: string): boolean {
+  return (ABAC_AGENT_SCHEMA_VERSIONS as readonly string[]).includes(schemaVersion);
 }
 
 export function abacSchema(version: string): unknown | null {
@@ -321,8 +378,37 @@ export interface AbacContextAttrs {
   clientIp?: string | null | undefined;
 }
 
+/**
+ * ADR-0188 S2 — an `Agent` principal's attributes (schema v4). Only its own: see SCHEMA_V4.
+ */
+export interface AbacAgentAttrs {
+  /** the workload identity id — the Cedar entity id, and what `context.actorChain` holds */
+  id: string;
+  kind: string;
+  identifier: string;
+  environments: readonly string[];
+  stewards: readonly string[];
+  autonomyClass?: string | null | undefined;
+}
+
+/** ADR-0188 S2 — the delegation facts every v4 evaluation carries in its context */
+export interface AbacDelegationContext {
+  /** identity ids, root first (decision 25) */
+  actorChain: readonly string[];
+  /** hop count (decision 26): 0 for a person acting directly */
+  delegationDepth: number;
+}
+
 export interface AbacRequest {
   principal: AbacPrincipalAttrs;
+  /**
+   * ADR-0188 S2 (decision 18): when set, THIS request is evaluated with the `Agent` as principal, against v4
+   * policies only, and the sponsor's attributes are not part of it at all. Absent = the sponsor as `User`,
+   * against every version, exactly as before.
+   */
+  agent?: AbacAgentAttrs | null | undefined;
+  /** v4 context; absent = no chain (`actorChain` empty, `delegationDepth` 0). Never reaches a v1–v3 group. */
+  delegation?: AbacDelegationContext | null | undefined;
   resource: AbacResourceAttrs;
   context: AbacContextAttrs;
   /** the instant to evaluate time-of-day at; defaults to now */
@@ -431,19 +517,7 @@ function compact(attrs: Record<string, unknown>): Record<string, cedar.CedarValu
  */
 function entitiesFor(req: AbacRequest, schemaVersion: string): cedar.Entities {
   return [
-    {
-      uid: entityUid("User", req.principal.id),
-      attrs: compact({
-        roles: [...req.principal.roles],
-        roleIds: [...req.principal.roleIds],
-        teams: [...req.principal.teams],
-        isAdmin: req.principal.isAdmin,
-        sessionOrigin: req.principal.sessionOrigin,
-        mfaCompleted: req.principal.mfaCompleted,
-        ...(hasAiTrainingAttribute(schemaVersion) ? { aiTrainingCurrent: req.principal.aiTrainingCurrent === true } : {}),
-      }),
-      parents: [],
-    },
+    principalEntity(req, schemaVersion),
     {
       uid: entityUid("Tool", req.resource.id),
       attrs: compact({
@@ -460,6 +534,37 @@ function entitiesFor(req: AbacRequest, schemaVersion: string): cedar.Entities {
       parents: [],
     },
   ];
+}
+
+/** the principal's entity: the `Agent` when the request names one (v4), otherwise the sponsor as `User` */
+function principalEntity(req: AbacRequest, schemaVersion: string): cedar.EntityJson {
+  if (req.agent) {
+    return {
+      uid: entityUid("Agent", req.agent.id),
+      // ONLY the agent's own attributes (decision 18) — nothing of the human is copied here
+      attrs: compact({
+        kind: req.agent.kind,
+        identifier: req.agent.identifier,
+        environments: [...req.agent.environments],
+        stewards: [...req.agent.stewards],
+        autonomyClass: req.agent.autonomyClass,
+      }),
+      parents: [],
+    };
+  }
+  return {
+    uid: entityUid("User", req.principal.id),
+    attrs: compact({
+      roles: [...req.principal.roles],
+      roleIds: [...req.principal.roleIds],
+      teams: [...req.principal.teams],
+      isAdmin: req.principal.isAdmin,
+      sessionOrigin: req.principal.sessionOrigin,
+      mfaCompleted: req.principal.mfaCompleted,
+      ...(hasAiTrainingAttribute(schemaVersion) ? { aiTrainingCurrent: req.principal.aiTrainingCurrent === true } : {}),
+    }),
+    parents: [],
+  };
 }
 
 /**
@@ -526,7 +631,37 @@ function contextFor(req: AbacRequest, timezone: string, schemaVersion: string): 
   if (schemaVersion !== "v1" && typeof ip === "string" && isLiteralIpAddress(ip)) {
     ctx.clientIp = { __extn: { fn: "ip", arg: ip } };
   }
+  // ADR-0188 S2: v4 groups only — an undeclared context attribute would fail a v1–v3 request closed
+  if (hasAgentPrincipal(schemaVersion)) {
+    ctx.actorChain = [...(req.delegation?.actorChain ?? [])];
+    ctx.delegationDepth = Math.max(0, Math.trunc(req.delegation?.delegationDepth ?? 0));
+  }
   return ctx;
+}
+
+/**
+ * ADR-0188 S2 — the editor's help for the one new way a v4 policy fails validation. Under v4 an unscoped
+ * `principal` may be a `User` OR an `Agent`, so a policy that reads an attribute only one of them has is refused.
+ * Cedar's own message names the attribute; this says what to write instead. Shown by the admin editor, which
+ * already renders `help` under each validation error.
+ */
+export const ABAC_V4_PRINCIPAL_HELP =
+  "Schema v4: `principal` may be a person (RegulAIt::User) or an agent (RegulAIt::Agent), and each has only its " +
+  "own attributes. Narrow the policy with `principal is RegulAIt::User` to use person attributes (isAdmin, " +
+  "mfaCompleted, sessionOrigin, roles, roleIds, teams, aiTrainingCurrent), or with `principal is RegulAIt::Agent` " +
+  "to use agent attributes (kind, identifier, environments, stewards, autonomyClass). Leave it unscoped only to " +
+  "write about resource or context attributes, which apply to both.";
+const PRINCIPAL_ONLY_ATTRIBUTES = [
+  "roles", "roleIds", "teams", "isAdmin", "sessionOrigin", "mfaCompleted", "aiTrainingCurrent",
+  "kind", "identifier", "environments", "stewards", "autonomyClass",
+];
+function withV4Help(issue: AbacValidationIssue, schemaVersion: string): AbacValidationIssue {
+  if (!hasAgentPrincipal(schemaVersion)) return issue;
+  const m = issue.message;
+  const aboutPrincipal =
+    /RegulAIt::(User|Agent)/.test(m) || PRINCIPAL_ONLY_ATTRIBUTES.some((a) => m.includes(`\`${a}\``));
+  if (!aboutPrincipal) return issue;
+  return { message: m, help: issue.help ? `${issue.help} ${ABAC_V4_PRINCIPAL_HELP}` : ABAC_V4_PRINCIPAL_HELP };
 }
 
 class CedarAbacEngine implements AbacEngine {
@@ -612,7 +747,7 @@ class CedarAbacEngine implements AbacEngine {
     if (answer.validationErrors.length > 0) {
       return {
         ok: false,
-        errors: answer.validationErrors.map((e) => detail(e.error)),
+        errors: answer.validationErrors.map((e) => withV4Help(detail(e.error), schemaVersion)),
         warnings: answer.validationWarnings.map((w) => detail(w.error)),
       };
     }
@@ -626,7 +761,10 @@ class CedarAbacEngine implements AbacEngine {
     return { ok: true, errors: [], warnings };
   }
 
-  evaluate(policies: readonly AbacPolicy[], request: AbacRequest): AbacDecision {
+  evaluate(allPolicies: readonly AbacPolicy[], request: AbacRequest): AbacDecision {
+    // ADR-0188 decision 18: an `Agent` is evaluated against v4 policies ONLY. Legacy v1–v3 policies were written
+    // for people and are never run for an agent; with no v4 policy, agent evaluation is neutral (grants decide).
+    const policies = request.agent ? allPolicies.filter((p) => hasAgentPrincipal(p.schemaVersion)) : allPolicies;
     if (policies.length === 0) return { effect: "permit" };
 
     // Group by DECLARED timezone: each group is evaluated against its own
@@ -655,7 +793,7 @@ class CedarAbacEngine implements AbacEngine {
         const staticPolicies: Record<string, string> = {};
         for (const p of subset) staticPolicies[p.id] = p.source;
         const answer = cedar.isAuthorized({
-          principal: entityUid("User", request.principal.id),
+          principal: request.agent ? entityUid("Agent", request.agent.id) : entityUid("User", request.principal.id),
           action: { type: `${ABAC_NAMESPACE}::Action`, id: ABAC_ACTION },
           resource: entityUid("Tool", request.resource.id),
           context: contextFor(request, tz, schemaVersion),
@@ -682,6 +820,17 @@ class CedarAbacEngine implements AbacEngine {
         // means nothing matched at all. That distinction is what keeps a
         // `permit`-less policy set from denying everything.
         const { decision, diagnostics } = answer.response;
+        // ADR-0188 S2 (decision 18): a v4 group that hits an evaluation error refuses the call (fail closed).
+        // Cedar skips an erroring policy and reports it here, which would otherwise read as "nothing matched".
+        // Scoped to v4 so every v1–v3 decision stays exactly what it was.
+        if (hasAgentPrincipal(schemaVersion) && diagnostics.errors.length > 0) {
+          return {
+            effect: "forbid",
+            policyId: "abac-engine-error",
+            policyName: null,
+            reason: `ABAC evaluation failed: ${diagnostics.errors.map((e) => `${e.policyId}: ${e.error.message}`).join("; ")}`,
+          };
+        }
         if (decision !== "deny" || diagnostics.reason.length === 0) continue;
         const hit = new Set(diagnostics.reason);
         for (const p of subset) if (hit.has(p.id)) matched.push(p);

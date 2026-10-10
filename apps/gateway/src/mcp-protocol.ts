@@ -332,6 +332,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       undefined,
       undefined,
       approvalTargetForServer(serverId, serverRow),
+      { actor: null }, // ADR-0188 S4 replaces
     );
   await db.insert(auditLog).values({
     userId,
@@ -669,6 +670,7 @@ async function loggingRelayAllowed(
     undefined,
     undefined,
     approvalTargetForServer(a.serverId, a.serverRow),
+    { actor: null }, // ADR-0188 S4 replaces
   );
   await db.insert(auditLog).values({
     userId: a.userId,

@@ -1,0 +1,2 @@
+unshare: unshare failed: Operation not permitted
+exit=1

@@ -1,0 +1,8 @@
+{"mode": "mem", "progress_mib": 32}
+{"mode": "mem", "progress_mib": 64}
+{"mode": "mem", "progress_mib": 96}
+{"mode": "mem", "progress_mib": 128}
+{"mode": "mem", "progress_mib": 160}
+{"mode": "mem", "progress_mib": 192}
+{"mode": "mem", "progress_mib": 224}
+exit=137 wall_s=2.03

@@ -1,3 +1,153 @@
+## X32 — ADR-0188 S0 identity-library spike (2026-10-10 04:17 UTC)
+
+**GO for the library choice in OWNER DECISION2**, with the owned wrappers and integration requirements in `docs/research/R11-identity-s0-spike.md`. Reproducible throwaway code lives under `spikes/identity-s0/`, excluded from workspace packages/builds; product gateway/shared/db/config were not edited. Baseline1f6cc6b5.
+
+- `S0_DATABASE_URL=<local Postgres> npm --prefix spikes/identity-s0 test`: **60/60 PASS**, zero skipped, after clean scratch-DB teardown (17.9s); exact output retained in `spikes/identity-s0/evidence/test-output.txt`. Actual gateway hooks, real PostgreSQL, actual TLS and **two independent OS-process replicas** tested. Ordinary Postgres upsert control reproduces `[true,true]`; atomic assertion/AS/RS races each have one winner and mapped refusals. Later failures/timeouts retain claims.
+- Parent child/body/key checks now run in the provider's public assertion-validation hook **before its first client-assertion claim**; a custom grant alone is too late. Altered body/output-key negatives prove neither assertion nor delegation-authorization claim was consumed. Genuine retry, child binding, nested actor rebuilding, parent revocation, ES256/EdDSA client authentication and nonce challenge across replicas pass.
+- Real existing auth, session-CSRF, admin route class, body limit, Postgres rate limit, timeout and chained audit controls pass. The synthetic bootstrap transport bridge is explicit: S5 must install actual workload-route admission; these results do not claim current product acceptance of external workload tokens. Fixture scope/budget tables are not the S3 kernel.
+- Offline PKIJS validates actual certificates, uploaded intermediate and SPIFFE profile; unknown/expired/future/wrong-domain/CA/usage/SAN negatives refuse. Actual Node HTTPS requires and validates its peer certificate. mTLS binding and JWT-SVID local-key checks pass; proxy tests use injected trusted transport facts, not deployed proxy claims.
+- `npm --prefix spikes/identity-s0 run licences`: **109 runtime packages**,95MIT/7BSD-3-Clause/6ISC/1zero-clauseBSD, exact lock/inventory/notice hashes PASS. Full texts and provider bundled-code notices preserved. Isolated exact-lock `npm audit --omit=dev --json`: **0 advisories**; receipt retained. Abstract-logging's linked body403 is documented with the same publisher service's pinned primary MIT template/author profile supplying its notice.
+- `pnpm --filter '@regulait/gateway...' build`, `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build`: **PASS**. Final JS syntax checks and `git diff --check` PASS. Earlier fixture parser/algorithm/future-time/forced-teardown errors were corrected; the 60-case final clean run is the passing evidence, not those attempts.
+
+Claude: adopt the approved exact closure/notices in your product lockfile, retain the pre-claim hook order contract, and carry the owned HMAC/freshness DPoP profile into S5 (the provider's built-in HKDF nonce profile differs). S1–S5 integration, current per-actor grant/entitlement checks, RFC8785 full canonicalization, edge-budget/charge semantics, audit-v2 cutover and suite PF-02 confirmation remain their assigned gates. No jose fallback is required by the measured S0 result.
+
+## X30 final returned-fix recheck: B5W-08/09 — 2026-10-10 UTC
+
+Independently reviewed PR #240 at `ce08a3922598a6a485370c3ac591272762aaa54b`, including the announced fix `9d3e15f48091db4669db07aa953a3a9bbe7dcb37`. **B5W-08 and B5W-09 are addressed in this reviewed scope.** This supersedes their older OPEN entries below; Claude retains official VERIFIED and merge ownership.
+
+The original independent object-severity crash and unread-setting lifetime/date negatives now pass. Array and unknown-string severity controls also remain readable, use fixed “unknown severity” wording and never render the synthetic untrusted marker. An unsafe verdict remains Unsafe, as adjudicated, rather than being downgraded to inconclusive. Failed settings reads report the actual retention period and deletion date as unknown; the strict default is identified separately. Successful settings reads still show their measured lifetime/date. Earlier cited-run and pre-aborted-upload independent controls also pass.
+
+Validation on the reviewed source:
+- `pnpm --filter @regulait/shared build` — PASS.
+- `pnpm --filter @regulait/web test` — **486/486 PASS**, 54 files.
+- `pnpm --filter @regulait/web build` — fresh TypeScript check and production build PASS.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts zz-x28-model-artifacts.mock.spec.ts x30-artifacts-independent.mock.spec.ts` — **26/26 PASS**, 19 original and seven independent cases, zero skipped, 2.2 minutes. Includes the original malformed-severity axe check, deletion confirmation/step-up, in-use refusal, upload/error/cancel and model-card evidence controls.
+
+Logs: `/tmp/oct10-x30-artifacts-final-{shared,units,build,browser}.log`. Screenshot: `/workspace/.regulait-onboarding/g11-followup/apps/web/test-results/x30-artifacts-independent.-f130c-ed-unknown-severity-wording/unsafe-unknown-severity.png`. The first browser cases overlapped another agent's Vite build because I started before its explicit completion message; the complete run passed, and further CPU work was held. No live model scan, production deployment or full CI claim. New work changes only this review ledger and retained independent mock regressions; no additional product fix. Attachment service did not complete within the attempted wait and was stopped; PR URLs remain in the handoff.
+
+## X29 returned Garak / Promptfoo fixes — independent recheck, 2026-10-10 UTC
+
+Reviewed PR #242's returned B5X-02/B5X-03 fixes at merged main `20e11eeb8ca37959e05bff7f02c1e62e6e39cf19` (original fix `7adbb97b`; PR's final source head `da3e459`). **B5X-02 and B5X-03 are independently resolved; no new finding.** This is review evidence only; no product code or ownership change.
+
+**B5X-02:** the mapper now reconciles generated status-1 and scored terminal status-2 records by UUID, output cardinality and exactly one terminal per generation. Every output requires a score. Missing generations/terminals, duplicates and conflicting lengths cannot pass; a measured hit remains fail despite other incomplete evidence. Independent probes use a correctly paired pinned-0.17.0 report as the positive control, rather than the previous review helper that omitted status-1 records. Ten probes PASS: paired pass, unmatched generated UUID, two outputs/one score, terminal without generation, duplicate generation, duplicate terminal, changed terminal output count, absent terminal/completion, hit plus an unmatched generation, and conflicting terminal plus missing completion. Against `git show 7adbb97b^:packages/engine-garak/src/mapper.ts`, seven probes fail: six defects return pass and the hit-with-incomplete-coverage retains fail but omits the new coverage problem. Three controls still pass. The fixed source was restored before final validation; no mutation is committed.
+
+**B5X-03:** cancellation is sent after the fake generation function signals entry, rather than after an assumed 20 ms scheduling interval. A distinct test proves cancellation before generation starts produces no start or result. An independent delayed run adds 80 ms before invoking the adapter and another 80 ms before fake generation entry: the fixed entry-bound cancellation still aborts generation, never starts evaluation and posts nothing (2/2 PASS including early cancellation). The old delayed-adapter test genuinely fails with `aborted=false`, because legitimate early cancellation prevented generation entry; that was a test synchronization defect, not evidence that the production adapter ignored cancellation.
+
+Validation (all commands use the onboarding activation helper; frozen install PASS):
+
+- `pnpm --filter @regulait/engine-garak test`: 31 PASS, four real-upstream opt-in SKIP.
+- `pnpm --filter @regulait/engine-promptfoo test`: 41 PASS, five real-upstream opt-in SKIP.
+- Independent Garak probes: 10/10 PASS; pre-fix mutation: 7 FAIL / 3 PASS as described above.
+- Delayed entry cancellation / early cancel: 2/2 PASS; old delayed proof: 1 genuine FAIL.
+- `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_garak_final_oct10 pnpm --filter @regulait/gateway test zz-b5-garak.test.ts`: 7/7 actual PostgreSQL/gateway PASS, real runner protocol/step-up/admission/budget with synthetic worker executor. Only this disposable database was created and dropped; no base database reset.
+- Engine dependency closure builds, both engine typechecks and gateway dependency closure build PASS. `git diff --check` PASS.
+
+Local retained evidence: `/tmp/oct10-garak-final-{install,build,clean-tests,typecheck,gateway-build,gateway}.log`, `/tmp/oct10-promptfoo-final-{build,clean-tests,typecheck}.log`, `/tmp/oct10-garak-independent-{green,red}.log`, `/tmp/oct10-promptfoo-delayed-{green,red}.log`; temporary independent probes preserved in `/tmp/oct10-garak-final-probes/` and removed from the source checkout. The review does not rerun or freshly claim prior Docker/upstream checks, deployed egress isolation, live cloud models or the unmeasured public-egress positive control. The four/five opt-in tests remain explicit skips.
+
+## X36 real Batch 5 browser sweep — 2026-10-10 UTC
+
+**READY-FOR-REVIEW for states reachable on the shipped unbuilt-engine install.**
+Reviewed main `20e11eeb` with a real PostgreSQL scratch database
+`regulait_review_x36_oct10`, gateway on127.0.0.1:3147, built SPA and filesystem
+artifact store `/tmp/oct10-x36-model-artifacts`. No HTTP mocks and no external
+model calls. Frozen install, gateway dependency closure and production web build
+PASS. `demo:prepare` created its fixtures and reached demo:check; that check first
+reported18 PASS/1 FAIL because this scratch environment had no deployment export
+signing key. After the documented demo-only key generation in
+`/tmp/oct10-x36-export-keys`, the same database's final `demo:check` passed19/19.
+This is not a claim that the initial command exited successfully.
+
+**3/3 Chromium journeys PASS in the final combined run (1.8 minutes).**
+All three engines are off with no image digest and the page says Off — not built.
+Actual enable returns409 `engine_self_test_required`; actual self-test states that
+no live runner exists. Confirmation and keyboard focus trapping/return are checked.
+Red-teaming and Evaluations show no enabled engine and no runs, with no verdict
+badge; a real404 selected run is unavailable, never passed. Actual synthetic-file
+upload returns201 `format:unrecognised`; it stays Not scanned / Not admissible,
+modelscan's start button is disabled, a direct start request is409 `engine_disabled`
+and the recorded scans remain empty. Raw synthetic file bytes never enter the DOM.
+The execution kill switch confirms an audited reason; restoring normal mode opens
+the real identity step-up dialog and the gateway stays halted until an actual TOTP
+verification authorizes the retried change. The final mode is normal.
+
+**14 axe analyses PASS** (seven surfaces in light/dark) and keyboard actions cover
+enabling/refusal, self-test, opening artifact detail/upload and halt/resume. Choosing
+the local file uses Playwright's native file input fixture. No page exception or
+unexpected console error after sign-in. Chromium's deliberately generated
+403/404/409/501 resource refusals are separately asserted; the unauthenticated
+sign-in401 precedes the reviewed pages and is outside the page error collection.
+
+Limits: an unbuilt/off install cannot admit a runner, a successful enabled run,
+runner revocation or an approval-waiting engine run. Thus no actual runner-revoke,
+not_run/unknown **completed run**, approval or kill-during-live-run claim is made.
+Unrecognised format and a never-scanned artifact are distinct from a measured
+unknown scan. The existing mock/unit tests pin those remaining rendering branches;
+a real runner acceptance sweep remains a gate when its image is enabled. PR#240's
+artifact delete/retention changes were not merged at this main SHA, so those belong
+to the separately assigned returned-fix review. No new production defect found in
+the reachable states; Claude retains VERIFIED and merge authority.
+
+Initial harness corrections: collect console errors after the real login's expected
+401; use the gateway's actual unrecognised vocabulary; avoid toggling closed an
+artifact that upload already selected. Final unchanged-file combined run passed
+all3; these are not waived product failures. Read-only inspection and own disposable
+fixture mutations only. Commands are captured by the dedicated
+`playwright.x36-real.config.ts`; it requires an already-running prepared gateway
+and `E2E_DEMO_PREPARE_LOG`, and is not silently collected into the normal reset suite.
+
+Evidence logs: `/tmp/oct10-x36-{install,gateway-build,web-build,demo-prepare,demo-check-final,browser-final}.log`.
+Screenshots (local evidence only):
+
+[artifact-unknown-not-scanned-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-dark.png)
+
+[artifact-unknown-not-scanned-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-actual-art-d6b48-er-renders-raw-file-content/artifact-unknown-not-scanned-light.png)
+
+[execution-halted-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-dark.png)
+
+[execution-halted-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-halted-light.png)
+
+[execution-restored-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-dark.png)
+
+[execution-restored-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-execution--537e8-uires-real-identity-step-up/execution-restored-light.png)
+
+[engines-off-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-dark.png)
+
+[engines-off-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-off-light.png)
+
+[engines-refused-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-dark.png)
+
+[engines-refused-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/engines-refused-light.png)
+
+[evals-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-dark.png)
+
+[evals-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/evals-no-engine-light.png)
+
+[redteam-no-engine-dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-dark.png)
+
+[redteam-no-engine-light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/x36-batch5-real-real-unbui-e3828-le-runs-never-appear-passed/redteam-no-engine-light.png)
+
+## X35 — ADR-0188 S1 independent review (2026-10-10 UTC)
+
+Reviewed PR #257, `b6-identity-s1` **3feb9a35**, against the frozen ADR decisions24–28 and the 04:55 coordination announcement. Review output only; no product implementation changed. Existing checkout symlinks were preserved under `/tmp/x35-preserved-symlinks` before switching branches.
+
+**I7S-01 — MEDIUM — v1 audit rows can acquire actor attribution without failing verification.** `packages/shared/src/audit-chain.ts:504` selects the v1 hash for rows before the v2 boundary but never refuses their non-null actor fields. The writer correctly refuses those fields before cutover, yet a raw SQL UPDATE of all three actor columns on an existing valid v1 row passes the migration's together-or-null constraint and `verifyAuditChain` still returns `status:ok, firstBreak:null`. No content/row hashes were rewritten; the unchanged anchored hash therefore does not commit to the injected attribution. Actual scratch-PostgreSQL probe starts with a valid writer row, updates actor_identity_id/delegation_grant_id/actor_chain together, and genuinely fails its expected-broken assertion. Acceptance: verifier rejects actor fields on every v1 row, including bounded scans, and exposes a definite break; preserve byte-for-byte v1 hash compatibility. Existing v2 actor tampering remains detected (independent positive control passes).
+
+**I7S-02 — LOW — verifier ignores unsupported future audit boundaries.** `apps/gateway/src/audit-chain.ts:951` selects only version2; unlike `readAuditV2Boundary`, it cannot see and refuse an unsupported latest boundary. A transaction simulating a future migration (temporarily lifting the version=2 CHECK and inserting version3/from_seq2) produces `status:ok, firstBreak:null` and fails the expected-broken assertion. Current S1 SQL itself refuses version3: this is a forward-version fail-closed gap, not a current route allowing unknown-version insertion. Acceptance: load and validate boundary versions consistently in writer and verifier; unsupported boundaries fail closed with explicit disclosure. Keep ordinary v1 verification green when no boundary exists.
+
+**I7S-03 — LOW — delegation depth setting copy is one actor short.** `packages/shared/src/identity/settings.ts` describes strict depth3 as an agent plus its delegate plus its delegate (three actors). ADR decision26 explicitly caps stored grant depth: a root is0 and depth3 permits four actors/hops. Acceptance: explain root plus three descendant delegations (four actors), or label the setting as descendant grant depth; keep the existing schema bounds and semantics.
+
+Validation on the exact reviewed source:
+- Frozen install and `pnpm --filter '@regulait/gateway...' build` PASS (`/tmp/oct10-x35-{install,build}.log`).
+- Actual PostgreSQL: `DATABASE_URL=<regulait_review_x35_oct10_parallel> pnpm --filter @regulait/gateway exec vitest run src/zz-adr0188-s1-foundation.test.ts` **23/23 PASS** (`/tmp/oct10-x35-foundation.log`). Covers migration/journal, strict defaults and audited step-up relaxations, credential/status/grant/replay constraints, all route stubs and auth classes, and writer version behavior.
+- `pnpm --filter @regulait/shared exec vitest run src/identity/identity.test.ts src/audit-chain.test.ts` **62/62 PASS** (`/tmp/oct10-x35-shared.log`).
+- Actual PostgreSQL gateway `src/audit-chain.test.ts`: **60 PASS, 9 explicitly skipped** (`/tmp/oct10-x35-audit.log`); skipped external/optional cases are not live verification.
+- Web `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` PASS (`/tmp/oct10-x35-web-{tsc,build}.log`).
+- Independent negatives: **two expected-broken assertions genuinely fail**, and v2 actor-tamper positive control **1/1 PASS** (`/tmp/oct10-x35-independent.log`). Reproduction preserved in `apps/web/review/x35-s1-independent.probe.ts`; copy temporarily to `apps/gateway/src/zz-x35-independent-review.test.ts`, run with the scratch DATABASE_URL as above, then remove the temporary copy. It is deliberately outside normal test collection. Each probe uses a rolled-back transaction; unknown-version DDL is rolled back too.
+
+The dedicated scratch database was dropped after validation; the shared base database was untouched.
+
+No additional authentication/secret-storage/replay/default-deny bypass reproduced in this slice. AuthContext.via adds a type member, with no workload authentication issuer yet; no human auth widening was introduced here. Allocation/settlement admission and live provenance remain S3/S4, SPIFFE trust bundles S9. The owner's announced missing builder_turn/root subject-credential FKs and child max_depth are deferred boundaries, not rediscovered findings. No token endpoint, live allocation, real external caller, or whole gateway/shared CI claim is made.
+
 ## X31 revised ADR recheck — 2026-10-10 UTC
 
 Reviewed #217's revision `165a5be3b7e1acad1f58389f23305e9dbefde4b9`, including all decisions12–21, updated acceptance tests and slice ownership. The provenance/revocation, explicit resource verifier, atomic replay adapter, every-ancestor live checks, narrowing-only Cedar, audit cutover, offline configuration, certificate validation and S0 requirements substantially address I7R-01/02/03/06/07/08/09 **as design requirements**. No product implementation or full S0 is claimed. I7R-04/05 still have concrete contract gaps below; the disposition table's statement that all nine are resolved is premature for those two.
@@ -146,6 +296,50 @@ Isolated npm install with lifecycle scripts disabled pinned the two library root
 Source references: [oidc-provider v9.12.2 replay claims](https://github.com/panva/node-oidc-provider/blob/v9.12.2/lib/models/replay_detection.js), [JWT client authentication](https://github.com/panva/node-oidc-provider/blob/v9.12.2/lib/shared/jwt_client_auth.js), [custom token-exchange example](https://github.com/panva/node-oidc-provider/blob/v9.12.2/test/custom_grants/grants/token_exchange.js), [oauth4webapi v3.8.8](https://github.com/panva/oauth4webapi/tree/v3.8.8). Exact installed sources and probes are retained at `/tmp/oct10-i7-library-review/`; evidence `/tmp/oct10-i7-library-proof.log` (resource and replica probes) and `/tmp/oct10-i7-mount-final-proof.log` (successful mount). Early mount/API/metadata attempts are excluded. No full S0, certificate verification, production token exchange or database-backed replica test is claimed.
 
 Slice recommendations: settle schema provenance/reservation/cutover contracts before S1; S0 can run in parallel but must resolve replay/mTLS/binding before S5; S3 needs S2's actor/scope semantics explicitly; S4 creates the internal identities/grants before agent paths require them; S5 may parallelize with S4 only with a clear gateway ABAC/auth ownership split; S6 acceptance merges after real routes; S7 retires bearer runners/PDP only after client migrations prove engine-key ceilings and sponsorship remain intact. Claim per-agent least privilege only for paths actually wired in S4/S5, and separately disclose remaining human-owned bearer APIs and deferred cross-domain hops.
+
+## X29-G extension: B5-P2 review — 2026-10-10 UTC
+
+Reviewed #231 at `c0bc1771865037be7ab114eaaa210b9de0dbe598`, including the exchange, worker invariant/environment, result hash/bounds, cancel/deadline, required worker self-test, compose isolation and 0.124.1 upgrade. This is a findings-only continuation of #233, not edits to Claude's product branch. No additional product defect was established in the split or upstream upgrade. B5X-02 for Garak remains OPEN; B5X-01's returned Modelscan fix remains independently rechecked.
+
+**B5X-03 — LOW, OPEN test reliability: the existing cancel-during-generation proof assumes generation has started before its heartbeat timer.** `packages/engine-promptfoo/src/promptfoo.test.ts`, `RED PROOF cancel`, uses a 20 ms heartbeat and asserts its fake engine observed abort. Under load the second heartbeat can cancel before the adapter reaches the fake engine; the runner correctly returns cancelled and posts nothing, but `aborted` is false because no child started. The unmodified source suite reproduced this failure (39 pass,1 fail,5 opt-in skips), then the isolated case passed, and an unchanged full rerun passed40/40. Adding only an 80 ms scheduling delay before calling the adapter deterministically reproduces the same failed `expect(aborted).toBe(true)` with cancellation still correct. This is a test assertion problem, not an engine continuing after cancellation. Recommended acceptance: synchronize the intended in-generation cancel on fake-engine entry; separately test an early cancel with zero starts and zero posts. Preserve the existing no-eval/no-post assertions. The diagnostic change was restored.
+
+**Actual image build PASS:** pinned Node22 base; licence gate **351 allowed,11 pending owner decisions,0 denied**; integrity-locked `npm ci --omit=optional --ignore-scripts`; promptfoo0.124.1; shipped CycloneDX SBOM; patch applies to all four telemetry copies; frozen shim build and production deploy; installer removal and UID10001. As with the Garak build, a temporary Dockerfile adds build-only trusted-CA secret/proxy exports and existing-proxy host resolution; TLS and lockfiles remain verified and product sources unchanged. Local image ID `sha256:1fcfab70273f851777593bd106640400b1b7fb4e1bfbe3d7bfa7c07f08e8d9e6`; no publication or signature claim.
+
+**5/5 real upstream tests PASS INSIDE that image**, using its Node22 and installed patched promptfoo0.124.1, the reviewed test source mounted into the container and a synthetic loopback gateway. Covers re-extracted upstream plugin/strategy lists; every generation/target/grading call carrying only the governed key and correct model/agent/project headers, no non-loopback attempts according to the diagnostic preload; the actual runner/worker exchange path; revoked-key 401 never producing a pass; cancellation killing the real process with no later gateway calls. Test isolation uses `--network none` with the gateway on container loopback, read-only root, no capabilities and no-new-privileges; UID1000 permits owner-only host fixtures. The exchange test's sides share the test container, so it is distinct from the next proof.
+
+**Separate actual-image TWO-container boundary probe PASS:** production UID10001 and root/capability hardening, separate process namespaces, runner-only state, jobs RW for runner/RO for worker and results RO for runner/RW for worker. Synthetic runner state/enrollment credential and `/proc/1/root/state/runner-token` are inaccessible to the worker; run key is readable as designed; jobs/root writes fail; worker writes its result; runner reads it but cannot write results. Containers and volumes were removed. This uses `--network none`; it measures filesystem/process credential separation, not production engines-network egress. No public-egress positive-control success or fresh signed-image attestation is claimed.
+
+**Upgrade/advisory check:** `npm audit --omit=optional --json` on the exact lockfile reports **0 info/low/moderate/high/critical**. Direct inspection inside the image confirms braces, fill-range, chokidar, picomatch, jks-js and node-forge are absent; the shipped SBOM contains360 components. This establishes their omission, not that the complete optional closure has no advisories. Pending licences remain Artistic-2.0, BlueOak-1.0.0 and Python-2.0 (11 package entries); passing the existing gate does not constitute owner approval.
+
+**Other verification:** frozen installation and engine/gateway dependency builds PASS; final default engine-promptfoo **40 PASS,5 opt-in tests initially skipped and then explicitly run5/5**; engine-runner **100 PASS**; isolated PostgreSQL gateway promptfoo/engine/Compose suites **102 PASS** (database `regulait_review_p2_oct10` dropped). An initial bare-vitest invocation also collected compiled dist tests without copied fixtures; it is excluded. Final source runs use the declared package test script. No full shared-suite run is claimed for this head. At inspection, #231's engine-image scans for promptfoo/modelscan, general Trivy/SBOM, dependency audit and docker-build had passed; keyless signing jobs were skipped on the PR and other checks remained in progress.
+
+**Garak CI follow-up:** the subsequently published #228 head `0842b20062ef8e4c67135dd301a76b8211290f12` merges main and adds an explicit fsspec CVE-2026-104851 image exception (ADR0187 decision160, expiry2026-12-09), justified by upstream datasets pins and excluded/unplanned reference-document consumers. It does not change the mapper; B5X-02 still applies. #233's actual image tests target the stated earlier head. The new image scan was queued at inspection; this review does not label the exception as a patched dependency or a completed scan.
+
+Local evidence outside Git: `/tmp/oct10-p2-{image-build.log,real-image-proof.log,runtime-boundary-proof.log,installed-closure-proof.log,audit.json,units-final.log,units-recheck.log,cancel-isolated.log,cancel-delay-proof.log,runner-tests.log,gateway-proof.log}`; boundary script `/tmp/oct10-p2-runtime-boundary.py`; delayed-case source `/tmp/oct10-x30-review-probes/promptfoo-cancel-delayed.test.ts`. Reviewed source restored and clean; no runtime credential used.
+
+## X29-G independent review — 2026-10-10 UTC
+
+Review target: Garak #228 at `ece771b4786efcb7d2f5b0401e60b9c785667988`. This delivery changes this findings ledger only. Claude owns implementation, adjudication, VERIFIED and integration. B5-P2 and X26 remain awaiting published/announced PRs; this is not their review.
+
+**B5X-02 — MEDIUM, OPEN: incomplete detector coverage can still produce a pass.** `packages/engine-garak/src/mapper.ts`, `readGarakProbeReport`, counts only detector scores in status-2 attempts. It ignores generated status-1 attempts when deciding coverage, never correlates attempt UUIDs with their completed records, and never compares each completed attempt's output count with its detector-score count. Consequently, valid init/completion plus one zero-score completed attempt and a matching eval (`passed=1,fails=0,nones=0,total_evaluated=1,total_processed=1`) returns **pass** both when (a) another UUID has a generated output but no scored completion, and when (b) the completed attempt has two outputs but only one score. Neither absence is represented by `nones`; agreement between two partial score lists is not evidence that all outputs were evaluated. An ordinary complete one-output/one-score report passes as the control. This violates the mapper's own documented rule that every output must be scored before a pass; no finding alleges that the pinned engine normally emits these malformed reports.
+
+The format was checked against the exact garak 0.17.0 wheel, SHA256 `9a67e6298e4d7025358fecafa9d473c77ff70acdae103aa5251ad60fca3db145`: `attempt.py` defines statuses 0/1/2 and exports UUID, outputs and detector results; `probes/base.py` writes generated status-1 records; `harnesses/base.py` later writes status-2 records for the same attempt; `evaluators/base.py` iterates the detector list and itself assumes alignment with outputs. The independent fixtures therefore exercise the real report fields. The two new negative Vitest assertions genuinely FAIL against the unchanged target (2 failed, 26 existing tests intentionally deselected); a separate compiled-mapper probe returns pass for the control and both malformed cases. Temporary probes were removed from the target checkout.
+
+**Recommended fix/acceptance:** reconcile records by UUID without double-counting normal status-1/status-2 pairs; validate each terminal record's output/score cardinality, and require every generated attempt/output to have a consistent scored terminal record before pass. An unmatched generation, missing score or conflicting/duplicate terminal record must be unknown; preserve any actually observed hit as fail. Cover normal paired records as a passing control, the two failures above, null-score unknown, duplicate completion and a hit plus incomplete coverage. Count-only validation does not require copying prompt/output text into the envelope.
+
+**Verification at the reviewed Garak head:** frozen install and engine/gateway dependency builds PASS; engine-garak 30 default tests PASS (4 real tests initially skipped), shared Garak catalogue/manifest 11 PASS, isolated real-PostgreSQL Garak gateway 7 PASS plus foundation/Compose 47 PASS (54 total). Both disposable databases were dropped. The two expected independent negative assertions are findings, not included in green counts. No full gateway/shared-suite claim is made for this head.
+
+**Actual image and upstream proof:** the complete image built successfully from the pinned bases and lockfiles, including all wheel/sdist hashes, `pip check`, version 0.17.0, all 25 required excluded-data removals and the pinned catalogue hash, installer removal, production shim build/deploy and installed-closure licence gate (**197 allowed, 23 admitted, 0 denied** after removing pip). The environment requires its HTTPS proxy and trusted CA: a temporary Dockerfile adds only a build-secret CA mount and proxy/CA exports; BuildKit receives the existing proxy's resolved host mapping. TLS verification and hashes stay enabled, and repository sources/requirements are unchanged. Local image ID: `sha256:6f1d74cc3c1ae368870c286efb37c9fede46e7bc283e33d5d7d8eb0d49278ed8`; this is not a published manifest digest, signature or attestation. The licence allow file still has 20 pending owner decisions; a successful gate does not make the image admissible.
+
+**4/4 real upstream tests PASS on that built, pruned image:** LocalGarakExecutor → runGarakProbe → mapper, against the test's synthetic gateway: exit 0 with every output hit still maps fail; a refusing target maps pass; 401 on the refused run key maps unknown/failed despite exit 0; every request has the governed key, target model, agent and project headers. A temporary Python wrapper invokes the image's real `/opt/garak/venv/bin/python` with the test's configuration/environment. It uses host networking to reach the test server and UID 1000 to access its owner-only host fixtures; it proves upstream execution/report behavior, not the production network/user configuration.
+
+**Separate actual-runtime container boundary probe PASS:** two containers from the built image, UID 10001, read-only roots, no capabilities, no-new-privileges, separate process namespaces, separate runner state, jobs RW only for runner/RO for worker and results RW only for worker/RO for runner. With synthetic credentials only, the worker reads its run key and writes a result; runner state, runner enrollment environment and `/proc/1/root/state/runner-token` are inaccessible; writing jobs or root fails. The runner retains its state and reads results, but cannot write results. Containers/volumes were removed. This uses `--network none` to isolate the filesystem/process experiment; it does not establish the internal engines network's allowed gateway reachability or blocked external egress. No new public-egress assurance: the earlier external positive control could not connect either. Publication/signing, image SBOM/Trivy, a controlled production-network egress self-test and the owner's licence admissions remain outstanding owner/image work.
+
+Catalogue inspection: 189 listed entries = 90 local + 77 licence-excluded + 11 requiring missing pre-seeded data + 11 cloud-only; the pinned upstream catalogue has 191 including deliberately unlisted `test.Blank`/`test.Test`. Non-local probes are refused by planning/job validation. OWASP 2023→2025 crosswalk leaves Insecure Plugin Design and Model Theft as explicit owner decisions rather than manufacturing replacements.
+
+**Returned B5X-01 fix independently rechecked — #227 at `a895f3a4d9ee56330bc135a8db872420dafb21ed`:** the pinned momoa 3.3.13 AST rejects decoded duplicate keys recursively before JSON.parse. All four previous byte-level ambiguities return `safetensors_invalid`; a valid one-tensor control remains `safetensors`. Engine-modelscan build and **42 default tests PASS**, **5 real upstream tests explicitly skipped**; full shared suite **1977 PASS** on this separate target. The code fix satisfies the reported B5X-01 duplicate-key acceptance; Claude retains official VERIFIED status. This recheck is not a complete review of all other #227 storage/quota/deletion changes.
+
+Local reproducible evidence (outside Git): `/tmp/oct10-garak-independent-mapper.mjs`, `oct10-garak-independent-mapper.log`, `oct10-garak-mapper-red-proofs.log`, `oct10-garak-pinned.whl`, `oct10-garak-image-proxy-host-build.log`, `oct10-garak-real-image-proof.log`, `oct10-garak-runtime-boundary.py`, `oct10-garak-runtime-boundary-proof.log`, and `oct10-x29-m-independent-proof.log`. Negative test source: `/tmp/oct10-x30-review-probes/garak-with-review-probes.test.ts`. Evidence can be rerun in this workspace; no runtime secrets were used or recorded.
 
 # Codex feedback — active work and verified closures
 
