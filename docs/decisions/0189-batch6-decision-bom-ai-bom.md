@@ -890,13 +890,6 @@ R44. **`anchored` requires an Object Lock that covers the retention period.** `S
       `anchored` as `anchored_lapsed` once it has passed, and `cannotProve` gains "that the external commitment
       exists after its retain-until date". A frozen body is never edited; only the reported finality changes.
 
-## Further design review happens at slice level
-
-From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here
-as further amendments. They are recorded as entry conditions on the B1–B8 slice PR that owns them, and each slice PR
-gets its own review against this ADR and those conditions. An amendment is added here only when a finding contradicts
-an accepted decision or needs an owner choice.
-
 ### Owner items from the review (not decided here)
 
 1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
@@ -907,6 +900,13 @@ an accepted decision or needs an owner choice.
 2. **Trust root for the release's SBOM identity file in air-gapped installs** (R9): verify the release's existing
    keyless signature offline against a trusted-root file shipped with the release, or an owner-held release key.
    Recommended: the existing signature with the shipped trusted root, so no new key needs custody.
+
+## Further design review happens at slice level
+
+From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here
+as further amendments. They are recorded as entry conditions on the B1–B8 slice PR that owns them, and each slice PR
+gets its own review against this ADR and those conditions. An amendment is added here only when a finding contradicts
+an accepted decision or needs an owner choice.
 
 ## Open questions
 
