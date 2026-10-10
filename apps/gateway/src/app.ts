@@ -145,6 +145,7 @@ import {
   SESSION_COOKIE,
   apiKeyMfaEnrollmentRequired,
   authenticate,
+  workloadPreHandler,
   clearSessionCookie,
   isAuthRefusal,
   generateToken,
@@ -1193,6 +1194,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
     }
 
+    // ADR-0188 S5: a gateway-issued delegated token (DPoP, or certificate-bound) is judged by its own path
+    const workload = await workloadPreHandler(db, req, reply, { dataKey: opts.dataKey });
+    if (workload === "refused") return reply;
+    if (workload === "authenticated") return;
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
     // ADR-0022: a valid key whose user is DEACTIVATED gets its own reason —
     // the holder should learn "your account is disabled", not "bad token".
@@ -5242,7 +5247,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
   // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
-  registerIdentityRoutes(app, db);
+  registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
   registerBomRoutes(app, db);
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any

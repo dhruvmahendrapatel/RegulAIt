@@ -373,6 +373,16 @@ export const tokenExchangeRequestSchema = z
     authorization_details: z.string().min(2).max(65_536),
     client_assertion_type: z.literal(CLIENT_ASSERTION_TYPE_JWT_BEARER).optional(),
     client_assertion: z.string().min(1).max(16_384).optional(),
+    /** RFC 8705: an mTLS client names itself (no assertion carries the id) */
+    client_id: z.string().min(1).max(2048).optional(),
+    // S5 — a CHILD exchange restates the rest of the body its parent signed (decision 23), so the token
+    // endpoint can rebuild the RFC 8785 form and compare it byte for byte; a root takes these from the proof
+    project_id: z.string().max(64).optional(),
+    env: z.string().max(64).optional(),
+    cap_micros: z.string().max(20).optional(),
+    max_depth: z.string().max(2).optional(),
+    expires_at: z.string().max(16).optional(),
+    idempotency_key: z.string().min(1).max(200).optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -383,6 +393,11 @@ export const tokenExchangeRequestSchema = z
     }
     if (!root && (v.actor_token === undefined || v.actor_token_type === undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a child exchange needs the parent's delegation authorization", path: ["actor_token"] });
+    }
+    const childFields = ["project_id", "env", "cap_micros", "max_depth", "expires_at", "idempotency_key"] as const;
+    for (const k of childFields) {
+      if (root && v[k] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `a root exchange takes ${k} from the delegation proof`, path: [k] });
+      if (!root && v[k] === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `a child exchange restates ${k}`, path: [k] });
     }
     if ((v.client_assertion === undefined) !== (v.client_assertion_type === undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "client_assertion and client_assertion_type go together", path: ["client_assertion"] });
@@ -584,6 +599,12 @@ export const createDelegationProofSchema = z
     env: environmentName,
     /** the agent's key thumbprint, when known: binds the proof to that key */
     agentKeyThumbprint: z.string().regex(SHA256_B64URL_PATTERN).optional(),
+    /** S5: the root grant's cap in integer micro-dollars; omitted = no per-grant cap (the sponsor's own budgets still apply) */
+    capMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    /** S5: how long the root grant lives (60 s to 24 h; default 1 h). Its tokens still live `delegated_token_ttl_seconds`. */
+    lifetimeSeconds: z.number().int().min(60).max(86_400).optional(),
+    /** S5: how many further delegations the agent may make below itself (default and ceiling: the org's `delegation_max_depth`) */
+    maxDepth: z.number().int().min(0).max(DELEGATION_DEPTH_CEILING).optional(),
   })
   .strict();
 export type CreateDelegationProof = z.infer<typeof createDelegationProofSchema>;
@@ -850,9 +871,9 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "PUT", path: "/v1/workload-identities/:identityId/grants", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/workload-identities/:identityId/grant-proposals", cls: "admin", slice: "S6" },
   { method: "GET", path: "/v1/identity/picker-sources", cls: "admin", slice: "S6" },
-  { method: "GET", path: "/v1/delegation-grants", cls: "admin", slice: "S6" },
-  { method: "GET", path: "/v1/delegation-grants/:grantId", cls: "admin", slice: "S6" },
-  { method: "POST", path: "/v1/delegation-grants/:grantId/revoke", cls: "admin", slice: "S6" },
+  { method: "GET", path: "/v1/delegation-grants", cls: "admin", slice: "S5" },
+  { method: "GET", path: "/v1/delegation-grants/:grantId", cls: "admin", slice: "S5" },
+  { method: "POST", path: "/v1/delegation-grants/:grantId/revoke", cls: "admin", slice: "S5" },
   { method: "GET", path: "/v1/identity/signing-keys", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/rotate", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/:kid/revoke", cls: "admin", slice: "S3" },
