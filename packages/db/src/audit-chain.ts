@@ -344,7 +344,8 @@ export async function readAuditV2Boundary(tx: { execute: (query: SQL) => Promise
  * gets one opened here.
  */
 export async function runAuditV2Cutover(
-  dbOrTx: { transaction: <T>(cb: (tx: never) => Promise<T>) => Promise<T> },
+  /** a chained handle (`createDb`) or, with `inTransaction`, a transaction of one */
+  dbOrTx: object,
   opts: { setBy: string | null; inTransaction?: boolean },
 ): Promise<{ fromSeq: number; created: boolean }> {
   const body = async (tx: AuditExec & { insert: (t: unknown) => { values: (v: unknown) => Promise<unknown> } }) => {
@@ -374,7 +375,7 @@ export async function runAuditV2Cutover(
     return { fromSeq, created: true };
   };
   if (opts.inTransaction) return body(dbOrTx as never);
-  return dbOrTx.transaction((tx) => body(tx as never));
+  return (dbOrTx as { transaction: <T>(cb: (tx: unknown) => Promise<T>) => Promise<T> }).transaction((tx) => body(tx as never));
 }
 
 /** Sentinel for `.returning()` called with no projection. */
