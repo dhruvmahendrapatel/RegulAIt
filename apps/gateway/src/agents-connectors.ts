@@ -3970,7 +3970,7 @@ export function registerAgentConnectorRoutes(
     const invokeLiteracy = await literacySlot(db, userId, { principal: abacPrincipalFromRequest(req) });
     const kernelDecision = evaluateAgent({
       userId,
-      actor: null, // ADR-0188 S4 replaces
+      actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
       // ADR-0124 — the kill switch on the native dispatch path.
       execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...invokeLiteracy },
       // the display name rides along so denial prose says "premium-mock
@@ -4225,7 +4225,7 @@ export function registerAgentConnectorRoutes(
           withModelPolicy(
             evaluateAgent({
               userId,
-              actor: null, // ADR-0188 S4 replaces
+              actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
               execution: { ...postureOf(routingExecutionMode, agentHaltOf(a)), ...invokeLiteracy },
               agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
               mode: body.mode,

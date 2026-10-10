@@ -898,9 +898,12 @@ async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"):
  */
 async function runDelegatedLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
   const { db } = seg;
-  // the PERSON first (decision 30: when the person is not entitled, the reason shown is the person's)
-  const personGate = await stepGate(seg, state, "step");
-  if (personGate) return stopWithRefusal(seg, state, personGate);
+  // the PERSON first (decision 30: when the person is not entitled, the reason shown is the person's) — on a
+  // fresh turn only: a resumed segment answers its queued tool call before any step gate, as `runLoop` does
+  if (!state.queue.length) {
+    const personGate = await stepGate(seg, state, "step");
+    if (personGate) return stopWithRefusal(seg, state, personGate);
+  }
   const ident = await ensureIdentityFor(db, { kind: "builder_agent", id: seg.agent.id });
   const box = await resolveToolbox(db, seg.agent, seg.userId);
   const org = await loadOrgSettings(db);

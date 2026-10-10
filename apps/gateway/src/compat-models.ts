@@ -111,7 +111,7 @@ export async function listEntitledModels(
     // client sees listed and what it may call cannot drift.
     const kernelDecision = evaluateAgent({
       userId,
-      actor: null, // ADR-0188 S4 replaces
+      actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
       /**
        * ADR-0124 — VISIBILITY, not execution. This is the `/v1/models` listing
        * an IDE reads to populate its picker. Emptying it during a halt would

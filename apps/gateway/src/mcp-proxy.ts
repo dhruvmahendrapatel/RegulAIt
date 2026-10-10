@@ -887,13 +887,17 @@ async function executeGovernedToolCallInner(
       // ADR-0188 S4: a delegated call is decided with the stored chain, read now; a person's own call is `null`
       { actor: delegatedActor },
     );
-    // ADR-0188 S4 (decision 6): the §5.1 ceiling is folded into the worker's delegation scope, so a tool the
-    // lead's ceiling excludes is refused by the scope term first; it keeps its distinct `lead-ceiling` rule id
-    const decision: Decision =
-      delegatedActor && evaluated.effect === "deny" && evaluated.ruleId === "delegation-scope" &&
-      args.ceilingTools != null && !args.ceilingTools.includes(toolName)
-        ? { ...evaluated, ruleId: "lead-ceiling", reason: `tool '${toolName}' is outside the lead's ceiling for this worker (its delegation scope)` }
-        : evaluated;
+    // ADR-0188 S4 (decision 30): when the delegation's scope refuses a call the PERSON could not make either,
+    // the reason shown is the person's own (their grant, or the §5.1 lead ceiling folded into the worker's
+    // scope keeps its `lead-ceiling` rule id). Only a deny is ever substituted, and only by a deny.
+    let decision: Decision = evaluated;
+    if (delegatedActor && evaluated.effect === "deny" && evaluated.ruleId === "delegation-scope") {
+      const own = await governedEvaluate(
+        db, userId, serverId, { serverId, name: toolName, kind }, args.arguments, args.ceilingTools ?? null, projectId,
+        args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null },
+      );
+      if (own.decision.effect === "deny") decision = own.decision;
+    }
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
       return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
@@ -2317,6 +2321,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // session row, never from a header the caller could set.
         principal: abacPrincipalFromRequest(req),
         trace: toolTrace,
+        // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
+        // with no grant resolves to no grant and is refused in the core (never decided as the person)
+        ...(req.authCtx.via === "workload" ? { delegationGrantId: req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000" } : {}),
       }).catch(async (err: unknown) => {
         // AER-024: the reply is already hijacked, so the primitive's admission
         // hold / egress refusal cannot be the pre-hijack 403 the manifest path

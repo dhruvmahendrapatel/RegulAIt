@@ -16,7 +16,7 @@
  * to `sponsor_only` (which still applies every delegation term) and the returned
  * function restores the strict value (M-068).
  */
-import { builderAgents, builderAgentTools, eq, inArray, mcpTools, orgSettings, ORG_SETTINGS_ID, type Db } from "@regulait/db";
+import { builderAgents, builderAgentTools, delegationGrants, eq, inArray, mcpTools, orgSettings, ORG_SETTINGS_ID, workloadIdentities, type Db } from "@regulait/db";
 import type { PutAgentGrants } from "@regulait/shared";
 import { ensureIdentityFor, type InternalSubject } from "../in-process-delegation.js";
 import { loadOrgSettings } from "../org-settings.js";
@@ -129,18 +129,54 @@ export async function grantBuilderAgentConfiguredForTest(
  * For a suite whose agents are created inline in many places (no one `mkAgent`): every agent created
  * through `POST /v1/agents` on this app is then granted ITSELF in every test mode, through the same
  * service an admin's PUT runs, so the suite's pillar-7 workers act under the strict `own_grants`
- * default. Tools are NOT granted here (a tool-using worker needs `grantAgentOwnGrantsForTest` with its
- * tools). The wrapper applies to the object form of `app.inject`, the only form the suites use.
+ * default. With `mirrorTools`, every tool the suite grants a PERSON (`POST /v1/grants/tools`, or a
+ * role's tool grant) is granted to every such agent too, so a tool-using worker is limited by the
+ * person's grants exactly as before, and an agent-side refusal is never the variable under test. The
+ * wrapper applies to the object form of `app.inject`, the only form the suites use.
  */
-export function autoGrantCreatedAgentsForTest(app: { inject: unknown }, db: Db): void {
+export function autoGrantCreatedAgentsForTest(app: { inject: unknown }, db: Db, opts: { mirrorTools?: boolean } = {}): void {
   type Res = { statusCode: number; json: () => unknown };
   const original = (app.inject as (o: unknown) => Promise<Res>).bind(app);
-  (app as { inject: unknown }).inject = async (o: { method?: string; url?: string }) => {
+  const agentIds: string[] = [];
+  const tools: Array<{ serverId: string; toolName: string }> = [];
+  (app as { inject: unknown }).inject = async (o: { method?: string; url?: string; payload?: unknown }) => {
     const res = await original(o);
-    if (o && typeof o === "object" && o.method === "POST" && o.url === "/v1/agents" && res.statusCode === 201) {
+    if (!o || typeof o !== "object" || o.method !== "POST" || res.statusCode >= 300) return res;
+    const url = (o.url ?? "").split("?")[0]!;
+    if (url === "/v1/agents" && res.statusCode === 201) {
       const id = (res.json() as { id?: string }).id;
-      if (id) await grantAgentOwnGrantsForTest(db, id);
+      if (id) {
+        agentIds.push(id);
+        await grantAgentOwnGrantsForTest(db, id, opts.mirrorTools && tools.length ? { tools } : {});
+      }
+    } else if (opts.mirrorTools && (url === "/v1/grants/tools" || /^\/v1\/roles\/[^/]+\/grants\/tools$/.test(url))) {
+      const p = (typeof o.payload === "string" ? JSON.parse(o.payload) : o.payload) as { serverId?: string; toolName?: string } | undefined;
+      if (p?.serverId && p.toolName && !tools.some((t) => t.serverId === p.serverId && t.toolName === p.toolName)) {
+        const t = { serverId: p.serverId, toolName: p.toolName };
+        tools.push(t);
+        for (const id of agentIds) await grantAgentOwnGrantsForTest(db, id, { tools: [t] });
+      }
     }
     return res;
   };
+}
+
+/**
+ * Cleanup support: an agent with a workload identity, and a person who sponsored a delegation grant, are
+ * referenced by rows that are never deleted (ADR-0188 decisions 2, 4). A suite's afterAll skips them.
+ */
+export async function agentsWithIdentity(db: Db, agentIds: readonly string[]): Promise<Set<string>> {
+  if (!agentIds.length) return new Set();
+  const rows = await db.select({ id: workloadIdentities.agentId }).from(workloadIdentities).where(inArray(workloadIdentities.agentId, [...agentIds]));
+  return new Set(rows.map((r) => r.id!).filter(Boolean));
+}
+export async function sponsorsWithGrants(db: Db, userIds: readonly string[]): Promise<Set<string>> {
+  if (!userIds.length) return new Set();
+  const rows = await db.select({ id: delegationGrants.sponsorUserId }).from(delegationGrants).where(inArray(delegationGrants.sponsorUserId, [...userIds]));
+  return new Set(rows.map((r) => r.id));
+}
+export async function projectsWithGrants(db: Db, projectIds: readonly string[]): Promise<Set<string>> {
+  if (!projectIds.length) return new Set();
+  const rows = await db.select({ id: delegationGrants.projectId }).from(delegationGrants).where(inArray(delegationGrants.projectId, [...projectIds]));
+  return new Set(rows.map((r) => r.id!).filter(Boolean));
 }
