@@ -1,3 +1,103 @@
+## X43 — ADR-0188 S3 independent cross-review (2026-10-10)
+
+Reviewed frozen main `94fffb656cbc505468a7b8e43c478ca4ad499a08`, including S3 PR #279
+head `95d334d6` merged as `25089d7246e4db5101cb020e8324c3f7c4eaca12`.
+Review only: no gateway/db/shared/product edits. Source probes are retained under
+`apps/web/review/x43-s3-independent.probe.ts`; temporary gateway copies were removed.
+Existing `/tmp/x35-preserved-symlinks` remains untouched. PostgreSQL database
+`regulait_review_x43_oct10b` is this review's scratch; the base database was untouched.
+
+### I7S3-01 — LOW: a lock-wait admission judges expiry by an old transaction timestamp
+
+**Trigger and evidence.** `admitChildGrant` samples `databaseNow(tx)` before its parent
+`FOR UPDATE`. PostgreSQL `now()` is the transaction-start timestamp. An independent
+pool holds the parent lock until its 1.5-second remaining lifetime passes. The second
+pool starts admission while the parent is live and demonstrably waits on that lock
+(`pg_stat_activity.wait_event_type = 'Lock'`). After the database deadline, releasing
+the lock permits admission: one new child and a 25-dollar reservation are committed
+under an expired root. An immediate, fresh `loadLiveChain` returns `grant_expired`.
+The exact code is `delegation.ts:765–767`, followed by the chain check at ~789;
+`databaseNow` at ~157 uses `now()`. The retained final probe uses an actual database
+lock barrier and database deadline, not a mocked refusal or elapsed-time assertion.
+
+**Impact and limit.** Admission reports success and reserves capacity for an already
+expired delegation. This proof does **not** show a post-expiry token or governed effect:
+a new point-of-use chain read still refuses it. The finding concerns strict admission
+and misleading success/budget bookkeeping, so severity is LOW. It is independent of
+replica process skew. Existing creation/credential predicates and normal budget races
+passed. Revocation also samples time before waiting for locks; inspect that path when
+fixing the shared clock policy, without assuming it was separately reproduced here.
+
+**Acceptance.** Obtain a fresh database wall-clock value *after* the relevant locks,
+then use the same refreshed value for expiry/credential predicates and admission stamps.
+Simply moving/repeating `now()` inside the same transaction does not refresh it;
+`clock_timestamp()` supplies the database clock at the point of use. Keep test-pinned
+`now` explicit, retain the one shared liveness predicate, and apply the timing policy
+consistently at other lock-wait boundaries. The retained `X43_EXPECT_FIXED=1` acceptance
+case must refuse with `grant_expired` and leave no child/allocation/reservation. Also keep
+an otherwise-identical live-parent control successful and all skew/rotation tests green.
+No owner implementation change is made by this review.
+
+### Validation and reproducibility
+
+- `CI=true pnpm install --frozen-lockfile`: PASS. Gateway dependency closure build PASS
+  (`/tmp/x43-closure.log`). Source SHA is frozen above; no owner branch is edited.
+- Existing S3 suite, alone on freshly recreated scratch: **51/51 PASS**, no skips,
+  `/tmp/x43-owner-clean.log`. Calls real Fastify routes, real PostgreSQL and pinned JWT
+  libraries; no fabricated external certificate validation claim.
+- Independent final suite: **9/9 PASS**, no skips, `/tmp/x43-independent-9-final.log`.
+  Eight security/control cases pass; the ninth proves the current defect as an observation,
+  rather than claiming fixed acceptance. Real two-pool 20-way cap race (4 winners), 16-way
+  admission replay (one child/edge/reservation), 16-way usage settlement (one charge across
+  every ancestor), concurrent release (one return to immediate parent), exact credential
+  boundaries/ownership/revocation, committed middle credential expiry, rotation/verification
+  under opposite two-hour process skews, issuer revocation on the other pool and refusal to
+  silently activate another key. Replica concurrency here means two independent PostgreSQL
+  pools in one test process; opposite process-clock skew is simulated by Date-only fake timers.
+  No separate OS-replica, Docker/public-egress or full S5 endpoint claim.
+- Genuine negative acceptance run on the reviewed source: **1 expected FAIL / 8 selected-out**,
+  `/tmp/x43-acceptance-red.log`; expected `grant_expired`, received success (`undefined` error).
+  Run with `X43_EXPECT_FIXED=1` and `-t X43-01`; this is an open finding, not a waived gate.
+- Returned X35: the original three independent probes now **3/3 PASS**; existing S1 audit
+  regression suite **10/10 PASS**. These are separate from S3 counts and demonstrate I7S-01
+  actor-on-v1 refusal, I7S-02 unknown-boundary refusal (CHECK lifted only in rollback), v2
+  positive control, and I7S-03 actor-count copy. Log `/tmp/x43-existing-and-returned.log`.
+  Owner S1 suite creates/drops its own uniquely named `a188x35_*` database; no base mutation.
+- Initial independent harness: 5 PASS/3 failed because each nested child's default expiry
+  was recomputed milliseconds later and outlived its parent. Fixed only that fixture to one
+  shared expiry; subsequent 8/8, then final 9/9 pass. No product fix or weakened assertion.
+- Initial combined owner run: 50 S3 PASS/1 failure plus 13 returned-audit PASS. Independent
+  ahead-clock activation had left an audit `at` two hours in the future; the owner test asks
+  for the globally latest signing audit by `at`, so it saw activation instead of rotation.
+  Fresh-scratch owner-only run passes 51/51. This is recorded isolation contamination,
+  not an unexplained flake or a new product finding; no combined green claim.
+- Web `pnpm --filter @regulait/web exec tsc --noEmit` and
+  `pnpm --filter @regulait/web build`: **PASS**, `/tmp/x43-web-tsc.log` and
+  `/tmp/x43-web-build.log`. No UI implementation changed; no browser screenshot required.
+- Scratch `regulait_review_x43_oct10b` dropped without FORCE after all runs; no retained
+  processes or temporary gateway source copies. Existing backup symlinks untouched.
+
+To reproduce the independent suite, in a scratch checkout at the frozen SHA, concatenate
+its fixture prefix with the retained owned probe and add the two named product imports:
+
+```python
+from pathlib import Path
+source = Path('apps/gateway/src/zz-adr0188-s3-issuer-grants.test.ts').read_text()
+prefix = source[:source.index('describe("ADR-0188 S3 — creation')]
+prefix = prefix.replace('  admitChildGrant,', '  admitChildGrant,\n  databaseNow,\n  credentialLiveAt,')
+Path('apps/gateway/src/zz-x43-independent.tmp.test.ts').write_text(
+    prefix + Path('apps/web/review/x43-s3-independent.probe.ts').read_text())
+```
+
+Then, with onboarding Node/pnpm activated and `DATABASE_URL` pointing only to the scratch,
+run `pnpm --filter @regulait/gateway test zz-x43-independent.tmp.test.ts --maxWorkers=1`.
+Run the original owner suite on a fresh scratch **before** these skew probes to avoid the
+recorded future audit-timestamp contamination. Remove the temporary gateway test afterward.
+The known S3 max-depth persistence, mTLS validation, and S4/S5 integration gaps remain as
+recorded in ADR-0188's S3 amendment; this review does not reopen them or claim completion.
+
+---
+
 ## X32 — ADR-0188 S0 identity-library spike (2026-10-10 04:17 UTC)
 
 **GO for the library choice in OWNER DECISION2**, with the owned wrappers and integration requirements in `docs/research/R11-identity-s0-spike.md`. Reproducible throwaway code lives under `spikes/identity-s0/`, excluded from workspace packages/builds; product gateway/shared/db/config were not edited. Baseline1f6cc6b5.
