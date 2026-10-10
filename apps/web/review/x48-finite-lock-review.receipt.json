@@ -1,0 +1,669 @@
+{
+  "reviewedHead": "f6963763fc4723426edd1fea3b403d60363ee4cc",
+  "scope": "pure finality matrix; no deployment/crypto claim",
+  "target": "/workspace/.regulait-onboarding/g10-followup",
+  "finalityCases": 66,
+  "reportedFinalityAssertions": 6,
+  "cases": [
+    {
+      "name": "unbounded future observed lock",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "retention_unbounded"
+      }
+    },
+    {
+      "name": "missing lock observation",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_not_recorded"
+      }
+    },
+    {
+      "name": "lock expires exactly now",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_lapsed"
+      }
+    },
+    {
+      "name": "lock expired before now",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_lapsed"
+      }
+    },
+    {
+      "name": "untrusted destination",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "destination_not_tamper_resistant"
+      }
+    },
+    {
+      "name": "required timestamp absent",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "timestamp_pending"
+      }
+    },
+    {
+      "name": "bounded retention fully covered",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": 1,
+      "actual": {
+        "freeze": true,
+        "state": "anchored"
+      }
+    },
+    {
+      "name": "bounded retention outlasts lock",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": 3,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_shorter_than_retention"
+      }
+    },
+    {
+      "name": "unsigned receipt always refused",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "receipt_unsigned"
+      }
+    },
+    {
+      "name": "missing anchor",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "anchor_not_flushed"
+      }
+    },
+    {
+      "name": "timestamps explicitly off",
+      "setting": "anchored",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "retention_unbounded"
+      }
+    },
+    {
+      "name": "unbounded future observed lock",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_finite_lock"
+      }
+    },
+    {
+      "name": "missing lock observation",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_not_recorded"
+      }
+    },
+    {
+      "name": "lock expires exactly now",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_lapsed"
+      }
+    },
+    {
+      "name": "lock expired before now",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_lapsed"
+      }
+    },
+    {
+      "name": "untrusted destination",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "destination_not_tamper_resistant"
+      }
+    },
+    {
+      "name": "required timestamp absent",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "timestamp_pending"
+      }
+    },
+    {
+      "name": "bounded retention fully covered",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": 1,
+      "actual": {
+        "freeze": true,
+        "state": "anchored"
+      }
+    },
+    {
+      "name": "bounded retention outlasts lock",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": 3,
+      "actual": {
+        "freeze": false,
+        "reason": "lock_shorter_than_retention"
+      }
+    },
+    {
+      "name": "unsigned receipt always refused",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "receipt_unsigned"
+      }
+    },
+    {
+      "name": "missing anchor",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "anchor_not_flushed"
+      }
+    },
+    {
+      "name": "timestamps explicitly off",
+      "setting": "anchored",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_finite_lock"
+      }
+    },
+    {
+      "name": "unbounded future observed lock",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "missing lock observation",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expires exactly now",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expired before now",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "untrusted destination",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "required timestamp absent",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "bounded retention fully covered",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": 1,
+      "actual": {
+        "freeze": true,
+        "state": "anchored"
+      }
+    },
+    {
+      "name": "bounded retention outlasts lock",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": 3,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "unsigned receipt always refused",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "receipt_unsigned"
+      }
+    },
+    {
+      "name": "missing anchor",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "anchor_not_flushed"
+      }
+    },
+    {
+      "name": "timestamps explicitly off",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "unbounded future observed lock",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_finite_lock"
+      }
+    },
+    {
+      "name": "missing lock observation",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expires exactly now",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expired before now",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "untrusted destination",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "required timestamp absent",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "bounded retention fully covered",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": 1,
+      "actual": {
+        "freeze": true,
+        "state": "anchored"
+      }
+    },
+    {
+      "name": "bounded retention outlasts lock",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": 3,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "unsigned receipt always refused",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "receipt_unsigned"
+      }
+    },
+    {
+      "name": "missing anchor",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "anchor_not_flushed"
+      }
+    },
+    {
+      "name": "timestamps explicitly off",
+      "setting": "anchored_unverified_destination",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_finite_lock"
+      }
+    },
+    {
+      "name": "unbounded future observed lock",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "missing lock observation",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expires exactly now",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expired before now",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "untrusted destination",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "required timestamp absent",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "bounded retention fully covered",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": 1,
+      "actual": {
+        "freeze": true,
+        "state": "anchored"
+      }
+    },
+    {
+      "name": "bounded retention outlasts lock",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": 3,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "unsigned receipt always refused",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "receipt_unsigned"
+      }
+    },
+    {
+      "name": "missing anchor",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "chain_signed"
+      }
+    },
+    {
+      "name": "timestamps explicitly off",
+      "setting": "chain_signed",
+      "finiteLock": "refuse",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "unbounded future observed lock",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_finite_lock"
+      }
+    },
+    {
+      "name": "missing lock observation",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expires exactly now",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "lock expired before now",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "untrusted destination",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "required timestamp absent",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "bounded retention fully covered",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": 1,
+      "actual": {
+        "freeze": true,
+        "state": "anchored"
+      }
+    },
+    {
+      "name": "bounded retention outlasts lock",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": 3,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_unverified_destination"
+      }
+    },
+    {
+      "name": "unsigned receipt always refused",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": false,
+        "reason": "receipt_unsigned"
+      }
+    },
+    {
+      "name": "missing anchor",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "chain_signed"
+      }
+    },
+    {
+      "name": "timestamps explicitly off",
+      "setting": "chain_signed",
+      "finiteLock": "accept",
+      "retainedDays": null,
+      "actual": {
+        "freeze": true,
+        "state": "anchored_finite_lock"
+      }
+    }
+  ]
+}

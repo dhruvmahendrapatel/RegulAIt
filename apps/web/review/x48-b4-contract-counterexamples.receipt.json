@@ -1,0 +1,120 @@
+{
+  "reviewedHead": "19b80068",
+  "target": "/workspace/.regulait-onboarding/g10-followup",
+  "mode": "frozen regression receipt",
+  "scope": "response-schema counterexamples only; no implemented verifier or signature validation exercised",
+  "cases": [
+    {
+      "name": "complete decision DTO with mandated limitations",
+      "finding": null,
+      "accepted": true,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "existing guard rejects wrong overall outcome",
+      "finding": null,
+      "accepted": false,
+      "outcome": "valid",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "existing guard rejects foreign subject check",
+      "finding": null,
+      "accepted": false,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 21,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "existing guard rejects missing section",
+      "finding": null,
+      "accepted": false,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "one check claims valid without signature or binding checks",
+      "finding": "B4C-01",
+      "accepted": true,
+      "outcome": "valid",
+      "checkCount": 1,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "duplicate one-check substitute also claims valid",
+      "finding": "B4C-01",
+      "accepted": true,
+      "outcome": "valid",
+      "checkCount": 2,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "R39 binding claims valid despite undisclosed preimage",
+      "finding": "B4C-01",
+      "accepted": true,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "R46 v1 receipt claims facts bound",
+      "finding": "B4C-01",
+      "accepted": true,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "valid"
+      ]
+    },
+    {
+      "name": "invalid section beside valid projection and non-invalid outcome (independent of B4C-01)",
+      "finding": "B4C-02",
+      "accepted": true,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "invalid",
+        "valid"
+      ]
+    },
+    {
+      "name": "combined omissions allow invalid section and overall valid",
+      "finding": "B4C-02",
+      "accepted": true,
+      "outcome": "valid",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "invalid",
+        "valid"
+      ]
+    },
+    {
+      "name": "AI stored-source response identifies a Decision BOM",
+      "finding": "B4C-03",
+      "accepted": true,
+      "outcome": "valid_with_unverifiable",
+      "checkCount": 20,
+      "sectionStatuses": [
+        "valid"
+      ]
+    }
+  ]
+}
