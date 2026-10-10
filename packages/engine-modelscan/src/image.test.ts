@@ -152,7 +152,7 @@ describe("the modelscan image's inputs", () => {
     expect(MODELSCAN_IMAGE_PATHS.npyHelper).toBe("/opt/modelscan/npy-header.py");
     expect(MODELSCAN_IMAGE_PATHS.python).toBe(`${MODELSCAN_IMAGE_PATHS.venvBin}/python`);
     expect(dockerfile).toContain(`COPY engines/modelscan/npy-header.py ${MODELSCAN_IMAGE_PATHS.npyHelper}`);
-    expect(dockerfile).toMatch(new RegExp(`^RUN chmod 0444 \\S+ ${MODELSCAN_IMAGE_PATHS.npyHelper.replace(/\./g, "\\.")} `, "m"));
+    expect(dockerfile).toMatch(new RegExp(`^RUN chmod 0444 \\S+ ${MODELSCAN_IMAGE_PATHS.npyHelper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `, "m"));
     // stdlib only: it imports nothing outside the standard library (it runs with -I -S)
     const helper = readFileSync(path.join(dir, "npy-header.py"), "utf8");
     const imports = [...helper.matchAll(/^(?:import|from) (\S+)/gm)].map((m) => m[1]);
