@@ -31,6 +31,7 @@ import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
+import { SpdxFieldsPanel } from "./SpdxFieldsPanel";
 import {
   Badge,
   Button,
@@ -716,6 +717,9 @@ export default function EvalsPage() {
                   },
                 ]}
               />
+
+              {/* ADR-0189 B9 (R51): this dataset VERSION's supplier-declared SPDX fields, admin only */}
+              <SpdxFieldsPanel kind="eval_dataset" subjectId={detail.data.dataset.id} />
 
               <div style={{ marginTop: "var(--s3)" }}>
                 <RefusalNotice guidance={act.guidance} />
