@@ -16,11 +16,29 @@
  * to `sponsor_only` (which still applies every delegation term) and the returned
  * function restores the strict value (M-068).
  */
-import { builderAgents, builderAgentTools, delegationGrants, eq, inArray, mcpTools, orgSettings, ORG_SETTINGS_ID, workloadIdentities, type Db } from "@regulait/db";
+import {
+  agentGrants,
+  and,
+  builderAgents,
+  builderAgentTools,
+  connectorGrants,
+  delegationGrants,
+  eq,
+  inArray,
+  mcpTools,
+  orgSettings,
+  ORG_SETTINGS_ID,
+  roleAssignments,
+  serverGrants,
+  toolGrants,
+  users,
+  workloadIdentities,
+  type Db,
+} from "@regulait/db";
 import type { PutAgentGrants } from "@regulait/shared";
 import { ensureIdentityFor, type InternalSubject } from "../in-process-delegation.js";
 import { loadOrgSettings } from "../org-settings.js";
-import { getIdentityGrants, putIdentityGrants } from "../workload-identity-admin.js";
+import { getIdentityGrants, putIdentityGrants, updateWorkloadIdentity } from "../workload-identity-admin.js";
 
 /** the modes a test agent is granted on itself when none are named (every mode the suites use) */
 export const TEST_AGENT_MODES = ["execute", "plan", "chat", "ask", "review", "read", "apply", "dry_run"] as const;
@@ -68,8 +86,40 @@ export async function grantOwnGrantsForTest(db: Db, subject: InternalSubject, gr
     ),
     roleIds: [...new Set([...cur.roleIds, ...(grants.roleIds ?? [])])],
   };
+  await ensureFixtureStewardHolds(db, ident.id, next);
   await putIdentityGrants(db, ident.id, next, null);
   return ident.id;
+}
+
+/** the one fixture steward of a test database (an ordinary, non-admin person) */
+export const FIXTURE_STEWARD_EMAIL = "s4-fixture-steward@example.invalid";
+
+/**
+ * S4 follow-up N1: an identity is granted only what one of its STEWARDS holds. A fixture therefore names a
+ * steward that holds exactly what it grants: one non-admin fixture person per database, given the same items
+ * as user grants, and added to the identity's stewards through the real update service. The person is never a
+ * sponsor of anything, so the suite's own users stay the subject of every decision under test.
+ */
+async function ensureFixtureStewardHolds(db: Db, identityId: string, set: PutAgentGrants): Promise<void> {
+  await db.insert(users).values({ email: FIXTURE_STEWARD_EMAIL, displayName: "S4 fixture steward" }).onConflictDoNothing();
+  const [steward] = await db.select({ id: users.id }).from(users).where(eq(users.email, FIXTURE_STEWARD_EMAIL));
+  const s = steward!.id;
+  for (const t of set.tools) await db.insert(toolGrants).values({ userId: s, serverId: t.serverId, toolName: t.toolName }).onConflictDoNothing();
+  for (const v of set.servers) await db.insert(serverGrants).values({ userId: s, serverId: v.serverId, readOnlyAll: v.readOnlyAll }).onConflictDoNothing();
+  for (const a of set.agents) {
+    const [have] = await db.select().from(agentGrants).where(and(eq(agentGrants.userId, s), eq(agentGrants.agentId, a.agentId)));
+    if (!have) await db.insert(agentGrants).values({ userId: s, agentId: a.agentId, allowedModes: null });
+  }
+  for (const c of set.connectors) {
+    const [have] = await db.select().from(connectorGrants).where(and(eq(connectorGrants.userId, s), eq(connectorGrants.connectorId, c.connectorId)));
+    if (!have) await db.insert(connectorGrants).values({ userId: s, connectorId: c.connectorId, mode: "readwrite", allowedObjects: null });
+  }
+  for (const r of set.roleIds) await db.insert(roleAssignments).values({ userId: s, roleId: r }).onConflictDoNothing();
+  const [ident] = await db.select({ stewards: workloadIdentities.sponsorUserIds }).from(workloadIdentities).where(eq(workloadIdentities.id, identityId));
+  if (!ident!.stewards.includes(s)) {
+    const people = ident!.stewards.filter((id) => id !== "00000000-0000-0000-0000-000000000000");
+    await updateWorkloadIdentity(db, identityId, { sponsorUserIds: [...people.slice(0, 9), s] }, null);
+  }
 }
 
 /**

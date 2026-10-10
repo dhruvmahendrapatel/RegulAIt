@@ -177,6 +177,8 @@ describe("decision 2: the body refuses every invariant break", () => {
     ["a platform we did not admit", (b) => ((b.runsc as { platform: string }).platform = "ptrace")],
     ["no per-placement report", (b) => ((b.attestation as { perPlacement: boolean }).perPlacement = false)],
     ["no probes", (b) => (b.attestation.probes = [])],
+    ["no runtime_identity probe (amendment U)", (b) => (b.attestation.probes = b.attestation.probes.filter((p) => p !== "runtime_identity"))],
+    ["no runtime_config probe (amendment U)", (b) => (b.attestation.probes = b.attestation.probes.filter((p) => p !== "runtime_config"))],
     ["an unknown probe", (b) => ((b.attestation as { probes: string[] }).probes = ["cpu_count"])],
     ["a wildcard host", (b) => (b.network = { mode: "allow_list", entries: [{ host: "*.example.com", port: 443 }] })],
     ["an empty allow-list", (b) => (b.network = { mode: "allow_list", entries: [] })],
