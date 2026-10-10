@@ -359,3 +359,39 @@ interfaces, Node v20.20.2, v21.7.3 and v22.22.2):
 Not fixed in the spike: the sample `AIPackage` entries lack `releaseTime` and `downloadLocation`, which SPDX 3.0.1
 makes mandatory for `AIPackage` but its SHACL model does not enforce. ADR-0189 R3 and owner item 1 decide how B5
 handles them.
+
+## 11. Third review round (2026-10-10, PR #265)
+
+The spike is a feasibility check, not the product renderer. Where a finding was about mapping real tables, the fix is a
+binding requirement on B3 in ADR-0189 (R24 and R26 to R32), and B3's loader is tested against rows shaped by the
+`packages/db` schema (R32). The spike code changed only where it made a false claim or the change was cheap:
+
+- **Email scan.** Any `@` with a non-space character on both sides is now refused, so quoted local parts, address
+  literals and dotless domains are caught (fail closed; a false positive names the path).
+- **Loader allowlist and persisted model cards.** `normalise` takes only allowlisted keys per record type and refuses
+  any other (an agent's system prompt, a prompt template, a skill body). `modelCardFromRow` maps the real
+  `model_cards` shape: `intended_use` and `limitations` stay whole strings, `bias_fairness` entries render by
+  `dimension` with method and status as a property (assessor and note are dropped), and `data_claims` is rendered as
+  supplier claims, never split or invented. Task and architecture appear only when the supplier declared them.
+- **Safe integers.** A number that is not a safe integer is refused before canonicalisation.
+- **Absent values.** `prop()` omits null and undefined; a null MCP release digest is `not_recorded`.
+- **Clean PII verdict.** No `sensitiveData` key at all (it was an empty list).
+- **Datasets (R24, R26).** Training checksums parse `sha256:<hex>:<rows>`; `fnv1a32:` stays a property only; the
+  evaluation dataset has a cases digest and no classification, owner or PII verdict; gaps are `incomplete`.
+- **Licences.** Every model component states a licence: the supplier-declared one, else `unknown`, with an
+  `incomplete` composition.
+- **SPDX.** Every artifact hash of an agent is listed; provider names reach IRIs only as a digest.
+- **No fabricated digests or claims (R30).** Evidence entries say `digest: not_recorded` (no table stores one);
+  `standard_refs` render as properties, not URLs; `authenticated` is emitted only from a recorded boolean.
+- **Fixtures.** Model cards, datasets, evidence and scans now follow the real columns. `make-records-b.mjs` keeps
+  array order inside `data_claims` (a jsonb value), reordering only its keys.
+
+Left to B3 by ADR amendment, not spiked: many-to-many artifact edges (R29), agent, builder-agent and install subjects
+(R31), and per-use-case data flows (R27).
+
+New values, from `npm run test:offline` (33 tests, all passing, no network namespace interfaces); the offline SHACL
+check of the new SPDX sample passes (`evidence/spdx3-validate-offline.txt`):
+
+| native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
+|---|---|---|---|---|
+| `34e8e54b…9a6c` | `428fbe83…1a04` | `fc2b7b00…7897` | `47e13615…7031` | `/MUhBadU…WehMBg==` |

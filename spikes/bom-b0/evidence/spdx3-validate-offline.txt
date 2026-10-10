@@ -1,4 +1,4 @@
-{"file": "sample.spdx-3.0.1.json", "triples": 179, "schemaErrors": 0, "shaclErrors": 0, "conforms": true, "expectFail": false, "verdict": "PASS"}
+{"file": "sample.spdx-3.0.1.json", "triples": 177, "schemaErrors": 0, "shaclErrors": 0, "conforms": true, "expectFail": false, "verdict": "PASS"}
 {"file": "neg-supplied-by-tool.expect-fail.json", "triples": 179, "schemaErrors": 0, "shaclErrors": 1, "conforms": false, "expectFail": true, "verdict": "PASS"}
     Violation of type sh:ClassConstraintComponent:
     	Severity: sh:Violation

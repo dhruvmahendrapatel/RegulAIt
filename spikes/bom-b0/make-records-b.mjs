@@ -2,11 +2,13 @@
 // builder: every array reversed and every object's keys inserted in reverse order. Run once; committed.
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const flip = (v) => {
-  if (Array.isArray(v)) return v.map(flip).reverse();
+// Arrays INSIDE a jsonb value (a model card's data_claims) are data, not row order: a replica returns them as stored,
+// so only their object keys are reordered.
+const flip = (v, keepArrays = false) => {
+  if (Array.isArray(v)) { const m = v.map((x) => flip(x, keepArrays)); return keepArrays ? m : m.reverse(); }
   if (v && typeof v === 'object') {
     const o = {};
-    for (const k of Object.keys(v).reverse()) o[k] = flip(v[k]);
+    for (const k of Object.keys(v).reverse()) o[k] = flip(v[k], keepArrays || k === 'dataClaims');
     return o;
   }
   return v;

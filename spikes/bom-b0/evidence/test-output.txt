@@ -3,139 +3,211 @@
 > B0_EXPECT_OFFLINE=1 unshare -n node --test --test-concurrency=1 spike.test.mjs
 
 TAP version 13
-# {"processes":6,"nodes":["v20.20.2","v21.7.3","v22.22.2"],"sha256":{"native":"3c36cfee90c5245dd247cbe4d1a78ec86d648e91487bd17ca080817a8aaffab1","cyclonedx-1.7":"efebbf0d38f91d5b5b1295d2d033d0c10fce37614f8c881951395d07d51909ca","cyclonedx-1.6":"58f7d5bcf6a24f2ee9c01df6cd3c1277bcef2d1d5ad5cdd85313b5227f346322","spdx-3.0.1":"e3dede3acd21077e92cd7dee3393de9d8b4ea7f237cdab1c217023062e7dbf91"}}
+# {"processes":6,"nodes":["v20.20.2","v21.7.3","v22.22.2"],"sha256":{"native":"34e8e54b9e478d63742ab6d300bd542ee7088c7fcb33356f4f7e1c2fb77d9a6c","cyclonedx-1.7":"428fbe83fbaa844ed3f64d840147b4fd48d54940d2e4a5073ad7fa6ee2331a04","cyclonedx-1.6":"fc2b7b00c3ad2d1f5956e162f69da0315b590282d57aeaba659dbcbbd0ec7897","spdx-3.0.1":"47e136150dc34e4014bd186a515acf22e39f7f950d1d4bdda3955343f2637031"}}
 # Subtest: offline: when B0_EXPECT_OFFLINE=1 the process has no network at all
 ok 1 - offline: when B0_EXPECT_OFFLINE=1 the process has no network at all
   ---
-  duration_ms: 5.419284
+  duration_ms: 5.048555
   type: 'test'
   ...
 # Subtest: item 1: cyclonedx-library 10.3.0 model lacks the ML-BOM fields, and its serializer drops them
 ok 2 - item 1: cyclonedx-library 10.3.0 model lacks the ML-BOM fields, and its serializer drops them
   ---
-  duration_ms: 190.77405
+  duration_ms: 213.045462
   type: 'test'
   ...
 # Subtest: item 2: the sample renders validate against the bundled 1.7, 1.6 and vendored SPDX 3.0.1 schemas
 ok 3 - item 2: the sample renders validate against the bundled 1.7, 1.6 and vendored SPDX 3.0.1 schemas
   ---
-  duration_ms: 127.682444
+  duration_ms: 126.322358
   type: 'test'
   ...
 # Subtest: item 2: the vendored SPDX schema is the recorded file
 ok 4 - item 2: the vendored SPDX schema is the recorded file
   ---
-  duration_ms: 3.468789
+  duration_ms: 3.124419
   type: 'test'
   ...
 # Subtest: item 2: negative controls: every one of these is REJECTED by both CycloneDX validators
 ok 5 - item 2: negative controls: every one of these is REJECTED by both CycloneDX validators
   ---
-  duration_ms: 25.643552
+  duration_ms: 28.626985
   type: 'test'
   ...
 # Subtest: item 2: the upstream library's iri-reference choice (accept every value) would let a non-IRI through
 ok 6 - item 2: the upstream library's iri-reference choice (accept every value) would let a non-IRI through
   ---
-  duration_ms: 930.171701
+  duration_ms: 911.29253
   type: 'test'
   ...
 # Subtest: item 2: negative controls: each is REJECTED by the SPDX 3.0.1 schema
 ok 7 - item 2: negative controls: each is REJECTED by the SPDX 3.0.1 schema
   ---
-  duration_ms: 54.501766
+  duration_ms: 58.601414
   type: 'test'
   ...
 # Subtest: item 2: the sample carries no email-shaped string at all
 ok 8 - item 2: the sample carries no email-shaped string at all
   ---
-  duration_ms: 3.297618
+  duration_ms: 3.262059
   type: 'test'
   ...
 # Subtest: item 3: canonicalize is byte-identical to canonicalJson on BOM shapes (Decision BOM, native AI BOM, renderings)
 ok 9 - item 3: canonicalize is byte-identical to canonicalJson on BOM shapes (Decision BOM, native AI BOM, renderings)
   ---
-  duration_ms: 365.274646
+  duration_ms: 507.555498
   type: 'test'
   ...
 # Subtest: item 3: what canonicalisation does NOT protect: floats and the jsonb hazard (why money is integer micro-USD and bodies are stored as text)
 ok 10 - item 3: what canonicalisation does NOT protect: floats and the jsonb hazard (why money is integer micro-USD and bodies are stored as text)
   ---
-  duration_ms: 0.751454
+  duration_ms: 1.22221
   type: 'test'
   ...
 # Subtest: item 4: same records twice in one process -> identical bytes and signature
 ok 11 - item 4: same records twice in one process -> identical bytes and signature
   ---
-  duration_ms: 9.048695
+  duration_ms: 15.508953
   type: 'test'
   ...
 # Subtest: item 4: a second replica's row/key order (records-b) -> identical bytes
 ok 12 - item 4: a second replica's row/key order (records-b) -> identical bytes
   ---
-  duration_ms: 6.69181
+  duration_ms: 7.672067
   type: 'test'
   ...
 # Subtest: item 4: non-vacuity: one changed fact changes the bytes; skipping normalisation changes them for records-b
 ok 13 - item 4: non-vacuity: one changed fact changes the bytes; skipping normalisation changes them for records-b
   ---
-  duration_ms: 8.509689
+  duration_ms: 13.823118
   type: 'test'
   ...
 # Subtest: item 4: fresh processes, both inputs, every available Node major -> identical hashes and signature
 ok 14 - item 4: fresh processes, both inputs, every available Node major -> identical hashes and signature
   ---
-  duration_ms: 1469.174525
+  duration_ms: 1497.400895
   type: 'test'
   ...
 # Subtest: review R10: an email in ANY string or key is refused by the whole-document scan, naming the path
 ok 15 - review R10: an email in ANY string or key is refused by the whole-document scan, naming the path
   ---
-  duration_ms: 23.504751
+  duration_ms: 24.423503
   type: 'test'
   ...
 # Subtest: review R10: non-vacuity: the schema validators alone ACCEPT an email in an ordinary string field
 ok 16 - review R10: non-vacuity: the schema validators alone ACCEPT an email in an ordinary string field
   ---
-  duration_ms: 9.126307
+  duration_ms: 3.342884
   type: 'test'
   ...
 # Subtest: review: a model card with no dataClaims renders, as provenance unknown, and validates
 ok 17 - review: a model card with no dataClaims renders, as provenance unknown, and validates
   ---
-  duration_ms: 24.253992
+  duration_ms: 14.529685
   type: 'test'
   ...
 # Subtest: review R11: PII verdicts map from the persisted vocabulary clean | flagged | blocked
 ok 18 - review R11: PII verdicts map from the persisted vocabulary clean | flagged | blocked
   ---
-  duration_ms: 42.653695
+  duration_ms: 23.545232
   type: 'test'
   ...
 # Subtest: review R12: two scans by one engine at different versions stay two scanner components, each attested exactly
 ok 19 - review R12: two scans by one engine at different versions stay two scanner components, each attested exactly
   ---
-  duration_ms: 0.486839
+  duration_ms: 0.484535
   type: 'test'
   ...
 # Subtest: review R12: every model_card_evidence kind (eval_run, external, engine_scan) becomes a claim, evidence and attestation
 ok 20 - review R12: every model_card_evidence kind (eval_run, external, engine_scan) becomes a claim, evidence and attestation
   ---
-  duration_ms: 1.539338
+  duration_ms: 1.580643
   type: 'test'
   ...
 # Subtest: review R13: the offline SPDX driver FAILS when given no documents
 ok 21 - review R13: the offline SPDX driver FAILS when given no documents
   ---
-  duration_ms: 81.497636
+  duration_ms: 76.798045
   type: 'test'
   ...
-1..21
-# tests 21
+# Subtest: review: a clean dataset carries no sensitiveData key at all, and still validates
+ok 22 - review: a clean dataset carries no sensitiveData key at all, and still validates
+  ---
+  duration_ms: 0.593539
+  type: 'test'
+  ...
+# Subtest: review: SPDX lists EVERY model artifact hash of an agent, as CycloneDX does
+ok 23 - review: SPDX lists EVERY model artifact hash of an agent, as CycloneDX does
+  ---
+  duration_ms: 20.337996
+  type: 'test'
+  ...
+# Subtest: review: a provider name with spaces never reaches an SPDX IRI
+ok 24 - review: a provider name with spaces never reaches an SPDX IRI
+  ---
+  duration_ms: 18.264124
+  type: 'test'
+  ...
+# Subtest: review: a persisted model_cards row maps without splitting text or dropping claims
+ok 25 - review: a persisted model_cards row maps without splitting text or dropping claims
+  ---
+  duration_ms: 18.980438
+  type: 'test'
+  ...
+# Subtest: review: every model component states a licence; unknown is explicit and the composition is incomplete
+ok 26 - review: every model component states a licence; unknown is explicit and the composition is incomplete
+  ---
+  duration_ms: 16.692524
+  type: 'test'
+  ...
+# Subtest: review: unknown loader keys are refused before signing (no raw prompt, template or skill body)
+ok 27 - review: unknown loader keys are refused before signing (no raw prompt, template or skill body)
+  ---
+  duration_ms: 3.092972
+  type: 'test'
+  ...
+# Subtest: review: absent values are omitted, never written as "null" or "undefined"
+ok 28 - review: absent values are omitted, never written as "null" or "undefined"
+  ---
+  duration_ms: 18.659813
+  type: 'test'
+  ...
+# Subtest: review: a number that is not a safe integer is refused before canonicalisation
+ok 29 - review: a number that is not a safe integer is refused before canonicalisation
+  ---
+  duration_ms: 4.460022
+  type: 'test'
+  ...
+# Subtest: review R24/R26: dataset hashes are honest per kind
+ok 30 - review R24/R26: dataset hashes are honest per kind
+  ---
+  duration_ms: 16.189596
+  type: 'test'
+  ...
+# Subtest: review: no evidence digest is fabricated (model_card_evidence and artifact_scans persist none)
+ok 31 - review: no evidence digest is fabricated (model_card_evidence and artifact_scans persist none)
+  ---
+  duration_ms: 6.310635
+  type: 'test'
+  ...
+# Subtest: review: standard_refs are display text, rendered as properties and never as URLs
+ok 32 - review: standard_refs are display text, rendered as properties and never as URLs
+  ---
+  duration_ms: 15.360522
+  type: 'test'
+  ...
+# Subtest: review: `authenticated` comes only from the recorded credential state
+ok 33 - review: `authenticated` comes only from the recorded credential state
+  ---
+  duration_ms: 1.120219
+  type: 'test'
+  ...
+1..33
+# tests 33
 # suites 0
-# pass 21
+# pass 33
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 4849.900972
+# duration_ms 5213.050749

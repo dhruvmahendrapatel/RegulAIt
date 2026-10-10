@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import canonicalize from 'canonicalize';
 import { buildValidators, findEmails } from './validators.mjs';
-import { normalise, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
+import { modelCardFromRow, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (p) => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
@@ -62,12 +62,12 @@ test('item 2: the vendored SPDX schema is the recorded file', async () => {
 });
 
 const mutate = (doc, fn) => { const d = structuredClone(doc); fn(d); return d; };
-const dataComponent = (d) => d.components.find((c) => c.type === 'data' && c.data?.[0]?.governance);
+const dataComponent = (d) => d.components.find((c) => c.type === 'data' && c.data?.[0]?.type === 'dataset');
 const flowService = (d) => d.services.find((s) => s.data);
 
 test('item 2: negative controls: every one of these is REJECTED by both CycloneDX validators', () => {
   const cases = {
-    'an email anywhere (idn-email reject-all)': (d) => { dataComponent(d).data[0].governance.owners[0].contact.email = 'someone@example.com'; },
+    'an email anywhere (idn-email reject-all)': (d) => { dataComponent(d).data[0].governance = { owners: [{ contact: { email: 'someone@example.com' } }] }; },
     'an unknown key on a component': (d) => { d.components[0].modelCard_typo = {}; },
     'an unknown key inside modelCard': (d) => { d.components.find((c) => c.modelCard).modelCard.notAField = 1; },
     'a bad data-flow enum': (d) => { flowService(d).data[0].flow = 'sideways'; },
@@ -181,10 +181,10 @@ test('item 4: a second replica\'s row/key order (records-b) -> identical bytes',
 
 test('item 4: non-vacuity: one changed fact changes the bytes; skipping normalisation changes them for records-b', () => {
   const changed = structuredClone(recordsA);
-  changed.datasets[0].checksum = 'c'.repeat(64);
+  changed.datasets.find((d) => d.kind === 'training').checksum = `sha256:${'c'.repeat(64)}:1200`;
   assert.notEqual(renderAll(changed).sha256.native, sample.sha256.native);
-  // list order: model-card lists pass straight into modelCard.considerations, so unsorted input reorders them
-  const unsorted = (r) => canonicalize(renderCycloneDx({ ...normalise(r), modelCards: r.modelCards }, '1.7'));
+  // list order: an MCP server's tools pass straight into its nested services, so unsorted input reorders them
+  const unsorted = (r) => canonicalize(renderCycloneDx({ ...normalise(r), mcpServers: r.mcpServers }, '1.7'));
   assert.notEqual(unsorted(recordsA), unsorted(recordsB), 'normalise() list sorting is load-bearing');
   // key order: the native body carries input objects; plain JSON.stringify would follow replica B's key order
   assert.notEqual(JSON.stringify(normalise(recordsB)), JSON.stringify(normalise(recordsA)), 'key order differs as text');
@@ -216,9 +216,12 @@ test('review R10: an email in ANY string or key is refused by the whole-document
   const email = 'someone@example.com';
   const cases = {
     'the use-case name': (r) => { r.useCase.name = `claims triage (owner ${email})`; },
-    'a model-card limitation': (r) => { r.modelCards[0].limitations.push(`ask ${email}`); },
+    'a model-card limitation': (r) => { r.modelCards[0].limitations += ` ask ${email}`; },
     'a properties[].value (requested model)': (r) => { r.agents[0].requestedModel = email; },
-    'an object key carried into the native body': (r) => { r.agents[0][email] = 'x'; },
+    'an object key carried into the native body (supplier claims are a free record)': (r) => { r.modelCards[0].dataClaims[email] = 'x'; },
+    'a quoted local part': (r) => { r.useCase.name = 'owner "Fred Bloggs"@example.com'; },
+    'an address literal': (r) => { r.useCase.name = 'owner user@[192.0.2.1]'; },
+    'a dotless domain': (r) => { r.agents[0].requestedModel = 'ops@localhost'; },
     'an internationalised address': (r) => { r.useCase.name = 'ü@例え.テスト'; },
   };
   for (const [name, fn] of Object.entries(cases)) {
@@ -238,12 +241,12 @@ test('review R10: non-vacuity: the schema validators alone ACCEPT an email in an
 
 test('review: a model card with no dataClaims renders, as provenance unknown, and validates', () => {
   const r = structuredClone(recordsA);
-  delete r.modelCards[0].dataClaims;
+  r.modelCards[0].dataClaims = {}; // the column default
   const out = renderAll(r);
   const d = JSON.parse(out.bytes['cyclonedx-1.7']);
   const model = d.components.find((c) => c.modelCard);
   assert.ok(model.properties.some((p) => p.name === 'regulait:trainingData:provenance' && p.value === 'unknown'));
-  assert.ok(!model.modelCard.properties.some((p) => p.name === 'regulait:trainingData:source'));
+  assert.ok(!model.modelCard.properties.some((p) => p.name.startsWith('regulait:supplierClaim:')));
   for (const k of ['cyclonedx-1.7', 'cyclonedx-1.6', 'spdx-3.0.1']) assert.equal(validators[k](JSON.parse(out.bytes[k])).valid, true, k);
   const withCard = r.agents.find((a) => a.modelCardId);
   const pkg = JSON.parse(out.bytes['spdx-3.0.1'])['@graph'].find((x) => x.spdxId?.endsWith(`agent-${withCard.id}`));
@@ -253,9 +256,10 @@ test('review: a model card with no dataClaims renders, as provenance unknown, an
 test('review R11: PII verdicts map from the persisted vocabulary clean | flagged | blocked', () => {
   const at = (verdict) => {
     const r = structuredClone(recordsA);
-    r.datasets.forEach((d) => { d.piiVerdict = verdict; });
-    const c = cdx17(r).components.filter((x) => x.type === 'data' && x.data[0].type === 'dataset');
-    const s = spdxOf(r)['@graph'].filter((x) => x.type === 'dataset_DatasetPackage');
+    r.datasets.filter((d) => d.kind === 'training').forEach((d) => { d.piiVerdict = verdict; });
+    const ids = new Set(r.datasets.filter((d) => d.kind === 'training').map((d) => d.id));
+    const c = cdx17(r).components.filter((x) => x.type === 'data' && ids.has(x['bom-ref'].replace(/^dataset:/, '')));
+    const s = spdxOf(r)['@graph'].filter((x) => x.type === 'dataset_DatasetPackage' && [...ids].some((i) => x.spdxId.endsWith(`#dataset-${i}`)));
     return {
       cdx: [...new Set(c.map((x) => JSON.stringify(x.data[0].sensitiveData)))],
       spdx: [...new Set(s.map((x) => x.dataset_hasSensitivePersonalInformation))],
@@ -263,7 +267,8 @@ test('review R11: PII verdicts map from the persisted vocabulary clean | flagged
   };
   assert.deepEqual(at('flagged'), { cdx: ['["pii"]'], spdx: ['yes'] });
   assert.deepEqual(at('blocked'), { cdx: ['["pii"]'], spdx: ['yes'] });
-  assert.deepEqual(at('clean'), { cdx: ['[]'], spdx: ['noAssertion'] });
+  // a clean scan is not proof of absence: NO sensitiveData entry at all, not an empty list
+  assert.deepEqual(at('clean'), { cdx: [undefined], spdx: ['noAssertion'] });
   for (const bad of ['contains_pii', 'unknown', null]) assert.throws(() => at(bad), /unknown pii_verdict/, String(bad));
 });
 
@@ -310,4 +315,155 @@ test('review R13: the offline SPDX driver FAILS when given no documents', { skip
   // non-vacuity: with a document argument the driver gets past the check (and then needs the venv's libraries)
   const withDoc = spawnSync(python, ['-I', driver, path.join(here, 'evidence', 'sample.spdx-3.0.1.json')], { encoding: 'utf8' });
   assert.notEqual(withDoc.status, 2);
+});
+
+// ------------------------------------------------------------------------------------------------ third review round (PR #265)
+const cdxOf = (r) => JSON.parse(renderAll(r).bytes['cyclonedx-1.7']);
+const allValid = (r) => { const out = renderAll(r); for (const k of ['cyclonedx-1.7', 'cyclonedx-1.6', 'spdx-3.0.1']) assert.equal(validators[k](JSON.parse(out.bytes[k])).valid, true, k); };
+
+test('review: a clean dataset carries no sensitiveData key at all, and still validates', () => {
+  const ds = docs['cyclonedx-1.7'].components.find((c) => c['bom-ref'] === 'dataset:ds-train-01');
+  assert.equal('sensitiveData' in ds.data[0], false);
+  assert.ok(ds.properties.some((p) => p.name === 'regulait:dataset:piiVerdict' && p.value === 'clean'));
+});
+
+test('review: SPDX lists EVERY model artifact hash of an agent, as CycloneDX does', () => {
+  const r = structuredClone(recordsA);
+  r.modelArtifacts.push({ ...r.modelArtifacts[0], id: 'art-78', sha256: 'a'.repeat(64) });
+  const pkg = spdxOf(r)['@graph'].find((x) => x.type === 'ai_AIPackage' && x.spdxId.endsWith(`agent-${r.agents[0].id}`));
+  assert.deepEqual(pkg.verifiedUsing.map((h) => h.hashValue).sort(), [r.modelArtifacts[0].sha256, 'a'.repeat(64)].sort());
+  allValid(r);
+});
+
+test('review: a provider name with spaces never reaches an SPDX IRI', () => {
+  const r = structuredClone(recordsA);
+  r.agents[0].provider = 'Acme AI / Labs #1';
+  r.endpoints[0].provider = 'Acme AI / Labs #1';
+  const g = spdxOf(r)['@graph'];
+  const org = g.find((x) => x.type === 'Organization' && x.name === 'Acme AI / Labs #1');
+  assert.match(org.spdxId, /#supplier-[0-9a-f]{32}$/);
+  for (const x of g) if (x.spdxId) assert.doesNotMatch(x.spdxId, /\s/, x.spdxId);
+  allValid(r);
+});
+
+test('review: a persisted model_cards row maps without splitting text or dropping claims', () => {
+  const row = recordsA.modelCards[0];
+  const m = modelCardFromRow(row);
+  assert.equal(typeof row.intendedUse, 'string');
+  const model = docs['cyclonedx-1.7'].components.find((c) => c.modelCard);
+  assert.deepEqual(model.modelCard.considerations.useCases, [row.intendedUse]);
+  assert.deepEqual(model.modelCard.considerations.technicalLimitations, [row.limitations]);
+  assert.deepEqual(model.modelCard.considerations.ethicalConsiderations.map((e) => e.name).sort(), ['dialect', 'language parity']);
+  const assessments = model.modelCard.properties.filter((p) => p.name === 'regulait:biasFairness:assessment').map((p) => JSON.parse(p.value));
+  assert.deepEqual(assessments.map((a) => a.status).sort(), ['assessed', 'in_progress']);
+  assert.ok(assessments.every((a) => !('assessedBy' in a) && !('note' in a)), 'free text about people is not rendered');
+  assert.ok(model.properties.some((p) => p.name === 'regulait:trainingData:provenance' && p.value === 'supplier-declared'));
+  assert.ok(model.modelCard.properties.some((p) => p.name === 'regulait:supplierClaim:retention' && p.value === '30 days'));
+  assert.equal(model.modelCard.modelParameters.task, 'text-classification');
+  assert.equal(m.limitations, row.limitations);
+  // null limitations: no technicalLimitations at all, never "null"
+  const r = structuredClone(recordsA); r.modelCards[0].limitations = null;
+  assert.equal('technicalLimitations' in cdxOf(r).components.find((c) => c.modelCard).modelCard.considerations, false);
+  allValid(r);
+  assert.throws(() => modelCardFromRow({ ...row, systemNote: 'x' }), /unknown key\(s\) refused: systemNote/);
+  assert.throws(() => modelCardFromRow({ ...row, biasFairness: [{ dimension: 'a', method: 'b', status: 'done' }] }), /unknown status/);
+});
+
+test('review: every model component states a licence; unknown is explicit and the composition is incomplete', () => {
+  const d = docs['cyclonedx-1.7'];
+  for (const c of d.components.filter((x) => x.type === 'machine-learning-model')) assert.deepEqual(c.licenses, [{ license: { name: 'unknown' } }], c['bom-ref']);
+  const comp = d.compositions.find((c) => c['bom-ref'] === 'composition:licence-unknown');
+  assert.equal(comp.aggregate, 'incomplete');
+  assert.equal(comp.assemblies.length, recordsA.agents.length);
+  const r = structuredClone(recordsA); r.modelCards[0].dataClaims.license = 'Supplier Licence 2.0';
+  const declared = cdxOf(r).components.find((c) => c.modelCard);
+  assert.deepEqual(declared.licenses, [{ license: { name: 'Supplier Licence 2.0', acknowledgement: 'declared' } }]);
+  allValid(r);
+});
+
+test('review: unknown loader keys are refused before signing (no raw prompt, template or skill body)', () => {
+  const cases = {
+    'an agent system prompt': (r) => { r.agents[0].systemPrompt = 'You are a claims bot'; },
+    'a prompt commit template': (r) => { r.promptCommits[0].template = 'Hello {{name}}'; },
+    'a skill body': (r) => { r.skills[0].body = '# skill'; },
+    'an mcp tool description': (r) => { r.mcpServers[0].tools[0].description = 'raw'; },
+    'an eval dataset checksum it does not have': (r) => { r.datasets.find((d) => d.kind === 'eval').checksum = 'x'; },
+  };
+  for (const [name, fn] of Object.entries(cases)) {
+    const r = structuredClone(recordsA); fn(r);
+    assert.throws(() => renderAll(r), /unknown key\(s\) refused/, name);
+  }
+});
+
+test('review: absent values are omitted, never written as "null" or "undefined"', () => {
+  const r = structuredClone(recordsA);
+  r.snapshot.supersedesId = null;
+  r.mcpServers[0].releaseDigest = null;
+  const out = renderAll(r);
+  for (const [k, b] of Object.entries(out.bytes)) assert.doesNotMatch(b, /"(null|undefined)"/, k);
+  const d = JSON.parse(out.bytes['cyclonedx-1.7']);
+  assert.equal(d.metadata.properties.some((p) => p.name === 'regulait:snapshot:supersedes'), false);
+  assert.ok(d.services.find((s) => s.name === 'claims-db').properties.some((p) => p.name === 'regulait:mcp:releaseDigest' && p.value === 'not_recorded'));
+  allValid(r);
+});
+
+test('review: a number that is not a safe integer is refused before canonicalisation', () => {
+  const big = structuredClone(recordsA); big.modelArtifacts[0].sizeBytes = 2 ** 53;
+  assert.throws(() => renderAll(big), /unsafe or non-integer number at \$\.modelArtifacts\[0\]\.sizeBytes/);
+  const float = structuredClone(recordsA); float.agents[0].observed.count = 1.5;
+  assert.throws(() => renderAll(float), /unsafe or non-integer/);
+  const ok = structuredClone(recordsA); ok.modelArtifacts[0].sizeBytes = Number.MAX_SAFE_INTEGER;
+  assert.doesNotThrow(() => renderAll(ok));
+});
+
+test('review R24/R26: dataset hashes are honest per kind', () => {
+  assert.deepEqual(parseTrainingChecksum(`sha256:${'d'.repeat(64)}:12`), { sha256: 'd'.repeat(64), rowCount: 12, legacy: null });
+  assert.deepEqual(parseTrainingChecksum('fnv1a32:0badf00d'), { sha256: null, rowCount: null, legacy: 'fnv1a32:0badf00d' });
+  assert.deepEqual(parseTrainingChecksum(''), { sha256: null, rowCount: null, legacy: null });
+  assert.throws(() => parseTrainingChecksum('d'.repeat(64)), /unparseable/);
+  const d = docs['cyclonedx-1.7'];
+  const train = d.components.find((c) => c['bom-ref'] === 'dataset:ds-train-01');
+  assert.equal(train.hashes[0].content, recordsA.datasets.find((x) => x.kind === 'training').checksum.split(':')[1]);
+  assert.ok(train.properties.some((p) => p.name === 'regulait:dataset:rowCount' && p.value === '1200'));
+  const ev = d.components.find((c) => c['bom-ref'] === 'dataset:ds-eval-02');
+  assert.equal(ev.data[0].classification, undefined);
+  assert.equal(ev.data[0].governance, undefined);
+  assert.ok(ev.properties.some((p) => p.name === 'regulait:dataset:piiVerdict' && p.value === 'not_scanned'));
+  assert.ok(ev.properties.some((p) => p.name === 'regulait:dataset:digestOf' && p.value === 'eval_cases'));
+  assert.ok(d.compositions.find((c) => c['bom-ref'] === 'composition:dataset-metadata-not-recorded').assemblies.includes('dataset:ds-eval-02'));
+  const legacy = structuredClone(recordsA); legacy.datasets.find((x) => x.kind === 'training').checksum = 'fnv1a32:0badf00d';
+  const lt = cdxOf(legacy).components.find((c) => c['bom-ref'] === 'dataset:ds-train-01');
+  assert.equal(lt.hashes, undefined, 'a legacy FNV value is never relabelled as SHA-256');
+  assert.ok(lt.properties.some((p) => p.name === 'regulait:dataset:legacyChecksum'));
+  allValid(legacy);
+});
+
+test('review: no evidence digest is fabricated (model_card_evidence and artifact_scans persist none)', () => {
+  const b = sample.bytes['cyclonedx-1.7'];
+  assert.doesNotMatch(b, /sha256:undefined/);
+  const ev = docs['cyclonedx-1.7'].declarations.evidence;
+  assert.ok(ev.length > 0 && ev.every((e) => e.description === 'digest: not_recorded'), JSON.stringify(ev.map((e) => e.description)));
+  const withDigest = structuredClone(recordsA); withDigest.modelCardEvidence[0].sha256 = 'e'.repeat(64);
+  assert.ok(cdxOf(withDigest).declarations.evidence.some((e) => e.description === `sha256:${'e'.repeat(64)}`));
+  const bad = structuredClone(recordsA); bad.modelCardEvidence[0].sha256 = 'nope';
+  assert.throws(() => renderAll(bad), /malformed sha256/);
+});
+
+test('review: standard_refs are display text, rendered as properties and never as URLs', () => {
+  const r = structuredClone(recordsA);
+  r.modelCards[0].standardRefs = ['NIST AI RMF Measure 2.11', 'iso-42001:8.3'];
+  const model = cdxOf(r).components.find((c) => c.modelCard);
+  assert.equal(model.externalReferences, undefined);
+  assert.deepEqual(model.modelCard.properties.filter((p) => p.name === 'regulait:standardRef').map((p) => p.value), ['NIST AI RMF Measure 2.11', 'iso-42001:8.3']);
+  allValid(r);
+});
+
+test('review: `authenticated` comes only from the recorded credential state', () => {
+  const d = docs['cyclonedx-1.7'];
+  const svc = (ref) => d.services.find((s) => s['bom-ref'] === ref);
+  assert.equal(svc('service:endpoint:ep-alpha').authenticated, true);
+  assert.equal(svc('service:endpoint:ep-beta').authenticated, false, 'a keyless endpoint is stated as unauthenticated');
+  assert.equal('authenticated' in svc('service:connector:conn-2'), false, 'no recorded state, no assertion');
+  const bad = structuredClone(recordsA); bad.connectors[0].authenticated = 'yes';
+  assert.throws(() => renderAll(bad), /must be a boolean/);
 });

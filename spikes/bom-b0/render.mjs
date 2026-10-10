@@ -12,8 +12,9 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0); // code-unit order, never lo
 const sortBy = (list, key) => [...(list ?? [])].sort((a, b) => cmp(key(a), key(b)));
 const sortStrings = (list) => [...(list ?? [])].sort(cmp);
 const stripAlg = (d) => d.replace(/^sha256:/, '');
-const prop = (name, value) => ({ name, value: String(value) });
-const props = (list) => sortBy(list, (p) => `${p.name}\u0000${p.value}`);
+// An absent value is OMITTED, never written as the strings "null" or "undefined" (PR #265 review).
+const prop = (name, value) => (value === null || value === undefined ? null : { name, value: String(value) });
+const props = (list) => sortBy(list.filter(Boolean), (p) => `${p.name}\u0000${p.value}`);
 
 /** RFC 9562 version-8 UUID from SHA-256 of a name (the CycloneDX serialNumber, fixed by the snapshot id). */
 export function uuidV8FromName(name) {
@@ -24,34 +25,127 @@ export function uuidV8FromName(name) {
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
 }
 
-/** Normalise a loaded record set: row order and key order are NOT inputs. */
-export function normalise(r) {
-  const tools = (s) => sortBy(s.tools, (t) => t.name).map((t) => ({ ...t, grantedTo: sortStrings(t.grantedTo) }));
+// ---------------------------------------------------------------- loader contract (PR #265 review)
+// Every record type has an explicit ALLOWLIST. An unknown key is refused, never copied into the signed body, so a
+// broad loader query (an agent's system prompt, a prompt commit's template, a skill's body) cannot reach a BOM.
+const ALLOWED = {
+  snapshot: ['id', 'subjectKind', 'subjectId', 'version', 'supersedesId', 'trigger', 'createdAt', 'basis'],
+  basis: ['auditSeq', 'anchorId', 'receiptSeq'],
+  install: ['id', 'release', 'sbomRefs'],
+  sbomRef: ['kind', 'serial', 'version', 'sha256'],
+  useCase: ['id', 'name', 'ownerUserId', 'dataSensitivity', 'complianceTags', 'euAiActTier'],
+  agent: ['id', 'name', 'provider', 'requestedModel', 'pinnedModelVersion', 'workloadIdentity', 'modelCardId', 'observed'],
+  observed: ['lastSeen', 'count'],
+  modelArtifact: ['id', 'agentId', 'sha256', 'format', 'sizeBytes'],
+  artifactScan: ['id', 'artifactId', 'engine', 'engineVersion', 'imageDigest', 'verdict', 'evidenceKind', 'evidenceSha256', 'at'],
+  // model_card_evidence persists no digest; `sha256` is accepted only when B3 defines one (ADR-0189 R30)
+  modelCardEvidence: ['id', 'modelCardId', 'kind', 'artifactScanId', 'sha256', 'at'],
+  // ADR-0189 R24: training_datasets has checksum and pii_verdict, classification only via its project, no owner;
+  // eval_datasets has none of these, only a digest the loader computes over the version's eval_cases.
+  'dataset:training': ['id', 'kind', 'name', 'version', 'checksum', 'piiVerdict', 'projectDataSensitivity'],
+  'dataset:eval': ['id', 'kind', 'name', 'version', 'casesDigest'],
+  promptCommit: ['id', 'agentId', 'name', 'hash', 'tag'],
+  // `authenticated` comes from the provider/connector credential record; absent means not asserted (R30)
+  endpoint: ['id', 'agentId', 'provider', 'url', 'trustZone', 'sends', 'receives', 'authenticated'],
+  mcpServer: ['id', 'name', 'transport', 'url', 'releaseDigest', 'admission', 'identityPropagation', 'ownerUserId', 'tools', 'authenticated'],
+  mcpTool: ['name', 'grantedTo', 'observed'],
+  connector: ['id', 'name', 'kind', 'url', 'admissionManifestDigest', 'ownerUserId', 'grantedTo', 'authenticated'],
+  memoryStore: ['id', 'agentId', 'kind', 'classification'],
+  skill: ['id', 'name', 'admittedDigest'],
+  evaluation: ['type', 'value', 'slice'],
+};
+function only(kind, o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error(`${kind}: expected an object`);
+  const allowed = ALLOWED[kind];
+  const extra = Object.keys(o).filter((k) => !allowed.includes(k));
+  if (extra.length) throw new Error(`${kind}: unknown key(s) refused: ${extra.join(', ')}`);
+  return Object.fromEntries(allowed.filter((k) => k in o).map((k) => [k, o[k]]));
+}
+
+/** Every number in a loaded record must be a safe integer: a larger value was already rounded when it was read, and a
+ * float has no place in a signed body (ADR-0189 amendment 5). Refuse, never round. */
+export function assertSafeIntegers(value, path = '$') {
+  if (typeof value === 'bigint') throw new Error(`bigint at ${path} refused: load it as a checked safe integer`);
+  if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new Error(`unsafe or non-integer number at ${path} refused: ${value}`);
+  if (Array.isArray(value)) value.forEach((v, i) => assertSafeIntegers(v, `${path}[${i}]`));
+  else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) assertSafeIntegers(v, `${path}.${k}`);
+}
+
+// The model_cards row (packages/db schema.ts) as the loader reads it, plus three joined fields. Columns that are read
+// but never rendered are dropped here by name; any other key is refused.
+const CARD_COLUMNS = ['id', 'intendedUse', 'dataClaims', 'limitations', 'biasFairness', 'standardRefs'];
+const CARD_DROPPED = ['agentId', 'customProviderId', 'note', 'pinnedModelVersion', 'createdByUserId', 'createdAt', 'updatedAt'];
+const CARD_JOINED = ['approvedId', 'datasetIds', 'evaluations'];
+// BiasFairnessEntry: assessedBy and note are free text about people and are not rendered
+const BIAS_RENDERED = ['dimension', 'method', 'status', 'resultRef', 'assessedAt'];
+const BIAS_DROPPED = ['assessedBy', 'note'];
+const BIAS_STATUSES = ['not_assessed', 'in_progress', 'assessed', 'waived'];
+
+/** Map a persisted model card (intended_use text, limitations text|null, bias_fairness BiasFairnessEntry[], data_claims
+ * an arbitrary supplier record) to the renderer's shape. Never splits a string, never invents a claim. */
+export function modelCardFromRow(row) {
+  const extra = Object.keys(row).filter((k) => ![...CARD_COLUMNS, ...CARD_DROPPED, ...CARD_JOINED].includes(k));
+  if (extra.length) throw new Error(`modelCard: unknown key(s) refused: ${extra.join(', ')}`);
+  if (typeof row.intendedUse !== 'string' || !row.intendedUse.trim()) throw new Error('modelCard: intendedUse must be non-empty text');
+  if (row.limitations !== null && row.limitations !== undefined && typeof row.limitations !== 'string') throw new Error('modelCard: limitations must be text or null');
+  const claims = row.dataClaims ?? {};
+  if (typeof claims !== 'object' || Array.isArray(claims)) throw new Error('modelCard: dataClaims must be an object');
+  const bias = (row.biasFairness ?? []).map((b) => {
+    const unknown = Object.keys(b).filter((k) => ![...BIAS_RENDERED, ...BIAS_DROPPED].includes(k));
+    if (unknown.length) throw new Error(`modelCard.biasFairness: unknown key(s) refused: ${unknown.join(', ')}`);
+    if (!BIAS_STATUSES.includes(b.status)) throw new Error(`modelCard.biasFairness: unknown status ${JSON.stringify(b.status)}`);
+    return Object.fromEntries(BIAS_RENDERED.filter((k) => b[k] !== undefined && b[k] !== null).map((k) => [k, b[k]]));
+  });
+  const str = (v) => (typeof v === 'string' && v.trim() ? v : null);
   return {
-    snapshot: r.snapshot,
-    install: { ...r.install, sbomRefs: sortBy(r.install.sbomRefs, (x) => x.serial) },
-    useCase: { ...r.useCase, complianceTags: sortStrings(r.useCase.complianceTags) },
-    agents: sortBy(r.agents, (a) => a.id),
-    modelCards: sortBy(r.modelCards, (m) => m.id).map((m) => ({
-      ...m,
-      datasetIds: sortStrings(m.datasetIds),
-      standardRefs: sortStrings(m.standardRefs),
-      intendedUse: sortStrings(m.intendedUse),
-      limitations: sortStrings(m.limitations),
-      biasFairness: sortBy(m.biasFairness, (b) => b.name),
-      evaluations: sortBy(m.evaluations, (e) => `${e.type}\u0000${e.slice}`),
-      dataClaims: m.dataClaims && { ...m.dataClaims, sources: sortStrings(m.dataClaims.sources) },
+    id: row.id,
+    approvedId: row.approvedId ?? null,
+    intendedUse: row.intendedUse,
+    limitations: str(row.limitations),
+    biasFairness: sortBy(bias, (b) => `${b.dimension}\u0000${b.method}`),
+    // supplier-declared only (OWNER DECISION 10): an empty record is "unknown", never an inferred claim
+    dataClaims: claims,
+    declared: Object.keys(claims).length > 0,
+    task: str(claims.task),
+    architecture: str(claims.architecture),
+    license: str(claims.license),
+    standardRefs: sortStrings(row.standardRefs),
+    datasetIds: sortStrings(row.datasetIds),
+    evaluations: sortBy((row.evaluations ?? []).map((e) => only('evaluation', e)), (e) => `${e.type}\u0000${e.slice}`),
+  };
+}
+
+/** Normalise a loaded record set: row order and key order are NOT inputs, and only allowlisted fields go through. */
+export function normalise(r) {
+  assertSafeIntegers(r);
+  const observed = (o) => (o ? only('observed', o) : null);
+  const dataset = (d) => {
+    const kind = { training: 'dataset:training', eval: 'dataset:eval' }[d?.kind];
+    if (!kind) throw new Error(`dataset: unknown kind ${JSON.stringify(d?.kind)}`);
+    return only(kind, d);
+  };
+  const snapshot = only('snapshot', r.snapshot);
+  if (snapshot.basis) snapshot.basis = only('basis', snapshot.basis);
+  const install = only('install', r.install);
+  return {
+    snapshot,
+    install: { ...install, sbomRefs: sortBy((install.sbomRefs ?? []).map((x) => only('sbomRef', x)), (x) => x.serial) },
+    useCase: (({ complianceTags, ...u }) => ({ ...u, complianceTags: sortStrings(complianceTags) }))(only('useCase', r.useCase)),
+    agents: sortBy((r.agents ?? []).map((a) => { const o = only('agent', a); return { ...o, observed: observed(o.observed) }; }), (a) => a.id),
+    modelCards: sortBy((r.modelCards ?? []).map(modelCardFromRow), (m) => m.id),
+    modelArtifacts: sortBy((r.modelArtifacts ?? []).map((x) => only('modelArtifact', x)), (a) => a.id),
+    artifactScans: sortBy((r.artifactScans ?? []).map((x) => only('artifactScan', x)), (s) => s.id),
+    modelCardEvidence: sortBy((r.modelCardEvidence ?? []).map((x) => only('modelCardEvidence', x)), (e) => e.id),
+    datasets: sortBy((r.datasets ?? []).map(dataset), (d) => d.id),
+    promptCommits: sortBy((r.promptCommits ?? []).map((x) => only('promptCommit', x)), (p) => p.id),
+    endpoints: sortBy((r.endpoints ?? []).map((x) => only('endpoint', x)), (e) => e.id),
+    mcpServers: sortBy((r.mcpServers ?? []).map((x) => only('mcpServer', x)), (s) => s.id).map((s) => ({
+      ...s,
+      tools: sortBy((s.tools ?? []).map((t) => only('mcpTool', t)), (t) => t.name).map((t) => ({ ...t, grantedTo: sortStrings(t.grantedTo), observed: observed(t.observed) })),
     })),
-    modelArtifacts: sortBy(r.modelArtifacts, (a) => a.id),
-    artifactScans: sortBy(r.artifactScans, (s) => s.id),
-    modelCardEvidence: sortBy(r.modelCardEvidence, (e) => e.id),
-    datasets: sortBy(r.datasets, (d) => d.id),
-    promptCommits: sortBy(r.promptCommits, (p) => p.id),
-    endpoints: sortBy(r.endpoints, (e) => e.id),
-    mcpServers: sortBy(r.mcpServers, (s) => s.id).map((s) => ({ ...s, tools: tools(s) })),
-    connectors: sortBy(r.connectors, (c) => c.id).map((c) => ({ ...c, grantedTo: sortStrings(c.grantedTo) })),
-    memoryStores: sortBy(r.memoryStores, (m) => m.id),
-    skills: sortBy(r.skills, (s) => s.id),
+    connectors: sortBy((r.connectors ?? []).map((x) => only('connector', x)), (c) => c.id).map((c) => ({ ...c, grantedTo: sortStrings(c.grantedTo) })),
+    memoryStores: sortBy((r.memoryStores ?? []).map((x) => only('memoryStore', x)), (m) => m.id),
+    skills: sortBy((r.skills ?? []).map((x) => only('skill', x)), (s) => s.id),
   };
 }
 
@@ -79,7 +173,36 @@ const piiKnown = (v) => {
   if (!PII_VERDICTS.includes(v)) throw new Error(`unknown pii_verdict: ${JSON.stringify(v)}`);
   return v !== 'clean';
 };
-const sensitive = (v) => (piiKnown(v) ? ['pii'] : []);
+// ADR-0189 R26: training_datasets.checksum is `sha256:<hex>:<rows>` (datasetChecksum); a pre-0176 `fnv1a32:` value is
+// kept as a property only (never relabelled SHA-256); empty means no hash; any other form is refused.
+export function parseTrainingChecksum(v) {
+  if (v === '' || v === null || v === undefined) return { sha256: null, rowCount: null, legacy: null };
+  const m = /^sha256:([0-9a-f]{64}):(0|[1-9][0-9]*)$/.exec(v);
+  if (m) return { sha256: m[1], rowCount: Number(m[2]), legacy: null };
+  if (/^fnv1a32:[0-9a-f]{1,8}(:[0-9]+)?$/.test(v)) return { sha256: null, rowCount: null, legacy: v };
+  throw new Error(`unparseable training checksum: ${JSON.stringify(v)}`);
+}
+const datasetDigest = (d) => (d.kind === 'training' ? parseTrainingChecksum(d.checksum) : { sha256: d.casesDigest, rowCount: null, legacy: null });
+
+// R11: a clean verdict is not proof of absence, so it gets NO sensitiveData entry at all (not an empty list)
+const sensitive = (v) => (piiKnown(v) ? { sensitiveData: ['pii'] } : {});
+// amendment 8: a model licence is stated when the supplier declared one, else stated as unknown (never omitted)
+// CycloneDX `authenticated` only from a recorded boolean; never asserted by default
+const authOf = (x) => {
+  if (x.authenticated === undefined || x.authenticated === null) return {};
+  if (typeof x.authenticated !== 'boolean') throw new Error('authenticated must be a boolean when recorded');
+  return { authenticated: x.authenticated };
+};
+const HEX64 = /^[0-9a-f]{64}$/;
+// a digest is stated only when the record carries a real one; never `sha256:undefined`
+const digestText = (v, what) => {
+  if (v === undefined || v === null) return 'digest: not_recorded';
+  if (!HEX64.test(v)) throw new Error(`${what}: malformed sha256`);
+  return `sha256:${v}`;
+};
+const modelLicense = (card) => (card?.license
+  ? [{ license: { name: card.license, acknowledgement: 'declared' } }]
+  : [{ license: { name: 'unknown' } }]);
 // one container component per exact scanner artifact (engine, version, image), never per engine name (ADR-0189 R12)
 const scannerKey = (x) => `${x.engine}/${x.engineVersion}/${stripAlg(x.imageDigest)}`;
 const MODEL_CARD_EVIDENCE_KINDS = ['eval_run', 'external', 'engine_scan'];
@@ -105,11 +228,13 @@ export function renderCycloneDx(n, specVersion) {
       name: a.name,
       supplier: { name: a.provider },
       ...(a.pinnedModelVersion ? { version: a.pinnedModelVersion } : {}),
+      licenses: modelLicense(card),
       properties: props([
         prop('regulait:agent:id', a.id),
         prop('regulait:model:requested', a.requestedModel),
         prop('regulait:identity:uri', a.workloadIdentity),
-        prop('regulait:trainingData:provenance', card?.dataClaims?.declared ? 'supplier-declared' : 'unknown'),
+        prop('regulait:trainingData:provenance', card?.declared ? 'supplier-declared' : 'unknown'),
+        prop('regulait:license:status', card?.license ? 'supplier-declared' : 'unknown'),
         ...(a.pinnedModelVersion ? [] : [prop('regulait:model:version', 'not_recorded')]),
         ...(a.observed ? [prop('regulait:observed:lastSeen', a.observed.lastSeen), prop('regulait:observed:count', a.observed.count)] : []),
       ]),
@@ -118,26 +243,32 @@ export function renderCycloneDx(n, specVersion) {
       c.modelCard = {
         'bom-ref': ref.card(card.id),
         modelParameters: {
-          task: card.task,
-          modelArchitecture: card.architecture,
+          // supplier-declared in data_claims only; model_cards has no task or architecture column
+          ...(card.task ? { task: card.task } : {}),
+          ...(card.architecture ? { modelArchitecture: card.architecture } : {}),
           datasets: card.datasetIds.map((d) => ({ ref: ref.dataset(d) })),
         },
         quantitativeAnalysis: {
           performanceMetrics: card.evaluations.map((e) => ({ type: e.type, value: e.value, slice: e.slice })),
         },
         considerations: {
-          useCases: card.intendedUse,
-          technicalLimitations: card.limitations,
-          ethicalConsiderations: card.biasFairness.map((b) => ({ name: b.name, mitigationStrategy: b.mitigation })),
+          // one card is one intended use (model_cards_agent_use_uq): one use case, never split into characters
+          useCases: [card.intendedUse],
+          ...(card.limitations ? { technicalLimitations: [card.limitations] } : {}),
+          // a declared assessment slot (dimension), not a mitigation we performed; its method and status are properties
+          ...(card.biasFairness.length ? { ethicalConsiderations: card.biasFairness.map((b) => ({ name: b.dimension })) } : {}),
         },
         properties: props([
           prop('regulait:modelCard:id', card.id),
           prop('regulait:modelCard:approval', card.approvedId),
-          // no supplier declaration is allowed and renders as provenance `unknown` above (OWNER DECISION 10)
-          ...(card.dataClaims?.sources ?? []).map((src) => prop('regulait:trainingData:source', src)),
+          // standard_refs are display-only control identifiers or prose, never URLs: properties, not externalReferences
+          ...card.standardRefs.map((x) => prop('regulait:standardRef', x)),
+          ...card.biasFairness.map((b) => prop('regulait:biasFairness:assessment', canonicalize(b))),
+          // supplier claims as recorded (OWNER DECISION 10); none renders as provenance `unknown` above
+          ...Object.keys(card.dataClaims).sort(cmp).map((k) => prop(`regulait:supplierClaim:${k}`,
+            typeof card.dataClaims[k] === 'string' ? card.dataClaims[k] : canonicalize(card.dataClaims[k]))),
         ]),
       };
-      c.externalReferences = sortBy(card.standardRefs.map((u) => ({ type: 'documentation', url: u, comment: 'standard reference' })), (x) => x.url);
     }
     components.push(c);
     dep(subject, c['bom-ref']);
@@ -165,22 +296,35 @@ export function renderCycloneDx(n, specVersion) {
     });
     dep(ref.engine(scannerKey(e)));
   }
+  // ADR-0189 R24: only what each dataset table records. No owner (the creator is not the owner), no invented hash.
+  const datasetGaps = [];
   for (const d of n.datasets) {
+    const training = d.kind === 'training';
+    const { sha256: digest, rowCount, legacy } = datasetDigest(d);
+    const classification = training ? (d.projectDataSensitivity ?? null) : null;
     components.push({
       type: 'data',
       'bom-ref': ref.dataset(d.id),
       name: d.name,
-      version: d.version,
-      hashes: [{ alg: 'SHA-256', content: d.checksum }],
+      version: String(d.version),
+      ...(digest ? { hashes: [{ alg: 'SHA-256', content: digest }] } : {}),
       data: [{
         type: 'dataset',
         name: d.name,
-        classification: d.classification,
-        sensitiveData: sensitive(d.piiVerdict),
-        governance: { owners: [{ contact: { 'bom-ref': `${userRef(d.ownerUserId)}:${d.id}`, name: userRef(d.ownerUserId) } }] },
+        ...(classification ? { classification } : {}),
+        ...(training ? sensitive(d.piiVerdict) : {}),
       }],
-      properties: props([prop('regulait:dataset:kind', d.kind), prop('regulait:dataset:piiVerdict', d.piiVerdict)]),
+      properties: props([
+        prop('regulait:dataset:kind', d.kind),
+        prop('regulait:dataset:piiVerdict', training ? d.piiVerdict : 'not_scanned'),
+        prop('regulait:dataset:digestOf', training ? (digest ? 'training_datasets.checksum' : null) : 'eval_cases'),
+        prop('regulait:dataset:rowCount', rowCount),
+        prop('regulait:dataset:legacyChecksum', legacy),
+        prop('regulait:dataset:owner', 'not_recorded'),
+      ]),
     });
+    // every dataset lacks an owner, and evaluation datasets also lack a classification and a PII scan
+    datasetGaps.push(ref.dataset(d.id));
     dep(ref.dataset(d.id));
   }
   for (const p of n.promptCommits) {
@@ -214,7 +358,7 @@ export function renderCycloneDx(n, specVersion) {
   for (const e of n.endpoints) {
     services.push({
       'bom-ref': ref.endpoint(e.id), provider: { name: e.provider }, name: `${e.provider}-endpoint`,
-      endpoints: [e.url], authenticated: true, trustZone: e.trustZone,
+      endpoints: [e.url], ...authOf(e), trustZone: e.trustZone,
       data: [{ flow: 'outbound', classification: e.sends }, { flow: 'inbound', classification: e.receives }],
     });
     dep(ref.agent(e.agentId), ref.endpoint(e.id));
@@ -222,13 +366,13 @@ export function renderCycloneDx(n, specVersion) {
   }
   for (const m of n.mcpServers) {
     services.push({
-      'bom-ref': ref.mcp(m.id), name: m.name, endpoints: [m.url], authenticated: true,
+      'bom-ref': ref.mcp(m.id), name: m.name, endpoints: [m.url], ...authOf(m),
       services: m.tools.map((t) => ({
         'bom-ref': ref.tool(m.id, t.name), name: t.name,
         ...(t.observed ? { properties: props([prop('regulait:observed:lastSeen', t.observed.lastSeen), prop('regulait:observed:count', t.observed.count)]) } : {}),
       })),
       properties: props([
-        prop('regulait:mcp:transport', m.transport), prop('regulait:mcp:releaseDigest', m.releaseDigest),
+        prop('regulait:mcp:transport', m.transport), prop('regulait:mcp:releaseDigest', m.releaseDigest ?? 'not_recorded'),
         prop('regulait:admission:state', m.admission), prop('regulait:identity:propagation', m.identityPropagation),
         prop('regulait:owner', userRef(m.ownerUserId)),
       ]),
@@ -241,7 +385,7 @@ export function renderCycloneDx(n, specVersion) {
   }
   for (const c of n.connectors) {
     services.push({
-      'bom-ref': ref.connector(c.id), name: c.name, endpoints: [c.url], authenticated: true,
+      'bom-ref': ref.connector(c.id), name: c.name, endpoints: [c.url], ...authOf(c),
       properties: props([prop('regulait:connector:kind', c.kind), prop('regulait:connector:admissionManifestDigest', c.admissionManifestDigest), prop('regulait:owner', userRef(c.ownerUserId))]),
     });
     dep(ref.connector(c.id));
@@ -249,6 +393,7 @@ export function renderCycloneDx(n, specVersion) {
   }
 
   const unknownAgents = n.agents.filter((a) => !a.modelCardId).map((a) => ref.agent(a.id));
+  const unknownLicence = n.agents.filter((a) => !(a.modelCardId && cards.get(a.modelCardId)?.license)).map((a) => ref.agent(a.id));
   const doc = {
     bomFormat: 'CycloneDX',
     specVersion,
@@ -278,6 +423,8 @@ export function renderCycloneDx(n, specVersion) {
       // third-party model internals are supplier-declared at best: never `complete`
       { 'bom-ref': 'composition:subject', aggregate: 'incomplete', assemblies: [subject] },
       ...(unknownAgents.length ? [{ 'bom-ref': 'composition:no-model-card', aggregate: 'unknown', assemblies: unknownAgents }] : []),
+      ...(unknownLicence.length ? [{ 'bom-ref': 'composition:licence-unknown', aggregate: 'incomplete', assemblies: sortStrings(unknownLicence) }] : []),
+      ...(datasetGaps.length ? [{ 'bom-ref': 'composition:dataset-metadata-not-recorded', aggregate: 'incomplete', assemblies: sortStrings(datasetGaps) }] : []),
     ],
     declarations: declarations(n, engines),
   };
@@ -293,7 +440,8 @@ function declarations(n, engines) {
     predicate: `${x.evidenceKind} by ${x.engine} ${x.engineVersion}: ${x.verdict}`, evidence: [`evidence:${x.id}`],
   }));
   const evidence = n.artifactScans.map((x) => ({
-    'bom-ref': `evidence:${x.id}`, propertyName: 'regulait:scan:verdict', description: `sha256:${x.evidenceSha256}`,
+    // artifact_scans persists the scanned artifact's sha256, not a digest of the scan evidence (R30)
+    'bom-ref': `evidence:${x.id}`, propertyName: 'regulait:scan:verdict', description: digestText(x.evidenceSha256, `artifact scan ${x.id}`),
     created: x.at, data: [{ name: `scan-${x.id}`, classification: 'internal' }],
   }));
   const attestations = n.artifactScans.map((x) => ({
@@ -321,7 +469,9 @@ function declarations(n, engines) {
       predicate: `${e.kind} supports model card ${e.modelCardId}`, evidence: sortStrings(evidenceRefs),
     });
     evidence.push({
-      'bom-ref': `evidence:mce:${e.id}`, propertyName: `regulait:modelCardEvidence:${e.kind}`, description: `sha256:${e.sha256}`,
+      'bom-ref': `evidence:mce:${e.id}`, propertyName: `regulait:modelCardEvidence:${e.kind}`,
+      // no digest is persisted for model_card_evidence: state one only when the record carries a real one
+      description: digestText(e.sha256, `model_card_evidence ${e.id}`),
       created: e.at, data: [{ name: `model-card-evidence-${e.id}`, classification: 'internal' }],
     });
     attestations.push({ summary: `model card evidence ${e.id}`, assessor, map: [{ claims: [`claim:mce:${e.id}`] }] });
@@ -340,7 +490,7 @@ const confidentiality = { public: 'clear', internal: 'green', confidential: 'amb
 
 export function renderSpdx(n) {
   const s = n.snapshot;
-  const base = `https://regulait.invalid/spdx/${n.install.id}/ai-bom/${s.id}/${s.version}`;
+  const base = `https://regulait.invalid/spdx/${encodeURIComponent(n.install.id)}/ai-bom/${encodeURIComponent(s.id)}/${s.version}`;
   const id = (k) => `${base}#${k}`;
   const ci = '_:creationinfo';
   const g = [];
@@ -348,36 +498,45 @@ export function renderSpdx(n) {
   const org = el({ type: 'Organization', spdxId: id('org-install'), name: `RegulAIt install ${n.install.id}` });
   const tool = el({ type: 'Tool', spdxId: id('tool'), name: 'regulait-bom-b0-spike' });
   const suppliers = new Map();
-  for (const a of n.agents) if (!suppliers.has(a.provider)) suppliers.set(a.provider, el({ type: 'Organization', spdxId: id(`supplier-${a.provider}`), name: a.provider }));
+  // an IRI fragment from an opaque digest of the provider name, never the raw name (which may hold spaces etc.)
+  for (const a of n.agents) if (!suppliers.has(a.provider)) suppliers.set(a.provider, el({ type: 'Organization', spdxId: id(`supplier-${sha256(a.provider).slice(0, 32)}`), name: a.provider }));
   const subject = el({ type: 'software_Package', spdxId: id('subject'), name: n.useCase.name, software_primaryPurpose: 'application', suppliedBy: org });
   const rels = [];
   const rel = (from, type, to, extra = {}) => rels.push({ type: 'Relationship', spdxId: id(`rel-${rels.length}`), from, relationshipType: type, to, ...extra });
   const cards = new Map(n.modelCards.map((m) => [m.id, m]));
   const dsId = new Map();
   for (const d of n.datasets) {
+    const training = d.kind === 'training';
+    const digest = datasetDigest(d).sha256;
+    const level = training && d.projectDataSensitivity ? confidentiality[d.projectDataSensitivity] : null;
     dsId.set(d.id, el({
-      type: 'dataset_DatasetPackage', spdxId: id(`dataset-${d.id}`), name: d.name, software_packageVersion: d.version,
+      type: 'dataset_DatasetPackage', spdxId: id(`dataset-${encodeURIComponent(d.id)}`), name: d.name, software_packageVersion: String(d.version),
       software_primaryPurpose: 'data', dataset_datasetType: ['noAssertion'],
-      dataset_confidentialityLevel: confidentiality[d.classification],
-      dataset_hasSensitivePersonalInformation: piiKnown(d.piiVerdict) ? 'yes' : 'noAssertion',
-      verifiedUsing: [{ type: 'Hash', algorithm: 'sha256', hashValue: d.checksum }],
+      ...(level ? { dataset_confidentialityLevel: level } : {}),
+      dataset_hasSensitivePersonalInformation: training && piiKnown(d.piiVerdict) ? 'yes' : 'noAssertion',
+      ...(digest ? { verifiedUsing: [{ type: 'Hash', algorithm: 'sha256', hashValue: digest }] } : {}),
       suppliedBy: org,
     }));
   }
   for (const a of n.agents) {
     const card = a.modelCardId ? cards.get(a.modelCardId) : null;
-    const art = n.modelArtifacts.find((x) => x.agentId === a.id);
+    // EVERY artifact of the agent, as the CycloneDX rendering lists them (never only the first)
+    const arts = n.modelArtifacts.filter((x) => x.agentId === a.id);
     const pkgId = el({
-      type: 'ai_AIPackage', spdxId: id(`agent-${a.id}`), name: a.name,
+      type: 'ai_AIPackage', spdxId: id(`agent-${encodeURIComponent(a.id)}`), name: a.name,
       ...(a.pinnedModelVersion ? { software_packageVersion: a.pinnedModelVersion } : {}),
       software_primaryPurpose: 'model', suppliedBy: suppliers.get(a.provider),
       ai_autonomyType: 'noAssertion',
-      ai_informationAboutTraining: card?.dataClaims?.declared ? `supplier-declared: ${card.dataClaims.sources.join('; ')}` : 'unknown',
-      ...(card ? { ai_limitation: card.limitations.join('; '), ai_typeOfModel: [card.architecture], ai_domain: card.intendedUse } : {}),
-      ...(art ? { verifiedUsing: [{ type: 'Hash', algorithm: 'sha256', hashValue: art.sha256 }] } : {}),
+      ai_informationAboutTraining: card?.declared ? `supplier-declared: ${canonicalize(card.dataClaims)}` : 'unknown',
+      ...(card ? { ai_domain: [card.intendedUse] } : {}),
+      ...(card?.limitations ? { ai_limitation: card.limitations } : {}),
+      ...(card?.architecture ? { ai_typeOfModel: [card.architecture] } : {}),
+      ...(arts.length ? { verifiedUsing: arts.map((x) => ({ type: 'Hash', algorithm: 'sha256', hashValue: x.sha256 })) } : {}),
     });
     rel(subject, 'dependsOn', [pkgId]);
     // licences are mandatory relationships in the AI profile; unknown is stated, never omitted (ADR-0189 §3)
+    // a supplier-declared licence name is not an SPDX licence expression, so SPDX keeps NoAssertion and the
+    // CycloneDX rendering carries the declared name (spike scope; B5 maps declared SPDX ids)
     rel(pkgId, 'hasDeclaredLicense', ['expandedlicensing_NoAssertionLicense']);
     rel(pkgId, 'hasConcludedLicense', ['expandedlicensing_NoAssertionLicense']);
     if (card) {

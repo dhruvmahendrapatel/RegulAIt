@@ -82,8 +82,10 @@ export function buildValidators(opts = {}) {
 }
 
 // ADR-0189 R10: an email shape anywhere in a document, in a key or a string value. Deliberately broad (fail closed):
-// a false positive refuses the BOM and names the path; nothing is redacted.
-const EMAIL = /[^\s"'<>()[\],;:@]+@[^\s"'<>()[\],;:@]+\.[\p{L}\p{N}-]{2,}/u;
+// any `@` with a non-space character on both sides, so quoted local parts ("Fred Bloggs"@example.com), address
+// literals (user@[192.0.2.1]) and dotless domains (user@localhost) are all caught. A false positive (for example
+// `pkg@1.0`) refuses the BOM and names the path; nothing is redacted.
+const EMAIL = /[^\s@]@[^\s@]/u;
 export function findEmails(value, path = '$') {
   const hits = [];
   if (typeof value === 'string') {
