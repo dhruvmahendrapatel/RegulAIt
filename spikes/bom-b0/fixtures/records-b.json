@@ -1,9 +1,11 @@
 {
  "skills": [
   {
-   "admittedDigest": "sha256:3fdba35f04dc8c462986c992bcf875546257113072a909c162f7e470e581e278",
+   "snapshotAdmissionState": "clean",
+   "snapshotDigest": "3fdba35f04dc8c462986c992bcf875546257113072a909c162f7e470e581e278",
    "name": "redact-pii",
-   "id": "sk-4"
+   "skillId": "sk-4",
+   "id": "bas-4"
   }
  ],
  "memoryStores": [

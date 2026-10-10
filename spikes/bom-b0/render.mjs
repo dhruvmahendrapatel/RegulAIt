@@ -51,7 +51,9 @@ const ALLOWED = {
   mcpTool: ['name', 'grantedTo', 'observed'],
   connector: ['id', 'name', 'kind', 'url', 'admissionManifestDigest', 'ownerUserId', 'grantedTo', 'authenticated'],
   memoryStore: ['id', 'agentId', 'kind', 'classification'],
-  skill: ['id', 'name', 'admittedDigest'],
+  // builder_agent_skills: the PINNED copy the agent runs (snapshot_digest, NOT NULL default ''), not the library
+  // row's nullable override digest
+  skill: ['id', 'skillId', 'name', 'snapshotDigest', 'snapshotAdmissionState'],
   evaluation: ['type', 'value', 'slice'],
 };
 function only(kind, o) {
@@ -131,7 +133,7 @@ export function modelCardFromRow(row) {
     license: str(claims.license),
     standardRefs: sortStrings(row.standardRefs),
     datasetIds: sortStrings(row.datasetIds),
-    evaluations: sortBy((row.evaluations ?? []).map((e) => only('evaluation', e)), (e) => `${e.type}\u0000${e.slice}`),
+    evaluations: sortBy((row.evaluations ?? []).map((e) => only('evaluation', e)), (e) => canonicalize(e)), // total order on every rendered field
   };
 }
 
@@ -158,12 +160,15 @@ export function normalise(r) {
     modelCardEvidence: sortBy((r.modelCardEvidence ?? []).map((x) => only('modelCardEvidence', x)), (e) => e.id),
     datasets: sortBy((r.datasets ?? []).map(dataset), (d) => d.id),
     promptCommits: sortBy((r.promptCommits ?? []).map((x) => only('promptCommit', x)), (p) => p.id),
-    endpoints: sortBy((r.endpoints ?? []).map((x) => only('endpoint', x)), (e) => e.id),
+    // R47: endpoints are sanitised HERE, so neither the signed native body nor any rendering ever holds a query,
+    // fragment or userinfo
+    endpoints: sortBy((r.endpoints ?? []).map((x) => only('endpoint', x)).map((e) => ({ ...e, url: cleanUrl(e.url, `endpoint ${e.id}`) })), (e) => e.id),
     mcpServers: sortBy((r.mcpServers ?? []).map((x) => only('mcpServer', x)), (s) => s.id).map((s) => ({
       ...s,
+      url: s.transport === 'stdio' ? null : cleanUrl(s.url, `mcp server ${s.id}`), // stdio: the sentinel is not an endpoint
       tools: sortBy((s.tools ?? []).map((t) => only('mcpTool', t)), (t) => t.name).map((t) => ({ ...t, grantedTo: sortStrings(t.grantedTo), observed: observed(t.observed) })),
     })),
-    connectors: sortBy((r.connectors ?? []).map((x) => only('connector', x)), (c) => c.id).map((c) => ({ ...c, grantedTo: sortStrings(c.grantedTo) })),
+    connectors: sortBy((r.connectors ?? []).map((x) => only('connector', x)), (c) => c.id).map((c) => ({ ...c, url: cleanUrl(c.url, `connector ${c.id}`), grantedTo: sortStrings(c.grantedTo) })),
     memoryStores: sortBy((r.memoryStores ?? []).map((x) => only('memoryStore', x)), (m) => m.id),
     skills: sortBy((r.skills ?? []).map((x) => only('skill', x)), (s) => s.id),
   };
@@ -215,6 +220,17 @@ const authOf = (x) => {
   return { authenticated: x.authenticated };
 };
 const HEX64 = /^[0-9a-f]{64}$/;
+export const SKILL_ADMISSION_STATES = ['unscanned', 'clean', 'held', 'refused', 'admitted'];
+// ADR-0189 R47: an exported endpoint is scheme, host, port and path only. Query and fragment (where a token may sit)
+// are always dropped; userinfo refuses the snapshot. Not relaxable.
+export function sanitiseEndpoint(url, what) {
+  let u;
+  try { u = new URL(url); } catch { throw new Error(`${what}: endpoint is not an absolute URL`); }
+  if (u.username || u.password) throw new Error(`${what}: endpoint carries userinfo; refused`);
+  return `${u.protocol}//${u.host}${u.pathname}`;
+}
+const cleanUrl = (url, what) => (url === null || url === undefined ? null : sanitiseEndpoint(url, what));
+const endpointsOf = (url, what) => (url === null || url === undefined ? {} : { endpoints: [sanitiseEndpoint(url, what)] });
 // a digest is stated only when the record carries a real one; never `sha256:undefined`
 const digestText = (v, what) => {
   if (v === undefined || v === null) return 'digest: not_recorded';
@@ -359,10 +375,17 @@ export function renderCycloneDx(n, specVersion) {
     dep(ref.prompt(p.id));
   }
   for (const k of n.skills) {
+    if (!SKILL_ADMISSION_STATES.includes(k.snapshotAdmissionState)) throw new Error(`skill ${k.id}: unknown admission state ${JSON.stringify(k.snapshotAdmissionState)}`);
+    if (k.snapshotDigest !== '' && !HEX64.test(k.snapshotDigest)) throw new Error(`skill ${k.id}: malformed snapshot digest`);
     components.push({
       type: 'data', 'bom-ref': ref.skill(k.id), name: k.name,
-      hashes: [{ alg: 'SHA-256', content: stripAlg(k.admittedDigest) }],
+      ...(k.snapshotDigest ? { hashes: [{ alg: 'SHA-256', content: k.snapshotDigest }] } : {}),
       data: [{ type: 'configuration', name: k.name }],
+      properties: props([
+        prop('regulait:skill:admissionState', k.snapshotAdmissionState),
+        prop('regulait:skill:digestOf', k.snapshotDigest ? 'builder_agent_skills.snapshot_digest' : 'not_recorded'),
+        prop('regulait:skill:libraryId', k.skillId),
+      ]),
     });
     dep(subject, ref.skill(k.id));
     dep(ref.skill(k.id));
@@ -379,7 +402,7 @@ export function renderCycloneDx(n, specVersion) {
   for (const e of n.endpoints) {
     services.push({
       'bom-ref': ref.endpoint(e.id), provider: { name: e.provider }, name: `${e.provider}-endpoint`,
-      endpoints: [e.url], ...authOf(e), trustZone: e.trustZone,
+      ...endpointsOf(e.url, `endpoint ${e.id}`), ...authOf(e), trustZone: e.trustZone,
       data: [{ flow: 'outbound', classification: e.sends }, { flow: 'inbound', classification: e.receives }],
     });
     dep(ref.agent(e.agentId), ref.endpoint(e.id));
@@ -389,7 +412,7 @@ export function renderCycloneDx(n, specVersion) {
     services.push({
       'bom-ref': ref.mcp(m.id), name: m.name,
       // a stdio server's url is the `stdio:<name>` sentinel, not an endpoint: none is emitted
-      ...(m.transport === 'stdio' ? {} : { endpoints: [m.url] }), ...authOf(m),
+      ...(m.transport === 'stdio' ? {} : endpointsOf(m.url, `mcp server ${m.id}`)), ...authOf(m),
       services: m.tools.map((t) => ({
         'bom-ref': ref.tool(m.id, t.name), name: t.name,
         ...(t.observed ? { properties: props([prop('regulait:observed:lastSeen', t.observed.lastSeen), prop('regulait:observed:count', t.observed.count)]) } : {}),
@@ -408,7 +431,8 @@ export function renderCycloneDx(n, specVersion) {
   }
   for (const c of n.connectors) {
     services.push({
-      'bom-ref': ref.connector(c.id), name: c.name, endpoints: [c.url], ...authOf(c),
+      // a governance-only connector has no base_url: no endpoints field at all
+      'bom-ref': ref.connector(c.id), name: c.name, ...endpointsOf(c.url, `connector ${c.id}`), ...authOf(c),
       properties: props([prop('regulait:connector:kind', c.kind), prop('regulait:connector:admissionManifestDigest', c.admissionManifestDigest), prop('regulait:owner', userRef(c.ownerUserId))]),
     });
     dep(ref.connector(c.id));

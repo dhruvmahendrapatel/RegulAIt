@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import canonicalize from 'canonicalize';
 import { buildValidators, findEmails } from './validators.mjs';
-import { CONFIDENTIALITY, DATA_CLAIM_MAX_CHARS, modelCardFromRow, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
+import { CONFIDENTIALITY, DATA_CLAIM_MAX_CHARS, modelCardFromRow, sanitiseEndpoint, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (p) => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
@@ -555,4 +555,48 @@ test('review: release SBOM BOM-links appear only on an install-scope snapshot', 
   const refs = cdxOf(inst).externalReferences;
   assert.deepEqual(refs.map((x) => x.type), ['bom', 'bom']);
   allValid(inst);
+});
+
+// ------------------------------------------------------------------------------------------------ round 10 (PR #265)
+test('review: evaluation metrics are totally ordered (equal type and slice, any input order)', () => {
+  const a = structuredClone(recordsA);
+  a.modelCards[0].evaluations = [{ type: 'f1', value: '0.91', slice: 'fr' }, { type: 'f1', value: '0.88', slice: 'fr' }];
+  const b = structuredClone(a); b.modelCards[0].evaluations.reverse();
+  const ra = renderAll(a); const rb = renderAll(b);
+  assert.deepEqual(rb.bytes, ra.bytes);
+  assert.equal(rb.signature, ra.signature);
+});
+
+test('review: a builder skill is hashed from its pinned snapshot digest, with its admission state', () => {
+  const sk = docs['cyclonedx-1.7'].components.find((c) => c['bom-ref'] === 'skill:bas-4');
+  assert.deepEqual(sk.hashes, [{ alg: 'SHA-256', content: recordsA.skills[0].snapshotDigest }]);
+  assert.ok(sk.properties.some((p) => p.name === 'regulait:skill:admissionState' && p.value === 'clean'));
+  const empty = structuredClone(recordsA); empty.skills[0].snapshotDigest = ''; // the column default
+  const e = cdxOf(empty).components.find((c) => c['bom-ref'] === 'skill:bas-4');
+  assert.equal(e.hashes, undefined);
+  assert.ok(e.properties.some((p) => p.name === 'regulait:skill:digestOf' && p.value === 'not_recorded'));
+  allValid(empty);
+  const legacy = structuredClone(recordsA); legacy.skills[0].admittedDigest = null;
+  assert.throws(() => renderAll(legacy), /unknown key\(s\) refused: admittedDigest/);
+  const badState = structuredClone(recordsA); badState.skills[0].snapshotAdmissionState = 'ok';
+  assert.throws(() => renderAll(badState), /unknown admission state/);
+});
+
+test('review: a governance-only connector (no base_url) has no endpoints and validates', () => {
+  const r = structuredClone(recordsA); r.connectors[0].url = null;
+  const c = cdxOf(r).services.find((s) => s['bom-ref'] === 'service:connector:conn-2');
+  assert.equal('endpoints' in c, false);
+  allValid(r);
+});
+
+test('review R47: endpoints lose query and fragment; userinfo refuses the snapshot', () => {
+  assert.equal(sanitiseEndpoint('https://h.example:8443/api/v1?token=s3cret#frag', 'x'), 'https://h.example:8443/api/v1');
+  const r = structuredClone(recordsA);
+  r.endpoints[0].url = 'https://api.alpha.example/v1/chat?api_key=canary-secret-1#canary-secret-2';
+  r.connectors[0].url = 'https://tickets.example/api?sig=canary-secret-3';
+  const out = renderAll(r);
+  for (const [k, b] of Object.entries(out.bytes)) assert.doesNotMatch(b, /canary-secret/, k);
+  allValid(r);
+  const u = structuredClone(recordsA); u.mcpServers[0].url = 'https://user:pass@mcp.internal.example/claims';
+  assert.throws(() => renderAll(u), /userinfo; refused/);
 });

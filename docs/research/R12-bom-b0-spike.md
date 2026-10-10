@@ -425,3 +425,20 @@ New values, from `npm run test:offline` (40 tests, all passing); the offline SHA
 | native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
 |---|---|---|---|---|
 | `2b7db023…ad1ce` | `584c6f76…dc16` | `906bd2a6…13fde` | `14b380aa…0a3b` | `Emabpcf1…jxUqBQ==` |
+
+## 14. Tenth review round (2026-10-10, PR #265)
+
+- Evaluation metrics sort on the canonical form of each entry (a total order).
+- A builder skill is hashed from the pinned `builder_agent_skills.snapshot_digest`, with its
+  `snapshot_admission_state` as a property; an empty digest (the column default) gives no hash. The library row's
+  nullable `admitted_digest` is no longer accepted.
+- A connector with no recorded endpoint (governance-only, `base_url` null) has no `endpoints` field.
+- ADR-0189 R47: endpoints are sanitised in `normalise`, so neither the signed native body nor any rendering holds a
+  query, fragment or userinfo; userinfo refuses the snapshot. A test seeds canary secrets in query and fragment.
+
+New values, from `npm run test:offline` (44 tests, all passing); the offline SHACL check passes and the SPDX rendering
+is unchanged:
+
+| native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
+|---|---|---|---|---|
+| `2663180c…f6b64c` | `b978c93a…f1ed76` | `9db1e936…681f62` | `14b380aa…0a3b` (unchanged) | `7csMwSO2…zRMpAQ==` |

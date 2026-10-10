@@ -183,4 +183,6 @@ regexes = [
   '''^prg/VxDGBsJT8LQzt\+eeSUzqVeX51yw\+N83\+aN5uKMLO6n/alyHE2hjq0/YXinQJtBG89\+qgll5Mvoql00C/Bg==$''',
   # the ninth review round's run (scalar data claims, install-only SBOM links)
   '''^Emabpcf1Nf9TxaSu7mzIWSIo4yLnlgbhgNKvbVBWQPswsBdec1JIHZlyZHuUogSAxkvjJ0WCk9pfRjfdjxUqBQ==$''',
+  # the tenth review round's run (pinned skill digests, sanitised endpoints)
+  '''^7csMwSO2PO/Mobnk\+Va1IPxR5oxjO/Ntdin5lkRnj220qlFDB0aFfEH3JmX7s/y6UyUA6aVcH0u0xIy1zRMpAQ==$''',
 ]
