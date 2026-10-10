@@ -30,6 +30,94 @@ Reproduction: activate the cloud environment; fetch the exact #285 head; `git sh
 
 ---
 
+## X38 real-stack model-artifact delete/retention sweep — 2026-10-10 UTC
+
+Reviewed merged #240 on main `94fffb65` with a fresh, disposable
+`demo:prepare` database (`regulait_review_x38_oct10b`) and the actual gateway
+at loopback3148. No HTTP route mocks, production source edits, runner admission
+or scanner execution. The explicit synthetic fixtures below establish the
+referential and quota states; they are not evidence that modelscan ran.
+
+**READY-FOR-REVIEW — no new production defect found in the assigned states.**
+
+- A valid synthetic **unknown** artifact-scan row cited by a synthetic model-card
+  evidence row makes the real DELETE return409 `artifact_in_use` with
+  `citedScans:1, unfinishedRuns:0` before any step-up. The artifact stays,
+  a `model-artifact-delete-refused` deny audit exists, and the scan stays not clean.
+- A valid synthetic queued modelscan run makes DELETE return409 with
+  `citedScans:0, unfinishedRuns:1` before any step-up. Marking only that fixture
+  cancelled permits deletion: the real request first403s `step_up_required`;
+  cancelling the actual prompt keeps the artifact; a later real TOTP ceremony
+  authorizes the retried DELETE200. The row and unshared stored object disappear.
+- Four valid quota-setting fixtures exercise actual uploader/organisation count
+  refusals409 and byte refusals413 with readable UI reasons. Neither an artifact
+  row nor the attempted stored object remains. These use100/101-byte successful
+  uploads and102-byte/2MiB refused uploads, far below the normal512MiB file limit.
+- Actual permission loss tests unread retention: after signing in, temporarily
+  demote only the fixture admin's `is_admin` column while its existing SPA shell
+  remains mounted. The real org-settings GET403s `admin_only`, while that person's
+  own artifact list and detail still200. Keyboard navigation mounts the tab;
+  retention states its period and deletion date are unknown, with no promised
+  lifetime/date. This is an explicit permission-loss fixture, not a network outage
+  or normal fresh non-admin access to the admin console. No schema DDL needed.
+
+**Validation:** frozen install, `pnpm --filter '@regulait/gateway...' build`,
+`pnpm --filter @regulait/web exec tsc --noEmit` and
+`pnpm --filter @regulait/web build` PASS. The fresh `demo:prepare` completes33s
+with its own preconfigured demo export key:19pass/0warn/0fail.
+`pnpm --filter @regulait/web exec playwright test --config playwright.x38-real.config.ts`
+with `DATABASE_URL` set to that exact scratch database,
+`E2E_BASE_URL=http://127.0.0.1:3148`, `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium`
+and `E2E_DEMO_PREPARE_LOG=/tmp/oct10-x38-demo-prepare.log` passes **4/4 in1.0min**.
+The final unchanged-file combined run passes **20 axe analyses** (ten surfaces
+in both themes), keyboard confirmations/escape/focus traps, real step-up/cancel,
+roving-tab keyboard selection, and no raw synthetic file bytes in the DOM.
+No page exception or unexpected console error; intentional real403/404/409/413
+resource-refusal messages are excluded from the console collector. Initial login401
+precedes the reviewed page's collector. An enabled-run or actual measured-scan
+claim is outside this review; the scheduler remains off and no retention sweep
+execution is claimed.
+
+Harness corrections, retained rather than counted as green: match the upload
+URL's pathname because XHR includes a filename query; use the DB verdict `unknown`
+(the UI renders Inconclusive); select an inactive roving tab with ArrowRight,
+not Tab. Repeated login attempts also exhausted the default10-per5min IP bucket.
+An attempted gateway restart exited `EADDRINUSE` because stopping pnpm left its
+child alive. The final green run used the original unchanged gateway after the
+bucket expired naturally; no rate-limit knob was disabled or increased.
+
+Fixture receipt/cleanup: SQL is guarded to the exact loopback scratch DB. Scan,
+card/evidence and queued-run fixtures are explicit in the dedicated spec; finally
+blocks remove those rows and restore quota settings/admin status. Post-run readback
+confirmed admin=true, quotas20/200/2048/20480, no synthetic evidence or queued-run
+rows. The original gateway PID187200 received an explicit SIGINT and logged
+`stopped (exit 0)`; the scratch DB was dropped without FORCE and the own `/tmp`
+artifact/license/export-key directories removed. Shared/base databases untouched.
+Earlier harness uploads lived only in this disposable DB and vanished with it.
+
+Logs: `/tmp/oct10-x38-{install,gateway-build,web-build,web-tsc,demo-prepare,browser-final,cleanup}.log`;
+actual gateway receipts are `/tmp/oct10-x38-gateway.log`, including the final
+requests and graceful shutdown. The failed restart is separately captured at
+`/tmp/oct10-x38-gateway-final.log` (not a successful startup claim).
+
+Representative evidence links (all20 screenshots retained under this checkout):
+
+[cited refusal light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-a5d16-erves-inconclusive-evidence/cited-delete-refused-light.png)
+
+[cited refusal dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-a5d16-erves-inconclusive-evidence/cited-delete-refused-dark.png)
+
+[real step-up light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-535fc--confirmed-real-TOTP-delete/delete-step-up-required-light.png)
+
+[real step-up dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-535fc--confirmed-real-TOTP-delete/delete-step-up-required-dark.png)
+
+[organisation byte quota light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-re-6e378-use-with-readable-UI-errors/quota-org-bytes-light.png)
+
+[organisation byte quota dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-re-6e378-use-with-readable-UI-errors/quota-org-bytes-dark.png)
+
+[unknown retention light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-47595-on-without-inventing-a-date/retention-unknown-real-permission-loss-light.png)
+
+[unknown retention dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-47595-on-without-inventing-a-date/retention-unknown-real-permission-loss-dark.png)
+
 ## X32 — ADR-0188 S0 identity-library spike (2026-10-10 04:17 UTC)
 
 **GO for the library choice in OWNER DECISION2**, with the owned wrappers and integration requirements in `docs/research/R11-identity-s0-spike.md`. Reproducible throwaway code lives under `spikes/identity-s0/`, excluded from workspace packages/builds; product gateway/shared/db/config were not edited. Baseline1f6cc6b5.
