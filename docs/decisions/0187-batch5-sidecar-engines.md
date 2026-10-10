@@ -1917,6 +1917,33 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
   and modelscan are each re-checked against the CI-built image layout, and whichever has not been checked reads
   `false`.
 
+**Review (X29-G, Codex, after #228 merged; 2 findings, each red first; branch `b5-garak-fix`).** Tests:
+`packages/engine-garak/src/garak.test.ts` [161], `packages/engine-promptfoo/src/promptfoo.test.ts` [162], and the
+garak gateway suite's report fixture (now paired records). No migration.
+
+161. **A pass needs complete detector coverage, reconciled by attempt UUID** (B5X-02, MEDIUM). The mapper counted only
+     the scores in completed (`status` 2) attempt lines and checked them against the eval line, so two partial lists
+     that agreed could pass: one scored output beside (a) another generated attempt that was never scored, or (b) a
+     completed attempt with two outputs and one score. garak 0.17.0 writes each attempt twice, generated (status 1)
+     then scored (status 2), with the same `uuid` (`probes/base.py`, `harnesses/base.py`). Now every attempt line of
+     the probe must carry a uuid, an `outputs` list and status 1 or 2; each generated uuid must have exactly one
+     completed record with the same number of outputs; every completed record must have its generation; and each
+     completed record must carry one score per output. A normal 1/2 pair is one attempt (never counted twice). An
+     unmatched generation, a missing or extra score, a duplicate generation or completed record, or a completed record
+     with no generation reads `unknown` (`coverage_incomplete`); a hit already observed still makes the item `fail`.
+     Counts only: no prompt or output text is read or copied. Red: with the check removed the new test fails (case
+     (a) reads `pass`). The opt-in real-engine suite passes against the pinned garak with the rule in place, now on a
+     venv pruned exactly as the image is (which also closes decision 158's "not a post-prune run" gap for the two
+     probes it runs: promptinject.HijackHateHumans and encoding.InjectBase64).
+162. **The promptfoo cancel proof no longer races the scheduler** (B5X-03, LOW). It cancelled on the second heartbeat
+     (20 ms), assuming the adapter had reached the fake engine by then; under load the cancel landed first, the runner
+     correctly posted nothing, but the "the engine saw the abort" assertion failed. The fake engine now signals that
+     generation started, and the heartbeat cancels only after that signal, so the proof is of a cancel DURING
+     generation (abort seen, the eval step never started, nothing posted) whatever the timing. A second test pins the
+     early cancel: the starting heartbeat already carries it, the engine is never started and nothing is posted.
+     Shown: with an 80 ms delay inserted before the adapter, the old timing fails the abort assertion (Codex's
+     reproduction) and the synchronised test passes.
+
 ### Implementation decisions (B5-M `.npy` header check, 2026-10-10, branch `b5-modelscan-npy`)
 
 Closes open question 15(b) (decision 108). No migration, no new dependency, no change to the Python lockfile or the
