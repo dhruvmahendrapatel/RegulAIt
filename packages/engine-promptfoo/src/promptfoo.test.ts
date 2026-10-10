@@ -148,9 +148,10 @@ describe("the plan: only what this build admits reaches promptfoo", () => {
 
   it("the manifest classes every set that runs and lists the reduced set; the taxonomy maps promptfoo ids", () => {
     const m = ENGINE_MANIFEST.promptfoo;
-    expect(m.version).toBe("0.123.1");
+    expect(m.version).toBe("0.124.1");
     expect(m.imageDigest).toBeNull(); // not built here: the engine cannot be enabled
-    expect(m.usageDataEnv).toEqual(PROMPTFOO_USAGE_DATA_ENV);
+    // B5-P2: the documented switches plus the worker container's own isolation report
+    expect(m.usageDataEnv).toEqual({ ...PROMPTFOO_USAGE_DATA_ENV, REGULAIT_PROMPTFOO_WORKER_ISOLATED: "1" });
     expect(m.sets["prompt-extraction"]).toBe("standard");
     expect(m.sets["strategy:crescendo"]).toBe("offensive");
     expect(m.sets["excessive-agency"]).toBe("agentic");

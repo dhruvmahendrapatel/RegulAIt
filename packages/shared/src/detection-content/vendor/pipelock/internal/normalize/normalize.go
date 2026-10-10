@@ -1,0 +1,743 @@
+// Copyright 2026 Josh Waldrep
+// SPDX-License-Identifier: Apache-2.0
+
+// Package normalize provides Unicode normalization pipelines for security scanning.
+// All scanning paths (DLP, response injection, tool poisoning, policy matching)
+// use these functions to strip evasion techniques before pattern matching.
+//
+// This package is the single source of truth for normalization. Changes here
+// propagate to all scanning paths automatically.
+package normalize
+
+import (
+	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
+)
+
+// MCPToolNameAlias returns the declared tool component of one bounded MCP
+// presentation alias. The protocol preserves tool names verbatim, so this is
+// deliberately a classifier aid rather than a tool identity rewrite: callers
+// must retain name for logs, receipts, and operator-configured matching.
+//
+// Claude's mcp__<server>__<tool> presentation is accepted when it has a bounded
+// ASCII server segment and one tool component. A single ASCII namespace followed
+// by '.' or ':' is also accepted as a defensive compatibility heuristic. The MCP specification
+// permits '.' in a tool name but does not assign it namespace meaning, and does
+// not recommend ':', so malformed or multi-separator forms are rejected rather
+// than guessed. This prevents a namespace keyword from changing the action of
+// the final tool component.
+func MCPToolNameAlias(name string) (string, bool) {
+	if strings.HasPrefix(strings.ToLower(name), "mcp__") {
+		parts := strings.SplitN(name, "__", 3)
+		if len(parts) != 3 || !strings.EqualFold(parts[0], "mcp") || !mcpToolNameSegment(parts[1]) || strings.Contains(parts[2], "__") || !mcpToolNameSegment(parts[2]) {
+			return "", false
+		}
+		return parts[2], true
+	}
+
+	for _, separator := range []byte{'.', ':'} {
+		if strings.Count(name, string(separator)) == 0 {
+			continue
+		}
+		if strings.Count(name, string(separator)) != 1 {
+			return "", false
+		}
+		index := strings.IndexByte(name, separator)
+		if !mcpToolNameSegment(name[:index]) || !mcpToolNameSegment(name[index+1:]) {
+			return "", false
+		}
+		return name[index+1:], true
+	}
+
+	return name, mcpToolNameSegment(name)
+}
+
+func mcpToolNameSegment(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// InvisibleRanges defines Unicode ranges stripped from all scanning paths.
+// Consolidates zero-width characters, Tags block (Pliny steganography vector),
+// and variation selectors (emoji steganography vector) into a single source of
+// truth. Ranges cover:
+//   - Soft hyphen, zero-width space through RTL mark, word joiner group, BOM
+//   - Variation selectors 1-16 (U+FE00-FE0F): emoji glyph modifiers
+//   - Tags block (U+E0000-E007F): deprecated language tags, steganography vector
+//   - Variation selectors supplement (U+E0100-E01EF): extended glyph modifiers
+var InvisibleRanges = &unicode.RangeTable{
+	R16: []unicode.Range16{
+		{Lo: 0x00AD, Hi: 0x00AD, Stride: 1}, // soft hyphen
+		{Lo: 0x115F, Hi: 0x1160, Stride: 1}, // Hangul Choseong/Jungseong Fillers
+		{Lo: 0x200B, Hi: 0x200F, Stride: 1}, // zero-width space through RTL mark
+		{Lo: 0x202A, Hi: 0x202E, Stride: 1}, // bidi embedding controls (LRE/RLE/PDF/LRO/RLO)
+		{Lo: 0x2060, Hi: 0x2064, Stride: 1}, // word joiner through invisible plus
+		{Lo: 0x2066, Hi: 0x2069, Stride: 1}, // bidi isolate controls (LRI/RLI/FSI/PDI)
+		{Lo: 0x3164, Hi: 0x3164, Stride: 1}, // Hangul Filler
+		{Lo: 0xFE00, Hi: 0xFE0F, Stride: 1}, // variation selectors 1-16
+		{Lo: 0xFEFF, Hi: 0xFEFF, Stride: 1}, // BOM / ZWNBSP
+		{Lo: 0xFFF9, Hi: 0xFFFB, Stride: 1}, // interlinear annotation anchors
+	},
+	R32: []unicode.Range32{
+		{Lo: 0xE0000, Hi: 0xE007F, Stride: 1}, // Tags block
+		{Lo: 0xE0100, Hi: 0xE01EF, Stride: 1}, // variation selectors supplement
+	},
+}
+
+// confusableMap maps Unicode characters from non-Latin scripts that are visually
+// identical to Latin letters. NFKC normalization does NOT handle cross-script
+// confusables - Cyrillic а (U+0430) stays as а, not Latin a.
+//
+// Covers Cyrillic, Greek, Armenian, Cherokee, and Latin Extended (small caps/IPA)
+// lookalikes commonly used in homoglyph attacks. Not exhaustive - focused on
+// characters that appear in English-language injection phrases and DLP key prefixes.
+var confusableMap = map[rune]rune{
+	// Cyrillic uppercase → Latin
+	'\u0410': 'A', // А
+	'\u0412': 'B', // В
+	'\u0421': 'C', // С
+	'\u0415': 'E', // Е
+	'\u041D': 'H', // Н
+	'\u0406': 'I', // І (Ukrainian)
+	'\u0408': 'J', // Ј (Serbian)
+	'\u041A': 'K', // К
+	'\u041C': 'M', // М
+	'\u041E': 'O', // О
+	'\u0420': 'P', // Р
+	'\u0405': 'S', // Ѕ (Macedonian)
+	'\u0422': 'T', // Т
+	'\u0425': 'X', // Х
+
+	// Cyrillic lowercase → Latin
+	'\u0430': 'a', // а
+	'\u0432': 'v', // в
+	'\u0435': 'e', // е
+	'\u043D': 'h', // н
+	'\u0456': 'i', // і (Ukrainian)
+	'\u043A': 'k', // к
+	'\u043C': 'm', // м
+	'\u043E': 'o', // о
+	'\u0440': 'p', // р
+	'\u0441': 'c', // с
+	'\u0442': 't', // т
+	'\u0443': 'y', // у
+	'\u0445': 'x', // х
+	'\u0458': 'j', // ј (Serbian)
+	'\u0455': 's', // ѕ (Macedonian)
+
+	// Greek uppercase → Latin
+	'\u0391': 'A', // Α
+	'\u0392': 'B', // Β
+	'\u0395': 'E', // Ε
+	'\u0396': 'Z', // Ζ
+	'\u0397': 'H', // Η
+	'\u0399': 'I', // Ι
+	'\u039A': 'K', // Κ
+	'\u039C': 'M', // Μ
+	'\u039D': 'N', // Ν
+	'\u039F': 'O', // Ο
+	'\u03A1': 'P', // Ρ
+	'\u03A4': 'T', // Τ
+	'\u03A5': 'Y', // Υ
+	'\u03A7': 'X', // Χ
+
+	// Greek lowercase → Latin
+	'\u03B1': 'a', // α
+	'\u03B5': 'e', // ε
+	'\u03B9': 'i', // ι
+	'\u03BA': 'k', // κ
+	'\u03BD': 'v', // ν (nu)
+	'\u03BF': 'o', // ο
+
+	// Armenian → Latin (visually identical in most fonts)
+	'\u0555': 'O', // Օ (Armenian Capital Letter Oh)
+	'\u0585': 'o', // օ (Armenian Small Letter Oh)
+	'\u054D': 'S', // Ս (Armenian Capital Letter Seh)
+	'\u057D': 's', // ս (Armenian Small Letter Seh)
+	'\u054C': 'L', // Լ - not perfect but close in sans-serif
+	'\u0570': 'h', // հ (Armenian Small Letter Ho)
+	'\u0578': 'n', // ո (Armenian Small Letter Vo - looks like n)
+	'\u057C': 'n', // ռ (Armenian Small Letter Ra - looks like n in some fonts)
+	'\u0561': 'a', // ա (Armenian Small Letter Ayb - similar to a in some fonts)
+
+	// Cherokee → Latin (uppercase only)
+	'\u13AA': 'A', // Ꭺ (Cherokee Letter GA - looks like A)
+	'\u13A2': 'I', // Ꭲ (Cherokee Letter I - looks like I)
+	'\u13D2': 'P', // Ꮲ
+	'\u13DA': 'S', // Ꮪ
+	'\u13A1': 'E', // Ꭱ - visually close to E
+	'\u13B3': 'W', // Ꮃ
+	'\u13D4': 'T', // Ꮤ
+
+	// Latin stroke/bar letters that do NOT NFD-decompose (the stroke is integral,
+	// not a combining mark). Used in Scandinavian, Polish, etc. but in English
+	// injection phrases they're confusables.
+	'\u00D8': 'O', // Ø (Latin Capital Letter O with Stroke)
+	'\u00F8': 'o', // ø (Latin Small Letter O with Stroke)
+	'\u0110': 'D', // Đ (Latin Capital Letter D with Stroke)
+	'\u0111': 'd', // đ (Latin Small Letter D with Stroke)
+	'\u0141': 'L', // Ł (Latin Capital Letter L with Stroke)
+	'\u0142': 'l', // ł (Latin Small Letter L with Stroke)
+	'\u0126': 'H', // Ħ (Latin Capital Letter H with Stroke)
+	'\u0127': 'h', // ħ (Latin Small Letter H with Stroke)
+	'\u0166': 'T', // Ŧ (Latin Capital Letter T with Stroke)
+	'\u0167': 't', // ŧ (Latin Small Letter T with Stroke)
+
+	// Latin Extended / IPA (small caps that survive NFKC)
+	'\u1D00': 'A', // ᴀ (Latin Letter Small Capital A)
+	'\u0299': 'B', // ʙ (Latin Letter Small Capital B)
+	'\u1D04': 'C', // ᴄ (Latin Letter Small Capital C)
+	'\u1D05': 'D', // ᴅ (Latin Letter Small Capital D)
+	'\u1D07': 'E', // ᴇ (Latin Letter Small Capital E)
+	'\uA730': 'F', // ꜰ (Latin Letter Small Capital F)
+	'\u0262': 'G', // ɢ (Latin Letter Small Capital G)
+	'\u029C': 'H', // ʜ (Latin Letter Small Capital H)
+	'\u026A': 'I', // ɪ (Latin Letter Small Capital I)
+	'\u1D0A': 'J', // ᴊ (Latin Letter Small Capital J)
+	'\u1D0B': 'K', // ᴋ (Latin Letter Small Capital K)
+	'\u029F': 'L', // ʟ (Latin Letter Small Capital L)
+	'\u1D0D': 'M', // ᴍ (Latin Letter Small Capital M)
+	'\u0274': 'N', // ɴ (Latin Letter Small Capital N)
+	'\u1D0F': 'O', // ᴏ (Latin Letter Small Capital O)
+	'\u1D18': 'P', // ᴘ (Latin Letter Small Capital P)
+	'\u0280': 'R', // ʀ (Latin Letter Small Capital R)
+	'\uA731': 'S', // ꜱ (Latin Letter Small Capital S)
+	'\u1D1B': 'T', // ᴛ (Latin Letter Small Capital T)
+	'\u1D1C': 'U', // ᴜ (Latin Letter Small Capital U)
+	'\u1D20': 'V', // ᴠ (Latin Letter Small Capital V)
+	'\u1D21': 'W', // ᴡ (Latin Letter Small Capital W)
+	'\u028F': 'Y', // ʏ (Latin Letter Small Capital Y)
+	'\u1D22': 'Z', // ᴢ (Latin Letter Small Capital Z)
+
+	// Negative Squared Latin Capital Letters (U+1F170–U+1F189)
+	// Emoji-style boxed letters that LLMs read as Latin. NFKC does not decompose them.
+	'\U0001F170': 'A', // 🅰
+	'\U0001F171': 'B', // 🅱
+	'\U0001F172': 'C', // 🅲
+	'\U0001F173': 'D', // 🅳
+	'\U0001F174': 'E', // 🅴
+	'\U0001F175': 'F', // 🅵
+	'\U0001F176': 'G', // 🅶
+	'\U0001F177': 'H', // 🅷
+	'\U0001F178': 'I', // 🅸
+	'\U0001F179': 'J', // 🅹
+	'\U0001F17A': 'K', // 🅺
+	'\U0001F17B': 'L', // 🅻
+	'\U0001F17C': 'M', // 🅼
+	'\U0001F17D': 'N', // 🅽
+	'\U0001F17E': 'O', // 🅾
+	'\U0001F17F': 'P', // 🅿
+	'\U0001F180': 'Q', // 🆀
+	'\U0001F181': 'R', // 🆁
+	'\U0001F182': 'S', // 🆂
+	'\U0001F183': 'T', // 🆃
+	'\U0001F184': 'U', // 🆄
+	'\U0001F185': 'V', // 🆅
+	'\U0001F186': 'W', // 🆆
+	'\U0001F187': 'X', // 🆇
+	'\U0001F188': 'Y', // 🆈
+	'\U0001F189': 'Z', // 🆉
+
+	// Regional Indicator Symbols (U+1F1E6–U+1F1FF)
+	// Used in pairs for flag emoji (🇺🇸 = U+1F1FA + U+1F1F8), but individually
+	// render as circled letters that LLMs interpret as Latin characters.
+	'\U0001F1E6': 'A', // 🇦
+	'\U0001F1E7': 'B', // 🇧
+	'\U0001F1E8': 'C', // 🇨
+	'\U0001F1E9': 'D', // 🇩
+	'\U0001F1EA': 'E', // 🇪
+	'\U0001F1EB': 'F', // 🇫
+	'\U0001F1EC': 'G', // 🇬
+	'\U0001F1ED': 'H', // 🇭
+	'\U0001F1EE': 'I', // 🇮
+	'\U0001F1EF': 'J', // 🇯
+	'\U0001F1F0': 'K', // 🇰
+	'\U0001F1F1': 'L', // 🇱
+	'\U0001F1F2': 'M', // 🇲
+	'\U0001F1F3': 'N', // 🇳
+	'\U0001F1F4': 'O', // 🇴
+	'\U0001F1F5': 'P', // 🇵
+	'\U0001F1F6': 'Q', // 🇶
+	'\U0001F1F7': 'R', // 🇷
+	'\U0001F1F8': 'S', // 🇸
+	'\U0001F1F9': 'T', // 🇹
+	'\U0001F1FA': 'U', // 🇺
+	'\U0001F1FB': 'V', // 🇻
+	'\U0001F1FC': 'W', // 🇼
+	'\U0001F1FD': 'X', // 🇽
+	'\U0001F1FE': 'Y', // 🇾
+	'\U0001F1FF': 'Z', // 🇿
+}
+
+// Whitespace replaces Unicode whitespace characters with ASCII space to
+// preserve word boundaries for pattern matching. Used in ForMatching / ForPolicy
+// / ForToolText, which need "ignore\u00a0all" to match as "ignore all" and not
+// collapse to "ignoreall".
+//
+// NFKC handles most Unicode whitespace via compatibility decomposition, but the
+// pipelines call Whitespace AFTER NFKC as belt-and-suspenders in case a future
+// pipeline change reorders or drops NFKC. The explicit list is auditable and
+// covers the known evasion set (NBSP, Ogham, Mongolian vowel separator,
+// en/em/thin/hair/punctuation spaces, line/paragraph separators, narrow no-break,
+// medium math space, ideographic space). Not Unicode Zs category-wide because
+// that would couple behavior to future standard changes.
+func Whitespace(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\u00A0', // NBSP
+			'\u1680', // Ogham space mark
+			'\u180E', // Mongolian vowel separator
+			'\u2000', // en quad
+			'\u2001', // em quad
+			'\u2002', // en space
+			'\u2003', // em space
+			'\u2004', // three-per-em space
+			'\u2005', // four-per-em space
+			'\u2006', // six-per-em space
+			'\u2007', // figure space
+			'\u2008', // punctuation space
+			'\u2009', // thin space
+			'\u200A', // hair space
+			'\u2028', // line separator
+			'\u2029', // paragraph separator
+			'\u202F', // narrow no-break space
+			'\u205F', // medium mathematical space
+			'\u3000': // ideographic space
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// StripExoticWhitespace removes non-ASCII whitespace characters entirely from s.
+// Used in the DLP pipeline: secrets never contain legitimate whitespace, so
+// exotic whitespace in the middle of what looks like a key is an evasion attempt
+// ("sk-pr\u00A0oj-abc" → "sk-proj-abc"). Must run BEFORE NFKC because NFKC
+// compatibility-decomposes NBSP/U+3000/U+2000-200A to ASCII space, which would
+// survive as a regex-breaking literal space inside a would-be match.
+//
+// ASCII whitespace (' ', '\t', '\n', '\r') is preserved: legitimate content
+// uses it, and the DLP pipeline's StripControlChars already removes tab/newline
+// for secrets that must not span lines. The rune set matches Whitespace()
+// exactly so the two functions share one mental model for stego whitespace.
+func StripExoticWhitespace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if isExoticWhitespace(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isExoticWhitespace(r rune) bool {
+	switch r {
+	case '\u00A0', '\u1680', '\u180E',
+		'\u2000', '\u2001', '\u2002', '\u2003', '\u2004',
+		'\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A',
+		'\u2028', '\u2029', '\u202F', '\u205F', '\u3000':
+		return true
+	default:
+		return false
+	}
+}
+
+// ZalgoSuspiciousThreshold is the minimum consecutive-combining-mark count that
+// ZalgoSuspicious treats as evasion. Three is chosen so composed text with at
+// most two stacked marks (Vietnamese "ế" in decomposed form, Thai vowel plus
+// tone) does not trigger. Exposed so callers and tests reference one value.
+const ZalgoSuspiciousThreshold = 3
+
+// ZalgoDensity returns the maximum number of consecutive Unicode combining
+// marks (category Mn) attached to any single base character in s. Legitimate
+// text uses 0–2 combining marks per base (composed Latin accents, Devanagari
+// and Thai vowel signs, Hebrew nikud). Values at or above ZalgoSuspiciousThreshold
+// indicate "Zalgo" text or obfuscated payload, not natural language.
+//
+// This is a detection signal, not a transformation. StripCombiningMarks already
+// neutralizes the runtime text by removing all combining marks; ZalgoDensity
+// lets callers raise a taint/exposure event even after the characters are gone.
+// Measured on the input string before any normalization so the caller controls
+// when (or whether) to normalize first.
+//
+// Implementation note: the longest run of consecutive Mn runes equals the
+// maximum marks-per-base because combining marks attach to the preceding base.
+// A run that begins at string start with no base character is still counted -
+// a stream of combining marks with no base is pathological either way.
+func ZalgoDensity(s string) int {
+	maxRun := 0
+	cur := 0
+	for _, r := range s {
+		if unicode.Is(unicode.Mn, r) {
+			cur++
+			if cur > maxRun {
+				maxRun = cur
+			}
+			continue
+		}
+		cur = 0
+	}
+	return maxRun
+}
+
+// ZalgoSuspicious reports whether s contains combining mark density at or
+// above ZalgoSuspiciousThreshold. Convenience wrapper for callers that
+// only need the boolean signal.
+//
+// Wired into internal/scanner.Scanner.ScanResponse via the StegoDetected /
+// StegoDensity fields on ResponseScanResult. The signal is exposure-only:
+// ForMatching already neutralizes combining marks via StripCombiningMarks,
+// so pattern matching is unaffected. Downstream taint/authority code keys
+// on StegoDetected to surface emit.EventTextStego events.
+func ZalgoSuspicious(s string) bool {
+	return ZalgoDensity(s) >= ZalgoSuspiciousThreshold
+}
+
+// Leetspeak maps common digit-for-letter substitutions used in L1B3RT4S-style
+// injection evasion.
+//
+//pipelock:provenance-transform leetspeak
+func Leetspeak(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '0':
+			return 'o'
+		case '1':
+			return 'i'
+		case '3':
+			return 'e'
+		case '4':
+			return 'a'
+		case '5':
+			return 's'
+		case '7':
+			return 't'
+		case '@':
+			return 'a'
+		case '$':
+			return 's'
+		}
+		return r
+	}, s)
+}
+
+// mapInvisible maps non-whitespace control characters and Unicode invisible
+// characters to the given replacement rune. Pass -1 to strip, ' ' to replace
+// with space. Whitespace controls (\t, \n, \r) are always preserved.
+func mapInvisible(s string, replacement rune) string {
+	return strings.Map(func(r rune) rune {
+		if r <= 0x1F && r != '\t' && r != '\n' && r != '\r' {
+			return replacement
+		}
+		if r == 0x7F {
+			return replacement
+		}
+		if r >= 0x80 && r <= 0x9F {
+			return replacement
+		}
+		if unicode.Is(InvisibleRanges, r) {
+			return replacement
+		}
+		return r
+	}, s)
+}
+
+// StripZeroWidth removes ASCII control characters (except \t, \n, \r) and
+// Unicode zero-width/invisible characters. Preserves whitespace control chars
+// because injection patterns use \s+ to match them.
+// Used in response/injection scanning paths.
+//
+//pipelock:provenance-transform invisible_strip
+func StripZeroWidth(s string) string {
+	return mapInvisible(s, -1)
+}
+
+// ReplaceInvisibleWithSpace replaces invisible/control characters with spaces
+// instead of dropping them. Preserves word boundaries at invisible character
+// positions: "ignore\u200ball" becomes "ignore all" (detectable) instead of
+// "ignoreall" (bypass). Used in policy matching where word boundaries matter.
+//
+//pipelock:provenance-transform invisible_space
+func ReplaceInvisibleWithSpace(s string) string {
+	return mapInvisible(s, ' ')
+}
+
+// ConfusableToASCII maps visually identical non-Latin characters to their Latin
+// equivalents. Applied after NFKC normalization to catch cross-script homoglyph
+// attacks that NFKC does not handle (Cyrillic, Greek lookalikes).
+func ConfusableToASCII(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x80 {
+			return r
+		}
+		if mapped, ok := confusableMap[r]; ok {
+			return mapped
+		}
+		return r
+	}, s)
+}
+
+// StripCombiningMarks removes Unicode combining marks (category Mn) that survive
+// NFKC normalization. NFD decomposition reverses NFKC composition so combining
+// marks can be stripped. Applied after NFKC + confusable mapping.
+func StripCombiningMarks(s string) string {
+	s = norm.NFD.String(s)
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// StripControlChars removes ALL C0 (0x00-0x1F), C1 (0x80-0x9F), DEL (0x7F),
+// and Unicode zero-width/invisible characters. Unlike StripZeroWidth, this also
+// strips whitespace control chars (\t, \n, \r) because DLP patterns match
+// specific character sequences where ANY control char is evasion, not content.
+// Used in DLP scanning paths.
+func StripControlChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		if isDLPControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isDLPControl(r rune) bool {
+	return r <= 0x1F || r == 0x7F || (r >= 0x80 && r <= 0x9F) || unicode.Is(InvisibleRanges, r)
+}
+
+// ForDLP applies the standard DLP normalization pipeline: strip all control/
+// invisible characters, remove exotic whitespace used to split secrets, NFKC
+// decomposition, confusable-to-ASCII mapping, combining mark removal. Used
+// across all DLP scanning paths (URL segments, MCP text, env leak detection).
+//
+// StripExoticWhitespace runs BEFORE NFKC because NFKC compatibility-decomposes
+// wide/NBSP space variants to ASCII space. If stripping happened after NFKC,
+// those evasion characters would leave behind a literal ASCII space in the
+// middle of what would otherwise be a matchable secret, breaking the regex.
+//
+//pipelock:provenance-transform dlp_normalize
+func ForDLP(s string) string {
+	// Printable ASCII is unchanged by every step below. Other input runs the
+	// full pipeline between stable code points (see segmentTable).
+	if isPrintableASCII(s) {
+		return s
+	}
+	return normalizeSegmented(s, &segmentTablesOnce().dlp, forDLPFull)
+}
+
+// forDLPFull is the complete ForDLP pipeline without fast paths. It is the
+// reference the segmented fast path is derived from and tested against.
+func forDLPFull(s string) string {
+	// These two stages only delete runes. Their union preserves the original
+	// order and strings.Map's malformed UTF-8 repair while walking once.
+	s = strings.Map(func(r rune) rune {
+		if isDLPControl(r) || isExoticWhitespace(r) {
+			return -1
+		}
+		return r
+	}, s)
+	s = norm.NFKC.String(s)
+	s = ConfusableToASCII(s)
+	s = StripCombiningMarks(s)
+	return s
+}
+
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
+}
+
+// ForMatching applies the standard normalization pipeline for response/injection
+// scanning: strip invisible chars (preserve whitespace), NFKC, confusable mapping,
+// combining mark removal, whitespace normalization.
+//
+//pipelock:provenance-transform matching_normalize
+func ForMatching(s string) string {
+	return matchingNormalize(s, true)
+}
+
+// matchingNormalize is the response and injection pipeline. recompose adds
+// NFC after mark stripping. v1 and v2 recipes pass false so their output
+// stays the NFD fixed point those profiles published. ForDLP does not use
+// this function; the fragment buffer's concatenation invariant depends on
+// ForDLP staying in NFD.
+func matchingNormalize(s string, recompose bool) string {
+	// Printable ASCII survives every matching transform unchanged. Whitespace
+	// only maps Unicode characters, so both versioned profiles can use it.
+	if isPrintableASCII(s) {
+		return s
+	}
+	if recompose {
+		return normalizeSegmented(s, &segmentTablesOnce().matching[1], recomposedMatchingFull)
+	}
+	return normalizeSegmented(s, &segmentTablesOnce().matching[0], decomposedMatchingFull)
+}
+
+func recomposedMatchingFull(s string) string { return matchingNormalizeFull(s, true) }
+
+func decomposedMatchingFull(s string) string { return matchingNormalizeFull(s, false) }
+
+// matchingNormalizeFull is the complete matching pipeline without fast paths.
+func matchingNormalizeFull(s string, recompose bool) string {
+	s = StripZeroWidth(s)
+	s = norm.NFKC.String(s)
+	s = ConfusableToASCII(s)
+	s = StripCombiningMarks(s)
+	if recompose {
+		s = norm.NFC.String(s)
+	}
+	s = Whitespace(s)
+	return s
+}
+
+// ASCIIUpper folds ASCII a-z to A-Z and retains other Unicode scalars.
+// Malformed UTF-8 becomes U+FFFD, matching strings.Map.
+// DNS 0x20 and RFC 4648 base32 case differences use this fold. It is not
+// Unicode case mapping.
+//
+//pipelock:provenance-transform ascii_upper
+func ASCIIUpper(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' {
+			return r - ('a' - 'A')
+		}
+		return r
+	}, s)
+}
+
+// DecodeJSONUnicodeEscapes replaces JSON-style \uXXXX escapes with their
+// Unicode scalars. A high surrogate immediately followed by a low surrogate
+// becomes one scalar, and an unpaired surrogate escape becomes U+FFFD, as
+// encoding/json decodes it. A truncated escape or non-hex digits are left
+// exactly as written. It never fails: a scanner view that one malformed escape could discard would
+// let a sender append one to hide every valid escape before it.
+//
+//pipelock:provenance-transform json_unicode_escape
+func DecodeJSONUnicodeEscapes(s string) string {
+	if !strings.Contains(s, `\u`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if r, size, ok := jsonUnicodeScalar(s[i:]); ok {
+			b.WriteRune(r)
+			i += size
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// jsonUnicodeScalar decodes one escape at the start of s. ok is false when s
+// does not start with a decodable escape, and the caller copies the byte.
+func jsonUnicodeScalar(s string) (rune, int, bool) {
+	if len(s) < 6 || s[0] != '\\' || s[1] != 'u' {
+		return 0, 0, false
+	}
+	value, ok := parseHex4(s[2:6])
+	if !ok {
+		return 0, 0, false
+	}
+	if value >= 0xDC00 && value <= 0xDFFF {
+		return unicode.ReplacementChar, 6, true
+	}
+	if value < 0xD800 || value > 0xDBFF {
+		return value, 6, true
+	}
+	if len(s) < 12 || s[6] != '\\' || s[7] != 'u' {
+		return unicode.ReplacementChar, 6, true
+	}
+	low, ok := parseHex4(s[8:12])
+	if !ok || low < 0xDC00 || low > 0xDFFF {
+		return unicode.ReplacementChar, 6, true
+	}
+	return 0x10000 + ((value-0xD800)<<10 | (low - 0xDC00)), 12, true
+}
+
+func parseHex4(s string) (rune, bool) {
+	if len(s) != 4 {
+		return 0, false
+	}
+	var value rune
+	for i := 0; i < 4; i++ {
+		c := rune(s[i])
+		var digit rune
+		switch {
+		case c >= '0' && c <= '9':
+			digit = c - '0'
+		case c >= 'a' && c <= 'f':
+			digit = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			digit = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		value = value<<4 | digit
+	}
+	return value, true
+}
+
+// ForPolicy applies the same pipeline as ForMatching, but replaces invisible
+// characters with spaces instead of dropping them. This preserves word boundaries
+// critical for tool-policy regex: "rm\u200b-rf" → "rm -rf" (matchable).
+func ForPolicy(s string) string {
+	s = ReplaceInvisibleWithSpace(s)
+	s = norm.NFKC.String(s)
+	s = ConfusableToASCII(s)
+	s = StripCombiningMarks(s)
+	s = Whitespace(s)
+	return s
+}
+
+// FoldVowels collapses all ASCII vowels to a single representative: lowercase
+// vowels become 'a', uppercase vowels become 'A'. Used as a final injection
+// detection pass after confusable mapping. When an attacker substitutes a single
+// confusable character (e.g. ø→o) for multiple different vowels, standard pattern
+// matching fails because "instroctions" != "instructions". Vowel-folding makes
+// both become "anstractaans", enabling pattern comparison on the folded forms.
+// Callers use (?i) regex flags so the case distinction does not affect matching.
+//
+//pipelock:provenance-transform vowel_fold
+func FoldVowels(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case 'a', 'e', 'i', 'o', 'u':
+			return 'a'
+		case 'A', 'E', 'I', 'O', 'U':
+			return 'A'
+		}
+		return r
+	}, s)
+}
+
+// ForToolText applies normalization for MCP tool description scanning. Strips ALL
+// control chars and invisibles, then NFKC + confusable + marks + leetspeak +
+// whitespace. More aggressive than ForMatching because tool descriptions have no
+// legitimate control chars - any present are evasion attempts.
+func ForToolText(s string) string {
+	s = StripControlChars(s)
+	s = norm.NFKC.String(s)
+	s = ConfusableToASCII(s)
+	s = StripCombiningMarks(s)
+	s = Leetspeak(s)
+	s = Whitespace(s)
+	return s
+}

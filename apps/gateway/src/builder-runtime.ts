@@ -833,7 +833,7 @@ async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"):
           userId,
           objectType: "agent",
           objectId: model.id,
-          detail: { ...seg.baseDetail, mode: "chat", step: state.modelSteps + 1 },
+          detail: { ...seg.baseDetail, mode: "chat", step: state.modelSteps + 1, receiptClass: "decision" },
           effect: decision.effect,
           ruleId: decision.ruleId,
           ruleChain: decision.ruleChain,
@@ -943,6 +943,7 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
         dispatch: outcome.ok
           ? { model: outcome.result.model, stopReason: outcome.result.stopReason, refusal: outcome.result.refusal, toolCalls: outcome.result.toolCalls?.length ?? 0 }
           : { error: outcome.error },
+        receiptClass: "decision",
       },
       effect: "allow",
       ruleId: seg.decision?.ruleId ?? "builder-step-dispatched",

@@ -1,6 +1,6 @@
 ---
-phase: adr0187-batch-5-modelscan
-last_updated: 2026-10-09
+phase: adr0187-batch-5-engines-and-adr0188-identity
+last_updated: 2026-10-10
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,25 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-10 - Parallel wave: Batch 5 engines and their UI merged; ADR-0188 (identity) accepted; garak open questions decided.**
+- Merged: #217 (ADR-0188), #227/#228 (modelscan follow-up, garak), #230 (Engines page), #231 (B5-P2 promptfoo split),
+  #234 (Batch 4 Codex integration), #237, #241, #243, #245 (board). Dependabot #239 was closed because garak 0.17.0
+  caps `datasets<4`, so the fsspec allow-list stays (decision 160).
+- In flight: #240 (artifacts UI fixes), #242 (garak coverage and the promptfoo cancel test), #244 (UI affordance census);
+  outbound credential-audience check; #234's fix round (`b4-codex-int-2`); B5W-07; modelscan `.npy` (decisions
+  180-184); CyberSecEval datasets (decisions 185-192, migration 0177 if needed); ADR-0188 S1 (migration 0180) then S2.
+- Owner, 2026-10-10: ADR-0188 accepted (all nine recommendations; the library choice depends on the S0 spike, and the
+  suite agent must confirm PF-02 before S5). garak open questions decided (ADR-0187, "Owner decisions (2026-10-10,
+  garak)"):
+  - all 20 image licences admitted;
+  - every excluded probe admitted;
+  - our own per-probe OWASP table;
+  - Hugging Face assets pre-seeded now;
+  - hosted-judge probes run through a gateway judge;
+  - the word lists stay deleted.
+- Codex queue: X32 (S0 spike), X33 (S6 UI), X36 (real-stack browser sweep), the re-checks, then X34/X35/X37 when
+  announced.
 
 **2026-10-09 - B5-P promptfoo merged (PR #205) with its follow-up (PR #210); G19 research merged (PR #208); B5-M started.**
 - Owner: "merge #205 once round 15 is green". Fifteen rounds of automated review produced ADR-0187 decisions 39-100.

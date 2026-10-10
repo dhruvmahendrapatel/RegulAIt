@@ -225,6 +225,7 @@ export async function auditCompiledDefaultDenied(
       code: args.decision.code,
       ...(args.decision.baseUrl ? { compiledBaseUrl: args.decision.baseUrl } : {}),
       ...(args.decision.host ? { host: args.decision.host } : {}),
+      receiptClass: "decision",
     },
     effect: "deny",
     ruleId: COMPILED_DEFAULT_RULE_ID,

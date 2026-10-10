@@ -484,21 +484,73 @@ services:
   # `engines`), plus:
   #   - platform linux/amd64: promptfoo's sqlite store needs libsql's native
   #     x64 binding (decision 51; arm64 is open question 10);
-  #   - ONE volume, the runner's own state (decisions 49 and 54): the runner
+  #   - the runner's own state volume (decisions 49 and 54): the runner
   #     token the runner generated, 0600, so a restart does not need a new
   #     enrolment token (the enrolment token is single-use and ignored once a
   #     stored token works). Deleting the volume means re-enrolling.
+  #
+  # ONE image, TWO containers (B5-P2, ADR-0187 decisions 170 on): the runner
+  # credential is out of promptfoo's reach.
+  #
+  #   engine-promptfoo         the runner: the hardened template, on `engines`,
+  #                            its own state volume (the runner token), the job
+  #                            volume read-write, the result volume READ-ONLY.
+  #                            It leases, heartbeats and posts results, and
+  #                            NEVER runs promptfoo.
+  #   engine-promptfoo-worker  the worker: runs promptfoo. On `engines` (its
+  #                            model calls go to the gateway's compat routes on
+  #                            each run's virtual key, the only credential it
+  #                            ever holds), read-only root, non-root, cap_drop
+  #                            ALL, no-new-privileges; NO state volume, NO
+  #                            runner or enrolment token, its own PID and IPC
+  #                            namespaces (it cannot see the runner process);
+  #                            the job volume READ-ONLY; its one shared
+  #                            writable volume is /out (the result volume).
+  #                            It proves this at run time (its self-test, which
+  #                            the runner reports as
+  #                            REGULAIT_PROMPTFOO_WORKER_ISOLATED).
+  #
+  # Both exchange volumes are tmpfs-backed: a job's run key never reaches a disk.
   engine-promptfoo:
     <<: *engine-runner
     platform: linux/amd64
     image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
     volumes:
       - engine-promptfoo-state:/state
+      - engine-promptfoo-jobs:/jobs
+      - engine-promptfoo-results:/results:ro
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
       REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
       REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
+      REGULAIT_PROMPTFOO_RESULTS_DIR: /results
+
+  engine-promptfoo-worker:
+    profiles: ["engines"]
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command: ["node", "/app/dist/worker-main.js"]
+    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
+    networks: [engines]
+    read_only: true
+    tmpfs:
+      - /work:size=1g,mode=0700,uid=10001,gid=10001
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    volumes:
+      - engine-promptfoo-jobs:/jobs:ro
+      - engine-promptfoo-results:/out
+    environment:
+      REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
+      REGULAIT_PROMPTFOO_RESULTS_DIR: /out
+    restart: unless-stopped
 
   # --- modelscan engine: runner + scanner (profile: engines) — ADR-0187 B5-M --
   #
@@ -836,6 +888,22 @@ volumes:
   demo_license_keys:
   # ADR-0187 decision 49: the promptfoo runner's own state (its runner token only)
   engine-promptfoo-state:
+  # ADR-0187 B5-P2: the two tmpfs-backed exchange volumes between the promptfoo
+  # runner and its worker (a job carries the run's virtual key: never on disk).
+  # The result volume holds one run's eval results (the runner reads at most
+  # 64 MiB of them) and the worker's self-test.
+  engine-promptfoo-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-promptfoo-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=160m,uid=10001,gid=10001,mode=0750"
   # ADR-0187 B5-M: the modelscan runner's own state (its runner token only), and
   # the two tmpfs-backed exchange volumes between the runner and the scanner
   engine-modelscan-state:

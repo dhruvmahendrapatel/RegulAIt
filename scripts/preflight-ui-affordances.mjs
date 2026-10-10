@@ -26,7 +26,7 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -37,10 +37,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 const DELIBERATELY_API_ONLY = new Map([
-  // TEMPORARY (M-053): ADR-0187 B5-F ships the runner-revocation route; its
-  // button belongs to the Engines page, Codex's X26 (B5-W). Deleting this entry
-  // is part of X26's acceptance.
-  ["/v1/engine-runners/:x", "ADR-0187: revoke an engine runner — the Engines page button is X26 (Codex); remove this entry when it lands"],
   // TEMPORARY (M-053): ADR-0187 decision 127 ships the model-artifact delete; no
   // Model artifacts page exists yet. Its button belongs to X28 (reassigned to
   // Claude by the owner on 10-10), and deleting this entry is part of X28's acceptance.
@@ -65,6 +61,45 @@ const norm = (p) =>
     .replace(/:[A-Za-z0-9_]+/g, ":x")
     .replace(/^\/+|\/+$/g, "");
 
+/**
+ * The web app's API client objects, by the identifier a call site uses. A call
+ * through any other object is not counted, so a Map's `.get("/v1/…")` or some
+ * unrelated `.del` is never mistaken for a button.
+ *
+ *   api        apps/web/src/api/client.ts, the shared client (most views)
+ *   stepUpApi  apps/web/src/stepup/stepUp.ts `api`, imported under this alias:
+ *              the step-up client every relaxing or owner-changing write uses
+ *   sharedApi  the shared client under the alias stepUp.ts gives it
+ *   deps       views/approvals/signedDecision.ts: the approval-decision seam,
+ *              whose default is stepUpApi.post (the injection exists for tests)
+ *
+ * A new client object (or a new alias for one) belongs on this list; the
+ * census test pins it. Missing one makes the census OVERSTATE the gap.
+ */
+export const API_CLIENTS = ["api", "stepUpApi", "sharedApi", "deps"];
+
+/** the method names each verb is written as on those clients */
+const VERB_FORMS = { del: ["del", "delete"], get: ["get"], post: ["post"], put: ["put"], patch: ["patch"] };
+
+/** every `/v1` path a web source file calls with `verb` through a known client, normalized */
+export function uiCallPaths(src, verb) {
+  const forms = VERB_FORMS[verb];
+  if (!forms) throw new Error(`uiCallPaths: unknown verb ${verb}`);
+  // `(?<![\w$.])` so `myapi.del(` and `foo.api.del(` are not the client
+  const call = new RegExp(
+    `(?<![\\w$.])(?:${API_CLIENTS.join("|")})\\.(?:${forms.join("|")})(?:WithHeaders)?(?:<[^>]*>)?\\(`,
+    "g",
+  );
+  const out = new Set();
+  for (const m of src.matchAll(call)) {
+    for (const lit of src.slice(m.index, m.index + 400).matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
+      // a query string is not part of the route
+      out.add(norm(lit[1].split("?")[0]));
+    }
+  }
+  return out;
+}
+
 function main() {
   const gatewaySrc = path.join(root, "apps/gateway/src");
   const webSrc = path.join(root, "apps/web/src");
@@ -75,13 +110,14 @@ function main() {
     for (const m of src.matchAll(/app\.delete\(\s*"([^"]+)"/g)) served.add(norm(m[1]));
   }
 
-  // EVERY SHAPE THE CALL IS ACTUALLY WRITTEN IN, which took three tries.
+  // EVERY SHAPE THE CALL IS ACTUALLY WRITTEN IN, which took four tries.
   //
   //   api.del(`/v1/x/${id}`)                 the easy one
   //   api.del<Thing>(`/v1/x/${id}`)          type parameter before the paren
   //   api.del(cond ? `/v1/a/..` : `/v1/b/..`) path chosen inside the call
   //   api.delWithHeaders(`/v1/x/${id}`, h)   the same DELETE with request headers
   //                                          (the intake draft's owner precondition)
+  //   stepUpApi.del(`/v1/x/${id}`, b, h)     a different client object (API_CLIENTS)
   //
   // The first two misses each made this census OVERSTATE the gap, which is the
   // more dangerous direction: a report that cries wolf is switched off, and
@@ -91,14 +127,9 @@ function main() {
   const reached = new Map();
   for (const f of walk(webSrc)) {
     const src = readFileSync(f, "utf8");
-    for (const m of src.matchAll(/api\.(?:del|delete)(?:WithHeaders)?(?:<[^>]*>)?\(/g)) {
-      const window = src.slice(m.index, m.index + 400);
-      for (const lit of window.matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
-        // a query string is not part of the route (the add side strips it too)
-        const key = norm(lit[1].split("?")[0]);
-        if (!reached.has(key)) reached.set(key, []);
-        reached.get(key).push(path.relative(root, f));
-      }
+    for (const key of uiCallPaths(src, "del")) {
+      if (!reached.has(key)) reached.set(key, []);
+      reached.get(key).push(path.relative(root, f));
     }
   }
 
@@ -135,15 +166,8 @@ function main() {
   }
   const uiVerb = (verb) => {
     const out = new Set();
-    for (const f of walk(webSrc)) {
-      const src = readFileSync(f, "utf8");
-      // `postWithHeaders` (idempotent create) is the same verb with headers
-      for (const m of src.matchAll(new RegExp(`api\\.${verb}(?:WithHeaders)?(?:<[^>]*>)?\\(`, "g"))) {
-        for (const lit of src.slice(m.index, m.index + 400).matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
-          out.add(norm(lit[1].split("?")[0]));
-        }
-      }
-    }
+    // `postWithHeaders` (idempotent create) is the same verb with headers
+    for (const f of walk(webSrc)) for (const p of uiCallPaths(readFileSync(f, "utf8"), verb)) out.add(p);
     return out;
   };
   const uiPost = uiVerb("post");
@@ -203,9 +227,12 @@ function main() {
   return orphans.length > 0 || staleExemptions.length > 0 || addGaps.length > 0 ? 1 : 0;
 }
 
-try {
-  process.exit(main());
-} catch (e) {
-  console.error("preflight-ui-affordances could not run:", e);
-  process.exit(2);
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (invokedDirectly) {
+  try {
+    process.exit(main());
+  } catch (e) {
+    console.error("preflight-ui-affordances could not run:", e);
+    process.exit(2);
+  }
 }

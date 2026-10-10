@@ -14,6 +14,8 @@
  * that reads as "none"), and the card says out loud that unknown is two
  * different real things and cannot be resolved into a mode retroactively.
  */
+import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
+import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
 import { useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -125,6 +127,8 @@ export default function AuditLogPage() {
         }
       />
       <div className={v.stack}>
+        <DecisionReceiptsPanel />
+        <AnchorTimestampsPanel />
         <Card title="Retention">
           {ret == null ? (
             <span className={v.dim}>Loading retention…</span>

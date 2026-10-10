@@ -349,7 +349,7 @@ export async function executeGovernedConnectorCall(
 
     if (preparationFailed) {
       await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
-        detail: { phase: "input", operation: body.operation, projectId }, effect: "deny",
+        detail: { phase: "input", operation: body.operation, projectId, receiptClass: "decision" }, effect: "deny",
         ruleId: "pii-transform-refused", ruleChain: [], reason: "Connector payload or routing identity cannot be safely transformed" });
       return out.status(403).send({ error: "pii_transform_refused", detail: "Connector payload or routing identity cannot be safely transformed." });
     }
@@ -362,7 +362,7 @@ export async function executeGovernedConnectorCall(
     const reserved = reservedChatControl(connector.providerKind ?? "", body.operation, originalInvocation.payload);
     if (reserved) {
       await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
-        detail: { phase: "input", operation: body.operation, code: reserved.code, projectId, ...(args.detail ?? {}) }, effect: "deny",
+        detail: { phase: "input", operation: body.operation, code: reserved.code, projectId, ...(args.detail ?? {}), receiptClass: "decision" }, effect: "deny",
         ruleId: "connector-reserved-chat-control", ruleChain: [], reason: `connector '${connector.name}': ${reserved.detail}` });
       return out.status(403).send({ error: reserved.code, detail: reserved.detail });
     }
@@ -429,6 +429,7 @@ export async function executeGovernedConnectorCall(
           // digests, whenever the write was under the dial's hold
           ...(binding ? { argumentsDigest: binding.argumentsDigest, approvalScope: "action", contextDigest: binding.contextDigest } : {}),
           ...(args.detail ?? {}),
+          receiptClass: "decision",
         },
         effect: decision.effect,
         ruleId: decision.ruleId,
@@ -468,6 +469,7 @@ export async function executeGovernedConnectorCall(
           operation: body.operation,
           ...(body.object ? { object: body.object } : {}),
           pricePerCallUsd: connector.pricePerCallUsd ?? null,
+          receiptClass: "decision",
         },
         effect: "deny",
         ruleId: "project-budget-cap",
@@ -690,6 +692,7 @@ export async function executeGovernedConnectorCall(
             pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "pii-blocked",
@@ -942,6 +945,7 @@ export async function executeGovernedConnectorCall(
             connectorKind: connector.providerKind,
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: "connector-egress-blocked",
@@ -1095,6 +1099,7 @@ export async function executeGovernedConnectorCall(
             pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "deny",
           ruleId: policyChanged ? "connector-policy-changed" : transformRefused ? "pii-transform-refused" : "pii-blocked",
@@ -1113,6 +1118,7 @@ export async function executeGovernedConnectorCall(
             pii: { mode: piiMode, action: "warn", inputHits, outputHits },
             operation: body.operation,
             ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
           },
           effect: "allow",
           ruleId: "pii-warned",
