@@ -14,6 +14,7 @@ import path from "node:path";
 import { describe, expect, it, beforeAll } from "vitest";
 import {
   AI_BOM_INSTALL_SUBJECT_ID,
+  AiBomRecordError,
   SPDX_MANDATORY,
   SPDX_NO_ASSERTION_LICENSE,
   SPDX_SCHEMA_FILE,
@@ -56,6 +57,15 @@ const rels = (d: Doc, from: string, type: string) => of(d, "Relationship").filte
 const withCard = (f: ReturnType<typeof producible>, i: number, claims: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
   const records = structuredClone(f.records);
   records.modelCards[i] = { ...records.modelCards[i]!, ...extra, dataClaims: { ...records.modelCards[i]!.dataClaims, ...claims } as never };
+  return records;
+};
+
+/** B9 (R51): patch the declared SPDX properties of model card `i` (the only source of releaseTime and downloadLocation) */
+const withDecl = (f: ReturnType<typeof producible>, i: number, patch: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+  const records = structuredClone(f.records);
+  const id = records.modelCards[i]!.id;
+  records.modelCards[i] = { ...records.modelCards[i]!, ...extra };
+  records.spdxFields = (records.spdxFields ?? []).map((x) => (x.subjectKind === "model_card" && x.subjectId === id ? ({ ...x, ...patch } as typeof x) : x));
   return records;
 };
 
@@ -179,20 +189,16 @@ describe("B5: R3 mandatory properties, never invented", () => {
     expect(spdxMandatoryMissing({})).toEqual(["SpdxDocument.@graph"]);
   });
 
+  // B9 (R51): the declarations are the only source; a missing one is not_producible
   const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, string[]]> = [
-    ["no releaseTime claim", { releaseTime: undefined }, {}, ["ai_AIPackage.releaseTime"]],
-    ["a date, not a DateTime (never padded to midnight)", { releaseTime: "2026-06-01" }, {}, ["ai_AIPackage.releaseTime"]],
-    ["fractional seconds (never truncated)", { releaseTime: "2026-06-01T00:00:00.5Z" }, {}, ["ai_AIPackage.releaseTime"]],
-    ["an impossible date", { releaseTime: "2026-02-30T00:00:00Z" }, {}, ["ai_AIPackage.releaseTime"]],
-    ["no downloadLocation claim", { downloadLocation: undefined }, {}, ["ai_AIPackage.software_downloadLocation"]],
-    ["plain http", { downloadLocation: "http://models.provider-a.example" }, {}, ["ai_AIPackage.software_downloadLocation"]],
+    ["no declared releaseTime", { releaseTime: null }, {}, ["ai_AIPackage.releaseTime"]],
+    ["no declared downloadLocation", { downloadLocation: null }, {}, ["ai_AIPackage.software_downloadLocation"]],
     ["no pinned version (agents have no version column)", {}, { pinnedModelVersion: null }, ["ai_AIPackage.software_packageVersion"]],
   ];
-  for (const [what, claims, extra, missing] of cases) {
+  for (const [what, patch, extra, missing] of cases) {
     it(`not_producible: ${what}`, () => {
       const f = producible();
-      const records = withCard(f, 1, claims, extra);
-      for (const [k, v] of Object.entries(claims)) if (v === undefined) delete (records.modelCards[1]!.dataClaims as Record<string, unknown>)[k];
+      const records = withDecl(f, 1, patch, extra);
       const b = buildAiBom(records, f.meta, opts);
       expect(b.renderings.map((r) => r.format)).toEqual(["cyclonedx-1.7", "cyclonedx-1.6"]);
       expect(b.body.renderings["spdx-3.0.1"]).toEqual({ status: "not_producible", missing });
@@ -201,6 +207,27 @@ describe("B5: R3 mandatory properties, never invented", () => {
       expect(aiBomNativeBodySchema.safeParse(JSON.parse(b.bodyBytes)).success).toBe(true);
     });
   }
+
+  // B9 (R51): a malformed declared value is refused outright (never padded, truncated or cut down), and the
+  // refusal names the field and rule, never the value
+  for (const [what, patch] of [
+    ["a date, not a DateTime (never padded to midnight)", { releaseTime: "2026-06-01" }],
+    ["fractional seconds (never truncated)", { releaseTime: "2026-06-01T00:00:00.5Z" }],
+    ["an impossible date", { releaseTime: "2026-02-30T00:00:00Z" }],
+    ["plain http", { downloadLocation: "http://models.provider-a.example" }],
+  ] as const) {
+    it(`refused: ${what}`, () => {
+      const f = producible();
+      expect(() => buildAiBom(withDecl(f, 1, patch), f.meta, opts)).toThrow(AiBomRecordError);
+    });
+  }
+
+  it("R51: a card's data_claims can no longer supply releaseTime or downloadLocation (retired keys are refused)", () => {
+    const f = producible();
+    for (const k of ["releaseTime", "downloadLocation"]) {
+      expect(() => buildAiBom(withCard(f, 0, { [k]: k === "releaseTime" ? "2026-06-01T00:00:00Z" : "https://models.provider-a.example" }), f.meta, opts), k).toThrow(/retired as an SPDX source/);
+    }
+  });
 
   it("an agent with no model card: its unknown model makes the rendering not_producible", () => {
     const f = producible();
@@ -365,25 +392,29 @@ describe("B5: no leakage of endpoints, paths or secrets (canaries)", () => {
     for (const c of CANARIES) expect(spdx.includes(c), c).toBe(false);
   });
 
-  it("a presigned or token-bearing downloadLocation reaches SPDX only as B3's origin (no path, query or fragment)", () => {
+  it("a presigned or token-bearing downloadLocation is refused, never cut down to its origin (R51), and the refusal leaks nothing", () => {
     const f = producible();
-    for (const [loc, origin] of [
-      ["https://bucket.example/m.bin?X-Amz-Signature=CANARY_PRESIGN", "https://bucket.example"],
-      ["https://hub.example/sk-live-CANARY/model", "https://hub.example"],
-      ["https://hub.example:8443?token=CANARY_QUERY#CANARY_FRAG", "https://hub.example:8443"],
-    ] as const) {
-      const b = buildAiBom(withCard(f, 0, { downloadLocation: loc }), f.meta, opts);
-      const spdx = b.renderings.find((r) => r.format === "spdx-3.0.1")!.bytes;
-      for (const c of CANARIES) expect(`${spdx}\n${b.bodyBytes}`.includes(c), `${loc}: ${c}`).toBe(false);
-      const card = of(JSON.parse(spdx) as Doc, "ai_AIPackage").find((p) => p.ai_informationAboutApplication === "Claims triage summaries")!;
-      expect(card.software_downloadLocation, loc).toBe(origin);
+    for (const loc of [
+      "https://bucket.example/m.bin?X-Amz-Signature=CANARY_PRESIGN",
+      "https://hub.example/sk-live-CANARY/model",
+      "https://hub.example:8443?token=CANARY_QUERY#CANARY_FRAG",
+    ]) {
+      let message = "";
+      try {
+        buildAiBom(withDecl(f, 0, { downloadLocation: loc }), f.meta, opts);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message, loc).toMatch(/downloadLocation: download_location_not_origin/);
+      for (const c of CANARIES) expect(message.includes(c), `${loc}: ${c}`).toBe(false);
     }
   });
 
   it("defence in depth: the renderer itself never exports a path-bearing location, even if a record bypassed normalisation", () => {
     const f = producible();
     const n = normaliseAiBomRecords(f.records);
-    (n.modelCards[0]!.dataClaims as Record<string, unknown>).downloadLocation = "https://hub.example/sk-live-CANARY/model";
+    const decl = n.spdxFields!.find((x) => x.subjectKind === "model_card" && x.subjectId === n.modelCards[0]!.id)!;
+    decl.downloadLocation = "https://hub.example/sk-live-CANARY/model";
     const d = renderAiBomSpdx(n, f.meta, renderAiBomCycloneDx(n, f.meta, "1.7")).doc;
     expect(JSON.stringify(d).includes("sk-live-CANARY")).toBe(false);
     expect(spdxMandatoryMissing(d)).toEqual(["ai_AIPackage.software_downloadLocation"]);

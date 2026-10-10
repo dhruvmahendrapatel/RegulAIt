@@ -112,7 +112,7 @@ beforeAll(async () => {
   // SYNTHETIC records: one agent, its model card (no pin, no claims), a training dataset reached through a
   // training artifact of the card, and an evaluation dataset reached through eval evidence on the card
   const [a] = await db.insert(agents).values({ name: `b9-agent-${RUN}`, provider: "provider-b9", tier: 1, model: "model-b9", ownerUserId: users.admin.id }).returning({ id: agents.id });
-  const [card] = await db.insert(modelCards).values({ agentId: a!.id, intendedUse: "B9 synthetic triage", dataClaims: { license: "Apache-2.0" } }).returning({ id: modelCards.id });
+  const [card] = await db.insert(modelCards).values({ agentId: a!.id, intendedUse: "B9 synthetic triage", dataClaims: { license: "Apache-2.0", releaseTime: "2025-01-01T00:00:00Z", downloadLocation: "https://claims.supplier-b9.example" } }).returning({ id: modelCards.id });
   const [card2] = await db.insert(modelCards).values({ agentId: a!.id, intendedUse: "B9 cascade probe" }).returning({ id: modelCards.id });
   const [tds] = await db.insert(trainingDatasets).values({ name: `b9-ft-${RUN}`, version: 1, checksum: `sha256:${"d".repeat(64)}:2`, rowCount: 2, piiVerdict: "clean" }).returning({ id: trainingDatasets.id });
   const [job] = await db.insert(trainingJobs).values({ name: "b9-job", datasetId: tds!.id, datasetVersion: 1, backend: "mock", method: "lora_sft", status: "succeeded" } as never).returning({ id: trainingJobs.id });
@@ -207,6 +207,9 @@ describe("B9: the loader and the SPDX renderer (R3, R51)", () => {
     // claim. B5 names missing properties per class, so the second card keeps ai_AIPackage.releaseTime listed.
     const s = await snapshotSpdx();
     expect(s.records.spdxFields).toHaveLength(1);
+    // R51: the card's retired data_claims keys are dropped by the loader, never a second source
+    const card = s.records.modelCards.find((c) => c.id === ids.card)!;
+    expect(Object.keys(card.dataClaims)).toEqual(["license"]);
     expect(s.status).toEqual({
       status: "not_producible",
       missing: [
@@ -245,6 +248,9 @@ describe("B9: the loader and the SPDX renderer (R3, R51)", () => {
       ["2026-03-15T08:00:00Z", "2026-04-01T09:30:00Z", "https://data.supplier-b9.example", ["text"]],
     ]);
     const models = (s.doc["@graph"] as Array<Record<string, any>>).filter((e) => e.type === "ai_AIPackage");
+    expect(models.map((m) => m.software_downloadLocation).sort()).toEqual(["https://models.supplier-b9.example", "https://models.supplier-b9.example:8443"]);
+    expect(models.map((m) => m.releaseTime).sort()).toEqual(["2026-01-02T03:04:05Z", "2026-02-01T00:00:00Z"]);
+    expect(JSON.stringify(s.doc)).not.toContain("claims.supplier-b9");
     expect(models.map((m) => m.software_packageVersion).sort()).toEqual(["b9-2026.01", "b9-2026.02"]);
     // the declarations are in the signed native body and its basis
     expect(s.build.basis.filter((b) => b.table === "ai_bom_spdx_declarations")).toHaveLength(4);

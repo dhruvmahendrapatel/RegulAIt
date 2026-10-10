@@ -44,6 +44,8 @@ const spdxOf = (b: ReturnType<typeof buildAiBom>) => {
 };
 const of = (d: Doc, type: string) => d["@graph"].filter((e) => e.type === type);
 const fields = (r: AiBomRecordSet) => r.spdxFields as SpdxFieldsRecord[];
+/** the dataset declarations only (the fixture also declares its two model cards) */
+const ds = (x: SpdxFieldsRecord[]) => x.filter((y) => y.subjectKind !== "model_card");
 const refusal = (fn: () => unknown): string => {
   try {
     fn();
@@ -80,9 +82,9 @@ describe("B9: complete declarations render SPDX (R51)", () => {
     expect(ds.map((d) => d.dataset_datasetType).sort()).toEqual([["structured", "text"], ["text"], ["text"]]);
   });
 
-  it("negative control: the same records with no declarations are not_producible", () => {
+  it("negative control: the same records with no dataset declarations are not_producible", () => {
     const f = declared();
-    delete f.records.spdxFields;
+    f.records.spdxFields = fields(f.records).filter((x) => x.subjectKind === "model_card");
     const b = buildAiBom(f.records, f.meta, opts);
     expect(b.body.renderings["spdx-3.0.1"]).toEqual({
       status: "not_producible",
@@ -95,17 +97,17 @@ describe("B9: complete declarations render SPDX (R51)", () => {
     const f = declared();
     const b = buildAiBom(f.records, f.meta, opts);
     const body = JSON.parse(b.bodyBytes) as { records: Record<string, unknown[]> };
-    expect(body.records.spdxFields).toHaveLength(3);
-    expect(b.basis.filter((x) => x.table === "ai_bom_spdx_declarations")).toHaveLength(3);
+    expect(body.records.spdxFields).toHaveLength(5);
+    expect(b.basis.filter((x) => x.table === "ai_bom_spdx_declarations")).toHaveLength(5);
     // a changed declaration changes the signed bytes (drift is visible)
     const g = declared();
-    fields(g.records)[0]!.builtTime = "2026-03-15T08:00:01Z";
+    ds(fields(g.records))[0]!.builtTime = "2026-03-15T08:00:01Z";
     expect(buildAiBom(g.records, g.meta, opts).bodyBytes).not.toBe(b.bodyBytes);
   });
 
   it("a dataset with no declared type keeps the standard's noAssertion (R3) and stays producible", () => {
     const f = declared();
-    for (const x of fields(f.records)) x.datasetType = [];
+    for (const x of ds(fields(f.records))) x.datasetType = [];
     const doc = spdxOf(buildAiBom(f.records, f.meta, opts))!;
     expect(of(doc, "dataset_DatasetPackage").map((d) => d.dataset_datasetType)).toEqual([["noAssertion"], ["noAssertion"], ["noAssertion"]]);
   });
@@ -113,8 +115,8 @@ describe("B9: complete declarations render SPDX (R51)", () => {
 
 describe("B9: partial declarations stay not_producible, naming exactly what is missing", () => {
   for (const [what, edit, missing] of [
-    ["one dataset lacks builtTime", (x: SpdxFieldsRecord[]) => (x[0]!.builtTime = null), ["dataset_DatasetPackage.builtTime"]],
-    ["one lacks originatedBy, another releaseTime", (x: SpdxFieldsRecord[]) => ((x[0]!.originatedBy = null), (x[1]!.releaseTime = null)), ["dataset_DatasetPackage.originatedBy", "dataset_DatasetPackage.releaseTime"]],
+    ["one dataset lacks builtTime", (x: SpdxFieldsRecord[]) => (ds(x)[0]!.builtTime = null), ["dataset_DatasetPackage.builtTime"]],
+    ["one lacks originatedBy, another releaseTime", (x: SpdxFieldsRecord[]) => ((ds(x)[0]!.originatedBy = null), (ds(x)[1]!.releaseTime = null)), ["dataset_DatasetPackage.originatedBy", "dataset_DatasetPackage.releaseTime"]],
     ["the eval dataset is not declared at all", (x: SpdxFieldsRecord[]) => x.splice(x.findIndex((y) => y.subjectKind === "eval_dataset"), 1), ["dataset_DatasetPackage.builtTime", "dataset_DatasetPackage.originatedBy", "dataset_DatasetPackage.releaseTime", "dataset_DatasetPackage.software_downloadLocation"]],
   ] as const) {
     it(what, () => {
@@ -140,25 +142,30 @@ describe("B9: model cards (releaseTime, downloadLocation, packageVersion)", () =
   const decl = (f: ReturnType<typeof declared>, v: Partial<SpdxFieldsRecord>) =>
     fields(f.records).push({ subjectKind: "model_card", subjectId: cardId(f), releaseTime: null, downloadLocation: null, packageVersion: null, builtTime: null, originatedBy: null, datasetType: [], ...v });
 
-  it("a declared value is used before the card's data_claims value", () => {
+  it("the declarations are the only source of releaseTime and downloadLocation (R51)", () => {
     const f = declared();
-    decl(f, { releaseTime: "2026-01-02T03:04:05Z", downloadLocation: "https://declared.supplier-a.example" });
+    const mine = fields(f.records).find((x) => x.subjectKind === "model_card" && x.subjectId === cardId(f))!;
+    Object.assign(mine, { releaseTime: "2026-01-02T03:04:05Z", downloadLocation: "https://declared.supplier-a.example" });
     const { pkg } = modelPkg(f);
     expect(pkg.releaseTime).toBe("2026-01-02T03:04:05Z");
     expect(pkg.software_downloadLocation).toBe("https://declared.supplier-a.example");
+    // negative control: the retired data_claims keys cannot supply them
+    f.records.modelCards[0]!.dataClaims = { ...f.records.modelCards[0]!.dataClaims, releaseTime: "2026-01-02T03:04:05Z" } as never;
+    expect(() => normaliseAiBomRecords(f.records)).toThrow(/retired as an SPDX source/);
   });
 
   it("packageVersion: the pin first; a declared version only when there is no pin", () => {
     const f = declared();
-    decl(f, { packageVersion: "declared-1.2.3" });
+    fields(f.records).find((x) => x.subjectKind === "model_card" && x.subjectId === cardId(f))!.packageVersion = "declared-1.2.3";
     expect(modelPkg(f).pkg.software_packageVersion).toBe(f.records.modelCards[0]!.pinnedModelVersion);
     f.records.modelCards[0]!.pinnedModelVersion = null;
     expect(modelPkg(f).pkg.software_packageVersion).toBe("declared-1.2.3");
   });
 
-  it("negative control: no pin, no declaration, no claim -> the model's mandatory properties are named missing", () => {
+  it("negative control: no pin and no declaration -> the model's mandatory properties are named missing", () => {
     const f = declared();
-    f.records.modelCards[0] = { ...f.records.modelCards[0]!, pinnedModelVersion: null, dataClaims: { license: "Apache-2.0" } as never };
+    f.records.modelCards[0] = { ...f.records.modelCards[0]!, pinnedModelVersion: null };
+    f.records.spdxFields = fields(f.records).filter((x) => !(x.subjectKind === "model_card" && x.subjectId === cardId(f)));
     const b = buildAiBom(f.records, f.meta, opts);
     expect(b.body.renderings["spdx-3.0.1"]).toEqual({
       status: "not_producible",
@@ -239,13 +246,13 @@ describe("B9: the normaliser re-checks every loaded value (defence in depth)", (
   ] as const) {
     it(`refuses ${what}`, () => {
       const f = declared();
-      (edit as (x: SpdxFieldsRecord) => unknown)(fields(f.records)[0]!);
+      (edit as (x: SpdxFieldsRecord) => unknown)(ds(fields(f.records))[0]!);
       expect(() => normaliseAiBomRecords(f.records)).toThrow(AiBomRecordError);
     });
   }
   it("refuses an unknown key and the same subject loaded twice", () => {
     const f = declared();
-    (fields(f.records)[0] as unknown as Record<string, unknown>).declaredBy = "00000000-0000-4000-8000-0000000000aa";
+    (ds(fields(f.records))[0] as unknown as Record<string, unknown>).declaredBy = "00000000-0000-4000-8000-0000000000aa";
     expect(() => normaliseAiBomRecords(f.records)).toThrow(/unknown key/);
     const g = declared();
     fields(g.records).push({ ...fields(g.records)[0]! });

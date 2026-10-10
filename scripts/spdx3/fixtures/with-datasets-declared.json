@@ -63,9 +63,7 @@
      "trainingData": "public web corpus (supplier statement)",
      "license": "Apache-2.0",
      "task": "text-generation",
-     "architecture": "transformer",
-     "releaseTime": "2026-06-01T00:00:00Z",
-     "downloadLocation": "https://models.provider-a.example"
+     "architecture": "transformer"
     },
     "standardRefs": [
      "ISO-42001-A.6"
@@ -80,9 +78,7 @@
     "limitations": null,
     "biasFairness": [],
     "dataClaims": {
-     "license": "proprietary",
-     "releaseTime": "2026-05-01T00:00:00Z",
-     "downloadLocation": "https://models.provider-a.example"
+     "license": "proprietary"
     },
     "standardRefs": [],
     "pinnedModelVersion": "2026-05-01"
@@ -302,6 +298,26 @@
    }
   ],
   "spdxFields": [
+   {
+    "subjectKind": "model_card",
+    "subjectId": "00000000-0000-4000-8000-000000000004",
+    "releaseTime": "2026-06-01T00:00:00Z",
+    "downloadLocation": "https://models.provider-a.example",
+    "packageVersion": null,
+    "builtTime": null,
+    "originatedBy": null,
+    "datasetType": []
+   },
+   {
+    "subjectKind": "model_card",
+    "subjectId": "00000000-0000-4000-8000-000000000005",
+    "releaseTime": "2026-05-01T00:00:00Z",
+    "downloadLocation": "https://models.provider-a.example",
+    "packageVersion": null,
+    "builtTime": null,
+    "originatedBy": null,
+    "datasetType": []
+   },
    {
     "subjectKind": "training_dataset",
     "subjectId": "00000000-0000-4000-8000-00000000000d",

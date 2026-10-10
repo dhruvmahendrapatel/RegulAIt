@@ -57,7 +57,15 @@ export const AI_BOM_CONFIG_STATUSES = ["active", "canary"] as const;
 export const AI_BOM_MEMORY_STORE_KINDS = ["semantic_cache", "conversations", "builder_agent_memory", "project_context"] as const;
 
 /** round 9: the only `data_claims` keys that may reach a BOM (spike B0 `DATA_CLAIM_KEYS`) */
-export const AI_BOM_DATA_CLAIM_KEYS = ["trainingData", "task", "architecture", "license", "retention", "releaseTime", "downloadLocation"] as const;
+export const AI_BOM_DATA_CLAIM_KEYS = ["trainingData", "task", "architecture", "license", "retention"] as const;
+/**
+ * ADR-0189 R51 (owner, 2026-10-10): `releaseTime` and `downloadLocation` are no
+ * longer `data_claims` keys. The governed declarations (`spdxFields`, table
+ * `ai_bom_spdx_declarations`) are their ONLY source, so a value can never come
+ * from two places. The loader drops these two keys from a card's claims; a
+ * record set that still carries one is refused (no grandfathering, ADR-0180).
+ */
+export const AI_BOM_RETIRED_DATA_CLAIM_KEYS = ["releaseTime", "downloadLocation"] as const;
 export const AI_BOM_DATA_CLAIM_MAX_CHARS = 512;
 /** the cap on any free-text value that may appear (names, intended use, limitations) */
 export const AI_BOM_TEXT_MAX_CHARS = 4096;
@@ -577,14 +585,13 @@ function dataClaims(v: unknown, at: string): Record<string, string | number | bo
   if (!v || typeof v !== "object" || Array.isArray(v)) return fail(`${at}: data_claims must be an object`);
   const out: Record<string, string | number | boolean> = {};
   for (const k of sortedStrings(Object.keys(v))) {
+    if ((AI_BOM_RETIRED_DATA_CLAIM_KEYS as readonly string[]).includes(k)) fail(`${at}: data_claims.${k} is retired as an SPDX source; declare it through the SPDX fields (ADR-0189 R51)`);
     if (!(AI_BOM_DATA_CLAIM_KEYS as readonly string[]).includes(k)) fail(`${at}: an unknown data_claims key is refused (allowed: ${AI_BOM_DATA_CLAIM_KEYS.join(", ")})`);
     let x = (v as Record<string, unknown>)[k];
     if (typeof x === "string") {
       if (x.length > AI_BOM_DATA_CLAIM_MAX_CHARS) fail(`${at}.${k}: longer than ${AI_BOM_DATA_CLAIM_MAX_CHARS} characters`);
-      // PR #287: a URL claim keeps its origin only (R47), a time claim must be a time, other text is guarded
-      if (k === "releaseTime") x = stamp(`${at}.${k}`, x, false);
-      else if (k === "downloadLocation") x = carriesUrl(x as string) ? sanitiseAiBomEndpoint(x as string, `${at}.${k}`) : fail(`${at}.${k}: not a URL`);
-      else x = urlOrText(`${at}.${k}`, x as string);
+      // PR #287: a URL claim keeps its origin only (R47); other text is guarded
+      x = urlOrText(`${at}.${k}`, x as string);
     } else if (!(typeof x === "boolean" || (typeof x === "number" && Number.isSafeInteger(x)))) {
       fail(`${at}.${k}: only a string, safe integer or boolean is allowed (no nested object or array)`);
     }

@@ -42,15 +42,15 @@
  *  - R3 and the B5 entry condition (4237371312): mandatory literal properties
  *    with no recorded value are OMITTED, never filled; `spdxMandatoryMissing`
  *    then names them and the builder records `not_producible` instead of a
- *    rendering. `releaseTime` and `downloadLocation` come only from the
- *    supplier-declared model-card claims, and only when they are already a
- *    valid SPDX DateTime and an https origin that B3's endpoint rule leaves
- *    unchanged (`isSpdxDownloadLocation`).
+ *    rendering. `releaseTime` and `downloadLocation` are used only when they
+ *    are already a valid SPDX DateTime and an https origin that B3's endpoint
+ *    rule leaves unchanged (`isSpdxDownloadLocation`).
  *  - B9 (OWNER DECISION 13, R51): the CURRENT supplier-declared values in
  *    `n.spdxFields` (from `ai_bom_spdx_declarations`) fill the properties no
- *    other table records. A model's declared `releaseTime` and
- *    `downloadLocation` come before its card's `data_claims` value; a declared
- *    `packageVersion` is used only when the card has no pinned version. A
+ *    other table records, and they are the ONLY source of a model's
+ *    `releaseTime` and `downloadLocation` (the card's `data_claims` keys are
+ *    retired, R51); a declared `packageVersion` is used only when the card has
+ *    no pinned version. A
  *    dataset gains `builtTime`, `originatedBy` (an Organization), `releaseTime`,
  *    `downloadLocation` and `datasetType`; with no declared type it keeps the
  *    standard's `noAssertion`. Each value passes the same literal checks as
@@ -245,9 +245,9 @@ export function renderAiBomSpdx(n: AiBomRecordSet, meta: AiBomSnapshotMeta, cdx:
         const supplierName = (c.supplier as { name: string } | undefined)?.name;
         if (!supplierName) throw new Error(`ai-bom spdx: model ${ref} has no supplier`);
         const decl = card ? declaredFields.get(`model_card:${card.id}`) : undefined;
-        // R51: a declared value first, then the card's supplier-declared claim (B5's source)
-        const releaseTime = decl?.releaseTime ?? claimText(card, "releaseTime");
-        const downloadLocation = decl?.downloadLocation ?? claimText(card, "downloadLocation");
+        // R51: the governed declarations are the only source (the data_claims keys are retired)
+        const releaseTime = decl?.releaseTime ?? null;
+        const downloadLocation = decl?.downloadLocation ?? null;
         const packageVersion = card?.pinnedModelVersion ?? decl?.packageVersion ?? null;
         const training = card && trainingDataDeclared(card) ? `supplier-declared: ${String(card.dataClaims.trainingData)}` : "unknown";
         const arch = claimText(card, "architecture");
