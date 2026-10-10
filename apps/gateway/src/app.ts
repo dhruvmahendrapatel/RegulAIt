@@ -460,7 +460,7 @@ import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 // ADR-0188 (batch 6 item 1) S1 — every identity route, a 501 stub until its slice lands
 import { registerIdentityRoutes } from "./identity-routes.js";
-import { lockPersonForRevocation } from "./workload-identity-admin.js";
+import { lockPersonForRevocation, lockRoleForGrantInsert } from "./workload-identity-admin.js";
 // ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
 import { registerBomRoutes } from "./bom-routes.js";
 import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
@@ -2260,10 +2260,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleToolGrants)
-      .values({ roleId, serverId: body.serverId, toolName: body.toolName })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleToolGrants)
+        .values({ roleId, serverId: body.serverId, toolName: body.toolName })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2278,10 +2282,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleServerGrants)
-      .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleServerGrants)
+        .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2297,10 +2305,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleAgentGrants)
-      .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleAgentGrants)
+        .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2314,15 +2326,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleConnectorGrants)
-      .values({
-        roleId,
-        connectorId: body.connectorId,
-        mode: body.mode,
-        allowedObjects: body.allowedObjects ?? null,
-      })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleConnectorGrants)
+        .values({
+          roleId,
+          connectorId: body.connectorId,
+          mode: body.mode,
+          allowedObjects: body.allowedObjects ?? null,
+        })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 

@@ -244,6 +244,19 @@ export async function lockPersonForRevocation(tx: Db, userId: string): Promise<b
 }
 
 /**
+ * The role-row twin of `lockPersonForRevocation` (PR #339 review). Adding an item to a role is an INSERT into a
+ * `role_*_grants` table, whose foreign-key check takes only `FOR KEY SHARE` on the role's row; that does not
+ * conflict with the `FOR SHARE` the steward check holds on every role it reads, so an item a steward has had
+ * revoked could join the role while the check is open. Every role-grant insert therefore first takes the role's
+ * row `FOR NO KEY UPDATE`: it waits for a check in flight, and a check that starts later waits for it and then
+ * sees the new item. Call it inside the insert's own transaction, before the insert.
+ */
+export async function lockRoleForGrantInsert(tx: Db, roleId: string): Promise<boolean> {
+  const rows = await tx.select({ id: roles.id }).from(roles).where(eq(roles.id, roleId)).for("no key update");
+  return rows.length > 0;
+}
+
+/**
  * What one steward holds, read in the caller's transaction with `FOR SHARE` on every grant, assignment and
  * revocation row (review L5): a concurrent revoke of a row this check relied on waits for the write that relied
  * on it, and a revoke that commits first is seen. Role-derived rows are read only for `lockedRoleIds`, the roles

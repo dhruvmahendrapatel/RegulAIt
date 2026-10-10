@@ -989,6 +989,54 @@ describe("S4+S5 follow-up: role bundles (L3), revocation serialization (L5), for
     await paused.done; // committed against a revocation that was already committed: the race the lock closes
   });
 
+  it("PR #339 review item 2: an item added to a role waits for a grant-set write whose check read that role", async () => {
+    const p = await mkUser("rb-steward");
+    const role = await mkRole("rb");
+    await db.insert(roleToolGrants).values({ roleId: role, serverId, toolName: "rd" });
+    await db.insert(roleAssignments).values({ userId: p.id, roleId: role });
+    // the steward has lost "wr"; the role does not bundle it yet, so the steward holds the whole role
+    await db.insert(revocations).values({ userId: p.id, serverId, toolName: "wr" });
+    const subject = await mkAgent("rb-subject");
+    const ident = await ensureIdentityFor(db, { kind: "agent", id: subject });
+    await db.update(workloadIdentities).set({ sponsorUserIds: [p.id] }).where(eq(workloadIdentities.id, ident.id));
+    const set = { ...emptySet, agents: [], revision: 0, roleIds: [role] };
+
+    const { done, release } = await pausedCheck(() => putIdentityGrants(db, ident.id, set, null));
+    // the revoked tool joins the role through the real route, which takes the role's row first and must wait
+    const order: string[] = [];
+    const add = inject("POST", `/v1/roles/${role}/grants/tools`, AUTH, { serverId, toolName: "wr" }).then((r) => {
+      order.push("role-grant");
+      return r;
+    });
+    expect(await settledWithin(add, 750), "the role gained an item while the steward check was open").toBe(false);
+    release();
+    const written = await done.then((r) => {
+      order.push("identity-grant");
+      return r;
+    });
+    expect(written.revision).toBe(1);
+    expect((await add).statusCode).toBe(201);
+    expect(order).toEqual(["identity-grant", "role-grant"]); // serial: the role was whole for the steward at the write
+    // the other order: with "wr" in the role, the next write of the same set is refused
+    await expect(putIdentityGrants(db, ident.id, { ...set, revision: 1 }, null)).rejects.toMatchObject({ code: "grant_exceeds_stewards" });
+
+    // positive control: an insert that does NOT take the role's row (the pre-fix route; its foreign-key check takes
+    // only FOR KEY SHARE) is not held back by the check's FOR SHARE on the role, which is the race this closes
+    const q = await mkUser("rb-control");
+    const role2 = await mkRole("rb-control");
+    await db.insert(roleToolGrants).values({ roleId: role2, serverId, toolName: "rd" });
+    await db.insert(roleAssignments).values({ userId: q.id, roleId: role2 });
+    await db.insert(revocations).values({ userId: q.id, serverId, toolName: "wr" });
+    const subject2 = await mkAgent("rb-subject2");
+    const ident2 = await ensureIdentityFor(db, { kind: "agent", id: subject2 });
+    await db.update(workloadIdentities).set({ sponsorUserIds: [q.id] }).where(eq(workloadIdentities.id, ident2.id));
+    const paused = await pausedCheck(() => putIdentityGrants(db, ident2.id, { ...set, roleIds: [role2] }, null));
+    const raw = db2.insert(roleToolGrants).values({ roleId: role2, serverId, toolName: "wr" });
+    expect(await settledWithin(raw, 2000), "an unlocked role-grant insert slips past the open check").toBe(true);
+    paused.release();
+    await paused.done; // committed with a role that already bundled a tool its steward had lost: the race the lock closes
+  });
+
   it("deadlock: a force role delete during the steward check waits on the role row; both finish, no 40P01", async () => {
     const p = await mkUser("dl-steward");
     const role = await mkRole("dl");
@@ -1021,19 +1069,40 @@ describe("S4+S5 follow-up: role bundles (L3), revocation serialization (L5), for
     const errors: string[] = [];
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
+    let assignmentsLocked!: () => void;
+    const atGate = new Promise<void>((r) => (assignmentsLocked = r));
     // the pre-fix order: the steward's assignment rows FOR SHARE, then (after the delete has started) the role's
     // bundled rows FOR SHARE, never the role row first
     const oldCheck = db
       .transaction(async (tx) => {
         await tx.execute(sql`select role_id from role_assignments where user_id = ${p.id} for share`);
+        assignmentsLocked();
         await gate;
         for (const t of ["role_connector_grants", "role_agent_grants", "role_server_grants", "role_tool_grants"]) {
           await tx.execute(sql`select 1 from ${sql.identifier(t)} where role_id = ${role} for share`);
         }
       })
       .catch((e: { cause?: { code?: string }; code?: string }) => errors.push(e.cause?.code ?? e.code ?? "?"));
-    const del = db2.execute(sql`delete from roles where id = ${role}`).catch((e: { cause?: { code?: string }; code?: string }) => errors.push(e.cause?.code ?? e.code ?? "?"));
-    await new Promise((r) => setTimeout(r, 500)); // the delete has locked the role and is cascading
+    await atGate; // the old check holds the assignment row before the delete starts (the two pools race otherwise)
+    // a per-run marker in the statement text, so the poll below finds exactly this DELETE
+    const marker = `dl-control-delete-${RUN}`;
+    const del = db2
+      .execute(sql`delete from roles where id = ${role} /* ${sql.raw(marker)} */`)
+      .catch((e: { cause?: { code?: string }; code?: string }) => errors.push(e.cause?.code ?? e.code ?? "?"));
+    // wait (bounded) until the cascading DELETE is blocked on a lock the old check holds: only then has it taken the
+    // role and its bundled rows, so the old check's next reads must close the cycle. A fixed sleep raced this.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const waiting = await db.execute(
+        sql`select 1 from pg_stat_activity where pid <> pg_backend_pid() and datname = current_database() and wait_event_type = 'Lock' and query like ${`%${marker}%`}`,
+      );
+      if ((waiting as unknown as { rows: unknown[] }).rows.length > 0) break;
+      if (Date.now() > deadline) {
+        const seen = await db.execute(sql`select pid, state, wait_event_type, wait_event, left(query, 120) as q from pg_stat_activity where datname = current_database()`);
+        throw new Error(`the cascading DELETE never waited on a lock; errors=${JSON.stringify(errors)} activity=${JSON.stringify((seen as unknown as { rows: unknown[] }).rows)}`);
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
     release();
     await Promise.all([oldCheck, del]);
     expect(errors, "the old order deadlocks (40P01)").toContain("40P01");
