@@ -478,14 +478,44 @@ decisions it had to make, each recorded here; none relaxes a strict default.
 - **S. Migration 0187** (`execution_offers`, the widened `replay_claims` namespace CHECK), `when` 1785122000000; the
   journal is re-ordered at merge time against 0184–0186 and S5's 0188.
 
+Amendments from the independent review of the I3 PR (#323, reviewed at 985f5b3; master decisions, 2026-10-10). Each
+tightens amendments K–S; none relaxes a strict default.
+
+- **T. Quarantine voids every earlier attestation; re-enable needs a NEW pass (decision 6, ADR-0180; review M1).** This
+  answers open question 4 below. The self-test route answers `409 executor_quarantined` (`next: quarantined`) unless
+  the executor's status is `active`. The status is re-checked under a share lock on the executor row, in the same
+  transaction that writes the verdicts, so a quarantine or a re-enable cannot cross a self-test while it is being
+  judged. Re-enable stamps `executors.reenabled_at = now()` (database clock; migration 0187 adds the column).
+  `freshAttestation`, the broker's refusal-reason query and the admin view share one predicate: they count only
+  attestation rows with `observed_at > reenabled_at`. A pass written before the quarantine, or while it lasted, never
+  counts again, even when its `expires_at` has not passed. Until the executor's next `pass`, the broker refuses and
+  offers nothing.
+- **U. The runtime probes cannot be dropped by a profile (decision 6, amendment D; review M3).** The evaluator
+  requires `runtime_identity` in every report. It also requires `runtime_config` whenever the backend is `gvisor` or
+  the claimed class is `user_space_kernel` (`requiredReportProbes`). This holds whatever `attestation.probes` lists,
+  so a report with no runtime evidence fails `probe_missing`. The profile schema also refuses a body whose
+  `attestation.probes` omits `runtime_identity` or `runtime_config`: every profile carries a `runsc` section, so any
+  profile can be placed on gVisor.
+- **V. The executor reaches the gateway over `https:` only (decision 4; review L1).** `REGULAIT_GATEWAY_URL` must be
+  `https:`. A plain `http:` URL is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), or when
+  `REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP=1` is set. That development flag defaults off and is logged at start.
+- **W. Refusals before authentication (review L6; accepted, partly narrowed).** A refused channel request writes one
+  `executor-channel-refused` audit row before any identity is proven, so an unauthenticated caller can add audit rows.
+  Request bodies of up to 4 MiB (self-test, report) used to be read before the proof was checked. Both are bounded by
+  the ADR-0031 global per-IP rate limit, so no extra limiter is added. The body read is also narrowed: the proof's
+  header, signature, identity, credential, `htm`, `htu` and `iat` are now verified in an `onRequest` hook BEFORE the
+  body is read. Only the body hash (`bh`), the one-use `jti` claim and the executor lookup wait for the body. An
+  unproven caller can therefore no longer make the gateway buffer a large body. Re-check both if the channel moves
+  behind a proxy that hides client addresses from the per-IP limit.
+
 Open questions I3 leaves to the master (also in the PR):
 
 1. S7's service-workload token path (amendment K) and whether the proof stays as the stricter option.
 2. Whether a quarantined executor's withdrawn offers should be RE-OFFERED to another executor by the broker (today the
    placement is refused `executor_quarantined` and the caller decides); I4's governed path is the natural place.
 3. The stream's transport for stdio bytes (amendment L): the same window, or a sibling stream.
-4. Whether re-enable should also require a fresh self-test on the gateway side before the executor's classes count
-   again (today the executor re-tests by its own rule; the gateway counts the still-fresh attestations).
+4. ~~Whether re-enable should also require a fresh self-test on the gateway side before the executor's classes count
+   again.~~ Answered by amendment T: yes. The gateway counts only attestations observed after the re-enable.
 
 ## Rollout: slices (one PR each)
 
