@@ -1151,6 +1151,40 @@ None relaxes a strict default (ADR-0180).
    *Adopted from the code* (`packages/shared/src/identity/contract.ts`, `.../identity/delegation-authz.ts`,
    `apps/gateway/src/oauth/delegation-proof.ts`). Vectors `root-request-template` and the `request-*` family.
 
+### Amendments from the S4+S5 follow-up (2026-10-10)
+
+PR #339 closes S5 review item 1 and conformance-gap item 5, and turns on the two release switches. It was reviewed
+independently twice under ADR-0191: once at 91bd1d6 (fix-then-merge, Lows only) and again at cfe8554 (merge).
+
+1. **The signed depth is enforced.** The root exchange stores min(org limit at exchange, signed `max_depth`) as the
+   root's `depth_limit` and sets `depth_limit_signed = true` (migration 0190). Only the root exchange sets that marker.
+   The 0184 guard trigger keeps it immutable, and a CHECK keeps it off children. A child exchange is refused
+   `delegation_depth` when `depth + 1 > depth_limit`. The refusal runs in preflight and again under the lock, before
+   any replay claim. A child's limit is the minimum of its parent's limit and the org limit. `SIGNED_ROOT_DEPTH_PERSISTED`
+   is lifted. This replaces the interim fail-closed guard of S5 review item 1.
+2. **A root minted before item 1 cannot delegate.** No grandfathering (ADR-0180): a child exchange under a root whose
+   `depth_limit_signed` is false is refused `invalid_grant` with `error_code` `delegation_depth_unenforced`. The
+   refusal is audited and runs before any claim.
+3. **Delegated routes are wired.** `DELEGATED_ROUTES_WIRED` is lifted. A workload token reaches exactly the routes in
+   S4 amendment 7, each decided against its grant: `/mcp` (tools/list, tools/call, every protocol method, the logging
+   relay), both compat dispatch routes, and `GET /v1/models`. Every other route is refused `workload_scope`, and a
+   workload principal is never an admin. RFC 9728 metadata lists the gateway's own issuer.
+4. **A workload call names exactly its grant's project.** A missing, different or repeated `x-regulait-project-id` is
+   refused `403 delegation_project_mismatch`, audited.
+5. **Workload rows carry the chain (decision 9).** A workload request runs inside the audit-actor context, so its
+   audit, trace and usage rows carry the actor columns, as in-process chains do.
+6. **A role counts as held only if nothing it bundles is revoked.** In the steward check (S4 follow-up N1), a steward
+   holds a role only when none of the role's tools, servers, agents or connectors is revoked for that steward.
+7. **Lock order between the steward check, revocations and role grants.** The steward check takes `FOR SHARE` on the
+   role rows first, then on the people and the rows that cascade from them, in id order. Revocation inserts lock the
+   person's row, and role-grant inserts (the four role-grant routes and the SoD override) lock the role row, both
+   `FOR NO KEY UPDATE`. So neither can slip past an open check, and a force role delete waits on the role row instead
+   of deadlocking.
+8. **Gap item 5 is closed.** The proof route's bootstrap-token refusal writes a `delegation-proof-refused` deny row.
+
+Follow-ups (Low, from the second review): a test for the SoD-override role-grant lock, and an explicit
+`404 role_not_found` when `lockRoleForGrantInsert` finds no role, instead of relying on the foreign-key error.
+
 ## Spike S0 result (2026-10-10)
 
 S0 ([R11](../research/R11-identity-s0-spike.md), Codex X32, PR #250) returned **GO** for owner decision 2:
