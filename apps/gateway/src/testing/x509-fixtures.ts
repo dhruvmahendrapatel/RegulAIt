@@ -27,6 +27,8 @@ export async function makeCert(
     issuer?: TestCert;
     name?: string;
     isCA?: boolean;
+    /** basicConstraints pathLenConstraint (a CA only) */
+    pathLen?: number;
     uris?: string[];
     keyUsage?: number;
     notBefore?: Date;
@@ -42,7 +44,7 @@ export async function makeCert(
   cert.notBefore.value = opts.notBefore ?? new Date(Date.now() - 3600_000);
   cert.notAfter.value = opts.notAfter ?? new Date(Date.now() + 24 * 3600_000);
   await cert.subjectPublicKeyInfo.importKey(key.publicKey);
-  const basic = new BasicConstraints({ cA: !!opts.isCA });
+  const basic = new BasicConstraints({ cA: !!opts.isCA, ...(opts.pathLen !== undefined ? { pathLenConstraint: opts.pathLen } : {}) });
   cert.extensions = [new Extension({ extnID: "2.5.29.19", critical: true, extnValue: basic.toSchema().toBER(false), parsedValue: basic })];
   // key usage: CA = keyCertSign|cRLSign (0x06); leaf default digitalSignature (0x80)
   const ku = opts.keyUsage ?? (opts.isCA ? 0x06 : 0x80);

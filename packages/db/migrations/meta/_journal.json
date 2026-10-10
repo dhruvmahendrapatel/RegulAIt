@@ -1219,13 +1219,6 @@
       "when": 1785118000000,
       "tag": "0183_isolation_execution_profiles",
       "breakpoints": true
-    },
-    {
-      "idx": 187,
-      "version": "7",
-      "when": 1785122000000,
-      "tag": "0187_execution_offers",
-      "breakpoints": true
     }
   ]
 }

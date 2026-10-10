@@ -66,6 +66,9 @@ export async function authenticateWorkloadClient(db: Db, req: FastifyRequest, fo
       } catch {
         continue;
       }
+      // `aud` is exactly one string, the token endpoint URL, as at the token endpoint (S5 review item 7): `jose`
+      // alone also accepts an array that merely contains it
+      if (typeof p.aud !== "string" || p.aud !== tokenEndpointUrl(issuer)) return { ok: false, code: "assertion_claims" };
       if (p.iat! < nowS - CLIENT_ASSERTION_MAX_AGE_SECONDS || p.iat! > nowS + DPOP_PROOF_MAX_FUTURE_SECONDS || p.exp! > p.iat! + CLIENT_ASSERTION_MAX_AGE_SECONDS || typeof p.jti !== "string" || p.jti.length > 256) {
         return { ok: false, code: "assertion_claims" };
       }
@@ -194,6 +197,8 @@ export function registerTokenAdminEndpoints(app: FastifyInstance, db: Db): void 
       } catch {
         return inactive("token_invalid");
       }
+      // one audience, a single string, as the token endpoint mints it (S5 review item 7)
+      if (typeof claims.aud !== "string") return inactive("token_invalid");
       const rest = await storedAndLive(db, claims, binding, key.row, { env: deploymentEnvironment() }, b.now);
       if (!rest.ok) return inactive(rest.code);
       await audit(db, "token-introspection", "allow", { tokenJti: own.jti, grantId: own.grantId, clientIdentityId: b.auth.client.identity.id });

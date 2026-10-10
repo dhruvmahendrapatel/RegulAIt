@@ -74,7 +74,7 @@ import {
   tokenExchangeRequestSchema,
   type DelegationBody,
 } from "@regulait/shared";
-import { admitChildGrant, createRootGrant, databaseNow, DelegationRefusedError } from "../delegation.js";
+import { admitChildGrant, createRootGrant, databaseNow, DelegationRefusedError, revokeDelegationGrant } from "../delegation.js";
 import {
   checkDelegationAuthorization,
   claimReplay,
@@ -88,7 +88,7 @@ import {
 import { loadOrgSettings } from "../org-settings.js";
 import { clientJwks, findWorkloadClient, matchCertificateCredential, type CertificateMatch, type WorkloadClient } from "./clients.js";
 import { deploymentEnvironment, gatewayResource, identityIssuer, identitySecretsFor, OAUTH_TOKEN_ROUTE_PATH, tokenEndpointUrl } from "./common.js";
-import { verifyDelegationProof, type VerifiedDelegationProof } from "./delegation-proof.js";
+import { rootCapFor, verifyDelegationProof, type VerifiedDelegationProof } from "./delegation-proof.js";
 import { presentedClientCertificate } from "./x509.js";
 
 /** the form parameters the exchange grant reads (everything else is stripped by the provider) */
@@ -112,6 +112,22 @@ export const EXCHANGE_PARAMS = [
 export const TOKEN_BODY_LIMIT_BYTES = 96 * 1024;
 /** the bound on the provider's work for one request (decision 20); a timed-out request is closed and audited */
 export const TOKEN_REQUEST_TIMEOUT_MS = 10_000;
+let requestTimeoutMs = TOKEN_REQUEST_TIMEOUT_MS;
+
+/**
+ * TEST ONLY (S5 review item 5): the timeout race cannot be reached on purpose
+ * from outside, so the tests shorten the timeout and pause the grant
+ * transaction just before its timeout re-check. Production code never sets
+ * either; `setTokenRequestTimeoutForTest` returns the restore.
+ */
+export const tokenEndpointTestHooks: { beforeGrantCommit?: () => Promise<void> } = {};
+export function setTokenRequestTimeoutForTest(ms: number): () => void {
+  const before = requestTimeoutMs;
+  requestTimeoutMs = ms;
+  return () => {
+    requestTimeoutMs = before;
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Per-request state (AsyncLocalStorage: the provider's hooks and adapter read it)
@@ -146,6 +162,10 @@ interface RequestState {
   mtls?: { clientId: string; match: CertificateMatch } | null;
   /** what to audit */
   outcome?: { grantId: string; parentGrantId: string | null; jti: string; actorIdentityId: string };
+  /** S5 review item 5: a grant made for this request that was revoked because the request timed out */
+  revokedOnAbort?: string;
+  /** S5 review item 5: settles when the grant handler has finished (the audit row waits for it) */
+  settled?: Promise<void>;
   code?: string;
   aborted: boolean;
   /** the client the request named (for the audit row) */
@@ -329,6 +349,16 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
     }
     if (requested !== proof.canonical) throw refuse(new InvalidGrant("the request differs from what the person delegated"), "proof_body_mismatch");
     if (proof.body.env !== env) throw refuse(new InvalidGrant("the delegation proof is for another environment"), "env_mismatch");
+    // S5 review item 2, re-read now: the person is still a steward of this agent
+    if (!client.identity.sponsorUserIds.includes(proof.sponsorUserId)) throw refuse(new InvalidGrant("the person is not a steward of this agent"), "delegation_not_steward");
+    // S5 review item 6 (ADR-0180), judged now against the CURRENT settings: a cap, and a short lifetime
+    const org = await loadOrgSettings(s.db);
+    if (proof.body.cap_micros === null && !rootCapFor(null, { ...org, delegationRootDefaultCapMicros: 0 }).ok) {
+      throw refuse(new InvalidGrant("this organisation does not allow uncapped delegations"), "delegation_cap_required");
+    }
+    if (proof.body.expires_at - Math.floor(s.now.getTime() / 1000) > org.delegationRootMaxLifetimeSeconds) {
+      throw refuse(new InvalidGrant("the delegation lives longer than this organisation allows"), "delegation_lifetime");
+    }
     return { client, authCredentialId, binding, resource, root: { proof } };
   }
 
@@ -372,6 +402,10 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
   }
   // decision 15 open question, answered strictly for v1: a child's single audience is its parent's
   if (authz.parentLive.leaf.audience !== resource) throw refuse(new InvalidTarget("a child's resource is its parent's"), "audience_not_parent");
+  // S5 review item 1: refused BEFORE any claim unless the parent's signed depth is enforced (today: never)
+  if (!parentDepthEnforced(authz.parentLive.leaf as unknown as Record<string, unknown>)) {
+    throw refuse(new InvalidGrant("delegation depth is not enforced for external children yet"), "delegation_depth_unenforced");
+  }
   // decision 12: the child's subject credential is the one behind the parent's proof (the parent grant's authenticating credential)
   return {
     client,
@@ -387,18 +421,41 @@ async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Prefligh
 // ---------------------------------------------------------------------------
 
 /**
- * S3 amendment item 1 (hard blocker for S5; the stored limit is built in S4,
- * migration 0184 `depth_limit`). Until that column exists on the grant row,
- * the depth a parent SIGNED for its child cannot be enforced below the child,
- * so an external exchange under a non-root parent is refused outright. Once S4
- * lands, `admitChildGrant` enforces the stored limit and this guard steps aside.
+ * S3 amendment item 1 and the S5 security review item 1 (HIGH): the root
+ * exchange signs `max_depth` but `createRootGrant` does not store it, so a
+ * person who signed `max_depth: 0` could not stop the agent authorising a
+ * child. FAIL CLOSED: an external child exchange is refused unless the parent
+ * grant carries an ENFORCED depth limit. Two things must both hold, and today
+ * neither does, so every external child exchange is refused:
+ *  - the row has S4's `depth_limit` (migration 0184), and
+ *  - the root exchange persists the SIGNED `max_depth` into it
+ *    (`SIGNED_ROOT_DEPTH_PERSISTED`): S4 alone stores the ORG limit on a root,
+ *    which is not what the person signed.
+ * TODO(ADR-0188 S4 follow-up): pass min(org limit, signed `max_depth`) to
+ * `createRootGrant` as the root's `depth_limit`, enforce `depth_limit` on every
+ * admission, then set `SIGNED_ROOT_DEPTH_PERSISTED` and turn the
+ * `delegation_depth_unenforced` tests into the reviewer's probe expecting
+ * `delegation_depth`.
  */
-function interimDepthGuard(parent: Record<string, unknown>): boolean {
-  return !("depthLimit" in parent) && (parent.depth as number) > 0;
+const SIGNED_ROOT_DEPTH_PERSISTED = false;
+export function parentDepthEnforced(parent: Record<string, unknown>): boolean {
+  return SIGNED_ROOT_DEPTH_PERSISTED && typeof parent.depthLimit === "number" && Number.isInteger(parent.depthLimit);
 }
+
 
 async function exchange(provider: Provider, ctx: KoaContextLike): Promise<void> {
   const s = state();
+  // S5 review item 5: the request's audit row waits until this handler has settled, so it records what happened
+  let settle!: () => void;
+  s.settled = new Promise<void>((r) => (settle = r));
+  try {
+    await exchangeSteps(provider, ctx, s);
+  } finally {
+    settle();
+  }
+}
+
+async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: RequestState): Promise<void> {
   if (!s.preflight) s.preflight = await preflight(ctx, s); // mTLS: no assertion, so nothing was claimed before this
   const pf = s.preflight;
   const clientId = ctx.oidc.client.clientId;
@@ -416,53 +473,80 @@ async function exchange(provider: Provider, ctx: KoaContextLike): Promise<void> 
   if (s.aborted) throw refuse(new InvalidGrant("request timeout"), "timeout");
 
   const binding = { kind: pf.binding.kind, thumbprint: pf.binding.thumbprint, authCredentialId: pf.authCredentialId, audience: pf.resource } as const;
-  let grantId: string;
-  let parentGrantId: string | null = null;
-  try {
-    if (pf.root) {
-      const b = pf.root.proof.body;
-      const g = await createRootGrant(s.db, {
-        sponsorUserId: pf.root.proof.sponsorUserId,
-        actorIdentityId: pf.client.identity.id,
-        scope: b.authorization_details,
-        capMicros: b.cap_micros,
-        expiresAt: new Date(b.expires_at * 1000),
-        environment: b.env,
-        projectId: b.project_id,
-        binding,
-      });
-      grantId = g.id;
-    } else {
-      const c = pf.child!;
-      const [parent] = await s.db.select().from(delegationGrants).where(eq(delegationGrants.id, c.parentGrantId));
-      if (!parent) throw refuse(new InvalidGrant("no parent grant"), "parent_not_found");
-      if (interimDepthGuard(parent as unknown as Record<string, unknown>)) throw refuse(new InvalidGrant("delegation depth"), "delegation_depth");
-      const r = await admitChildGrant(s.db, {
-        parentGrantId: c.parentGrantId,
-        idempotencyKey: c.idempotencyKey,
-        actorIdentityId: pf.client.identity.id,
-        scope: c.body.authorization_details,
-        capMicros: c.body.cap_micros,
-        expiresAt: new Date(c.body.expires_at * 1000),
-        maxFurtherDepth: c.body.max_depth,
-        environment: c.body.env,
-        projectId: c.body.project_id,
-        subjectCredentialId: c.subjectCredentialId,
-        binding,
-      });
-      grantId = r.grant.id;
-      parentGrantId = c.parentGrantId;
-    }
-  } catch (e) {
-    if (e instanceof DelegationRefusedError) throw mapDelegationRefusal(e);
-    throw e;
+  // S5 review item 5: the grant and its token are made in ONE transaction that re-reads the timeout flag before it
+  // commits. A request that timed out meanwhile revokes its new grant in that same transaction; one that times out
+  // during the commit is revoked straight after. A refusal is never recorded while a live grant exists.
+  const issued = await s.db.transaction(
+    async (tx): Promise<{ grantId: string; parentGrantId: string | null; minted: Awaited<ReturnType<typeof mintDelegatedToken>> | null }> => {
+      const txDb = tx as unknown as Db;
+      let grantId: string;
+      let parentGrantId: string | null = null;
+      try {
+        if (pf.root) {
+          const b = pf.root.proof.body;
+          const g = await createRootGrant(txDb, {
+            sponsorUserId: pf.root.proof.sponsorUserId,
+            actorIdentityId: pf.client.identity.id,
+            scope: b.authorization_details,
+            capMicros: b.cap_micros,
+            expiresAt: new Date(b.expires_at * 1000),
+            environment: b.env,
+            projectId: b.project_id,
+            binding,
+          });
+          grantId = g.id;
+        } else {
+          const c = pf.child!;
+          const [parent] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, c.parentGrantId));
+          if (!parent) throw refuse(new InvalidGrant("no parent grant"), "parent_not_found");
+          if (!parentDepthEnforced(parent as unknown as Record<string, unknown>)) throw refuse(new InvalidGrant("delegation depth is not enforced for external children yet"), "delegation_depth_unenforced");
+          const r = await admitChildGrant(txDb, {
+            parentGrantId: c.parentGrantId,
+            idempotencyKey: c.idempotencyKey,
+            actorIdentityId: pf.client.identity.id,
+            scope: c.body.authorization_details,
+            capMicros: c.body.cap_micros,
+            expiresAt: new Date(c.body.expires_at * 1000),
+            maxFurtherDepth: c.body.max_depth,
+            environment: c.body.env,
+            projectId: c.body.project_id,
+            subjectCredentialId: c.subjectCredentialId,
+            binding,
+          });
+          grantId = r.grant.id;
+          parentGrantId = c.parentGrantId;
+        }
+      } catch (e) {
+        if (e instanceof DelegationRefusedError) throw mapDelegationRefusal(e);
+        throw e;
+      }
+      let minted;
+      try {
+        minted = await mintDelegatedToken(txDb, { grantId, issuer: s.issuer, secrets: s.secrets });
+      } catch (e) {
+        if (e instanceof TokenMintError) throw refuse(new InvalidGrant("the delegation cannot be issued"), e.code);
+        throw e;
+      }
+      await tokenEndpointTestHooks.beforeGrantCommit?.();
+      if (s.aborted) {
+        // the response is gone and its token was never delivered: the grant is revoked in the transaction that made
+        // it, so it commits already ended (its creation and revocation both stay on the record)
+        await revokeDelegationGrant(txDb, { grantId, reason: "request_aborted" });
+        return { grantId, parentGrantId, minted: null };
+      }
+      return { grantId, parentGrantId, minted };
+    },
+  );
+  const { grantId, parentGrantId, minted } = issued;
+  if (!minted) {
+    s.revokedOnAbort = grantId;
+    throw refuse(new InvalidGrant("request timeout"), "timeout_grant_revoked");
   }
-  let minted;
-  try {
-    minted = await mintDelegatedToken(s.db, { grantId, issuer: s.issuer, secrets: s.secrets });
-  } catch (e) {
-    if (e instanceof TokenMintError) throw refuse(new InvalidGrant("the delegation cannot be issued"), e.code);
-    throw e;
+  if (s.aborted) {
+    // the timeout fired while the transaction committed: the grant is live, so end it now and say so
+    await revokeDelegationGrant(s.db, { grantId, reason: "request_aborted" });
+    s.revokedOnAbort = grantId;
+    throw refuse(new InvalidGrant("request timeout"), "timeout_grant_revoked");
   }
   s.outcome = { grantId, parentGrantId, jti: minted.jti, actorIdentityId: pf.client.identity.id };
   ctx.body = buildTokenResponse(provider, {
@@ -587,7 +671,8 @@ async function auditTokenRequest(db: Db, s: RequestState | null, status: number,
   await db.insert(auditLog).values({
     userId: "00000000-0000-0000-0000-000000000000",
     objectType: "delegation_grant",
-    objectId: ok ? s!.outcome!.grantId : null,
+    // S5 review item 5: a grant made and then revoked because the request timed out is named, never hidden
+    objectId: ok ? s!.outcome!.grantId : (s?.revokedOnAbort ?? null),
     detail: {
       phase: "token-exchange",
       route: `POST ${OAUTH_TOKEN_ROUTE_PATH}`,
@@ -595,6 +680,7 @@ async function auditTokenRequest(db: Db, s: RequestState | null, status: number,
       code: ok ? null : (s?.code ?? (status >= 500 ? "server_error" : "refused")),
       clientId,
       ...(ok ? { grantId: s!.outcome!.grantId, parentGrantId: s!.outcome!.parentGrantId, tokenJti: s!.outcome!.jti, actorIdentityId: s!.outcome!.actorIdentityId } : {}),
+      ...(!ok && s?.revokedOnAbort ? { grantId: s.revokedOnAbort, grantRevokedReason: "request_aborted" } : {}),
     },
     effect: ok ? "allow" : "deny",
     ruleId: ok ? "token-exchange-issued" : "token-exchange-refused",
@@ -681,7 +767,7 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
     s.aborted = true;
     s.code = "timeout";
     reply.raw.destroy();
-  }, TOKEN_REQUEST_TIMEOUT_MS);
+  }, requestTimeoutMs);
   try {
     await als.run(
       s,
@@ -694,6 +780,9 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
     );
   } finally {
     clearTimeout(timer);
+    // S5 review item 5: a timed-out response closes before the grant handler ends; the audit row records the
+    // handler's real outcome (a grant revoked on abort, or none), never a refusal while it may still make a grant
+    if (s.settled) await s.settled.catch(() => {});
     if (!s.audited) {
       s.audited = true;
       await auditTokenRequest(db, s, s.aborted ? 499 : reply.raw.statusCode, clientId).catch(() => {});

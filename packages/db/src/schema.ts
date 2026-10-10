@@ -3945,6 +3945,13 @@ export const orgSettings = pgTable(
     dpopNonceRequired: boolean("dpop_nonce_required").notNull().default(true),
     /** the longest a registered workload key is accepted, 1–90 days */
     workloadKeyMaxAgeDays: integer("workload_key_max_age_days").notNull().default(90),
+    // --- ADR-0188 S5 security review item 6 (migration 0188): strict root grants -------------------
+    /** a root delegation grant with no cap is refused; true relaxes it */
+    delegationUncappedRootAllowed: boolean("delegation_uncapped_root_allowed").notNull().default(false),
+    /** the cap (micro-dollars) a root grant gets when the person names none; 0 = none (a cap must be named); larger relaxes it */
+    delegationRootDefaultCapMicros: bigint("delegation_root_default_cap_micros", { mode: "number" }).notNull().default(0),
+    /** the longest a root delegation grant lives, 60–86400 s; longer relaxes it */
+    delegationRootMaxLifetimeSeconds: integer("delegation_root_max_lifetime_seconds").notNull().default(900),
 
     // --- ADR-0189 (batch 6 item 2, migration 0182): the BOM settings, all strict
     /** facts captured for every receipt-eligible decision; off relaxes it */
@@ -4633,6 +4640,9 @@ export const orgSettings = pgTable(
       sql`jsonb_typeof(${t.workloadClientAuthMethods}) = 'array' AND ${t.workloadClientAuthMethods} <@ '["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"]'::jsonb`,
     ),
     check("org_settings_workload_key_max_age_days_check", sql`${t.workloadKeyMaxAgeDays} BETWEEN 1 AND 90`),
+    // ADR-0188 S5 review item 6 (migration 0188)
+    check("org_settings_delegation_root_default_cap_micros_check", sql`${t.delegationRootDefaultCapMicros} BETWEEN 0 AND 1000000000000`),
+    check("org_settings_delegation_root_max_lifetime_seconds_check", sql`${t.delegationRootMaxLifetimeSeconds} BETWEEN 60 AND 86400`),
     // ADR-0189 (migration 0182)
     check("org_settings_decision_facts_capture_check", sql`${t.decisionFactsCapture} IN ('on', 'off')`),
     check(
