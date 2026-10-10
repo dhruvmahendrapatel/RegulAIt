@@ -173,4 +173,4 @@ description = "ADR-0189 spike B0 evidence: an Ed25519 signature (not a key) over
 condition = "AND"
 paths = ['''^spikes/bom-b0/evidence/sample\.sha256\.json$''']
 regexTarget = "secret"
-regexes = ['''^n9ZXFfLcsSpY5GYt/cD6Bfx9YIAL5a4gDsKXIZ6ArhWy7/8LEAT\+5\+SK8dmm\+HqDjewnMSNA8T\+G6iRXS6kcBA==$''']
+regexes = ['''^lrUdt/mQ6eFJnk4y2wrf2HUy45nTgzoern/fPd0dq4rEABF/OlRN0s4KO7y/MGzPxVsgss9tcc0tqiC2axZ2BA==$''']

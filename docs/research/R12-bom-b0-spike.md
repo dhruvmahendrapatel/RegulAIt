@@ -329,3 +329,33 @@ the same version. Lock sha256: `d93a4bfb3d43eea4489617654d35a1e705f1859704c940f3
    returned 404, and the repository host was refused by the sandbox and not routed around.
 9. **B0 slice row and test strategy.** "Run `spdx3-validate` pinned in a CI container" was met only as a hash-locked,
    network-isolated venv. No container runtime was available, so B5 owns the real CI job.
+
+## 10. Review fixes (2026-10-10, PR #265)
+
+A review of the spike raised findings that were checked and fixed in the spike, with tests (ADR-0189 amendments R10
+to R13 record what binds the product slices):
+
+- **Email anywhere (R10).** `validators.mjs` gains `findEmails`, a scan of every key and string; `renderAll` refuses a
+  document with any hit and names the path. Tests put an email into the use-case name, a model-card limitation, a
+  `properties[].value`, an object key and an internationalised address, and show that the schema validators alone
+  accept an email in an ordinary string field.
+- **No `dataClaims`.** A model card without supplier training-data claims now renders as provenance `unknown` and
+  validates; it used to throw.
+- **PII verdicts (R11).** The fixtures use the persisted `clean | flagged | blocked` vocabulary. `flagged` and
+  `blocked` map to `["pii"]` and SPDX `yes`, `clean` to no entry and `noAssertion`, and any other value is refused.
+- **Scanner identity and model-card evidence (R12).** Engine components are keyed by engine, version and image
+  digest; the fixture now has two runs of one engine at two versions. `modelCardEvidence` rows of all three kinds
+  become claims, evidence and attestations, and `engine_scan` evidence links its artifact scan.
+- **Offline driver (R13).** `spdx3/run_offline.py` exits 2 when given no document, before it imports anything.
+
+Because the fixtures changed, the §4 hashes changed. The SPDX rendering is byte-identical, so its §5 SHACL result
+still applies. New values, from `npm run test:offline` (21 tests, all passing, network namespace without
+interfaces, Node v20.20.2, v21.7.3 and v22.22.2):
+
+| native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
+|---|---|---|---|---|
+| `3c36cfee…fab1` | `efebbf0d…09ca` | `58f7d5bc…6322` | `e3dede3a…bf91` (unchanged) | `lrUdt/mQ…axZ2BA==` |
+
+Not fixed in the spike: the sample `AIPackage` entries lack `releaseTime` and `downloadLocation`, which SPDX 3.0.1
+makes mandatory for `AIPackage` but its SHACL model does not enforce. ADR-0189 R3 and owner item 1 decide how B5
+handles them.

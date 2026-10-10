@@ -1,13 +1,13 @@
 // ADR-0189 spike B0. Run: `npm test` (Node 22+, for the canonicalJson import) or, offline, `npm run test:offline`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import canonicalize from 'canonicalize';
-import { buildValidators } from './validators.mjs';
+import { buildValidators, findEmails } from './validators.mjs';
 import { normalise, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -206,4 +206,108 @@ test('item 4: fresh processes, both inputs, every available Node major -> identi
     assert.equal(r.signature, sample.signature, `${r.node} ${r.f}`);
   }
   console.log(JSON.stringify({ processes: results.length, nodes: [...new Set(results.map((r) => r.node))], sha256: sample.sha256 }));
+});
+
+// ------------------------------------------------------------------------------------------------ review fixes (PR #265)
+const cdx17 = (r) => JSON.parse(renderAll(r).bytes['cyclonedx-1.7']);
+const spdxOf = (r) => JSON.parse(renderAll(r).bytes['spdx-3.0.1']);
+
+test('review R10: an email in ANY string or key is refused by the whole-document scan, naming the path', () => {
+  const email = 'someone@example.com';
+  const cases = {
+    'the use-case name': (r) => { r.useCase.name = `claims triage (owner ${email})`; },
+    'a model-card limitation': (r) => { r.modelCards[0].limitations.push(`ask ${email}`); },
+    'a properties[].value (requested model)': (r) => { r.agents[0].requestedModel = email; },
+    'an object key carried into the native body': (r) => { r.agents[0][email] = 'x'; },
+    'an internationalised address': (r) => { r.useCase.name = 'ü@例え.テスト'; },
+  };
+  for (const [name, fn] of Object.entries(cases)) {
+    const r = structuredClone(recordsA);
+    fn(r);
+    assert.throws(() => renderAll(r), /email-shaped string in .* at \$/, name);
+  }
+});
+
+test('review R10: non-vacuity: the schema validators alone ACCEPT an email in an ordinary string field', () => {
+  // the gap the scan closes: idn-email only covers fields the schema types as email
+  const d = mutate(docs['cyclonedx-1.7'], (x) => { x.metadata.component.name = 'someone@example.com'; });
+  assert.equal(validators['cyclonedx-1.7'](d).valid, true);
+  assert.deepEqual(findEmails(d), ['$.metadata.component.name']);
+  for (const [k, b] of Object.entries(sample.bytes)) assert.deepEqual(findEmails(JSON.parse(b)), [], k);
+});
+
+test('review: a model card with no dataClaims renders, as provenance unknown, and validates', () => {
+  const r = structuredClone(recordsA);
+  delete r.modelCards[0].dataClaims;
+  const out = renderAll(r);
+  const d = JSON.parse(out.bytes['cyclonedx-1.7']);
+  const model = d.components.find((c) => c.modelCard);
+  assert.ok(model.properties.some((p) => p.name === 'regulait:trainingData:provenance' && p.value === 'unknown'));
+  assert.ok(!model.modelCard.properties.some((p) => p.name === 'regulait:trainingData:source'));
+  for (const k of ['cyclonedx-1.7', 'cyclonedx-1.6', 'spdx-3.0.1']) assert.equal(validators[k](JSON.parse(out.bytes[k])).valid, true, k);
+  const withCard = r.agents.find((a) => a.modelCardId);
+  const pkg = JSON.parse(out.bytes['spdx-3.0.1'])['@graph'].find((x) => x.spdxId?.endsWith(`agent-${withCard.id}`));
+  assert.equal(pkg.ai_informationAboutTraining, 'unknown');
+});
+
+test('review R11: PII verdicts map from the persisted vocabulary clean | flagged | blocked', () => {
+  const at = (verdict) => {
+    const r = structuredClone(recordsA);
+    r.datasets.forEach((d) => { d.piiVerdict = verdict; });
+    const c = cdx17(r).components.filter((x) => x.type === 'data' && x.data[0].type === 'dataset');
+    const s = spdxOf(r)['@graph'].filter((x) => x.type === 'dataset_DatasetPackage');
+    return {
+      cdx: [...new Set(c.map((x) => JSON.stringify(x.data[0].sensitiveData)))],
+      spdx: [...new Set(s.map((x) => x.dataset_hasSensitivePersonalInformation))],
+    };
+  };
+  assert.deepEqual(at('flagged'), { cdx: ['["pii"]'], spdx: ['yes'] });
+  assert.deepEqual(at('blocked'), { cdx: ['["pii"]'], spdx: ['yes'] });
+  assert.deepEqual(at('clean'), { cdx: ['[]'], spdx: ['noAssertion'] });
+  for (const bad of ['contains_pii', 'unknown', null]) assert.throws(() => at(bad), /unknown pii_verdict/, String(bad));
+});
+
+test('review R12: two scans by one engine at different versions stay two scanner components, each attested exactly', () => {
+  const d = docs['cyclonedx-1.7'];
+  const containers = d.components.filter((c) => c.type === 'container');
+  assert.deepEqual(containers.map((c) => `${c.name} ${c.version}`).sort(), ['model-scanner 1.4.2', 'model-scanner 1.5.0']);
+  assert.equal(new Set(containers.map((c) => c.hashes[0].content)).size, 2);
+  const assessors = new Set(d.declarations.assessors.map((a) => a['bom-ref']));
+  for (const scan of recordsA.artifactScans) {
+    const att = d.declarations.attestations.find((a) => a.map[0].claims[0] === `claim:${scan.id}`);
+    assert.equal(att.assessor, `assessor:${scan.engine}/${scan.engineVersion}/${scan.imageDigest.replace(/^sha256:/, '')}`);
+    assert.ok(assessors.has(att.assessor));
+  }
+});
+
+test('review R12: every model_card_evidence kind (eval_run, external, engine_scan) becomes a claim, evidence and attestation', () => {
+  const d = docs['cyclonedx-1.7'].declarations;
+  for (const e of recordsA.modelCardEvidence) {
+    const claim = d.claims.find((c) => c['bom-ref'] === `claim:mce:${e.id}`);
+    assert.ok(claim, e.id);
+    assert.equal(claim.target, `modelcard:${e.modelCardId}`);
+    assert.ok(d.evidence.some((x) => x['bom-ref'] === `evidence:mce:${e.id}`), e.id);
+    assert.ok(d.attestations.some((a) => a.map[0].claims.includes(`claim:mce:${e.id}`)), e.id);
+  }
+  assert.deepEqual([...new Set(recordsA.modelCardEvidence.map((e) => e.kind))].sort(), ['engine_scan', 'eval_run', 'external']);
+  const scanEv = d.claims.find((c) => c['bom-ref'] === 'claim:mce:mce-3');
+  assert.ok(scanEv.evidence.includes('evidence:scan-4'), 'engine_scan evidence links its artifact scan');
+  assert.ok(d.assessors.some((a) => a['bom-ref'] === 'assessor:external' && a.thirdParty === true));
+  const broken = structuredClone(recordsA);
+  broken.modelCardEvidence.find((e) => e.kind === 'engine_scan').artifactScanId = 'scan-missing';
+  assert.throws(() => renderAll(broken), /has no artifact scan/);
+  const unknownKind = structuredClone(recordsA);
+  unknownKind.modelCardEvidence[0].kind = 'vibes';
+  assert.throws(() => renderAll(unknownKind), /unknown model_card_evidence kind/);
+});
+
+const python = ['/usr/local/bin/python3', '/usr/bin/python3'].find((p) => existsSync(p));
+test('review R13: the offline SPDX driver FAILS when given no documents', { skip: !python && 'needs python3' }, () => {
+  const driver = path.join(here, 'spdx3', 'run_offline.py');
+  const r = spawnSync(python, ['-I', driver], { encoding: 'utf8' });
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /no SPDX documents given/);
+  // non-vacuity: with a document argument the driver gets past the check (and then needs the venv's libraries)
+  const withDoc = spawnSync(python, ['-I', driver, path.join(here, 'evidence', 'sample.spdx-3.0.1.json')], { encoding: 'utf8' });
+  assert.notEqual(withDoc.status, 2);
 });

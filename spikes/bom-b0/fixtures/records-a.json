@@ -62,11 +62,17 @@
     { "id": "art-77", "agentId": "a9e8d7c6-b5a4-4392-8817-161514131211", "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "format": "safetensors", "sizeBytes": 13421772800 }
   ],
   "artifactScans": [
-    { "id": "scan-3", "artifactId": "art-77", "engine": "model-scanner", "engineVersion": "1.4.2", "imageDigest": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae", "verdict": "pass", "evidenceKind": "engine_scan", "evidenceSha256": "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9", "at": "2026-10-08T11:00:00.000Z" }
+    { "id": "scan-3", "artifactId": "art-77", "engine": "model-scanner", "engineVersion": "1.4.2", "imageDigest": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae", "verdict": "pass", "evidenceKind": "engine_scan", "evidenceSha256": "fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9", "at": "2026-10-08T11:00:00.000Z" },
+    { "id": "scan-4", "artifactId": "art-77", "engine": "model-scanner", "engineVersion": "1.5.0", "imageDigest": "sha256:1fd4c8544a6ac506fb1fef5cfd741fa004775c3b2a5503c055a814ebebce51f3", "verdict": "pass", "evidenceKind": "engine_scan", "evidenceSha256": "9fe9a5f5f13bfa54554413abffd344cecd0ab26f5f349eb7f0e1f46561859374", "at": "2026-10-09T08:30:00.000Z" }
+  ],
+  "modelCardEvidence": [
+    { "id": "mce-2", "modelCardId": "mc-01", "kind": "external", "sha256": "ec3a1a38443459fd2d5caa1fa4293def5b0de7bd5960140d0c0689c2d9403483", "at": "2026-10-07T15:00:00.000Z" },
+    { "id": "mce-1", "modelCardId": "mc-01", "kind": "eval_run", "sha256": "d51cc6e0e6d9cb46ba7964bfda133e91c046f7ea7e8094f0ad84353200d3777d", "at": "2026-10-06T10:00:00.000Z" },
+    { "id": "mce-3", "modelCardId": "mc-01", "kind": "engine_scan", "artifactScanId": "scan-4", "sha256": "ba0fc351ee902e27f59bbe31a42226bf3e4ecd68baee8741da028d5654b0f29a", "at": "2026-10-09T08:31:00.000Z" }
   ],
   "datasets": [
-    { "id": "ds-eval-02", "kind": "eval", "name": "claims-eval", "version": "2026.09", "checksum": "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c", "classification": "confidential", "ownerUserId": "9d8c7b6a-5f4e-4d3c-8b2a-190807060504", "piiVerdict": "contains_pii" },
-    { "id": "ds-train-01", "kind": "training", "name": "claims-finetune", "version": "v4", "checksum": "7d865e959b2466918c9863afca942d0fb89d7c9ac0c99bafc3749504ded97730", "classification": "restricted", "ownerUserId": "9d8c7b6a-5f4e-4d3c-8b2a-190807060504", "piiVerdict": "no_pii_detected" }
+    { "id": "ds-eval-02", "kind": "eval", "name": "claims-eval", "version": "2026.09", "checksum": "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c", "classification": "confidential", "ownerUserId": "9d8c7b6a-5f4e-4d3c-8b2a-190807060504", "piiVerdict": "flagged" },
+    { "id": "ds-train-01", "kind": "training", "name": "claims-finetune", "version": "v4", "checksum": "7d865e959b2466918c9863afca942d0fb89d7c9ac0c99bafc3749504ded97730", "classification": "restricted", "ownerUserId": "9d8c7b6a-5f4e-4d3c-8b2a-190807060504", "piiVerdict": "clean" }
   ],
   "promptCommits": [
     { "id": "pc-12", "agentId": "a9e8d7c6-b5a4-4392-8817-161514131211", "name": "triage-system-prompt", "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "tag": "prod-candidate" }

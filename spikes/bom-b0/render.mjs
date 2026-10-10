@@ -4,6 +4,7 @@
 // Spike code only; B3/B5 write the product renderers.
 import { createHash, createPrivateKey, sign } from 'node:crypto';
 import canonicalize from 'canonicalize';
+import { findEmails } from './validators.mjs';
 
 export const NATIVE_V = 'regulait.ai-bom.v1';
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -43,6 +44,7 @@ export function normalise(r) {
     })),
     modelArtifacts: sortBy(r.modelArtifacts, (a) => a.id),
     artifactScans: sortBy(r.artifactScans, (s) => s.id),
+    modelCardEvidence: sortBy(r.modelCardEvidence, (e) => e.id),
     datasets: sortBy(r.datasets, (d) => d.id),
     promptCommits: sortBy(r.promptCommits, (p) => p.id),
     endpoints: sortBy(r.endpoints, (e) => e.id),
@@ -70,7 +72,17 @@ const ref = {
   skill: (id) => `skill:${id}`,
 };
 const userRef = (id) => `user:${id}`;
-const sensitive = (v) => (v === 'contains_pii' ? ['pii'] : []);
+// training_datasets.pii_verdict is `clean | flagged | blocked` (TRAINING_SCAN_VERDICTS). ADR-0189 R11: flagged and
+// blocked are known sensitive data; clean is NOT proof of absence (noAssertion in SPDX); anything else is refused.
+export const PII_VERDICTS = ['clean', 'flagged', 'blocked'];
+const piiKnown = (v) => {
+  if (!PII_VERDICTS.includes(v)) throw new Error(`unknown pii_verdict: ${JSON.stringify(v)}`);
+  return v !== 'clean';
+};
+const sensitive = (v) => (piiKnown(v) ? ['pii'] : []);
+// one container component per exact scanner artifact (engine, version, image), never per engine name (ADR-0189 R12)
+const scannerKey = (x) => `${x.engine}/${x.engineVersion}/${stripAlg(x.imageDigest)}`;
+const MODEL_CARD_EVIDENCE_KINDS = ['eval_run', 'external', 'engine_scan'];
 
 export function renderCycloneDx(n, specVersion) {
   const s = n.snapshot;
@@ -121,7 +133,8 @@ export function renderCycloneDx(n, specVersion) {
         properties: props([
           prop('regulait:modelCard:id', card.id),
           prop('regulait:modelCard:approval', card.approvedId),
-          ...card.dataClaims.sources.map((src) => prop('regulait:trainingData:source', src)),
+          // no supplier declaration is allowed and renders as provenance `unknown` above (OWNER DECISION 10)
+          ...(card.dataClaims?.sources ?? []).map((src) => prop('regulait:trainingData:source', src)),
         ]),
       };
       c.externalReferences = sortBy(card.standardRefs.map((u) => ({ type: 'documentation', url: u, comment: 'standard reference' })), (x) => x.url);
@@ -141,16 +154,16 @@ export function renderCycloneDx(n, specVersion) {
     dep(ref.agent(art.agentId), ref.artifact(art.id));
     dep(ref.artifact(art.id));
   }
-  const engines = sortBy([...new Map(n.artifactScans.map((x) => [x.engine, x])).values()], (x) => x.engine);
+  const engines = sortBy([...new Map(n.artifactScans.map((x) => [scannerKey(x), x])).values()], scannerKey);
   for (const e of engines) {
     components.push({
       type: 'container',
-      'bom-ref': ref.engine(e.engine),
+      'bom-ref': ref.engine(scannerKey(e)),
       name: e.engine,
       version: e.engineVersion,
       hashes: [{ alg: 'SHA-256', content: stripAlg(e.imageDigest) }],
     });
-    dep(ref.engine(e.engine));
+    dep(ref.engine(scannerKey(e)));
   }
   for (const d of n.datasets) {
     components.push({
@@ -266,22 +279,59 @@ export function renderCycloneDx(n, specVersion) {
       { 'bom-ref': 'composition:subject', aggregate: 'incomplete', assemblies: [subject] },
       ...(unknownAgents.length ? [{ 'bom-ref': 'composition:no-model-card', aggregate: 'unknown', assemblies: unknownAgents }] : []),
     ],
-    declarations: {
-      assessors: engines.map((e) => ({ 'bom-ref': `assessor:${e.engine}`, thirdParty: false })),
-      claims: n.artifactScans.map((x) => ({
-        'bom-ref': `claim:${x.id}`, target: ref.artifact(x.artifactId),
-        predicate: `${x.evidenceKind} by ${x.engine} ${x.engineVersion}: ${x.verdict}`, evidence: [`evidence:${x.id}`],
-      })),
-      evidence: n.artifactScans.map((x) => ({
-        'bom-ref': `evidence:${x.id}`, propertyName: 'regulait:scan:verdict', description: `sha256:${x.evidenceSha256}`,
-        created: x.at, data: [{ name: `scan-${x.id}`, classification: 'internal' }],
-      })),
-      attestations: n.artifactScans.map((x) => ({
-        summary: `scan ${x.id}`, assessor: `assessor:${x.engine}`, map: [{ claims: [`claim:${x.id}`] }],
-      })),
-    },
+    declarations: declarations(n, engines),
   };
   return doc;
+}
+
+/** Engine scans AND every model_card_evidence row (eval_run, external, engine_scan) as claims (ADR-0189 §3, R12). */
+function declarations(n, engines) {
+  const scans = new Map(n.artifactScans.map((x) => [x.id, x]));
+  const assessors = engines.map((e) => ({ 'bom-ref': `assessor:${scannerKey(e)}`, thirdParty: false }));
+  const claims = n.artifactScans.map((x) => ({
+    'bom-ref': `claim:${x.id}`, target: ref.artifact(x.artifactId),
+    predicate: `${x.evidenceKind} by ${x.engine} ${x.engineVersion}: ${x.verdict}`, evidence: [`evidence:${x.id}`],
+  }));
+  const evidence = n.artifactScans.map((x) => ({
+    'bom-ref': `evidence:${x.id}`, propertyName: 'regulait:scan:verdict', description: `sha256:${x.evidenceSha256}`,
+    created: x.at, data: [{ name: `scan-${x.id}`, classification: 'internal' }],
+  }));
+  const attestations = n.artifactScans.map((x) => ({
+    summary: `scan ${x.id}`, assessor: `assessor:${scannerKey(x)}`, map: [{ claims: [`claim:${x.id}`] }],
+  }));
+  const needsInternal = n.modelCardEvidence.some((e) => e.kind === 'eval_run');
+  const needsExternal = n.modelCardEvidence.some((e) => e.kind === 'external');
+  if (needsInternal) assessors.push({ 'bom-ref': 'assessor:regulait-eval', thirdParty: false });
+  if (needsExternal) assessors.push({ 'bom-ref': 'assessor:external', thirdParty: true });
+  for (const e of n.modelCardEvidence) {
+    if (!MODEL_CARD_EVIDENCE_KINDS.includes(e.kind)) throw new Error(`unknown model_card_evidence kind: ${JSON.stringify(e.kind)}`);
+    let assessor;
+    let evidenceRefs = [`evidence:mce:${e.id}`];
+    if (e.kind === 'engine_scan') {
+      // packages/shared/src/mrm.ts: engine_scan evidence requires an artifact_scan_id
+      const scan = scans.get(e.artifactScanId);
+      if (!scan) throw new Error(`engine_scan evidence ${e.id} has no artifact scan in the snapshot`);
+      assessor = `assessor:${scannerKey(scan)}`;
+      evidenceRefs = [...evidenceRefs, `evidence:${scan.id}`];
+    } else {
+      assessor = e.kind === 'eval_run' ? 'assessor:regulait-eval' : 'assessor:external';
+    }
+    claims.push({
+      'bom-ref': `claim:mce:${e.id}`, target: ref.card(e.modelCardId),
+      predicate: `${e.kind} supports model card ${e.modelCardId}`, evidence: sortStrings(evidenceRefs),
+    });
+    evidence.push({
+      'bom-ref': `evidence:mce:${e.id}`, propertyName: `regulait:modelCardEvidence:${e.kind}`, description: `sha256:${e.sha256}`,
+      created: e.at, data: [{ name: `model-card-evidence-${e.id}`, classification: 'internal' }],
+    });
+    attestations.push({ summary: `model card evidence ${e.id}`, assessor, map: [{ claims: [`claim:mce:${e.id}`] }] });
+  }
+  return {
+    assessors: sortBy(assessors, (a) => a['bom-ref']),
+    claims: sortBy(claims, (c) => c['bom-ref']),
+    evidence: sortBy(evidence, (c) => c['bom-ref']),
+    attestations: sortBy(attestations, (a) => a.summary),
+  };
 }
 
 // ---------------------------------------------------------------- SPDX 3.0.1
@@ -309,7 +359,7 @@ export function renderSpdx(n) {
       type: 'dataset_DatasetPackage', spdxId: id(`dataset-${d.id}`), name: d.name, software_packageVersion: d.version,
       software_primaryPurpose: 'data', dataset_datasetType: ['noAssertion'],
       dataset_confidentialityLevel: confidentiality[d.classification],
-      dataset_hasSensitivePersonalInformation: d.piiVerdict === 'contains_pii' ? 'yes' : 'noAssertion',
+      dataset_hasSensitivePersonalInformation: piiKnown(d.piiVerdict) ? 'yes' : 'noAssertion',
       verifiedUsing: [{ type: 'Hash', algorithm: 'sha256', hashValue: d.checksum }],
       suppliedBy: org,
     }));
@@ -381,6 +431,12 @@ export function renderAll(records) {
     renderings: Object.fromEntries(Object.entries(renderings).map(([k, v]) => [k, { sha256: sha256(v), bytes: Buffer.byteLength(v, 'utf8') }])),
   };
   const nativeBytes = canonicalize(native);
+  // ADR-0189 R10: a whole-document scan of every key and string, because the idn-email format covers only fields the
+  // schema types as email. Fail closed: refuse (never redact) and name every path.
+  for (const [k, v] of Object.entries({ native: nativeBytes, ...renderings })) {
+    const hits = findEmails(JSON.parse(v));
+    if (hits.length) throw new Error(`email-shaped string in ${k} at ${hits.join(', ')}`);
+  }
   const signature = sign(null, Buffer.from(nativeBytes, 'utf8'), testKey).toString('base64');
   const bytes = { native: nativeBytes, ...renderings };
   return {

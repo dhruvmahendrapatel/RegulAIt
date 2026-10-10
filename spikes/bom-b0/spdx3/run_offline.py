@@ -7,15 +7,21 @@ library's public functions (`schema_validator`, `check_graph`, `SPDX_VERSIONS`) 
 files vendored in ../schemas (sha256 recorded in R12), and parses the graph with the vendored
 context substituted for the context URL (the URL is unchanged in the document itself).
 
-Usage: python -I run_offline.py <spdx.json> [...]; exit 0 only if every document conforms.
+Usage: python -I run_offline.py <spdx.json> [...]; exit 0 only if every document conforms; exit 2 when no
+document is given.
 A document named *.expect-fail.json must FAIL (negative control)."""
 import json
 import sys
 from pathlib import Path
 
-import rdflib
-from spdx3_validate.core import check_graph, schema_validator
-from spdx3_validate.spdx_versions import SPDX_VERSIONS
+# ADR-0189 R13: no document is a failure, checked before anything else so a misconfigured CI command cannot go green.
+if not sys.argv[1:]:
+    print("run_offline.py: no SPDX documents given; refusing to report success", file=sys.stderr)
+    sys.exit(2)
+
+import rdflib  # noqa: E402 (after the argument check on purpose)
+from spdx3_validate.core import check_graph, schema_validator  # noqa: E402
+from spdx3_validate.spdx_versions import SPDX_VERSIONS  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SCHEMAS = HERE.parent / "schemas"

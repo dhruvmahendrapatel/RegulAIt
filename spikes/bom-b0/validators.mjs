@@ -80,3 +80,21 @@ export function buildValidators(opts = {}) {
   const wrap = (fn) => (doc) => (fn(doc) ? { valid: true, errors: [] } : { valid: false, errors: fn.errors ?? [] });
   return { 'cyclonedx-1.7': wrap(v17), 'cyclonedx-1.6': wrap(v16), 'spdx-3.0.1': wrap(spdx) };
 }
+
+// ADR-0189 R10: an email shape anywhere in a document, in a key or a string value. Deliberately broad (fail closed):
+// a false positive refuses the BOM and names the path; nothing is redacted.
+const EMAIL = /[^\s"'<>()[\],;:@]+@[^\s"'<>()[\],;:@]+\.[\p{L}\p{N}-]{2,}/u;
+export function findEmails(value, path = '$') {
+  const hits = [];
+  if (typeof value === 'string') {
+    if (EMAIL.test(value)) hits.push(path);
+  } else if (Array.isArray(value)) {
+    value.forEach((v, i) => hits.push(...findEmails(v, `${path}[${i}]`)));
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (EMAIL.test(k)) hits.push(`${path}{key ${JSON.stringify(k)}}`);
+      hits.push(...findEmails(v, `${path}.${k}`));
+    }
+  }
+  return hits;
+}
