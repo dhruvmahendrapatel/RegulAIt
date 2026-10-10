@@ -167,10 +167,10 @@ function requiredPrefix(pattern) {
 // alternative contains a necessary ASCII fragment, including grouped/class
 // prefixes. A changed source receives no gate until its proof is reviewed.
 const provedFragments = {
-  stripe_key:['sk-','rk-','sk_','rk_'], github_token:['ghp_','gho_','ghu_','ghr_','ghs_'],
-  gitlab_service_token:['gl'], aws_secret_key:['secret'], discord_bot_token:['.'],
+  stripe_key:['sk-live-','sk-test-','rk-live-','rk-test-','sk_live_','sk_test_','rk_live_','rk_test_'], github_token:['ghp_','gho_','ghu_','ghr_','ghs_'],
+  gitlab_service_token:['gl'], aws_secret_key:['secret'], discord_bot_token:['m','n'],
   twilio_api_key:['sk'], sendgrid_api_key:['sg.'], vercel_token:['vercel_','vcp_','vci_','vca_','vcr_','vck_'],
-  jwt_token:['.'], extended_private_key:['xprv','yprv','zprv','tprv'], ethereum_private_key:['0x'],
+  jwt_token:['eyj','eya','ewo','ewk','ew0'], extended_private_key:['xprv','yprv','zprv','tprv'], ethereum_private_key:['0x'],
   social_security_number:['-'],google_oauth_client_id:['.apps.googleusercontent.com'],
   environment_variable_secret:['secret','password','passwd','token','api']
 };
@@ -181,8 +181,16 @@ const requiredPrefixes=Object.fromEntries(secrets.map(rule=>{
   const proved=proofPatterns[short]===rule.pattern?provedFragments[short]:undefined;
   return [rule.id,ordinary?[ordinary]:proved];
 }).filter(([,prefix])=>prefix));
+// Ordinary extracted literals occur at match start. Reviewed exceptional
+// patterns have fixed preceding context, except two unbounded name/number forms.
+const manualStartContext={stripe_key:0,github_token:0,gitlab_service_token:0,aws_secret_key:4,discord_bot_token:0,twilio_api_key:0,sendgrid_api_key:0,vercel_token:0,jwt_token:0,extended_private_key:0,ethereum_private_key:0,social_security_number:3};
+const prefixStartContext=Object.fromEntries(secrets.flatMap(rule=>{
+ const short=rule.id.replace('pipelock.secrets.','');
+ const context=requiredPrefix(rule.pattern)?0:proofPatterns[short]===rule.pattern?manualStartContext[short]:undefined;
+ return context===undefined?[]:[[rule.id,context]];
+}));
 const spaceRunSafeIds = secrets.filter((rule) => flexibleSpaces(rule.pattern)).map(rule=>rule.id);
-const outputs = { GENERATED_REQUIRED_PREFIXES:requiredPrefixes, GENERATED_SPACE_RUN_SAFE_IDS:spaceRunSafeIds, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
+const outputs = { GENERATED_REQUIRED_PREFIXES:requiredPrefixes, GENERATED_PREFIX_START_CONTEXT:prefixStartContext, GENERATED_SPACE_RUN_SAFE_IDS:spaceRunSafeIds, GENERATED_SECRET_RULES:secrets, GENERATED_INJECTION_RULES:injections, GENERATED_MCP_HEURISTICS:heuristics, GENERATED_PACK_MANIFESTS:manifests, NORMALISE_CONFUSABLES:confusables, NORMALISE_INVISIBLE_RANGES:invisibleRanges, NORMALISE_WHITESPACE:whitespace };
 const result = '// Generated offline by scripts/vendor/convert-detection-content.mjs; do not edit.\n' + Object.entries(outputs).map(([name,value]) => `export const ${name} = ${JSON.stringify(value,null,2)} as const;\n`).join('\n');
 const output = path.join(base,'generated.ts');
 if (process.argv.includes('--check')) { if (readFileSync(output,'utf8') !== result) throw Error('Generated detection content differs; rerun converter'); }

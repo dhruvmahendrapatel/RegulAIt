@@ -28,10 +28,14 @@ export const GENERATED_REQUIRED_PREFIXES = {
     "gocspx-"
   ],
   "pipelock.secrets.stripe_key": [
-    "sk-",
-    "rk-",
-    "sk_",
-    "rk_"
+    "sk-live-",
+    "sk-test-",
+    "rk-live-",
+    "rk-test-",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "rk_test_"
   ],
   "pipelock.secrets.stripe_webhook_secret": [
     "whsec_"
@@ -104,7 +108,8 @@ export const GENERATED_REQUIRED_PREFIXES = {
     "xapp-"
   ],
   "pipelock.secrets.discord_bot_token": [
-    "."
+    "m",
+    "n"
   ],
   "pipelock.secrets.twilio_api_key": [
     "sk"
@@ -175,7 +180,11 @@ export const GENERATED_REQUIRED_PREFIXES = {
     "-----begin"
   ],
   "pipelock.secrets.jwt_token": [
-    "."
+    "eyj",
+    "eya",
+    "ewo",
+    "ewk",
+    "ew0"
   ],
   "pipelock.secrets.extended_private_key": [
     "xprv",
@@ -202,6 +211,68 @@ export const GENERATED_REQUIRED_PREFIXES = {
   "pipelock.secrets.gcp_service_account_key": [
     "\"type\""
   ]
+} as const;
+
+export const GENERATED_PREFIX_START_CONTEXT = {
+  "pipelock.secrets.anthropic_api_key": 0,
+  "pipelock.secrets.openai_api_key": 0,
+  "pipelock.secrets.openai_service_key": 0,
+  "pipelock.secrets.fireworks_api_key": 0,
+  "pipelock.secrets.llm_router_api_key": 0,
+  "pipelock.secrets.answer_engine_api_key": 0,
+  "pipelock.secrets.web_research_api_key": 0,
+  "pipelock.secrets.google_api_key": 0,
+  "pipelock.secrets.google_oauth_client_secret": 0,
+  "pipelock.secrets.stripe_key": 0,
+  "pipelock.secrets.stripe_webhook_secret": 0,
+  "pipelock.secrets.github_token": 0,
+  "pipelock.secrets.github_fine_grained_pat": 0,
+  "pipelock.secrets.gitlab_pat": 0,
+  "pipelock.secrets.gitlab_deploy_token": 0,
+  "pipelock.secrets.gitlab_runner_token": 0,
+  "pipelock.secrets.gitlab_ci_job_token": 0,
+  "pipelock.secrets.gitlab_pipeline_trigger_token": 0,
+  "pipelock.secrets.gitlab_oauth_application_secret": 0,
+  "pipelock.secrets.gitlab_scim_token": 0,
+  "pipelock.secrets.gitlab_service_token": 0,
+  "pipelock.secrets.postgresql_connection_string": 0,
+  "pipelock.secrets.mysql_connection_string": 0,
+  "pipelock.secrets.mongodb_connection_string": 0,
+  "pipelock.secrets.redis_connection_string": 0,
+  "pipelock.secrets.aws_secret_key": 4,
+  "pipelock.secrets.google_oauth_token": 0,
+  "pipelock.secrets.gcp_service_account_private_key_id": 0,
+  "pipelock.secrets.azure_storage_account_key": 0,
+  "pipelock.secrets.azure_sas_token": 0,
+  "pipelock.secrets.slack_token": 0,
+  "pipelock.secrets.slack_app_token": 0,
+  "pipelock.secrets.discord_bot_token": 0,
+  "pipelock.secrets.twilio_api_key": 0,
+  "pipelock.secrets.sendgrid_api_key": 0,
+  "pipelock.secrets.mailgun_api_key": 0,
+  "pipelock.secrets.new_relic_api_key": 0,
+  "pipelock.secrets.hugging_face_token": 0,
+  "pipelock.secrets.databricks_token": 0,
+  "pipelock.secrets.replicate_api_token": 0,
+  "pipelock.secrets.together_ai_key": 0,
+  "pipelock.secrets.pinecone_api_key": 0,
+  "pipelock.secrets.groq_api_key": 0,
+  "pipelock.secrets.xai_api_key": 0,
+  "pipelock.secrets.digitalocean_token": 0,
+  "pipelock.secrets.hashicorp_vault_token": 0,
+  "pipelock.secrets.vercel_token": 0,
+  "pipelock.secrets.supabase_service_key": 0,
+  "pipelock.secrets.npm_token": 0,
+  "pipelock.secrets.pypi_token": 0,
+  "pipelock.secrets.linear_api_key": 0,
+  "pipelock.secrets.notion_api_key": 0,
+  "pipelock.secrets.sentry_auth_token": 0,
+  "pipelock.secrets.private_key_header": 0,
+  "pipelock.secrets.jwt_token": 0,
+  "pipelock.secrets.extended_private_key": 0,
+  "pipelock.secrets.ethereum_private_key": 0,
+  "pipelock.secrets.social_security_number": 3,
+  "pipelock.secrets.gcp_service_account_key": 0
 } as const;
 
 export const GENERATED_SPACE_RUN_SAFE_IDS = [

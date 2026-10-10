@@ -121,3 +121,22 @@ describe("Vendored detection admission and real consumers", () => {
     expect(credentialAudienceViolations(synthetic, "https://evil.test/", { packs: [] })).toEqual([]);
   });
 });
+
+// R23-10: marker syntax is caller-controlled; credential text is never opaque.
+it("R23-10: forged redaction labels cannot hide credential material",()=>{
+ const token="ghp_"+"a".repeat(36);
+ for(const input of [`[redacted:${token}:40:012345abcdef]`,`[redacted:aws_key+${token}:40:012345abcdef]`]){
+  expect(scrubAuditText(input)).not.toContain(token);
+ }
+});
+
+it("R23-02: more than eight open gates avoid a fleet-wide combined scan",()=>{
+ const text="é".repeat(400000)+" sk-ant- sk-proj- sk-svcacct- fw_ sk-or-v1- pplx- tvly- aiza gocspx- sk_live_ ghp_ glpat- discord vercel_ xprv 0x ";
+ const start=performance.now();vendoredSecretSpans(text);expect(performance.now()-start).toBeLessThan(100);
+});
+
+it("candidate prefix positions preserve UTF-16 offsets before real tokens",()=>{
+ const text="İ".repeat(1000)+" "+synthetic;
+ expect(vendoredSecretSpans(text)).toEqual(vendoredSecretSpans(text,{rules:[...VENDORED_SECRET_RULES]}));
+ expect(vendoredSecretSpans(text).length).toBeGreaterThan(0);
+});

@@ -20,7 +20,7 @@
  * out of an immutable record is never the relaxation an admin asked for.
  */
 import { RE2JS, RE2Set } from "re2js";
-import { GENERATED_SECRET_RULES, GENERATED_SPACE_RUN_SAFE_IDS, GENERATED_REQUIRED_PREFIXES } from "./generated.js";
+import { GENERATED_SECRET_RULES, GENERATED_SPACE_RUN_SAFE_IDS, GENERATED_REQUIRED_PREFIXES, GENERATED_PREFIX_START_CONTEXT } from "./generated.js";
 import { VENDORED_DETECTION_PACKS, type VendoredDetectionPack } from "../batch4.js";
 import {
   normaliseForInjection,
@@ -122,16 +122,26 @@ export function secretCandidateRules(text: string, rules: readonly VendoredSecre
   if (!rules.length) return [];
   if(rules === GENERATED_SECRET_RULES) {
     // RE2 simple-fold equivalents of ASCII S/K must participate in gates.
+    // Preserve UTF-16 length too: lowercase İ normally expands to i + dot.
     // This transforms candidates only; every exact span still uses original.
-    const lower=text.replace(/[ſK]/g,char=>char==='ſ'?'s':'k').toLowerCase();
+    const lower=text.replace(/[ſKİ]/g,char=>char==='ſ'?'s':char==='K'?'k':'i').toLowerCase();
     const selected=rules.filter(rule=>prefixes[rule.id]?.some(prefix=>lower.includes(prefix)));
-    if(selected.length<=8 && prefixlessSet) {
-      try {
-        return [...prefixlessSet.match(text).map(index=>prefixlessRules[index]!),...selected.filter(rule=>{
-          const re=compileVendored(rule.id,rule.pattern,rule.caseInsensitive);return !re||re.test(text);
-        })];
-      } catch { return rules; }
-    }
+    const contexts:Readonly<Record<string,number>>=GENERATED_PREFIX_START_CONTEXT;
+    try {
+      const matched=selected.filter(rule=>{
+        const re=compileVendored(rule.id,rule.pattern,rule.caseInsensitive);
+        if(!re)return true;
+        const context=contexts[rule.id];
+        const positions=prefixes[rule.id]!.map(prefix=>lower.indexOf(prefix)).filter(index=>index>=0);
+        // Candidate-only slicing preserves the preceding ASCII boundary. The
+        // converter pins proofs that no match can start earlier. Exact spans
+        // always run against original text, including its original boundaries.
+        const start=context===undefined?0:Math.max(0,Math.min(...positions)-context-1);
+        return re.test(text.slice(start));
+      });
+      return [...(prefixlessSet?prefixlessSet.match(text).map(index=>prefixlessRules[index]!):prefixlessRules),...matched];
+    } catch { return [...prefixlessRules,...selected]; }
+
   }
   let set = secretSets.get(rules);
   if (set === undefined) {
