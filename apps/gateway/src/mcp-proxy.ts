@@ -29,8 +29,8 @@ import {
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
-import { visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
-import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
+import { scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { actorEntitlementsReach, DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
@@ -533,6 +533,30 @@ export interface McpPii {
   withheld: boolean;
 }
 
+
+/**
+ * ADR-0188 S4 — the tools a delegated caller may be OFFERED on a server: those every live link of its chain
+ * covers in its grant scope and, under `own_grants`, in its own grants. Listing is a courtesy; every
+ * `tools/call` is still decided by the kernel with the chain read fresh.
+ */
+export async function delegatedToolNames(db: Db, grantId: string, refs: readonly ToolRef[]): Promise<Set<string>> {
+  let actor: GovernedActor;
+  try {
+    actor = await actorForGrant(db, grantId, { costKnown: true });
+  } catch (err) {
+    if (err instanceof DelegationRefusedError) return new Set();
+    throw err;
+  }
+  const out = new Set<string>();
+  for (const r of refs) {
+    const call = { type: "mcp_tool" as const, serverId: r.serverId, toolName: r.name, kind: r.kind };
+    const ok = actor.links.every(
+      (l) => l.live && scopeCovers(l.scope, call) && (actor.entitlementMode !== "own_grants" || actorEntitlementsReach(l.entitlements, call)),
+    );
+    if (ok) out.add(r.name);
+  }
+  return out;
+}
 
 export async function executeGovernedToolCall(
   db: Db,
@@ -2165,6 +2189,11 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     // ADR-0185 G3: `tools` always; resources / prompts / completions / logging
     // only when the org has enabled a method under them (none by default)
     const orgForProtocol = await loadOrgSettings(db);
+    // ADR-0188 S4 (for S5): a WORKLOAD caller (a delegated token) acts under its leaf grant on every method
+    // of this route; a workload context with no grant resolves to the nil id, which no grant has, so every
+    // method refuses (never decided as the person alone)
+    const workloadGrantId =
+      req.authCtx.via === "workload" ? (req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000") : undefined;
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
       { capabilities: protocolCapabilities(orgForProtocol.mcpProtocolMethods ?? []) },
@@ -2195,6 +2224,8 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           trace: protocolTrace,
           relay: extra.relay,
           progressToken: extra.progressToken,
+          // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
+          ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
         }).catch(async (err: unknown) => {
           // the same named policy refusal a tools/call raises post-hijack
           if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
@@ -2249,6 +2280,12 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       const visible = new Set(
         visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
       );
+      // ADR-0188 S4: a workload caller is offered only the tools its whole chain may call (each link's grant
+      // scope, and its own grants under `own_grants`), read now; an unreadable chain lists nothing
+      if (workloadGrantId) {
+        const offered = await delegatedToolNames(db, workloadGrantId, refs);
+        for (const name of [...visible]) if (!offered.has(name)) visible.delete(name);
+      }
       const entitled = upstreamTools.filter((t) => visible.has(t.name));
 
       // OPTIMIZATION §8: lazy tool-loading. Governance filtering above decides
@@ -2323,7 +2360,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         trace: toolTrace,
         // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
         // with no grant resolves to no grant and is refused in the core (never decided as the person)
-        ...(req.authCtx.via === "workload" ? { delegationGrantId: req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000" } : {}),
+        ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
       }).catch(async (err: unknown) => {
         // AER-024: the reply is already hijacked, so the primitive's admission
         // hold / egress refusal cannot be the pre-hijack 403 the manifest path

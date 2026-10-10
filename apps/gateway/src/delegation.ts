@@ -159,6 +159,17 @@ export async function databaseNow(db: DbOrTx): Promise<Date> {
   return new Date(Number(r.rows[0]!.ms));
 }
 
+/**
+ * The database's WALL clock (`clock_timestamp()`), for a decision taken after waiting on a row lock
+ * (X43 I7S3-01): `now()` is the transaction's START, so a transaction that waited on the parent's lock
+ * past the parent's expiry would still judge it live. Every liveness and expiry decision taken after a
+ * lock is judged by this, sampled once the locks are held.
+ */
+export async function databaseWallNow(db: DbOrTx): Promise<Date> {
+  const r = await db.execute<{ ms: number | string }>(sql`select (extract(epoch from clock_timestamp()) * 1000)::float8 as ms`);
+  return new Date(Number(r.rows[0]!.ms));
+}
+
 /** the facts about an identity and its subject that decide whether it is in service */
 export interface IdentityServiceFacts {
   kind: string;
@@ -670,8 +681,9 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
     refuse("delegation-request-invalid", "context_invalid", "a grant is made for at most one run context");
   }
   return db.transaction(async (tx) => {
-    // the database clock: `created_at` and every window below are judged by it (a test may pin `now`)
-    const now = input.now ?? (await databaseNow(tx));
+    // the database's wall clock (X43 I7S3-01: never a transaction-start sample): `created_at` and every
+    // window below are judged by it (a test may pin `now`)
+    const now = input.now ?? (await databaseWallNow(tx));
     validateCommon(input, now);
     await checkActorSponsorScope(tx, input, now);
     const org = await loadOrgSettings(tx as unknown as Db);
@@ -782,10 +794,11 @@ export async function admitChildGrant(
     refuse("delegation-request-invalid", "idempotency_key_invalid", "an idempotency key is 1 to 200 characters");
   }
   return db.transaction(async (tx) => {
-    const now = input.now ?? (await databaseNow(tx));
-    validateCommon(input, now);
     const [parent] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.parentGrantId)).for("update");
     if (!parent) return refuse("actor-chain-invalid", "parent_not_found", `no delegation grant ${input.parentGrantId}`);
+    // X43 I7S3-01: the clock is sampled AFTER the parent's lock is held (a wait past its expiry refuses)
+    const now = input.now ?? (await databaseWallNow(tx));
+    validateCommon(input, now);
     if (input.environment !== parent.environment || input.projectId !== parent.projectId) {
       refuse("delegation-request-invalid", "delegation_body_mismatch", "the requested environment or project is not the parent's (a child inherits both)");
     }
@@ -1010,8 +1023,6 @@ export async function revokeDelegationGrant(
   input: { grantId: string; reason: DelegationRevokeReason; actorUserId?: string | null; now?: Date },
 ): Promise<{ revokedGrantIds: string[]; releasedMicros: number }> {
   return db.transaction(async (tx) => {
-    const now = input.now ?? (await databaseNow(tx));
-    const at = sql`${now.toISOString()}::timestamptz`;
     const [g] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.grantId));
     if (!g) throw new DelegationRefusedError("actor-chain-invalid", "grant_not_found", `no delegation grant ${input.grantId}`);
     // lock the parent and the whole subtree in one order (depth, then id)
@@ -1027,6 +1038,9 @@ export async function revokeDelegationGrant(
       )
       .orderBy(asc(delegationGrants.depth), asc(delegationGrants.id))
       .for("update");
+    // X43 I7S3-01: the clock is sampled once the subtree's locks are held
+    const now = input.now ?? (await databaseWallNow(tx));
+    const at = sql`${now.toISOString()}::timestamptz`;
     // a grant that has already EXPIRED (database clock) ended on its own: it is not stamped revoked, so its
     // record keeps saying how it really ended; only its edges are closed below (PR #279 review)
     const revoked = await tx

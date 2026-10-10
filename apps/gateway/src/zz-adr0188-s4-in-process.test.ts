@@ -31,6 +31,8 @@ import {
   desc,
   eq,
   isNotNull,
+  orgSettings,
+  ORG_SETTINGS_ID,
   runAuditV2Cutover,
   runMigrations,
   runWithAuditActor,
@@ -45,7 +47,10 @@ import { verifyAuditChain } from "./audit-chain.js";
 import { assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { admitChildGrant, createRootGrant, DelegationRefusedError } from "./delegation.js";
 import { ensureIdentityFor, ensureInternalIdentities, inProcessEnvironment, startInProcessChain, agentScopeItem, toolScopeItems } from "./in-process-delegation.js";
-import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { delegatedToolNames, executeGovernedToolCall } from "./mcp-proxy.js";
+import { executeGovernedProtocolCall } from "./mcp-protocol.js";
+import { listEntitledModels } from "./compat-models.js";
+import { executeGovernedDispatch } from "./agents-connectors.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { grantAgentOwnGrantsForTest, grantOwnGrantsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -334,6 +339,45 @@ describe("S4 / migration 0184: the decision 23 max_depth is stored and binds eve
   });
 });
 
+describe("X43 I7S3-01: admission judges expiry by the clock AFTER the parent's lock is held", () => {
+  it("a child admitted after waiting on the parent's lock past its expiry is refused, and nothing is reserved", async () => {
+    const ivy = await mkUser("clock");
+    const target = await mkAgent("clock-target");
+    await grantUserAgent(ivy.id, target);
+    const a = await grantAgentOwnGrantsForTest(db, await mkAgent("clock-a"), { agents: [{ agentId: target, allowedModes: ["execute"] }] });
+    const b = await grantAgentOwnGrantsForTest(db, await mkAgent("clock-b"), { agents: [{ agentId: target, allowedModes: ["execute"] }] });
+    const scope = [agentScopeItem(target, "execute")];
+    const env = inProcessEnvironment();
+    const binding = { kind: "in_process" as const };
+    const parentExpiry = new Date(Date.now() + 1_500);
+    const root = await createRootGrant(db, { sponsorUserId: ivy.id, environment: env, projectId: null, actorIdentityId: a, scope, capMicros: 100, expiresAt: parentExpiry, binding });
+    const holder = createDb(DATABASE_URL!);
+    try {
+      let locked!: () => void;
+      const isLocked = new Promise<void>((r) => (locked = r));
+      const hold = holder.transaction(async (tx) => {
+        await tx.select({ id: delegationGrants.id }).from(delegationGrants).where(eq(delegationGrants.id, root.id)).for("update");
+        locked();
+        await new Promise((r) => setTimeout(r, 2_500)); // past the parent's expiry
+      });
+      await isLocked;
+      // requested while the parent is still live (the child's lifetime is inside it); decided after the wait
+      const admitted = admitChildGrant(db, {
+        parentGrantId: root.id, environment: env, projectId: null, actorIdentityId: b, scope, capMicros: 10,
+        expiresAt: parentExpiry, binding, idempotencyKey: `clock-${RUN}`,
+      }).then(() => null, (err: unknown) => err);
+      await hold;
+      const e = await admitted;
+      expect(e, "admitted although the parent expired while the request waited on its lock").toBeInstanceOf(DelegationRefusedError);
+      const [after] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, root.id));
+      expect(after!.reservedMicros).toBe(0);
+      expect(await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, root.id))).toHaveLength(0);
+    } finally {
+      await holder.$client.end();
+    }
+  });
+});
+
 describe("S4: a call with no grant, or under a grant revoked a moment ago, never reaches the upstream", () => {
   it("refuses at the tool path, fresh at the point of use; the granted control goes through and is settled", async () => {
     const ivy = await mkUser("tool");
@@ -385,6 +429,87 @@ describe("S4: a call with no grant, or under a grant revoked a moment ago, never
     const out = await executeGovernedToolCall(db, undefined, { userId: ivy.id, serverId, toolName: "get_time", arguments: {}, delegationGrantId: chain.leafGrantId });
     expect(out.kind === "denied" && out.decision.ruleId).toBe("actor-allow-list");
     expect(upstreamCalls).toBe(before);
+  });
+});
+
+describe("S4 for S5: a WORKLOAD caller (delegated token) is governed by its grant on every /mcp and compat path", () => {
+  // The routes read `req.authCtx.delegationGrantId` when S5's auth resolves a delegated token
+  // (`via: "workload"`, behind S5's DELEGATED_ROUTES_WIRED). Until S4 and S5 are combined, the governed
+  // primitives each route calls are driven here with the grant the route passes.
+  const NIL = "00000000-0000-0000-0000-000000000000";
+
+  it("tools/list offers only what the whole chain may call; an unreadable chain lists nothing", async () => {
+    const ivy = await mkUser("wl-list");
+    await grantUserTool(ivy.id, "get_time");
+    const agent = await mkAgent("wl-list");
+    const identityId = await grantAgentOwnGrantsForTest(db, agent, { tools: [{ serverId, toolName: "get_time" }] });
+    const chain = await startInProcessChain(db, {
+      sponsorUserId: ivy.id, projectId: null, context: { runId: randomUUID() },
+      hops: [{ identityId, scope: toolScopeItems([{ serverId, toolName: "get_time", kind: "read" }]), capMicros: null }],
+    });
+    const refs = [
+      { serverId, name: "get_time", kind: "read" as const },
+      { serverId, name: "write_note", kind: "write" as const },
+    ];
+    expect([...(await delegatedToolNames(db, chain.leafGrantId, refs))]).toEqual(["get_time"]);
+    expect((await delegatedToolNames(db, NIL, refs)).size).toBe(0);
+  });
+
+  it("protocol methods (resources/prompts/completion/logging) are decided with the chain, not as the person", async () => {
+    const ivy = await mkUser("wl-proto");
+    await grantUserTool(ivy.id, "get_time");
+    const agent = await mkAgent("wl-proto");
+    const identityId = await grantAgentOwnGrantsForTest(db, agent, { tools: [{ serverId, toolName: "get_time" }] });
+    const chain = await startInProcessChain(db, {
+      sponsorUserId: ivy.id, projectId: null, context: { runId: randomUUID() },
+      hops: [{ identityId, scope: toolScopeItems([{ serverId, toolName: "get_time", kind: "read" }]), capMicros: null }],
+    });
+    const [org] = await db.select({ m: orgSettings.mcpProtocolMethods }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const all = ["resources/list", "resources/templates/list", "resources/read", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel"] as const;
+    await db.update(orgSettings).set({ mcpProtocolMethods: [...all] }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    try {
+      for (const method of all) {
+        const params = method === "resources/read" ? { uri: "file:///x" } : method === "prompts/get" ? { name: "p" } : method === "logging/setLevel" ? { level: "info" } : method === "completion/complete" ? { ref: { type: "ref/prompt", name: "p" }, argument: { name: "a", value: "b" } } : {};
+        const person = await executeGovernedProtocolCall(db, { userId: ivy.id, serverId, method, params });
+        const delegated = await executeGovernedProtocolCall(db, { userId: ivy.id, serverId, method, params, delegationGrantId: chain.leafGrantId });
+        const none = await executeGovernedProtocolCall(db, { userId: ivy.id, serverId, method, params, delegationGrantId: NIL });
+        // the grant covers no protocol method: refused by the delegation, never decided as the person
+        expect(delegated.kind, method).toBe("denied");
+        expect(delegated.kind === "denied" && delegated.decision.ruleId, method).toMatch(/^(delegation-scope|actor-allow-list)$/);
+        expect(none.kind === "denied" && none.decision.ruleId, method).toBe("actor-chain-invalid");
+        // control: the person alone is decided by the person's own rule (not a delegation rule)
+        expect(person.kind === "denied" ? person.decision.ruleId : person.kind, method).not.toMatch(/^(delegation-|actor-)/);
+      }
+    } finally {
+      await db.update(orgSettings).set({ mcpProtocolMethods: org!.m }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+  });
+
+  it("the compat model listing is the chain's intersection; dispatch is decided with the chain (refused without one)", async () => {
+    const ivy = await mkUser("wl-compat");
+    const x = await mkAgent("wl-x");
+    const y = await mkAgent("wl-y");
+    await grantUserAgent(ivy.id, x);
+    await grantUserAgent(ivy.id, y);
+    const agent = await mkAgent("wl-compat-actor");
+    const identityId = await grantAgentOwnGrantsForTest(db, agent, { agents: [{ agentId: x, allowedModes: ["execute"] }, { agentId: y, allowedModes: ["execute"] }] });
+    const chain = await startInProcessChain(db, {
+      sponsorUserId: ivy.id, projectId: null, context: { runId: randomUUID() },
+      hops: [{ identityId, scope: [agentScopeItem(x, "execute")], capMicros: null }],
+    });
+    const asPerson = (await listEntitledModels(db, ivy.id, null)).flatMap((m) => m.agentIds);
+    expect(asPerson).toEqual(expect.arrayContaining([x, y]));
+    const asWorkload = (await listEntitledModels(db, ivy.id, null, chain.leafGrantId)).flatMap((m) => m.agentIds);
+    expect(asWorkload).toContain(x);
+    expect(asWorkload).not.toContain(y);
+    expect(await listEntitledModels(db, ivy.id, null, NIL)).toEqual([]);
+    const [yRow] = await db.select().from(agents).where(eq(agents.id, y));
+    const out = await executeGovernedDispatch(db, undefined, {
+      userId: ivy.id, served: yRow!, requestedAgentId: y, input: "hi", mode: "execute", delegationGrantId: chain.leafGrantId,
+    });
+    expect(out.ok).toBe(false);
+    expect(!out.ok && out.error).toBe("delegation_denied");
+    expect(!out.ok && out.ruleId).toBe("delegation-scope");
   });
 });
 
