@@ -121,6 +121,8 @@ export async function evaluatorTestEvidence(
         gte(evalRuns.finishedAt, scope.periodStart),
         lt(evalRuns.finishedAt, scope.periodEnd),
         projectFilter,
+        // ADR-0187: an engine run counts only when it completed
+        sql`NOT EXISTS (SELECT 1 FROM engine_runs er WHERE er.eval_run_id = ${evalRuns.id} AND er.status <> 'completed')`,
       ),
     );
   const seen = new Set<string>();
@@ -145,6 +147,7 @@ export async function evaluatorTestEvidence(
         isNotNull(redteamRuns.finishedAt),
         gte(redteamRuns.finishedAt, scope.periodStart),
         lt(redteamRuns.finishedAt, scope.periodEnd),
+        sql`NOT EXISTS (SELECT 1 FROM engine_runs er WHERE er.redteam_run_id = ${redteamRuns.id} AND er.status <> 'completed')`,
         scope.projectIds === null ? undefined : inArray(redteamRuns.projectId, safeIds(scope.projectIds)),
       ),
     );

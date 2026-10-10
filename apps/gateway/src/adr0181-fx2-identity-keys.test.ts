@@ -42,6 +42,7 @@ import { buildApp } from "./app.js";
 import { resolveHsts } from "./hsts.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { enrolAdminTotpForTest } from "./testing/identity-posture.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -152,7 +153,13 @@ describe("ADR-0181 FX2 finding 3 — an admin's API key answers to mfaRequired",
     expect(exchanged.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
 
     await enrolAdminTotpForTest(app, BOOT, a.id);
-    expect((await app.inject({ method: "GET", url: "/v1/audit", headers: key })).statusCode).toBe(200);
+    try {
+      expect((await app.inject({ method: "GET", url: "/v1/audit", headers: key })).statusCode).toBe(200);
+    } finally {
+      // B4S-06: an admin who can step up ends first-admin setup; the settings
+      // writes below are the bootstrap credential's, in that setup state
+      await forgetStepUpMethodsForTest(db, [a.id]);
+    }
   });
 
   it("a member's key is untouched under 'admins' and answers to 'all'", async () => {

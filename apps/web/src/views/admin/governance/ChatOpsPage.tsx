@@ -19,6 +19,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
@@ -564,8 +565,12 @@ function OutlookRecipients({ connection }: { connection: Connection }) {
   // list), not the merged list: confirming re-reads and re-merges
   type Shown = Extract<ReturnType<typeof outlookRecipientChange>, { kind: "save" }>;
   const [pending, setPending] = useState<{ text: string; shown: Shown; changedWhileOpen: boolean } | null>(null);
+  // ADR-0186 A: adding a mailbox is a settings_relax the gateway binds to this workspace and the added mailboxes, so
+  // it answers step_up_required; the step-up dialog opens inside the held flight, and a cancelled step-up writes
+  // nothing and frees the form (removing a mailbox needs no step-up and is sent once)
   const save = async (recipients: string[]) => {
-    if (await act.run(() => api.patch(`/v1/chatops/connections/${connection.id}`, { outlookRecipientAllowList: recipients }), "Outlook recipients saved")) await baseline.settle();
+    const write = () => withStepUp((h) => stepUpApi.patch(`/v1/chatops/connections/${connection.id}`, { outlookRecipientAllowList: recipients }, h));
+    if (await act.run(write, "Outlook recipients saved")) await baseline.settle();
   };
   const loaded = connection.outlookRecipientAllowList ?? [];
   const readCurrent = () => api.get<ConnectionsResponse>("/v1/chatops/connections").then(

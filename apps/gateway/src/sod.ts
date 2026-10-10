@@ -86,6 +86,7 @@ import {
   type SodPatternDimension,
   type SodRuleRow,
 } from "@regulait/db";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // the CLOSED provider vocabulary agents.provider speaks — the pattern
 // dimension 'provider' validates against it, never against free text
 import { MODEL_PROVIDER_KINDS } from "@regulait/model-provider";
@@ -1397,8 +1398,19 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
   app.patch("/v1/sod/rules/:ruleId", async (req, reply) => {
     const { ruleId } = ruleIdParam.parse(req.params);
     const body = z.object({ enabled: z.boolean() }).parse(req.body);
-    const [rule] = await db.update(sodRules).set({ enabled: body.enabled }).where(eq(sodRules.id, ruleId)).returning();
-    if (!rule) return reply.status(404).send({ error: "not_found" });
+    const [current] = await db.select({ enabled: sodRules.enabled }).from(sodRules).where(eq(sodRules.id, ruleId));
+    if (!current) return reply.status(404).send({ error: "not_found" });
+    // ADR-0186 A (Class C): disabling a SoD rule lifts a restriction — a settings_relax step-up
+    if (current.enabled && !body.enabled) {
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { sodRuleId: ruleId, values: { enabled: false } } })).ok) return reply;
+    }
+    const [rule] = await db
+      .update(sodRules)
+      .set({ enabled: body.enabled })
+      // Class A: compare-and-set on the state the step-up was decided on
+      .where(and(eq(sodRules.id, ruleId), eq(sodRules.enabled, current.enabled)))
+      .returning();
+    if (!rule) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? rule.id,
       objectType: "sod_rule",
@@ -1418,6 +1430,8 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
 
   app.delete("/v1/sod/rules/:ruleId", async (req, reply) => {
     const { ruleId } = ruleIdParam.parse(req.params);
+    // ADR-0186 A (Class C): removing a SoD rule lifts its restriction — a settings_relax step-up
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { sodRuleId: ruleId, values: { deleted: true } } })).ok) return reply;
     const [rule] = await db.delete(sodRules).where(eq(sodRules.id, ruleId)).returning();
     if (!rule) return reply.status(404).send({ error: "not_found" });
     await db.insert(auditLog).values({

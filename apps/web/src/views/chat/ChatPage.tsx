@@ -69,6 +69,12 @@ interface PendingAttachment {
   thumb: string | null;
   size: number;
 }
+/** outcome of restoring a thread's history: a later restore may supersede it */
+type Restored =
+  | { status: "loaded"; agentId: string | null; projectId: string }
+  | { status: "superseded" }
+  | { status: "gone" };
+
 interface Exchange {
   prompt: string;
   agentName: string;
@@ -226,33 +232,43 @@ export default function ChatPage() {
     }
   }, [convoId, freshChat, streaming, conversations, setConvo]);
 
-  // restore the open thread's history from the server
+  // restore the open thread's history from the server. Every restore takes a
+  // ticket; only the latest one may write, so a restore that resolves late
+  // (e.g. one a send superseded) never overwrites a newer live exchange.
+  const historySeq = useRef(0);
+  const restoreHistory = useCallback(
+    async (id: string): Promise<Restored> => {
+      const ticket = ++historySeq.current;
+      try {
+        const detail = await api.get<ConversationDetail>(`/v1/conversations/${id}`);
+        if (ticket !== historySeq.current) return { status: "superseded" };
+        setExchanges(exchangesFromMessages(detail, agentNames));
+        setLoadedFor(id);
+        const threadAgent =
+          detail.agentId && agents.some((a) => a.agentId === detail.agentId) ? detail.agentId : null;
+        if (threadAgent) setAgentId(threadAgent);
+        const threadProject = detail.projectId && projects.some((p) => p.id === detail.projectId) ? detail.projectId : "";
+        setProjectId(threadProject);
+        return { status: "loaded", agentId: threadAgent, projectId: threadProject };
+      } catch {
+        if (ticket !== historySeq.current) return { status: "superseded" };
+        // stale id (deleted / another account's) clears silently
+        setConvo(null);
+        setExchanges([]);
+        setLoadedFor(null);
+        return { status: "gone" };
+      }
+    },
+    [agentNames, agents, projects, setConvo],
+  );
   useEffect(() => {
     if (!convoId || streaming || loadedFor === convoId) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const detail = await api.get<ConversationDetail>(`/v1/conversations/${convoId}`);
-        if (cancelled) return;
-        setExchanges(exchangesFromMessages(detail, agentNames));
-        setLoadedFor(convoId);
-        if (detail.agentId && agents.some((a) => a.agentId === detail.agentId)) {
-          setAgentId(detail.agentId);
-        }
-        setProjectId(detail.projectId && projects.some((p) => p.id === detail.projectId) ? detail.projectId : "");
-      } catch {
-        if (!cancelled) {
-          // stale id (deleted / another account's) clears silently
-          setConvo(null);
-          setExchanges([]);
-          setLoadedFor(null);
-        }
-      }
-    })();
+    void restoreHistory(convoId);
     return () => {
-      cancelled = true;
+      // a cleanup (thread switched, a send began) voids the in-flight restore
+      historySeq.current += 1;
     };
-  }, [convoId, streaming, loadedFor, agentNames, agents, projects, setConvo]);
+  }, [convoId, streaming, loadedFor, restoreHistory]);
 
   // autoscroll while streaming / after sends
   useEffect(() => {
@@ -341,11 +357,29 @@ export default function ChatPage() {
     }
 
     let activeConvo = convoId;
+    let sendAgentId = agentId;
+    let sendProjectId = projectId;
+    // a send into an open thread whose history is still loading waits for it:
+    // otherwise the restore lands after the stream and replaces the live reply
+    // (and its governance trace) with the stored history. The send then goes
+    // to the thread's own agent and project, as it would once loaded.
+    if (activeConvo && loadedFor !== activeConvo) {
+      let restored: Restored = { status: "superseded" };
+      for (let attempt = 0; attempt < 3 && restored.status === "superseded"; attempt++) {
+        restored = await restoreHistory(activeConvo);
+      }
+      if (restored.status !== "loaded") {
+        toast("Couldn't load this conversation — try again.", "error");
+        return;
+      }
+      sendAgentId = restored.agentId ?? sendAgentId;
+      sendProjectId = restored.projectId;
+    }
     if (!activeConvo) {
       try {
         const row = await api.post<{ id: string }>("/v1/conversations", {
-          agentId,
-          ...(projectId ? { projectId } : {}),
+          agentId: sendAgentId,
+          ...(sendProjectId ? { projectId: sendProjectId } : {}),
         });
         activeConvo = row.id;
         setFreshChat(false);
@@ -375,7 +409,7 @@ export default function ChatPage() {
 
     const x: Exchange = {
       prompt,
-      agentName: agentNames[agentId] ?? "agent",
+      agentName: agentNames[sendAgentId] ?? "agent",
       text: "",
       streaming: true,
       ...(attachViews.length ? { attachments: attachViews } : {}),
@@ -396,7 +430,7 @@ export default function ChatPage() {
     let compacted = false;
     try {
       const res = await ssePost(
-        `/v1/agents/${agentId}/invoke`,
+        `/v1/agents/${sendAgentId}/invoke`,
         {
           mode: "execute",
           input: prompt,
@@ -404,7 +438,7 @@ export default function ChatPage() {
           stream: true,
           costSensitivity,
           conversationId: activeConvo,
-          ...(projectId ? { projectId } : {}),
+          ...(sendProjectId ? { projectId: sendProjectId } : {}),
           ...(attachments.length ? { attachments } : {}),
           ...(referenceContent ? { referenceContent } : {}),
         },
@@ -509,6 +543,8 @@ export default function ChatPage() {
     attach,
     agentId,
     convoId,
+    loadedFor,
+    restoreHistory,
     projectId,
     costSensitivity,
     agentNames,

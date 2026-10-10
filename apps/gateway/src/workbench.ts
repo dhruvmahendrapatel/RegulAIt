@@ -76,6 +76,7 @@ import {
   type ApprovalRoutingContext,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { requireStepUp } from "./step-up.js";
 import { projectClassifications, projectPiiMode } from "./projects.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
@@ -592,6 +593,21 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
 
   app.post("/v1/approvals/sla-policies", async (req, reply) => {
     const body = createApprovalSlaPolicySchema.parse(req.body);
+    // B4S-02 (owner principle): an escalation that hands an approval to someone
+    // else (reassign, add an assignee) changes who it goes to — a settings_relax
+    // step-up bound to where it escalates
+    if (body.escalateAction !== "notify_only") {
+      const facts = {
+        values: {
+          approvalSlaEscalation: {
+            escalateAction: body.escalateAction,
+            escalateToKind: body.escalateToKind ?? null,
+            escalateToId: body.escalateToId ?? null,
+          },
+        },
+      };
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    }
     const [row] = await db
       .insert(approvalSlaPolicies)
       .values({
@@ -637,6 +653,22 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
         .from(approvalSlaPolicies)
         .where(eq(approvalSlaPolicies.id, body.slaPolicyId));
       if (!p) return reply.status(404).send({ error: "unknown_sla_policy" });
+    }
+    // B4S-02 (owner principle): a routing rule moves matching approvals to
+    // another approver — a settings_relax step-up bound to the rule as written
+    const routing = {
+      assigneeKind: body.assigneeKind,
+      assigneeId: body.assigneeId,
+      objectType: body.objectType ?? null,
+      projectId: body.projectId ?? null,
+      dataSensitivity: body.dataSensitivity ?? null,
+      stagePattern: body.stagePattern ?? null,
+      templateId: body.templateId ?? null,
+      quorum: body.quorum,
+      enabled: body.enabled,
+    };
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { approvalRouting: routing } } })).ok) {
+      return reply;
     }
     const [row] = await db
       .insert(approvalAssignmentRules)

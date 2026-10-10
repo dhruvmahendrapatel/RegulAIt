@@ -55,6 +55,19 @@ import {
   STEP_UP_METHODS,
   STEP_UP_MODES,
   WEBAUTHN_CHALLENGE_PURPOSES,
+  // ADR-0187 (migration 0173): the batch-5 engine vocabularies, in lockstep
+  // with the migration's CHECKs by being the same constants
+  ARTIFACT_FORMATS,
+  ARTIFACT_SCAN_VERDICTS,
+  ENGINE_IDS,
+  ENGINE_ITEM_VERDICTS,
+  ENGINE_KINDS,
+  ENGINE_NOT_RUN_REASONS,
+  ENGINE_RUN_PHASES,
+  ENGINE_RUN_STATUSES,
+  ENGINE_RUN_TRIGGERS,
+  ENGINE_TARGET_KINDS,
+  type EngineRunConfig,
   type StepUpActionKind,
   type VendoredDetectionPack,
   type WebauthnTransport,
@@ -66,6 +79,7 @@ import {
   type SeriousIncidentCriterion,
 } from "@regulait/shared";
 import {
+  type AnyPgColumn,
   bigint,
   check,
   integer,
@@ -1388,6 +1402,13 @@ export const auditLog = pgTable(
         "step_up",
         "decision_receipt",
         "detection_content",
+        // ADR-0187 (batch 5): the sidecar engines, their runners, runs,
+        // schedules and model artifacts. Plain text column — no DDL needed.
+        "engine",
+        "engine_runner",
+        "engine_run",
+        "engine_schedule",
+        "model_artifact",
       ],
     })
       .notNull()
@@ -1742,6 +1763,14 @@ export const approvals = pgTable(
     /** how each approval must be proven: passkey signature over the call,
      * a step-up, or nothing (an audited relaxation) */
     signatureMode: text("signature_mode", { enum: APPROVAL_SIGNATURE_MODES }).notNull().default("passkey"),
+    /** ADR-0186 A (migration 0172): the approver role of the naming rule when the
+     * call was queued — eligibility and queue visibility read this, never the
+     * rule's current role. No FK: a historical fact. */
+    approverRoleId: uuid("approver_role_id"),
+    /** ADR-0186 A (migration 0172): the approver NAMED when the call was queued —
+     * the one source of named-approver authority for a tool-call approval (never
+     * reconstructed from prunable audit rows). No FK: a historical fact. */
+    namedApproverUserId: uuid("named_approver_user_id"),
   },
   (t) => [
     check("approvals_quorum_check", sql`${t.quorum} BETWEEN 1 AND 5`),
@@ -3764,6 +3793,20 @@ export const orgSettings = pgTable(
     /** M: the jailbreak correlation window, 1–168 hours; shorter relaxes it */
     monitorJailbreakWindowHours: integer("monitor_jailbreak_window_hours").notNull().default(24),
 
+    // --- ADR-0187 (batch 5, migration 0173): all strict ---------------------
+    /** the longest any engine run may last, 1–120 minutes; longer relaxes it */
+    engineMaxRunTimeoutMinutes: integer("engine_max_run_timeout_minutes").notNull().default(30),
+    /** the budget a run gets when it names none (USD); higher relaxes it */
+    engineDefaultRunBudgetUsd: doublePrecision("engine_default_run_budget_usd").notNull().default(2),
+    /** a run whose budget is above this waits for approval (USD); higher relaxes it */
+    engineRunApprovalThresholdUsd: doublePrecision("engine_run_approval_threshold_usd").notNull().default(10),
+    /** raw engine reports kept (encrypted) this many days; longer relaxes it */
+    engineRawReportRetentionDays: integer("engine_raw_report_retention_days").notNull().default(90),
+    /** agentic, offensive and unclassified engine sets need approval; off relaxes it */
+    engineSensitiveSetApproval: boolean("engine_sensitive_set_approval").notNull().default(true),
+    /** B5-M (migration 0175): the largest model-artifact upload, in MiB; larger relaxes it */
+    modelArtifactMaxMegabytes: integer("model_artifact_max_megabytes").notNull().default(512),
+
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
       .notNull()
@@ -4376,6 +4419,21 @@ export const orgSettings = pgTable(
       "org_settings_monitor_jailbreak_window_hours_check",
       sql`${t.monitorJailbreakWindowHours} BETWEEN 1 AND 168`,
     ),
+    // ADR-0187 (migration 0173)
+    check("org_settings_engine_max_run_timeout_minutes_check", sql`${t.engineMaxRunTimeoutMinutes} BETWEEN 1 AND 120`),
+    check(
+      "org_settings_engine_default_run_budget_usd_check",
+      sql`${t.engineDefaultRunBudgetUsd} >= 0.01 AND ${t.engineDefaultRunBudgetUsd} <= 1000`,
+    ),
+    check(
+      "org_settings_engine_run_approval_threshold_usd_check",
+      sql`${t.engineRunApprovalThresholdUsd} >= 0 AND ${t.engineRunApprovalThresholdUsd} <= 10000`,
+    ),
+    check(
+      "org_settings_engine_raw_report_retention_days_check",
+      sql`${t.engineRawReportRetentionDays} BETWEEN 1 AND 3650`,
+    ),
+    check("org_settings_model_artifact_max_megabytes_check", sql`${t.modelArtifactMaxMegabytes} BETWEEN 1 AND 8192`),
   ],
 );
 
@@ -5148,7 +5206,8 @@ export const MODEL_CARD_APPROVAL_STATUSES = [
 ] as const;
 export type ModelCardApprovalStatus = (typeof MODEL_CARD_APPROVAL_STATUSES)[number];
 
-export const MODEL_CARD_EVIDENCE_KINDS = ["eval_run", "external"] as const;
+/** ADR-0187 (migration 0173) adds `engine_scan`: an `artifact_scans` row */
+export const MODEL_CARD_EVIDENCE_KINDS = ["eval_run", "external", "engine_scan"] as const;
 export type ModelCardEvidenceKind = (typeof MODEL_CARD_EVIDENCE_KINDS)[number];
 
 /** ADR-0045 §2: one declared bias/fairness assessment SLOT on a card. */
@@ -5286,18 +5345,22 @@ export const modelCardEvidence = pgTable(
     kind: text("kind", { enum: MODEL_CARD_EVIDENCE_KINDS }).notNull(),
     evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "restrict" }),
     externalRef: text("external_ref"),
+    /** ADR-0187: kind 'engine_scan' cites one artifact scan (RESTRICT, like a cited eval run) */
+    artifactScanId: uuid("artifact_scan_id").references((): AnyPgColumn => artifactScans.id, { onDelete: "restrict" }),
     label: text("label"),
     note: text("note"),
     attachedByUserId: uuid("attached_by_user_id").references(() => users.id, { onDelete: "set null" }),
     attachedAt: timestamp("attached_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check("model_card_evidence_kind_check", sql`${t.kind} IN ('eval_run','external')`),
+    check("model_card_evidence_kind_check", sql`${t.kind} IN ('eval_run','external','engine_scan')`),
     check(
       "model_card_evidence_shape_check",
-      sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL)`,
+      sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.artifactScanId} IS NULL) OR (${t.kind} = 'engine_scan' AND ${t.artifactScanId} IS NOT NULL AND ${t.evalRunId} IS NULL AND ${t.externalRef} IS NULL)`,
     ),
     index("model_card_evidence_card_idx").on(t.cardId),
+    // ADR-0187 B5-M (migration 0175, PR #212 review [4234946093]): a scan is cited on a card at most once
+    uniqueIndex("model_card_evidence_card_scan_unique").on(t.cardId, t.artifactScanId).where(sql`${t.artifactScanId} IS NOT NULL`),
     uniqueIndex("model_card_evidence_run_uq")
       .on(t.cardId, t.evalRunId)
       .where(sql`${t.evalRunId} IS NOT NULL`),
@@ -8060,7 +8123,14 @@ export const virtualKeys = pgTable(
      * authorization questions, which before this could only be an admin API
      * key — making proxy compromise equivalent to control-plane admin. The
      * separation runs BOTH ways: a pdp key cannot dispatch either. */
-    purpose: text("purpose").notNull().default("dispatch").$type<"dispatch" | "pdp">(),
+    purpose: text("purpose").notNull().default("dispatch").$type<"dispatch" | "pdp" | "engine">(),
+    /** ADR-0187 (migration 0173) — an `engine` key is PINNED to one project: a
+     * call whose x-regulait-project-id names another is refused, and an
+     * unattributed call is attributed here. FK-free like every ledger
+     * attribution column. NOT NULL exactly when purpose = 'engine' (CHECK). */
+    projectId: uuid("project_id"),
+    /** ADR-0187 — the engine run this key was minted for (purpose 'engine' only) */
+    engineRunId: uuid("engine_run_id"),
     allowedModels: jsonb("allowed_models").$type<string[]>(),
     /** NULL = no per-key budget. When set, spend is enforced BEFORE dispatch
      * against `spent_usd`; the first crossing is allowed (measured cost is only
@@ -11419,6 +11489,10 @@ export const webauthnChallenges = pgTable(
     actionDigest: text("action_digest"),
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "cascade" }),
     decision: text("decision", { enum: APPROVAL_DECISION_VALUES }),
+    /** ADR-0186 A (migration 0172): a register ceremony admitted by the
+     * first-passkey rule (no step-up); its completion re-checks under the user's
+     * row lock that the account still has no way to step up */
+    firstPasskey: boolean("first_passkey").notNull().default(false),
     /** approval_sign: the `ApprovalSigningPayload` whose digest is the challenge */
     signedPayload: jsonb("signed_payload"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -11544,7 +11618,8 @@ export const ssoReauthRequests = pgTable(
     ),
     check(
       "sso_reauth_requests_verified_check",
-      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND ${t.authTime} > ${t.requestedAt})`,
+      // migration 0171: a whole-second auth time (OIDC) may equal the request's second
+      sql`${t.verifiedAt} IS NULL OR (${t.authTime} IS NOT NULL AND (${t.authTime} > ${t.requestedAt} OR (date_trunc('second', ${t.authTime}) = ${t.authTime} AND ${t.authTime} >= date_trunc('second', ${t.requestedAt}))))`,
     ),
     check("sso_reauth_requests_used_check", sql`${t.usedAt} IS NULL OR ${t.verifiedAt} IS NOT NULL`),
     index("sso_reauth_requests_step_up_idx").on(t.stepUpId),
@@ -11650,3 +11725,291 @@ export const decisionReceipts = pgTable(
   ],
 );
 export type DecisionReceiptRow = typeof decisionReceipts.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0187 (batch 5, migration 0173) — THE SIDECAR ENGINES
+// ---------------------------------------------------------------------------
+//
+// One contract for every external engine that runs as its own process: a
+// runner container per engine leases work from the gateway (no Docker socket),
+// every model call rides a run-scoped virtual key, and the result is
+// normalised into these tables and the existing red-team / eval ledgers. Every
+// engine starts OFF; enabling needs a passing runner self-test and a
+// settings_relax step-up.
+
+/** One row per engine this build knows. Version and digest come from the
+ * shipped manifest (`syncEngineManifest`); no route writes them. */
+export const engines = pgTable(
+  "engines",
+  {
+    id: text("id", { enum: ENGINE_IDS }).primaryKey(),
+    kind: text("kind", { enum: ENGINE_KINDS }).notNull(),
+    version: text("version").notNull(),
+    /** the signed image's digest from the manifest; null until the image is built */
+    imageDigest: text("image_digest"),
+    licence: text("licence").notNull(),
+    maintainerCount: integer("maintainer_count"),
+    /** the usage-data switches and what the last self-test said of them */
+    usageDataPosture: jsonb("usage_data_posture").$type<Record<string, unknown>>().notNull().default({}),
+    lastVerified: text("last_verified"),
+    reCheckBy: text("re_check_by"),
+    /** STRICT: off until an admin enables it, after a passing self-test, with a step-up */
+    enabled: boolean("enabled").notNull().default(false),
+    timeoutSeconds: integer("timeout_seconds").notNull().default(1800),
+    maxBudgetUsd: doublePrecision("max_budget_usd").notNull().default(5),
+    maxConcurrent: integer("max_concurrent").notNull().default(1),
+    /** the last self-test verdict: {passed, failures, runnerId, at} */
+    selfTest: jsonb("self_test").$type<Record<string, unknown>>(),
+    selfTestPassedAt: timestamp("self_test_passed_at", { withTimezone: true }),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }),
+    enabledByUserId: uuid("enabled_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0187 decision 95 (migration 0174): the manifest generation the row was last written from; only ever moves forward */
+    manifestGeneration: integer("manifest_generation").notNull().default(0),
+  },
+  (t) => [
+    check("engines_enabled_needs_self_test_check", sql`NOT ${t.enabled} OR ${t.selfTestPassedAt} IS NOT NULL`),
+    check("engines_manifest_generation_check", sql`${t.manifestGeneration} >= 0`),
+    check("engines_timeout_check", sql`${t.timeoutSeconds} BETWEEN 60 AND 7200`),
+    check("engines_budget_check", sql`${t.maxBudgetUsd} >= 0.01 AND ${t.maxBudgetUsd} <= 10000`),
+    check("engines_concurrency_check", sql`${t.maxConcurrent} BETWEEN 1 AND 20`),
+  ],
+);
+export type EngineRow = typeof engines.$inferSelect;
+
+/** A one-time enrolment token, minted on the Engines page (only its sha256 is stored). */
+export const engineEnrollmentTokens = pgTable(
+  "engine_enrollment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ENGINE_IDS })
+      .notNull()
+      .references(() => engines.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    label: text("label"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    runnerId: uuid("runner_id"),
+  },
+  (t) => [check("engine_enrollment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes'`)],
+);
+
+/** A registered runner. Its `rge_` token reaches only the runner route allow-list. */
+export const engineRunners = pgTable(
+  "engine_runners",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ENGINE_IDS })
+      .notNull()
+      .references(() => engines.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    enrollmentTokenId: uuid("enrollment_token_id").references(() => engineEnrollmentTokens.id, { onDelete: "set null" }),
+    reportedDigest: text("reported_digest").notNull(),
+    reportedVersion: text("reported_version").notNull(),
+    selfTest: jsonb("self_test").$type<Record<string, unknown>>().notNull(),
+    selfTestPassed: boolean("self_test_passed").notNull(),
+    selfTestFailures: jsonb("self_test_failures").$type<string[]>().notNull().default([]),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    revokeReason: text("revoke_reason"),
+  },
+  (t) => [
+    index("engine_runners_engine_idx").on(t.engineId),
+    check("engine_runners_digest_check", sql`${t.reportedDigest} ~ '^sha256:[0-9a-f]{64}$'`),
+  ],
+);
+export type EngineRunnerRow = typeof engineRunners.$inferSelect;
+
+/** An uploaded model artifact (B5-M: POST /v1/model-artifacts; content-addressed by sha256). */
+export const modelArtifacts = pgTable(
+  "model_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sha256: text("sha256").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    format: text("format").notNull(),
+    filename: text("filename").notNull(),
+    storageKey: text("storage_key").notNull(),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    uploadedByUserId: uuid("uploaded_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_artifacts_sha256_check", sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
+    check("model_artifacts_size_check", sql`${t.sizeBytes} >= 0`),
+    // B5-M (migration 0175): the format comes from the bytes (ARTIFACT_FORMATS); storage is by sha256
+    check("model_artifacts_format_check", sql`${t.format} IN (${sql.raw(ARTIFACT_FORMATS.map((f) => `'${f}'`).join(", "))})`),
+    check("model_artifacts_storage_key_check", sql`${t.storageKey} = 'sha256/' || ${t.sha256}`),
+    index("model_artifacts_sha256_idx").on(t.sha256),
+  ],
+);
+
+/** A scheduled engine run, executed as the person who configured it. */
+export const engineSchedules = pgTable(
+  "engine_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ENGINE_IDS })
+      .notNull()
+      .references(() => engines.id, { onDelete: "cascade" }),
+    /** the run request (the same body as POST /v1/engine-runs) */
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    configHash: text("config_hash").notNull(),
+    /** the person each run executes as; gone = the schedule skips, with a stated reason */
+    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
+    intervalHours: integer("interval_hours").notNull(),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    lastRunId: uuid("last_run_id"),
+    lastSkip: text("last_skip"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("engine_schedules_interval_check", sql`${t.intervalHours} BETWEEN 1 AND 720`),
+    index("engine_schedules_due_idx").on(t.nextRunAt).where(sql`${t.enabled}`),
+  ],
+);
+
+/** ONE ENGINE RUN: who it runs as, what it targets, its key, its lease and how it ended. */
+export const engineRuns = pgTable(
+  "engine_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    engineId: text("engine_id", { enum: ENGINE_IDS })
+      .notNull()
+      .references(() => engines.id, { onDelete: "restrict" }),
+    engineVersion: text("engine_version").notNull(),
+    status: text("status", { enum: ENGINE_RUN_STATUSES }).notNull(),
+    trigger: text("trigger", { enum: ENGINE_RUN_TRIGGERS }).notNull(),
+    /** the person the run executes as: its entitlements and budget are the ceiling */
+    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    targetKind: text("target_kind", { enum: ENGINE_TARGET_KINDS }).notNull(),
+    targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    targetArtifactId: uuid("target_artifact_id").references(() => modelArtifacts.id, { onDelete: "set null" }),
+    config: jsonb("config").$type<EngineRunConfig>().notNull(),
+    configHash: text("config_hash").notNull(),
+    /** the target agent's configuration hash when the run was made (A3 compares it) */
+    agentConfigHash: text("agent_config_hash"),
+    trials: integer("trials").notNull().default(3),
+    budgetUsd: doublePrecision("budget_usd").notNull(),
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    timeoutSeconds: integer("timeout_seconds").notNull(),
+    virtualKeyId: uuid("virtual_key_id").references(() => virtualKeys.id, { onDelete: "set null" }),
+    runnerId: uuid("runner_id").references(() => engineRunners.id, { onDelete: "set null" }),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    scheduleId: uuid("schedule_id").references(() => engineSchedules.id, { onDelete: "set null" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    workflowStageId: text("workflow_stage_id"),
+    workflowCheckName: text("workflow_check_name"),
+    workflowRound: integer("workflow_round"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    queueExpiresAt: timestamp("queue_expires_at", { withTimezone: true }).notNull(),
+    leasedAt: timestamp("leased_at", { withTimezone: true }),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    phase: text("phase", { enum: ENGINE_RUN_PHASES }),
+    progress: doublePrecision("progress"),
+    deadlineAt: timestamp("deadline_at", { withTimezone: true }),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+    cancelRequestedByUserId: uuid("cancel_requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    /** the server's normalised summary: verdict, counts, ASR, classes, explanation */
+    summary: jsonb("summary").$type<Record<string, unknown>>(),
+    rawReportSha256: text("raw_report_sha256"),
+    rawReportBytes: integer("raw_report_bytes"),
+    /** the raw report, encrypted under the data key; deleted after the retention window */
+    rawReportCiphertext: text("raw_report_ciphertext"),
+    rawReportExpiresAt: timestamp("raw_report_expires_at", { withTimezone: true }),
+    redteamRunId: uuid("redteam_run_id").references(() => redteamRuns.id, { onDelete: "set null" }),
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    /** PR #203 review [5]: when the run's end reached its workflow stage (the sweep retries until it does) */
+    workflowNotifiedAt: timestamp("workflow_notified_at", { withTimezone: true }),
+    /** ADR-0187 decision 94 (migration 0174): the runner's own request id for the lease that took this run */
+    leaseRequestId: uuid("lease_request_id"),
+  },
+  (t) => [
+    check(
+      "engine_runs_target_check",
+      sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,
+    ),
+    check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
+    check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
+    check("engine_runs_timeout_check", sql`${t.timeoutSeconds} BETWEEN 60 AND 7200`),
+    check("engine_runs_error_code_check", sql`${t.errorCode} IS NULL OR ${t.errorCode} ~ '^[a-z][a-z0-9_]{0,63}$'`),
+    check("engine_runs_raw_sha_check", sql`${t.rawReportSha256} IS NULL OR ${t.rawReportSha256} ~ '^[0-9a-f]{64}$'`),
+    index("engine_runs_lease_idx").on(t.engineId, t.status, t.createdAt),
+    index("engine_runs_user_idx").on(t.runAsUserId, t.createdAt),
+    uniqueIndex("engine_runs_workflow_uq")
+      .on(t.workflowInstanceId, t.workflowStageId, t.workflowCheckName, t.workflowRound)
+      .where(sql`${t.workflowInstanceId} IS NOT NULL`),
+    uniqueIndex("engine_runs_runner_lease_request_unique").on(t.runnerId, t.leaseRequestId).where(sql`${t.leaseRequestId} IS NOT NULL`),
+  ],
+);
+export type EngineRunRow = typeof engineRuns.$inferSelect;
+
+/** Every normalised item of a run, mapped or not (the authoritative per-item record). */
+export const engineRunItems = pgTable(
+  "engine_run_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => engineRuns.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    sourceSystem: text("source_system").notNull(),
+    sourceId: text("source_id").notNull(),
+    attackClass: text("attack_class"),
+    scorerKind: text("scorer_kind"),
+    claimedClass: text("claimed_class"),
+    severity: text("severity").notNull(),
+    attempts: integer("attempts").notNull(),
+    defeated: integer("defeated").notNull(),
+    claimedVerdict: text("claimed_verdict", { enum: ENGINE_ITEM_VERDICTS }).notNull(),
+    verdict: text("verdict", { enum: ENGINE_ITEM_VERDICTS }).notNull(),
+    /** the engine's reason, after the detection scrub; null when withheld */
+    reason: text("reason"),
+    verdictNote: text("verdict_note"),
+    notRunReason: text("not_run_reason", { enum: ENGINE_NOT_RUN_REASONS }),
+    dispatchAuditIds: jsonb("dispatch_audit_ids").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("engine_run_items_run_idx").on(t.runId),
+    check("engine_run_items_counts_check", sql`${t.attempts} >= 0 AND ${t.defeated} >= 0 AND ${t.defeated} <= ${t.attempts}`),
+  ],
+);
+
+/** A model-artifact scan's result (B5-M writes these). */
+export const artifactScans = pgTable(
+  "artifact_scans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactId: uuid("artifact_id")
+      .notNull()
+      .references(() => modelArtifacts.id, { onDelete: "restrict" }),
+    engineRunId: uuid("engine_run_id").references(() => engineRuns.id, { onDelete: "set null" }),
+    artifactSha256: text("artifact_sha256").notNull(),
+    format: text("format"),
+    verdict: text("verdict", { enum: ARTIFACT_SCAN_VERDICTS }).notNull(),
+    issues: jsonb("issues").$type<unknown[]>().notNull().default([]),
+    scannerVersion: text("scanner_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("artifact_scans_artifact_idx").on(t.artifactId),
+    check("artifact_scans_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
+    // B5-M (migration 0175): clean only for a verified non-executable format; one scan per run
+    check("artifact_scans_clean_format_check", sql`${t.verdict} <> 'clean' OR ${t.format} = 'safetensors'`),
+    uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
+  ],
+);

@@ -61,6 +61,7 @@ import {
   type Db,
   type GroupSource,
 } from "@regulait/db";
+import { lockApproverRoles } from "./approval-pool.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -89,6 +90,8 @@ export type GroupReconcileResult = {
   impliedRoleIds: string[];
   added: Array<{ roleId: string; roleName: string | null; viaGroups: string[] }>;
   removed: Array<{ roleId: string; roleName: string | null }>;
+  /** ADR-0186 decision 29: implied roles NOT granted because they are approver roles */
+  withheld: Array<{ roleId: string; roleName: string | null; viaGroups: string[] }>;
 };
 
 const SKIPPED: Omit<GroupReconcileResult, "asserted"> = {
@@ -98,6 +101,7 @@ const SKIPPED: Omit<GroupReconcileResult, "asserted"> = {
   impliedRoleIds: [],
   added: [],
   removed: [],
+  withheld: [],
 };
 
 /**
@@ -253,17 +257,25 @@ export async function reconcileGroupRoles(
   //    delete is scoped to origin='group' a SECOND time (belt to the braces of
   //    having selected only group rows) — an admin's direct grant is a
   //    different row and is unreachable from here.
+  //
+  //    ADR-0186 decision 29 (PR #198 follow-up, finding 48): an IdP group never
+  //    adds anyone to an APPROVER role (one an approval rule as served names) —
+  //    the same rule as the JIT default role (`grantJitDefaultRole`). Decided per
+  //    role under the approver-role lock, so a rule edit naming the role cannot
+  //    interleave. Withheld and audited; an admin may assign the role directly,
+  //    with the settings_relax step-up a role assignment needs.
   const added: GroupReconcileResult["added"] = [];
+  const withheld: GroupReconcileResult["withheld"] = [];
   for (const roleId of toAdd) {
-    await db
-      .insert(roleAssignments)
-      .values({ userId, roleId, origin: "group" })
-      .onConflictDoNothing();
-    added.push({
-      roleId,
-      roleName: nameById.get(roleId) ?? null,
-      viaGroups: impliedBy.get(roleId) ?? [],
+    const outcome = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      if ((await lockApproverRoles(tx, [roleId])).has(roleId)) return "withheld" as const;
+      await tx.insert(roleAssignments).values({ userId, roleId, origin: "group" }).onConflictDoNothing();
+      return "granted" as const;
     });
+    const entry = { roleId, roleName: nameById.get(roleId) ?? null, viaGroups: impliedBy.get(roleId) ?? [] };
+    if (outcome === "withheld") withheld.push(entry);
+    else added.push(entry);
   }
   const removed: GroupReconcileResult["removed"] = [];
   for (const roleId of toRemove) {
@@ -290,6 +302,7 @@ export async function reconcileGroupRoles(
     })),
     added,
     removed,
+    withheld,
   });
 
   return {
@@ -300,6 +313,7 @@ export async function reconcileGroupRoles(
     impliedRoleIds,
     added,
     removed,
+    withheld,
   };
 }
 
@@ -331,6 +345,7 @@ async function auditReconciliation(
     mappingsFired: Array<{ mappingId: string; externalGroup: string; roleId: string; roleName: string | null }>;
     added: GroupReconcileResult["added"];
     removed: GroupReconcileResult["removed"];
+    withheld: GroupReconcileResult["withheld"];
   },
 ): Promise<void> {
   const [subject] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
@@ -341,6 +356,9 @@ async function auditReconciliation(
   for (const r of detail.removed) {
     changes.push(`-${r.roleName ?? r.roleId} (origin=group, no longer implied)`);
   }
+  for (const w of detail.withheld) {
+    changes.push(`WITHHELD ${w.roleName ?? w.roleId} (an approver role, via ${w.viaGroups.join(", ")})`);
+  }
   const reason =
     `${event.kind} (${event.actor}) reconciled group-derived roles for '${subject?.email ?? userId}': ` +
     `asserted [${detail.asserted.join(", ") || "none"}]` +
@@ -350,6 +368,22 @@ async function auditReconciliation(
     ` — ${changes.length > 0 ? changes.join("; ") : "no change"}` +
     ` (admin-direct assignments untouched)`;
 
+  // one deny row per withheld approver role, as the JIT default role's `sso-default-role-withheld`
+  for (const w of detail.withheld) {
+    await db.insert(auditLog).values({
+      userId: event.actorUserId ?? NIL_UUID,
+      objectType: "group_role_mapping",
+      objectId: userId,
+      effect: "deny",
+      ruleId: "group-role-withheld",
+      ruleChain: [],
+      reason:
+        `${event.kind} (${event.actor}) did NOT add '${subject?.email ?? userId}' to role '${w.roleName ?? w.roleId}' ` +
+        `(via ${w.viaGroups.join(", ")}): it is an approver role, and an identity provider's group never joins an ` +
+        "approver pool silently (an admin may assign it, with a step-up)",
+      detail: { phase: "group-role-reconcile", event: event.kind, source, roleId: w.roleId, viaGroups: w.viaGroups },
+    });
+  }
   await db.insert(auditLog).values({
     userId: event.actorUserId ?? NIL_UUID,
     objectType: "group_role_mapping",

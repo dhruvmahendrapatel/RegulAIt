@@ -273,7 +273,14 @@ describe("who may act — an admin or the CURRENT steward", () => {
     expect((await review(id, successor.auth)).statusCode).toBe(403);
 
     expect((await review(id, steward.auth)).statusCode).toBe(200);
-    const handOver = await patch(id, { stewardUserId: outsider.id, successorUserId: successor.id }, steward.auth);
+    // B4S-01: a hand-over is an owner change and needs an `owner_change` step-up,
+    // which an API key can never give — the steward is refused by name, and the
+    // hand-over goes through an admin (zz-b4s-stewardship-step-up proves the
+    // steward's own stepped-up hand-over in a browser session)
+    const keyHandOver = await patch(id, { stewardUserId: outsider.id, successorUserId: successor.id }, steward.auth);
+    expect(keyHandOver.statusCode, keyHandOver.body).toBe(403);
+    expect(keyHandOver.json()).toMatchObject({ error: "step_up_required", actionKind: "owner_change", methods: [] });
+    const handOver = await patch(id, { stewardUserId: outsider.id, successorUserId: successor.id });
     expect(handOver.statusCode, handOver.body).toBe(200);
     // the PREVIOUS steward lost the right with the hand-over
     expect((await patch(id, { stewardUserId: steward.id }, steward.auth)).statusCode).toBe(403);

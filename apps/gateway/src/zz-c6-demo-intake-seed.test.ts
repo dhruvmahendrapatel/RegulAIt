@@ -11,7 +11,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiPolicyAcknowledgements, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, workflowTemplates, type Db } from "@regulait/db";
+import { aiPolicyAcknowledgements, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, users, workflowTemplates, type Db } from "@regulait/db";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import type { DemoIntakeFixtures, IntakeAssistRequest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { DEMO_AUP_EVIDENCE, DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
@@ -103,6 +104,14 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // B4S-06 (M-068): the seeder enrolled Ada's authenticator on this shared
+  // database; an admin who can step up would end first-admin setup for later suites
+  const ada = await db.select({ id: users.id }).from(users).where(eq(users.email, "admin@regulait.local"));
+  await forgetStepUpMethodsForTest(db, ada.map((u) => u.id));
+  // ...and the one-time password the seeder issued with that enrolment, so the next
+  // seeder on this database enrols her again through the real routes (it never
+  // overwrites a password somebody holds)
+  for (const u of ada) await db.update(users).set({ passwordHash: null, mustChangePassword: false }).where(eq(users.id, u.id));
   // the seeder routes use-case sign-offs to Avery with an intake VARIANT
   // (ADR-0165); on a shared database that would redirect every later test
   // file's use-case sign-off, so retire it here (M-040 order independence)

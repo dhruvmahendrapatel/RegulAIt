@@ -25,8 +25,10 @@ const started = Date.now();
 for (const [name, file] of steps) {
   console.log(`\n=== ${name} ===`);
   // ADR-0181 FX3: the seed runs only on an explicit demo signal; this command
-  // IS the demo, so it says so
-  const args = file === "seed.js" ? [path.join(here, file), "--seed-demo"] : [path.join(here, file)];
+  // IS the demo, so it says so.
+  // B4S-06: and the seed opens the assurance run's guardrail window during
+  // first-admin setup (see seed.ts), which demo:intake keeps and closes
+  const args = file === "seed.js" ? [path.join(here, file), "--seed-demo", "--open-assurance-window"] : [path.join(here, file)];
   const r = spawnSync(process.execPath, args, { stdio: "inherit", env: process.env });
   if (r.status !== 0) {
     console.error(`\ndemo:prepare stopped: ${name} exited ${r.status ?? r.signal}`);

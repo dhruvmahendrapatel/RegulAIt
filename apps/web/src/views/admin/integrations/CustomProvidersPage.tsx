@@ -65,6 +65,7 @@ import { useAdminInvalidate, useAgents, useCustomProviders, useEgressAllowHosts 
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import c from "./customProviders.module.css";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const WIRE_PROTOCOLS: Array<{ v: CustomWireProtocol; l: string }> = [
   { v: "openai_chat", l: "openai_chat — /chat/completions (Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI)" },
@@ -800,7 +801,7 @@ function ProvidersCard(props: {
     setSubject(p);
     void act.run(
       p.name,
-      () => api.post(`/v1/custom-model-providers/${p.id}/enabled`, { enabled }),
+      () => withStepUp((h) => stepUpApi.post(`/v1/custom-model-providers/${p.id}/enabled`, { enabled }, h)),
       {
         title: enabled ? "Provider enabled" : "Provider disabled",
         reason: enabled

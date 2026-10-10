@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   randomBytes,
   scryptSync,
@@ -26,11 +27,14 @@ import {
   roles,
   samlProviders,
   sql,
+  ssoReauthRequests,
   users,
   type Db,
   type IpPolicy,
   type OrgSettingsRow,
   type SessionOrigin,
+  webauthnChallenges,
+  webauthnCredentials,
 } from "@regulait/db";
 import {
   BROKER_IDP_VALUES,
@@ -52,6 +56,21 @@ import {
   oidcJitDomainsMissing,
 } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
+import {
+  accountHasStepUpMethodLocked,
+  admitAuthenticatorEnrolment,
+  CHANGED_CONCURRENTLY,
+  stepUpCallerOf,
+  claimSsoReauthByState,
+  finishSsoReauth,
+  isSsoReauthState,
+  requireStepUp,
+  STEP_UP_CEREMONY_SECONDS,
+  stepUpResultPage,
+  type SsoReauthStart,
+  type SsoReauthStartArgs,
+} from "./step-up.js";
+import { grantJitDefaultRole, isApproverRole } from "./approval-pool.js";
 import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -63,6 +82,7 @@ import { loadEgressAllowList } from "./custom-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 import { hashToken } from "./token-hash.js";
 import { isVirtualKeyToken, resolveVirtualKey, touchVirtualKey } from "./virtual-keys.js";
+import { resolveEngineCredential } from "./engine-runner-auth.js";
 import {
   anchorLinkedUser,
   anchorOfRequest,
@@ -104,11 +124,21 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
    *  ADR-0066's model surfaces; 'pdp' is `POST /v1/authz/check` and nothing
-   *  else. Set only when `via === "virtual-key"`. */
-  virtualKeyPurpose?: "dispatch" | "pdp";
+   *  else; ADR-0187 'engine' is the compat model routes, pinned to one project.
+   *  Set only when `via === "virtual-key"`. */
+  virtualKeyPurpose?: "dispatch" | "pdp" | "engine";
+  /** ADR-0187: the runner (`via === "engine-runner"`) or enrolment token
+   * (`via === "engine-enrollment"`) a sidecar runner presented, and its engine.
+   * Neither is a user: `userId` is null and `isAdmin` false, and each reaches
+   * only its own route allow-list (`ENGINE_RUNNER_ROUTES`). */
+  engineRunnerId?: string;
+  engineEnrollmentTokenId?: string;
+  /** PR #205 review [54]: the enrolment token was already spent (it can only replay its registration) */
+  engineEnrollmentSpent?: boolean;
+  engineId?: string;
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */
   virtualKeyId?: string;
@@ -141,6 +171,10 @@ export interface AuthContext {
  */
 export const AUTH_REFUSALS = [
   "disabled",
+  // ADR-0187: a revoked runner token, and an enrolment token that is unknown,
+  // used or expired (only its holder ever sees either)
+  "engine_runner_revoked",
+  "engine_enrollment_invalid",
   "virtual_key_revoked",
   "virtual_key_expired",
   "api_key_expired",
@@ -157,6 +191,9 @@ export function isAuthRefusal(x: AuthContext | null | AuthRefusal): x is AuthRef
  * same credential. */
 export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
   disabled: "this account has been deactivated — an admin can reactivate it",
+  engine_runner_revoked: "this engine runner has been revoked and authenticates nothing — enrol it again",
+  engine_enrollment_invalid:
+    "this enrolment token is unknown, already used or expired — mint a new one on the Engines page",
   virtual_key_revoked: "this virtual key has been revoked and authenticates nothing",
   virtual_key_expired: "this virtual key has expired — its issuer can mint a new one",
   api_key_expired:
@@ -203,6 +240,13 @@ export async function authenticate(
   // silently carried admin would be the exact opposite of what it is for. Its
   // `userId` IS the owner, so every downstream entitlement check evaluates the
   // owner's grants, which is what makes the key a CEILING rather than a bypass.
+  // ADR-0187 — SIDECAR ENGINE RUNNERS. The `rge_` (runner) and `rgee_`
+  // (one-time enrolment) prefixes are disjoint from `rgl_`/`rglv_`, so this
+  // branch changes no other credential's path. Neither resolves to a user and
+  // neither is admin; the route hook then confines each to its allow-list.
+  const engineCred = await resolveEngineCredential(db, token);
+  if (engineCred !== null) return engineCred;
+
   if (isVirtualKeyToken(token)) {
     const resolved = await resolveVirtualKey(db, token);
     if (!resolved.ok) {
@@ -1031,6 +1075,110 @@ export async function beginSamlTotpStepUp(
   return { token, maxAgeSeconds: MFA_PENDING_MINUTES * 60 };
 }
 
+/** ADR-0043: one issuer-URL egress decision against the SAME default-deny
+ * `egress_allow_hosts` table every other guarded surface uses. An OIDC
+ * issuer is configured once, by an admin, at setup — one allow entry is a
+ * one-time act, not per-call friction — so the ordinary allow-list posture
+ * applies (NOT the MCP private-ranges-open default). */
+async function oidcIssuerDecision(db: Db, issuerUrl: string) {
+  const allowList = await loadEgressAllowList(db);
+  const decision = await checkEgress(issuerUrl, { allowList });
+  return { decision, allowList };
+}
+
+/** discovery against the provider's issuer — now THROUGH the egress guard
+ * (ADR-0043). The issuer is re-validated on every discovery (a write-time
+ * verdict is not a fact about the future, and rows written before this
+ * guard existed are in the live database right now), and the discovery +
+ * token + JWKS fetches all ride `createGuardedFetch`, so they inherit the
+ * ADR-0034 pinned transport and redirect refusal. `allowInsecureRequests`
+ * for an http:// issuer is no longer free: checkEgress only passes plaintext
+ * http when the issuer host's allow entry set allowPlaintextHttp, so the
+ * insecure opt-in is a per-host admin decision, not a side effect of typing
+ * 'http://'. A refusal throws OidcEgressBlockedError with nothing leaving
+ * the box, audited. */
+export async function oidcDiscoveryFor(db: Db, dataKey: string | undefined, provider: typeof oidcProviders.$inferSelect) {
+  if (!dataKey) throw new Error("REGULAIT_DATA_KEY required for OIDC");
+  const { decision, allowList } = await oidcIssuerDecision(db, provider.issuerUrl);
+  if (!decision.ok) {
+    await auditAuth(db, null, provider.id, "oidc-egress-blocked", "deny",
+      `OIDC discovery refused for provider '${provider.name}': ${decision.reason}`,
+      { phase: "oidc-discovery", provider: provider.name, issuerUrl: provider.issuerUrl, code: decision.code },
+      "oidc_provider");
+    throw new OidcEgressBlockedError(decision);
+  }
+  const secret = decryptSecret(dataKey, provider.clientSecretCiphertext);
+  return oidc.discovery(new URL(provider.issuerUrl), provider.clientId, secret, undefined, {
+    // the guarded fetch is assigned onto the resolved Configuration too, so
+    // the token-endpoint and JWKS requests of the login flow are guarded —
+    // not just the discovery document fetch
+    [oidc.customFetch]: createGuardedFetch({ allowList }),
+    // only reachable for http:// when the host's allow entry opted in —
+    // checkEgress refused plaintext without allowPlaintextHttp above
+    ...(decision.protocol === "http:" ? { execute: [oidc.allowInsecureRequests] } : {}),
+  });
+}
+
+/**
+ * ADR-0186 A — START a fresh OIDC login for a step-up (called by
+ * `POST /v1/auth/step-up/options` for a user whose linked identity is at this
+ * provider). The SAME guarded discovery, redirect URI, PKCE, state and nonce
+ * as a sign-in, plus `prompt=login` and `max_age=0` so the provider must
+ * authenticate the person again now. The state is written to
+ * `sso_reauth_requests` (never `oidc_login_states`), so the callback can tell
+ * a step-up from a sign-in, and is bound to this browser by the same HMAC
+ * cookie as a sign-in.
+ */
+export async function beginOidcReauth(
+  db: Db,
+  dataKey: string | undefined,
+  req: FastifyRequest,
+  args: SsoReauthStartArgs,
+): Promise<SsoReauthStart> {
+  const [provider] = await db
+    .select()
+    .from(oidcProviders)
+    .where(and(eq(oidcProviders.id, args.providerId), eq(oidcProviders.enabled, true)));
+  if (!provider) throw new Error("the linked OIDC provider is not enabled");
+  const config = await oidcDiscoveryFor(db, dataKey, provider);
+  const codeVerifier = oidc.randomPKCECodeVerifier();
+  const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
+  const state = oidc.randomState();
+  const nonce = oidc.randomNonce();
+  const redirectUri = `${deploymentBaseUrl(req)}/auth/oidc/callback`;
+  await db.insert(ssoReauthRequests).values({
+    stepUpId: args.stepUpId,
+    userId: args.userId,
+    sessionId: args.sessionId,
+    providerKind: "oidc",
+    oidcProviderId: provider.id,
+    state,
+    nonce,
+    codeVerifier,
+    redirectUri,
+    actionDigest: args.actionDigest,
+    expiresAt: sql`now() + make_interval(secs => ${STEP_UP_CEREMONY_SECONDS})`,
+  });
+  const authUrl = oidc.buildAuthorizationUrl(config, {
+    redirect_uri: redirectUri,
+    scope: "openid email profile",
+    state,
+    nonce,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    prompt: "login",
+    max_age: "0",
+  });
+  return {
+    redirectUrl: authUrl.href,
+    setCookie: ssoBindingCookie(OIDC_BINDING_COOKIE, ssoBrowserBinding(dataKey, state), {
+      path: "/auth/oidc",
+      secure: requestIsSecure(req),
+      crossSite: false,
+    }),
+  };
+}
+
 export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRouteOptions = {}) {
   const setSession = async (
     reply: FastifyReply,
@@ -1218,7 +1366,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     // consume: the pending token is single-use, the step is burned forever
     await db.delete(authMfaPending).where(eq(authMfaPending.id, pending.id));
-    await db.update(users).set({ totpLastUsedStep: step }).where(eq(users.id, user.id));
+    // ADR-0186 A (round 5): the step is burned only against the authenticator the code was
+    // verified with, and only forward — a concurrent MFA clear or rotation, or a replay, wins
+    const burned = await db
+      .update(users)
+      .set({ totpLastUsedStep: step })
+      .where(
+        and(
+          eq(users.id, user.id),
+          eq(users.totpEnabled, true),
+          eq(users.totpSecretCiphertext, user.totpSecretCiphertext),
+          sql`(${users.totpLastUsedStep} IS NULL OR ${users.totpLastUsedStep} < ${step})`,
+        ),
+      )
+      .returning({ id: users.id });
+    if (burned.length === 0) return reply.status(401).send({ error: "invalid_code" });
     // ADR-0028: the second factor does not change WHICH credential established
     // the session — a MFA-completed login is still 'password' origin, and a
     // SAML login that stepped up to TOTP is still 'saml' (ADR-0174).
@@ -1276,6 +1438,17 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         error: "virtual_key_not_exchangeable",
         detail:
           "a virtual key is a scoped, budgeted dispatch credential and cannot be exchanged for a browser session — that would hand back the full identity the key exists to narrow",
+      });
+    }
+    // ADR-0187 — AN ALLOW-LIST, NOT ANOTHER DENY. Only an API key or the
+    // bootstrap token buys a browser session here. An engine runner or
+    // enrolment token resolves to NO user, and a session with no user is the
+    // bootstrap operator's (admin); exchanging one would turn a credential
+    // confined to four runner routes into an administrator.
+    if (ctx.via !== "api-key" && ctx.via !== "bootstrap") {
+      return reply.status(403).send({
+        error: "credential_not_exchangeable",
+        detail: "only a user's API key can be exchanged for a browser session; this credential is confined to its own routes",
       });
     }
     const org = await loadOrgSettings(db);
@@ -1476,6 +1649,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
   });
 
   // ---- TOTP self-service ---------------------------------------------------
+  // ADR-0186 A (PR #198 review round 6): an authenticator app is a way to step
+  // up, so adding one is admitted by THE SAME rule as adding a passkey
+  // (`admitAuthenticatorEnrolment`): a `passkey_manage` step-up when the account
+  // already has a way to step up, else a FRESH human sign-in. Enrolment issues a
+  // single-use ticket (a `register` ceremony row whose challenge is derived from
+  // THIS secret's ciphertext) bound to the enrolling session; activation must
+  // present the same session, the same secret, an unexpired unused ticket, and —
+  // for a ticket admitted as the account's first method — re-checks under the
+  // user's row lock that the account still has no way to step up.
+  const TOTP_SESSION_REQUIRED = {
+    error: "browser_session_required",
+    detail: "only a person signed in to RegulAIt in a browser can set up an authenticator app — an API key or the bootstrap token cannot",
+  } as const;
+  /** the ticket's challenge: names THIS secret (its ciphertext carries a random IV), never the secret itself */
+  const totpTicketOf = (ciphertext: string) => `totp-${createHash("sha256").update(ciphertext).digest("base64url")}`;
+
   app.post("/auth/totp/enroll", async (req, reply) => {
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "no_user_identity" });
@@ -1485,14 +1674,36 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "TOTP secrets are stored encrypted — set REGULAIT_DATA_KEY on the gateway first",
       });
     }
+    const caller = stepUpCallerOf(req);
+    if (caller.kind !== "session" || caller.userId !== userId) return reply.status(403).send(TOTP_SESSION_REQUIRED);
     const [user] = await db.select().from(users).where(eq(users.id, userId));
     if (!user) return reply.status(404).send({ error: "unknown_user" });
     if (user.totpEnabled) return reply.status(409).send({ error: "totp_already_enabled" });
+    const admitted = await admitAuthenticatorEnrolment(db, req, reply, userId, caller.sessionId, "totp");
+    if (!admitted) return reply;
     const secret = generateTotpSecret();
-    await db
-      .update(users)
-      .set({ totpSecretCiphertext: encryptSecret(opts.dataKey, secret), totpEnabled: false, totpLastUsedStep: null })
-      .where(eq(users.id, userId));
+    const ciphertext = encryptSecret(opts.dataKey, secret);
+    const written = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [locked] = await tx.select({ totpEnabled: users.totpEnabled }).from(users).where(eq(users.id, userId)).for("update");
+      if (!locked) return "gone" as const;
+      if (locked.totpEnabled) return "enabled" as const;
+      await tx
+        .update(users)
+        .set({ totpSecretCiphertext: ciphertext, totpEnabled: false, totpLastUsedStep: null })
+        .where(eq(users.id, userId));
+      await tx.insert(webauthnChallenges).values({
+        userId,
+        sessionId: caller.sessionId,
+        purpose: "register",
+        challenge: totpTicketOf(ciphertext),
+        firstPasskey: admitted === "first_method",
+        expiresAt: sql`now() + make_interval(secs => ${STEP_UP_CEREMONY_SECONDS})`,
+      });
+      return "ok" as const;
+    });
+    if (written === "gone") return reply.status(404).send({ error: "unknown_user" });
+    if (written === "enabled") return reply.status(409).send({ error: "totp_already_enabled" });
     // the secret + URI are shown exactly ONCE, like every secret in the product
     return { secret, otpauthUri: otpauthUri(user.email, secret) };
   });
@@ -1502,16 +1713,57 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "no_user_identity" });
     if (!opts.dataKey) return reply.status(409).send({ error: "data_key_required" });
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
-    if (!user?.totpSecretCiphertext) return reply.status(409).send({ error: "not_enrolled" });
-    if (user.totpEnabled) return reply.status(409).send({ error: "totp_already_enabled" });
-    const secret = decryptSecret(opts.dataKey, user.totpSecretCiphertext);
-    const step = verifyTotp(secret, body.code, user.totpLastUsedStep);
-    if (step === null) return reply.status(401).send({ error: "invalid_code" });
-    await db.update(users).set({ totpEnabled: true, totpLastUsedStep: step }).where(eq(users.id, userId));
+    const caller = stepUpCallerOf(req);
+    if (caller.kind !== "session" || caller.userId !== userId) return reply.status(403).send(TOTP_SESSION_REQUIRED);
+    const dataKey = opts.dataKey;
+    const out = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [user] = await tx.select().from(users).where(eq(users.id, userId)).for("update");
+      if (!user?.totpSecretCiphertext) return { status: 409, body: { error: "not_enrolled" } } as const;
+      if (user.totpEnabled) return { status: 409, body: { error: "totp_already_enabled" } } as const;
+      const [ticket] = await tx
+        .select({ id: webauthnChallenges.id, firstPasskey: webauthnChallenges.firstPasskey })
+        .from(webauthnChallenges)
+        .where(
+          and(
+            eq(webauthnChallenges.userId, userId),
+            eq(webauthnChallenges.sessionId, caller.sessionId),
+            eq(webauthnChallenges.purpose, "register"),
+            eq(webauthnChallenges.challenge, totpTicketOf(user.totpSecretCiphertext)),
+            isNull(webauthnChallenges.usedAt),
+            gt(webauthnChallenges.expiresAt, sql`now()`),
+          ),
+        )
+        .for("update");
+      if (!ticket) {
+        return {
+          status: 409,
+          body: {
+            error: "totp_enrolment_not_found",
+            detail:
+              "no authenticator setup is waiting for this sign-in (it expires after 5 minutes and belongs to the " +
+              "session that started it) — start the setup again",
+          },
+        } as const;
+      }
+      // a first-method ticket: the account must STILL have no way to step up
+      if (ticket.firstPasskey && (await accountHasStepUpMethodLocked(tx, userId, req))) {
+        return { status: CHANGED_CONCURRENTLY.status, body: CHANGED_CONCURRENTLY.body } as const;
+      }
+      const secret = decryptSecret(dataKey, user.totpSecretCiphertext);
+      const step = verifyTotp(secret, body.code, user.totpLastUsedStep);
+      if (step === null) return { status: 401, body: { error: "invalid_code" } } as const;
+      await tx.update(webauthnChallenges).set({ usedAt: sql`now()` }).where(eq(webauthnChallenges.id, ticket.id));
+      await tx
+        .update(users)
+        .set({ totpEnabled: true, totpLastUsedStep: step })
+        .where(and(eq(users.id, userId), eq(users.totpSecretCiphertext, user.totpSecretCiphertext)));
+      return { status: 200, email: user.email } as const;
+    });
+    if (out.status !== 200) return reply.status(out.status).send(out.body);
     await auditAuth(db, userId, userId, "mfa-enabled", "allow",
-      `user '${user.email}' enabled TOTP MFA`,
-      { phase: "mfa-enabled", email: user.email });
+      `user '${out.email}' enabled TOTP MFA`,
+      { phase: "mfa-enabled", email: out.email });
     return { ok: true, totpEnabled: true };
   });
 
@@ -1563,6 +1815,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "this user already has a password — pass force:true to overwrite it (audited reset)",
       });
     }
+    // B4S-02 (owner principle): issuing a password lets the issuer sign in as that
+    // account (and decide as it) — a settings_relax step-up bound to the user. Also for
+    // the caller's OWN account (PR #198 round 5): a stolen admin session or key must
+    // not mint itself a password login (and then its own authenticator) unproven
+    if (
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { password: "issued" } } })).ok
+    ) {
+      return reply;
+    }
     // generated server-side: 18 random bytes -> 24 url-safe chars, always
     // passes any policy up to length 24 / 3 classes
     const password = "Rg1-" + randomBytes(18).toString("base64url");
@@ -1596,6 +1857,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     if (!target.totpEnabled && !target.totpSecretCiphertext) {
       return reply.status(409).send({ error: "totp_not_enabled" });
+    }
+    // B4S-02 (owner principle): clearing a second factor removes that account's proof of
+    // identity — a settings_relax step-up bound to the user, the caller's own account
+    // included (round 5; the self-service path is POST /auth/totp/disable, which re-proves
+    // the password and a current code)
+    if (
+      !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { userId, values: { mfa: "cleared" } } })).ok
+    ) {
+      return reply;
     }
     await db
       .update(users)
@@ -1729,49 +1999,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // client_secret_ciphertext deliberately absent: secrets are WRITE-ONLY
   });
 
-  /** ADR-0043: one issuer-URL egress decision against the SAME default-deny
-   * `egress_allow_hosts` table every other guarded surface uses. An OIDC
-   * issuer is configured once, by an admin, at setup — one allow entry is a
-   * one-time act, not per-call friction — so the ordinary allow-list posture
-   * applies (NOT the MCP private-ranges-open default). */
-  const oidcIssuerDecision = async (issuerUrl: string) => {
-    const allowList = await loadEgressAllowList(db);
-    const decision = await checkEgress(issuerUrl, { allowList });
-    return { decision, allowList };
-  };
-
-  /** discovery against the provider's issuer — now THROUGH the egress guard
-   * (ADR-0043). The issuer is re-validated on every discovery (a write-time
-   * verdict is not a fact about the future, and rows written before this
-   * guard existed are in the live database right now), and the discovery +
-   * token + JWKS fetches all ride `createGuardedFetch`, so they inherit the
-   * ADR-0034 pinned transport and redirect refusal. `allowInsecureRequests`
-   * for an http:// issuer is no longer free: checkEgress only passes plaintext
-   * http when the issuer host's allow entry set allowPlaintextHttp, so the
-   * insecure opt-in is a per-host admin decision, not a side effect of typing
-   * 'http://'. A refusal throws OidcEgressBlockedError with nothing leaving
-   * the box, audited. */
-  const oidcConfigFor = async (provider: typeof oidcProviders.$inferSelect) => {
-    if (!opts.dataKey) throw new Error("REGULAIT_DATA_KEY required for OIDC");
-    const { decision, allowList } = await oidcIssuerDecision(provider.issuerUrl);
-    if (!decision.ok) {
-      await auditAuth(db, null, provider.id, "oidc-egress-blocked", "deny",
-        `OIDC discovery refused for provider '${provider.name}': ${decision.reason}`,
-        { phase: "oidc-discovery", provider: provider.name, issuerUrl: provider.issuerUrl, code: decision.code },
-        "oidc_provider");
-      throw new OidcEgressBlockedError(decision);
-    }
-    const secret = decryptSecret(opts.dataKey, provider.clientSecretCiphertext);
-    return oidc.discovery(new URL(provider.issuerUrl), provider.clientId, secret, undefined, {
-      // the guarded fetch is assigned onto the resolved Configuration too, so
-      // the token-endpoint and JWKS requests of the login flow are guarded —
-      // not just the discovery document fetch
-      [oidc.customFetch]: createGuardedFetch({ allowList }),
-      // only reachable for http:// when the host's allow entry opted in —
-      // checkEgress refused plaintext without allowPlaintextHttp above
-      ...(decision.protocol === "http:" ? { execute: [oidc.allowInsecureRequests] } : {}),
-    });
-  };
+  /** ADR-0043 discovery through the egress guard — the module-level
+   * `oidcDiscoveryFor` (moved out unchanged so the ADR-0186 fresh-login
+   * step-up uses the very same guarded discovery) */
+  const oidcConfigFor = (provider: typeof oidcProviders.$inferSelect) => oidcDiscoveryFor(db, opts.dataKey, provider);
 
   // REGULAIT_PUBLIC_URL when set, else the request's scheme and Host
   const baseUrlFor = (req: FastifyRequest): string => deploymentBaseUrl(req);
@@ -1941,6 +2172,78 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     return beginOidcLogin(req, reply, providerId, returnTo, rawIdp);
   });
 
+  /**
+   * ADR-0186 A — the return leg of a fresh OIDC login made for a STEP-UP. No
+   * session is minted and none is read (the callback is a cross-site
+   * navigation). The state is claimed once; the browser binding, PKCE, nonce
+   * and token validation are a sign-in's; then the identity the provider
+   * returned must be LINKED to the user who asked (403
+   * `sso_reauth_identity_mismatch`), and its `auth_time` must be after the
+   * request (409 `sso_reauth_stale`). The grant is collected by the session
+   * that started the step-up (`GET /v1/auth/step-up/:stepUpId`).
+   */
+  const completeOidcReauth = async (req: FastifyRequest, reply: FastifyReply, state: string) => {
+    const row = await claimSsoReauthByState(db, "oidc", state);
+    if (!row) return stepUpResultPage(req, reply, 409, "sso_reauth_stale", null);
+    const presentedBinding = readCookie(req.headers.cookie, OIDC_BINDING_COOKIE);
+    if (!ssoBindingMatches(presentedBinding, ssoBrowserBinding(opts.dataKey, state))) {
+      await auditAuth(db, null, row.userId, "oidc-reauth-browser-mismatch", "deny",
+        "OIDC step-up callback refused: the fresh login was started in a different browser — request consumed, no grant",
+        { phase: "oidc-reauth-callback", providerId: row.oidcProviderId, stepUpId: row.stepUpId, bindingCookiePresent: presentedBinding !== null });
+      return reply.status(401).send({
+        error: "login_not_bound_to_this_browser",
+        detail: "this sign-in was started in a different browser session — start again from RegulAIt",
+      });
+    }
+    const [provider] = await db
+      .select()
+      .from(oidcProviders)
+      .where(and(eq(oidcProviders.id, row.oidcProviderId!), eq(oidcProviders.enabled, true)));
+    if (!provider) return stepUpResultPage(req, reply, 409, "sso_reauth_stale", row.stepUpId);
+    let config: oidc.Configuration;
+    try {
+      config = await oidcConfigFor(provider);
+    } catch (err) {
+      if (err instanceof OidcEgressBlockedError) {
+        return reply.status(403).send({ error: "egress_blocked", code: err.decision.code, detail: err.decision.reason });
+      }
+      throw err;
+    }
+    const currentUrl = new URL(row.redirectUri);
+    currentUrl.search = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    let claims: oidc.IDToken;
+    try {
+      const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
+        pkceCodeVerifier: row.codeVerifier!,
+        expectedState: state,
+        expectedNonce: row.nonce,
+        idTokenExpected: true,
+      });
+      const c = tokens.claims();
+      if (!c) throw new Error("no id_token claims");
+      claims = c;
+    } catch (err) {
+      await auditAuth(db, null, row.userId, "oidc-reauth-failed", "deny",
+        `OIDC step-up token exchange/validation failed for provider '${provider.name}'`,
+        { phase: "oidc-reauth-callback", provider: provider.name, stepUpId: row.stepUpId, error: err instanceof Error ? err.message : String(err) });
+      return reply.status(401).send({ error: "oidc_validation_failed" });
+    }
+    const anchor: FederatedAnchor = {
+      ref: { kind: "oidc", id: provider.id, name: provider.name },
+      issuer: typeof claims.iss === "string" ? claims.iss : provider.issuerUrl,
+      subjectFormat: "",
+      subject: String(claims.sub),
+    };
+    const authTime = typeof claims.auth_time === "number" && Number.isFinite(claims.auth_time) ? new Date(claims.auth_time * 1000) : null;
+    const verdict = await finishSsoReauth(db, row, {
+      linkedUserId: await anchorLinkedUser(db, anchor),
+      authTime,
+      providerName: provider.name,
+    });
+    if (!verdict.ok) return stepUpResultPage(req, reply, verdict.status, verdict.error, row.stepUpId);
+    return stepUpResultPage(req, reply, 200, "ok", row.stepUpId);
+  };
+
   // step 2: the IdP redirects back — validate state, PKCE and nonce, map the
   // VERIFIED email claim, mint the SAME session cookie password login mints.
   app.get("/auth/oidc/callback", async (req, reply) => {
@@ -1955,7 +2258,12 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .where(and(eq(oidcLoginStates.state, state), gt(oidcLoginStates.expiresAt, now)))
       .returning();
     const login = claimed[0];
-    if (!login) return reply.status(401).send({ error: "invalid_or_expired_state" });
+    if (!login) {
+      // ADR-0186 A: a fresh login started for a STEP-UP lives in its own table
+      // and is completed by its own handler; a sign-in state never reaches it
+      if (await isSsoReauthState(db, "oidc", state)) return completeOidcReauth(req, reply, state);
+      return reply.status(401).send({ error: "invalid_or_expired_state" });
+    }
     // ADR-0167 (AUTHZ-04): the row is claimed either way (single-use holds),
     // but it completes a login only in the browser that opened it. Refused
     // BEFORE the token exchange, so a planted callback costs the IdP nothing.
@@ -2117,15 +2425,32 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         .values({ email, displayName, isAdmin: false })
         .returning();
       user = created!;
-      if (provider.defaultRoleId) {
-        await db
-          .insert(roleAssignments)
-          .values({ userId: user.id, roleId: provider.defaultRoleId })
-          .onConflictDoNothing();
+      // decision 27 (finding 42): the grant's outcome is carried into the provisioning audit row, so the
+      // chain never says "with the default role" for a role that was withheld
+      const roleGrant = provider.defaultRoleId ? await grantJitDefaultRole(db, user.id, provider.defaultRoleId) : null;
+      if (provider.defaultRoleId && roleGrant === "withheld") {
+        await auditAuth(db, null, user.id, "sso-default-role-withheld", "deny",
+          `user '${email}' JIT-provisioned via OIDC provider '${provider.name}' WITHOUT its default role: the role is an ` +
+          "approver role, and an identity the IdP mints never joins an approver pool silently (an admin may assign it, with a step-up)",
+          { phase: "oidc-jit", provider: provider.name, email, roleId: provider.defaultRoleId });
       }
       await auditAuth(db, null, user.id, "oidc-user-provisioned", "allow",
-        `user '${email}' JIT-provisioned via OIDC provider '${provider.name}'${provider.defaultRoleId ? " with the provider's default role" : ""} (never admin)`,
-        { phase: "oidc-jit", provider: provider.name, email, sub: claims.sub, defaultRoleId: provider.defaultRoleId });
+        `user '${email}' JIT-provisioned via OIDC provider '${provider.name}'` +
+          (roleGrant === "granted"
+            ? " with the provider's default role"
+            : roleGrant === "withheld"
+              ? " WITHOUT the provider's default role (withheld: it is an approver role)"
+              : "") +
+          " (never admin)",
+        {
+          phase: "oidc-jit",
+          provider: provider.name,
+          email, sub: claims.sub,
+          // the role the account actually got (null when none was granted), and what happened to the provider's default
+          defaultRoleId: roleGrant === "granted" ? provider.defaultRoleId : null,
+          defaultRoleGrant: roleGrant ?? "none",
+          ...(roleGrant === "withheld" ? { withheldRoleId: provider.defaultRoleId } : {}),
+        });
       await recordFederatedLink(db, anchor, user.id, "jit");
     }
 
@@ -2242,6 +2567,27 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       const step = verifyTotp(decryptSecret(opts.dataKey, user.totpSecretCiphertext), body.code, user.totpLastUsedStep);
       if (step === null) return failProof("wrong_code");
       totpStepUsed = step;
+    }
+    // ADR-0186 A (PR #198 review round 6): a linked identity is a way to step up, so
+    // adding one is a credential admission. This proof checks the password and the
+    // authenticator app; an account that also holds a passkey has a factor this
+    // form cannot check, so it is linked only by an administrator's approval —
+    // never by the password alone. Decided after the proof (nothing leaks to a guesser).
+    const [passkey] = await db
+      .select({ id: webauthnCredentials.id })
+      .from(webauthnCredentials)
+      .where(and(eq(webauthnCredentials.userId, user.id), isNull(webauthnCredentials.revokedAt)))
+      .limit(1);
+    if (passkey) {
+      await auditAuth(db, null, user.id, "federated-link-proof-refused", "deny",
+        `link proof for '${user.email}' refused: the account holds a passkey, which this proof cannot check — request left pending for an administrator`,
+        { phase: "link-confirm", linkRequestId: pending.id, provider: providerName, sub: pending.subject, why: "passkey_holder" });
+      return reply.status(403).send({
+        error: "link_needs_admin_approval",
+        detail:
+          "this account is protected by a passkey, so linking a single sign-on identity to it needs an administrator's " +
+          "approval — ask an administrator to approve the pending link request",
+      });
     }
     // ADR-0174 (finding 12): the identity-already-linked refusal comes BEFORE
     // the request is spent, so a refused confirm leaves it pending (an admin
@@ -2471,13 +2817,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+      // ADR-0186 A (round 5): a default role that is an approver role would mint JIT identities into
+      // an approver pool — naming it needs the settings_relax a role assignment needs (JIT withholds it
+      // anyway, decided under the approver-role lock: grantJitDefaultRole)
+      if (
+        (await isApproverRole(db, body.defaultRoleId)) &&
+        !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ssoDefaultRole: { provider: "oidc", roleId: body.defaultRoleId } } } })).ok
+      ) {
+        return reply;
+      }
     }
     // ADR-0043: WRITE-TIME egress check against the ordinary default-deny
     // allow-list — a non-permitted issuer is an honest 400 before the row is
     // stored, audited. (Discovery re-checks every login; this is the earliest
     // honest failure.)
     {
-      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      const { decision } = await oidcIssuerDecision(db, body.issuerUrl);
       if (!decision.ok) {
         await auditAuth(db, req.authCtx.userId, null, "oidc-egress-blocked", "deny",
           `OIDC provider '${body.name}' registration refused: issuer ${decision.reason}`,
@@ -2539,10 +2894,19 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+      // ADR-0186 A (round 5): a default role that is an approver role would mint JIT identities into
+      // an approver pool — naming it needs the settings_relax a role assignment needs (JIT withholds it
+      // anyway, decided under the approver-role lock: grantJitDefaultRole)
+      if (
+        (await isApproverRole(db, body.defaultRoleId)) &&
+        !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { values: { ssoDefaultRole: { provider: "oidc", roleId: body.defaultRoleId } } } })).ok
+      ) {
+        return reply;
+      }
     }
     // ADR-0043: moving the issuer re-runs the write-time egress check
     if (body.issuerUrl !== undefined) {
-      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      const { decision } = await oidcIssuerDecision(db, body.issuerUrl);
       if (!decision.ok) {
         await auditAuth(db, req.authCtx.userId, providerId, "oidc-egress-blocked", "deny",
           `OIDC provider '${existing.name}' issuer change refused: ${decision.reason}`,

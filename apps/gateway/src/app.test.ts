@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { createDb, eq, runMigrations, users, type Db } from "@regulait/db";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { buildApp } from "./app.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -70,6 +71,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreStrictAdmission?.();
+  // B4S-06 (M-068): the root admin's authenticator does not outlive the suite
+  const root = await db.select({ id: users.id }).from(users).where(eq(users.email, "root@example.com"));
+  await forgetStepUpMethodsForTest(db, root.map((u) => u.id));
   await app.close();
 });
 

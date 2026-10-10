@@ -1,3 +1,8 @@
 # Shell scripts run inside Linux containers and CI; a Windows checkout with core.autocrlf=true would
 # otherwise give them CRLF line endings and `sh` fails on the stray carriage returns.
 *.sh text eol=lf
+# ADR-0187 B5-M (M-069): files the modelscan image build executes or parses on Linux
+engines/modelscan/*.py text eol=lf
+engines/modelscan/patches/*.py text eol=lf
+engines/modelscan/requirements.txt text eol=lf
+engines/modelscan/*.toml text eol=lf

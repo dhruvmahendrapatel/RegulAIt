@@ -61,6 +61,7 @@ import {
   type BuilderSkillRow,
   type Db,
 } from "@regulait/db";
+import { requireStepUp } from "./step-up.js";
 import {
   admissionFindingSummary,
   admitSkillSchema,
@@ -510,6 +511,11 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
       .from(builderAgentSkills)
       .where(and(eq(builderAgentSkills.skillId, id), eq(builderAgentSkills.snapshotDigest, s.contentDigest), eq(builderAgentSkills.snapshotAdmissionState, "held")));
     if (await agentEvidenceHoldRefused(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`)) return reply;
+    // ADR-0186 A (Class C): admitting a held skill lifts a quarantine — a settings_relax step-up
+    // bound to the skill and the digest the admin reviewed (the write is conditional on it)
+    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { skillId: id, values: { admitted: body.digest } } })).ok) {
+      return reply;
+    }
     // X15-H01: the hold is re-checked inside the admission's own transaction, serialised with hold creation
     const row = await withAgentEvidenceHold(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`, async (db) => {
       const [row] = await db

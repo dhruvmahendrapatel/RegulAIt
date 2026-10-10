@@ -113,6 +113,15 @@ import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // D4 DFX2 (D4G-02): Art. 73(6) evidence hold
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
+import {
+  approvalRuleShape,
+  assertApprovalRuleLooseningStepUp,
+  assertRuleRemovalStepUp,
+  assertApprovalRuleWritable,
+  type ApprovalRuleStepUp,
+} from "./approval-pool.js";
+import { assertRuleLooseningStepUp, ruleLooseningCovers } from "./rule-loosening.js";
+import { approvalRuleStepUp } from "./step-up.js";
 
 /**
  * A `Db` OR a transaction handle. Drizzle's transaction type is not assignable
@@ -392,6 +401,8 @@ export async function newVersion(
     authorUserId: string | null;
     activate?: boolean;
     reason?: string | null;
+    /** ADR-0180: the route's settings_relax step-up, used when activating loosens an approval rule */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<{ version: ConfigVersionRow; activated: boolean }> {
   return db.transaction(async (tx) => mintVersionLocked(tx, args));
@@ -407,11 +418,19 @@ async function mintVersionLocked(
     authorUserId: string | null;
     activate?: boolean;
     reason?: string | null;
+    /** ADR-0180: the route's settings_relax step-up, used when activating loosens an approval rule */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<{ version: ConfigVersionRow; activated: boolean }> {
   // FIRST STATEMENT. Everything below reads state that a concurrent writer of
   // the same artifact could otherwise move underneath it.
   await lockRuleArtifact(db, args.artifactType, args.artifactId);
+  // ADR-0186 A — THE ONE GUARD: an approval-rule version whose pool could never
+  // reach its quorum is refused when it is written (draft or active)
+  if (args.artifactType === "approval_rule") {
+    const ruleRow = await loadRuleRow(db, args.artifactType, args.artifactId);
+    if (ruleRow) await assertApprovalRuleWritable(db, approvalRuleShape({ ...ruleRow, ...args.body }));
+  }
   let existing = await loadVersions(db, args.artifactType, args.artifactId);
 
   // ADR-0073 — THE LAZY BASELINE (ADR-0048 §7's behaviour-preserving default,
@@ -509,6 +528,7 @@ async function mintVersionLocked(
     version: next,
     actorUserId: args.authorUserId,
     reason: args.reason ?? null,
+    stepUp: args.stepUp,
   });
   return { version: activated.target, activated: true };
 }
@@ -539,6 +559,9 @@ export async function activateVersion(
     reason?: string | null;
     /** set when this activation is a promotion of the canary */
     promotion?: { ruleId: string; evalRunId: string | null; override: boolean; reason: string } | null;
+    /** ADR-0180: the route's settings_relax step-up for an activation that loosens an approval rule
+     * (absent → such an activation is refused while the policy asks for one) */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<{ target: ConfigVersionRow; previous: ConfigVersionRow | null; rollback: boolean }> {
   const outcome = await db.transaction(async (tx) => {
@@ -548,7 +571,30 @@ export async function activateVersion(
     const versions = await loadVersions(tx, args.artifactType, args.artifactId);
     const target = versions.find((v) => v.version === args.version);
     if (!target) throw new Error("unknown_version");
+    // ADR-0186 A — THE ONE GUARD, again at activation (rollback and canary
+    // promotion included): membership may have moved since the version was minted
     const previous = versions.find((v) => v.status === "active") ?? null;
+    if (args.artifactType === "approval_rule") {
+      const ruleRow = await loadRuleRow(tx, args.artifactType, args.artifactId);
+      if (ruleRow) await assertApprovalRuleWritable(tx, approvalRuleShape({ ...ruleRow, ...(target.body as Record<string, unknown>) }));
+    }
+    // ADR-0180 / ADR-0186 decision 28 (finding 47): activating (or rolling back to, or
+    // promoting) a version that loosens what the rule enforces NOW — a lower quorum, a
+    // wider pool, fewer calls matched, a higher limit, a wider scope — needs the
+    // settings_relax step-up, for every rule kind the comparator covers
+    if (ruleLooseningCovers(args.artifactType) && previous?.id !== target.id) {
+      const ruleRow = await loadRuleRow(tx, args.artifactType, args.artifactId);
+      if (ruleRow) {
+        const base = ruleRow as Record<string, unknown>;
+        await assertRuleLooseningStepUp(tx, {
+          artifactType: args.artifactType,
+          ruleId: args.artifactId,
+          before: { ...base, ...((previous?.body ?? {}) as Record<string, unknown>) },
+          after: { ...base, ...(target.body as Record<string, unknown>) },
+          stepUp: args.stepUp,
+        });
+      }
+    }
     const rollback = previous != null && previous.version > target.version;
 
     // ADR-0074 — THE BASELINE SEAM. If a shadow canary is running on this
@@ -718,6 +764,9 @@ export async function deleteRuleArtifact(
     actorUserId: string | null;
     /** names the route in the ledger and the audit row */
     routeLabel: string;
+    /** ADR-0180 / B4S-05: removing any governance rule (an approval rule's requirement, a rate limit, a data
+     * scope) removes a restriction — the route's settings_relax step-up */
+    stepUp?: ApprovalRuleStepUp | null;
   },
 ): Promise<RuleDeleteSuccess | RuleDeleteRefusal> {
   const table = ruleTableFor(args.artifactType);
@@ -741,6 +790,18 @@ export async function deleteRuleArtifact(
       };
     }
     const versions = await loadVersions(tx, args.artifactType, args.artifactId);
+    if (args.artifactType === "approval_rule") {
+      const active = versions.find((v) => v.status === "active");
+      await assertApprovalRuleLooseningStepUp(tx, {
+        ruleId: args.artifactId,
+        before: approvalRuleShape({ ...row, ...((active?.body ?? {}) as Record<string, unknown>) }),
+        after: null,
+        stepUp: args.stepUp,
+      });
+    } else {
+      // B4S-05: removing a rate limit or a data-scope rule removes a restriction
+      await assertRuleRemovalStepUp(tx, { ruleId: args.artifactId, stepUp: args.stepUp });
+    }
     const pointers = versions.filter((v) => v.status === "active" || v.status === "canary");
     for (const v of pointers) {
       await tx
@@ -1322,6 +1383,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         label: body.label ?? null,
         authorUserId: req.authCtx.userId ?? null,
         activate: body.activate,
+        stepUp: approvalRuleStepUp(db, req),
       });
     const res = body.activate ? await agentHeldWrite(req, reply, artifactType, artifactId, "create and activate a version", create) : await create(db);
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1343,6 +1405,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         version: body.version,
         actorUserId: req.authCtx.userId ?? null,
         reason: body.reason ?? null,
+        stepUp: approvalRuleStepUp(db, req),
       }),
     );
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1388,6 +1451,7 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
         version: lastMove.fromVersion!,
         actorUserId: req.authCtx.userId ?? null,
         reason: body.reason,
+        stepUp: approvalRuleStepUp(db, req),
       }),
     );
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1595,11 +1659,13 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       );
       return reply.status(409).send({ error: decision.ruleId, detail: decision.reason });
     }
+    const stepUp = approvalRuleStepUp(db, req);
     const res = await agentHeldWrite(req, reply, artifactType, artifactId, `promote the canary (version ${canary.version})`, (db) => activateVersion(db, {
       artifactType,
       artifactId,
       version: canary.version,
       actorUserId: req.authCtx.userId ?? null,
+      stepUp,
       promotion: {
         ruleId: decision.ruleId,
         evalRunId: decision.evalRunId,

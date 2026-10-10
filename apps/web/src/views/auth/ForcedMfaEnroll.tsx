@@ -2,8 +2,11 @@
  * exactly once; activate proves the authenticator before the gate opens. */
 import { useState } from "react";
 import { api, ApiError } from "../../api/client";
+import StepUpDialog from "../../stepup/StepUpDialog";
+import { withStepUp } from "../../stepup/stepUp";
 import { useSession } from "../../session/SessionContext";
-import { Button, CodeBlock, Field, Input } from "../../ui/kit";
+import { Button, Field, Input } from "../../ui/kit";
+import { TotpQrCode } from "../../ui/TotpQrCode";
 import { Brand } from "./LoginPage";
 import s from "./auth.module.css";
 
@@ -18,7 +21,8 @@ export default function ForcedMfaEnroll() {
     setError(null);
     setBusy(true);
     try {
-      setSecret(await api.post<{ secret: string; otpauthUri: string }>("/auth/totp/enroll"));
+      // ADR-0186 A: an account that already has a way to step up proves it before adding an authenticator
+      setSecret(await withStepUp(async (h) => (await api.postWithHeaders<{ secret: string; otpauthUri: string }>("/auth/totp/enroll", {}, h)).body));
     } catch (err) {
       setError(
         err instanceof ApiError && err.payload.detail
@@ -53,6 +57,8 @@ export default function ForcedMfaEnroll() {
 
   return (
     <div className={s.gate}>
+      {/* the step-up prompt: an account with a passkey or SSO identity proves it before adding an authenticator */}
+      <StepUpDialog />
       <main className={s.panel}>
         <Brand />
         {/* Same reason as the password gate: an authenticator entry is bound to
@@ -75,10 +81,7 @@ export default function ForcedMfaEnroll() {
           <div className={s.form}>
             <div className={s.secretBox}>
               <strong>Shown exactly once.</strong>
-              <span>Add this secret to your authenticator app (manual entry):</span>
-              <span className={s.secretValue}>{secret.secret}</span>
-              <span>Or paste the full otpauth URI into an app that accepts it:</span>
-              <CodeBlock maxHeight="90px">{secret.otpauthUri}</CodeBlock>
+              <TotpQrCode secret={secret.secret} otpauthUri={secret.otpauthUri} uriMaxHeight="90px" />
             </div>
             <Field label="Code from your authenticator">
               <Input

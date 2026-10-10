@@ -78,7 +78,8 @@ import {
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
-import { consumeBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
+import { signatureRecheckDenial, spendBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
+import { auditQuorumUnsatisfiableAtQueue, reusePendingToolApproval, toolApprovalRequirements } from "./approval-signatures.js";
 import { loadOrgSettings } from "./org-settings.js";
 import type { RetiredApproval } from "./governed-evaluate.js";
 import {
@@ -213,11 +214,17 @@ async function connectorWriteBinding(
   const argumentsDigest =
     input.preparedPii?.argumentsDigest ??
     approvalArgumentsDigest({ projectId: input.projectId, arguments: input.invocation });
+  const dualControlOrg = await loadOrgSettings(db);
   const contextDigest = approvalContextDigest({
     // the dial's hold is the one "rule" that demanded this consent
     ruleVersions: [{ ruleId: "execution-require-approval", activeVersionId: null }],
     requiredApproverUserId: input.approverUserId,
     approvalScope: "action",
+    // ADR-0186 A: the org's signing and sensitive quorum, as for an MCP consent
+    orgDualControl: {
+      signatureMode: dualControlOrg.approvalSignatureMode,
+      sensitiveQuorum: dualControlOrg.toolApprovalSensitiveQuorum,
+    },
     target: {
       kind: "connector",
       connectorId: connector.id,
@@ -483,6 +490,31 @@ export async function executeGovernedConnectorCall(
         ? await supersedeStaleConsent(db, b.retired, { userId, connector: { id: connector.id, name: connector.name }, projectId })
         : [];
       const { approvalTtlHours } = await loadOrgSettings(db);
+      // ADR-0186 A — dual control decided at queue time (see mcp-proxy's
+      // queueGovernedApproval): the hold names one approver and no rule, so the
+      // quorum is the sensitive-project quorum or 1, and a pool that can never
+      // reach it is a denied, audited call.
+      const connectorToolName = `${connector.name}.${body.operation}`;
+      const requirement = await toolApprovalRequirements(db, {
+        callerUserId: userId,
+        approverUserId: decision.approverUserId!,
+        ruleId: null,
+        matchedApprovalRuleIds: [],
+        projectId,
+      });
+      if (!requirement.satisfiable) {
+        const reason = await auditQuorumUnsatisfiableAtQueue(db, {
+          userId,
+          req: requirement,
+          projectId,
+          target: { connectorId: connector.id, toolName: connectorToolName },
+        });
+        return out.status(403).send({
+          decision: { effect: "deny", ruleId: "approval-quorum-unsatisfiable", ruleChain: decision.ruleChain, reason },
+          error: "approval_quorum_unsatisfiable",
+          detail: reason,
+        });
+      }
       // an identical pending call reuses its pending row (the dedup keys on the
       // payload: a different payload is a different consent)
       const [pending] = await db
@@ -501,8 +533,10 @@ export async function executeGovernedConnectorCall(
         )
         .orderBy(asc(approvals.requestedAt))
         .limit(1);
+      // ADR-0186 A: reused only while its queue-time pool can still reach its quorum
+      const reusable = pending && (await reusePendingToolApproval(db, pending.id)) ? pending : undefined;
       const approvalId =
-        pending?.id ??
+        reusable?.id ??
         (
           await db
             .insert(approvals)
@@ -511,7 +545,7 @@ export async function executeGovernedConnectorCall(
               objectType: CONNECTOR_APPROVAL_OBJECT_TYPE,
               connectorId: connector.id,
               // the operation and the object a person reads in the queue
-              toolName: `${connector.name}.${body.operation}`,
+              toolName: connectorToolName,
               approverUserId: decision.approverUserId!,
               argumentsDigest: b.argumentsDigest,
               argumentsPreview: b.argumentsPreview,
@@ -520,6 +554,12 @@ export async function executeGovernedConnectorCall(
               projectId,
               contextDigest: b.contextDigest,
               ...(approvalTtlHours != null ? { expiresAt: new Date(Date.now() + approvalTtlHours * 3_600_000) } : {}),
+              // ADR-0186 A/B: snapshotted here
+              quorum: requirement.quorum,
+              signatureMode: requirement.signatureMode,
+              approverRoleId: requirement.approverRoleId,
+              // ADR-0186 A (0172): the approver named now, persisted — never reconstructed later
+              namedApproverUserId: decision.approverUserId!,
             })
             .returning({ id: approvals.id })
         )[0]!.id;
@@ -543,14 +583,24 @@ export async function executeGovernedConnectorCall(
     const consumeHeld = async (): Promise<ConnectorAttemptResult | null> => {
       const approvedId = binding?.approvedApprovalId;
       if (!approvedId || !binding) return null;
-      const consumed = await consumeBoundApproval(db, {
+      const spent = await spendBoundApproval(db, {
         approvalId: approvedId,
         policyEpoch: admissionGeneration!.epoch,
         approvalScope: "action",
         argumentsDigest: binding.argumentsDigest,
         contextDigest: binding.contextDigest,
+        // ADR-0186 B: what the approvers signed besides the digests
+        call: { connectorId: connector.id, toolName: `${connector.name}.${body.operation}` },
       });
-      if (consumed) return null;
+      if (spent === "consumed") return null;
+      if (spent === "signature_recheck_failed") {
+        return out.status(403).send({
+          decision: signatureRecheckDenial(approvedId),
+          error: "approval_signature_recheck_failed",
+          approvalId: approvedId,
+          detail: signatureRecheckDenial(approvedId).reason,
+        });
+      }
       const [row] = await db.select().from(approvals).where(eq(approvals.id, approvedId));
       if (row && row.status === "approved") {
         const reason: RetiredApproval["reason"] =

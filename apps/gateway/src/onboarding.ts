@@ -104,6 +104,8 @@ import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
 import { reconcileGroupRoles } from "./group-roles.js";
+import { isApproverRole, lockApproverRoles } from "./approval-pool.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 // ADR-0074: a pack RE-APPLY over an existing profile is an edit of twelve
 // versioned fields, so it goes through the one choke point.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -515,6 +517,9 @@ export function registerOnboardingRoutes(
       if (!row) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
       const { tag: _tag, ...versioned } = values;
       const edit = await applyRuleEdit<ComplianceProfileRow>(db, {
+        // ADR-0186 decision 29 (finding 52): re-applying a pack over a profile an admin tightened
+        // is judged like any profile edit
+        stepUp: approvalRuleStepUp(db, req),
         artifactType: "compliance_profile",
         artifactId: row.id,
         patch: versioned,
@@ -879,17 +884,45 @@ export function registerOnboardingRoutes(
     }
 
     const roleByName = new Map(knownRoles.map((r) => [r.name.toLowerCase(), r]));
-    let created = 0;
+    // B4S-02 / G1 (owner principle): a mapping to a role an approval rule names
+    // as approver_role_id adds that group's holders to an approver pool — the
+    // same settings_relax step-up as POST /v1/group-role-mappings, bound to
+    // every such mapping this import creates (sorted, so the same file asks
+    // for the same grant)
+    const approverMappings: Array<{ source: string; externalGroup: string; roleId: string }> = [];
     for (const e of plan.entries) {
       if (e.action !== "create") continue;
       const role = roleByName.get(e.roleName.toLowerCase())!;
-      const [row] = await db
-        .insert(groupRoleMappings)
-        .values({ source: e.source as GroupSource, externalGroup: e.externalGroup, roleId: role.id })
-        .onConflictDoNothing()
-        .returning();
-      if (row) created += 1;
+      if (await isApproverRole(db, role.id)) approverMappings.push({ source: e.source, externalGroup: e.externalGroup, roleId: role.id });
     }
+    if (approverMappings.length > 0) {
+      approverMappings.sort((a, b) =>
+        `${a.source}\u0000${a.externalGroup}\u0000${a.roleId}`.localeCompare(`${b.source}\u0000${b.externalGroup}\u0000${b.roleId}`),
+      );
+      const facts = { values: { approverRoleGroups: approverMappings } };
+      if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts })).ok) return reply;
+    }
+    // ADR-0186 A (Class A): the mappings are written under the approver-role lock, and a
+    // role that became an approver role since the step-up was decided refuses the import
+    const createIds = plan.entries.filter((e) => e.action === "create").map((e) => roleByName.get(e.roleName.toLowerCase())!.id);
+    const decidedApprover = new Set(approverMappings.map((m) => m.roleId));
+    const created = await db.transaction(async (tx) => {
+      const nowApprover = await lockApproverRoles(tx as unknown as Db, createIds);
+      if ([...nowApprover].some((id) => !decidedApprover.has(id))) return null;
+      let n = 0;
+      for (const e of plan.entries) {
+        if (e.action !== "create") continue;
+        const role = roleByName.get(e.roleName.toLowerCase())!;
+        const [row] = await tx
+          .insert(groupRoleMappings)
+          .values({ source: e.source as GroupSource, externalGroup: e.externalGroup, roleId: role.id })
+          .onConflictDoNothing()
+          .returning();
+        if (row) n += 1;
+      }
+      return n;
+    });
+    if (created === null) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     const [importRow] = await db
       .insert(onboardingImports)
       .values({

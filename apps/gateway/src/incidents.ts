@@ -158,6 +158,7 @@ import { haltAgentInTx } from "./execution-control.js";
 // X15-H01: hold creation takes the evidence-hold lock exclusively (agent-evidence-hold.ts has no static edge back here)
 import { lockEvidenceHoldsExclusive } from "./agent-evidence-hold.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { stepUpRefusal } from "./step-up.js";
 import { buildExportBundle, resolveExportSigningKey } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
 import { securityHeaders } from "./security-headers.js";
@@ -984,6 +985,16 @@ export async function incidentEvidenceHoldRefused(
     change,
   };
   if (override !== null && actor.isAdmin && override.length >= 10 && override.length <= 2000) {
+    // ADR-0186 A: an override needs an `evidence_hold_override` step-up bound
+    // to this agent, this change, the incidents holding it and the reason
+    const stepUp = await stepUpRefusal(db, req, {
+      kind: "evidence_hold_override",
+      facts: { agentId, change, incidents: holding.map((h) => h.id).sort(), reason: override },
+    });
+    if (stepUp) {
+      reply.status(stepUp.status).send(stepUp.body);
+      return true;
+    }
     await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       for (const h of holding) {

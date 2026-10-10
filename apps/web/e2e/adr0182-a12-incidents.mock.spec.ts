@@ -20,6 +20,7 @@
 import { activate, escapeToTrigger, expectDialogTrap, typeAt } from "./keyboard-audit";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -344,4 +345,17 @@ test("X14 keyboard: incident detail report dialog traps focus, announces refusal
   await expectAxeClean(page, "keyboard incident detail refusal");
   await page.screenshot({ path: testInfo.outputPath("x14-incident-detail.png") });
   await escapeToTrigger(page, dialog, trigger);
+});
+
+// ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: relaxing an incident setting asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const cap = await mockApi(page);
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/incidents");
+  const settingsCard = page.locator("section[data-rg-card]").filter({ hasText: "Incident settings" }).first();
+  await settingsCard.getByLabel("Incident deploy gate").selectOption("warn");
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(su.attempts[0]!.body).toEqual({ incidentGateMode: "warn" });
+  expect(cap.settings).toEqual([{ incidentGateMode: "warn" }]);
 });

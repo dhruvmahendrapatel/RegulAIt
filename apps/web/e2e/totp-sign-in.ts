@@ -60,7 +60,7 @@ export function recordTotpSecret(email: string, secret: string): void {
  * refused code is never retried. The gateway accepts the previous, current and
  * next step; the previous one is skipped near the end of a window, where it
  * would age out before the request lands. */
-async function nextCode(email: string): Promise<string> {
+export async function nextCode(email: string): Promise<string> {
   for (;;) {
     const store = load();
     const entry = store[email.toLowerCase()];
@@ -93,22 +93,52 @@ async function nextCode(email: string): Promise<string> {
  * real, audited lost-authenticator route (`POST /v1/users/:id/mfa/clear`): the
  * person enrols again at that sign-in, from the secret on screen. An account
  * with no TOTP is left alone.
+ *
+ * B4S-02/06: clearing someone else's second factor is a settings_relax
+ * step-up. With `adminOneTimePassword` (the seed's one-time password for Ada,
+ * whose authenticator secret this run holds) Ada clears it, stepped up with her
+ * authenticator (`asSteppedUpAdmin`). Without it the bootstrap credential is
+ * used, which passes only during first-admin setup (no admin can step up yet);
+ * its refusal is reported as such. Ada's own authenticator is never cleared
+ * here: once she can step up, only she can prove who she is, so a run that does
+ * not hold her secret must read it from demo:prepare's output instead
+ * (E2E_DEMO_PREPARE_LOG, see demo-credentials.ts).
  */
 export async function reprovisionTotp(
   baseUrl: string,
   bootHeaders: Record<string, string>,
   email: string,
+  adminOneTimePassword?: string,
 ): Promise<void> {
   const res = await fetch(`${baseUrl}/v1/users`, { headers: bootHeaders });
   const users = ((await res.json()) as { users: Array<{ id: string; email: string; totpEnabled?: boolean }> }).users;
   const user = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
   if (!user?.totpEnabled) return;
+  const reason = "e2e journey: the authenticator enrolled by the demo seed is not held by this run; the person re-enrols at sign-in";
+  if (adminOneTimePassword !== undefined) {
+    // a dynamic import: admin-api imports this module (nextCode, passTotp)
+    const { ADMIN_EMAIL, asSteppedUpAdmin } = await import("./admin-api");
+    if (email.toLowerCase() === ADMIN_EMAIL) {
+      throw new Error(
+        `${email} is the admin who gives the step-up: her authenticator cannot be cleared by the journey — ` +
+          "use the secret demo:prepare printed (E2E_DEMO_PREPARE_LOG)",
+      );
+    }
+    const cleared = await asSteppedUpAdmin(baseUrl, adminOneTimePassword, "POST", `/v1/users/${user.id}/mfa/clear`, { reason });
+    expect(cleared.status(), `Ada clearing ${email}'s TOTP for re-enrolment: ${cleared.bodyText}`).toBe(200);
+    return;
+  }
   const cleared = await fetch(`${baseUrl}/v1/users/${user.id}/mfa/clear`, {
     method: "POST",
     headers: { ...bootHeaders, "content-type": "application/json" },
-    body: JSON.stringify({ reason: "e2e journey: the authenticator enrolled by the demo seed is not held by this run; the person re-enrols at sign-in" }),
+    body: JSON.stringify({ reason }),
   });
-  expect(cleared.status, `clearing ${email}'s TOTP for re-enrolment`).toBe(200);
+  const text = await cleared.text();
+  expect(
+    cleared.status,
+    `clearing ${email}'s TOTP for re-enrolment with the bootstrap credential (first-admin setup only; ` +
+      `once an admin can step up, pass the admin's one-time password so she clears it): ${text}`,
+  ).toBe(200);
 }
 
 /**

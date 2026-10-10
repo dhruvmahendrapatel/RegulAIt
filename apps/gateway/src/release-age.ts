@@ -29,6 +29,7 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
+import { requireStepUp } from "./step-up.js";
 import {
   RELEASE_AGE_RECOMMENDED_DAYS,
   releaseAgeStatus,
@@ -262,6 +263,16 @@ export function registerReleaseAgeRoutes(app: FastifyInstance, db: Db) {
           `${digest.slice(0, 16)}. Reload the queue and review the current release.`,
       });
     if (digest !== body.digest) return changed();
+    // ADR-0186 A (Class C): an override lifts the release quarantine — a settings_relax step-up
+    // bound to the item and the release reviewed (the write is conditional on it)
+    if (
+      !(await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { values: { releaseQuarantineOverride: { kind: body.kind, id: body.id, digest: body.digest } } },
+      })).ok
+    ) {
+      return reply;
+    }
     // conditional on the item still being on that release when the row is
     // written: the subject row is locked, re-checked, then the override goes in
     const created = await db.transaction(async (tx) => {

@@ -15,6 +15,8 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
+import { steppedUpAs } from "./demo-credentials";
+import { ADMIN_EMAIL } from "./admin-api";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +65,8 @@ let holderId: string;
 test("declare a rule, get refused at the real grant form, escalate, arm's-length approve — and the grant exists with the override recorded", async ({
   page,
 }) => {
+  // B4S-06: the sign-ins and the two step-ups each spend a TOTP step (may wait a 30 s window)
+  test.setTimeout(180_000);
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // --- seed via the bootstrap API: a holder, two agents, one grant ---------
@@ -96,13 +100,17 @@ test("declare a rule, get refused at the real grant form, escalate, arm's-length
   });
   expect(approverRes.status()).toBe(201);
   const approverId = (await approverRes.json()).id as string;
-  const adminFlip = await page.request.post(`/v1/users/${approverId}/admin`, {
-    headers: BOOT,
-    data: { isAdmin: true, reason: "zz sod e2e approver" },
+  // B4S-02/06: granting admin and issuing someone else's one-time password are
+  // settings_relax step-ups, which the bootstrap credential no longer gives once
+  // Ada can step up — Ada (signed in on this page) makes both, stepped up with
+  // her authenticator
+  const adminFlip = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", `/v1/users/${approverId}/admin`, {
+    isAdmin: true,
+    reason: "zz sod e2e approver",
   });
-  expect(adminFlip.status()).toBe(200);
-  const otp = await page.request.post(`/v1/users/${approverId}/set-initial-password`, { headers: BOOT, data: {} });
-  expect(otp.status()).toBe(200);
+  expect(adminFlip.status(), await adminFlip.text()).toBe(200);
+  const otp = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", `/v1/users/${approverId}/set-initial-password`, {});
+  expect(otp.status(), await otp.text()).toBe(200);
   const approverOtp = (await otp.json()).password as string;
 
   // --- declare the toxic combination through the page ----------------------
@@ -132,7 +140,9 @@ test("declare a rule, get refused at the real grant form, escalate, arm's-length
   await grantCard.getByRole("button", { name: "Grant" }).click();
   // the gateway's own sentence — rule name, reason and existing holding
   const refusal = grantCard.getByRole("alert");
-  await expect(refusal).toContainText("sod_conflict");
+  // the refusal reads as prose since f9aebbe ("Sod conflict — …"), never as the bare code
+  await expect(refusal).toContainText("Sod conflict");
+  await expect(refusal).not.toContainText("sod_conflict");
   await expect(refusal).toContainText("SoD rule 'zz-sod-rule' refuses this");
   await expect(refusal).toContainText("agent 'zz-sod-pay'");
   // and no row was minted

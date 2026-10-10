@@ -15,6 +15,7 @@
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 const PROJECT = "a1111111-1111-4111-8111-111111111111";
 const UC = "c1111111-1111-4111-8111-111111111111";
@@ -350,4 +351,15 @@ test.describe("ADR-0175 A15: the energy estimate", () => {
     expect(state.estimateQueries.some((q) => q.includes(`useCaseId=${UC}`))).toBe(true);
     await expectAxeClean(page, "Use case stack tab with energy estimate");
   });
+});
+
+// ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once
+test("ADR-0186 A: a credentials setting write asks to confirm it's you and resends the same PUT once", async ({ page }) => {
+  const state = await mockApi(page);
+  const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/org/settings", kind: "settings_relax" });
+  await page.goto("/ui/admin/credentials");
+  await page.getByRole("button", { name: "Turn alerts on" }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(state.puts).toEqual([{ staleCredentialAlerts: true }]);
 });

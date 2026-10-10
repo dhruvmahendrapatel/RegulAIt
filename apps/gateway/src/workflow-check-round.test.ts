@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { and, auditLog, createDb, eq, orgSettings, runMigrations, sql, users, workflowInstances, type Db } from "@regulait/db";
 import { resolveProvider, type MockGitProvider } from "@regulait/git-provider";
 import { buildApp } from "./app.js";
 import { enrolTotpForTest } from "./testing/identity-posture.js";
@@ -16,6 +16,7 @@ import {
   type EffectHistoryEntry,
   type EffectStamp,
 } from "./workflows.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 
 /**
  * AER-048 — the check executor, check reports and re-opens are bound to a
@@ -194,6 +195,9 @@ afterEach(() => {
 
 afterAll(async () => {
   await restoreAdminKeyMfa?.();
+  // B4S-06 (M-068): the console admin's authenticator does not outlive the suite
+  const consoleAdmins = await db.select({ id: users.id }).from(users).where(eq(users.email, "wr-console-admin@example.com"));
+  await forgetStepUpMethodsForTest(db, consoleAdmins.map((u) => u.id));
   delete workflowTestHooks.duringStageEval;
   delete workflowTestHooks.beforeStageCommit;
   await app.close();

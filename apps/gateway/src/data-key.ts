@@ -274,6 +274,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // `findCiphertextRegistryDrift`) take the suffix columns from the schema and
   // check this one by name.
   { table: "use_case_feedback", column: "resolution_note", what: "feedback resolution notes" },
+  // ADR-0187 (migration 0173): an engine's raw report (it can quote model
+  // text), kept for the raw-report retention window, then deleted.
+  { table: "engine_runs", column: "raw_report_ciphertext", what: "raw engine reports" },
 ];
 
 export interface CiphertextProbe {

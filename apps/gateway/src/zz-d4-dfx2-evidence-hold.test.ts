@@ -24,6 +24,7 @@ import { agents, aiIncidents, aiUseCases, and, auditLog, configVersions, desc, e
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { EVIDENCE_HOLD_OVERRIDE_HEADER } from "./incidents.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
 let k: BuilderKit;
 let owner: Person;
@@ -77,14 +78,18 @@ const expectHeld = (r: { statusCode: number; body: string; json: () => any }, wh
   expect(r.json().error, what).toBe("incident_evidence_hold");
 };
 
+// ADR-0186 A: this suite drives step-up actions through API keys, which can never step up (restored below, M-068)
+let restoreStepUp: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   k = await builderKit("dfx2-hold");
+  restoreStepUp = await relaxStepUpForTest(k.db);
   restore = await relaxStrictAdmissionForTest(k.db, ["minReleaseAgeDays"]);
   owner = await k.person("owner");
   admin = await k.person("admin", { admin: true });
 }, 120_000);
 
 afterAll(async () => {
+  await restoreStepUp?.();
   await restore?.();
   // migration 0168 (DFX1): an incident that is not closed is never deleted, so the fixtures are closed first
   // (a test-only shortcut past the API's close rules), then deleted (their events and clocks cascade)

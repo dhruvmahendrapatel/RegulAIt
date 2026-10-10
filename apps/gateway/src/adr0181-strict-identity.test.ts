@@ -41,6 +41,7 @@ import { buildApp } from "./app.js";
 import { resolveHsts } from "./hsts.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { enrolTotpForTest } from "./testing/identity-posture.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -165,7 +166,14 @@ describe("ADR-0181 SA — MFA required for admins", () => {
     expect((await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: member.cookie } })).statusCode).toBe(200);
 
     await enrolTotpForTest(app, cookie);
-    expect((await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } })).statusCode).toBe(200);
+    try {
+      expect((await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } })).statusCode).toBe(200);
+    } finally {
+      // B4S-06: an admin who can step up ends first-admin setup (the bootstrap
+      // credential stops passing step-up); the relaxations below are made by the
+      // bootstrap credential in that setup state, so this admin's method goes
+      await forgetStepUpMethodsForTest(db, [a.id]);
+    }
   });
 
   it("an admin may relax it to off; the audit row records old -> new", async () => {

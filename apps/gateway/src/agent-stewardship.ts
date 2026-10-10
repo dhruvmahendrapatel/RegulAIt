@@ -37,6 +37,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { agents, aiUseCases, and, auditLog, eq, inArray, notInArray, sql, users, type Db } from "@regulait/db";
 import { setAgentStewardshipSchema } from "@regulait/shared";
+import { ownerChangeStepUpArgs, requireStepUps, type StepUpCheckArgs } from "./step-up.js";
 
 const params = z.object({ agentId: z.string().uuid() });
 const SYSTEM_USER = "00000000-0000-0000-0000-000000000000";
@@ -180,6 +181,18 @@ export async function withStewardship(db: Db, rows: AgentRow[]) {
   return rows.map((a) => ({ ...a, ...views.get(a.id)! }));
 }
 
+/**
+ * ADR-0180 / ADR-0186 A (B4S-01): moving an agent OUT of `suspended` to any
+ * status that dispatches again (everything but `retired`, which is tighter)
+ * lifts a protection, so it needs a `settings_relax` step-up bound to the
+ * agent and the status it moves to — through either writer (POST
+ * /v1/agents/:id/lifecycle or the stewardship PATCH). Null = no step-up.
+ */
+export function agentUnsuspendStepUp(agentId: string, from: string, to: string): StepUpCheckArgs | null {
+  if (from !== "suspended" || to === "suspended" || to === "retired") return null;
+  return { kind: "settings_relax", facts: { agentId, values: { lifecycleStatus: to } } };
+}
+
 /** admin, or the agent's current steward — anyone else is refused by name */
 function mayActAsSteward(req: FastifyRequest, agent: AgentRow): boolean {
   if (req.authCtx.isAdmin) return true;
@@ -315,6 +328,16 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
       return reply.send({ ...view, unchanged: true });
     }
 
+    // ADR-0186 A (B4S-01): a new steward is a new accountable owner — the same
+    // `owner_change` step-up POST /v1/agents/:id/owner asks for — and lifting a
+    // suspension is a relaxation (`settings_relax`); asked after every refusal
+    // above, so a refused request spends no grant
+    const stepUps: StepUpCheckArgs[] = [];
+    if (changes.stewardUserId) stepUps.push(ownerChangeStepUpArgs("agent", agentId, nextSteward));
+    const unsuspend = statusChanges ? agentUnsuspendStepUp(agentId, agent.lifecycleStatus, nextStatus) : null;
+    if (unsuspend) stepUps.push(unsuspend);
+    if (stepUps.length > 0 && !(await requireStepUps(db, req, reply, stepUps))) return reply;
+
     const [row] = await db
       .update(agents)
       .set({
@@ -327,7 +350,15 @@ export function registerAgentStewardshipRoutes(app: FastifyInstance, db: Db): vo
       })
       // ADR-0170 item 7: compare-and-swap on the status this request read — a
       // concurrent retirement or suspension is never overwritten by a stale read
-      .where(and(eq(agents.id, agentId), eq(agents.lifecycleStatus, agent.lifecycleStatus)))
+      // ADR-0186 A (Class A): and on the steward this request's owner_change step-up
+      // and steward authority were decided on
+      .where(
+        and(
+          eq(agents.id, agentId),
+          eq(agents.lifecycleStatus, agent.lifecycleStatus),
+          sql`${agents.ownerUserId} IS NOT DISTINCT FROM ${agent.ownerUserId}`,
+        ),
+      )
       .returning();
     if (!row) return refuseLifecycleChangedConcurrently(reply, agent.lifecycleStatus);
     const people = await loadUsers(db, [nextSteward, nextSuccessor]);
