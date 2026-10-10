@@ -27,15 +27,17 @@ truefalse_falseclaims.txt
 truefalse_falseclaims_50.txt
 # phrasing: prompts whose source repository has no licence
 phrasing
-# badchars: Unicode confusables data (Unicode licence; OWNER DECISION)
-badchars
+# badchars: KEPT since 2026-10-10 (owner, open question 20; ADR-0187 decision 197): the Unicode
+# confusables data, Unicode License v3, its notice in THIRD_PARTY.md and the image notices
 # tap: the cached prompt file's own origin is not stated
 tap
-# unsafe_content word lists: unverified (profanity, regulator list) or CC-BY-4.0 (OWNER DECISION);
-# read at import of garak.detectors.unsafe_content, which no admitted probe uses
+# unsafe_content word lists with no licence or source G19 could establish (the profanity list and the
+# regulator list). The owner kept both deleted (2026-10-10, open question 26, the strict default). They
+# are read at import of garak.detectors.unsafe_content, so every detector in that module fails to load
+# and the probes that use one are never planned (ADR-0187 decision 196). The CC-BY-4.0 list
+# (ldnoobw-en.txt) is KEPT since 2026-10-10 (owner, open question 20), with its attribution.
 profanity_en.csv
 ofcom-potentially-offensive.txt
-ldnoobw-en.txt
 # fitd and goat: no licence found, and both probes need attacker models
 fitd
 goat
