@@ -69,7 +69,7 @@ function replay(answer: (job: ScanJob) => { exitCode: number | null; report?: un
         jobs.push(job);
         const a = answer(job);
         const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-        return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false, npy: null };
+        return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false, npy: null, npz: null };
       },
       async release() {},
       async reconcile() {

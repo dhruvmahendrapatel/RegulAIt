@@ -156,7 +156,8 @@ describe("the modelscan image's inputs", () => {
     // stdlib only: it imports nothing outside the standard library (it runs with -I -S)
     const helper = readFileSync(path.join(dir, "npy-header.py"), "utf8");
     const imports = [...helper.matchAll(/^(?:import|from) (\S+)/gm)].map((m) => m[1]);
-    expect(imports.sort()).toEqual(["ast", "json", "os", "re", "sys"]);
+    // decisions 219–224 add zipfile and zlib (the .npz check), both the standard library
+    expect(imports.sort()).toEqual(["ast", "json", "os", "re", "sys", "zipfile", "zlib"]);
     // no builtin eval, exec or compile (re.compile is a method), no dynamic import
     expect(helper).not.toMatch(/(?<![\w.])(?:eval|exec|compile)\(|__import__|importlib/);
   });
