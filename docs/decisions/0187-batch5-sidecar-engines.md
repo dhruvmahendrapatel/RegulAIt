@@ -2318,6 +2318,7 @@ the list below; the coordinator numbers them when merging).
   through the gateway judge would be the same mechanism, but it is a separate owner decision. `fitd` and `goat`
   additionally need their deleted payload data admitted (question 20 did not list them).
 
+
 ### Implementation decision (X26 Engines page review, 2026-10-10, PR #230)
 
 Numbered 178 by the coordinator, after the decisions of the slices merged before it.
