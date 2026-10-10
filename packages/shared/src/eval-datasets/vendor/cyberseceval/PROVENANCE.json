@@ -1,0 +1,39 @@
+{
+  "repo": "https://github.com/meta-llama/PurpleLlama",
+  "commit": "172c1074069eb88ec834124272c1b1c4f8893445",
+  "subdirectory": "CybersecurityBenchmarks",
+  "retrievedAt": "2026-10-10T03:51:00Z",
+  "files": [
+    {
+      "path": "LICENSE",
+      "upstreamPath": "CybersecurityBenchmarks/LICENSE",
+      "sha256": "da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93",
+      "bytes": 1088,
+      "spdx": "MIT"
+    },
+    {
+      "path": "datasets/prompt_injection/prompt_injection.json",
+      "upstreamPath": "CybersecurityBenchmarks/datasets/prompt_injection/prompt_injection.json",
+      "sha256": "069e4d5d36f6d19f972a3bbc65df840cc729354f89358a9031aeb44d95b18a9a",
+      "bytes": 199176,
+      "records": 251,
+      "spdx": "MIT"
+    },
+    {
+      "path": "datasets/mitre_frr/mitre_frr.json",
+      "upstreamPath": "CybersecurityBenchmarks/datasets/mitre_frr/mitre_frr.json",
+      "sha256": "7a9b400bdf5ddbb36d5e7c3e8f6b5adb5d13125b8d03be66fd252a0f20b79d15",
+      "bytes": 420424,
+      "records": 750,
+      "spdx": "MIT"
+    },
+    {
+      "path": "datasets/interpreter/interpreter.json",
+      "upstreamPath": "CybersecurityBenchmarks/datasets/interpreter/interpreter.json",
+      "sha256": "1d3e7cd4dd94a436d96b6e689c13e4f3edf5418d680d0b485a3ea8bf4664840c",
+      "bytes": 388355,
+      "records": 500,
+      "spdx": "MIT"
+    }
+  ]
+}

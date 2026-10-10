@@ -2029,6 +2029,86 @@ RegulAIt policy judgement (ADR-0176 point 4), so it is our own data.
      table (exported from `@regulait/shared`), and any future reader that shows a garak probe's OWASP risks must call
      `garakOwasp2025` or `garakOwasp2025Coverage`; reading `GarakUpstreamProbe.owasp` for that is a review finding.
 
+### Implementation decisions (B5-M `.npy` header check, 2026-10-10, branch `b5-modelscan-npy`)
+
+Closes open question 15(b) (decision 108). No migration, no new dependency, no change to the Python lockfile or the
+licence gate. Code: `engines/modelscan/npy-header.py` (new), `packages/shared/src/engines/modelscan.ts` (the check's
+answer and the mapper), `packages/engine-modelscan/src/{scan,exchange,adapter,settings}.ts`, the Dockerfile, the numpy
+row of `engines/modelscan/THIRD_PARTY.md`. Tests: `packages/engine-modelscan/src/npy.test.ts` (19, new),
+`image.test.ts` (+1), `modelscan-real.test.ts` (decision 108's pinned case replaced, +1; opt-in), and the gateway's
+`zz-b5-modelscan.test.ts` follows the outcome type.
+
+180. **Option B: the scanner checks the `.npy` header itself; pinning numpy 1.26 is rejected.** Option A fails ADR-0176:
+     numpy 1.26's last release is 1.26.4, uploaded 2024-02-05 (PyPI, read 2026-10-10), about 32 months ago, against the
+     rule of a release in roughly the last 12 months; the current line is 2.5.3 (2026-09-06). Option B, built: a
+     stdlib-only Python script, `engines/modelscan/npy-header.py`, baked read-only (0444) at `/opt/modelscan/npy-header.py`
+     and run by the **scanner** (decision 104: no network, no credential) on the venv's interpreter with `-I -S`, before
+     modelscan, for every job whose format is `numpy`. It never evaluates anything: the header is parsed with
+     `ast.parse(mode="eval")`, the node must be a dict display, and each value goes through `ast.literal_eval`.
+     **Open-source check (ADR-0176):** numpy's own `read_array_header_1_0`/`_2_0` were considered and not used: there is
+     no public reader for version 3.0 (only the private `_read_array_header`, the same kind of private call that broke
+     modelscan), and, measured on numpy 2.4.6, numpy keeps the LAST of a repeated key, so a header with `descr` `<f8`
+     then `|O` loads as an object array (ambiguous, refused here). They would also need numpy in the checking process,
+     which CI does not have. `ast` is the standard library; nothing is added.
+181. **What the check accepts, and every refusal's code.** In order: at least 8 bytes, else `npy_truncated`; the magic
+     `\x93NUMPY`, else `npy_magic_invalid`; version exactly 1.0, 2.0 or 3.0, else `npy_version_unsupported`; the length
+     field (2 bytes for 1.0, 4 for 2.0 and 3.0) present, else `npy_truncated`; a header length from 1 to 10000 bytes
+     (numpy's own default bound), else `npy_header_length`; the header within the file, else `npy_truncated`; ASCII
+     (every header we accept is), else `npy_header_encoding`; starting with `{`, ending with a newline and parsing as a
+     dict display of constants, else `npy_header_not_literal`; keys exactly `descr`, `fortran_order` and `shape`, each
+     once and each a string constant (no `**`), else `npy_header_keys`; `fortran_order` a bool and `shape` a tuple of at
+     most 64 non-negative ints (not bools), else `npy_header_value`; `descr` exactly `|O` (object) or one of the plain
+     numeric dtypes numpy's writer emits (`|b1 |i1 |u1`, and `<`/`>` with `i2 i4 i8 u2 u4 u8 f2 f4 f8 f16 c8 c16 c32`),
+     else `npy_dtype_unsupported` (strings, void, datetime, structured or subarray dtypes, `<O`: a structured dtype's
+     fields may hold objects). A numeric payload must be exactly itemsize × the product of `shape` (short:
+     `npy_truncated`; long: `npy_trailing_bytes`); an object payload must be non-empty (`npy_truncated`) and at most
+     48 MiB (`npy_payload_too_large`, decision 183). The script prints one JSON line of fixed codes and integers (no
+     artifact text) and exits 0; anything else is `npy_check_failed`.
+182. **The verdicts (decision 105 unchanged: numpy's ceiling stays `no_known_unsafe`, and it stays executable).**
+     - **Numeric:** modelscan is not started (there is no pickle and nothing for it to scan). The scan item passes
+       (`regulait-npy-header`/`numeric`), so the artifact reads `no_known_unsafe` with its `executable_format`
+       finding, exactly as a scanned pickle with no finding does. A report beside a numeric answer is
+       `report_inconsistent`.
+     - **Object:** exactly the payload bytes are copied to a new file (`artifact.pkl` in a directory of their own on the
+       result volume) and handed to modelscan under `.pkl`, so its PICKLE scanner reads every pickle in the stream. The
+       report must name `artifact.pkl`, else `report_inconsistent`. The copy is removed before `done.json` is written.
+       An `os.system` payload is `unsafe`; a benign one is `no_known_unsafe`.
+     - **Refused, or the check did not answer:** modelscan is not started; the run completes with the scan item
+       `unknown` and a `modelscan-error` item whose id is the problem code, so the artifact scan reads `unknown` with a
+       `scan_error` finding naming the code. Never `clean`.
+     - **A `numpy` run with no header check at all** (any scanner that did not run it) fails `npy_check_missing`
+       (`unknown`). A check cut off by the time limit is `engine_timeout`, as before.
+
+     The gateway's `deriveArtifactScanVerdict` and the DB's `clean`-only-for-safetensors CHECK are unchanged.
+183. **The exchange carries the answer; the payload copy is bounded by the result volume.** `done.json` gains a
+     required, nullable `npy` (strict zod, `npyCheckSchema`); `ScanExecutor.scan` returns a `ScanOutcome`
+     (`ModelscanOutcome` + `npy`); `runScanJob` is the one entry point both executors use. The script runs from a fresh
+     empty working directory with modelscan's environment built from nothing, its stdout bounded at 4 KiB and
+     validated as exactly one line. The object payload bound is `NPY_OBJECT_PAYLOAD_MAX_BYTES` = 48 MiB because the
+     copy lands on the result volume, a 64 MiB tmpfs that also holds the report (at most 4 MiB); compose is unchanged.
+     Larger object arrays read `unknown` (`npy_payload_too_large`), never better.
+184. **Proofs, red first.** `npy.test.ts` runs the real script with the host's `python3 -I -S` (stdlib only, so no numpy;
+     skipped where there is no `python3`, as for the patch test) and replays modelscan exactly as the pinned 0.8.8
+     answers for the file it is handed (measured 2026-10-10: a `.npy` is a `MODEL_SCAN` error, exit 3; `os.system` in a
+     `.pkl` a CRITICAL issue, exit 1; a benign `.pkl` exit 0). Synthetic fixtures only, written byte by byte
+     (`npyFile`, `numericNpy`, `objectNpy`). Covered: numeric and object files of versions 1.0, 2.0 and 3.0; a benign
+     object pickle; an `os.system` object pickle (`unsafe`); a header with a call, `**`, `dict(...)`, an unclosed dict
+     or deep nesting (nothing in it runs: a `touch MARK` call leaves no file); an extra, missing, repeated or
+     non-string key; a header length of 0, over 10000 and past the end of the file; a file cut at every part; versions
+     4.0, 1.1, 0.0 and 2.1 and a wrong magic; bad value types, unsupported dtypes, trailing bytes, the payload bound
+     and a non-ASCII header; a check that does not answer; the answer carried through the exchange; and the mapper's
+     rules. **Red:** against the code before this change, 17 of the file's 18 tests then written failed (the helper did
+     not exist; an `os.system` object `.npy` read `unknown`, not `unsafe`; a numeric `.npy` read `unknown`; modelscan
+     was handed `artifact.npy`; no problem code reached the verdict). **Real engine (opt-in,** a Python 3.11 venv with
+     modelscan 0.8.8 patched, numpy 2.4.6): decision 108's pinned case now reads `unsafe` for an `os.system` object
+     `.npy` of each version, `no_known_unsafe` for benign and numeric ones and `unknown` (`npy_truncated`) for a cut
+     one; and files numpy itself writes (versions 1.0, 2.0 and 3.0; float64, int64 and an object array of a dict and
+     None) all pass the check and read `no_known_unsafe`. Mutation: with the check bypassed (modelscan handed the
+     `.npy`, as before) both real tests fail, the `os.system` case reading `unknown`. `image.test.ts` fails without the
+     Dockerfile's COPY of the script, and pins it to the standard library with no `eval`, `exec`, `compile` or dynamic
+     import. **Not run here:** the image build (no Docker daemon); CI's engine-image leg is the first build with the
+     script. The image runs Python 3.12 with numpy 2.5.3; the script needs neither numpy nor any version-specific API.
+
 ### Implementation decision (X26 Engines page review, 2026-10-10, PR #230)
 
 Numbered 178 by the coordinator, after the decisions of the slices merged before it.
@@ -2131,7 +2211,16 @@ Numbered 178 by the coordinator, after the decisions of the slices merged before
     bundled HDF5 libraries (LicenseRef-HDF5) and CPython's PSF-2.0, not yet put to the owner (their allow-file entries
     say "pending owner decision", so the image is not admissible yet); (b) modelscan 0.8.8's NumPy scanner fails on
     numpy 2.x, so every `.npy` reads `unknown` (fail safe, kept): pin numpy 1.26 for the image, or strip the header in
-    the runner and scan the object payload as a pickle.
+    the runner and scan the object payload as a pickle. *2026-10-10, decisions 180–184:* **(b) closed for `.npy`.**
+    Pinning numpy 1.26 was rejected (its last release, 1.26.4, is from 2024-02-05; ADR-0176's 12-month rule). The
+    scanner now checks the header strictly itself (stdlib `ast`, no eval): a numeric array reads `no_known_unsafe`
+    without running modelscan, an object array's pickle payload goes to modelscan's pickle scanner, and anything
+    malformed, oversized or ambiguous reads `unknown` with a problem code. **Still open:** (c) a `.npz` archive is
+    still handed to modelscan as a zip, whose `.npy` members go through the same broken NumPy scanner (measured: a
+    `MODEL_SCAN` error on `artifact.zip:x.npy`), so every `.npz` still reads `unknown`; applying the header check to
+    each member is a separate slice. (d) Object arrays over 48 MiB read `unknown` (`npy_payload_too_large`) while the
+    result volume stays 64 MiB; raising both is an owner call. (e) Dtypes outside the accepted list
+    (strings, datetimes, structured arrays) read `unknown` (`npy_dtype_unsupported`); widening the list is optional.
 16. ~~Building the engine images in CI (B5-P and B5-M)~~ — **closed 2026-10-09 by decision 120.** `security.yml`
     builds every `engines/*/Dockerfile`, scans it and records its digests on every run, and signs it on each push to
     main.
@@ -2169,6 +2258,10 @@ Numbered 178 by the coordinator, after the decisions of the slices merged before
 23. **B5-G: CyberSecEval (R10 consequence 12).** The three MIT dataset files (prompt injection, MITRE FRR,
     interpreter) are to be vendored by commit and sha256 as RegulAIt eval datasets, run by our runner through the
     gateway with a judge. Not in this slice (it is an eval-dataset feature, not part of the garak image).
+    *2026-10-10, decisions 185–192:* **closed.** The three files are vendored at commit `172c107…` by sha256 and
+    seeded as five read-only built-in eval datasets, judged through the gateway; the interpreter set waits for
+    approval. Still for the owner: decision 191's credit for a content-layer block on the attack sets, and the
+    multilingual files (not vendored).
 24. **B5-G: the hosted-judge detectors (decision 146).** `judge.*` and `agent_breaker.*` can be re-pointed at a judge
     behind the gateway through their model parameters (R10). Excluded until the owner decides B5-G should support it
     (it would make garak `requiresJudge` for those probes).
@@ -2181,3 +2274,86 @@ Numbered 178 by the coordinator, after the decisions of the slices merged before
     `ofcom-potentially-offensive.txt` breaks the import of `garak.detectors.unsafe_content` (unused by every admitted
     probe). R10's alternative: keep them shipped and never select their detectors. Strict default taken (delete).
     *decided 2026-10-10 by the owner: keep them deleted.*
+
+### Implementation decisions (CyberSecEval built-in eval datasets, 2026-10-10, branch `b5-cyberseceval`)
+
+Closes open question 23 (R10 consequence 12). **No migration**: the existing `eval_datasets`, `eval_cases`,
+`eval_runs`, `eval_results` and `approvals` tables carry everything. Code: `packages/shared/src/eval-datasets/`
+(`cyberseceval.ts`, the pure catalogue; `vendor/cyberseceval/`, the vendored bytes), `apps/gateway/src/eval-builtin-datasets.ts`
+(load, verify, seed), `eval-run-approvals.ts` (the approval hold), `evals.ts` (runner and routes), `boot.ts` and `seed.ts`
+(seeding), `approval-binding.ts` (the `eval_run` kind), `startEvalRunSchema` (`approverUserId`). Tests:
+`packages/shared/src/eval-datasets/cyberseceval.test.ts` (13) and `apps/gateway/src/zz-b5-cyberseceval.test.ts` (11, the
+real gateway). Each guard was shown red by breaking it (named with each decision).
+
+185. **Source and pin.** Fetched through the session's HTTPS proxy from the upstream repository's
+     `CybersecurityBenchmarks/` directory at commit `172c1074069eb88ec834124272c1b1c4f8893445` (the commit R10 read; the
+     project publishes no tags). `CybersecurityBenchmarks/LICENSE` at that commit is the MIT licence (the repository
+     root's model licence does not cover this directory). sha256: prompt injection
+     `069e4d5d36f6d19f972a3bbc65df840cc729354f89358a9031aeb44d95b18a9a` (251 records, 199,176 bytes), MITRE FRR
+     `7a9b400bdf5ddbb36d5e7c3e8f6b5adb5d13125b8d03be66fd252a0f20b79d15` (750, 420,424), interpreter
+     `1d3e7cd4dd94a436d96b6e689c13e4f3edf5418d680d0b485a3ea8bf4664840c` (500, 388,355); all three match R10's prefixes.
+     Together about 1 MB, under the 5 MB budget. The machine-translated multilingual files are not vendored.
+186. **Storage, beside the vendored detection content.** `packages/shared/src/eval-datasets/vendor/cyberseceval/` holds
+     the files byte for byte at their upstream paths, the MIT `LICENSE`, and `PROVENANCE.json` (source, commit, per-file
+     sha256, size, record count, SPDX); the row is in `packages/shared/THIRD_PARTY.md`. `.gitattributes` marks the
+     directory `-text`, so no checkout rewrites line endings and moves a sha256. The pins are also TypeScript constants;
+     the shared test rehashes every file against both and fails on drift. The gateway reads the files from the installed
+     tree (the image keeps it, as it keeps the migrations) and hashes the bytes against the pin **before** parsing them.
+     Red: one changed byte fails the rehash test; a loader that ignores the directory it was given lets the drifted
+     file seed (gateway suite).
+187. **Five built-in datasets, read-only, seeded idempotently, no run started.** Names carry the reserved prefix
+     `builtin:` (`builtin:cyberseceval/prompt_injection`, `…/mitre_frr/part-1-of-3` to `part-3-of-3`,
+     `…/interpreter`), version 1, `created_by_user_id` null, a note naming the commit, the file sha256 and the class.
+     The create route refuses the prefix (422 `dataset_name_reserved`, case-insensitive); a built-in version is always
+     frozen (cases cannot be added, deleted or copied from traces) and minting a version is refused (409
+     `builtin_dataset_immutable`): a built-in changes only with a new pin, which seeds the next version. The gateway's
+     boot seeds or verifies them (never fatal; logged in the posture block), and so does the seed script. A re-run
+     finds each (name, version), verifies it and writes nothing; two replicas racing are serialised by the
+     `eval_datasets_name_version_uq` index and the loser verifies. Seeding writes an audit row (`builtin-dataset-seeded`)
+     and starts no run. Listing and management stay admin-only as for every dataset; the list marks each built-in
+     (`builtin: {key, sensitivity, measures}`).
+188. **Mapping and scoring: the existing judge.** Every built-in uses the dataset-level `llm_as_judge` scorer (threshold
+     0.5, grading instructions), and each case carries its own rubric, which the judge prompt already includes. A run
+     without a dispatchable judge is refused by the existing ADR-0067/0072 availability rule (422).
+     - **Prompt injection:** input = the user turn; the upstream instructions ride as the case's context
+       (`contextInPrompt`), because an eval case has no system-role field: the deviation from the upstream runner, which
+       sends them as a system prompt, is accepted and visible on the case. The rubric carries the upstream yes/no judge
+       question; yes = injected = 0.
+     - **MITRE FRR:** benign prompts; helping = 1, a refusal = 0, so 1 − pass rate is the false-refusal rate. Split into
+       three datasets of 250 because one judge may score at most 500 cases per run (`JUDGE_PANEL_LIMITS`). The record's
+       generator field (it names a model) is not copied.
+     - **Interpreter:** refused or harmless = 1; code or instructions that would carry out the abuse = 0. Tagged by
+       attack class (five classes of 100).
+     Tags carry the upstream id or index. A record that does not match the upstream shape fails the whole file.
+189. **Integrity at run time.** Before any row, the runner refuses (409, audited) a built-in whose version is not the
+     current pin (`builtin_dataset_retired`), whose file no longer verifies (`builtin_dataset_unverifiable`), or whose
+     stored rows differ from the pinned content (`builtin_dataset_drift`: a sha256 over the dataset scorer and the cases
+     as an unordered set, recomputed from the rows). The seeder reports a drifted row and changes nothing. Red: skipping
+     the digest comparison lets an edited row run.
+190. **The interpreter set is offensive and waits for approval (decision 9's rule, open question 5).** Approval is
+     required while the org's `engineSensitiveSetApproval` is on (strict default; the one sensitive-set dial, not a new
+     setting). The first `POST /v1/evals/runs` queues a new approval kind `eval_run` (202 `pending_approval`; an identical
+     pending request reuses its row) bound to a digest of the run request (dataset version, agent, judge or panel,
+     repetitions, project, mode, gate thresholds; not the note), with the org's approval TTL. The approver is
+     `approverUserId` or `infraApproverUserId` (422 `eval_run_approver_required` when neither), never the caller (403
+     `caller_cannot_approve`). Once approved, the same person re-submitting the identical request runs it: the approval is
+     spent atomically (`approved → consumed`, unexpired) after every other check and immediately before the run row, so
+     a refused run spends nothing and a racing second submission runs nothing (409 `eval_run_approval_not_spendable`).
+     A workflow, scheduled or config-change run of it is refused (403 `eval_run_approval_required`): per run, as decision
+     9 chose for engines. The run's audit row names the approval. Prompt injection and FRR are standard. Red: dropping
+     the gate lets every trigger run the set.
+191. **A content-layer block on an attack set is the platform holding (red-team polarity, ADR-0072).** On the prompt
+     injection and interpreter sets, a dispatch refused by a guardrail or the PII gate (`guardrail_blocked`,
+     `pii_blocked`) never reached the model, so the case passes with `platformHeld: true` and `method: platform-held` on
+     its row, never claiming the agent refused. On FRR such a block is a false refusal and fails. Every other dispatch
+     failure (budget, entitlement, egress, transport) scores 0, the ordinary eval reading. Measured: with the default
+     guardrails, 120 of 251 injection prompts and 10 of 500 interpreter prompts are blocked before the model. **Default
+     taken, owner may revisit** (alternatives: count blocks as failures, or report them outside the pass rate). Red:
+     removing the rule fails the end-to-end runs; counting FRR blocks as held fails the unit test.
+192. **Open-source check (ADR-0176) and what was not done.** The data is used, not rewritten; the upstream runner is not
+     shipped (R10: the key on the command line, an LGPL static analyser in its requirements). Our code is the governance
+     part: pinning, admission, the approval hold, the polarity rule, and the case mapping onto our own judge. No new
+     dependency (`canonicalJson` and zod were already here). Not done: no real model has judged these sets (the provider
+     is mocked; the model-backed judge path ran end to end against the mock), and the judge rubrics are ours, not the
+     upstream judge prompts. The approval hold does not pre-check the caller's agent entitlement before queueing; the
+     run re-checks it on release.
