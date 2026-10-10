@@ -10,8 +10,10 @@
  * as approvals do (ADR-0186).
  *
  * WHO MAY DELEGATE WHAT (S5 security review item 2): the person must be a
- * STEWARD of the agent (listed in its `sponsor_user_ids`) and must have access
- * to the project (`assertProjectAttribution`, ADR-0011). STRICT ROOTS (item 6,
+ * STEWARD of the agent (listed in its `sponsor_user_ids`) and an EXPLICIT
+ * member of the project (`project_members`; admins too). Unlike ADR-0011's
+ * attribution rule, a project with no members is NOT open for delegation
+ * (secure by default, ADR-0180; master ruling on the S5 review). STRICT ROOTS (item 6,
  * ADR-0180): a cap is required unless the org set a default cap or allows
  * uncapped roots, and the lifetime defaults to 15 minutes and may not pass the
  * org's `delegation_root_max_lifetime_seconds`. Every refusal is audited.
@@ -29,7 +31,7 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { decodeProtectedHeader, importJWK, jwtVerify, SignJWT, type JWK, type JWTPayload } from "jose";
-import { auditLog, eq, projects, workloadIdentities, type Db } from "@regulait/db";
+import { and, auditLog, eq, projectMembers, projects, workloadIdentities, type Db } from "@regulait/db";
 import {
   canonicalDelegationBody,
   createDelegationProofSchema,
@@ -41,7 +43,6 @@ import {
 import { databaseNow, identityServiceFailure } from "../delegation.js";
 import { currentIssuerSigner, ISSUER_JWS_ALG, publishedSigningKeys, signingKeyAccepts } from "../identity-signing-keys.js";
 import { loadOrgSettings } from "../org-settings.js";
-import { assertProjectAttribution } from "../projects.js";
 import { requireStepUp } from "../step-up.js";
 import { deploymentEnvironment, gatewayResource, identityIssuer } from "./common.js";
 
@@ -67,6 +68,16 @@ export interface VerifiedDelegationProof {
   body: DelegationBody;
   canonical: string;
   exp: number;
+}
+
+/** a delegation-specific project check (S5 review): an explicit `project_members` row, nothing implied */
+export async function isExplicitProjectMember(db: Db, projectId: string, userId: string): Promise<boolean> {
+  const [m] = await db
+    .select({ id: projectMembers.id })
+    .from(projectMembers)
+    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)))
+    .limit(1);
+  return !!m;
 }
 
 /** POST /v1/delegations/proofs */
@@ -110,9 +121,9 @@ export async function createDelegationProofRoute(db: Db, req: FastifyRequest, re
   }
   const [project] = await db.select({ id: projects.id, classifications: projects.classifications }).from(projects).where(eq(projects.id, body.projectId));
   if (!project) return reply.status(400).send({ error: "project_not_found" });
-  // ... and only on a project the person may work on (the gateway's project check, ADR-0011)
-  const access = await assertProjectAttribution(db, project.id, userId, ctx.isAdmin);
-  if (!access.ok) return refuseProof(403, "delegation_project_access", "you do not have access to this project");
+  // ... and only on a project they are an EXPLICIT member of: a memberless project is not open for delegation, and
+  // being an admin is not membership (ADR-0011's attribution rule is deliberately not reused here)
+  if (!(await isExplicitProjectMember(db, project.id, userId))) return refuseProof(403, "delegation_project_access", "you do not have access to this project");
   const org = await loadOrgSettings(db);
   const maxDepth = body.maxDepth ?? org.delegationMaxDepth;
   if (maxDepth > org.delegationMaxDepth) {

@@ -969,9 +969,10 @@ session's rulings below are binding on S5 and the slices after it. Items 1 to 6 
    with `max_depth: 0`, the root exchange, A authorises child B → refused `delegation_depth`).
 2. **Only a steward with access to the project may start a delegation (MEDIUM).** `POST /v1/delegations/proofs`
    checked no relation between the person, the agent and the project. Now the caller must be listed in the workload
-   identity's `sponsor_user_ids` (a steward) and must have access to `projectId` through the gateway's existing
-   project check (`assertProjectAttribution`, ADR-0011: an admin, or a member of a project that has members).
-   Otherwise 403 `delegation_not_steward` or `delegation_project_access`, each audited as a deny.
+   identity's `sponsor_user_ids` (a steward) and must be an **explicit member** of `projectId` (a `project_members`
+   row). *Master ruling after the fix round:* a delegation-specific check, not ADR-0011's attribution rule: a project
+   with no members is NOT open for delegation, and being an admin is not membership (ADR-0180). ADR-0011's general
+   rule is unchanged. Otherwise 403 `delegation_not_steward` or `delegation_project_access`, each audited as a deny.
 3. **Every issuer on an X.509 path must be a CA (MEDIUM).** `pkijs` 3.4.1 `CertificateChainValidationEngine` checks
    signatures and validity but not `basicConstraints.cA`, the `keyCertSign` key usage or `pathLenConstraint` on
    issuers, so a leaf certificate could sign another leaf. After the engine accepts a path, our validator walks
@@ -992,7 +993,7 @@ session's rulings below are binding on S5 and the slices after it. Items 1 to 6 
    - `delegationUncappedRootAllowed` (strict `false`): a root grant with no cap is refused
      (`delegation_cap_required`) unless an admin turns this on.
    - `delegationRootDefaultCapMicros` (strict `0` = none, so the person must name a cap): the cap applied when a
-     person names none. Setting one, or raising it, is a relaxation.
+     person names none. Setting one, or raising it, is a relaxation that needs the `settings_relax` step-up (master ruling, confirmed).
    - `delegationRootMaxLifetimeSeconds` (strict 900): the longest root grant. The default lifetime is 15 minutes (not
      1 hour); a longer request is refused (`delegation_lifetime`) unless an admin raises the limit (up to 24 h).
    The proof route and the root exchange both enforce them, so a setting tightened between the two still applies.
