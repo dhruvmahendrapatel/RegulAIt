@@ -18,13 +18,13 @@
  *  - **Sign-off is not here.** The request goes to the ONE Approvals Queue and
  *    the decision is made there. This page has no approve button, deliberately.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea } from "../../../ui/kit";
 import {
   QueryGate,
   RemoveButton,
@@ -40,6 +40,8 @@ import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { EngineScanEvidenceChip } from "./EngineScanChip";
 import type { ArtifactScan } from "./modelArtifacts";
+
+const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((module) => ({ default: module.AiBomPanel })));
 
 type CardState = "unsigned" | "pending" | "approved" | "expiring" | "expired" | "revoked";
 
@@ -228,6 +230,7 @@ export default function ModelRiskPage() {
   const [newLimits, setNewLimits] = useState("");
   const [newClaims, setNewClaims] = useState("");
   const [newRefs, setNewRefs] = useState("");
+  const [bomCardId, setBomCardId] = useState<string | null>(null);
   const [openCard, setOpenCard] = useState<string | null>(null);
   // ADR-0086 — the DETAIL read is the one that fills itself from the ledgers;
   // it is fetched per open card (the list read stays cheap on purpose)
@@ -599,6 +602,9 @@ export default function ModelRiskPage() {
                   </span>
                 </div>
 
+                <Tabs tabs={[{ id: "evidence", label: "Model card and evidence" }, ...(detail.agentId ? [{ id: "ai-bom", label: "AI BOM" }] : [])]} active={detail.agentId && bomCardId === detail.id ? "ai-bom" : "evidence"} onChange={(tab) => setBomCardId(tab === "ai-bom" ? detail.id : null)} />
+                {detail.agentId && bomCardId === detail.id ? <div role="tabpanel" aria-label="Model card AI BOM"><Suspense fallback={<p role="status">Loading AI BOM controls…</p>}><AiBomPanel key={detail.agentId} subject={{ kind: "agent", id: detail.agentId }} /></Suspense></div> : null}
+                <div role="tabpanel" aria-label="Model card and evidence" hidden={Boolean(detail.agentId && bomCardId === detail.id)} className={v.stack}>
                 {/* ADR-0086 — staleness first: a certified card whose world
                     moved says so before anything else on the card */}
                 {staleness?.drifted && (
@@ -929,6 +935,7 @@ export default function ModelRiskPage() {
                 <div className={v.faint}>
                   A high evaluation score is an input to a risk decision, never a substitute for one — a model
                   can score well and still be unapproved for a use that touches regulated data.
+                </div>
                 </div>
               </div>
             </Card>

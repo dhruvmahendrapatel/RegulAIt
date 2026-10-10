@@ -5,13 +5,13 @@
  * agent grants, the per-user agent policy (default, cost ceiling, routing,
  * run budget), and the per-user entitlement view.
  */
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea } from "../../../ui/kit";
 import {
   KV,
   RemoveButton,
@@ -30,6 +30,8 @@ import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
+const AiBomPanel = lazy(() => import("../governance/BomEvidencePanel").then((module) => ({ default: module.AiBomPanel })));
+
 const CLEAR = "__clear__";
 
 export default function AgentsPage() {
@@ -37,6 +39,8 @@ export default function AgentsPage() {
   const users = useUsers();
   const customProviders = useCustomProviders();
   const act = useAction();
+  const [bomAgentId, setBomAgentId] = useState("");
+  const [agentEvidenceTab, setAgentEvidenceTab] = useState("overview");
 
   // `#agent-<id>` deep links (dependency graph, governance alerts): once the
   // list has loaded, scroll that agent's row into view and mark it, so the
@@ -159,6 +163,12 @@ export default function AgentsPage() {
             empty={<EmptyState title="No agents registered" body="Register the first agent below." />}
           />
         </Card>
+
+        <Card title="Agent evidence"><div className={v.stack}>
+          <Field label="Agent for AI BOM evidence"><Select value={bomAgentId} onChange={(event) => setBomAgentId(event.target.value)}>{optionEls(aOpts, "Choose an agent")}</Select></Field>
+          <Tabs tabs={[{ id: "overview", label: "Overview" }, { id: "ai-bom", label: "AI BOM" }]} active={agentEvidenceTab} onChange={setAgentEvidenceTab} />
+          {agentEvidenceTab === "overview" ? <div role="tabpanel" aria-label="Agent evidence overview"><p>{(agents.data?.agents ?? []).find((agent) => agent.id === bomAgentId)?.name ?? "No agent selected"}</p><p>Choose an agent and open AI BOM to inspect its signed snapshots, export formats and drift. Catalog and entitlement controls remain available on this page.</p></div> : <div role="tabpanel" aria-label="Agent AI BOM">{bomAgentId && (agents.data?.agents ?? []).some((agent) => agent.id === bomAgentId) ? <Suspense fallback={<p role="status">Loading AI BOM controls…</p>}><AiBomPanel key={bomAgentId} subject={{ kind: "agent", id: bomAgentId }} /></Suspense> : <p>Choose an agent to inspect its signed evidence and drift.</p>}</div>}
+        </div></Card>
 
         <RegisterAgentCard />
         <ModelPricingCard agents={agents.data?.agents ?? []} />

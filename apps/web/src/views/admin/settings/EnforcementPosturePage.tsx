@@ -37,12 +37,15 @@
  *    harden action. An admin hardening a regulated deployment is not thereby
  *    asking to serve more answers from cache.
  */
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
+import { putOrgSettings } from "../../../stepup/stepUp";
+import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
-import { QueryGate, Stat, useAction } from "../adminKit";
+import { Badge, Button, Card, EmptyState, Field, Input, Modal, Select, Table } from "../../../ui/kit";
+import { QueryGate, Stat, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -282,7 +285,103 @@ export default function EnforcementPosturePage() {
             />
           </Card>
         </QueryGate>
+        <BomSettingsPanel />
       </div>
     </>
   );
+}
+
+
+/** Browser-safe copy of ADR-0189 settings; no shared barrel/runtime import (node crypto). */
+export const BOM_POSTURE_SETTINGS = [
+  { key: "decisionFactsCapture", column: "decision_facts_capture", label: "Decision BOM facts", strict: "on", options: ["on", "off"], consequence: "Off leaves decisions made while off with facts not recorded forever." },
+  { key: "decisionBomFinality", column: "decision_bom_finality", label: "Decision BOM finality", strict: "anchored", options: ["anchored", "anchored_unverified_destination", "chain_signed"], consequence: "An unverified destination is not observed tamper-resistant. Chain signed freezes before an anchor exists." },
+  { key: "bomExportRoles", column: "bom_export_roles", label: "BOM export roles", strict: "admins_only", options: ["admins_only", "admins_and_auditors"], consequence: "Adding auditors allows only people with an explicit auditor grant. Membership or sponsorship alone grants no export access." },
+  { key: "bomPersonIdentifiers", column: "bom_person_identifiers", label: "People in AI BOMs", strict: "id_only", options: ["id_only", "display_name"], consequence: "Display names may be recorded in AI BOM snapshots. Decision BOMs always use IDs; emails are never included." },
+  { key: "aiBomSnapshotTriggers", column: "ai_bom_snapshot_triggers", label: "Automatic AI BOM snapshots", strict: "sign_off_events", options: ["sign_off_events", "on_demand_only"], consequence: "On demand only allows sign-offs with no snapshot of what was signed off." },
+  { key: "aiBomSnapshotWithoutKey", column: "ai_bom_snapshot_without_key", label: "Sign-off with no signing key", strict: "refuse", options: ["refuse", "skip_and_record"], consequence: "Skip and record proceeds with an audited evidence gap. No snapshot is queued or taken later." },
+  { key: "cyclonedxExportVersions", column: "cyclonedx_export_versions", label: "CycloneDX export versions", strict: ["1.7"], options: ["1.7", "1.7,1.6"], consequence: "Adding 1.6 provides a previous-version rendering. Version 1.7 remains required." },
+  { key: "bomExportRateLimitPerMinute", column: "bom_export_rate_limit_per_minute", label: "BOM exports per minute, per person", strict: 30, consequence: "Above 30 permits faster bulk evidence extraction, up to 600 per minute." },
+  { key: "decisionBomFiniteLockFinality", column: "decision_bom_finite_lock_finality", label: "Finality with unbounded audit retention", strict: "refuse", options: ["refuse", "accept"], consequence: "Accept permits a finite lock while retention has no end. The verifier reports the lock as lapsed after its expiry." },
+] as const;
+type BomPostureSetting = (typeof BOM_POSTURE_SETTINGS)[number];
+
+export function bomPostureValue(setting: BomPostureSetting, input: string): string | string[] | number | null {
+  if (setting.key === "bomExportRateLimitPerMinute") {
+    if (!/^[0-9]+$/.test(input)) return null;
+    const value = Number(input);
+    return Number.isSafeInteger(value) && value >= 1 && value <= 600 ? value : null;
+  }
+  if (setting.key === "cyclonedxExportVersions") {
+    const versions = input.split(",");
+    if (!versions.includes("1.7") || new Set(versions).size !== versions.length || versions.some((value) => value !== "1.7" && value !== "1.6")) return null;
+    return ["1.7", "1.6"].filter((value) => versions.includes(value));
+  }
+  return setting.options.some((value: string) => value === input) ? input : null;
+}
+function bomValueText(value: unknown): string | null {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value.join(",");
+  return null;
+}
+export function bomStoredValue(setting: BomPostureSetting, value: unknown): string | string[] | number | null {
+  if (setting.key === "cyclonedxExportVersions" ? !Array.isArray(value) : setting.key === "bomExportRateLimitPerMinute" ? typeof value !== "number" : typeof value !== "string") return null;
+  const text=bomValueText(value); return text===null ? null : bomPostureValue(setting,text);
+}
+/** A successful write is not a fresh baseline until the follow-up read succeeds. */
+export async function saveBomPostureAndReload(body: Record<string, unknown>, write: (body: Record<string, unknown>) => Promise<unknown>, settle: () => Promise<boolean>): Promise<boolean> {
+  await write(body);
+  return settle();
+}
+function BomSettingsPanel() {
+  const settings = useQuery({ queryKey: ["admin", "org-settings"], retry: false, queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
+  const baseline = useSettleAfterWrite(["admin", "org-settings"]);
+  const flight = useSingleFlight();
+  const save = async (body: Record<string, unknown>) => {
+    if (baseline.stale || !flight.enter()) throw new Error("The settings are locked until their current values are reloaded.");
+    try {
+      const fresh = await saveBomPostureAndReload(body, putOrgSettings, baseline.settle);
+      if (!fresh) throw new Error("Saved, but the current values could not be reloaded. Retry loading before changing another setting.");
+    } finally { flight.leave(); }
+  };
+  const retry = async () => {
+    if (!flight.enter()) return;
+    try { await baseline.settle(); } finally { flight.leave(); }
+  };
+  return <Card title="BOM evidence posture"><div className={v.stack}>
+    <p>Strict defaults record digests and classifications, never raw content. Exports require an admin or an explicitly granted auditor and are audited. Changing settings requires admin access; relaxing one requires settings step-up.</p>
+    <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
+      {settings.data ? BOM_POSTURE_SETTINGS.map((setting) => <BomSettingRow key={`${setting.key}:${JSON.stringify(settings.data.settings[setting.key])}`} setting={setting} current={settings.data.settings[setting.key]} locked={baseline.stale || flight.busy} onSave={save} />) : null}
+    </QueryGate>
+    {baseline.stale ? <StaleAfterWrite onRetry={() => void retry()} /> : null}
+  </div></Card>;
+}
+function BomSettingRow({ setting, current, locked, onSave }: { setting: BomPostureSetting; current: unknown; locked: boolean; onSave: (body: Record<string, unknown>) => Promise<void> }) {
+  const act = useAction();
+  const currentValue = bomStoredValue(setting,current);
+  const currentText = bomValueText(currentValue);
+  const [draft, setDraft] = useState(currentValue === null ? "" : bomValueText(currentValue)!);
+  const [pending, setPending] = useState<{ body: Record<string, unknown>; oldValue: string; newValue: string } | null>(null);
+  const parsed = bomPostureValue(setting, draft);
+  const known = currentValue !== null;
+  const relaxed = known && (setting.key === "bomExportRateLimitPerMinute" ? Number(currentValue) > 30 : JSON.stringify(currentValue) !== JSON.stringify(setting.strict));
+  const save = (body: Record<string, unknown>) => void act.run(async () => { await onSave(body); }, "BOM evidence setting saved and current values reloaded").finally(() => setPending(null));
+  return <div className={v.stack}>
+    <form className={v.stack} onSubmit={(event) => {
+      event.preventDefault();
+      if (locked || act.busy || !known || parsed === null) return;
+      const body = { [setting.key]: Array.isArray(parsed) ? [...parsed] : parsed };
+      setPending({ body, oldValue: currentText!, newValue: bomValueText(parsed)! });
+    }}>
+      <Field label={setting.label}>
+        {setting.key === "bomExportRateLimitPerMinute" ? <Input type="number" min={1} max={600} step={1} required disabled={locked || !known || act.busy || pending !== null} value={draft} onChange={(event) => setDraft(event.target.value)} /> : <Select disabled={locked || !known || act.busy || pending !== null} value={draft} onChange={(event) => setDraft(event.target.value)}>{!known ? <option value="">Unknown — setting not reported</option> : null}{setting.options.map((option) => <option key={option} value={option}>{option.replaceAll("_", " ")}</option>)}</Select>}
+      </Field>
+      <p>Current: {known ? currentText : "unknown — no stored setting reported"}. Strict default: {bomValueText(setting.strict)}. {known ? <Badge tone={relaxed ? "warn" : "ok"}>{relaxed ? "audited relaxation" : "strict"}</Badge> : <Badge tone="warn">unknown</Badge>}</p>
+      {setting.key === "decisionFactsCapture" && currentValue === "off" ? <p role="status">Decision BOM: not captured</p> : null}
+      <p className={v.faint}>{setting.consequence}</p>
+      <Button type="submit" size="sm" disabled={locked || !known || act.busy || pending !== null || parsed === null || JSON.stringify(parsed) === JSON.stringify(currentValue)}>Review change</Button>
+      {act.error ? <p role="alert">{act.error}</p> : null}
+    </form>
+    <Modal open={pending !== null} title={`Change ${setting.label.toLowerCase()}?`} onClose={() => { if (!act.busy && !locked) setPending(null); }} actions={<><Button disabled={act.busy || locked} onClick={() => setPending(null)}>Cancel</Button><Button disabled={act.busy || locked} onClick={() => { if (pending && !act.busy && !locked) save(pending.body); }}>{act.busy ? "Saving…" : "Save setting"}</Button></>}><p>Stored value: {pending?.oldValue} → New value: {pending?.newValue}</p><p>{setting.consequence}</p><p>Every change is audited. A relaxation requires a fresh settings step-up.</p></Modal>
+  </div>;
 }

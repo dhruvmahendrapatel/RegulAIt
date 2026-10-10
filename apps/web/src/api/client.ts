@@ -322,7 +322,15 @@ async function parseBody(res: Response): Promise<ApiErrorPayload | null> {
   }
 }
 
+/** Binary GET retaining normal session-loss handling; BOM archives are never JSON-decoded. */
+async function getBlobWithHeaders(path: string): Promise<{body:Blob;headers:Headers}> {
+  const res=await fetch(path,{credentials:"include",headers:{[CSRF_HEADER]:"1"}});
+  if(!res.ok)throw apiErrorFrom("GET",path,res.status,await parseBody(res));
+  return {body:await res.blob(),headers:res.headers};
+}
+
 export const api = {
+  getBlobWithHeaders,
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body ?? {}),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body ?? {}),
