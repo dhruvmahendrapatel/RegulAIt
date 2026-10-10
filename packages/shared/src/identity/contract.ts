@@ -284,13 +284,15 @@ export type ActorChain = z.infer<typeof actorChainSchema>;
 // Replay claims (decision 14) and the audit chain version (decision 19)
 // ---------------------------------------------------------------------------
 
-/** `replay_claims.namespace` (migration 0180 CHECK) */
+/** `replay_claims.namespace` (migration 0180 CHECK, widened by 0187) */
 export const REPLAY_NAMESPACES = [
   "client_assertion",
   "as_dpop",
   "rs_dpop",
   "human_delegation_proof",
   "delegation_authz",
+  // ADR-0190 I3: the executor channel's one-use request proofs (migration 0187 widens the CHECK)
+  "executor_channel",
 ] as const;
 export type ReplayNamespace = (typeof REPLAY_NAMESPACES)[number];
 

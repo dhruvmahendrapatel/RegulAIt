@@ -121,6 +121,9 @@ import {
   PLACEMENT_OUTCOMES,
   REQUIRABLE_ISOLATION_CLASSES,
   REQUIRED_CLASS_SOURCES,
+  EXECUTION_OFFER_STATUSES,
+  EXECUTION_OFFER_DECLINE_REASONS,
+  EXECUTION_OFFER_END_OUTCOMES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -13324,3 +13327,58 @@ export const executionPlacements = pgTable(
   ],
 );
 export type ExecutionPlacementRow = typeof executionPlacements.$inferSelect;
+
+/**
+ * ADR-0190 I3 (migration 0187): a placement OFFERED to one executor over its
+ * channel (decision 4). Rows, not memory, so a placement decided on one gateway
+ * replica reaches the executor's stream on another. Forward-only statuses
+ * (guard trigger), never deleted; the placement it ends in is named once known.
+ */
+export const executionOffers = pgTable(
+  "execution_offers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    executorId: uuid("executor_id")
+      .notNull()
+      .references(() => executors.id, { onDelete: "restrict" }),
+    workloadKind: text("workload_kind", { enum: ISOLABLE_WORKLOAD_KINDS }).notNull(),
+    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull(),
+    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }).notNull(),
+    enforcement: text("enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull(),
+    profileDigest: text("profile_digest")
+      .notNull()
+      .references(() => executionProfiles.digest, { onDelete: "restrict" }),
+    imageDigest: text("image_digest").notNull(),
+    status: text("status", { enum: EXECUTION_OFFER_STATUSES }).notNull().default("offered"),
+    declineReason: text("decline_reason", { enum: EXECUTION_OFFER_DECLINE_REASONS }),
+    endOutcome: text("end_outcome", { enum: EXECUTION_OFFER_END_OUTCOMES }),
+    placementId: uuid("placement_id").references(() => executionPlacements.id, { onDelete: "restrict" }),
+    offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("execution_offers_workload_kind_check", sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`),
+    check("execution_offers_required_class_check", sql`${t.requiredClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`),
+    check(
+      "execution_offers_required_by_check",
+      sql`${t.requiredBy} IN ('workload_kind', 'data_sensitivity', 'compliance_tag', 'autonomy_class', 'configured_profile', 'unknown_agent', 'parent_grant')`,
+    ),
+    check("execution_offers_enforcement_check", sql`${t.enforcement} IN ('enforce', 'warn')`),
+    check("execution_offers_image_digest_check", sql`${t.imageDigest} ~ '^sha256:[0-9a-f]{64}$'`),
+    check(
+      "execution_offers_status_check",
+      sql`${t.status} IN ('offered', 'accepted', 'placed', 'mismatch', 'declined', 'expired', 'withdrawn', 'ended')`,
+    ),
+    check(
+      "execution_offers_decline_reason_check",
+      sql`${t.declineReason} IS NULL OR ${t.declineReason} IN ('attestation_stale', 'class_below_required', 'capacity', 'quarantined', 'profile_unknown')`,
+    ),
+    check("execution_offers_end_outcome_check", sql`${t.endOutcome} IS NULL OR ${t.endOutcome} IN ('completed', 'failed', 'killed', 'limit_exceeded')`),
+    check("execution_offers_expiry_check", sql`${t.expiresAt} > ${t.offeredAt}`),
+    index("execution_offers_executor_status_idx").on(t.executorId, t.status, t.offeredAt),
+  ],
+);
+export type ExecutionOfferRow = typeof executionOffers.$inferSelect;
