@@ -631,6 +631,44 @@ and both builds remain recorded above. No full unrelated gateway-suite claim.
 ### X21 cross-review corrections — 2026-10-08
 R21-01 fixed: online verifier replaces bundle keys with deployment receipt_signing_keys; submitted same-ID x mismatches are untrusted and cannot verify as valid. Real registry substitution attack is a genuine red. Offline CLI always prints UNPINNED and exits2 without a trusted-keys file; pinned valid prefixes exit0, invalid signatures exit1. UI explains registry pinning. R21-02 fixed: empty audit strings allowed; oversized tool names/rule IDs carry SHA256 in optional typed fields with raw fields null. Real empty/5k signing/verifying succeeds; status surfaces failed/disabled scheduled sweeps or pending rows older than120s as stalled, without exposing error text. R21-03 authorized receipt-only foundation route/sweep expectations updated to real200/400/no_key. R21-04 configuration rule IDs (including agent-owner-set, fallback-chain-configured and mcp-tool-price-set) excluded from signing AND lag counts. Future configuration writers must extend that explicit classification. R21-05 listing receipt envelopes writes only range/count audit metadata. R21-06 payload/envelope/bundle/public-key validators now use strict zod schemas with existing bounds/date/sequence checks. No private JWKs or free reason/detail accepted.
 Validation: actual PostgreSQL/app/CLI9/9 plus21 foundation=30/30; verifier7/7, complete shared1944/1944, receipt browser6/6 with stalled-state screenshot in testInfo output. Shared build and fresh DB/gateway build plus web build/typecheck PASS. Four baseline failures captured (three independent review regressions plus downstream signing blockage); `/tmp/x21-review-red.log`, `/tmp/x21-reviewed-*`, `/tmp/x21-review-fresh-*`. No full gateway-suite claim.
+## X22 — RFC 3161 anchor timestamps (2026-10-07)
+
+Replaced the timestamp seam with HTTPS-only, admin allow-listed, DNS-pinned RFC 3161 requests over canonical anchor bytes. No default TSA. Configured certificate roots and optional policy are deployment inputs; key material is neither accepted nor logged. One writer serializes capture/manual/scheduled attempts; granted tokens are not overwritten; failed attempts retry with exponential backoff, a 20-attempt automatic ceiling, a 10-anchor sweep bound and a 15-second request/body deadline. Responses/trust bundles are bounded to 1 MiB. Verification requires granted status, SHA-256 imprint, nonce, requested policy, supported signature hash, CMS signature, a chain to configured roots at generation time, critical exclusive timestamp EKU, and the ESS certificate/issuer binding. No AIA/OCSP/CRL network retrieval or certificate-revocation guarantee is claimed. Manual attempts are audited by state/count, and failure never changes a successful storage flush.
+
+The audit panel distinguishes unconfigured/pending/failed/verified-at-issuance states and offers authenticated DER reply download and retry. It states independent trust/anchor-byte verification and completeness/receipt-time limits.
+
+Focused validation: 11/11 gateway cases (6 independent OpenSSL crypto checks plus 5 real PostgreSQL cases exercising the actual egress guard with synthetic DNS/final transport), and 6/6 browser cases PASS. No live/public TSA contacted. The first capture test used the wrong CaptureResult property; corrected anchorId. Negative EKU cases re-sign fresh TSTInfo so a one-second certificate notBefore boundary does not mask the intended EKU check. Gateway/web final builds and units run separately. Local evidence, not committed: /workspace/.regulait-onboarding/x22-{gateway-final,crypto-eku-diagnosis,browser,gateway-final-build,web-final-build,web-units}.log.
+
+Integration prerequisite requested under To Claude: audit-chain.ts must create the original record before inserting the anchor and store record.capturedAt as createdAt, making retry reconstruction byte-identical; its GET mapping must add anchorTimestampSummary and omit raw tsaToken. Those hot-file edits belong to Claude and are not applied here. Full gateway foundation 501/not_built expectations also need owner adaptation. X22 is reviewable but not represented as fully integrated until these dependencies land.
+
+### X22 authorized integration follow-up — 2026-10-07
+
+Claude's 22:15 coordination message explicitly authorized the two audit-chain
+seams. Capture now constructs the canonical record before inserting the anchor
+and persists `createdAt` from that record's `capturedAt`. The list maps measured
+timestamp summaries and omits raw `tsaToken`; DER remains on the authenticated
+`.tsr` endpoint. Two genuine regression proofs fail before these changes:
+25ms simulated insert latency makes the flushed/reconstructed timestamps differ,
+and the real anchors API lacks the verified summary (`x22-seams-red.log`).
+
+Final actual PostgreSQL/guard/OpenSSL run **13/13 PASS** (seven DB cases plus six
+independent crypto cases, `x22-seams-final.log`). It includes a real capture →
+verified issuance → list summary → idempotent retry → downloaded token
+reverification from the persisted canonical record. Gateway `tsc --noEmit` PASS
+(`x22-seams-typecheck.log`). No live/public TSA or certificate-revocation check
+is claimed. Earlier 6/6 browser, 336 units and both build evidence remains in
+the initial X22 section; current-main integration follows this checkpoint.
+
+X22 post-main integration evidence (`1eebf0cf`): 13/13 gateway/crypto cases,
+6/6 browser cases and web build/typecheck PASS. Logs:
+`x22-current-main-{tests,browser,web-build}.log` in the onboarding directory.
+The authorized hot-file dependencies are complete; review and merge remain
+Claude's responsibility.
+
+
+### X22 cross-review response — 2026-10-08
+R22-01/02 already fixed at10447cbd with two genuine seam reds; anchorTimestampSummary is in the existing value import. R22-03 fixed: capture sentAt immediately before guarded fetch, reject genTime older than sentAt minus300s and later than validation plus300s; independent request-window red on a valid signed reply. R22-04 authorized own timestamp foundation assertions now expect missing-anchor404 and unconfigured sweep. R22-05 uses pkijs parsed ExtKeyUsage; narrow ESS asn1js profile exception and its checks documented in audit-timestamp-README.md, gateway THIRD_PARTY wording corrected. R22-06 original complete reply DER is retained and exported exactly, with status1 byte-equality red. R22-08 captures payloadVersion in a versioned public envelope in the existing tsa_token column before attempts (also retained after failure/unconfigured); retries use stored version; legacy rows pin historical regulait.audit.v1 rather than current build constant. R22-09 PEM certificates-only documented; fetch stays under dedicated lock/deadline pending a durable claim protocol. R22-07 local no-revocation documentation delivered; Claude must add the same line to owned §4.9/ADR.
+Validation: `vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts src/zz-adr0186-b4-foundation.test.ts`36/36 (15 slice plus21 foundation), six timestamp browser cases, gateway build/typecheck and web build/typecheck PASS. Two new genuine crypto/red-reply tests fail on old verifier. No live TSA or network revocation claim. Logs `/tmp/x22-review-*`.
 ## X24 — measured detection monitor rules and R13-20/21 (2026-10-07)
 
 Implemented the four assigned rules in the actual loader. MCP drift compares
@@ -692,3 +730,7 @@ Utah now credits the original checked C13-72-S101_2026050620260506.pdf; the HTML
 ### X21 re-review R21-07–10 — 2026-10-10 UTC
 R21-07: replaced the configuration deny-list with explicit receiptClass metadata at eligible audit writers. Decisions/approvals opt in; configuration writers classify out; unknown and historical unclassified rows fail closed and remain available in the audit chain. Metadata is written after caller-controlled detail spreads. The TypeScript source check resolves every eligible gateway writer, including helpers, unions and implicit MCP defaults, and fails when classification is absent. R21-08 verifies with the registry key regardless of bundle keys (valid originals remain valid despite bogus supplied keys; attacker signatures fail). R21-09 single-envelope reads are metadata-audited. R21-10 imports precede the receipt module documentation.
 Evidence: reverting eligibility/key handling reproduces two independent DB regressions (plus the downstream signed-count failure); restored actual PostgreSQL/API/CLI 9/9 and writer coverage 1/1 PASS. Fresh gateway dependency builds, gateway tsc --noEmit and web build/typecheck PASS. Logs /tmp/oct10-x21-*. Unclassified past rows are intentionally not backfilled or signed; receipt omission limits remain explicit. No full gateway CI claim.
+### X22 second cross-review corrections — 2026-10-09 CDT
+R22-05 uses MIT @peculiar/asn1-ess 2.10.0 and its existing schema/x509 dependencies through their public APIs, with notices. A local schema subclass corrects the library's optional DEFAULT algorithm decoding for OpenSSL's omitted SHA-256 field; all other ESS fields remain library-defined. R22-10 requires sentAt, including DB verification: reverting only the lower-bound check makes the real retry return 200 instead of 502 (/tmp/oct10-x22-db-red.log). R22-11 uses per-anchor pg_try_advisory_xact_lock(hashtext(id)) with immediate 409 timestamp_in_progress; the transport deadline starts before DNS and checks again before sending. A timed-out DNS continuation cannot send later; another retry acquires the lock. README describes the transport bound accurately. R22-12 disables Retry when not_configured. Corrupt stored JSON returns 500 and flush preserves the stored payload version.
+Validation: 19/19 actual PostgreSQL/guarded transport/independent OpenSSL crypto tests PASS (DATABASE_URL=<local scratch base> pnpm --filter @regulait/gateway exec vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts; /tmp/oct10-x22-final-green.log). Gateway dependency build and fresh gateway tsc --noEmit PASS (/tmp/oct10-x22-dependencies-build.log, /tmp/oct10-x22-final-tsc.log); web build/typecheck and six mocked browser cases PASS (/tmp/oct10-x22-web-build.log, /tmp/oct10-x22-browser.log). No public TSA used. Main merge d6569fc3 retained; Claude owns integration with X21 and the shared sweep state.
+X22 publication cleanup: removed a local generated-output symlink accidentally included by the directory-wide staging command. It is environment setup only and is not part of the implementation.

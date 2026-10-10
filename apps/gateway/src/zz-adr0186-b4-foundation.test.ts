@@ -759,6 +759,9 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
         const expected=m==="POST"?400:200;
         expect(admin.statusCode,admin.body).toBe(expected);expect(admin.json().error).not.toBe("not_built");continue;
       }
+      if(url.startsWith("/v1/audit/anchors/")){
+        expect(admin.statusCode,admin.body).toBe(404);expect(admin.json()).toEqual({error:"anchor_not_found"});continue;
+      }
       expect(admin.statusCode, `${m} ${url} (admin): ${admin.body}`).toBe(501);
       expect(admin.json()).toEqual({ error: "not_built" });
     }
@@ -772,7 +775,12 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       expect(def!.adr).toBe("ADR-0186");
       const out = await def!.run({ db, actorUserId: null, now: new Date(), runId: `a186-${RUN}` });
       expect(out.itemsProcessed, name).toBe(0);
-      expect(out.detail, name).toMatchObject({ state: name==="decision-receipt-sign-sweep"?"no_key":"not_built" });
+      // One map of each implemented sweep's honest unconfigured state (X21 receipts, X22 timestamps).
+      const unconfiguredState: Record<string, string> = {
+        "decision-receipt-sign-sweep": "no_key",
+        "anchor-timestamp-sweep": "not_configured",
+      };
+      expect(out.detail, name).toMatchObject({ state: unconfiguredState[name] });
     }
   });
 

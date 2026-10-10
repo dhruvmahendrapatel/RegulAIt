@@ -1,0 +1,11 @@
+# Timestamp validation scope
+
+Trust configuration accepts PEM CERTIFICATE blocks only, up to 1 MiB and 64 certificates. The validator does not retrieve AIA, OCSP or CRLs or check network certificate revocation. A valid signature therefore does not claim current non-revocation. Request sentAt is recorded immediately before guarded fetch; signed genTime must be within five minutes of that request and validation time.
+
+Original RFC 3161 reply DER is stored without re-encoding, including granted-with-modifications status. The existing tsa_token text field holds a versioned public envelope with payloadVersion and base64 replyDer. Before any attempt, payloadVersion is pinned from the captured record, retained after failure and used for retries. Legacy bare-token or unattempted pre-version records use the historical regulait.audit.v1 schema; future payload schemas must preserve these metadata. No private key or anchor content is placed in this envelope.
+
+ESS SigningCertificate and SigningCertificateV2 decode through pinned @peculiar/asn1-ess 2.10.0 and its @peculiar/asn1-schema parser. Exactly one binding attribute/value is required, with the first certificate hash and optional issuer/serial checked against the actual CMS signer. pkijs handles CMS signature/chain and parsed EKU.
+
+Each anchor uses pg_try_advisory_xact_lock(hashtext(id)): concurrent attempts for that anchor return 409 timestamp_in_progress immediately, while different anchors proceed independently. DNS, admission and response-body transport share a 15-second abort deadline; late DNS cannot send after timeout. Local configuration and cryptographic verification remain bounded by size limits, not that transport timer. The lock stays held during verification and storage; moving transport outside it would require a durable claim/CAS protocol.
+
+Pinned ESS v2 schema compatibility: OpenSSL omits the DEFAULT SHA-256 algorithm. The library’s optional ANY otherwise consumes certHash; two schema subclasses make that field an optional typed AlgorithmIdentifier and reuse all library ESS fields. Independent OpenSSL issuance and signed missing/wrong-binding tests cover this adapter. No hand-written ESS traversal remains.
