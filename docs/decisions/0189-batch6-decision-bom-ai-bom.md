@@ -311,8 +311,9 @@ Build as for a first load: no grandfathering. Decisions made before B2 ships hav
 - `ai_bom_snapshots` (`id`, `subject_kind` `use_case | agent | builder_agent | install`, `subject_id` (NOT NULL; nil UUID for install, R20), `version`,
   `serial_number` uuid, `supersedes_id`, `trigger`, `basis` jsonb, `body`, `body_sha256`, `signature`, `key_id`,
   `created_by`, `created_at`; UNIQUE (`subject_kind`, `subject_id`, `version`)). Append-only.
-- `bom_renderings` (`owner_kind` `decision_bom | ai_bom`, `owner_id`, `format` `cyclonedx-1.7 | cyclonedx-1.6 |
-  spdx-3.0.1 | in-toto`, `bytes`, `sha256`, `validator`, `created_at`; PK (`owner_kind`, `owner_id`, `format`)).
+- `bom_renderings` (`id`, `decision_bom_id` or `ai_bom_snapshot_id` (exactly one, each `ON DELETE CASCADE`; R36),
+  `format` `cyclonedx-1.7 | cyclonedx-1.6 | spdx-3.0.1 | in-toto`, `bytes`, `sha256`, `validator`, `created_at`;
+  UNIQUE (parent, `format`)).
 - Settings rows for decision 7; the auditor export grant.
 - Retention follows the audit retention of the compliance profile and respects evidence holds (OWNER DECISION 11),
   through the single prune path of amendment R16.
@@ -637,7 +638,7 @@ R16. **Retention pruning works through the immutability rules.** OWNER DECISION 
       already gone (the 0168 "parent gone" test with `audit_log` as the parent); and no evidence hold covers it. A
       direct DELETE, or one that fails any test, raises as `regulait_refuse_mutation` does.
     - AI BOM snapshots: the newest snapshot of each subject, and any snapshot that a retained Decision BOM links to,
-      are never deleted. `bom_renderings` go with their parent by the 0168 own-parent cascade.
+      are kept only while R38 allows. `bom_renderings` go with their parent by cascade (R36).
 
 R17. **Snapshot routes are enabled only once both B4 and B5 have merged.** R2 let B5 enable the snapshot routes while
     B4, which builds `export-bundle/3` (R7), might not have merged. The enable switch moves out of B5: it flips in
@@ -795,9 +796,9 @@ R34. **Receipt v2 is switched on at a recorded boundary, after every replica and
     `factsHash` is still null signs a missing fact for good. So, mirroring ADR-0188 decision 19:
     - B1 and B2 ship code that **verifies** v2 but still **emits** v1. Nothing emits v2 because a binary was
       deployed.
-    - The cutover writes a boundary row (receipt seq from which v2 applies, activation time, actor) under the
-      receipt sign lock, in a verifier-trusted table, as an audited admin step. It is refused unless every live
-      replica reports a v2-capable build and fact capture is on for every governed path (after B2 and ADR-0188 S4).
+    - The cutover writes a boundary row (the first audit seq v2 governs, R42; activation time, actor) under the
+      receipt sign lock, in a verifier-trusted table, as an audited admin step, after the drained rollout and with
+      the boot refusal of R43 (after B2 and ADR-0188 S4).
       The receipt v2 payload is shared with ADR-0188 decision 9 (open question 1), so this is one cutover for both.
     - From the boundary on, every receipt is v2, a v1 receipt after it is `invalid`, and a binary that does not
       know v2 refuses to sign (it already fails closed). The boundary is never moved back.
@@ -814,6 +815,87 @@ R35. **Addenda are sequenced under a per-decision lock.** Two late facts for one
     writers for different decisions do not contend. A decision with no `decision_facts` row (capture off) gets no
     addendum; its late facts are `not_recorded`. The sign sweep (R15) signs in `n` order and stops at a gap or a
     `prev_hash` mismatch.
+
+### Seventh review round (2026-10-10)
+
+Nine findings against `4419a08`, each checked against `main` (`export-bundle.ts`, `audit-chain.ts`
+`S3ObjectLockSink`, migration 0168, ADR-0188 decision 19); all real, none an owner choice.
+
+R36. **Renderings have real parent keys.** `bom_renderings` replaces the polymorphic `owner_kind`/`owner_id` with two
+    nullable foreign keys, `decision_bom_id` → `decision_boms` and `ai_bom_snapshot_id` → `ai_bom_snapshots`, both
+    `ON DELETE CASCADE`, a CHECK that exactly one is set (`num_nonnulls(...) = 1`), and UNIQUE (parent, `format`).
+    Its append-only trigger admits a DELETE only as the cascade of whichever parent is set, once that parent row is
+    gone (the 0168 own-parent test, applied to the non-null column).
+
+R37. **The Decision BOM carries the exact facts it is verified against.** The body includes `facts.payload`, the
+    exact canonical bytes of `decision_facts.facts` (as a string), and `facts.addenda`, each addendum's exact
+    canonical bytes with its `n`, `prev_hash`, signature and key id. The verifier hashes those bytes and compares
+    them with the receipt's `factsHash` and the addendum chain. The `action`, `policy`, `model`, `approval`,
+    `outcome`, `cost`, `trace` and `actors` sections are defined as a pure projection of those payloads (the mapping
+    lives once in the B1 shared zod and in `verify.ts`); the verifier recomputes every section from the payloads, and
+    any difference is `invalid`. The payloads hold ids, digests, enums, integers and times only (R18), so they pass
+    the R21 scan.
+
+R38. **The newest-snapshot exemption ends with retention.** R16 kept a subject's newest AI BOM snapshot
+    unconditionally. Now it is kept only while the subject still exists and the snapshot is within its retention
+    period. Once the subject is deleted, or the snapshot passes the cutoff with no newer snapshot, it is pruned like
+    any other unless an evidence hold covers it. A snapshot linked from a retained Decision BOM is kept only while
+    that Decision BOM is retained.
+
+R39. **The decision row's audit preimage is disclosed, or the claim is withdrawn.** `chain.tsv` lets a verifier
+    recompute row hashes but not that a `contentHash` came from the decision the BOM describes; the ADR-0116 bundle
+    adds `audit/rows/<seq>.payload` for this (`export-bundle.ts`), and R21 removed it. Now the Decision BOM bundle
+    includes `audit/rows/<seq>.payload` for the **decision row only** (the other segment rows are other decisions
+    and stay hash-only, which still proves their links). That file goes through R21's scan. If it holds an
+    email-shaped string, it is withheld, never redacted, and the verifier reports the decision row's content as
+    `unverifiable` with reason `preimage_withheld`, while the link checks still run. When present, the verifier
+    hashes it, compares it with `contentHash`, and checks that the `decision` section matches its fields.
+
+R40. **Assembly holds the per-decision lock.** The freeze transaction takes the same `SELECT … FOR UPDATE` on the
+    decision's `decision_facts` row as R35's writers, before its final addendum recheck, and keeps it through the
+    `decision_boms` insert. A late fact therefore commits either before the recheck, so it is included or the freeze
+    waits for its signature, or after the insert, so it is covered by a new version with `supersedes`.
+
+R41. **Queued snapshot requests are drained before any new snapshot of the subject.** This is the simpler strict
+    option. While a subject has pending `ai_bom_snapshot_requests`, an on-demand snapshot is refused with 409
+    `bom_snapshot_requests_pending`, and an automatic trigger enqueues a request rather than freezing directly. The
+    sweep freezes requests per subject in request order. A captured record set can therefore never supersede a newer
+    live snapshot.
+
+R42. **The receipt v2 boundary is an audit sequence.** R34's boundary is redefined. Under the audit append lock and
+    the receipt sign lock, the cutover records `from_audit_seq`, the first audit `seq` that v2 governs. A
+    receipt-eligible row below it always gets a v1 receipt, whenever the sweep reaches it, so a pre-facts backlog left
+    unsigned at cutover (a slow sweep or a key outage) is signed as v1 and never stops the sweep. A row at or above it
+    gets v2, and R34's facts rule applies.
+
+R43. **Replica readiness reuses ADR-0188 decision 19.** There is no replica heartbeat or registry. R34's "every live
+    replica reports" prerequisite is replaced by decision 19's mechanism:
+    - the cutover is run only after a rolling deploy in which every replica runs v2-aware (B2 or later) code and the
+      old replicas have been drained, as a runbook step (B8);
+    - every binary from B1 on checks at boot and refuses to start when a receipt v2 boundary exists and it cannot emit
+      v2 receipts with facts;
+    - every receipt writer reads the boundary under the sign lock before each pass, so a v1 receipt can never land at
+      or above `from_audit_seq`.
+
+    The audit v2 and receipt v2 cutovers may be one operation (open question 1).
+
+R44. **`anchored` requires an Object Lock that covers the retention period.** `S3ObjectLockSink` writes a finite
+    `ObjectLockRetainUntilDate`, and R4 persisted only a boolean.
+    - B1 adds `audit_anchors.retain_until`: the retain-until date read back from the written object version at flush,
+      null when there is none.
+    - A Decision BOM freezes as `anchored` only when `retain_until` is on or after the end of the decision's evidence
+      retention period (decision time plus the compliance profile's audit retention). A shorter lock freezes at most
+      as `anchored_unverified_destination`, an audited relaxation as before.
+    - `retain_until` is inside the signed proof. The verifier compares it with the verification time and reports
+      `anchored` as `anchored_lapsed` once it has passed, and `cannotProve` gains "that the external commitment
+      exists after its retain-until date". A frozen body is never edited; only the reported finality changes.
+
+## Further design review happens at slice level
+
+From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here
+as further amendments. They are recorded as entry conditions on the B1–B8 slice PR that owns them, and each slice PR
+gets its own review against this ADR and those conditions. An amendment is added here only when a finding contradicts
+an accepted decision or needs an owner choice.
 
 ### Owner items from the review (not decided here)
 
