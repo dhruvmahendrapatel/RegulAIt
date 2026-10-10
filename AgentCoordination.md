@@ -617,7 +617,7 @@ shell line.
 **Conversations (any user)** — an expired conversation is 404 `conversation_expired`; deleting one held by an incident
 is 409 `incident_evidence_hold`. Show both as explanations, not raw codes.
 
-### 4.9 Batch 4 (ADR-0186) — FOUNDATION READY (PR #172, branch `b4-found` 7758fec); A, B and T LIVE on `b4-int` (e315845). The R, S and V routes are 501 `not_built` stubs until their slices land.
+### 4.9 Batch 4 (ADR-0186) — LIVE on main. The R, S and V routes are implemented handlers, not stubs (`decision-receipts.ts`, `audit-timestamp.ts`, `detection-content-routes.ts`, registered in `app.ts`); availability depends on configuration: receipts sign only with a receipt key (`GET /v1/receipts/status` reports `off`, `no_key`, `signing` or `stalled`; an unusable key is 503 `receipt_signing_key_invalid`), anchor timestamps need a configured TSA URL and trust bundle (otherwise `not_configured`; a retry answers 409 or 502), and detection content serves the vendored packs. Source audit only, not a fresh HTTP or TSA test. (Foundation was PR #172; A, B and T first went live on `b4-int` e315845.)
 
 Step-up header: `x-regulait-step-up: rgsu_…`. "self" = a signed-in user acting for themselves.
 
