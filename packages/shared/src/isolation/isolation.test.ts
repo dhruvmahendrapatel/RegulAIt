@@ -17,6 +17,8 @@ import {
   executionProfileRelaxations,
   EXECUTION_PROFILE_SCHEMA,
   ISOLATION_CLASSES,
+  isExactHost,
+  isSandboxPath,
   ISOLATION_ROUTES,
   ISOLATION_SETTING_COLUMNS,
   ISOLATION_SETTING_KEYS,
@@ -294,6 +296,21 @@ describe("the routes", () => {
     for (const r of ISOLATION_ROUTES) {
       expect(r.cls).toBe("admin");
       expect(r.path.startsWith("/v1/")).toBe(true);
+    }
+  });
+});
+
+describe("the path and host validators (split, then a linear pattern per piece)", () => {
+  it("accept sandbox paths and refuse everything else", () => {
+    for (const p of ["/work", "/work/", "/a/b.c/d_e-f", "/jobs"]) expect(isSandboxPath(p), p).toBe(true);
+    for (const p of ["", "/", "work", "//work", "/a//b", "/a/./b", "/a/../b", "/..", "/a b", "/a/b//", "/" + "a".repeat(256)]) {
+      expect(isSandboxPath(p), p).toBe(false);
+    }
+  });
+  it("accept exact host names and IP literals; refuse wildcards, bad labels and overlong names", () => {
+    for (const h of ["api.example.com", "a", "a-b.c", "10.0.0.1", "[::1]", "[fd00::1]"]) expect(isExactHost(h), h).toBe(true);
+    for (const h of ["", "*.example.com", "-a.com", "a-.com", "a..com", ".a", "A.com", "a_b.com", "[]", "[::1", "a".repeat(64), `${"a".repeat(63)}.`.repeat(5)]) {
+      expect(isExactHost(h), h).toBe(false);
     }
   });
 });

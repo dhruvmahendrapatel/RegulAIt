@@ -203,10 +203,36 @@ export const ATTESTATION_STRENGTH = "software_attested" as const;
 
 /** a profile name: lowercase, digits and hyphens */
 export const EXECUTION_PROFILE_NAME_RE = /^[a-z][a-z0-9-]{1,62}$/;
-const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
-const ABS_PATH_RE = /^\/(?:[A-Za-z0-9._-]+\/?)+$/;
-/** an exact host name or IP literal (no wildcard): every allow-list entry is also on the egress allow-list */
-const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$|^\[[0-9a-f:.]+\]$/;
+/**
+ * Each pattern below is linear: anchored, one character class per position, no nested or overlapping
+ * quantifier. Paths and host names are split first and each piece is checked on its own (a regex over the
+ * whole string with a repeated group backtracks exponentially, CodeQL js/redos), with a length cap checked
+ * before any pattern runs.
+ */
+const PATH_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+const HOST_LABEL_RE = /^[a-z0-9-]+$/;
+const IP_LITERAL_RE = /^\[[0-9a-f:.]+\]$/;
+const SANDBOX_PATH_MAX = 256;
+
+/** an absolute path inside the sandbox: `/seg[/seg…][/]`, no empty, `.` or `..` segment */
+export function isSandboxPath(p: string): boolean {
+  if (p.length < 2 || p.length > SANDBOX_PATH_MAX || p[0] !== "/") return false;
+  const segments = p.slice(1).split("/");
+  if (segments[segments.length - 1] === "") segments.pop(); // one trailing slash
+  return (
+    segments.length > 0 &&
+    segments.every((seg) => seg !== "." && seg !== ".." && PATH_SEGMENT_RE.test(seg))
+  );
+}
+
+/** an exact DNS name (lowercase labels of 1–63, no leading or trailing hyphen) or a bracketed IP literal; no wildcard */
+export function isExactHost(h: string): boolean {
+  if (h.length < 1 || h.length > 253) return false;
+  if (h[0] === "[") return IP_LITERAL_RE.test(h);
+  return h
+    .split(".")
+    .every((label) => label.length >= 1 && label.length <= 63 && HOST_LABEL_RE.test(label) && label[0] !== "-" && label[label.length - 1] !== "-");
+}
 
 const uniqueBy = <T>(key: (t: T) => string) => (a: T[]) => new Set(a.map(key)).size === a.length;
 const posInt = (max: number) => z.number().int().min(1).max(max);
@@ -229,11 +255,9 @@ export const EXECUTION_PROFILE_LIMITS = {
 } as const;
 
 /** a mount path inside the sandbox, never a host path */
-const sandboxPath = z
-  .string()
-  .max(256)
-  .regex(ABS_PATH_RE)
-  .refine((p) => !p.split("/").some((s) => s === "." || s === ".."), { message: "no . or .. segments" });
+const sandboxPath = z.string().refine(isSandboxPath, {
+  message: "an absolute sandbox path of at most 256 characters, with no empty, . or .. segment",
+});
 
 export const executionProfileInputSchema = z
   .object({
@@ -257,7 +281,7 @@ export const executionProfileNetworkSchema = z.discriminatedUnion("mode", [
     .object({
       mode: z.literal("allow_list"),
       entries: z
-        .array(z.object({ host: z.string().regex(HOST_RE), port: z.number().int().min(1).max(65535) }).strict())
+        .array(z.object({ host: z.string().refine(isExactHost, { message: "an exact host name or IP literal" }), port: z.number().int().min(1).max(65535) }).strict())
         .min(1)
         .max(EXECUTION_PROFILE_LIMITS.allowList.max)
         .refine(uniqueBy((e) => `${e.host}:${e.port}`), { message: "duplicate allow-list entry" }),
