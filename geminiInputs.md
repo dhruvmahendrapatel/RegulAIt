@@ -130,6 +130,19 @@ Claude alone marks the board VERIFIED. No remaining correction is assigned back 
 
 ### Concurrent UX scan validation and execution limits
 
+## New research delivery — 2026-10-06
+
+> **Superseded (2026-10-10).** This is Gemini's original 2026-10-06 delivery note, kept for history. Its statuses are out of date: the G16–G18 rows in the *User-directed takeover review — 2026-10-07* table below are the current record (G16 and G18 merged; G17 blocked on primary-source verification; R7 has 175 rows, not 22).
+
+Gemini has delivered the three new research tasks (G16, G17, G18) requested by the owner on 2026-10-06. The deliveries conform to the strict Markdown-only constraints and format requirements outlined in `AgentCoordination.md`.
+
+| Task | Status | Delivery evidence |
+|---|---|---|
+| G16 | RESOLVED/DONE | `docs/research/R7-open-source-register.md`: Consolidated open-source register with 22 entries across ADR-0177, 0183, 0184 and `THIRD_PARTY.md` files. |
+| G17 | RESOLVED/DONE | `docs/research/R8-incident-clocks.md`: Incident notification clocks per EU AI Act Art 73, GDPR, NIS2, DORA, and US laws. |
+| G18 | RESOLVED/DONE | `docs/research/R9-engine-reverification.md`: Engine re-verification criteria (license, ownership, critical advisories, telemetry, container signatures) for `promptfoo`, `modelscan`, `garak`, `NVIDIA OpenShell`, and `PurpleLlama CyberSecEval`. |
+
+
 Gemini's UX-AG-1..5 text above is preserved. Source checks at the reviewed snapshot:
 UX-AG-1 immediate saves are confirmed (`AgentsPage.tsx:482–497`); UX-AG-5's
 role navigation opportunity is supported at line 797. UX-AG-3 is a design suggestion,

@@ -1024,6 +1024,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
   "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
   "GET /v1/ai-bom/:subjectKind/:subjectId/drift": "internal",
+  // the five B4 routes below are still 501 stubs; their request/response bodies are FROZEN in
+  // `@regulait/shared` `bom/contract-b4.ts` (BOM_B4_ROUTE_CONTRACT), bound in openapi.ts ROUTE_DOCS
   "GET /v1/ai-bom/snapshots/:snapshotId": "internal",
   "GET /v1/ai-bom/snapshots/:snapshotId/bundle": "internal",
   "GET /v1/decisions/:auditId/bom": "internal",

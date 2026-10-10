@@ -155,7 +155,7 @@ regexTarget = "secret"
 regexes = ['''^GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ$''']
 
 [[allowlists]]
-description = "Synthetic AWS-key-shaped passkey label: the B4 step-up test proves a secret-shaped label is redacted before storage (never a real key)"
+description = "HISTORY ONLY: synthetic AWS-key-shaped passkey label the B4 step-up test used from d28ab09 until 2bc9a12 replaced it with AWS's published AKIAIOSFODNN7EXAMPLE. The literal is no longer in the tree, but the secret scan reads the full history, so this exact value stays allowed in this one file."
 condition = "AND"
 paths = ['''^apps/gateway/src/zz-b4a-step-up\.test\.ts$''']
 regexTarget = "secret"
@@ -212,5 +212,17 @@ regexes = ['''^abcdefgh12345678$''', '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0N
 description = "ADR-0189 B3 leak tests: synthetic secret-shaped canaries (sk-live-CANARY…, token=…CANARY) that prove the AI BOM never exports them. B5 adds its SPDX leak tests; B9 its SPDX-field validator and route tests. Scoped to these test files and to matches containing CANARY."
 condition = "AND"
 paths = ['''^packages/shared/src/bom/ai-bom\.test\.ts$''', '''^packages/shared/src/bom/ai-bom-spdx\.test\.ts$''', '''^packages/shared/src/bom/ai-bom-spdx-fields\.test\.ts$''', '''^apps/gateway/src/zz-adr0189-b9-spdx-fields\.test\.ts$''']
+regexTarget = "match"
+regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0189 B4 specification worked example: TEST-ONLY keys derived from published seed strings, with key ids and seed texts that contain CANARY (no private key is checked in). Scoped to these four files and to matches containing CANARY."
+condition = "AND"
+paths = [
+  '''^docs/decisions/0189-batch6-decision-bom-ai-bom\.md$''',
+  '''^apps/gateway/src/testing/bom-b4-spec-example\.ts$''',
+  '''^apps/gateway/src/adr0189-b4-spec-example\.test\.ts$''',
+  '''^scripts/bom-b4-spec-example\.mjs$''',
+]
 regexTarget = "match"
 regexes = ['''CANARY''']

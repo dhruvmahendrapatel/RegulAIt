@@ -36,7 +36,8 @@ import {
 import { AI_BOM_RECORD_LISTS, AI_BOM_RECORD_TABLES, aiBomRecordKey, cmpCodeUnits, normaliseAiBomRecords, sortedBy, type AiBomRecordSet } from "./ai-bom-records.js";
 import { renderAiBomCycloneDx, type AiBomGap, type AiBomSnapshotMeta, type CycloneDxRenderResult, type CycloneDxSpecVersion } from "./ai-bom-cyclonedx.js";
 import { cycloneDxValidatorId, validateCycloneDx } from "./ai-bom-cyclonedx-schema.js";
-import { renderAiBomSpdx, spdxMandatoryMissing } from "./ai-bom-spdx.js";
+import { bomSafeIssue } from "./ai-dev-stack.js";
+import { renderAiBomSpdx, spdxInexpressible, spdxMandatoryMissing } from "./ai-bom-spdx.js";
 import { spdxValidatorId, validateSpdx } from "./ai-bom-spdx-schema.js";
 
 export class AiBomBuildError extends Error {
@@ -200,7 +201,10 @@ export function buildAiBom(records: AiBomRecordSet, meta: AiBomSnapshotMeta, opt
   // R3 + 4237371312: a mandatory literal property with no recorded value means NO SPDX rendering for this snapshot;
   // the signed body records `not_producible` with the missing property names. Never a placeholder.
   const notProducible: Partial<Record<BomRenderingFormat, { status: "not_producible"; missing: string[] }>> = {};
-  {
+  // B7: a release record set (dev-stack formulation, BOM-Links) has no SPDX form; recorded, never half-rendered
+  const inexpressible = spdxInexpressible(n);
+  if (inexpressible.length) notProducible["spdx-3.0.1"] = { status: "not_producible", missing: inexpressible };
+  else {
     const spdx = renderAiBomSpdx(n, meta, cdx17!).doc;
     const missing = spdxMandatoryMissing(spdx);
     if (missing.length) notProducible["spdx-3.0.1"] = { status: "not_producible", missing };
@@ -241,7 +245,7 @@ export function buildAiBom(records: AiBomRecordSet, meta: AiBomSnapshotMeta, opt
   const emails = findEmailShapesBroad(candidate);
   if (emails.length) throw new AiBomBuildError("email-shaped value in the native body", emails);
   const parsed = aiBomNativeBodySchema.safeParse(candidate);
-  if (!parsed.success) throw new AiBomBuildError("native body fails the regulait.ai-bom.v1 contract", parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`));
+  if (!parsed.success) throw new AiBomBuildError("native body fails the regulait.ai-bom.v1 contract", parsed.error.issues.map(bomSafeIssue));
   const bodyBytes = bomCanonicalBytes(candidate);
   return { records: n, body: parsed.data, bodyBytes, bodySha256: bomSha256(bodyBytes), renderings, gaps, basis };
 }

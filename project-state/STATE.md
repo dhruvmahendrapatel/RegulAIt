@@ -4,7 +4,7 @@ last_updated: 2026-10-10
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-10-session-01.md
+last_session: sessions/2026-10-10-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,19 +21,39 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-10 (helper session) - CI sharding measured on runners; `dhruv/active` repaired; repo review #309.** Full
+record: [sessions/2026-10-10-session-02.md](sessions/2026-10-10-session-02.md).
+- Merged #291: the sharded gateway suite measured on five runs against six single-job runs. Whole-run wall clock
+  26–32 min → 13–16 min; slowest build-and-test job 9m49s under its 20-min cap; cost +14 billed min a push (~19 PR
+  pushes a month at 2,000 min, from ~22). `ci.yml`'s arithmetic comment, README and ADR-0110 §7 carry the numbers.
+  The ADR-0110 unique-constraint pre-flight stays per shard (owner).
+- `dhruv/active` would not fast-forward (9ab8b55, Gemini's G16–G18 note, existed only there); `main` was merged into it
+  with no force-push. #301 carries that note to `main` marked superseded, plus `THIRD_PARTY.md` for the 14 packages
+  that had none and the gitleaks fixture fix (#309 items 1 and 5). Merge #301 **with a merge commit**, then
+  fast-forward `dhruv/active`.
+- Issue #309 remaining: `AgentCoordination.md` inbox older than its 12 h rule and at 768/800 lines; migration numbers
+  0177–0179 undocumented as retired; ADR-0149 and ADR-0190 unmentioned here.
+
 **2026-10-10 (afternoon) - Batch 6 slices in parallel: S3 in CI, B1 merged, I1 next; CI sharded.** Full record:
 [sessions/2026-10-10-session-01.md](sessions/2026-10-10-session-01.md).
 - Merged: B1 BOM foundation (#283, migration 0182), spike B0 (#265), ADR-0189 (#253), outbound credential audience
   (#273, 0181), gateway CI sharding (#284), and the Batch 4/5 tail (#264, #270, #272).
 - Merge order from here: #279 S3, then #286 I1 (0183), then S4 (0184), then #285 guard hardening (0185); #287 B3
-  after its security review. S5 (token endpoint, #302) needs no migration; 0186 is B9 SPDX fields and 0187 is ADR-0190 I3.
+  after its security review. S5 (token endpoint, #302) carries 0188; 0186 is B9 SPDX fields and 0187 is ADR-0190 I3.
 - Building: S4 in-process wiring, S5 token endpoint, B5 SPDX renderer. Next unblocked: I2 after S3+S4; B2 after S4;
   B4 after B2+B3; B7/B8 after B4/B5.
 - Owner decision 13 (ADR-0189, owner item 1, 2026-10-10): collect the mandatory SPDX properties (amendment R51).
   Slice B9 SPDX fields (branch `b6-bom-b8-spdx-fields`, migration 0186) stores them append-only, admin-written and
   audited; a record still missing one stays `not_producible`.
-- Owner decision 12 (ADR-0189): snapshots fail closed without a signing key. Codex queue: X41, X43, X42, X38, X37, X34,
-  X39, X40, X33.
+- Owner decision 12 (ADR-0189): snapshots fail closed without a signing key.
+- **2026-10-10 18:10 UTC - owner: "We will stop using codex and absorb all of its work. Claude will be our only
+  builder now." ([ADR-0191](../docs/decisions/0191-claude-sole-builder.md)).** Web UI (S6, B6, I9 and the rest) moves
+  to Claude; cross-review is done by fresh-context Claude reviewer agents not given the builder's report first;
+  specification-only vectors by a Claude agent that does not read the implementation; `codexInputs.md` is frozen.
+  Codex's open PRs are adopted, re-done or closed per the 10-10 inventory; no new Codex PR is merged; its open findings
+  stay tracked until fixed. Board: Codex's TODO/IN-PROGRESS tasks cancelled (PR #306).
+- **Agents:** Claude is the only builder and reviewer (master session plus parallel Claude sessions and subagents,
+  builders and independent reviewers). Codex retired 2026-10-10 (ADR-0191).
 
 **2026-10-10 - Parallel wave: Batch 5 engines and their UI merged; ADR-0188 (identity) accepted; garak open questions decided.**
 - Merged: #217 (ADR-0188), #227/#228 (modelscan follow-up, garak), #230 (Engines page), #231 (B5-P2 promptfoo split),
