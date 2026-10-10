@@ -1,0 +1,155 @@
+{
+  "format": "x46.generic-crypto-vectors.v1",
+  "source": {
+    "commit": "2276739bb1ca3d5cddfcf03cbef186d59e1966a7",
+    "adr0189Blob": "73653a8c4b000dfccf734c8512b7dfcaa4129036",
+    "adr0189LastChange": "4f9f50a2cdc7f540d269e30eabbaa55e736e36f3",
+    "adr0116Blob": "311263cb8f9dc8d8888ba15edf98887615227b05",
+    "coordinationCommit": "5164b2f20bfaf124b509b931d0ad36f3279d1d35"
+  },
+  "warning": "These minimal canonical JSON objects and explicit base64/SPKI encodings are fixture transport conventions, not schema-complete BOMs, receipts or export-bundle/3 archives. K05 has a DIFFERENT independently pinned trust context from K04; it does not authorise embedded-key trust.",
+  "syntheticPublicTestSeedsHex": [
+    "1111111111111111111111111111111111111111111111111111111111111111",
+    "2222222222222222222222222222222222222222222222222222222222222222"
+  ],
+  "fingerprints": {
+    "A": "sha256:503d8ee46d581c649966569ae095e27041de83322e8e0480e5539e00d2d5d874",
+    "B": "sha256:744f36cca67eb1912cb282e08e86bd2fe0d09004a28cf6e7c6bd56cdd6bf65aa"
+  },
+  "primitives": [
+    {
+      "id": "K01",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "5ylo1Oir/pbjNUwCioGJS+uf9hn79CCcKTRQDf958s6g8vi6lC1JXY3WSDX+IAni05SbieDNHpGj4debSRTbDQ==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§5",
+        "§6"
+      ]
+    },
+    {
+      "id": "K02",
+      "bytes": "{\"decision\":{\"seq\":8},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "5ylo1Oir/pbjNUwCioGJS+uf9hn79CCcKTRQDf958s6g8vi6lC1JXY3WSDX+IAni05SbieDNHpGj4debSRTbDQ==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "Test strategy: Signature and binding"
+      ]
+    },
+    {
+      "id": "K03",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "5ylo1Oir/pbjNUwCioGJS+uf9hn79CCcKTRQDf958s6g8vi6lC1JXY3WSDX+IAni05SbieDNHpGj4debSRTbDQ==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEAoJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§6"
+      ]
+    },
+    {
+      "id": "K04",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "8uQHhwokrIQIC5IyG+2JrScnmHHsyGjxTxpgLfbymXMmB9Io1/Wo0FgsOF2wz3nwpUv0U8OF5gjm2PmjJAzRCg==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§6",
+        "ADR-0116 §1"
+      ]
+    },
+    {
+      "id": "K05",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "8uQHhwokrIQIC5IyG+2JrScnmHHsyGjxTxpgLfbymXMmB9Io1/Wo0FgsOF2wz3nwpUv0U8OF5gjm2PmjJAzRCg==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEAoJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§6"
+      ]
+    },
+    {
+      "id": "K06",
+      "bytes": "{\"factsHash\":\"99a7e4d00d41b076f7ee944d5c1f48587d9b18da3270fa74c968647c269e1f98\",\"v\":\"regulait.receipt.v2\"}",
+      "signatureBase64": "A/lo/eRNt9Y71aYAQfI61uW0UKfZG6y31t2aoRMTOwdl82yxwCUCEBUb5Z/8SkjRafcCFMcgY2BQWcggjMfqBQ==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": false,
+      "refs": [
+        "§5",
+        "Owner decision2"
+      ]
+    },
+    {
+      "id": "K07",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "A/lo/eRNt9Y71aYAQfI61uW0UKfZG6y31t2aoRMTOwdl82yxwCUCEBUb5Z/8SkjRafcCFMcgY2BQWcggjMfqBQ==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§5"
+      ]
+    },
+    {
+      "id": "K08",
+      "bytes": "{\"v\":\"regulait.decision-bom.v999\"}",
+      "signatureBase64": "ejB8Hjjex11fp3hL1HynhkgTHOMcqqz+2a3VMBDc3IMTTik1QDqrB5wbmmn3o+WIF+EyfQr81GmxLqIIL8bnBw==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": false,
+      "refs": [
+        "§5"
+      ]
+    },
+    {
+      "id": "K09",
+      "bytes": "{\"v\":\"regulait.ai-bom.v1\"}",
+      "signatureBase64": "gWhqOGEeMUP37D/u3meeObU2Neo8+lkBBZ6iIBsgrnK/gQbuG9ZqBvtLoqVVx36VBMZG/M5Trz+p7XulARWzAA==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": true,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "R19"
+      ]
+    },
+    {
+      "id": "K10",
+      "bytes": "{\"decision\":{\"seq\":7},\"v\":\"regulait.decision-bom.v1\"}",
+      "signatureBase64": "vSGrkWDZ1NdqJICRykHqlHQtuEf7nDTTzLpUDnoIULOxFfDLCBthy028BzyjTZcYWvRDHBStrDtYAGvGnqbtAQ==",
+      "pinnedPublicKeySpkiDerBase64": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "expectedPrimitiveSignatureValid": false,
+      "expectedRecognisedBomDomain": true,
+      "refs": [
+        "§5"
+      ]
+    }
+  ],
+  "facts": {
+    "canonicalBytes": "{\"audit_seq\":7}",
+    "sha256": "99a7e4d00d41b076f7ee944d5c1f48587d9b18da3270fa74c968647c269e1f98",
+    "nonCanonicalBytes": "{ \"audit_seq\":7 }",
+    "nonCanonicalSha256": "b1cc544687bb2d752567bf3ea0bb296bfd6a741a67caf41b77812307fb873f4a",
+    "refs": [
+      "R37",
+      "R48"
+    ]
+  },
+  "rendering": {
+    "bytes": "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.7\"}",
+    "sha256": "d5444e04cf09826ffc281f55bde8ad21712f648e83286c5b8d831ff41cdd6c1f",
+    "utf8ByteLength": 45,
+    "mutationBytes": "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\"}",
+    "refs": [
+      "R7",
+      "R19"
+    ]
+  },
+  "productWirePositiveStatus": "BLOCKED"
+}
