@@ -2024,6 +2024,115 @@ row of `engines/modelscan/THIRD_PARTY.md`. Tests: `packages/engine-modelscan/src
      import. **Not run here:** the image build (no Docker daemon); CI's engine-image leg is the first build with the
      script. The image runs Python 3.12 with numpy 2.5.3; the script needs neither numpy nor any version-specific API.
 
+### Implementation decisions (B5-M `.npz` archive check, 2026-10-10, branch `b5-modelscan-npz`)
+
+Closes open question 15(c). Built on decisions 180–184 (branch `b5-modelscan-npy`, PR #254). No migration, no new
+dependency, no change to the Python lockfile, the licence gate, compose or the Dockerfile's build steps. Code:
+`engines/modelscan/npy-header.py` (a `--npz` mode; the `.npy` check now reads from a stream), `packages/shared/src/
+engines/modelscan.ts` (the archive check's answer, its bounds and the mapper), `packages/engine-modelscan/src/
+{scan,exchange,adapter,fixtures}.ts`. Tests: `packages/engine-modelscan/src/npz.test.ts` (24, new),
+`modelscan-real.test.ts` (+1, opt-in), `image.test.ts` (the stdlib import pin gains `zipfile` and `zlib`), and the
+outcome literals in `modelscan.test.ts` and the gateway's `zz-b5-modelscan.test.ts` gain `npz: null`.
+
+219. **The scanner checks a `.npz` itself, with Python's `zipfile`; modelscan never opens the archive.** modelscan's
+     zip path hands every member to its NumPy scanner, which fails on numpy 2.x (decision 108), so every `.npz` read
+     `unknown` (measured on the real engine, below). For a job whose format is `numpy_npz` the scanner (decision 104:
+     no network, no credential) runs `npy-header.py --npz <artifact> <payload-dir> <max-object-payload-bytes>
+     <max-uncompressed-bytes> <max-members>` (`-I -S`, the venv's interpreter, a fresh empty working directory,
+     modelscan's environment built from nothing, stdout bounded at 128 KiB and validated as exactly one JSON line by
+     `npzCheckSchema`). **Open-source check (ADR-0176):** `zipfile` and `zlib` are the standard library; numpy's
+     `np.load` was not used (it needs numpy in the checking process and would unpickle object members);
+     `modelaudit` (MIT) also reads `.npz` but is the deferred fallback of open question 3, with open question 2's
+     ownership caveat, and would be a second scanner in the image. Our own code is only the policy: what is refused,
+     and how members combine.
+220. **Archive-level refusals: the whole archive is `unknown` with one problem code, nothing is extracted and modelscan
+     is not started.** In order:
+     - the end record must end the file (no archive comment, nothing after it), else `npz_layout`; no end record in
+       the last 64 KiB + 22 bytes (not a zip, or cut short) is `npz_malformed`; a zip64 end record is accepted only
+       directly before its locator, with no extensible data, single-disk;
+     - the end record's member count over `NPZ_MAX_MEMBERS` (1024) is `npz_too_many_members` before `zipfile` reads
+       the central directory; `zipfile` failing to read it is `npz_malformed`; no member is `npz_empty`;
+     - `zipfile`'s central-directory offset must equal the end record's (`zipfile` silently shifts every offset by any
+       bytes found before the archive), else `npz_layout`;
+     - any member encrypted (traditional, strong, or an encrypted central directory: flag bits 0, 6, 13) is
+       `npz_member_encrypted`;
+     - each stored name (`orig_filename`: `zipfile`'s `filename` is cut at a NUL and has `\` turned into `/`)
+       containing `/`, `\`, `:` or a NUL, or starting with `..`, is `npz_member_path`; any other name not matching
+       `[A-Za-z0-9_][A-Za-z0-9_.-]{0,250}\.npy` (so no `.pkl`, no nested `.zip`, no hidden or non-ASCII name, no
+       upper-case `.NPY`) is `npz_member_not_npy`; a repeated name is `npz_member_duplicate` (numpy's `NpzFile` would
+       read one of them);
+     - a compression method other than stored (0) or deflate (8), the two numpy writes, is
+       `npz_compression_unsupported`;
+     - the members' declared uncompressed sizes summed over `NPZ_MAX_UNCOMPRESSED_BYTES` (2 GiB) is `npz_too_large`
+       (the zip-bomb bound; it is checked before any member is read);
+     - **central directory against local headers:** every local header must carry the local signature, the same
+       name, flags and method, and the same CRC and sizes (its zip64 extra resolved), else `npz_header_mismatch`; a
+       data descriptor (flag bit 3: the local header has no sizes to compare, and numpy never writes one) is
+       `npz_layout`; the members must tile the file from offset 0 to the central directory with no gap and no
+       overlap (overlapping members are the classic quine bomb), else `npz_layout`; the end record's count must
+       equal the members read, else `npz_header_mismatch`.
+221. **Each member through the `.npy` check, read with a hard cap.** In central-directory order, each member is opened
+     with `zipfile` (which never yields more than the declared size) and checked by the same code as a lone `.npy`
+     (decision 181), now reading from a stream; its first eight bytes are looked at first, and a member that is
+     itself an archive (zip, gzip, bzip2, xz, 7z, rar or zstd magic) is `npz_member_nested`. The member is then read
+     to its end: exactly its declared size must come out and its CRC must match (`zipfile` checks it on the last
+     byte), else `npz_member_corrupt` (a stream that ends early, a deflate error or a lying size). An object member's
+     payload is copied to `<payload-dir>/member-NNNN.pkl` (NNNN its 1-based position; the member's own name never
+     leaves the script) and removed again if the member is then refused. **One payload bound for the whole archive:**
+     the object payloads together stay within `NPY_OBJECT_PAYLOAD_MAX_BYTES` (48 MiB, decision 183), so a member that
+     would exceed what is left is `npy_payload_too_large`. A member-level refusal does not stop the others. The
+     scanner then requires the payload directory to hold exactly the object members' files, else
+     `npz_check_failed`.
+222. **The verdicts: strongest-not-clean (decision 105 unchanged: `numpy_npz` stays executable, ceiling
+     `no_known_unsafe`).** The answer (`{kind: "npz", members: [...]}`, every member `numeric`, `object` with its
+     payload size, or `invalid` with an `npy_*` or member-level `npz_*` code; or an archive-level `invalid`) travels in
+     `done.json` beside `npy` (a required, nullable `npz`, strict zod). The mapper:
+     - **an archive-level refusal**, or the check not answering (`npz_check_failed`): completed, the scan item
+       `unknown` and a `modelscan-error` item naming the code, so the artifact reads `unknown` with that `scan_error`;
+     - **no object member**: modelscan is not started; all numeric reads the scan item `pass`
+       (`regulait-npy-header`/`numeric`), so the artifact is `no_known_unsafe` with its `executable_format` finding;
+       any refused member makes the scan item `unknown`; a report beside it is `report_inconsistent`;
+     - **object members**: modelscan is run once on the payload directory, and its PICKLE scanner reads each
+       `member-NNNN.pkl` (it names files relative to a directory it is given, `modelscan.py` `_generate_results`).
+       The report must name only those files (else `report_inconsistent`) and must cover every one of them (else
+       the scan item is `unknown`); each refused member is its own `unknown` item (`npz/member/<n>`, the problem code
+       as a `modelscan-error`);
+     - so **any unsafe → unsafe** (an issue is a finding however the rest ended, and `deriveArtifactScanVerdict`
+       puts an unsafe operator first) and **any unknown → unknown**; never `clean`. A `numpy_npz` run with no
+       archive check at all fails `npz_check_missing`. An encrypted member, a non-`.npy` member or a cut archive
+       never reaches the check as `.npz`: the gateway's own detection (decision 109) already stores those as
+       `zip_opaque` or `zip` (`unknown` at best); the check refuses them too, for a runner that is ever handed one.
+223. **The bounds are constants in `@regulait/shared`, passed to the script on its argv.** `NPZ_MAX_MEMBERS` 1024 and
+     `NPZ_MAX_UNCOMPRESSED_BYTES` 2 GiB, beside decision 183's 48 MiB object-payload bound (one result volume for the
+     whole archive). All are strict, not org settings: a larger archive reads `unknown`, never better. Raising them
+     is an owner call, recorded with open question 15(d). Numeric members are read and discarded (never written), so
+     only the CPU time of the declared bytes is spent, inside the run's time limit.
+224. **Proofs, red first.** `npz.test.ts` runs the real script with the host's `python3 -I -S` and replays modelscan
+     as the pinned 0.8.8 answers for a file or a directory (names relative to it; `os.system` a CRITICAL issue, exit
+     1; a benign `.pkl` exit 0). Synthetic fixtures only, written byte by byte (`zipArchive`, `npzFile`, with control
+     over every field the check cross-reads). Covered: a benign numeric `.npz`, stored and deflated; an object member
+     with `os.system` (`unsafe`, modelscan handed exactly that payload as `member-0002.pkl`); a benign object member;
+     mixed members (numeric, refused, malicious and benign together → `unsafe`; without the malicious one →
+     `unknown`); zip bombs (64 MiB of zeros deflated to under 1 MiB against a 16 MiB bound, a member declaring 3 GiB,
+     a member declaring about 64 KiB whose stream inflates to 64 MiB more, too many members, the shared payload bound); traversal,
+     absolute, backslash, drive and NUL names; a repeated name; an encrypted member, and one encrypted in its local
+     header only; non-`.npy` names and a `.npy` member holding a zip or a gzip stream; an archive cut at seven points
+     and a member with a wrong CRC; an archive comment, a prefix, trailing bytes, an empty archive, bzip2, and a
+     central directory that disagrees with a local header; a check that does not answer; the answer carried through
+     the exchange; and the mapper's rules. **Red:** against the code before this change (the `.npy` check of PR #254,
+     with this file's three new shared constants inlined), 23 of the 24 tests failed: the script had no `--npz` mode,
+     modelscan was handed `artifact.zip`, and the mapper had no `.npz` rule; the one that passed is the "never
+     reaches the check as `.npz`" case, which pins the gateway's detection and does not depend on this change.
+     **Mutations:** without the repeated-name refusal 3 tests fail; without reading each member to its end (the CRC
+     check) the lying-bomb case passes as numeric and fails the test (its member is larger than `zipfile`'s 4 KiB
+     read-ahead, so only the full read finds the CRC mismatch). **Real engine (opt-in,** the same Python 3.11 venv
+     with modelscan 0.8.8 patched and numpy 2.4.6): an `os.system` object member reads `unsafe`, stored and deflated;
+     a benign object member reads `no_known_unsafe`; a repeated name reads `unknown` (`npz_member_duplicate`); and
+     archives numpy itself writes (`savez` and `savez_compressed`, numeric, object, and positional `arr_0`/`arr_1`
+     members; numpy writes them with zip64 local extras) all pass the check and read `no_known_unsafe`. Against the
+     code before this change the same real test fails: the `os.system` `.npz` read `unknown`. **Not run here:** the
+     image build (no Docker daemon); CI's engine-image leg is the first build with the `--npz` mode.
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -2104,6 +2213,15 @@ row of `engines/modelscan/THIRD_PARTY.md`. Tests: `packages/engine-modelscan/src
     each member is a separate slice. (d) Object arrays over 48 MiB read `unknown` (`npy_payload_too_large`) while the
     result volume stays 64 MiB; raising both is an owner call. (e) Dtypes outside the accepted list
     (strings, datetimes, structured arrays) read `unknown` (`npy_dtype_unsupported`); widening the list is optional.
+    *2026-10-10, decisions 219–224:* **(c) closed.** The scanner checks a `.npz` itself with Python's `zipfile`
+    (strict layout, central directory against local headers, at most 1024 members and 2 GiB declared, no encrypted,
+    nested, repeated, traversal or non-`.npy` member, each member read with a hard cap and its CRC checked), runs each
+    member through the `.npy` check, and hands only object members' pickle payloads to modelscan's pickle scanner;
+    members combine strongest-not-clean, so an `os.system` member is `unsafe` and a numeric-only archive is
+    `no_known_unsafe` (measured on the real engine: before, the same `os.system` archive read `unknown`). **(d) now
+    also covers** the `.npz` bounds (1024 members, 2 GiB declared, one 48 MiB object-payload bound per archive): a
+    larger archive reads `unknown`; raising any of them is the same owner call. Data descriptors (never written by
+    numpy) are refused (`npz_layout`); accepting them would need a second cross-check against the descriptor.
 16. ~~Building the engine images in CI (B5-P and B5-M)~~ — **closed 2026-10-09 by decision 120.** `security.yml`
     builds every `engines/*/Dockerfile`, scans it and records its digests on every run, and signs it on each push to
     main.

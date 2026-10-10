@@ -106,7 +106,8 @@ describe.skipIf(!PYTHON)("ADR-0187 decisions 219–220: the strict .npz archive 
     expect(await answer(zipArchive([{ name: "z.npy", data: numericNpy(), method: 8, declaredSize: 3 * 1024 * MiB }]))).toEqual(refused("npz_too_large"));
     // a member declaring a small size whose stream inflates to 64 MiB: zipfile never yields more than the
     // declared size, and the CRC of what was read does not match, so the member is refused
-    const small = numericNpy();
+    // (the numeric member is larger than zipfile's 4 KiB read-ahead, so only reading it to its end checks the CRC)
+    const small = numericNpy([1, 0], 8192);
     for (const data of [Buffer.concat([small, Buffer.alloc(64 * MiB)]), Buffer.concat([objectNpy(maliciousPickle()), Buffer.alloc(64 * MiB)])]) {
       const declared = data.length - 64 * MiB;
       const r = await checkNpz(zipArchive([{ name: "z.npy", data, method: 8, declaredSize: declared }]));
