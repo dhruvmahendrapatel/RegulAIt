@@ -427,6 +427,47 @@ export const MODELSCAN_EXIT = { clean: 0, issues: 1, errors: 2, nothingScanned: 
 /** the largest report the runner reads (a report lists issues and errors, not data) */
 export const MODELSCAN_MAX_REPORT_BYTES = 4 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// The .npy header check (ADR-0187 decisions 180–184; closes open question 15(b))
+// ---------------------------------------------------------------------------
+
+/**
+ * Every answer the scanner's header check (engines/modelscan/npy-header.py) can give for a refused
+ * `.npy`, plus `npy_check_failed` (the check itself did not answer). Each one reads `unknown`.
+ */
+export const NPY_PROBLEMS = [
+  "npy_truncated",
+  "npy_magic_invalid",
+  "npy_version_unsupported",
+  "npy_header_length",
+  "npy_header_encoding",
+  "npy_header_not_literal",
+  "npy_header_keys",
+  "npy_header_value",
+  "npy_dtype_unsupported",
+  "npy_trailing_bytes",
+  "npy_payload_too_large",
+  "npy_check_failed",
+] as const;
+export type NpyProblem = (typeof NPY_PROBLEMS)[number];
+
+/** the header check's one answer: a numeric array (no pickle), an object array (its payload is a pickle), or refused */
+export const npyCheckSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("numeric") }).strict(),
+  z.object({ kind: z.literal("object"), payloadBytes: z.number().int().min(1) }).strict(),
+  z.object({ kind: z.literal("invalid"), problem: z.enum(NPY_PROBLEMS) }).strict(),
+]);
+export type NpyCheck = z.infer<typeof npyCheckSchema>;
+
+/** an object array's payload is handed to modelscan's PICKLE scanner under this name */
+export const NPY_OBJECT_PAYLOAD_NAME = "artifact.pkl";
+
+/**
+ * The largest object-array payload the scanner copies out for modelscan (larger: `npy_payload_too_large`,
+ * unknown). The copy lands on the result volume, a 64 MiB tmpfs that also holds the report (at most 4 MiB).
+ */
+export const NPY_OBJECT_PAYLOAD_MAX_BYTES = 48 * 1024 * 1024;
+
 /**
  * PR #212 review [4234946100]: does the report's summary disagree with its own lists? `total_issues`
  * and the per-severity counts against `issues[]`; `total_scanned` against `scanned_files`;
@@ -531,10 +572,12 @@ export function mapModelscanReport(input: {
   report: Uint8Array | null | "too_large";
   /** sha256 of the report bytes, recorded as the raw report (nothing attached) */
   reportSha256?: string | null;
+  /** the scanner's `.npy` header check (decisions 180–184); read only for the `numpy` format */
+  npy?: NpyCheck | null;
 }): ModelscanEnvelopeBody {
   const plan = ARTIFACT_FORMAT_PLANS[input.format];
   const fmt = formatItem(input.format, input.formatDetail);
-  const name = modelscanArtifactName(input.format);
+  let name = modelscanArtifactName(input.format);
   const rawReport = input.reportSha256 ? { sha256: input.reportSha256, bytes: 0 } : null;
   const unknownScan = (why: string) => item(MODELSCAN_SCAN_ITEM_KEY, "modelscan", "scan", "medium", 0, 0, "unknown", why);
   if (!plan.scanAs || !name) {
@@ -549,6 +592,42 @@ export function mapModelscanReport(input: {
     rawReport,
   });
   if (input.timedOut) return failed("engine_timeout", "modelscan did not finish within the run's time limit");
+  if (input.format === "numpy") {
+    // decisions 180–184: modelscan 0.8.8's NumPy scanner cannot read a header under numpy 2.x, so the
+    // scanner checks the header itself and modelscan sees only an object array's pickle payload
+    const npy = npyCheckSchema.safeParse(input.npy);
+    if (!npy.success) return failed("npy_check_missing", "the .npy header was not checked");
+    if (npy.data.kind === "invalid") {
+      const problem = npy.data.problem;
+      return {
+        status: "completed",
+        errorCode: null,
+        items: [
+          fmt.item,
+          unknownScan("the .npy header was refused: the array cannot be read safely, so its content is unknown"),
+          item("modelscan/error/1", MODELSCAN_ERROR_SYSTEM, problem, "medium", 0, 0, "unknown", `the .npy header was refused (${problem}); the artifact is unknown`),
+        ],
+        notRun: [],
+        rawReport: null,
+      };
+    }
+    if (npy.data.kind === "numeric") {
+      // a numeric array is raw bytes: no pickle, so modelscan has nothing to scan and was not started
+      if (input.report !== null || input.exitCode !== null) return failed("report_inconsistent", "modelscan ran on a numeric .npy, which has nothing for it to scan");
+      return {
+        status: "completed",
+        errorCode: null,
+        items: [
+          fmt.item,
+          item(MODELSCAN_SCAN_ITEM_KEY, "regulait-npy-header", "numeric", "low", 1, 0, "pass", "the .npy header verified a plain numeric dtype and the payload is exactly its size: no pickle to scan"),
+        ],
+        notRun: [],
+        rawReport: null,
+      };
+    }
+    // an object array: modelscan's pickle scanner was handed exactly the payload, as artifact.pkl
+    name = NPY_OBJECT_PAYLOAD_NAME;
+  }
   if (input.report === null) return failed("report_missing", "modelscan wrote no report");
   if (input.report === "too_large" || input.report.length > MODELSCAN_MAX_REPORT_BYTES) return failed("report_too_large", "modelscan's report is larger than the runner reads");
   let report: ModelscanReport;
