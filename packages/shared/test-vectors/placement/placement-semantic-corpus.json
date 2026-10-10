@@ -1,0 +1,3430 @@
+{
+  "format": "synthetic-placement-semantic-vectors/1",
+  "source": {
+    "adrPath": "docs/decisions/0190-batch6-isolation-execution-profiles.md",
+    "baseCommit": "2276739bb1ca3d5cddfcf03cbef186d59e1966a7",
+    "gitBlob": "e359ffd660f0b023659ae28ded5a4a36cbc443b3",
+    "boardCommit": "2536ab4b4ca5ad54efd6741534f91c720770a302"
+  },
+  "vectors": [
+    {
+      "id": "floor-mcp_stdio-public",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-mcp_stdio-internal",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "internal",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-mcp_stdio-confidential",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "confidential",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-mcp_stdio-regulated",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-code_exec-public",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "code_exec",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-code_exec-internal",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "code_exec",
+        "sensitivity": "internal",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-code_exec-confidential",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "code_exec",
+        "sensitivity": "confidential",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "code_exec confidential uses the explicit Decision 3 L3 requirement."
+    },
+    {
+      "id": "floor-code_exec-regulated",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "code_exec",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-engine_worker-public",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "engine_worker",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-engine_worker-internal",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "engine_worker",
+        "sensitivity": "internal",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-engine_worker-confidential",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "engine_worker",
+        "sensitivity": "confidential",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-engine_worker-regulated",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "engine_worker",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-byoc_worker-public",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-byoc_worker-internal",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "internal",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-byoc_worker-confidential",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "confidential",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "floor-byoc_worker-regulated",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1\u20132"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "compliance-L1",
+      "adrSections": [
+        "Decision 7 item 3"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L1"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "compliance-L2",
+      "adrSections": [
+        "Decision 7 item 3"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L2"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "compliance-L3",
+      "adrSections": [
+        "Decision 7 item 3"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L3"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "compliance-list-19",
+      "adrSections": [
+        "Decision 7 item 3",
+        "Decision 14"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L1",
+          "L3",
+          "L2"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "null means a deliberately unmapped nullable compliance floor, not an unknown class."
+    },
+    {
+      "id": "compliance-list-20",
+      "adrSections": [
+        "Decision 7 item 3",
+        "Decision 14"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L3",
+          "L2",
+          "L1"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "null means a deliberately unmapped nullable compliance floor, not an unknown class."
+    },
+    {
+      "id": "compliance-list-21",
+      "adrSections": [
+        "Decision 7 item 3",
+        "Decision 14"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L3",
+          "L3"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "null means a deliberately unmapped nullable compliance floor, not an unknown class."
+    },
+    {
+      "id": "compliance-list-22",
+      "adrSections": [
+        "Decision 7 item 3",
+        "Decision 14"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          null,
+          "L3"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "null means a deliberately unmapped nullable compliance floor, not an unknown class."
+    },
+    {
+      "id": "compliance-list-23",
+      "adrSections": [
+        "Decision 7 item 3",
+        "Decision 14"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          null
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "null means a deliberately unmapped nullable compliance floor, not an unknown class."
+    },
+    {
+      "id": "autonomyFloor-L1",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "autonomyFloor-L2",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "autonomyFloor-L3",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L3",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "ownProfileFloor-L1",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L1",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "ownProfileFloor-L2",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "ownProfileFloor-L3",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L3",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "parentRequiredClass-L1",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L1",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "parentRequiredClass-L2",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L2",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "parentRequiredClass-L3",
+      "adrSections": [
+        "Decision 7 items 4\u20136"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L3",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "assurance-unknown",
+      "adrSections": [
+        "Decision 7 item 5",
+        "Decision 2"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "unknown",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "assurance-no_identity",
+      "adrSections": [
+        "Decision 7 item 5",
+        "Decision 2"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "no_identity",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "assurance-observed_autonomy_above_declared",
+      "adrSections": [
+        "Decision 7 item 5",
+        "Decision 2"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "observed_autonomy_above_declared",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "l3-satisfies-l2",
+      "adrSections": [
+        "Decision 1",
+        "Decision 7"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "refusal-no_executor",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 6"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": []
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "no_executor",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "refusal-attestation_stale",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 6"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "stale"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "attestation_stale",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "refusal-class_below_required",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 6"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "refusal-executor_quarantined",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 6"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": true,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "executor_quarantined",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "refusal-profile_retired",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 6"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": true,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "profile_retired",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "no-fallback-initial",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 11 invariants",
+        "Test strategy: No fallback"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "attemptPhase": "initial"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "no-fallback-retry",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 11 invariants",
+        "Test strategy: No fallback"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "attemptPhase": "retry"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "no-fallback-queued_retry",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 11 invariants",
+        "Test strategy: No fallback"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "attemptPhase": "queued_retry"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "no-fallback-restart",
+      "adrSections": [
+        "Decision 7 first Then bullet",
+        "Decision 11 invariants",
+        "Test strategy: No fallback"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "attemptPhase": "restart"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "engine-not-run",
+      "adrSections": [
+        "Decision 7 first Then bullet"
+      ],
+      "semanticRequest": {
+        "workloadKind": "engine_worker",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": []
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "no_executor",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false,
+        "engineRunStatus": "not_run",
+        "engineRunReason": "isolation_unavailable",
+        "clean": false
+      },
+      "note": ""
+    },
+    {
+      "id": "stdio-below-floor-L0",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7",
+        "Decision 11 invariants"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L0",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "stdio-below-floor-L1",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7",
+        "Decision 11 invariants"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L1",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "customer-declared-mapped-L2",
+      "adrSections": [
+        "Decision 1",
+        "Decision 7 final bullet",
+        "Decision 11 customer_declared mapping"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "customer_declared",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing",
+            "adminMappedClass": "L2",
+            "mappingAudited": true,
+            "mappingStepUp": true
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": ""
+    },
+    {
+      "id": "customer-declared-mapped-L3",
+      "adrSections": [
+        "Decision 1",
+        "Decision 7 final bullet",
+        "Decision 11 customer_declared mapping"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "customer_declared",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing",
+            "adminMappedClass": "L3",
+            "mappingAudited": true,
+            "mappingStepUp": true
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "declared",
+        "notAnAuthorizationGrant": true
+      },
+      "note": ""
+    },
+    {
+      "id": "customer-declared-unmapped",
+      "adrSections": [
+        "Decision 7 final bullet"
+      ],
+      "semanticRequest": {
+        "workloadKind": "byoc_worker",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "customer_declared",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing",
+            "adminMappedClass": null
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "fallbackAllowed": false,
+        "gap": "unmapped_reason"
+      },
+      "note": ""
+    },
+    {
+      "id": "non-isolable-model_call",
+      "adrSections": [
+        "Decision 3"
+      ],
+      "semanticRequest": {
+        "workloadKind": "model_call",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": []
+      },
+      "expectedProjection": {
+        "outcome": "outside_local_placement",
+        "executionLocation": "L0",
+        "isolated": false,
+        "sandboxLabelAllowed": false
+      },
+      "note": "connector_call egress/secret profile bounds still apply. No authorization bypass is implied."
+    },
+    {
+      "id": "non-isolable-connector_call",
+      "adrSections": [
+        "Decision 3"
+      ],
+      "semanticRequest": {
+        "workloadKind": "connector_call",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": []
+      },
+      "expectedProjection": {
+        "outcome": "outside_local_placement",
+        "executionLocation": "L0",
+        "isolated": false,
+        "sandboxLabelAllowed": false
+      },
+      "note": "connector_call egress/secret profile bounds still apply. No authorization bypass is implied."
+    },
+    {
+      "id": "non-isolable-remote_mcp",
+      "adrSections": [
+        "Decision 3"
+      ],
+      "semanticRequest": {
+        "workloadKind": "remote_mcp",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": []
+      },
+      "expectedProjection": {
+        "outcome": "outside_local_placement",
+        "executionLocation": "external",
+        "isolated": false,
+        "sandboxLabelAllowed": false
+      },
+      "note": "connector_call egress/secret profile bounds still apply. No authorization bypass is implied."
+    },
+    {
+      "id": "delegation-L1-L1",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L1",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L1-L2",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L1",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L2"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L1-L3",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L1",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L3"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L2-L1",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L2",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "ruleId": "delegation-isolation",
+        "authorizationStillRequired": true,
+        "gap": "delegation_refusal_http"
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L2-L2",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L2",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L2"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L2-L3",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L2",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L3"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L3-L1",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L3",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "ruleId": "delegation-isolation",
+        "authorizationStillRequired": true,
+        "gap": "delegation_refusal_http"
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L3-L2",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L3",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L2"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "ruleId": "delegation-isolation",
+        "authorizationStillRequired": true,
+        "gap": "delegation_refusal_http"
+      },
+      "note": ""
+    },
+    {
+      "id": "delegation-L3-L3",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L3",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L3"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null
+      },
+      "note": ""
+    },
+    {
+      "id": "middle-actor-executor-inactive",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": false,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": "live_chain_refusal_envelope"
+      },
+      "note": "A fresh healthy leaf does not rescue an invalid middle actor placement."
+    },
+    {
+      "id": "middle-actor-executor-quarantined",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": true,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": "live_chain_refusal_envelope"
+      },
+      "note": "A fresh healthy leaf does not rescue an invalid middle actor placement."
+    },
+    {
+      "id": "middle-actor-executor-stale",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "stale"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": "live_chain_refusal_envelope"
+      },
+      "note": "A fresh healthy leaf does not rescue an invalid middle actor placement."
+    },
+    {
+      "id": "sponsor-not-floor-override",
+      "adrSections": [
+        "Decision 7 items 1\u20136",
+        "Decision 8"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "sponsorRequestedClass": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "ADR0190 has no sponsor-class cascade input. Identity authorization is a separate prerequisite; sponsor preference cannot remove the project floor."
+    },
+    {
+      "id": "unknown-workloadKind",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "future_kind",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution."
+    },
+    {
+      "id": "unknown-sensitivity",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "unknown",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution."
+    },
+    {
+      "id": "unknown-complianceFloors",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [
+          "L9"
+        ],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution."
+    },
+    {
+      "id": "unknown-autonomyFloor",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": null,
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution."
+    },
+    {
+      "id": "unknown-ownProfileFloor",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L9",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution."
+    },
+    {
+      "id": "unknown-parentRequiredClass",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L9",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution."
+    },
+    {
+      "id": "attestation-missing",
+      "adrSections": [
+        "Decision 6 executor self-test",
+        "Decision 7"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "missing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "gap": "missing_failing_report_reason"
+      },
+      "note": ""
+    },
+    {
+      "id": "attestation-failing",
+      "adrSections": [
+        "Decision 6 executor self-test",
+        "Decision 7"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "failing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "gap": "missing_failing_report_reason"
+      },
+      "note": ""
+    },
+    {
+      "id": "profile-mismatch-offer",
+      "adrSections": [
+        "Decision 4 pull model",
+        "Decision 7 first Then bullet"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": false,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "gap": "profile_match_reason"
+      },
+      "note": ""
+    },
+    {
+      "id": "freshness-boundary",
+      "adrSections": [
+        "Decision 6 executor self-test",
+        "Decision 11 attestation age"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "attestationAgeSeconds": 7200
+      },
+      "expectedProjection": {
+        "outcome": "contract_gap",
+        "gap": "freshness_boundary"
+      },
+      "note": "ADR states 2 h limit but does not define equality, future timestamps or clock choice. No wire-positive boundary invented."
+    },
+    {
+      "id": "warn-shortfall",
+      "adrSections": [
+        "Decision 11 isolation_enforcement",
+        "Decision 11 falling-back invariant",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "regulated",
+        "sensitivityFloor": "L3",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "warn",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "contract_gap",
+        "gap": "warn_conflict",
+        "fallbackAllowed": false,
+        "minimumSelectableClass": "L3"
+      },
+      "note": "Warning prose permits available placement while invariant prohibits below-required placement; owner must resolve. No positive shortfall fixture."
+    },
+    {
+      "id": "audited-l1-floors-still-profile-l2",
+      "adrSections": [
+        "Decision 7 items 1\u20135",
+        "Decision 11 floors"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L1",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L1",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "workloadKindFloorOverride": "L1",
+        "floorRelaxationAudited": true,
+        "floorRelaxationStepUp": true
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": "Relaxing sensitivity and stdio floors does not erase the own-profile L2 input."
+    },
+    {
+      "id": "audited-l1-all-inputs",
+      "adrSections": [
+        "Decision 7",
+        "Decision 11 floors",
+        "Decision 2 profile relaxations"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L1",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L1",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L1",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "workloadKindFloorOverride": "L1",
+        "floorRelaxationAudited": true,
+        "floorRelaxationStepUp": true
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L1",
+        "minimumSelectableClass": "L1",
+        "selectedClassAtLeast": "L1",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true,
+        "sandboxLabelAllowed": false
+      },
+      "note": "Valid only with every relaxation authorized, audited and stepped up; execution remains on an executor."
+    },
+    {
+      "id": "placement-report-mismatch",
+      "adrSections": [
+        "Decision 6 per-placement report"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "release_input",
+        "perPlacementReportMatches": false
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "error": "execution_profile_mismatch",
+        "inputBytesDelivered": 0,
+        "sandboxKilled": true,
+        "executorQuarantined": true,
+        "alertRaised": true,
+        "gap": "mismatch_http_status"
+      },
+      "note": ""
+    },
+    {
+      "id": "openshell-gvisor-refused",
+      "adrSections": [
+        "Amendment F"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing",
+            "backend": "openshell",
+            "runtimeClassName": "gvisor"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": "openshell_refusal_envelope"
+      },
+      "note": ""
+    },
+    {
+      "id": "unknown-missing-workloadKind",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "workloadKind"
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified."
+    },
+    {
+      "id": "unknown-missing-sensitivity",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "sensitivity"
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified."
+    },
+    {
+      "id": "unknown-missing-autonomyFloor",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "autonomyFloor"
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified."
+    },
+    {
+      "id": "unknown-missing-ownProfileFloor",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "ownProfileFloor"
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified."
+    },
+    {
+      "id": "unknown-missing-complianceFloors",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "complianceFloors"
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified."
+    },
+    {
+      "id": "unknown-missing-parentRequiredClass",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "parentRequiredClass",
+        "delegatedCall": true
+      },
+      "expectedProjection": {
+        "outcome": "fail_closed_pending_contract",
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null,
+        "gap": "missing_fact_refusal"
+      },
+      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified."
+    }
+  ]
+}
