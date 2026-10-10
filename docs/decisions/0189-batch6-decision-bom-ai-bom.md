@@ -316,7 +316,7 @@ Build as for a first load: no grandfathering. Decisions made before B2 ships hav
 - Settings rows for decision 7; the auditor export grant.
 - Retention follows the audit retention of the compliance profile and respects evidence holds (OWNER DECISION 11),
   through the single prune path of amendment R16.
-- Receipt payload v2 field `factsHash` (open question 1).
+- Receipt payload v2 field `factsHash` (open question 1), emitted only from the R34 boundary.
 
 ### 9. API and UI surface
 
@@ -366,7 +366,7 @@ against the specification rather than against itself.
 | Slice | Owner | Content | Depends on | Parallel? |
 |---|---|---|---|---|
 | **B0 spike** (research, no product code) | Claude | Confirm at runtime that `@cyclonedx/cyclonedx-library` 10.3.0's model lacks `modelCard`/`data`/`declarations`; compile its bundled 1.7 and 1.6 schemas and the SPDX 3.0.1 schema with our pinned Ajv offline, with the reject-all `idn-email` format; extend the `canonicalize` byte-identity corpus to BOM shapes; render a sample AI BOM twice and on two Node versions and compare bytes; run `spdx3-validate` pinned in a CI container; read the OWASP AIBOM field guidance. Output: a research note and go/no-go on decision 3's exception | none | **Yes**, now, with ADR-0188 S1–S4 |
-| **B1 foundation** | Claude | Migration `0181+` (decision 8 tables, settings, immutability triggers), `schema.ts`, shared zod for `regulait.decision-bom.v1` and `regulait.ai-bom.v1`, strict settings with audited relaxation, every route as a 501 stub, receipt payload v2 `factsHash` as agreed under open question 1 | B0 go; ADR-0188 S1 merged (shared migration journal) | serial (hot files) |
+| **B1 foundation** | Claude | Migration `0181+` (decision 8 tables, settings, immutability triggers), `schema.ts`, shared zod for `regulait.decision-bom.v1` and `regulait.ai-bom.v1`, strict settings with audited relaxation, every route as a 501 stub, receipt payload v2 `factsHash` as agreed under open question 1 (verified, not emitted, until the R34 cutover), `audit_anchors.tsa_request_sent_at` (R33) | B0 go; ADR-0188 S1 merged (shared migration journal) | serial (hot files) |
 | **B2 fact capture** | Claude | `decision_facts` written in the decision transaction on every governed path; `factsHash` in receipts; the `actors` facts read from ADR-0188's columns | B1; **ADR-0188 S4 merged** (same files, and the actor chain must exist) | serial |
 | **B3 AI BOM builder and CycloneDX renderer** | Claude | `packages/shared/src/bom/` pure builder from a loaded record set, CycloneDX 1.7 and 1.6 renderers, validation, compositions; gateway loader, snapshot and drift routes (no draft route; snapshot routes and triggers ship disabled until both B4 and B5 merge, amendments R2 and R17) | B1 | **Yes**, with B2 (no shared files) |
 | **B4 Decision BOM assembler, signer, bundle and verifier** | Claude | Assembly from facts and stored rows, freezing rules, signing with the receipt key, `export-bundle/3`, pure verifier and `scripts/verify-bom.mjs` (both subjects, R19), whole-bundle email scan (R21), `POST /v1/boms/verify` | B2, B3 (BOM-Link) | serial after B2 |
@@ -768,6 +768,49 @@ R32. **B3's loader is tested against real row shapes, not the spike fixtures.** 
     tests), including nulls and column defaults, and a test fails if any rendered value has no source column or
     stated derivation. The spike's fixtures are not a contract.
 
+### Fifth review round (2026-10-10)
+
+Three findings against `91b0db0`, each checked against `main`; all real, none an owner choice.
+
+R33. **The proof carries the timestamp request facts.** `verifyTimestampResponse`
+    (`apps/gateway/src/audit-timestamp-verify.ts`) needs the request nonce and the time the request was sent: it
+    refuses a missing or different nonce and a `genTime` more than five minutes before `sentAt`. `audit_anchors`
+    already stores `tsa_nonce` and `tsa_policy_oid` but not the send time. So:
+    - B1 adds `tsa_request_sent_at` (database clock), written in the same statement that records the nonce before
+      the request leaves; a granted row without it fails the `audit_anchors_tsa_granted_check`, extended to require
+      it with the nonce. No grandfathering: a token granted before the column exists has no send time, and the
+      verifier reports its RFC 3161 check as `unverifiable` with reason `request_facts_not_recorded`, never `valid`.
+    - `proof.anchor` adds `tsaNonce`, `tsaRequestSentAt` and `tsaPolicyOid` as stored, inside the signed body.
+    - The offline verifier runs the same checks as `verifyTimestampResponse` (imprint from R1's canonical record,
+      nonce, policy, `genTime` window against `tsaRequestSentAt`, chain to the supplied TSA trust bundle), using the
+      verification time as `now`.
+
+R34. **Receipt v2 is switched on at a recorded boundary, after every replica and writer is ready.** The sign sweep
+    checks the chain tip against its own `RECEIPT_PAYLOAD_VERSION` and aborts when that fails
+    (`apps/gateway/src/decision-receipts.ts`), so a v1-only replica stops at the first v2 tip, and a v2 emitted while
+    `factsHash` is still null signs a missing fact for good. So, mirroring ADR-0188 decision 19:
+    - B1 and B2 ship code that **verifies** v2 but still **emits** v1. Nothing emits v2 because a binary was
+      deployed.
+    - The cutover writes a boundary row (receipt seq from which v2 applies, activation time, actor) under the
+      receipt sign lock, in a verifier-trusted table, as an audited admin step. It is refused unless every live
+      replica reports a v2-capable build and fact capture is on for every governed path (after B2 and ADR-0188 S4).
+      The receipt v2 payload is shared with ADR-0188 decision 9 (open question 1), so this is one cutover for both.
+    - From the boundary on, every receipt is v2, a v1 receipt after it is `invalid`, and a binary that does not
+      know v2 refuses to sign (it already fails closed). The boundary is never moved back.
+    - A v2 receipt carries `factsHash` for every decision; it is null only when `decision_facts_capture` was off
+      for that decision, with `factsStatus: capture_off` inside the signed payload. Any other missing facts stop
+      the sweep, as an integrity failure does today.
+
+R35. **Addenda are sequenced under a per-decision lock.** Two late facts for one decision (a usage event and a span)
+    could both take the same `n` and `prev_hash` and fork the chain, and a uniqueness constraint alone would make
+    one of them fail. So `decision_fact_addenda` has PRIMARY KEY (`audit_id`, `n`) and `n >= 1`. A writer takes
+    `SELECT … FOR UPDATE` on the decision's `decision_facts` row in its own transaction, then reads the last
+    addendum, and writes `n + 1` with `prev_hash` equal to that addendum's `facts_hash` (or the decision's
+    `facts_hash` for `n = 1`). Concurrent writers for one decision therefore wait, never fork and never fail;
+    writers for different decisions do not contend. A decision with no `decision_facts` row (capture off) gets no
+    addendum; its late facts are `not_recorded`. The sign sweep (R15) signs in `n` order and stops at a gap or a
+    `prev_hash` mismatch.
+
 ### Owner items from the review (not decided here)
 
 1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
@@ -782,8 +825,9 @@ R32. **B3's loader is tested against real row shapes, not the spike fixtures.** 
 ## Open questions
 
 1. **Receipt payload v2.** ADR-0188 decision 9 adds sponsor, actor chain and grant id to receipts; this ADR adds
-   `factsHash`. Proposed: one `regulait.receipt.v2` carrying both, defined once in ADR-0188 S1 (fields nullable until
-   B2 fills `factsHash`), so receipts never go through a v3. Needs agreement with ADR-0188's slice owner before S1
+   `factsHash`. Proposed: one `regulait.receipt.v2` carrying both, defined once in ADR-0188 S1 and emitted only after
+   the recorded cutover of amendment R34 (never with a null `factsHash` except `capture_off`), so receipts never go
+   through a v3. Needs agreement with ADR-0188's slice owner before S1
    freezes.
 2. **Suite gating.** CLAUDE.md requires checking the suite capability map before building what another module may own
    (evidence export, AI inventory). The suite documents are not reachable from this session. Proposed: the suite agent
