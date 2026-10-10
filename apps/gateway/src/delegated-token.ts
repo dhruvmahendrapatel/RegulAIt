@@ -34,7 +34,7 @@
  * libraries do not do: the freshness window, nonce, replay claim, the
  * stored-binding and live-chain checks, and the mTLS branch.
  */
-import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import {
   calculateJwkThumbprint,
   decodeJwt,
@@ -50,6 +50,7 @@ import { and, eq, isNotNull, issuedTokens, lte, or, replayClaims, workloadCreden
 import {
   actClaimFromChain,
   canonicalDelegationBody,
+  constantTimeEqual,
   DELEGATION_AUTHZ_TYP,
   DPOP_PROOF_MAX_AGE_SECONDS,
   DPOP_PROOF_MAX_FUTURE_SECONDS,
@@ -108,7 +109,7 @@ export function issueDpopNonce(nonceKey: Buffer, now: Date = new Date()): string
 export function dpopNonceValid(value: unknown, nonceKey: Buffer, now: Date = new Date()): boolean {
   if (typeof value !== "string") return false;
   const expected = issueDpopNonce(nonceKey, now);
-  return value.length === expected.length && timingSafeEqual(Buffer.from(value), Buffer.from(expected));
+  return constantTimeEqual(value, expected);
 }
 
 // ---------------------------------------------------------------------------
