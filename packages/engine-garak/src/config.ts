@@ -17,10 +17,16 @@
  *     are never loaded); one generation per prompt; the prompt cap is the run's trials;
  *   - the report directory and XDG config/data/cache directories are fresh and empty on the worker's
  *     tmpfs, so no `garak.site.yaml` and no data override can be picked up (R10);
- *   - every usage-data switch is set; no proxy, vendor key or inherited variable but PATH.
+ *   - every usage-data switch is set; no proxy, vendor key or inherited variable but PATH;
+ *   - the pre-seeded Hugging Face assets (decisions 198-200) are read from the image's read-only tree:
+ *     `HF_HUB_CACHE` is its hub cache, and `HF_DATASETS_CACHE` is a fresh per-probe directory whose
+ *     entries are symlinks into it (datasets takes a lock file in its cache root); `HF_HOME` stays fresh;
+ *   - a probe with settings in GARAK_PROBE_SETTINGS gets exactly those (the system-prompt probe names the
+ *     pre-seeded dataset only).
  * `assertGatewayOnly` re-checks the finished config and environment before anything is written.
  */
 import {
+  GARAK_PROBE_SETTINGS,
   GARAK_TAXONOMY_SYSTEM,
   GARAK_USAGE_DATA_ENV,
   garakNotRunReason,
@@ -38,6 +44,8 @@ export const GARAK_TARGET_TYPE = "openai.OpenAICompatible";
 export const GARAK_EVAL_THRESHOLD = 0.5;
 /** the report prefix: garak writes `<report_dir>/<prefix>.report.jsonl` */
 export const GARAK_REPORT_PREFIX = "garak";
+/** the image's pre-seeded, read-only Hugging Face tree (engines/garak/Dockerfile; image.test.ts checks it) */
+export const GARAK_HF_PRESEED_DIR = "/opt/garak/hf";
 
 export class GarakConfigRefused extends Error {
   constructor(
@@ -131,6 +139,7 @@ export function buildGarakConfig(args: { target: GarakTarget; probe: string; tri
       target_type: GARAK_TARGET_TYPE,
       target_name: args.target.model,
       extended_detectors: false,
+      ...probeSettings(args.probe),
       generators: {
         openai: {
           OpenAICompatible: {
@@ -149,6 +158,14 @@ export function buildGarakConfig(args: { target: GarakTarget; probe: string; tri
   };
 }
 
+/** `plugins.probes.<module>.<Class>` for a probe with fixed settings, else nothing */
+function probeSettings(probe: string): { probes?: Record<string, Record<string, Record<string, unknown>>> } {
+  const settings = GARAK_PROBE_SETTINGS[probe];
+  if (!settings) return {};
+  const [module, klass] = probe.split(".") as [string, string];
+  return { probes: { [module]: { [klass]: JSON.parse(JSON.stringify(settings)) as Record<string, unknown> } } };
+}
+
 /** the directories one garak process owns (all fresh and empty, on the worker's tmpfs) */
 export interface GarakDirs {
   home: string;
@@ -162,7 +179,7 @@ export interface GarakDirs {
  * The child's WHOLE environment. HOME and the three XDG directories are fresh per probe; Python never
  * writes bytecode, never reads a user site and never puts the working directory on its path.
  */
-export function buildGarakEnv(apiKey: string, dirs: GarakDirs, pathVar: string): Record<string, string> {
+export function buildGarakEnv(apiKey: string, dirs: GarakDirs, pathVar: string, hfPreseed: string = GARAK_HF_PRESEED_DIR): Record<string, string> {
   return {
     PATH: pathVar,
     HOME: dirs.home,
@@ -171,6 +188,8 @@ export function buildGarakEnv(apiKey: string, dirs: GarakDirs, pathVar: string):
     XDG_DATA_HOME: dirs.data,
     XDG_CACHE_HOME: dirs.cache,
     HF_HOME: `${dirs.cache}/huggingface`,
+    HF_HUB_CACHE: `${hfPreseed}/hub`,
+    HF_DATASETS_CACHE: garakDatasetsCacheDir(dirs),
     PYTHONDONTWRITEBYTECODE: "1",
     PYTHONNOUSERSITE: "1",
     PYTHONSAFEPATH: "1",
@@ -180,6 +199,11 @@ export function buildGarakEnv(apiKey: string, dirs: GarakDirs, pathVar: string):
     ...GARAK_USAGE_DATA_ENV,
     [GARAK_KEY_ENV]: apiKey,
   };
+}
+
+/** the per-probe datasets cache root (symlinks into the pre-seeded tree; garak-run.ts creates them) */
+export function garakDatasetsCacheDir(dirs: GarakDirs): string {
+  return `${dirs.cache}/hf-datasets`;
 }
 
 const URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -192,6 +216,8 @@ const ALLOWED_ENV = new Set([
   "XDG_DATA_HOME",
   "XDG_CACHE_HOME",
   "HF_HOME",
+  "HF_HUB_CACHE",
+  "HF_DATASETS_CACHE",
   "PYTHONDONTWRITEBYTECODE",
   "PYTHONNOUSERSITE",
   "PYTHONSAFEPATH",
@@ -217,7 +243,7 @@ function onlyKeys(v: unknown, path: string, allowed: readonly string[]): Record<
  * detector; one probe that is in the catalogue and runs here; the report and XDG directories as given;
  * every usage-data switch set; nothing else in the environment. Throws `GarakConfigRefused`.
  */
-export function assertGatewayOnly(config: Record<string, unknown>, env: Record<string, string>, gatewayBaseUrl: string): void {
+export function assertGatewayOnly(config: Record<string, unknown>, env: Record<string, string>, gatewayBaseUrl: string, hfPreseed: string = GARAK_HF_PRESEED_DIR): void {
   let base: URL;
   try {
     base = new URL(gatewayBaseUrl);
@@ -238,7 +264,11 @@ export function assertGatewayOnly(config: Record<string, unknown>, env: Record<s
     throw new GarakConfigRefused("config_probe", "the probe is not one this build runs");
   }
   if (run["generations"] !== 1 || run["eval_threshold"] !== GARAK_EVAL_THRESHOLD) throw new GarakConfigRefused("config_run", "one generation per prompt, the fixed threshold");
-  const plugins = onlyKeys(top["plugins"], "plugins", ["target_type", "target_name", "extended_detectors", "generators"]);
+  const plugins = onlyKeys(top["plugins"], "plugins", ["target_type", "target_name", "extended_detectors", "generators", "probes"]);
+  // a probe's settings are exactly the fixed ones this build writes for it, or none
+  if (JSON.stringify(plugins["probes"]) !== JSON.stringify(probeSettings(entry.probe).probes)) {
+    throw new GarakConfigRefused("config_probe_settings", "a probe gets exactly this build's fixed settings");
+  }
   if (plugins["target_type"] !== GARAK_TARGET_TYPE) throw new GarakConfigRefused("config_generator", "the only generator is the gateway's OpenAI-compatible route");
   if (plugins["extended_detectors"] !== false) throw new GarakConfigRefused("config_detectors", "only the probe's primary detector may run");
   const generators = onlyKeys(plugins["generators"], "plugins.generators", ["openai"]);
@@ -267,6 +297,12 @@ export function assertGatewayOnly(config: Record<string, unknown>, env: Record<s
     if (!ALLOWED_ENV.has(name)) throw new GarakConfigRefused("env_forbidden", `${name} must not reach garak`);
   }
   if (!env[GARAK_KEY_ENV]) throw new GarakConfigRefused("env_key_missing", "the run's key is required");
+  // the Hub caches: the image's read-only hub cache, and per-probe writable roots under the fresh cache dir
+  const cache = env["XDG_CACHE_HOME"];
+  const under = (v: string | undefined) => typeof cache === "string" && cache.startsWith("/") && typeof v === "string" && v.startsWith(`${cache}/`) && !v.includes("..");
+  if (env["HF_HUB_CACHE"] !== `${hfPreseed}/hub` || !under(env["HF_HOME"]) || !under(env["HF_DATASETS_CACHE"])) {
+    throw new GarakConfigRefused("env_hf_cache", "the Hub caches are the image's pre-seeded tree and fresh per-probe directories");
+  }
 }
 
 /** the item key and taxonomy id of a probe (garak's `module.Class`) */

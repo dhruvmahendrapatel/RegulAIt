@@ -1917,6 +1917,111 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
   and modelscan are each re-checked against the CI-built image layout, and whichever has not been checked reads
   `false`.
 
+### Implementation decisions (B5-G2 garak admissions: owner questions 21, 20 and 22, 2026-10-10, branch `b5-garak-admit`)
+
+Builds the owner's decisions of 2026-10-10 on open questions 21, 20 and 22 (the section above). **No migration.** Code:
+`engines/garak` (allow file, licence gate, prune list, `hf-preseed.json`, `preseed-hf.py`, `IMAGE-NOTICES.txt`,
+Dockerfile, THIRD_PARTY.md), `packages/shared/src/engines/garak.ts` (dispositions only: the OWASP crosswalk and the
+`judge.*`/`agent_breaker.*` rows are untouched, other slices own them), the new `garak-preseed.ts`, the manifest's
+garak entry, `packages/engine-garak` (`config.ts`, `garak-run.ts`) and `security/image-allowlist.engine-garak.json`.
+Tests: `packages/shared/src/engines/garak.test.ts` (12), `packages/engine-garak/src/image.test.ts` (8),
+`garak.test.ts` (+2 cases and 6 refusal variants), `garak-real.test.ts` (9 with the opt-in pre-seed, 5 new).
+`garak-upstream.ts` is NOT edited: it is generated from the wheel's `plugin_cache.json` (decision 142), and its
+`active` flag is garak's own default, which the runner never reads; admission lives in `garak.ts`'s dispositions.
+
+193. **Question 21: the 20 allow-file entries are owner acceptances.** Each says `accepted by owner 2026-10-10
+     (ADR-0187 decision 193)` with its reason (PSF-2.0 ×4 including CPython, MPL-2.0 ×4, ZPL-2.1 ×2, MIT-0,
+     CNRI-Python, MIT-CMU, pillow's FreeType, HarfBuzz, libjpeg-turbo, libpng and libtiff libraries, torch's BSL-1.0
+     (Boost) and Apache-2.0 WITH LLVM-exception). No entry says "pending owner decision" any more; numpy's three stay
+     on decision 106. The acceptance covers these named licences in shipped engine images only; the gate still
+     DENIES any term the allow file does not name, including a second, unnamed term of an admitted subject. Run on
+     the exact closure (pruned, pip removed, as the Dockerfile does): **197 allowed, 23 admitted, 0 denied**. The
+     manifest's `unverified` entry for licences now records the acceptance; the image stays not admissible until
+     CI's OS-layer and native-library scans are clean. Red: an `EPL-2.0`, a `Unicode-3.0` and an
+     `LGPL-3.0-only` term next to an admitted one are each denied with the real allow file (image test).
+194. **MPL-2.0 is admitted only while unmodified, and the gate checks it.** An allow entry may carry
+     `"condition": "unmodified"`, and an MPL-2.0 entry must (`allowProblems` refuses one without it; an unknown
+     condition is refused). Such a row is admitted only when every hashed file in the distribution's RECORD (the
+     hashes pip wrote from the hash-pinned wheel) is present with that sha256 and size; a RECORD path outside the
+     venv is refused; with no checker, a conditional entry admits nothing. Red: appending one comment line to the
+     installed `certifi/core.py` made the real gate deny certifi ("certifi/core.py is modified"); restored, 0 denied.
+     The same case, a missing RECORD and a path escape are pinned in the image test.
+195. **Question 20: the probes whose only bar was the owner decision now run (`local`).** doctor.{Puppetry, Bypass,
+     BypassLeet} and grandma.{Substances, Win10, Win11}: offensive, `jailbreak`; goodside.Tag: standard,
+     `prompt_injection` (instructions hidden in Unicode tag characters, reached over the chat route as decision 147
+     reads latent injection); goodside.{WhoIsRiley, ThreatenJSON, Davidjl} and glitch.{Glitch, GlitchFull}: standard,
+     reported, never counted; badchars.BadCharacters: offensive, `encoding_evasion` (as smuggling's homoglyphs).
+     Every primary detector is a string, trigger or regex detector (mitigation, goodside, productkey, base). Measured
+     on the pruned venv through the worker: eight of them load and give a reading.
+196. **Admitted by licence, still not runnable here, and the reason says so.** atkgen.Tox,
+     latentinjection.LatentJailbreak(Full), lmrc.Bullying and realtoxicityprompts.* need
+     `unsafe_content.ToxicCommentModel`, whose OpenRAIL model is not pre-seeded (question 22 named only licence-clear
+     assets; its weights are also a pickle) and whose module reads, at import, the two word lists question 26 keeps
+     deleted: `missing_preseed` ("licence admitted; …"). lmrc.{SlurUsage, SexualContent, Sexualisation, Profanity}
+     read the profanity list that stays deleted, and grandma.Slurs reads the unlicensed slur list (continuation's
+     data, never admitted): `excluded_licence` with that sentence. None of these reaches garak; claiming them would
+     report a probe that cannot load as a run. (grandma.GrandmaIntent, which names no detector, is now unlisted, as
+     decision 143 already said.)
+197. **The admitted data ships, with its notices; the two word lists stay deleted.** `excluded-data.txt` no longer
+     lists `badchars` (Unicode License v3) or `ldnoobw-en.txt` (CC-BY-4.0); 23 paths are deleted, including
+     `profanity_en.csv` and `ofcom-potentially-offensive.txt` (question 26) and the slur lists. `IMAGE-NOTICES.txt`
+     is copied to `/opt/garak/NOTICES.txt`: the Unicode copyright and permission notice in full, the CC-BY-4.0
+     credit, the pre-seeded assets with their commits and licences, and, as the owner required, the OpenRAIL++-M
+     use restrictions (Attachment A, verbatim from the licence dated 2023-07-26) for the admitted toxicity model, plus
+     the CC-BY-4.0 credit for the admitted second system-prompt dataset; THIRD_PARTY.md records the same.
+198. **Question 22: the nine licence-clear assets R10 names are pre-seeded, pinned and verified.**
+     `hf-preseed.json` (mirrored by `GARAK_PRESEEDED_HF_ASSETS`; a test keeps them equal): the refutation detector
+     (Apache-2.0) and the NLI detector (MIT); the pypi, npm, rubygems, dart, perl and raku package lists and the drh
+     system-prompt set (Apache-2.0). Each is pinned to its full commit (R10's short revisions; each was still the
+     Hub's `main` on 2026-10-10), and each file (25, `.gitattributes` and helper scripts excluded) by sha256 and size,
+     1.89 GB in all. `preseed-hf.py fetch` downloads exactly the listed files at that commit, refuses any file whose
+     hash or size differs, reads the licence from the card at that commit (it must be the recorded MIT or
+     Apache-2.0), and writes `refs/main` = the commit. Licences were checked at the pinned commits: the cards say
+     `apache-2.0` (8) and `mit` (the NLI model). The NLI model's 1.43 GB weights were hashed by streaming
+     (`214cd01c…`, as pinned); the disk here could not hold them, so its offline load is proven by the build step only.
+199. **Materialised at build, proven offline in the build, read-only at run time.** An offline build of a dataset
+     from its raw snapshot is refused by datasets 3.6 (measured), so `materialise` runs `load_dataset(id,
+     split="train", revision=<commit>)` with network right after `fetch`, then requires every cached snapshot file to
+     be listed and still match and no other commit to be cached, and removes the download locks, transfer cache and
+     module cache. A `RUN --network=none` step with every offline switch then runs `verify`: every file's hash,
+     `refs/main`, each model loaded the way garak's HFDetector loads it (by id, no revision) and run once, each
+     dataset loaded the way garak loads it with its row count and column. Only the tree is copied into the runtime
+     image (root-owned, `chmod -R a-w`), not the venv the pre-seed ran in. Measured here, in a fresh network
+     namespace with the tree mounted read-only: the eight assets that fit on this disk load offline (the full verify
+     passes). A first attempt with the read-only tree as `HF_HOME` failed on the lock file datasets takes in its
+     cache root, which led to decision 200.
+200. **The worker's Hub layout.** Each garak process gets `HF_HUB_CACHE=/opt/garak/hf/hub` (the read-only tree),
+     a fresh `HF_HOME` (as before) and a fresh `HF_DATASETS_CACHE` under its own cache directory whose entries are
+     symlinks to the materialised datasets (`linkPreseededDatasets`): datasets takes a lock file in its cache root,
+     so the root must be writable, while the data stays read-only and cannot be overridden. The config invariant
+     requires exactly that: the hub cache is the image's tree; `HF_HOME` and `HF_DATASETS_CACHE` are under the
+     probe's fresh cache directory (no `..`). Red: a writable or foreign hub cache, a datasets cache in the image
+     tree, `HF_HOME` on the image tree or a traversal are each refused (`env_hf_cache`).
+201. **The packagehallucination and system-prompt probes run.** packagehallucination.{Python, JavaScript, Ruby,
+     Dart, Perl, RakuLand}: standard, reported, never counted (as promptfoo's hallucination plugins); Rust stays
+     excluded (its dataset declares no licence). sysprompt_extraction.SystemPromptExtraction: standard,
+     `system_prompt_extraction`. Its default sources include the CC-BY-4.0 dataset that is admitted but not
+     pre-seeded, so the worker writes `plugins.probes.sysprompt_extraction.SystemPromptExtraction.
+     system_prompt_sources = [the drh dataset]` (`GARAK_PROBE_SETTINGS`), and the invariant accepts exactly the
+     fixed settings for the probe being run (widening or dropping them is refused, `config_probe_settings`). garak
+     honours that setting (measured: a nonexistent source gives zero prompts). The two NLI detectors are pre-seeded
+     and loadable, but their only probe, misleading.FalseAssertion, stays excluded (its data has no licence), so no
+     admitted probe uses them yet. fsspec CVE-2026-104851's allow-list entry (decision 160) now states the new reach:
+     datasets and the hub client run only on the image's own read-only, hash-pinned TSV, JSON Lines and JSON files,
+     offline, with dataset ids fixed by our config; the expiry is unchanged. The manifest's garak `generation` is 2
+     (the image changed), and its sets and reduced set follow the catalogue.
+202. **Proofs and what was not done.** The opt-in real-engine suite ran against a venv built from the exact
+     lockfiles (`--require-hashes`, `pip check` clean), pruned with the new list and with pip removed (as decision
+     158, now after the prune), inside its own network namespace (loopback only; the suite's first case shows a
+     public address is unreachable) with the pre-seeded tree mounted read-only: 9 of 9 passed, among them every
+     pre-seeded asset loading offline (`verify`), a known package passing and an invented one failing, the
+     system-prompt probe loading its dataset and passing a refusal, and eight owner-admitted probes giving readings.
+     Red: pointed at an empty tree, the three pre-seed cases fail and the probes read `unknown`, never pass.
+     **Size:** about 1.9 GB of files plus about 0.25 GB of materialised datasets, about 2.1 GB in all (under the
+     owner's estimate plus the 2.5 GB ceiling). **Not done here:** there is no Docker daemon, so the image (and the
+     `--network=none` step, the read-only tree and the notices in it) is first built by CI; the NLI model was not
+     loaded locally (decision 198); the hub egress was allowed (no 403).
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is
@@ -2009,6 +2114,10 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
     lmrc.Bullying, realtoxicityprompts.*), the CC-BY-4.0 word list and system-prompt dataset (lmrc slur and sexual
     probes, sysprompt_extraction). Strict default meanwhile: `excluded_licence`, data deleted where it is a file.
     *decided 2026-10-10 by the owner: every listed probe is admitted (see "Owner decisions (2026-10-10, garak)").*
+    *Built 2026-10-10, decisions 195-197: the doctor, grandma (but Slurs), goodside, glitch and badchars probes run;
+    the toxicity-detector probes are `missing_preseed` (model not pre-seeded; its module reads the question-26 lists),
+    the lmrc slur/sexual probes and grandma.Slurs stay `excluded_licence` (their detectors read deleted, unlicensed
+    lists); the notices ship in the image.*
 21. **B5-G: the garak image's licences outside the ADR-0176 list (decision 157).** 20 allow-file entries say "pending
     owner decision": PSF-2.0 (CPython, aiohappyeyeballs, defusedxml, typing_extensions), MPL-2.0 (certifi,
     mikeshardmind-base2048, orjson, tqdm), ZPL-2.1 (datetime, zope.interface), MIT-0 (cffi), CNRI-Python (regex),
@@ -2016,11 +2125,13 @@ Taken by the owner in session on 2026-10-10. The build follows in its own slices
     LLVM-exception and BSL-1.0 terms. All permissive or file-level. The image is not admissible until decided; the
     torch wheel's native libraries and the OS layer still need the first CI scan.
     *decided 2026-10-10 by the owner: all 20 licences are admitted (see "Owner decisions (2026-10-10, garak)").*
+    *Built 2026-10-10, decisions 193-194 (MPL-2.0 checked unmodified against the wheel RECORD).*
 22. **B5-G: pre-seeding Hugging Face assets (decision 146).** R10 lists licence-clear assets (two Apache/MIT detector
     models; six Apache-2.0 package-list datasets and one system-prompt dataset). Pre-seeding them would admit
     packagehallucination (six probes) and the misleading NLI detectors; it needs the offline load proven in the image
     (`refs/main` set to each pinned revision) and adds about 2 GB. Not done in B5-G; the probes stay `missing_preseed`.
-    *decided 2026-10-10 by the owner: pre-seed now.*
+    *decided 2026-10-10 by the owner: pre-seed now.* *Built 2026-10-10, decisions 198-201: nine assets, about 2.1 GB;
+    packagehallucination (six) and sysprompt_extraction run; the NLI detectors load but no admitted probe uses them.*
 23. **B5-G: CyberSecEval (R10 consequence 12).** The three MIT dataset files (prompt injection, MITRE FRR,
     interpreter) are to be vendored by commit and sha256 as RegulAIt eval datasets, run by our runner through the
     gateway with a judge. Not in this slice (it is an eval-dataset feature, not part of the garak image).

@@ -11,3 +11,4 @@ export * from "./promptfoo-upstream.js";
 export * from "./modelscan.js";
 export * from "./garak.js";
 export * from "./garak-upstream.js";
+export * from "./garak-preseed.js";
