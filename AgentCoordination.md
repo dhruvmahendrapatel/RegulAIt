@@ -16,7 +16,7 @@ this line and every milestone moves with it.)
 | Agent | Now | Next | ETA (UTC) | Last check-in (UTC) | Blocked on |
 |---|---|---|---|---|---|
 | Claude | On request: feedback audit done; 3E signed export fixed (AER-008); drawer fixed; AER-039/040/042/043 gaps closed; handoff notes in codexInputs/geminiInputs | Codex/Gemini: evaluate and close findings (see Implementer update 2026-10-02) | — | 10-02 18:49 | — |
-| Codex | Reviews X41/X42/X43 delivered; X37/X34/X38 executing; X39/X40 parallel UI | Owner finding fixes/rechecks; quiet timing and real browser; queue request16:20UTC | — | 10-10 16:04 | X33 heldS4/S5; X39 B4 bodies/capabilities; X40 I2-I4 integration |
+| Codex | Four review PRs delivered; X34 gates; X38 browser queued; parallel X39/X40 UI | Quiet timing then real browser; independent UI review; queue request16:20UTC | — | 10-10 16:07 | X33 heldS4/S5; X39 B4 shapes; X40 I2-I4 DTOs/assignments |
 | Gemini | Completed CREDO parity checklist update and agent UX scan | Standby for Codex validation | — | 10-04 01:13 | — |
 
 ## Check-in protocol (owner directive 10-02: every agent, at least hourly)
@@ -310,7 +310,7 @@ tail, retention/metrics/MCP coverage). Same rules as before: your files only (`a
 - **X43 — Cross-review of ADR-0188 S3 (#279) after four Codex bot rounds** (findings `I7S3-NN`). One liveness predicate and one (database) clock across creation, admission, live chain, mint, verify and revoke; credential validity windows; edge budgets under concurrency; key rotation and revocation across replicas with skewed clocks. Branch `codex/x43`.
   Status: READY-FOR-REVIEW (e2abfc54, draft #295) — I7S3-01 LOW stale clock after parent-lock wait admits expired child/reserves budget; fresh authorization refuses;51 owner+9 independent+13 returned PASS,1 genuine red; builds/tsc PASS
 - **X37 — Cross-review of ADR-0188 S2 kernel and Cedar wiring** (Claude, after S1; findings `I7K-NN`). `ActorChain` required on all three kernel inputs; allow = sponsor ∧ every actor ∧ delegation scope ∧ lead ceiling (no path where an actor exceeds its sponsor); Cedar v4 `Agent` entity and decision 18 per-principal evaluation (grants authorise, Cedar only narrows); new rule ids audited; property tests that would catch a widened intersection. Write independent counterexample property tests in your branch. Branch `codex/x37`.
-  Status: IN-PROGRESS (Codex, 10-10 15:55 UTC) — independent parallel review on frozen main94fffb65; owner dependencies retained, tests and evidence underway
+  Status: READY-FOR-REVIEW (b0ec841f, draft #296) — no confirmed S2 defect;241 kernel including16 independent+11 actual PG PASS;3072 exhaustive/3600 generated/1000 scope cases and3 widening mutants; kernel/gateway/web builds/tsc PASS
 
 ### Gemini — demo content and research
 
