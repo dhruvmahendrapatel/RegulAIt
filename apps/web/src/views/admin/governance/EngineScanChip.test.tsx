@@ -40,7 +40,7 @@ describe("EngineScanEvidenceChip", () => {
     expect(html).toContain("Engine: modelscan v0.8.8");
     expect(html).toContain("Scanned Oct 9, 2026");
     expect(html).toContain(">Admissible<");
-    expect(html).toContain('href="/admin/admission?tab=artifacts&amp;artifact=99999999-8888-4000-8000-000000000001&amp;run=99999999-7777-4000-8000-000000000001"');
+    expect(html).toContain('href="/admin/admission?tab=artifacts&amp;artifact=99999999-8888-4000-8000-000000000001&amp;scan=99999999-9999-4000-8000-000000000001&amp;run=99999999-7777-4000-8000-000000000001"');
     expect(html.toLowerCase()).not.toMatch(/\bsafe\b/);
   });
 
