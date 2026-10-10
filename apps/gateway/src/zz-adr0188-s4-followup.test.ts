@@ -11,15 +11,41 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, authSessions, createDb, eq, runMigrations, stepUpGrants, users, workloadIdentities, type Db } from "@regulait/db";
-import { stepUpActionDigest } from "@regulait/shared";
+import {
+  agentGrants,
+  agentRevocations,
+  and,
+  auditLog,
+  authSessions,
+  connectorGrants,
+  connectorRevocations,
+  connectors,
+  createDb,
+  eq,
+  mcpServers,
+  mcpTools,
+  revocations,
+  roleAssignments,
+  roleConnectorGrants,
+  roles,
+  roleToolGrants,
+  runMigrations,
+  serverGrants,
+  stepUpGrants,
+  toolGrants,
+  users,
+  workloadIdentities,
+  type Db,
+} from "@regulait/db";
+import { stepUpActionDigest, type PutAgentGrants } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { listEntitledModels, modelListingGrantId } from "./compat-models.js";
 import { agentScopeItem, ensureIdentityFor, startInProcessChain } from "./in-process-delegation.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { hashToken } from "./token-hash.js";
-import { getIdentityGrants, identityGrantsStepUp } from "./workload-identity-admin.js";
+import { firstItemNoStewardHolds, getIdentityGrants, grantSetDigest, identityGrantsStepUp, identityUpdateStepUp } from "./workload-identity-admin.js";
+import type { StepUpCheckArgs } from "./step-up.js";
 import type { VirtualKeyContext } from "./virtual-keys.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -229,6 +255,8 @@ describe("N3: engine-key listing, non-admin refusal, no step-up for an admin key
     for (const [m, url, body] of calls) {
       const r = await inject(m, url, member.key, body);
       expect(r.statusCode, `${m} ${url}: ${r.body}`).toBe(403);
+      // the admin gate refused it, not some other 403 (review L6)
+      expect(r.json().error, `${m} ${url}`).toBe("admin_only");
     }
     // control: the bootstrap admin reads it
     expect((await inject("GET", `/v1/workload-identities/${ident.id}`, AUTH)).statusCode).toBe(200);
@@ -247,3 +275,585 @@ describe("N3: engine-key listing, non-admin refusal, no step-up for an admin key
   });
 });
 
+// ---------------------------------------------------------------------------------------------------------------
+// Fix round from the #336 review (M1, L2–L7)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** a browser session for `userId` and a step-up token made for exactly `args` (the real tables, no shortcut) */
+async function sessionWithStepUp(userId: string, args: StepUpCheckArgs) {
+  const sessionToken = "rgls_" + randomBytes(32).toString("hex");
+  const [session] = await db
+    .insert(authSessions)
+    .values({
+      tokenHash: createHash("sha256").update(sessionToken).digest("hex"),
+      userId,
+      origin: "password",
+      expiresAt: new Date(Date.now() + 3_600_000),
+      idleExpiresAt: new Date(Date.now() + 3_600_000),
+      idleMinutes: 60,
+    })
+    .returning({ id: authSessions.id });
+  const stepUpToken = "rgsu_" + randomBytes(24).toString("hex");
+  const [grant] = await db
+    .insert(stepUpGrants)
+    .values({
+      tokenHash: hashToken(stepUpToken),
+      userId,
+      sessionId: session!.id,
+      method: "totp",
+      actionKind: args.kind,
+      actionDigest: stepUpActionDigest(args.kind, args.facts),
+      expiresAt: new Date(Date.now() + 120_000),
+    })
+    .returning({ id: stepUpGrants.id });
+  return { sessionToken, stepUpToken, grantId: grant!.id };
+}
+const auditRows = (objectId: string, ruleId: string) =>
+  db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.objectId, objectId), eq(auditLog.ruleId, ruleId)));
+const stewardsOf = async (identityId: string) =>
+  (
+    await db
+      .select({ s: workloadIdentities.sponsorUserIds })
+      .from(workloadIdentities)
+      .where(eq(workloadIdentities.id, identityId))
+  )[0]!.s;
+async function freshIdentity(label: string) {
+  return ensureIdentityFor(db, { kind: "agent", id: await mkAgent(label) });
+}
+
+describe("M1: changing the stewards re-checks the current grant set", () => {
+  it("refuses stewards who do not hold the current set (422, deny audit row, unchanged); a holder is accepted", async () => {
+    const s = await mkUser("m1-s");
+    const t = await mkUser("m1-t"); // holds nothing
+    const u = await mkUser("m1-u");
+    const x = await mkAgent("m1-x");
+    await grantUserAgent(s.id, x);
+    await grantUserAgent(u.id, x);
+    const ident = await freshIdentity("m1-subject");
+    expect(
+      (
+        await inject("PATCH", `/v1/workload-identities/${ident.id}`, AUTH, {
+          sponsorUserIds: [s.id],
+        })
+      ).statusCode,
+    ).toBe(200);
+    const put = await inject(
+      "PUT",
+      `/v1/workload-identities/${ident.id}/grants`,
+      AUTH,
+      {
+        ...emptySet,
+        revision: 0,
+        agents: [{ agentId: x, allowedModes: ["execute"] }],
+      },
+    );
+    expect(put.statusCode, put.body).toBe(200);
+
+    const toT = await inject(
+      "PATCH",
+      `/v1/workload-identities/${ident.id}`,
+      AUTH,
+      { sponsorUserIds: [t.id] },
+    );
+    expect(toT.statusCode, toT.body).toBe(422);
+    expect(toT.json()).toMatchObject({ error: "grant_exceeds_stewards" });
+    expect(toT.json().detail).toContain(x);
+    expect(await stewardsOf(ident.id)).toEqual([s.id]);
+    const denied = await auditRows(ident.id, "grant-exceeds-stewards");
+    expect(
+      denied.some(
+        (r) =>
+          r.effect === "deny" &&
+          (r.detail as { phase?: string }).phase === "update_refused",
+      ),
+    ).toBe(true);
+
+    // control: a steward who holds the set is accepted
+    const toU = await inject(
+      "PATCH",
+      `/v1/workload-identities/${ident.id}`,
+      AUTH,
+      { sponsorUserIds: [u.id] },
+    );
+    expect(toU.statusCode, toU.body).toBe(200);
+    expect(await stewardsOf(ident.id)).toEqual([u.id]);
+  });
+});
+
+describe("L4/L7: PATCH refusals are audited; steward_not_found and a disabled steward", () => {
+  it("steward_not_found for an unknown person (deny audit row); an existing person is accepted (allow audit row)", async () => {
+    const ident = await freshIdentity("l4-unknown");
+    const ghost = randomUUID();
+    const r = await inject(
+      "PATCH",
+      `/v1/workload-identities/${ident.id}`,
+      AUTH,
+      { sponsorUserIds: [ghost] },
+    );
+    expect(r.statusCode, r.body).toBe(404);
+    expect(r.json().error).toBe("steward_not_found");
+    const [deny] = await auditRows(
+      ident.id,
+      "workload-identity-update-refused",
+    );
+    expect(deny).toMatchObject({ effect: "deny" });
+    expect(deny!.detail).toMatchObject({
+      phase: "update_refused",
+      code: "steward_not_found",
+      missing: [ghost],
+    });
+    expect(await stewardsOf(ident.id)).not.toContain(ghost);
+
+    const real = await mkUser("l4-real");
+    const ok = await inject(
+      "PATCH",
+      `/v1/workload-identities/${ident.id}`,
+      AUTH,
+      { sponsorUserIds: [real.id] },
+    );
+    expect(ok.statusCode, ok.body).toBe(200);
+    const [allow] = await auditRows(ident.id, "workload-identity-updated");
+    expect(allow).toMatchObject({ effect: "allow" });
+    expect(allow!.detail).toMatchObject({
+      phase: "updated",
+      after: { sponsorUserIds: [real.id] },
+    });
+  });
+
+  it("a disabled person cannot be named and, once a steward, holds nothing; enabled, the same person works", async () => {
+    const d = await mkUser("l7-disabled");
+    const x = await mkAgent("l7-dx");
+    await grantUserAgent(d.id, x);
+    const ident = await freshIdentity("l7-disabled-subject");
+    await db
+      .update(users)
+      .set({ disabledAt: new Date() })
+      .where(eq(users.id, d.id));
+    const named = await inject(
+      "PATCH",
+      `/v1/workload-identities/${ident.id}`,
+      AUTH,
+      { sponsorUserIds: [d.id] },
+    );
+    expect(named.statusCode, named.body).toBe(404);
+    expect(named.json().error).toBe("steward_not_found");
+    // already a steward when disabled: holds nothing
+    await db
+      .update(workloadIdentities)
+      .set({ sponsorUserIds: [d.id] })
+      .where(eq(workloadIdentities.id, ident.id));
+    const set = {
+      ...emptySet,
+      revision: 0,
+      agents: [{ agentId: x, allowedModes: ["execute"] }],
+    };
+    const refused = await inject(
+      "PUT",
+      `/v1/workload-identities/${ident.id}/grants`,
+      AUTH,
+      set,
+    );
+    expect(refused.statusCode, refused.body).toBe(422);
+    // control: re-enabled, the same steward holds it
+    await db.update(users).set({ disabledAt: null }).where(eq(users.id, d.id));
+    const ok = await inject(
+      "PUT",
+      `/v1/workload-identities/${ident.id}/grants`,
+      AUTH,
+      set,
+    );
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it("identity_not_found and a revoked identity are refused with deny audit rows", async () => {
+    const someone = await mkUser("l4-someone");
+    const missing = randomUUID();
+    const nf = await inject(
+      "PATCH",
+      `/v1/workload-identities/${missing}`,
+      AUTH,
+      { sponsorUserIds: [someone.id] },
+    );
+    expect(nf.statusCode, nf.body).toBe(404);
+    expect(nf.json().error).toBe("identity_not_found");
+    const [nfRow] = await auditRows(
+      missing,
+      "workload-identity-update-refused",
+    );
+    expect(nfRow).toMatchObject({ effect: "deny" });
+    expect(nfRow!.detail).toMatchObject({ code: "identity_not_found" });
+
+    const ident = await freshIdentity("l4-revoked");
+    await db
+      .update(workloadIdentities)
+      .set({ status: "revoked" })
+      .where(eq(workloadIdentities.id, ident.id));
+    const rv = await inject(
+      "PATCH",
+      `/v1/workload-identities/${ident.id}`,
+      AUTH,
+      { sponsorUserIds: [someone.id] },
+    );
+    expect(rv.statusCode, rv.body).toBe(409);
+    const [rvRow] = await auditRows(
+      ident.id,
+      "workload-identity-update-refused",
+    );
+    expect(rvRow).toMatchObject({ effect: "deny" });
+    expect(rvRow!.detail).toMatchObject({ code: "identity_not_active" });
+  });
+});
+
+describe("L7: the PATCH step-up is bound to exactly the change", () => {
+  it("a step-up for change A is refused for change B and stays unspent, then works for change A", async () => {
+    const admin = await mkUser("l7-su-admin", true);
+    const a = await mkUser("l7-su-a");
+    const b = await mkUser("l7-su-b");
+    const ident = await freshIdentity("l7-su-subject");
+    // an enrolled authenticator, so a mismatched token is answered step_up_required (not "unavailable"). This is
+    // ORG-GLOBAL state (an admin who can step up ends the bootstrap credential's step-up), so it is undone in the
+    // finally below before any other test or file runs (M-040)
+    await db
+      .update(users)
+      .set({ totpEnabled: true })
+      .where(eq(users.id, admin.id));
+    try {
+      const changeA = { sponsorUserIds: [a.id] };
+      const changeB = { sponsorUserIds: [b.id] };
+      expect(identityUpdateStepUp(ident.id, changeA).facts).not.toEqual(
+        identityUpdateStepUp(ident.id, changeB).facts,
+      );
+      const su = await sessionWithStepUp(
+        admin.id,
+        identityUpdateStepUp(ident.id, changeA),
+      );
+      const patch = (body: unknown) =>
+        app.inject({
+          method: "PATCH",
+          url: `/v1/workload-identities/${ident.id}`,
+          headers: { ...CSRF, "x-regulait-step-up": su.stepUpToken },
+          cookies: { regulait_session: su.sessionToken },
+          payload: body as object,
+        });
+      const forB = await patch(changeB);
+      expect(forB.statusCode, forB.body).toBe(403);
+      expect(forB.json().error).toBe("step_up_required");
+      const [unspent] = await db
+        .select({ usedAt: stepUpGrants.usedAt })
+        .from(stepUpGrants)
+        .where(eq(stepUpGrants.id, su.grantId));
+      expect(
+        unspent!.usedAt,
+        "a step-up for change A was spent on change B",
+      ).toBeNull();
+      expect(await stewardsOf(ident.id)).not.toContain(b.id);
+      // control: the same step-up is good for exactly change A
+      const forA = await patch(changeA);
+      expect(forA.statusCode, forA.body).toBe(200);
+      expect(await stewardsOf(ident.id)).toEqual([a.id]);
+    } finally {
+      await db
+        .update(users)
+        .set({ totpEnabled: false, isAdmin: false })
+        .where(eq(users.id, admin.id));
+    }
+  });
+});
+
+describe("L2: the grant-set digest has no delimiter collision", () => {
+  it('objects ["a","b"] and ["a,b"] digest differently; order still does not matter', () => {
+    const c = randomUUID();
+    const base = { tools: [], servers: [], agents: [], roleIds: [] };
+    const two = grantSetDigest({
+      ...base,
+      connectors: [
+        { connectorId: c, mode: "read", allowedObjects: ["a", "b"] },
+      ],
+    });
+    const one = grantSetDigest({
+      ...base,
+      connectors: [{ connectorId: c, mode: "read", allowedObjects: ["a,b"] }],
+    });
+    expect(two).not.toBe(one);
+    // control: list order is not part of the set
+    expect(
+      grantSetDigest({
+        ...base,
+        connectors: [
+          { connectorId: c, mode: "read", allowedObjects: ["b", "a"] },
+        ],
+      }),
+    ).toBe(two);
+    const t1 = { serverId: randomUUID(), toolName: "x" };
+    const t2 = { serverId: randomUUID(), toolName: "y" };
+    expect(grantSetDigest({ ...base, connectors: [], tools: [t1, t2] })).toBe(
+      grantSetDigest({ ...base, connectors: [], tools: [t2, t1] }),
+    );
+    // and a tool name carrying the old delimiters is not confused with another split
+    const sv = randomUUID();
+    expect(
+      grantSetDigest({
+        ...base,
+        connectors: [],
+        tools: [{ serverId: sv, toolName: "a/b" }],
+      }),
+    ).not.toBe(
+      grantSetDigest({
+        ...base,
+        connectors: [],
+        tools: [{ serverId: sv + "/a", toolName: "b" }],
+      }),
+    );
+  });
+});
+
+describe("L3/L7: each branch of the steward check, with the revocation subtraction", () => {
+  const check = (
+    stewards: string[],
+    set: Partial<Omit<PutAgentGrants, "revision">>,
+  ) =>
+    db.transaction((tx) =>
+      firstItemNoStewardHolds(tx as unknown as Db, stewards, {
+        ...emptySet,
+        agents: [],
+        revision: 0,
+        ...set,
+      }),
+    );
+  let serverId = "";
+  let otherServer = "";
+  beforeAll(async () => {
+    const [s1] = await db
+      .insert(mcpServers)
+      .values({ name: `s4f-srv-${RUN}`, url: "http://127.0.0.1:9/mcp" })
+      .returning({ id: mcpServers.id });
+    const [s2] = await db
+      .insert(mcpServers)
+      .values({ name: `s4f-srv2-${RUN}`, url: "http://127.0.0.1:9/mcp2" })
+      .returning({ id: mcpServers.id });
+    serverId = s1!.id;
+    otherServer = s2!.id;
+    await db.insert(mcpTools).values([
+      { serverId, name: "rd", kind: "read" },
+      { serverId, name: "wr", kind: "write" },
+      { serverId: otherServer, name: "rd", kind: "read" },
+    ]);
+  });
+
+  it("tool: a tool grant holds it; a tool or whole-server revocation takes it; read-only-all holds a READ tool only", async () => {
+    const p = await mkUser("l3-tool");
+    await db
+      .insert(toolGrants)
+      .values({ userId: p.id, serverId, toolName: "wr" });
+    expect(
+      await check([p.id], { tools: [{ serverId, toolName: "wr" }] }),
+    ).toBeNull(); // control
+    await db
+      .insert(revocations)
+      .values({ userId: p.id, serverId, toolName: "wr" });
+    expect(await check([p.id], { tools: [{ serverId, toolName: "wr" }] })).toBe(
+      `tool ${serverId}/wr`,
+    );
+
+    const q = await mkUser("l3-tool-ws");
+    await db
+      .insert(toolGrants)
+      .values({ userId: q.id, serverId, toolName: "wr" });
+    await db
+      .insert(serverGrants)
+      .values({ userId: q.id, serverId, readOnlyAll: true });
+    expect(
+      await check([q.id], { tools: [{ serverId, toolName: "rd" }] }),
+    ).toBeNull(); // read tool via read-only-all
+    expect(
+      await check([q.id], { tools: [{ serverId, toolName: "wr" }] }),
+    ).toBeNull();
+    await db
+      .insert(revocations)
+      .values({ userId: q.id, serverId, toolName: null }); // the whole server
+    expect(await check([q.id], { tools: [{ serverId, toolName: "wr" }] })).toBe(
+      `tool ${serverId}/wr`,
+    );
+    expect(await check([q.id], { tools: [{ serverId, toolName: "rd" }] })).toBe(
+      `tool ${serverId}/rd`,
+    );
+
+    const r = await mkUser("l3-tool-ro");
+    await db
+      .insert(serverGrants)
+      .values({ userId: r.id, serverId, readOnlyAll: true });
+    expect(await check([r.id], { tools: [{ serverId, toolName: "wr" }] })).toBe(
+      `tool ${serverId}/wr`,
+    ); // a write tool is not read-only
+  });
+
+  it("tool through a ROLE: held, and the steward's own revocation takes it", async () => {
+    const p = await mkUser("l3-role-tool");
+    const [role] = await db
+      .insert(roles)
+      .values({ name: `s4f-role-tool-${RUN}` })
+      .returning({ id: roles.id });
+    await db
+      .insert(roleToolGrants)
+      .values({ roleId: role!.id, serverId: otherServer, toolName: "rd" });
+    await db.insert(roleAssignments).values({ userId: p.id, roleId: role!.id });
+    expect(
+      await check([p.id], {
+        tools: [{ serverId: otherServer, toolName: "rd" }],
+      }),
+    ).toBeNull(); // control
+    await db
+      .insert(revocations)
+      .values({ userId: p.id, serverId: otherServer, toolName: null });
+    expect(
+      await check([p.id], {
+        tools: [{ serverId: otherServer, toolName: "rd" }],
+      }),
+    ).toBe(`tool ${otherServer}/rd`);
+  });
+
+  it("server: a server grant holds it; read-only-all needs a read-only-all grant; a whole-server revocation takes it", async () => {
+    const p = await mkUser("l3-server");
+    await db
+      .insert(serverGrants)
+      .values({ userId: p.id, serverId, readOnlyAll: false });
+    expect(
+      await check([p.id], { servers: [{ serverId, readOnlyAll: false }] }),
+    ).toBeNull(); // control
+    expect(
+      await check([p.id], { servers: [{ serverId, readOnlyAll: true }] }),
+    ).toBe(`server ${serverId} (read-only all)`);
+    await db
+      .insert(revocations)
+      .values({ userId: p.id, serverId, toolName: null });
+    expect(
+      await check([p.id], { servers: [{ serverId, readOnlyAll: false }] }),
+    ).toBe(`server ${serverId}`);
+    // a single-tool revocation does not take the server grant
+    const q = await mkUser("l3-server-tool-rev");
+    await db
+      .insert(serverGrants)
+      .values({ userId: q.id, serverId, readOnlyAll: false });
+    await db
+      .insert(revocations)
+      .values({ userId: q.id, serverId, toolName: "wr" });
+    expect(
+      await check([q.id], { servers: [{ serverId, readOnlyAll: false }] }),
+    ).toBeNull();
+  });
+
+  it("connector: mode and every object by one grant, direct or role; a revocation takes both", async () => {
+    const [c] = await db
+      .insert(connectors)
+      .values({ name: `s4f-conn-${RUN}`, kind: "crm" })
+      .returning({ id: connectors.id });
+    const cid = c!.id;
+    const p = await mkUser("l3-conn");
+    await db
+      .insert(connectorGrants)
+      .values({
+        userId: p.id,
+        connectorId: cid,
+        mode: "read",
+        allowedObjects: ["a", "b"],
+      });
+    expect(
+      await check([p.id], {
+        connectors: [{ connectorId: cid, mode: "read", allowedObjects: ["a"] }],
+      }),
+    ).toBeNull(); // control
+    expect(
+      await check([p.id], {
+        connectors: [
+          { connectorId: cid, mode: "readwrite", allowedObjects: ["a"] },
+        ],
+      }),
+    ).toBe(`connector ${cid} (readwrite)`);
+    expect(
+      await check([p.id], {
+        connectors: [
+          { connectorId: cid, mode: "read", allowedObjects: ["a", "z"] },
+        ],
+      }),
+    ).toBe(`connector ${cid} (read)`);
+    await db
+      .insert(connectorRevocations)
+      .values({ userId: p.id, connectorId: cid });
+    expect(
+      await check([p.id], {
+        connectors: [{ connectorId: cid, mode: "read", allowedObjects: ["a"] }],
+      }),
+    ).toBe(`connector ${cid} (read)`);
+
+    const q = await mkUser("l3-conn-role");
+    const [role] = await db
+      .insert(roles)
+      .values({ name: `s4f-role-conn-${RUN}` })
+      .returning({ id: roles.id });
+    await db
+      .insert(roleConnectorGrants)
+      .values({
+        roleId: role!.id,
+        connectorId: cid,
+        mode: "readwrite",
+        allowedObjects: null,
+      });
+    await db.insert(roleAssignments).values({ userId: q.id, roleId: role!.id });
+    expect(
+      await check([q.id], {
+        connectors: [
+          { connectorId: cid, mode: "readwrite", allowedObjects: ["z"] },
+        ],
+      }),
+    ).toBeNull(); // control
+    await db
+      .insert(connectorRevocations)
+      .values({ userId: q.id, connectorId: cid });
+    expect(
+      await check([q.id], {
+        connectors: [
+          { connectorId: cid, mode: "readwrite", allowedObjects: ["z"] },
+        ],
+      }),
+    ).toBe(`connector ${cid} (readwrite)`);
+  });
+
+  it("role: held only by a steward assigned it; agent: every mode, minus an agent revocation", async () => {
+    const p = await mkUser("l3-role");
+    const [role] = await db
+      .insert(roles)
+      .values({ name: `s4f-role-${RUN}` })
+      .returning({ id: roles.id });
+    expect(await check([p.id], { roleIds: [role!.id] })).toBe(
+      `role ${role!.id}`,
+    );
+    await db.insert(roleAssignments).values({ userId: p.id, roleId: role!.id });
+    expect(await check([p.id], { roleIds: [role!.id] })).toBeNull(); // control
+    // the system principal holds nothing
+    expect(
+      await check(["00000000-0000-0000-0000-000000000000"], {
+        roleIds: [role!.id],
+      }),
+    ).toBe(`role ${role!.id}`);
+
+    const x = await mkAgent("l3-agent");
+    await db
+      .insert(agentGrants)
+      .values({ userId: p.id, agentId: x, allowedModes: ["plan"] });
+    expect(
+      await check([p.id], { agents: [{ agentId: x, allowedModes: ["plan"] }] }),
+    ).toBeNull(); // control
+    expect(
+      await check([p.id], {
+        agents: [{ agentId: x, allowedModes: ["plan", "execute"] }],
+      }),
+    ).toBe(`agent ${x} mode execute`);
+    await db.insert(agentRevocations).values({ userId: p.id, agentId: x });
+    expect(
+      await check([p.id], { agents: [{ agentId: x, allowedModes: ["plan"] }] }),
+    ).toBe(`agent ${x} mode plan`);
+  });
+});

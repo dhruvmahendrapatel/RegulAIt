@@ -968,6 +968,20 @@ owner decision.
    (`PATCH /v1/workload-identities/:id`, built for this; `identity_manage` step-up bound to the change). The
    at-use intersection (decision 3) is unchanged. The PUT's step-up is bound to the identity, the revision and a
    canonical digest of the set (N2), so a step-up for one set is never good for another.
+   **Fix round from the #336 review.**
+   - **Changing the stewards (M1).** A PATCH that changes the stewards re-checks the identity's CURRENT grant set
+     against the proposed stewards in the same transaction. If an item is no longer held it is refused 422
+     `grant_exceeds_stewards`, with a deny audit row. When a steward later loses a grant, nothing cascades: the
+     drift is bounded at use by the sponsor intersection (decision 3). Revocation cascades are not built.
+   - **"Holds" (L3).** It is the steward's direct and role grants minus the steward's revocations, the same
+     subtraction as `sponsorGrantsMiss`. A whole-server revocation (`tool_name IS NULL`) takes every tool and the
+     server grant. An agent or connector revocation also takes a role-derived grant.
+   - **Locking (L5).** The check reads those grant, assignment and revocation rows `FOR SHARE` inside the write's
+     transaction.
+   - **Digest (L2).** The set digest is the canonical JSON of structured, sorted entries; no strings are joined.
+   - **Auditing (L4).** Every PATCH refusal writes a deny audit row: `identity_not_found`, revoked,
+     `steward_not_found` and `grant_exceeds_stewards`. The PATCH step-up is bound to the identity and a digest of
+     exactly the change.
 2. **One chain per piece of work.** A pillar-7 node dispatch gets a root grant from the initiating user to the top
    lead's agent and one child per lead down to the worker (consecutive same-agent hops collapse); a builder turn or
    resumed segment, and each schedule firing, gets a root to the builder agent (context: the turn, or the schedule); an

@@ -22,6 +22,8 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  agentGrants,
+  agentRevocations,
   agents,
   and,
   connectorGrants,
@@ -29,9 +31,13 @@ import {
   inArray,
   mcpTools,
   roleAssignments,
+  revocations,
+  roleAgentGrants,
   roleConnectorGrants,
   roleServerGrants,
+  roleToolGrants,
   serverGrants,
+  toolGrants,
   users,
   asc,
   auditLog,
@@ -67,9 +73,6 @@ import {
   type WorkloadIdentityView,
 } from "@regulait/shared";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
-import type { ScopeCall } from "@regulait/policy-kernel";
-import { sponsorGrantsMiss } from "./delegation.js";
-import { isPlanSafeMode } from "./plan-only.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ identityId: z.string().uuid() });
@@ -221,83 +224,140 @@ export async function putIdentityGrants(db: Db, identityId: string, body: PutAge
 }
 
 /**
- * S4 follow-up N1: the first item of `set` that NONE of `stewards` holds (a label), or null. A steward
- * "holds" an item when their own grants (direct or role) reach it, minus their revocations: a tool, an agent
- * in each mode, a connector in the mode and for every listed object, a server's read-only-all, a role. A
- * disabled or unknown steward holds nothing (the system principal is no person and holds nothing).
+ * What one steward holds, read in the caller's transaction with `FOR SHARE` on every grant, assignment and
+ * revocation row (review L5): a concurrent revoke of a row this check relied on waits for the write that relied
+ * on it, and a revoke that commits first is seen.
  */
-export async function firstItemNoStewardHolds(db: Db, stewardIds: readonly string[], set: PutAgentGrants): Promise<string | null> {
-  const live = (
-    await db.select({ id: users.id }).from(users).where(and(inArray(users.id, [...stewardIds]), isNull(users.disabledAt)))
-  ).map((r) => r.id);
-  const anyHolds = async (atom: ScopeCall) => {
-    for (const s of live) if (!(await sponsorGrantsMiss(db, s, [atom]))) return true;
-    return false;
+async function stewardHoldings(tx: Db, userId: string) {
+  const assignments = await tx.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId)).for("share");
+  const roleIds = [...new Set(assignments.map((r) => r.roleId))];
+  const byRole = roleIds.length > 0;
+  return {
+    roleIds,
+    tools: [
+      ...(await tx.select({ serverId: toolGrants.serverId, toolName: toolGrants.toolName }).from(toolGrants).where(eq(toolGrants.userId, userId)).for("share")),
+      ...(byRole ? await tx.select({ serverId: roleToolGrants.serverId, toolName: roleToolGrants.toolName }).from(roleToolGrants).where(inArray(roleToolGrants.roleId, roleIds)).for("share") : []),
+    ],
+    servers: [
+      ...(await tx.select({ serverId: serverGrants.serverId, readOnlyAll: serverGrants.readOnlyAll }).from(serverGrants).where(eq(serverGrants.userId, userId)).for("share")),
+      ...(byRole ? await tx.select({ serverId: roleServerGrants.serverId, readOnlyAll: roleServerGrants.readOnlyAll }).from(roleServerGrants).where(inArray(roleServerGrants.roleId, roleIds)).for("share") : []),
+    ],
+    agents: [
+      ...(await tx.select({ agentId: agentGrants.agentId, modes: agentGrants.allowedModes }).from(agentGrants).where(eq(agentGrants.userId, userId)).for("share")),
+      ...(byRole ? await tx.select({ agentId: roleAgentGrants.agentId, modes: roleAgentGrants.allowedModes }).from(roleAgentGrants).where(inArray(roleAgentGrants.roleId, roleIds)).for("share") : []),
+    ],
+    connectors: [
+      ...(await tx.select({ connectorId: connectorGrants.connectorId, mode: connectorGrants.mode, objects: connectorGrants.allowedObjects }).from(connectorGrants).where(eq(connectorGrants.userId, userId)).for("share")),
+      ...(byRole
+        ? await tx.select({ connectorId: roleConnectorGrants.connectorId, mode: roleConnectorGrants.mode, objects: roleConnectorGrants.allowedObjects }).from(roleConnectorGrants).where(inArray(roleConnectorGrants.roleId, roleIds)).for("share")
+        : []),
+    ],
+    toolRevocations: await tx.select({ serverId: revocations.serverId, toolName: revocations.toolName }).from(revocations).where(eq(revocations.userId, userId)).for("share"),
+    agentRevocations: await tx.select({ agentId: agentRevocations.agentId }).from(agentRevocations).where(eq(agentRevocations.userId, userId)).for("share"),
+    connectorRevocations: await tx.select({ connectorId: connectorRevocations.connectorId }).from(connectorRevocations).where(eq(connectorRevocations.userId, userId)).for("share"),
   };
-  for (const t of set.tools) {
-    const [row] = await db.select({ kind: mcpTools.kind }).from(mcpTools).where(and(eq(mcpTools.serverId, t.serverId), eq(mcpTools.name, t.toolName)));
-    const kind = row?.kind === "read" ? "read" : "write";
-    if (!(await anyHolds({ type: "mcp_tool", serverId: t.serverId, toolName: t.toolName, kind }))) return `tool ${t.serverId}/${t.toolName}`;
-  }
-  for (const a of set.agents) {
-    for (const mode of a.allowedModes) {
-      if (!(await anyHolds({ type: "agent", agentId: a.agentId, mode, kind: isPlanSafeMode(mode) ? "read" : "write" }))) return `agent ${a.agentId} mode ${mode}`;
-    }
-  }
-  for (const v of set.servers) {
-    let held = false;
-    for (const s of live) {
-      const roleIds = (await db.select({ r: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, s))).map((x) => x.r);
-      const rows = [
-        ...(await db.select({ ro: serverGrants.readOnlyAll }).from(serverGrants).where(and(eq(serverGrants.userId, s), eq(serverGrants.serverId, v.serverId)))),
-        ...(roleIds.length
-          ? await db.select({ ro: roleServerGrants.readOnlyAll }).from(roleServerGrants).where(and(inArray(roleServerGrants.roleId, roleIds), eq(roleServerGrants.serverId, v.serverId)))
-          : []),
-      ];
-      if (rows.some((r) => !v.readOnlyAll || r.ro)) held = true;
-    }
-    if (!held) return `server ${v.serverId}${v.readOnlyAll ? " (read-only all)" : ""}`;
-  }
-  for (const c of set.connectors) {
-    let held = false;
-    for (const s of live) {
-      if ((await db.select({ id: connectorRevocations.id }).from(connectorRevocations).where(and(eq(connectorRevocations.userId, s), eq(connectorRevocations.connectorId, c.connectorId)))).length) continue;
-      const roleIds = (await db.select({ r: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, s))).map((x) => x.r);
-      const grants = [
-        ...(await db.select({ mode: connectorGrants.mode, objects: connectorGrants.allowedObjects }).from(connectorGrants).where(and(eq(connectorGrants.userId, s), eq(connectorGrants.connectorId, c.connectorId)))),
-        ...(roleIds.length
-          ? await db.select({ mode: roleConnectorGrants.mode, objects: roleConnectorGrants.allowedObjects }).from(roleConnectorGrants).where(and(inArray(roleConnectorGrants.roleId, roleIds), eq(roleConnectorGrants.connectorId, c.connectorId)))
-          : []),
-      ];
-      // one grant must cover the mode AND every object (grants are candidates, never merged)
-      if (grants.some((g) => (c.mode === "read" || g.mode === "readwrite") && (g.objects == null || c.allowedObjects.every((o) => (g.objects as string[]).includes(o))))) held = true;
-    }
-    if (!held) return `connector ${c.connectorId} (${c.mode})`;
-  }
-  for (const r of set.roleIds) {
-    if (!live.length || !(await db.select({ id: roleAssignments.id }).from(roleAssignments).where(and(inArray(roleAssignments.userId, live), eq(roleAssignments.roleId, r)))).length) {
-      return `role ${r}`;
-    }
-  }
-  return null;
 }
 
 /**
- * S4 follow-up N2: the step-up for a grant-set replace is bound to the identity, the revision it replaces and
- * a canonical digest of the parsed set (lists sorted), so a step-up given for set A is never good for set B.
+ * S4 amendment 1 (N1): the first item of `set` that NONE of `stewards` holds (a label), or null. A steward holds
+ * an item when one of their own grants, direct or through a role, reaches it and their revocations do not take it
+ * away. The subtraction mirrors `sponsorGrantsMiss`. A whole-server revocation (`tool_name IS NULL`) takes every
+ * tool and the server grant; a tool revocation takes that tool; an agent or connector revocation takes the target
+ * whether it was granted directly or through a role. The rules per item:
+ * - a tool: a tool grant, or a read-only-all server grant for a read tool;
+ * - an agent: in every listed mode;
+ * - a connector: in its mode and for every listed object, by ONE grant;
+ * - a server: a server grant, read-only-all when the item asks for it;
+ * - a role: assigned to the steward.
+ * A disabled or unknown steward holds nothing; the system principal is no person and holds nothing. Must run
+ * inside the caller's transaction, because the reads lock with `FOR SHARE`.
+ */
+export async function firstItemNoStewardHolds(tx: Db, stewardIds: readonly string[], set: PutAgentGrants): Promise<string | null> {
+  const live = stewardIds.length
+    ? (await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, [...stewardIds]), isNull(users.disabledAt))).for("share")).map((r) => r.id)
+    : [];
+  const held: Array<Awaited<ReturnType<typeof stewardHoldings>>> = [];
+  for (const s of live) held.push(await stewardHoldings(tx, s));
+  const toolKinds = new Map<string, string>();
+  for (const t of set.tools) {
+    const [row] = await tx.select({ kind: mcpTools.kind }).from(mcpTools).where(and(eq(mcpTools.serverId, t.serverId), eq(mcpTools.name, t.toolName)));
+    toolKinds.set(`${t.serverId}\u0000${t.toolName}`, row?.kind === "read" ? "read" : "write");
+  }
+  const modesAllow = (m: unknown, mode: string) => m === null || m === undefined || (Array.isArray(m) && m.includes(mode));
+  const serverRevoked = (h: Awaited<ReturnType<typeof stewardHoldings>>, serverId: string) => h.toolRevocations.some((r) => r.serverId === serverId && r.toolName === null);
+  for (const t of set.tools) {
+    const read = toolKinds.get(`${t.serverId}\u0000${t.toolName}`) === "read";
+    const ok = held.some(
+      (h) =>
+        !h.toolRevocations.some((r) => r.serverId === t.serverId && (r.toolName === null || r.toolName === t.toolName)) &&
+        (h.tools.some((g) => g.serverId === t.serverId && g.toolName === t.toolName) || (read && h.servers.some((g) => g.serverId === t.serverId && g.readOnlyAll))),
+    );
+    if (!ok) return `tool ${t.serverId}/${t.toolName}`;
+  }
+  for (const a of set.agents) {
+    for (const mode of a.allowedModes) {
+      const ok = held.some((h) => !h.agentRevocations.some((r) => r.agentId === a.agentId) && h.agents.some((g) => g.agentId === a.agentId && modesAllow(g.modes, mode)));
+      if (!ok) return `agent ${a.agentId} mode ${mode}`;
+    }
+  }
+  for (const v of set.servers) {
+    const ok = held.some((h) => !serverRevoked(h, v.serverId) && h.servers.some((g) => g.serverId === v.serverId && (!v.readOnlyAll || g.readOnlyAll)));
+    if (!ok) return `server ${v.serverId}${v.readOnlyAll ? " (read-only all)" : ""}`;
+  }
+  for (const c of set.connectors) {
+    const ok = held.some(
+      (h) =>
+        !h.connectorRevocations.some((r) => r.connectorId === c.connectorId) &&
+        // one grant must cover the mode AND every object (grants are candidates, never merged)
+        h.connectors.some(
+          (g) =>
+            g.connectorId === c.connectorId &&
+            (c.mode === "read" || g.mode === "readwrite") &&
+            (g.objects == null || c.allowedObjects.every((o) => (g.objects as string[]).includes(o))),
+        ),
+    );
+    if (!ok) return `connector ${c.connectorId} (${c.mode})`;
+  }
+  for (const r of set.roleIds) if (!held.some((h) => h.roleIds.includes(r))) return `role ${r}`;
+  return null;
+}
+
+/** sort structured entries by their canonical JSON (no string joining, so no delimiter can collide: review L2) */
+function sortedCanonical<T>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => {
+    const x = canonicalJson(a);
+    const y = canonicalJson(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+}
+
+/** the canonical digest of a grant set: structured entries, inner lists sorted, entries sorted */
+export function grantSetDigest(set: Omit<PutAgentGrants, "revision">): string {
+  return sha256Hex(
+    canonicalJson({
+      tools: sortedCanonical(set.tools.map((t) => ({ serverId: t.serverId, toolName: t.toolName }))),
+      servers: sortedCanonical(set.servers.map((v) => ({ serverId: v.serverId, readOnlyAll: v.readOnlyAll }))),
+      agents: sortedCanonical(set.agents.map((a) => ({ agentId: a.agentId, allowedModes: [...a.allowedModes].sort() }))),
+      connectors: sortedCanonical(set.connectors.map((c) => ({ connectorId: c.connectorId, mode: c.mode, allowedObjects: [...c.allowedObjects].sort() }))),
+      roleIds: [...set.roleIds].sort(),
+    }),
+  );
+}
+
+/**
+ * S4 amendment 1 (N2): the step-up for a grant-set replace is bound to the identity, the revision it replaces and
+ * the canonical digest of the parsed set, so a step-up given for set A is never good for set B.
  */
 export function identityGrantsStepUp(identityId: string, set: PutAgentGrants): StepUpCheckArgs {
-  const sorted = {
-    tools: [...set.tools].map((t) => `${t.serverId}/${t.toolName}`).sort(),
-    servers: [...set.servers].map((v) => `${v.serverId}:${v.readOnlyAll}`).sort(),
-    agents: [...set.agents].map((a) => `${a.agentId}:${[...a.allowedModes].sort().join(",")}`).sort(),
-    connectors: [...set.connectors].map((c) => `${c.connectorId}:${c.mode}:${[...c.allowedObjects].sort().join(",")}`).sort(),
-    roleIds: [...set.roleIds].sort(),
-  };
   return {
     kind: "identity_manage",
-    facts: { op: "identity_grants_replace", identityId, revision: set.revision, grantsDigest: sha256Hex(canonicalJson(sorted)) },
+    facts: { op: "identity_grants_replace", identityId, revision: set.revision, grantsDigest: grantSetDigest(set) },
   };
+}
+
+/** the step-up for `PATCH /v1/workload-identities/:id`: bound to the identity and exactly this change */
+export function identityUpdateStepUp(identityId: string, change: UpdateWorkloadIdentity): StepUpCheckArgs {
+  return { kind: "identity_manage", facts: { op: "identity_update", identityId, changeDigest: sha256Hex(canonicalJson(change)) } };
 }
 
 /**
@@ -308,13 +368,41 @@ export function identityGrantsStepUp(identityId: string, set: PutAgentGrants): S
  */
 export async function updateWorkloadIdentity(db: Db, identityId: string, body: UpdateWorkloadIdentity, actorUserId: string | null): Promise<WorkloadIdentityView> {
   const change = updateWorkloadIdentitySchema.parse(body);
-  return db.transaction(async (tx) => {
+  const actor = actorUserId ?? SYSTEM_USER_ID;
+  // a refusal writes its deny audit row and COMMITS (nothing else is written), then is thrown (review L4)
+  const out = await db.transaction(async (tx): Promise<WorkloadIdentityView | IdentityGrantsError> => {
+    const refuse = async (err: IdentityGrantsError, extra: Record<string, unknown> = {}) => {
+      await tx.insert(auditLog).values({
+        userId: actor,
+        objectType: "workload_identity",
+        objectId: identityId,
+        detail: { phase: "update_refused", code: err.code, fields: Object.keys(change), ...extra },
+        effect: "deny",
+        ruleId: err.code === "grant_exceeds_stewards" ? "grant-exceeds-stewards" : "workload-identity-update-refused",
+        ruleChain: [],
+        reason: `refused: ${err.message} (ADR-0188 S4 amendment 1)`,
+      });
+      return err;
+    };
     const [ident] = await tx.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("update");
-    if (!ident) throw new IdentityGrantsError("identity_not_found", 404, `no workload identity ${identityId}`);
-    if (ident.status === "revoked") throw new IdentityGrantsError("identity_not_active", 409, `identity ${identityId} is revoked`);
+    if (!ident) return refuse(new IdentityGrantsError("identity_not_found", 404, `no workload identity ${identityId}`));
+    if (ident.status === "revoked") return refuse(new IdentityGrantsError("identity_not_active", 409, `identity ${identityId} is revoked`));
     if (change.sponsorUserIds) {
-      const found = await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, change.sponsorUserIds), isNull(users.disabledAt)));
-      if (found.length !== change.sponsorUserIds.length) throw new IdentityGrantsError("steward_not_found", 404, "every steward is an existing, enabled user");
+      const found = await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, change.sponsorUserIds), isNull(users.disabledAt))).for("share");
+      if (found.length !== change.sponsorUserIds.length) {
+        const missing = change.sponsorUserIds.filter((id) => !found.some((f) => f.id === id));
+        return refuse(new IdentityGrantsError("steward_not_found", 404, "every steward is an existing, enabled user"), { missing });
+      }
+      // review M1: the identity's CURRENT grant set must still be held by the new stewards. A steward who later
+      // loses a grant is bounded at use by the sponsor intersection (decision 3); there is no revocation cascade.
+      const current = (await getIdentityGrants(tx as unknown as Db, identityId))!;
+      const unheld = await firstItemNoStewardHolds(tx as unknown as Db, change.sponsorUserIds, current);
+      if (unheld) {
+        return refuse(new IdentityGrantsError("grant_exceeds_stewards", 422, `no proposed steward of this identity holds ${unheld}`), {
+          item: unheld,
+          stewards: change.sponsorUserIds,
+        });
+      }
     }
     const [row] = await tx
       .update(workloadIdentities)
@@ -327,7 +415,7 @@ export async function updateWorkloadIdentity(db: Db, identityId: string, body: U
       .where(eq(workloadIdentities.id, identityId))
       .returning();
     await tx.insert(auditLog).values({
-      userId: actorUserId ?? SYSTEM_USER_ID,
+      userId: actor,
       objectType: "workload_identity",
       objectId: identityId,
       detail: { phase: "updated", fields: Object.keys(change), before: { sponsorUserIds: ident.sponsorUserIds, environments: ident.environments, status: ident.status }, after: change },
@@ -338,6 +426,8 @@ export async function updateWorkloadIdentity(db: Db, identityId: string, body: U
     });
     return view(row!);
   });
+  if (out instanceof IdentityGrantsError) throw out;
+  return out;
 }
 
 /** list identities, keyset-paginated by id */
@@ -399,10 +489,7 @@ export function workloadIdentityAdminHandlers(db: Db) {
       const parsed = updateWorkloadIdentitySchema.safeParse(req.body ?? {});
       if (!parsed.success) return reply.status(400).send({ error: "invalid_body", detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
       // bound to the identity and exactly this change
-      const su = await requireStepUp(db, req, reply, {
-        kind: "identity_manage",
-        facts: { op: "identity_update", identityId, changeDigest: sha256Hex(canonicalJson(parsed.data)) },
-      });
+      const su = await requireStepUp(db, req, reply, identityUpdateStepUp(identityId, parsed.data));
       if (!su.ok) return reply;
       try {
         return reply.send(await updateWorkloadIdentity(db, identityId, parsed.data, req.authCtx.userId ?? SYSTEM_USER_ID));
