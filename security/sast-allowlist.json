@@ -144,6 +144,15 @@
       "reason": "False positive. Test code: a mocked fetch or route handler picks a canned response by URL substring. It is not a sanitizer and does not ship; egress enforcement is the gateway's allow-list, tested elsewhere.",
       "reviewedOn": "2026-10-06",
       "expires": "2027-01-04"
+    },
+    {
+      "id": "js/incomplete-hostname-regexp",
+      "path": "packages/shared/src/__fixtures__/scrub-equivalence-corpus.ts",
+      "fingerprint": "1e34a00014bea74c:1",
+      "line": 34,
+      "reason": "False positive. FRAGMENTS is a test-only list of plain strings spliced into scrubber input text by a seeded PRNG to build the scrub-equivalence corpus; no entry is ever passed to new RegExp or used to match hostnames. Changing the string would also invalidate the pinned snapshot digests.",
+      "reviewedOn": "2026-10-10",
+      "expires": "2027-01-08"
     }
   ]
 }

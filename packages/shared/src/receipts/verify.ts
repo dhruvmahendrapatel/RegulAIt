@@ -4,6 +4,10 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, type DecisionReceiptPayload } from "../batch4.js";
 
 export interface SignedDecisionReceipt { receiptSeq: number; payload: DecisionReceiptPayload; signature: string; keyId: string }
+// Lifecycle metadata describes the signing service, not a trusted timestamp
+// on these bytes. Retirement stops new signing; it preserves public evidence
+// needed to verify historical receipts. decision.at is the decision's time,
+// which can precede the sweep and firstUsedAt by an arbitrary backlog.
 export interface ReceiptPublicKey { keyId: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string }; firstUsedAt?: string | null; retiredAt?: string | null }
 export interface ReceiptBundle { verifier: typeof RECEIPT_PAYLOAD_VERSION; receipts: SignedDecisionReceipt[]; keys: ReceiptPublicKey[] }
 export interface ReceiptVerificationResult { receiptSeq: number | null; status: "valid" | "invalid" | "unverifiable"; reason: string }
@@ -12,6 +16,7 @@ export const RECEIPT_CANNOT_PROVE = [
   "Correctness of the underlying decision or completeness of its omitted reason/detail.",
   "Signing time, unless independently verified anchor timestamp evidence covers these bytes.",
   "Identity or trust of the signing key: bundle-supplied keys require independent pinning.",
+  "Whether these bytes were signed before key retirement, or whether the key was compromised. Retirement preserves historical signature verification; it is not a revocation attestation.",
 ] as const;
 const digestSchema=z.string().regex(/^[0-9a-f]{64}$/);
 const sequenceSchema=z.number().int().positive().safe();

@@ -595,7 +595,7 @@ export async function auditAdjudication(
       platformEffect: a.platformEffect,
       targetRegistered: a.targetRegistered,
       executed: false,
-      receiptClass: "decision",
+      receiptClass: "excluded",
     },
     effect,
     ruleId:

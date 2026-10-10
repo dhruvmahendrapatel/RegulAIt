@@ -193,7 +193,12 @@ jobs:
       # behind a green build.
       - run: pnpm -r build
 
-      - run: pnpm -r test
+      # ADR-0186 decision 30 item 3 (B4I-03): @regulait/shared holds the wall-clock budget tests (its `timing`
+      # Vitest project, serialized after its parallel `unit` project). It runs on its own first, so the
+      # gateway suite on the other cores cannot stretch those budgets; every other package then runs in
+      # parallel as before. `!regulait` keeps the root's own recursive `test` script out of the filter.
+      - run: pnpm --filter @regulait/shared test
+      - run: pnpm -r --filter '!@regulait/shared' --filter '!regulait' test
         env:
           # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
           REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

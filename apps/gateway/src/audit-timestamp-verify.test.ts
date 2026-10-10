@@ -3,10 +3,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createHash, createPrivateKey, webcrypto } from "node:crypto";
+import { constants, createHash, createPrivateKey, sign as nodeSign, webcrypto } from "node:crypto";
 import path from "node:path";
 import * as asn1 from "asn1js";
-import { Certificate, IssuerAndSerialNumber, SignedData, TSTInfo, TimeStampResp } from "pkijs";
+import { AlgorithmIdentifier, Certificate, IssuerAndSerialNumber, RSASSAPSSParams, SignedData, TSTInfo, TimeStampResp } from "pkijs";
 import { anchorCanonicalBytes, timestampRequest } from "./audit-timestamp.js";
 import { derSchema, parseTimestampTrustBundle, timestampReplyBytes, verifyTimestampResponse, type TimestampRequestFacts } from "./audit-timestamp-verify.js";
 import type { AnchorRecord } from "./audit-chain.js";
@@ -41,6 +41,30 @@ async function changedToken(change: (cms: SignedData) => void, generationTime = 
   parsed.timeStampToken!.content = cms.toSchema(true);
   return Buffer.from(parsed.toSchema().toBER(false));
 }
+
+const SHA = { sha1: "1.3.14.3.2.26", sha256: "2.16.840.1.101.3.4.2.1", sha384: "2.16.840.1.101.3.4.2.2" } as const;
+const pssParams = (hash: keyof typeof SHA, mgfHash: keyof typeof SHA, saltLength: number) => new RSASSAPSSParams({
+  hashAlgorithm: new AlgorithmIdentifier({ algorithmId: SHA[hash], algorithmParams: new asn1.Null() }),
+  maskGenAlgorithm: new AlgorithmIdentifier({ algorithmId: "1.2.840.113549.1.1.8", algorithmParams: new AlgorithmIdentifier({ algorithmId: SHA[mgfHash], algorithmParams: new asn1.Null() }).toSchema() }),
+  saltLength,
+}).toSchema();
+/** PR #234 item 5: a cryptographically valid token whose signer signs with the given effective algorithm.
+ * Only signatureAlgorithm and the signature change; digestAlgorithm stays SHA-256 and the messageDigest
+ * attribute stays correct, so the previous digestAlgorithm-only check passed every one of these. */
+async function signedWith(algorithmId: string, algorithmParams: asn1.AsnType | undefined, sign: (data: Buffer) => Buffer) {
+  const fresh = await changedToken(() => undefined);
+  const parsed = new TimeStampResp({ schema: derSchema(fresh) });
+  const cms = new SignedData({ schema: parsed.timeStampToken!.content });
+  const signer = cms.signerInfos[0]!;
+  signer.signatureAlgorithm = new AlgorithmIdentifier({ algorithmId, ...(algorithmParams ? { algorithmParams } : {}) });
+  const attrs = Buffer.from(signer.signedAttrs!.toSchema().toBER(false)); attrs[0] = 0x31;
+  signer.signature = new asn1.OctetString({ valueHex: new Uint8Array(sign(attrs)).buffer });
+  parsed.timeStampToken!.content = cms.toSchema(true);
+  return Buffer.from(parsed.toSchema().toBER(false));
+}
+const tsaKey = () => createPrivateKey(readFileSync(file("tsa.key")));
+const rsa = (hash: string) => (data: Buffer) => nodeSign(hash, data, tsaKey());
+const pss = (hash: string, saltLength: number) => (data: Buffer) => nodeSign(hash, data, { key: tsaKey(), padding: constants.RSA_PKCS1_PSS_PADDING, saltLength });
 beforeAll(() => {
   openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "2", "-subj", "/CN=RegulAIt Synthetic TSA Root", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", file("ca.key"), "-out", file("ca.pem"));
   openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256", "-subj", "/CN=RegulAIt Synthetic TSA", "-keyout", file("tsa.key"), "-out", file("tsa.csr"));
@@ -119,6 +143,23 @@ describe("RFC 3161 independent issuer verification", () => {
       await diagnostic.verify({ signer: 0, trustedCerts: facts.trust, data: new Uint8Array(facts.bytes).buffer, checkChain: true, passedWhenNotRevValues: true, extendedMode: true }).catch((e) => { throw new Error(`Synthetic ${purpose}: ${e.message}`); });
       await expect(verifyTimestampResponse(wrong, facts)).rejects.toThrow("eku_invalid");
     }
+  });
+  it("PR #234 item 5: accepts only SHA-2 effective signature algorithms that match the digest algorithm", async () => {
+    // positive controls: the same forged-signature path, signed with allowed forms, verifies
+    expect((await verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.11", new asn1.Null(), rsa("sha256")), facts)).imprint).toMatch(/^[0-9a-f]{64}$/);
+    expect((await verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.10", pssParams("sha256", "sha256", 32), pss("sha256", 32)), facts)).imprint).toMatch(/^[0-9a-f]{64}$/);
+    // sha1WithRSAEncryption with a SHA-256 digestAlgorithm: a real SHA-1 signature
+    await expect(verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.5", new asn1.Null(), rsa("sha1")), facts)).rejects.toThrow("timestamp_signature_algorithm_unsupported");
+    // RSASSA-PSS with absent parameters: RFC 4055 defaults are SHA-1 hash and MGF1-SHA-1
+    await expect(verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.10", undefined, pss("sha1", 20)), facts)).rejects.toThrow("timestamp_signature_algorithm_unsupported");
+    // RSASSA-PSS with explicit SHA-1 hash, and with a SHA-256 hash but MGF1-SHA-1
+    await expect(verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.10", pssParams("sha1", "sha1", 20), pss("sha1", 20)), facts)).rejects.toThrow("timestamp_signature_algorithm_unsupported");
+    await expect(verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.10", pssParams("sha256", "sha1", 32), pss("sha256", 32)), facts)).rejects.toThrow("timestamp_signature_algorithm_unsupported");
+    // ecdsa-with-SHA1 and an unknown signature OID
+    await expect(verifyTimestampResponse(await signedWith("1.2.840.10045.4.1", undefined, rsa("sha1")), facts)).rejects.toThrow("timestamp_signature_algorithm_unsupported");
+    await expect(verifyTimestampResponse(await signedWith("1.2.3.4", undefined, rsa("sha256")), facts)).rejects.toThrow("timestamp_signature_algorithm_unsupported");
+    // an allowed SHA-2 form whose hash differs from the digest algorithm
+    await expect(verifyTimestampResponse(await signedWith("1.2.840.113549.1.1.12", new asn1.Null(), rsa("sha384")), facts)).rejects.toThrow("timestamp_signature_hash_mismatch");
   });
   it("bounds DER and trust inputs and rejects trailing bytes or private PEM material", async () => {
     await expect(verifyTimestampResponse(Buffer.concat([response, Buffer.from([0])]), facts)).rejects.toThrow("der_malformed");
