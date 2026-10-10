@@ -150,6 +150,11 @@ constraint out is still right.
 
 `.github/workflows/ci.yml`, `build-and-test`, **after `pnpm -r test`**:
 
+> **Update 2026-10-10 (gateway sharding, PR #284):** the gateway suite now runs as four
+> `gateway-tests` shards, each on its own database. This step runs in every shard, after that
+> shard's tests, so the union of the four scans still covers every row the suite wrote. The
+> decision is unchanged; only where the step sits moved.
+
 ```yaml
 - name: Pre-flight — duplicates that would block a unique constraint (ADR-0109/0110)
   run: node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
