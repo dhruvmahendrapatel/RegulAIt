@@ -29,8 +29,15 @@ roadmap: ../docs/product/ROADMAP.md
   after its security review. S5 (token endpoint) takes 0186 if it needs a migration.
 - Building: S4 in-process wiring, S5 token endpoint, B5 SPDX renderer. Next unblocked: I2 after S3+S4; B2 after S4;
   B4 after B2+B3; B7/B8 after B4/B5.
-- Owner decision 12 (ADR-0189): snapshots fail closed without a signing key. Codex queue: X41, X43, X42, X38, X37, X34,
-  X39, X40, X33.
+- Owner decision 12 (ADR-0189): snapshots fail closed without a signing key.
+- **2026-10-10 18:10 UTC - owner: "We will stop using codex and absorb all of its work. Claude will be our only
+  builder now." ([ADR-0191](../docs/decisions/0191-claude-sole-builder.md)).** Web UI (S6, B6, I9 and the rest) moves
+  to Claude; cross-review is done by fresh-context Claude reviewer agents not given the builder's report first;
+  specification-only vectors by a Claude agent that does not read the implementation; `codexInputs.md` is frozen.
+  Codex's open PRs are adopted, re-done or closed per the 10-10 inventory; no new Codex PR is merged; its open findings
+  stay tracked until fixed. Board: Codex's TODO/IN-PROGRESS tasks cancelled (PR #306).
+- **Agents:** Claude is the only builder and reviewer (master session plus parallel Claude sessions and subagents,
+  builders and independent reviewers). Codex retired 2026-10-10 (ADR-0191).
 
 **2026-10-10 - Parallel wave: Batch 5 engines and their UI merged; ADR-0188 (identity) accepted; garak open questions decided.**
 - Merged: #217 (ADR-0188), #227/#228 (modelscan follow-up, garak), #230 (Engines page), #231 (B5-P2 promptfoo split),
