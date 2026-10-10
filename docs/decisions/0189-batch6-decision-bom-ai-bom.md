@@ -377,6 +377,7 @@ against the specification rather than against itself.
 | **B6 web UI** | Codex | Decision 9's tabs, actions and verify panel; drift view; posture rows | B1 stubs | **Yes** (web only); merges after B4's real routes |
 | **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs through release-published, signed SBOM identity metadata (amendment R9); PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3, B4 and B5 (inactive until the R17 switch flips, R28) | **Yes** (developed in parallel), with B4–B6 |
 | **B8 runbooks** | Claude, reviewed by Codex | Air-gapped and BYOC verification runbooks; every command executed before it is written down (M-041) | B4, B5 | **Yes**, with B6, B7 |
+| **B9 SPDX fields** | Claude | OWNER DECISION 13 and amendment R51: migration `0186` (`ai_bom_spdx_declarations`, append-only), admin routes to set, withdraw and read the supplier-declared SPDX properties of models and datasets (audited), the loader and the SPDX renderer reading them | B5 | **Yes**, with B6, B7 and B8 |
 
 ## Test strategy
 
@@ -413,7 +414,7 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
 ## Owner decisions (accepted 2026-10-10)
 
 The owner accepted all eleven recommendations on 2026-10-10, as written below, and decided a twelfth (from review
-owner item 3) the same day. Spike B0 may start now; B1 onward waits
+owner item 3) and a thirteenth (from review owner item 1) the same day. Spike B0 may start now; B1 onward waits
 for ADR-0188 S1 and S4, as the slice plan says.
 
 1. **OWNER DECISION — Decision BOM format.** *Recommended:* our own `regulait.decision-bom.v1` (no standard defines a
@@ -452,6 +453,12 @@ for ADR-0188 S1 and S4, as the slice plan says.
     ADR-0180; an admin may relax it, audited, to proceed and record an audited `snapshot_skipped_no_key` gap. There is
     no queue. Rejected: (a) a durable queue of captured record sets (seven review findings across rounds 7–9), and (c)
     skip-and-record as the default. Amendment R25 states the rule.
+13. **OWNER DECISION — mandatory SPDX properties with no recorded value (decided 2026-10-10, review owner item 1).**
+    *Chosen:* **collect** them. The supplier-declared values are recorded, with their provenance, in a governed store
+    (slice B9, amendment R51), so a model or dataset whose values are all recorded renders SPDX 3.0.1. R3's strict
+    fallback stays for every record that still lacks one: no SPDX rendering, `spdx-3.0.1: not_producible` with the
+    missing property names, and never a placeholder. Rejected: accepting CycloneDX-only for such subjects as the end
+    state, and (b) emitting SPDX without the mandatory properties.
 
 ## Amendments after spike B0 (2026-10-10)
 
@@ -522,7 +529,7 @@ R3. **Mandatory SPDX `AIPackage` properties are never invented.** SPDX 3.0.1 set
     the standard defines a no-assertion form for a property (element-valued properties, licences), B5 uses it and
     marks the snapshot `incomplete`. For a literal-valued property with no such form (`releaseTime` is a DateTime,
     `downloadLocation` an anyURI, `packageVersion` a string), the standard gives no unknown value. Until the owner
-    decides (owner item 1 below), the strict default applies: that model's snapshot gets **no SPDX rendering**; the
+    decides (owner item 1 below; decided 2026-10-10: collect, OWNER DECISION 13 and R51), the strict default applies: that model's snapshot gets **no SPDX rendering**; the
     signed native body records `spdx-3.0.1: not_producible` with the missing property names, the snapshot is
     `incomplete`, and the CycloneDX renderings are unaffected. No placeholder date, URL or version is ever emitted.
 
@@ -953,7 +960,8 @@ R50. **An on-demand snapshot is one writable transaction.** R22's `READ ONLY` lo
 
 ### Owner items from the review (not decided here)
 
-1. **SPDX mandatory literal properties with no known value** (R3). Options: (a) the strict default above: no SPDX
+1. **SPDX mandatory literal properties with no known value** (R3). *Decided 2026-10-10: collect (OWNER DECISION 13,
+   amendment R51, slice B9).* The options as they were put: (a) the strict default above: no SPDX
    rendering for that snapshot, with the reason recorded; (b) emit the SPDX document without those properties, marked
    `incomplete`, knowing it does not meet the AI profile's cardinality; (c) require the supplier's release time and
    download location as mandatory model-card fields before a model can be approved. Recommended: (a) now, with (c)
@@ -963,6 +971,51 @@ R50. **An on-demand snapshot is one writable transaction.** R22's `READ ONLY` lo
    Recommended: the existing signature with the shipped trusted root, so no new key needs custody.
 
 Owner item 3 (automatic snapshots without a signing key) was decided on 2026-10-10: OWNER DECISION 12 under "Owner decisions".
+
+### Owner decision 13: collect the mandatory SPDX properties (2026-10-10)
+
+R51. **The mandatory SPDX properties are collected, never invented (slice B9).** OWNER DECISION 13 answers owner
+    item 1. These rules bind B9 and every later reader of the values.
+    - **What is collected.** For a model (a `model_cards` row, the model component of B3 and B5): `releaseTime`,
+      `downloadLocation`, and `packageVersion`, which is used only when the card has no `pinned_model_version` (the
+      pin stays first, as B5 renders it). For a dataset (a `training_datasets` or `eval_datasets` row, each row one
+      dataset version): `builtTime`, `originatedBy`, `releaseTime`, `downloadLocation` and `datasetType`.
+      `suppliedBy` (the provider) and `primaryPurpose` (`model`, `data`) already come from recorded columns, as R3
+      says. A dataset version is its own row, so a new version starts with no values; nothing is carried over.
+    - **Where it is stored.** One append-only table, `ai_bom_spdx_declarations` (migration `0186`). Each row holds one
+      property value for exactly one parent (`model_card_id`, `training_dataset_id` or `eval_dataset_id`, each a
+      real foreign key with `ON DELETE CASCADE`, as R36 asks of renderings), its source (`supplier_declared` or
+      `admin_entered`), the declaring user, and `declared_at`, which a trigger sets to the database clock (M-075). A
+      correction is a new row; a `withdrawn` row clears the value. The current value is the newest row for that
+      parent and property. UPDATE, DELETE (except the parent's cascade) and TRUNCATE are refused in the database.
+    - **Who may write.** Admins only: the routes sit behind the global admin gate and are not in `NON_ADMIN_ROUTES`
+      (default-deny). Every write, including a withdrawal, writes an audit row in the same transaction. Reads are
+      admin-only too.
+    - **Validation, strict.** A time is a real instant in whole seconds and is rendered as an `xsd:dateTime` in UTC
+      (`YYYY-MM-DDThh:mm:ssZ`). A download location follows R47 and #280 (4237493036), the rule B3 and B5 already apply
+      to every exported endpoint: an `https` origin (`https://host[:port]`) only. A value with a path, query, fragment
+      or userinfo, a non-https scheme, or a non-ASCII host is **refused** at write, never cut down to its origin,
+      because cutting would record a value nobody declared. Plain `http` is refused too: B5 never exports it, so a
+      stored `http` value could never render (owner accepted https only, 2026-10-10). `packageVersion` and `originatedBy` are bounded plain text,
+      refused when they carry a URL, an `@`, control characters or credential-shaped material (the audit scrubber's
+      own rules). `datasetType` is one or more values of the SPDX 3.0.1 `DatasetType` vocabulary. The database
+      repeats the shape checks in CHECK constraints.
+    - **Rendering.** The AI BOM loader reads the current values in the snapshot's own transaction, so they are in the
+      signed native body and its basis. The declarations are the **only** source of these properties (owner,
+      2026-10-10): the `releaseTime` and `downloadLocation` keys of a model card's `data_claims`, B5's earlier source,
+      are retired, so a value can never come from two places. The loader drops those two keys from a card's claims,
+      and a record set that still carries one is refused. There is no grandfathering, because the product is not live
+      (ADR-0180). A declared `packageVersion` is used only when the card has no `pinned_model_version`. With every mandatory
+      value present, SPDX 3.0.1 renders and passes B5's cardinality check, schema and SHACL; with any missing, R3's
+      `not_producible` lists exactly the missing names. A dataset with no declared `datasetType` keeps the standard's
+      own `noAssertion` value (R3). No setting can relax any of this, because nothing here is a default to relax.
+    - **Accepted limits for v1 (owner, 2026-10-10).** The missing names are reported per class
+      (`ai_AIPackage.releaseTime`), not per element, as B5 does; the GET route's `undeclared` list shows them per
+      record. An agent with no model card has no SPDX rendering, because declarations attach to model cards. Who
+      declared a value, when, and from which source stays in the table and the audit trail and is never rendered into
+      SPDX or CycloneDX output.
+    - **Not in B9.** Requiring these values before a model card can be approved (option (c)) is not adopted; approval
+      is unchanged. It is an open follow-up (open question 8).
 
 ## Further design review happens at slice level
 
@@ -1027,6 +1080,9 @@ an accepted decision or needs an owner choice.
    re-checks it if it comes back. Nothing further is open here.
 7. **The argument digest coverage** (Context): if B2 finds receipt-eligible paths that never compute
    `argumentsDigest`, those paths record `not_recorded` until a follow-up computes it.
+8. **Approval gate for the SPDX properties (R51, open follow-up).** Should a model card that will be exported as SPDX
+   need its declared `releaseTime`, `downloadLocation` and (without a pin) `packageVersion` before it can be approved
+   (owner item 1's option (c))? Slice B9 adds no gate; approval is unchanged.
 
 ## Consequences
 

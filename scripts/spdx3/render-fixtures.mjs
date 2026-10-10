@@ -7,6 +7,8 @@
 //   with-datasets.draft.spdx.json   the renderer's document for a record set WITH datasets. buildAiBom refuses to
 //                                   ship it (not_producible, R3); the draft is validated so the dataset mapping is
 //                                   checked against the official model too. It is never a product output.
+//   with-datasets-declared.spdx.json   B9 (R51): buildAiBom's real rendering of the same datasets with every mandatory
+//                                   property declared (spdxFields); it must render, so the dataset mapping ships.
 //   use_case.supplied-by-tool.expect-fail.json   the R12 §5 negative control, derived from the real rendering: an
 //                                   ai_AIPackage whose suppliedBy points at the Tool. It passes the JSON schema and
 //                                   must FAIL SHACL; the driver fails if it does not.
@@ -60,6 +62,13 @@ if (!spdxMandatoryMissing(draft).length) fail("with-datasets: the draft unexpect
 const v = validateSpdx(draft);
 if (!v.valid) fail(`with-datasets draft fails the JSON schema: ${JSON.stringify(v.errors.slice(0, 3))}`);
 write("with-datasets.draft.spdx.json", bomCanonicalBytes(draft));
+
+// B9 (R51): the same datasets with every mandatory property declared: buildAiBom's REAL rendering
+const declared = fixture("with-datasets-declared.json");
+const declaredBuild = buildAiBom(declared.records, declared.meta, { cyclonedxVersions: ["1.7"] });
+const declaredSpdx = declaredBuild.renderings.find((x) => x.format === "spdx-3.0.1");
+if (!declaredSpdx) fail(`with-datasets-declared: no SPDX rendering (${JSON.stringify(declaredBuild.body.renderings["spdx-3.0.1"])})`);
+write("with-datasets-declared.spdx.json", declaredSpdx.bytes);
 
 const neg = JSON.parse(useCaseBytes);
 const toolId = neg["@graph"].find((e) => e.type === "Tool")?.spdxId;

@@ -1,5 +1,5 @@
 {
- "comment": "ADR-0189 B5: SYNTHETIC records whose SPDX rendering is producible (no datasets; every model card has a pinned version and declared releaseTime and downloadLocation (spdxFields, ADR-0189 R51)). Used by packages/shared/src/bom/ai-bom-spdx.test.ts and scripts/spdx3/render-fixtures.mjs.",
+ "comment": "ADR-0189 B9 (R51): SYNTHETIC records, the with-datasets set plus supplier-declared SPDX properties (spdxFields) for every dataset, so the snapshot's SPDX 3.0.1 is rendered (producible) and CI validates the real product output with SHACL.",
  "meta": {
   "id": "00000000-0000-4000-8000-000000000384",
   "subjectKind": "use_case",
@@ -103,13 +103,77 @@
     "externalRef": null,
     "artifactScanId": "00000000-0000-4000-8000-000000000013",
     "attachedAt": "2026-10-10T12:00:00.000Z"
+   },
+   {
+    "id": "00000000-0000-4000-8000-000000000008",
+    "cardId": "00000000-0000-4000-8000-000000000004",
+    "kind": "eval_run",
+    "evalRunId": "00000000-0000-4000-8000-00000000000b",
+    "externalRef": null,
+    "artifactScanId": null,
+    "attachedAt": "2026-10-10T12:00:00.000Z"
    }
   ],
-  "evalRuns": [],
-  "evalDatasets": [],
-  "trainingDatasets": [],
-  "trainingJobs": [],
-  "trainingArtifacts": [],
+  "evalRuns": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000b",
+    "datasetId": "00000000-0000-4000-8000-00000000000c",
+    "datasetVersion": 2
+   }
+  ],
+  "evalDatasets": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000c",
+    "version": 2,
+    "name": "triage-golden",
+    "casesDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+   }
+  ],
+  "trainingDatasets": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000d",
+    "version": 1,
+    "name": "claims-ft",
+    "checksum": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:120",
+    "rowCount": 120,
+    "piiVerdict": "flagged",
+    "projectId": "00000000-0000-4000-8000-000000000020",
+    "projectDataSensitivity": "regulated"
+   },
+   {
+    "id": "00000000-0000-4000-8000-000000000022",
+    "version": 3,
+    "name": "claims-unclassified",
+    "checksum": "",
+    "rowCount": 0,
+    "piiVerdict": "clean",
+    "projectId": null,
+    "projectDataSensitivity": null
+   }
+  ],
+  "trainingJobs": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000e",
+    "datasetId": "00000000-0000-4000-8000-00000000000d",
+    "datasetVersion": 1,
+    "method": "lora",
+    "baseAgentId": "00000000-0000-4000-8000-000000000002",
+    "status": "succeeded"
+   }
+  ],
+  "trainingArtifacts": [
+   {
+    "id": "00000000-0000-4000-8000-00000000000f",
+    "jobId": "00000000-0000-4000-8000-00000000000e",
+    "name": "claims-lora",
+    "method": "lora",
+    "kind": "inline",
+    "agentId": "00000000-0000-4000-8000-000000000002",
+    "modelCardId": "00000000-0000-4000-8000-000000000004",
+    "payloadDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "createdAt": "2026-10-10T12:00:00.000Z"
+   }
+  ],
   "modelArtifacts": [
    {
     "id": "00000000-0000-4000-8000-000000000011",
@@ -253,6 +317,43 @@
     "builtTime": null,
     "originatedBy": null,
     "datasetType": []
+   },
+   {
+    "subjectKind": "training_dataset",
+    "subjectId": "00000000-0000-4000-8000-00000000000d",
+    "releaseTime": "2026-04-01T09:30:00Z",
+    "downloadLocation": "https://datasets.supplier-b.example",
+    "packageVersion": null,
+    "builtTime": "2026-03-15T08:00:00Z",
+    "originatedBy": "Synthetic Data Supplier B",
+    "datasetType": [
+     "text"
+    ]
+   },
+   {
+    "subjectKind": "training_dataset",
+    "subjectId": "00000000-0000-4000-8000-000000000022",
+    "releaseTime": "2026-04-01T09:30:00Z",
+    "downloadLocation": "https://datasets.supplier-b.example",
+    "packageVersion": null,
+    "builtTime": "2026-03-15T08:00:00Z",
+    "originatedBy": "Synthetic Data Supplier B",
+    "datasetType": [
+     "structured",
+     "text"
+    ]
+   },
+   {
+    "subjectKind": "eval_dataset",
+    "subjectId": "00000000-0000-4000-8000-00000000000c",
+    "releaseTime": "2026-05-20T00:00:00Z",
+    "downloadLocation": "https://evals.supplier-c.example:8443",
+    "packageVersion": null,
+    "builtTime": "2026-05-19T23:59:59Z",
+    "originatedBy": "Synthetic Eval Lab C",
+    "datasetType": [
+     "text"
+    ]
    }
   ]
  }

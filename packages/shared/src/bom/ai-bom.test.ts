@@ -527,7 +527,9 @@ describe("security review round (PR #287): free-form references and claims never
   });
   it("MEDIUM: URL-shaped claims, standard refs and bias methods keep the origin only; secret-shaped free text is refused", () => {
     const urlCases: Array<[(f: AiBomRecordSet) => void, string]> = [
+      // R51: downloadLocation is a retired data_claims key (refused); a URL in another claim keeps its origin only
       [(f) => { f.modelCards[0]!.dataClaims = { downloadLocation: "https://bucket.s3.test/w.bin?X-Amz-Signature=CANARYSIG" }; }, "CANARYSIG"],
+      [(f) => { f.modelCards[0]!.dataClaims = { trainingData: "https://bucket.s3.test/w.bin?X-Amz-Signature=CANARYSIG2" }; }, "CANARYSIG2"],
       [(f) => { f.modelCards[0]!.standardRefs = ["https://std.test/doc?token=CANARYSTD"]; }, "CANARYSTD"],
       [(f) => { f.modelCards[0]!.biasFairness = [{ dimension: "age", method: "https://eval.test/run?key=CANARYBIAS", status: "assessed", resultRef: null, assessedAt: null }]; }, "CANARYBIAS"],
       [(f) => { f.modelCards[0]!.dataClaims = { trainingData: "corpus key sk-live-CANARYTRAIN0123456789abcdef" }; }, "CANARYTRAIN"],
@@ -542,13 +544,13 @@ describe("security review round (PR #287): free-form references and claims never
     }
     expect(outcomes.filter((o) => o.endsWith("LEAKED"))).toEqual([]);
   });
-  it("assessedAt and releaseTime must be timestamps", () => {
+  it("assessedAt must be a timestamp; releaseTime is a retired data_claims key (R51)", () => {
     const f = fixture();
     f.modelCards[0]!.biasFairness = [{ ...f.modelCards[0]!.biasFairness[0]!, assessedAt: "token=SECRET" }];
     refused(() => normaliseAiBomRecords(f), /assessedAt/);
     const g = fixture();
-    g.modelCards[0]!.dataClaims = { releaseTime: "next tuesday" };
-    refused(() => normaliseAiBomRecords(g), /releaseTime/);
+    g.modelCards[0]!.dataClaims = { releaseTime: "2026-06-01T00:00:00Z" };
+    refused(() => normaliseAiBomRecords(g), /data_claims\.releaseTime is retired/);
   });
   it("LOW: a refusal names the field and rule, never the record value", () => {
     const f = fixture();
