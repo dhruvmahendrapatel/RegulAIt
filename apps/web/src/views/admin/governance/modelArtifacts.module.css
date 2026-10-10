@@ -1,0 +1,65 @@
+/* ADR-0187 X28 — model artifacts (Admission review) and the engine-scan evidence chip (Model risk) */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.reasons {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--rg-ink-body);
+}
+
+.reasons li + li {
+  margin-top: 2px;
+}
+
+.progress {
+  width: min(360px, 100%);
+  height: 10px;
+  accent-color: var(--primary);
+}
+
+.chip {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--rg-surface);
+  max-width: 520px;
+}
+
+.chipMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--rg-ink-muted);
+  font-size: 12px;
+}
+
+/* links in a line of text are told apart by more than colour */
+.chipMeta a {
+  text-decoration: underline;
+}
+
+.dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0;
+}
+
+.dl dt {
+  color: var(--rg-ink-muted);
+}
+
+.dl dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
