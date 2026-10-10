@@ -1,3 +1,54 @@
+## X47 rolling review: CI/local-failure PR #304 — 2026-10-10 UTC
+
+**READY-FOR-REVIEW — no new defect found.** Reviewed exact owner head
+`1a7ca6d26363d7a3ed601b759b40d869a11fe58d` (`ci-docs-local-fails`), using a
+clean detached checkout during verification. The findings branch starts at main
+`2276739b`; owner source was not edited, and the checkout is back on the findings
+branch. This delivery adds only this ledger and an independent review probe.
+
+The README, dated ADR-0110 amendment and verification-script header agree with
+`.github/workflows/ci.yml`: base build/non-gateway/static checks; four gateway
+shards, each with its own Postgres/object store and post-test unique-constraint
+pre-flight; coverage confirming each file ran once; and the required aggregate
+check. The ADR preserves its original wording under a dated amendment. The
+verification script's executable commands are unchanged; `bash -n` passes.
+
+With `REGULAIT_DATA_KEY` removed from the invoking environment, all three changed
+suites pass together: **57/57 tests in three files** (59.91s). This is the combined
+seed, docker-demo-license and receipt-writer result, not a standalone seed-suite
+count. The built seed succeeds on its fresh per-run scratch databases because the
+changed test harness supplies the synthetic 64-hex fixture key. A nonempty supplied
+key still wins over that fallback in both spawn environments; shipping seed/auth
+code and the data-key requirement are unchanged.
+
+The independent TypeScript differential examines the real gateway AST and compares
+old whole-literal eligibility with optimized initializer eligibility at every
+literal `insert(auditLog).values` site: **489 writers, 101 eligible, 15 spread
+fallbacks, zero changed eligibility**. The original classification test also passes.
+A compiler-host-only mutation renames `receiptClass` at the real eligible writer
+`agent-stewardship.ts:372`; both scans detect exactly that one missing class. No
+owner source file is changed for the negative control. The optimized branch retains
+whole-literal typing when a spread is present. This establishes equivalence on the
+current inventory, not every possible future TypeScript syntax form. No elapsed
+wall-time budget assertion is introduced, so no shared timing-file change is needed.
+
+Commands on the frozen owner head:
+
+- `CI=true pnpm install --frozen-lockfile` — PASS.
+- `pnpm --filter '@regulait/gateway...' build` — PASS.
+- `pnpm --filter @regulait/web exec tsc --noEmit` — PASS.
+- `pnpm --filter @regulait/web build` — PASS.
+- `env -u REGULAIT_DATA_KEY DATABASE_URL=<own scratch URL> pnpm --filter @regulait/gateway exec vitest run src/seed.test.ts src/docker-demo-license.test.ts src/receipt-writer-classification.test.ts` — 57 PASS.
+- `node apps/web/review/x47-304-writer-differential.mjs` — inventory and renamed-class negative PASS; emits the counts above.
+- `bash -n scripts/verify-clean-checkout.sh` — PASS.
+
+The disposable parent database was `regulait_review_x47_304_oct10`, on loopback
+Postgres; the seed/license suites made and removed their own per-run child
+scratch databases. The parent was dropped without FORCE after verification.
+No shared/base database was reset, and no gateway listener or browser was started.
+Logs: `/tmp/oct10-x47-304-{install,gateway-build,web-tsc,web-build,selected-tests,differential,cleanup}.log`.
+Claude retains adjudication, VERIFIED and merge authority.
+
 ## X42 — ADR-0190 I1 and migration 0185 independent review (2026-10-10)
 
 **READY FOR OWNER REVIEW with two findings.** Reviewed merged I1 #286 at `94fffb656cbc505468a7b8e43c478ca4ad499a08` (I1 head `a79e47e792cc52b33201e84f3576b2838cb75b19`) and exact guard-hardening #285 `6f6de2bc4cc8d69a810c0a30d1acb29da420a316`. Product implementation is unchanged. Independent synthetic probes live in `apps/web/review/x42-isolation.probe.ts`.
