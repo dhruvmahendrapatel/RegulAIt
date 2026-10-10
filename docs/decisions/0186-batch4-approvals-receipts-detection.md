@@ -574,6 +574,46 @@ unless stated.
 
       Both web writers (the profiles page, the first-run pack) go through `withStepUp` and the census covers them.
 
+30. **PR #234 review fixes, Batch 4 integration of X21-X23 (2026-10-10, branch `b4-codex-int-2`)** (each red first
+    on the integration head; merges `codex/x21` f69db5e and `codex/x23` bedc91a, which contains 30a730c):
+    - **Item 1, receipt classification.** Only governed-call allow/deny/refuse rows and approval approve/deny/expire
+      outcomes are `receiptClass: "decision"`. Reclassified as `"excluded"` (a new value, never signed, kept in the
+      audit chain): approval routing, SLA warning and breach, claims, refused decide attempts (bulk item,
+      `approval-signature-refused`), the advisory `/v1/evaluate` preview, `builder-tool-step-resume-failed`, red-team
+      adjudications, playground evaluation summaries, external-effect records and chatops channel events. Agent halt
+      and resume are operator controls, `"configuration"`. Kept as decisions: the decide-path rows that carry an
+      outcome (`approval-decision-recorded`, `-quorum-reached`, `-vetoed`, `-pool-unsatisfiable`, the signature
+      recheck refusal, admin-override, self-review, delegated and bulk decisions) and every call-path allow/deny
+      including compaction and dispatch records. `receipt-writer-classification.test.ts` now also fails when a writer
+      in a known non-decision family is classified `decision` (red: 14 writers).
+    - **Item 2, retired keys (B4I-01): no `retiredAt`/`decision.at` check.** `decision.at` is signer-controlled, so a
+      forger with a retired key would backdate it, and a backlog sweep legitimately signs decisions older than the
+      key's first use; the check would be false assurance. Retirement stops the sweep from signing with the key and
+      is not revocation; `RECEIPT_CANNOT_PROVE` says so and both the API and the offline CLI return it (tests pin
+      both). Proposed follow-up, not built: a signed revocation record (key id, reason, effective time) whose time is
+      covered by an anchored RFC 3161 timestamp, so a verifier can reject receipts not covered by an earlier anchor.
+    - **Item 3, gate-dense scrub CPU (B4I-02) and budget flakes (B4I-03).** Codex's 30a730c is kept unchanged. The
+      gate-dense value (`"sk gl m n secret mysql: redis postgres mongodb xox sig= key- tok_ dapi hf_ r8_ "` x 5300,
+      418,700 characters) still takes 290-360 ms on the development box (CPU 290-300 ms), against 100 ms: 17 rules
+      pass their gates and each runs one RE2 scan of the remainder. Measured alternatives in re2js 2.8.6: a combined
+      `RE2Set` of the 17 rules 440-590 ms (whatever the DFA memory), one alternation 440 ms, per-gate windows with a
+      result cache 120 ms (single-letter gates give 116,600 hits) and still inexact for unbounded rules. Open,
+      returned to the owner. B4I-03: the eight files that bound wall time form a Vitest `timing` project
+      (`fileParallelism: false`, run after the parallel `unit` project by `sequence.groupOrder`), CI runs
+      `@regulait/shared` alone before the other packages, and `timing-isolation.test.ts` keeps the list complete.
+      No budget or timeout changed.
+    - **Item 4, TSA policy OID.** `REGULAIT_TSA_POLICY_OID` must be the canonical dotted form that asn1js (the encoder
+      pkijs uses for `reqPolicy`) encodes and decodes back unchanged: first arc 0-2, second arc 0-39 under 0 or 1, no
+      leading zeros, two or more arcs. A configuration error no longer consumes an attempt or schedules backoff: the
+      anchor stays `pending` with `timestamp_configuration_invalid` and the manual retry answers 409
+      `configuration_invalid`.
+    - **Item 5, CMS signature hash.** The signer's effective `signatureAlgorithm` is validated: `rsaEncryption` (the
+      hash is `digestAlgorithm`'s), sha256/384/512WithRSAEncryption, ecdsa-with-SHA256/384/512, or RSASSA-PSS whose
+      hash and MGF1 hash are the same SHA-2 function (absent parameters are the SHA-1 defaults and refuse). Its hash
+      must equal the digest hash (`timestamp_signature_hash_mismatch`); anything else is
+      `timestamp_signature_algorithm_unsupported`. Red: a real SHA-1-signed token with a SHA-256 digestAlgorithm
+      verified. Ed25519 tokens are refused until a TSA needs them.
+
 **Two notes on B4S-09 (no code change)**
 - **Tool-scoped approvals in passkey mode** (corrected 2026-10-10, B4X-01; decision 29, finding 51). The recheck
   rebuilds the signed payload from the call actually run. For a tool-scoped approval (ADR-0104 `approvalScope: "tool"`)

@@ -23,6 +23,17 @@ describe("ADR-0186 offline receipts", () => {
     expect(out.cannotProve.join(" ")).toContain("Omission after the last receipt");
     expect(out.cannotProve.join(" ")).toContain("independent pinning");
   });
+  it("B4I-01: historical signatures survive retirement without claiming a signing-time proof", () => {
+    const bundle = fixture();
+    // Sweeps can sign decisions that predate a key's first use. Neither
+    // lifecycle date establishes when these particular bytes were signed.
+    bundle.keys[0]!.firstUsedAt = "2026-10-08T10:00:00.000Z";
+    bundle.keys[0]!.retiredAt = "2026-10-09T10:00:00.000Z";
+    const out = verifyReceiptBundle(bundle);
+    expect(out.results.map(row => row.status)).toEqual(["valid", "valid", "valid"]);
+    expect(out.cannotProve.join(" ")).toContain("signed before key retirement");
+    expect(out.cannotProve.join(" ")).toContain("not a revocation attestation");
+  });
   it("detects modified decisions and does not call their successors valid", () => {
     const bundle = fixture(); bundle.receipts[0]!.payload.decision.effect = "deny";
     expect(verifyReceiptBundle(bundle).results.map((r) => r.status)).toEqual(["invalid", "invalid", "unverifiable"]);

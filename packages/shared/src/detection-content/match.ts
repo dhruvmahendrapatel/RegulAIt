@@ -112,7 +112,9 @@ const spaceSafeRules = GENERATED_SECRET_RULES.filter(rule => spaceSafeIds.has(ru
 const spaceUnsafeRules = GENERATED_SECRET_RULES.filter(rule => !spaceSafeIds.has(rule.id));
 const prefixes: Readonly<Record<string,readonly string[]>> = GENERATED_REQUIRED_PREFIXES;
 const prefixlessRules = GENERATED_SECRET_RULES.filter(rule=>!prefixes[rule.id]);
-const prefixlessSet = secretSet(prefixlessRules);
+// An empty RE2 set still walks the input. The current default snapshot has
+// gates for every rule, so there is no prefixless candidate scan to perform.
+const prefixlessSet = prefixlessRules.length ? secretSet(prefixlessRules) : null;
 secretSets.set(GENERATED_SECRET_RULES, secretSet(GENERATED_SECRET_RULES));
 secretSets.set(spaceSafeRules, secretSet(spaceSafeRules));
 /** One combined RE2 scan selects candidates, then individual RE2 matchers

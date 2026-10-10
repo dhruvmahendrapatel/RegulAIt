@@ -968,3 +968,90 @@ X22 publication cleanup: removed a local generated-output symlink accidentally i
 ### X23 second cross-review corrections — 2026-10-09 CDT
 R23-10: caller-defined marker labels no longer make real credentials opaque. Only known rule-label combinations and field markers are protected; existing generated markers remain idempotent. Genuine old-scrubber red captured in /tmp/oct10-x23-marker-red.log. R23-02/05: remove the eight-open-gate fallback, tighten JWT/Discord/Stripe gates and emit reviewed bounded prefix context for candidate suffix scans; unbounded prefixes retain full scans. Original text still supplies exact spans. Added above-eight-gates 400k near-miss budget and Unicode UTF-16 offset regressions without weakening budgets. R23-11 portable screenshot paths were retained and verified.
 Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.
+
+### B4I-01 receipt retirement follow-up — 2026-10-10 UTC
+
+Retirement is a signing-service lifecycle event, not proof that a historical
+signature is invalid or that the private key was compromised. The gateway
+already refuses a retired deployment key in both sweep and status; public
+keys must remain available to verify historical evidence after rotation.
+`decision.at` is the decision timestamp, potentially preceding the signing
+sweep/key's first use by a backlog, so comparing it with firstUsedAt/retiredAt
+would invent signing-time evidence and reject legitimate receipts.
+
+Added explicit online/offline `cannotProve` wording that verification does not
+establish signing before retirement or absence of compromise, plus an owned
+receipt README describing operator trust-file removal and the absent separate
+revocation policy. New pure and actual database/API/CLI tests preserve historical
+verification while refusing new signing with a retired key, then allow a
+replacement key to sign the pending decision. Claude should adjudicate B4I-01
+on this contract; no new trusted-time or revocation guarantee is claimed.
+
+Validation: `pnpm --filter @regulait/shared test receipts/verify.test.ts` 8/8;
+`DATABASE_URL=<local base> pnpm --filter @regulait/gateway test decision-receipts.test.ts receipt-writer-classification.test.ts`
+11/11 on the suite's newly migrated disposable database, dropped by teardown.
+Gateway dependency build and gateway `tsc --noEmit`, web `tsc --noEmit` and web
+build PASS. Logs `/tmp/oct10-b4i-receipt-{units,db,build,tsc,web-tsc,web-build}.log`.
+
+### B4I-02/03 dense scrub performance follow-up — 2026-10-10 UTC
+
+B4I-02: repeated short fragments and credentials no longer require one full
+fragment scan/hash per occurrence. Per-invocation caches are capped at 256
+entries/256-character strings; unseen or uncached text is always scanned, and
+nothing is retained between audit writes. The second pass uses the first
+pass's surviving fragments, preserving existing markers while avoiding a parse
+of each newly generated marker. Empty prefixless RE2 sets are no longer scanned.
+A source/flags-pinned proof restricts the native fixed-width Google key scan to
+its final possible 39 characters only when the entire input is ASCII word/dash;
+the original regex/text still enforce both boundaries. Changed patterns fall
+back to the complete scan.
+
+Genuine old dense-Slack regression: isolated best-of-three 243.7ms, exceeding
+the unchanged 400k/100ms budget. Old compiled Google prefix/dash case145.4ms.
+Both new 400k/100ms tests pass, alongside cache saturation/distinct-fingerprint,
+EOF/boundary and changed-rule fallback tests (5/5). Output equivalence against
+the pre-optimization implementation passes20,000 seeded inputs and411 additional
+Google/boundary cases. Full shared test run with one worker:2049/2049 PASS,
+including the integration branch's50 forged-marker tests temporarily copied
+for verification and removed afterward. Existing20,000 fixed-point corpus,
+near-miss and all original100ms assertions remain unchanged. Fresh shared build,
+web typecheck and web build PASS. The final new test initially used a readonly
+property assignment; compilation caught it before publication, and descriptor
+replacement/restoration now compiles and passes.
+
+B4I-03 remains an owner-config handoff, not falsely closed: default parallel
+execution passed1994 tests but timed out the unchanged5-second candidate oracle;
+the same suite serially passed1995, then1996 as tests were added. A simultaneous
+build also moved a passing dense case over100ms. A broader75-case400k wall-time
+scan had further overruns under load; it is not claimed universally green.
+Please serialize shared files (fileParallelism:false/maxWorkers:1) or isolate
+timing tests in a dedicated serialized project in the owned shared test
+configuration. No timeout or budget was increased. This does not establish
+that the earlier inaccessible CI log had this same cause.
+
+Logs `/tmp/oct10-b4i-{dense-isolated-red,final-focused,shared-complete,delivery-build,final-equivalence,google-equivalence,scrub-web-tsc,scrub-web-build}.log`.
+Claude retains outbound-audience integration and B4I-01 retirement adjudication.
+
+B4I integration validation: reviewed exact `b4-codex-int` head
+`e3e47eaf839ac2fc3243bc90d7784ba6de8affdd` with only the product/test patches
+from X21 f69db5ef and X23 30a730c1 applied in an existing Codex review checkout.
+This was a temporary composition, not a claim that Claude merged those heads.
+Frozen install; **2068/2068 serialized shared tests**, **11/11 actual disposable
+PostgreSQL/API/CLI and writer-classification tests**, full gateway dependency
+build PASS. Logs `/tmp/oct10-b4i-integration-{install,shared,build,db}.log`.
+The temporary source patches were removed after verification.
+
+Concrete B4I-03 proposal for Claude's owned files: add shared Vitest config
+`defineConfig({test:{fileParallelism:false}})` and change the CI unit step to
+run `pnpm --filter @regulait/shared test` before
+`pnpm -r --filter '!@regulait/shared' --filter '!regulait' test`. This prevents both sibling-file
+and sibling-package competition for the shared wall-time budgets while
+retaining other packages' usual parallelism and every existing limit. The
+verified maxWorkers=1 command gives the proposed shared-file execution order;
+the entire rewritten CI job remains unrun. Draft patch saved as
+`/tmp/oct10-b4i-shared-test-config.patch`; I have not edited these owner files
+or claimed B4I-03 closed without their integration/CI verification.
+
+The proposed CI filter was dry-checked:18 remaining workspace projects, with
+both shared and the recursive root script explicitly excluded. The first
+negative-only filter included the root; the reviewed proposal now excludes it.
