@@ -1,11 +1,8 @@
-# R13: content provenance (Batch 6 item 6, ROADMAP I4), research spike
+# R14: content provenance (Batch 6 item 6, ROADMAP I4), research spike
 
 Checked 2026-10-10 UTC against `main` @ `fb24991`. This is research only. No product code changed. It feeds a future
 ADR for ADR-0183 §1 batch 6 item 6 ("content provenance (I4)"). An earlier agent started the item and has been
 retired; this spike replaces that work.
-
-> **File name.** `R13-isolation-i0-spike.md` already uses the R13 number. This note keeps the name it was assigned. The
-> owner may renumber it to R14 when the ADR cites it.
 
 ## Decision summary
 
