@@ -407,7 +407,7 @@ async function applyRuleEditLocked<T>(
       // body, so the written columns' old -> new rides here — every
       // relaxation is audited old -> new
       ...(plan.kind === "row" ? { transitions: settingTransitions(row as object, plan.rowPatch) } : {}),
-      mintedVersion,
+      mintedVersion, receiptClass:"configuration",
     },
     effect: "allow",
     ruleId: args.auditRuleId,

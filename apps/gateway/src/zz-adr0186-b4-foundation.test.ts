@@ -755,6 +755,10 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       const member = await inject(m, url, users.member.auth, payload);
       expect(member.statusCode, `${m} ${url} (member): ${member.body}`).toBe(403);
       const admin = await inject(m, url, users.admin.auth, payload);
+      if(url.startsWith("/v1/receipts")){
+        const expected=m==="POST"?400:200;
+        expect(admin.statusCode,admin.body).toBe(expected);expect(admin.json().error).not.toBe("not_built");continue;
+      }
       expect(admin.statusCode, `${m} ${url} (admin): ${admin.body}`).toBe(501);
       expect(admin.json()).toEqual({ error: "not_built" });
     }
@@ -768,7 +772,7 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       expect(def!.adr).toBe("ADR-0186");
       const out = await def!.run({ db, actorUserId: null, now: new Date(), runId: `a186-${RUN}` });
       expect(out.itemsProcessed, name).toBe(0);
-      expect(out.detail, name).toMatchObject({ state: "not_built" });
+      expect(out.detail, name).toMatchObject({ state: name==="decision-receipt-sign-sweep"?"no_key":"not_built" });
     }
   });
 

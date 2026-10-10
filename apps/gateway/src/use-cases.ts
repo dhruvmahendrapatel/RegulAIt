@@ -1496,7 +1496,7 @@ export function registerUseCaseRoutes(
             userId,
             objectType: "agent",
             objectId: agent.id,
-            detail: { surface: "intake_assist", agentName: agent.name, dataClass: intakeGate.dataClass },
+            detail: { surface: "intake_assist", agentName: agent.name, dataClass: intakeGate.dataClass, receiptClass: "decision" },
             effect: "deny",
             ruleId: decision.ruleId,
             ruleChain: decision.ruleChain,
