@@ -337,7 +337,7 @@ function ResubmitForm(props: { useCaseId: string; detail: Detail; record: string
     {leave.dialog}
     <PageHeader title="Update and resubmit" sub="The account for this editing session changed." />
     <Card>
-      <p role="alert">{busy || sentBeforeChange || accountChangedDuringSend.current ? "You're now signed in as someone else. A request was sent before the account changed — open the record to check whether it was saved. No further resubmission requests will be sent. Discard to leave." : "You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave."}</p>
+      <p role="alert">{busy || sentBeforeChange || accountChangedDuringSend.current ? `${draft.ownerChanged ? "You're now signed in as someone else." : "The account changed while this resubmission was being sent."} A request was sent before the account changed — open the record to check whether it was saved. No further resubmission requests will be sent. Discard to leave.` : "You're now signed in as someone else. This resubmission belongs to the previous account, so nothing was sent. Sign back in as that account to resubmit, or discard to leave."}</p>
       <Button disabled={busy} onClick={() => { draft.abandon(); setDone(true); }}>Discard and leave</Button>
     </Card>
   </>;

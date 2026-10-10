@@ -27,23 +27,24 @@ export async function detectionMonitorInput(db:Db,now:Date):Promise<Partial<Reco
     try{output[key]=await snapshot.transaction(load);}catch{/* Omit this rule only: existing episodes are held. */}
   };
   await rule("mcp_server_baseline_drift",async tx=>{
-  const drift=await rows<{agentId:string;serverId:string;calls:number}>(tx,sql`
-    SELECT coalesce(a.detail->>'builderAgentId',a.detail->>'agentId') AS "agentId",a.server_id AS "serverId",count(*)::int AS calls
+  const drift=await rows<{agentId:string;serverId:string;calls:number;baselineComplete:boolean}>(tx,sql`
+    SELECT coalesce(a.detail->>'builderAgentId',a.detail->>'agentId') AS "agentId",a.server_id AS "serverId",count(*)::int AS calls,
+      EXISTS(SELECT 1 FROM audit_log known WHERE known.object_type='mcp_tool' AND known.tool_name IS NOT NULL
+        AND coalesce(known.detail->>'builderAgentId',known.detail->>'agentId')=coalesce(a.detail->>'builderAgentId',a.detail->>'agentId')
+        AND known.at<${baseline}::timestamptz) AS "baselineComplete"
     FROM audit_log a WHERE a.object_type='mcp_tool' AND a.server_id IS NOT NULL AND a.tool_name IS NOT NULL
       AND a.at>=${recent}::timestamptz AND a.at<=${end}::timestamptz
       AND coalesce(a.detail->>'builderAgentId',a.detail->>'agentId') IS NOT NULL
-      AND EXISTS(SELECT 1 FROM audit_log known WHERE known.object_type='mcp_tool' AND known.tool_name IS NOT NULL
-        AND coalesce(known.detail->>'builderAgentId',known.detail->>'agentId')=coalesce(a.detail->>'builderAgentId',a.detail->>'agentId')
-        AND known.at<${recent}::timestamptz)
       AND NOT EXISTS(SELECT 1 FROM audit_log b WHERE b.object_type='mcp_tool' AND b.tool_name IS NOT NULL
         AND b.server_id=a.server_id AND coalesce(b.detail->>'builderAgentId',b.detail->>'agentId')=coalesce(a.detail->>'builderAgentId',a.detail->>'agentId')
         AND b.at>=${baseline}::timestamptz AND b.at<${recent}::timestamptz)
-    GROUP BY 1,2 LIMIT ${MAX_SUBJECTS+1}`);
-  const driftInput=measured(drift.filter(row=>uuid(row.agentId)&&uuid(row.serverId)).map(row=>({
+    GROUP BY 1,2,4 LIMIT ${MAX_SUBJECTS+1}`);
+  const driftInput=measured(drift.filter(row=>row.baselineComplete&&uuid(row.agentId)&&uuid(row.serverId)).map(row=>({
     subjectKey:`builder_agent:${row.agentId}>mcp_server:${row.serverId}`,
     title:`Agent ${row.agentId} called a server outside its observed MCP baseline`,
     detail:{agentId:row.agentId,serverId:row.serverId,observedCalls:row.calls,baselineDays:settings.monitorMcpBaselineDays,observationHours:24},
   })));
+  driftInput.heldSubjectKeys=drift.filter(row=>!row.baselineComplete&&uuid(row.agentId)&&uuid(row.serverId)).map(row=>`builder_agent:${row.agentId}>mcp_server:${row.serverId}`);
   return driftInput;
   });
   await rule("sharing_scope_widened",async tx=>{
