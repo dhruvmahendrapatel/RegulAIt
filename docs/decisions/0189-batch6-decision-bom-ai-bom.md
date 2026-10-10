@@ -271,7 +271,8 @@ needs the ADR-0102 scrub (M-055 check done at B1 anyway).
   a convenience, never the authority (the lesson of ADR-0186 review finding R21-01, "online verify trusts the bundle's
   keys").
 - Checks: the body signature; the receipt signature and that the receipt's `factsHash` equals the facts in the body;
-  the audit-chain segment row by row up to the anchor; the anchor's row hash; the RFC 3161 token with `pkijs` against
+  the audit-chain segment's links row by row up to the anchor (the decision row's content binding is reported
+  `unverifiable`, `preimage_not_exported`, R39); the anchor's row hash; the RFC 3161 token with `pkijs` against
   a supplied TSA trust bundle; and the BOM-Link to the AI BOM snapshot by serial, version and SHA-256 when that
   snapshot is in the bundle.
 - Results per section: `valid`, `invalid`, or `unverifiable` (with the reason), plus a fixed `cannotProve` list: that
@@ -676,8 +677,8 @@ R21. **The email scan covers the whole bundle.** `export-bundle/3` adds files ou
     (the manifest, the README, the operator-set `installId`, which is unconstrained), and the audit scrub keeps emails
     by design (`audit-scrub.ts`). B4 therefore runs R10's scan over every final bundle entry, after the bundle is
     assembled and before it is signed, and refuses the export naming the file and path. The BOM bundle profile also
-    carries no audit-row payloads, only the `chain.tsv` hash columns; an `installId` that matches the scan refuses
-    the export until the operator changes it.
+    carries no audit-row payloads, only the `chain.tsv` hash columns (R39: no preimage of any row, the decision row
+    included); an `installId` that matches the scan refuses the export until the operator changes it.
 
 R22. **An AI BOM is loaded from one consistent snapshot.** B3's loader reads every source table in a single
     `REPEATABLE READ READ ONLY` transaction, so a model card, prompt promotion or admission changing mid-load cannot
@@ -842,14 +843,20 @@ R38. **The newest-snapshot exemption ends with retention.** R16 kept a subject's
     any other unless an evidence hold covers it. A snapshot linked from a retained Decision BOM is kept only while
     that Decision BOM is retained.
 
-R39. **The decision row's audit preimage is disclosed, or the claim is withdrawn.** `chain.tsv` lets a verifier
-    recompute row hashes but not that a `contentHash` came from the decision the BOM describes; the ADR-0116 bundle
-    adds `audit/rows/<seq>.payload` for this (`export-bundle.ts`), and R21 removed it. Now the Decision BOM bundle
-    includes `audit/rows/<seq>.payload` for the **decision row only** (the other segment rows are other decisions
-    and stay hash-only, which still proves their links). That file goes through R21's scan. If it holds an
-    email-shaped string, it is withheld, never redacted, and the verifier reports the decision row's content as
-    `unverifiable` with reason `preimage_withheld`, while the link checks still run. When present, the verifier
-    hashes it, compares it with `contentHash`, and checks that the `decision` section matches its fields.
+R39. **No audit preimage leaves in a BOM bundle; the decision row's content binding is reported unverifiable.**
+    (Revised in review round 8. The earlier text exported the decision row's `audit/rows/<seq>.payload` after the
+    email scan, but the canonical audit payload holds raw invocation fields, for example a connector call's
+    caller-controlled `object` in `detail` (`apps/gateway/src/connector-call.ts`), so exporting it broke the
+    digests-only invariant of OWNER DECISION 5. An email scan cannot detect such content.)
+    - The Decision BOM bundle carries **no** `audit/rows/<seq>.payload` for any row, the decision row included. The
+      chain segment is hash-only (`chain.tsv`).
+    - The verifier still checks every link of the segment (`prevHash`, `rowHash`) up to the anchor. It reports the
+      binding between the decision row's `contentHash` and the BOM's `decision` section as `unverifiable` with reason
+      `preimage_not_exported`. `cannotProve` gains "that the audit row's content is the decision described: the
+      content hash is chained and anchored, but its preimage is not disclosed".
+    - **B4 entry condition:** this stays `unverifiable` unless a later slice defines a commitment over only the
+      permitted projection (ids, digests, enums, integers and times) that is bound into the audit chain or the
+      receipt. B4 must not disclose a raw preimage to close the gap.
 
 R40. **Assembly holds the per-decision lock.** The freeze transaction takes the same `SELECT … FOR UPDATE` on the
     decision's `decision_facts` row as R35's writers, before its final addendum recheck, and keeps it through the
@@ -907,6 +914,20 @@ From the seventh review round on, this ADR is complete as a design record. Later
 as further amendments. They are recorded as entry conditions on the B1–B8 slice PR that owns them, and each slice PR
 gets its own review against this ADR and those conditions. An amendment is added here only when a finding contradicts
 an accepted decision or needs an owner choice.
+
+### Entry conditions from review round 8
+
+- **B3, B5** (4237322631): request fulfilment is idempotent; `ai_bom_snapshots` carries the `request_id` of the
+  `ai_bom_snapshot_requests` row it fulfils, UNIQUE, so a retried sweep cannot freeze one request twice.
+- **B3** (4237322637): the agent's active and canary system-prompt config versions are components, each with its id,
+  version and content digest only, never the prompt text.
+- **B1, B3** (4237322632): snapshot `version` is allocated under a per-subject lock, as R35 does for addenda.
+- **B1, B2** (4237322635): every receipt-eligible decision persists a receipt-bound capture-status marker in its own
+  transaction, including `capture_off` when capture is off, so the receipt never infers the status later.
+- **B1, B4** (4237322627): decision-scoped rows (facts, addenda, addendum signatures, Decision BOMs, their renderings)
+  share one `expires_at` computed from the decision's audit timestamp, and R16's prune uses it.
+- **B4** (4237322624, see R39): the decision row's content binding stays `unverifiable` unless a commitment over only
+  the permitted projection is defined; no raw preimage is ever exported.
 
 ## Open questions
 
