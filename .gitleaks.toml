@@ -181,4 +181,6 @@ regexes = [
   '''^/MUhBadUVzalO1ZfHUer57dPy\+aSxoQmz55QOsvvlw\+qfIl/j/niAdYZt5r94QsO/Mv6a6v\+xNKVddX\+WehMBg==$''',
   # the sixth review round's run (regulated sensitivity in the fixture)
   '''^prg/VxDGBsJT8LQzt\+eeSUzqVeX51yw\+N83\+aN5uKMLO6n/alyHE2hjq0/YXinQJtBG89\+qgll5Mvoql00C/Bg==$''',
+  # the ninth review round's run (scalar data claims, install-only SBOM links)
+  '''^Emabpcf1Nf9TxaSu7mzIWSIo4yLnlgbhgNKvbVBWQPswsBdec1JIHZlyZHuUogSAxkvjJ0WCk9pfRjfdjxUqBQ==$''',
 ]

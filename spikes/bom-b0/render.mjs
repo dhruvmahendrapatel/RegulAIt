@@ -81,6 +81,26 @@ const BIAS_RENDERED = ['dimension', 'method', 'status', 'resultRef', 'assessedAt
 const BIAS_DROPPED = ['assessedBy', 'note'];
 const BIAS_STATUSES = ['not_assessed', 'in_progress', 'assessed', 'waived'];
 
+// data_claims is an arbitrary jsonb record (z.record(z.unknown())), so it is PROJECTED to a typed safe shape before
+// signing: allowlisted keys only, each a length-capped string, a safe integer or a boolean. A nested object or array
+// (where raw content could hide) or any other key is refused, never copied (ADR-0189 B3 entry condition, round 9).
+export const DATA_CLAIM_KEYS = ['trainingData', 'task', 'architecture', 'license', 'retention', 'releaseTime', 'downloadLocation'];
+export const DATA_CLAIM_MAX_CHARS = 512;
+function safeClaims(c) {
+  if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('modelCard: dataClaims must be an object');
+  const out = {};
+  for (const [k, v] of Object.entries(c)) {
+    if (!DATA_CLAIM_KEYS.includes(k)) throw new Error(`modelCard.dataClaims: unknown key refused: ${JSON.stringify(k)}`);
+    if (typeof v === 'string') {
+      if (v.length > DATA_CLAIM_MAX_CHARS) throw new Error(`modelCard.dataClaims.${k}: longer than ${DATA_CLAIM_MAX_CHARS} characters`);
+    } else if (!(typeof v === 'boolean' || (typeof v === 'number' && Number.isSafeInteger(v)))) {
+      throw new Error(`modelCard.dataClaims.${k}: only a string, safe integer or boolean is allowed`);
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
 /** Map a persisted model card (intended_use text, limitations text|null, bias_fairness BiasFairnessEntry[], data_claims
  * an arbitrary supplier record) to the renderer's shape. Never splits a string, never invents a claim. */
 export function modelCardFromRow(row) {
@@ -88,8 +108,7 @@ export function modelCardFromRow(row) {
   if (extra.length) throw new Error(`modelCard: unknown key(s) refused: ${extra.join(', ')}`);
   if (typeof row.intendedUse !== 'string' || !row.intendedUse.trim()) throw new Error('modelCard: intendedUse must be non-empty text');
   if (row.limitations !== null && row.limitations !== undefined && typeof row.limitations !== 'string') throw new Error('modelCard: limitations must be text or null');
-  const claims = row.dataClaims ?? {};
-  if (typeof claims !== 'object' || Array.isArray(claims)) throw new Error('modelCard: dataClaims must be an object');
+  const claims = safeClaims(row.dataClaims ?? {});
   const bias = (row.biasFairness ?? []).map((b) => {
     const unknown = Object.keys(b).filter((k) => ![...BIAS_RENDERED, ...BIAS_DROPPED].includes(k));
     if (unknown.length) throw new Error(`modelCard.biasFairness: unknown key(s) refused: ${unknown.join(', ')}`);
@@ -102,7 +121,8 @@ export function modelCardFromRow(row) {
     approvedId: row.approvedId ?? null,
     intendedUse: row.intendedUse,
     limitations: str(row.limitations),
-    biasFairness: sortBy(bias, (b) => `${b.dimension}\u0000${b.method}`),
+    // a TOTAL order: every rendered field is in the key, so equal dimension and method never tie on input order
+    biasFairness: sortBy(bias, (b) => canonicalize(b)),
     // supplier-declared only (OWNER DECISION 10): an empty record is "unknown", never an inferred claim
     dataClaims: claims,
     declared: Object.keys(claims).length > 0,
@@ -417,10 +437,11 @@ export function renderCycloneDx(n, specVersion) {
     },
     components: sortBy(components, (c) => c['bom-ref']),
     services: sortBy(services, (c) => c['bom-ref']),
-    externalReferences: n.install.sbomRefs.map((x) => ({
+    // the release's SBOMs describe the whole install: linked only from an install-scope BOM (§3)
+    ...(s.subjectKind !== 'install' ? {} : { externalReferences: n.install.sbomRefs.map((x) => ({
       type: 'bom', url: `urn:cdx:${x.serial.replace(/^urn:uuid:/, '')}/${x.version}`,
       hashes: [{ alg: 'SHA-256', content: x.sha256 }], comment: `${x.kind} SBOM of release ${n.install.release}`,
-    })),
+    })) }),
     dependencies: sortBy([...deps].map(([r, set]) => ({ ref: r, ...(set.size ? { dependsOn: sortStrings([...set]) } : {}) })), (d) => d.ref),
     compositions: [
       // third-party model internals are supplier-declared at best: never `complete`

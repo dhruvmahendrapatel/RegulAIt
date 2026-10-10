@@ -411,3 +411,17 @@ is unchanged:
 | native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
 |---|---|---|---|---|
 | `c1403f2f…91d0fc` | `90d71a50…4492f` | `07237b81…f09c3` | `47e13615…7031` (unchanged) | `prg/VxDG…00C/Bg==` |
+
+## 13. Ninth review round (2026-10-10, PR #265)
+
+- `data_claims` is projected to a typed safe shape before signing: allowlisted keys only, each a string of at most
+  512 characters, a safe integer or a boolean. A nested object or array, or an unknown key (for example a raw
+  prompt), is refused. The fixture's training-data claim is now one string.
+- Bias assessments sort on every rendered field, so equal dimension and method never tie on input order.
+- Release SBOM BOM-links are emitted only for an install-scope snapshot; the use-case sample no longer carries them.
+
+New values, from `npm run test:offline` (40 tests, all passing); the offline SHACL check passes:
+
+| native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
+|---|---|---|---|---|
+| `2b7db023…ad1ce` | `584c6f76…dc16` | `906bd2a6…13fde` | `14b380aa…0a3b` | `Emabpcf1…jxUqBQ==` |

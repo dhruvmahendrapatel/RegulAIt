@@ -192,10 +192,7 @@
     "retention": "30 days",
     "architecture": "transformer decoder",
     "task": "text-classification",
-    "trainingData": [
-     "licensed claims corpus 2019-2024",
-     "public web text"
-    ]
+    "trainingData": "licensed claims corpus 2019-2024; public web text"
    },
    "biasFairness": [
     {

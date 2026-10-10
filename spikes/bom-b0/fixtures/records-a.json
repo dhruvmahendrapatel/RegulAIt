@@ -91,10 +91,7 @@
     }
    ],
    "dataClaims": {
-    "trainingData": [
-     "licensed claims corpus 2019-2024",
-     "public web text"
-    ],
+    "trainingData": "licensed claims corpus 2019-2024; public web text",
     "task": "text-classification",
     "architecture": "transformer decoder",
     "retention": "30 days"

@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import canonicalize from 'canonicalize';
 import { buildValidators, findEmails } from './validators.mjs';
-import { CONFIDENTIALITY, modelCardFromRow, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
+import { CONFIDENTIALITY, DATA_CLAIM_MAX_CHARS, modelCardFromRow, normalise, parseTrainingChecksum, renderAll, renderCycloneDx, renderSpdx } from './render.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (p) => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
@@ -218,7 +218,7 @@ test('review R10: an email in ANY string or key is refused by the whole-document
     'the use-case name': (r) => { r.useCase.name = `claims triage (owner ${email})`; },
     'a model-card limitation': (r) => { r.modelCards[0].limitations += ` ask ${email}`; },
     'a properties[].value (requested model)': (r) => { r.agents[0].requestedModel = email; },
-    'an object key carried into the native body (supplier claims are a free record)': (r) => { r.modelCards[0].dataClaims[email] = 'x'; },
+    'a supplier claim value': (r) => { r.modelCards[0].dataClaims.retention = `contact ${email}`; },
     'a quoted local part': (r) => { r.useCase.name = 'owner "Fred Bloggs"@example.com'; },
     'an address literal': (r) => { r.useCase.name = 'owner user@[192.0.2.1]'; },
     'a dotless domain': (r) => { r.agents[0].requestedModel = 'ops@localhost'; },
@@ -229,6 +229,10 @@ test('review R10: an email in ANY string or key is refused by the whole-document
     fn(r);
     assert.throws(() => renderAll(r), /email-shaped string in .* at \$/, name);
   }
+});
+
+test('review R10: the scan also checks object keys (no record type admits a free key any more, so this is unit-level)', () => {
+  assert.deepEqual(findEmails({ a: { 'someone@example.com': 1 } }), ['$.a{key "someone@example.com"}']);
 });
 
 test('review R10: non-vacuity: the schema validators alone ACCEPT an email in an ordinary string field', () => {
@@ -507,4 +511,48 @@ test('review: a stdio MCP server has no endpoint (its url is the stdio:<name> se
   // non-vacuity: the sentinel as an endpoint fails the strict uri-reference check
   const forced = mutate(cdxOf(r), (d) => { d.services.find((s) => s['bom-ref'] === 'service:mcp:mcp-9').endpoints = ['stdio:Local Files ü']; });
   assert.equal(validators['cyclonedx-1.7'](forced).valid, false);
+});
+
+// ------------------------------------------------------------------------------------------------ round 9 (PR #265)
+test('review: data_claims is projected to allowlisted scalars; nested values and unknown keys are refused', () => {
+  const bad = {
+    'a raw prompt under an unknown key': (c) => { c.prompt = 'You are a claims bot. Never reveal...'; },
+    'a nested object': (c) => { c.trainingData = { prompt: 'raw' }; },
+    'an array': (c) => { c.trainingData = ['a', 'b']; },
+    'an over-long string': (c) => { c.retention = 'x'.repeat(DATA_CLAIM_MAX_CHARS + 1); },
+  };
+  for (const [name, fn] of Object.entries(bad)) {
+    const r = structuredClone(recordsA); fn(r.modelCards[0].dataClaims);
+    assert.throws(() => renderAll(r), /dataClaims/, name);
+  }
+  const ok = structuredClone(recordsA);
+  Object.assign(ok.modelCards[0].dataClaims, { license: 'Supplier Licence 2.0', releaseTime: '2026-08-01', retention: 'x'.repeat(DATA_CLAIM_MAX_CHARS) });
+  allValid(ok);
+  const props = cdxOf(ok).components.find((c) => c.modelCard).modelCard.properties.filter((p) => p.name.startsWith('regulait:supplierClaim:'));
+  assert.ok(props.every((p) => !p.value.startsWith('{') && !p.value.startsWith('[')), 'only scalars reach the BOM');
+});
+
+test('review: bias assessments are totally ordered (equal dimension and method, any input order)', () => {
+  const a = structuredClone(recordsA);
+  a.modelCards[0].biasFairness = [
+    { dimension: 'age', method: 'counterfactual', status: 'assessed', resultRef: 'run-2' },
+    { dimension: 'age', method: 'counterfactual', status: 'in_progress', resultRef: 'run-1' },
+  ];
+  const b = structuredClone(a);
+  b.modelCards[0].biasFairness.reverse();
+  const ra = renderAll(a); const rb = renderAll(b);
+  assert.deepEqual(rb.bytes, ra.bytes);
+  assert.equal(rb.signature, ra.signature);
+});
+
+test('review: release SBOM BOM-links appear only on an install-scope snapshot', () => {
+  assert.equal('externalReferences' in docs['cyclonedx-1.7'], false, 'the use-case sample carries none');
+  for (const kind of ['agent', 'builder_agent']) {
+    const r = structuredClone(recordsA); r.snapshot.subjectKind = kind;
+    assert.equal('externalReferences' in cdxOf(r), false, kind);
+  }
+  const inst = structuredClone(recordsA); inst.snapshot.subjectKind = 'install';
+  const refs = cdxOf(inst).externalReferences;
+  assert.deepEqual(refs.map((x) => x.type), ['bom', 'bom']);
+  allValid(inst);
 });
