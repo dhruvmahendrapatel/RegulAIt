@@ -72,13 +72,12 @@ async function loadReads(tx: Tx, rows: DecisionAuditRow[]): Promise<DecisionFact
   const approvalIds = [...new Set(refs.flatMap((r) => r.approvalIds))];
   const grantIds = [...new Set(refs.map((r) => r.grantId).filter((x): x is string => x !== null))];
   const identityIds = [...new Set(refs.flatMap((r) => r.identityIds))];
-  const [projectRows, approvalRows, decisionRows, grantRows, identityRows] = await Promise.all([
-    projectIds.length ? tx.select({ id: projects.id, classifications: projects.classifications }).from(projects).where(inArray(projects.id, projectIds)) : [],
-    approvalIds.length ? tx.select().from(approvals).where(inArray(approvals.id, approvalIds)) : [],
-    approvalIds.length ? tx.select().from(approvalDecisions).where(inArray(approvalDecisions.approvalId, approvalIds)) : [],
-    grantIds.length ? tx.select().from(delegationGrants).where(inArray(delegationGrants.id, grantIds)) : [],
-    identityIds.length ? tx.select().from(workloadIdentities).where(inArray(workloadIdentities.id, identityIds)) : [],
-  ]);
+  // one after another: a transaction is one connection, and pg refuses overlapping queries on it (pg@9)
+  const projectRows = projectIds.length ? await tx.select({ id: projects.id, classifications: projects.classifications }).from(projects).where(inArray(projects.id, projectIds)) : [];
+  const approvalRows = approvalIds.length ? await tx.select().from(approvals).where(inArray(approvals.id, approvalIds)) : [];
+  const decisionRows = approvalIds.length ? await tx.select().from(approvalDecisions).where(inArray(approvalDecisions.approvalId, approvalIds)) : [];
+  const grantRows = grantIds.length ? await tx.select().from(delegationGrants).where(inArray(delegationGrants.id, grantIds)) : [];
+  const identityRows = identityIds.length ? await tx.select().from(workloadIdentities).where(inArray(workloadIdentities.id, identityIds)) : [];
   const decisionsByApproval = new Map<string, Record<string, unknown>[]>();
   for (const d of decisionRows as Array<Record<string, unknown> & { approvalId: string }>) {
     const list = decisionsByApproval.get(d.approvalId) ?? [];

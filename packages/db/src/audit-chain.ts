@@ -186,6 +186,17 @@ export async function appendChainedAuditRows(
   returning?: unknown,
 ): Promise<unknown> {
   if (values.length === 0) return returning === undefined ? undefined : [];
+  // A handle that already chains (a transaction of another `createDb` handle) chains and captures on its
+  // own `insert(auditLog)`: hand the rows over ONCE rather than appending them here and again inside it,
+  // which would chain them twice and (ADR-0189 B2) capture the decision's facts twice.
+  if ((tx as unknown as Record<symbol, unknown>)[CHAINED]) {
+    const builder = tx.insert(auditLog).values(values) as unknown as Promise<unknown> & { returning: (sel?: unknown) => Promise<unknown> };
+    if (returning === undefined) {
+      await builder;
+      return undefined;
+    }
+    return returning === ALL_COLUMNS ? builder.returning() : builder.returning(returning);
+  }
 
   // Serialize at the tip. Everything from here to COMMIT is the critical
   // section; it is deliberately as short as possible.
